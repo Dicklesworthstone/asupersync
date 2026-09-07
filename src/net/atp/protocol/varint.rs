@@ -261,6 +261,27 @@ mod tests {
     }
 
     #[test]
+    fn prefix_decode_preserves_suffix_and_waits_for_every_boundary() {
+        for value in [0, 63, 64, 16383, 16384, 1073741823, 1073741824, VARINT_MAX] {
+            let varint = VarInt::new(value).unwrap();
+            let mut encoded = BytesMut::new();
+            varint.encode(&mut encoded).unwrap();
+            let length = encoded.len();
+            for split in 0..length {
+                assert!(VarInt::decode_prefix(&encoded[..split]).unwrap().is_none());
+            }
+            encoded.extend_from_slice(b"untouched suffix");
+            assert_eq!(
+                VarInt::decode_prefix(&encoded).unwrap(),
+                Some((varint, length))
+            );
+            assert_eq!(encoded.len(), length + b"untouched suffix".len());
+            assert_eq!(VarInt::decode(&mut encoded).unwrap(), Some(varint));
+            assert_eq!(encoded.as_ref(), b"untouched suffix");
+        }
+    }
+
+    #[test]
     fn test_varint_too_large() {
         assert!(VarInt::new(VARINT_MAX + 1).is_err());
         assert!(VarInt::new(u64::MAX).is_err());

@@ -418,6 +418,164 @@ mod tests {
     use super::*;
     use crate::net::atp::protocol::transcript::TranscriptHasher;
 
+    const FRAME_TYPES: [FrameType; 22] = [
+        FrameType::Handshake,
+        FrameType::HandshakeAck,
+        FrameType::Capabilities,
+        FrameType::CapabilitiesAck,
+        FrameType::ObjectManifest,
+        FrameType::ObjectRequest,
+        FrameType::ObjectData,
+        FrameType::ObjectComplete,
+        FrameType::ObjectError,
+        FrameType::PathUpdate,
+        FrameType::PathChallenge,
+        FrameType::PathResponse,
+        FrameType::KeepAlive,
+        FrameType::Cancel,
+        FrameType::Error,
+        FrameType::Close,
+        FrameType::Control,
+        FrameType::Data,
+        FrameType::Proof,
+        FrameType::Repair,
+        FrameType::Session,
+        FrameType::Manifest,
+    ];
+
+    // Keep the family census exhaustive if the protocol gains another variant.
+    fn frame_type_wire_id(frame_type: FrameType) -> u16 {
+        match frame_type {
+            FrameType::Handshake => 0x0001,
+            FrameType::HandshakeAck => 0x0002,
+            FrameType::Capabilities => 0x0003,
+            FrameType::CapabilitiesAck => 0x0004,
+            FrameType::ObjectManifest => 0x0100,
+            FrameType::ObjectRequest => 0x0101,
+            FrameType::ObjectData => 0x0102,
+            FrameType::ObjectComplete => 0x0103,
+            FrameType::ObjectError => 0x0104,
+            FrameType::PathUpdate => 0x0200,
+            FrameType::PathChallenge => 0x0201,
+            FrameType::PathResponse => 0x0202,
+            FrameType::KeepAlive => 0x0203,
+            FrameType::Cancel => 0x0300,
+            FrameType::Error => 0x0301,
+            FrameType::Close => 0x0302,
+            FrameType::Control => 0x0400,
+            FrameType::Data => 0x0401,
+            FrameType::Proof => 0x0402,
+            FrameType::Repair => 0x0403,
+            FrameType::Session => 0x0404,
+            FrameType::Manifest => 0x0405,
+        }
+    }
+
+    #[test]
+    fn every_frame_family_preserves_wire_and_transcript_at_every_split() {
+        for frame_type in FRAME_TYPES {
+            for payload in [vec![], (0u8..64).collect::<Vec<_>>()] {
+                let mut frame = Frame::new(ProtocolVersion::V0, frame_type, payload).unwrap();
+                frame.header.extensions.insert(u16::MAX, vec![0xa5; 64]);
+                frame.header.extensions.insert(0, vec![]);
+                let wire = frame.to_wire_bytes().unwrap();
+                let id = frame_type_wire_id(frame_type);
+                let mut expected = vec![0];
+                if id < 64 {
+                    expected.push(id as u8);
+                } else {
+                    expected.extend_from_slice(&(0x4000 | id).to_be_bytes());
+                }
+                if frame.payload.is_empty() {
+                    expected.push(0);
+                } else {
+                    expected.extend_from_slice(&[0x40, 0x40]);
+                }
+                expected.extend_from_slice(&[2, 0, 0, 0x80, 0, 0xff, 0xff, 0x40, 0x40]);
+                expected.extend_from_slice(&[0xa5; 64]);
+                expected.extend_from_slice(&frame.payload);
+                assert_eq!(wire, expected, "frame_type={frame_type:?}");
+                let mut original = TranscriptHasher::new();
+                original.update_frame(&frame);
+                let expected_hash = original.finalize();
+                for split in 0..wire.len() {
+                    let mut codec = AtpFrameCodec::new();
+                    let mut buffer = BytesMut::from(&wire[..split]);
+                    assert!(codec.decode(&mut buffer).unwrap().is_none());
+                    buffer.extend_from_slice(&wire[split..]);
+                    let decoded = codec.decode_eof(&mut buffer).unwrap().unwrap();
+                    assert_eq!(decoded, frame, "frame_type={frame_type:?}, split={split}");
+                    let mut replay = TranscriptHasher::new();
+                    replay.update_frame(&decoded);
+                    assert_eq!(replay.finalize(), expected_hash);
+                    assert!(buffer.is_empty());
+                    assert!(codec.decode_eof(&mut buffer).unwrap().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eof_drains_complete_frames_before_refusing_a_truncated_successor() {
+        let frames: Vec<_> = FRAME_TYPES
+            .into_iter()
+            .map(|kind| Frame::new(ProtocolVersion::V0, kind, vec![]).unwrap())
+            .collect();
+        let mut wire = BytesMut::new();
+        let mut encoder = AtpFrameCodec::new();
+        for frame in &frames {
+            encoder.encode(frame.clone(), &mut wire).unwrap();
+        }
+        let incomplete = Frame::new(ProtocolVersion::V0, FrameType::ObjectData, vec![1]).unwrap();
+        wire.extend_from_slice(
+            &incomplete.to_wire_bytes().unwrap()[..incomplete.header.encoded_len()],
+        );
+        let mut decoder = AtpFrameCodec::new();
+        for frame in frames {
+            assert_eq!(decoder.decode_eof(&mut wire).unwrap(), Some(frame));
+        }
+        assert!(matches!(
+            decoder.decode_eof(&mut wire),
+            Err(FrameError::UnexpectedEof)
+        ));
+        assert!(wire.is_empty(), "truncated frame header was consumed");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 128,
+            rng_seed: proptest::test_runner::RngSeed::Fixed(0x4154_505f_4231),
+            ..proptest::test_runner::Config::default()
+        })]
+
+        #[test]
+        fn arbitrary_frames_roundtrip_with_chunked_input(
+            kind in 0usize..FRAME_TYPES.len(),
+            payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..1024),
+            extensions in proptest::collection::btree_map(
+                proptest::prelude::any::<u16>(),
+                proptest::collection::vec(proptest::prelude::any::<u8>(), 0..80),
+                0..8,
+            ),
+            chunk_size in 1usize..128,
+        ) {
+            let mut frame = Frame::new(ProtocolVersion::V0, FRAME_TYPES[kind], payload).unwrap();
+            frame.header.extensions.extend(extensions);
+            let wire = frame.to_wire_bytes().unwrap();
+            let mut codec = AtpFrameCodec::with_max_frame_size(wire.len() as u64);
+            let mut buffer = BytesMut::new();
+            let mut decoded = None;
+            for chunk in wire.chunks(chunk_size) {
+                proptest::prop_assert!(decoded.is_none());
+                buffer.extend_from_slice(chunk);
+                decoded = codec.decode(&mut buffer).unwrap();
+            }
+            proptest::prop_assert_eq!(decoded, Some(frame));
+            proptest::prop_assert!(buffer.is_empty());
+            proptest::prop_assert!(codec.decode_eof(&mut buffer).unwrap().is_none());
+        }
+    }
+
     fn raw_extension_frame(extensions: &[(u16, &[u8])], payload: &[u8]) -> BytesMut {
         let mut wire = BytesMut::new();
         for value in [
@@ -584,7 +742,10 @@ mod tests {
                     }
                 }
                 assert!(
-                    matches!(codec.decode_eof(&mut buffer), Err(FrameError::UnexpectedEof)),
+                    matches!(
+                        codec.decode_eof(&mut buffer),
+                        Err(FrameError::UnexpectedEof)
+                    ),
                     "split={split}, decode_before_eof={decode_before_eof}",
                 );
                 // EOF failure does not discard the partial payload or header;
