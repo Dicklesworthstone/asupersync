@@ -1252,7 +1252,7 @@ pub fn server_config(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // Canonical CA + leaf chain (P-256), valid ~100 years, generated with openssl
@@ -1260,7 +1260,7 @@ mod tests {
     // IP:127.0.0.1 and the serverAuth EKU that rustls-webpki requires; the client
     // trusts the CA, so this exercises the REAL WebPKI verifier path end-to-end
     // (no insecure skip-verify).
-    const LEAF_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+    pub const LEAF_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIBwTCCAWigAwIBAgIUTQyiZ96ufyKHVqRYRZBXpRQABGMwCgYIKoZIzj0EAwIw\n\
 FzEVMBMGA1UEAwwMYXRwcS10ZXN0LWNhMCAXDTI2MDYxNjA1MTYyM1oYDzIxMjYw\n\
 NTIzMDUxNjIzWjAUMRIwEAYDVQQDDAlhdHBxLXRlc3QwWTATBgcqhkjOPQIBBggq\n\
@@ -1279,7 +1279,7 @@ UPAvB8O86PWbkhxy/8cx/FrSa1ShRANCAASqge/wCghqQ7mK2i0YFNQQqYuxtyBb\n\
 xlDvlrJDWhuXLXcrwcK4eQkpN3QBVt6JLUpAuYpUrQYUSL28G0cYl4hd\n\
 -----END PRIVATE KEY-----\n";
 
-    const CA_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+    pub const CA_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIBlDCCATugAwIBAgIUYOTxo/FMMZjqCnJT+IDmJ2BNux0wCgYIKoZIzj0EAwIw\n\
 FzEVMBMGA1UEAwwMYXRwcS10ZXN0LWNhMCAXDTI2MDYxNjA1MTYyM1oYDzIxMjYw\n\
 NTIzMDUxNjIzWjAXMRUwEwYDVQQDDAxhdHBxLXRlc3QtY2EwWTATBgcqhkjOPQIB\n\
@@ -1291,7 +1291,7 @@ RwAwRAIgFLcs0Qdsy190QfKzpvLj28srfpw6wZ2PURF20N+twm8CIFZMWnG65VsE\n\
 WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 -----END CERTIFICATE-----\n";
 
-    fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
+    pub fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
         let mut reader = std::io::BufReader::new(pem.as_bytes());
         rustls_pemfile::certs(&mut reader)
             .next()
@@ -1364,7 +1364,7 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         CertificateDer::from(der)
     }
 
-    fn leaf_key() -> PrivateKeyDer<'static> {
+    pub fn leaf_key() -> PrivateKeyDer<'static> {
         let mut reader = std::io::BufReader::new(LEAF_KEY_PEM.as_bytes());
         rustls_pemfile::private_key(&mut reader)
             .expect("read key pem")

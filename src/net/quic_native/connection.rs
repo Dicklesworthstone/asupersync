@@ -126,6 +126,19 @@ impl fmt::Display for NativeQuicConnectionError {
 
 impl std::error::Error for NativeQuicConnectionError {}
 
+impl NativeQuicConnectionError {
+    /// Whether receive reassembly has run out of metadata capacity.
+    ///
+    /// Packet drivers may discard this packet without acknowledging it and
+    /// continue receiving gap-closing input. The peer can retransmit reliable
+    /// frames under a fresh packet number. This predicate preserves the public
+    /// exhaustive error enum and the existing direct STREAM API error value.
+    #[must_use]
+    pub fn is_stream_reassembly_backpressure(&self) -> bool {
+        matches!(self, Self::InvalidState(message) if *message == STREAM_REASSEMBLY_LIMIT_ERROR)
+    }
+}
+
 impl From<QuicTlsError> for NativeQuicConnectionError {
     fn from(value: QuicTlsError) -> Self {
         Self::Tls(value)
@@ -398,6 +411,7 @@ const MAX_TRACKED_ACK_RANGES: usize = MAX_ACK_FRAME_RANGES * 4;
 /// authenticated peer can fill the receive window with tiny disjoint ranges
 /// and amplify each byte into a tree node plus reassembly work.
 pub(crate) const MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS: usize = 4096;
+const STREAM_REASSEMBLY_LIMIT_ERROR: &str = "stream receive reassembly fragment limit exceeded";
 
 /// Maximum number of outbound DATAGRAM payloads queued before `send_datagram`
 /// drops the oldest queued payload to keep the unreliable send path bounded.
@@ -1230,7 +1244,7 @@ impl NativeQuicConnection {
             .map_err(map_stream_table_error)?
         {
             return Err(NativeQuicConnectionError::InvalidState(
-                "stream receive reassembly fragment limit exceeded",
+                STREAM_REASSEMBLY_LIMIT_ERROR,
             ));
         }
         self.streams
@@ -2146,6 +2160,12 @@ impl NativeQuicConnection {
     /// packet's frames (for example to count DATAGRAM slots before admission)
     /// pass them here directly instead of paying a second decode + payload
     /// copy via [`Self::process_packet_payload`].
+    ///
+    /// Reassembly-capacity refusal precedes all frame effects and queues no
+    /// ACK. Drivers can recognize it with
+    /// [`NativeQuicConnectionError::is_stream_reassembly_backpressure`], discard
+    /// this packet, and continue receiving. Other frame errors retain their
+    /// ordinary processing semantics; this is not a general packet rollback.
     pub fn process_packet_frames(
         &mut self,
         cx: &Cx,
@@ -2155,6 +2175,17 @@ impl NativeQuicConnection {
         now_micros: u64,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        if self
+            .streams
+            .packet_reassembly_fragment_limit_would_be_exceeded(
+                frames,
+                MAX_BUFFERED_STREAM_REASSEMBLY_FRAGMENTS,
+            )
+        {
+            return Err(NativeQuicConnectionError::InvalidState(
+                STREAM_REASSEMBLY_LIMIT_ERROR,
+            ));
+        }
         let ack_eliciting = frames.iter().any(frame_is_ack_eliciting);
 
         let mut index = 0usize;

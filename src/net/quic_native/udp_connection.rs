@@ -781,13 +781,21 @@ impl NativeQuicUdpConnection {
                 .inner_mut()
                 .on_datagram_received(cx, packet.data.len() as u64)?;
             let now_micros = self.instant_micros(packet.receive_time);
-            self.connection.inner_mut().process_packet_payload(
+            if let Err(error) = self.connection.inner_mut().process_packet_payload(
                 cx,
                 PacketNumberSpace::ApplicationData,
                 header.packet_number,
                 &plaintext,
                 now_micros,
-            )?;
+            ) {
+                if error.is_stream_reassembly_backpressure() {
+                    // Do not ACK or park ahead of the packet that fills the
+                    // hole. Reliable frames can return under a fresh number.
+                    progress.packets_dropped = progress.packets_dropped.saturating_add(1);
+                    continue;
+                }
+                return Err(error.into());
+            }
             progress.packets_received = progress.packets_received.saturating_add(1);
         }
 
@@ -885,4 +893,236 @@ fn bind_transport_parameters(
             .unwrap_or(0),
     );
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytes::Bytes;
+    use crate::net::atp::protocol::quic_frames::QuicFrame;
+    use crate::net::atp::protocol::varint::VarInt;
+    use crate::net::quic_native::connection::NativeQuicConnection;
+    use crate::net::quic_native::connection_manager::{ConnectionRouter, RoutingResult};
+    use crate::net::quic_native::handshake_driver::tests::{
+        CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert,
+    };
+    use crate::net::quic_native::handshake_driver::{client_config, server_config};
+    use crate::net::quic_native::{QuicConnectionState, StreamId};
+    use futures_lite::future::{block_on, zip};
+    use rustls::pki_types::ServerName;
+
+    fn assert_reassembly_recovered(cx: &Cx, connection: &mut NativeQuicConnection) {
+        assert_eq!(connection.state(), QuicConnectionState::Established);
+        assert_eq!(connection.datagrams_received(), 1);
+        assert_eq!(connection.recv_datagram().as_deref(), Some(&b"once"[..]));
+        assert!(connection.recv_datagram().is_none());
+        let mut received = Vec::new();
+        while received.len() < 2 {
+            let bytes = connection.read_stream_bytes(cx, StreamId(0), 2).unwrap();
+            assert!(!bytes.is_empty());
+            received.extend_from_slice(&bytes);
+        }
+        assert_eq!(received, b"hx");
+        assert!(!connection.is_stream_read_eof(StreamId(0)).unwrap());
+        assert_eq!(
+            connection
+                .streams()
+                .stream(StreamId(0))
+                .unwrap()
+                .recv_offset,
+            2
+        );
+    }
+
+    #[test]
+    fn reassembly_backpressure_recovers_in_udp_owner_and_authenticated_router() {
+        block_on(async {
+            for routed in [false, true] {
+                let cx = Cx::for_testing();
+                let config = NativeQuicConnectionConfig::default();
+                let parameters = TransportParameters {
+                    initial_max_data: Some(config.connection_recv_limit),
+                    initial_max_stream_data_bidi_local: Some(config.recv_window),
+                    initial_max_stream_data_bidi_remote: Some(config.recv_window),
+                    initial_max_stream_data_uni: Some(config.recv_window),
+                    initial_max_streams_bidi: Some(config.max_local_bidi),
+                    max_datagram_frame_size: Some(1200),
+                    ..TransportParameters::default()
+                };
+                let mut parameters_bytes = Vec::new();
+                parameters.encode(&mut parameters_bytes).unwrap();
+                let client_socket = QuicUdpEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    QuicUdpEndpointConfig::default(),
+                )
+                .await
+                .unwrap();
+                let server_socket = QuicUdpEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    QuicUdpEndpointConfig::default(),
+                )
+                .await
+                .unwrap();
+                let address = server_socket.local_addr();
+                let alpn = b"reassembly-test";
+                let client_tls =
+                    client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![alpn.to_vec()]).unwrap();
+                let server_tls = server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![alpn.to_vec()],
+                )
+                .unwrap();
+                let initial_cid = ConnectionId::new(b"initial").unwrap();
+                let server_cid = ConnectionId::new(b"server").unwrap();
+                let (client, server) = zip(
+                    NativeQuicUdpConnection::connect(
+                        &cx,
+                        client_socket,
+                        address,
+                        QuicHandshakeDriver::client(
+                            client_tls,
+                            ServerName::try_from("localhost").unwrap(),
+                            parameters_bytes.clone(),
+                        )
+                        .unwrap(),
+                        initial_cid,
+                        ConnectionId::new(b"client").unwrap(),
+                        config,
+                        alpn,
+                    ),
+                    NativeQuicUdpConnection::accept(
+                        &cx,
+                        server_socket,
+                        QuicHandshakeDriver::server(server_tls, parameters_bytes).unwrap(),
+                        initial_cid,
+                        server_cid,
+                        config,
+                        alpn,
+                    ),
+                )
+                .await;
+                let mut client = client.unwrap();
+                let mut server = server.unwrap();
+                assert!(server.early_one_rtt_packets.is_empty());
+                let id = StreamId(0);
+                let connection = server.connection.inner_mut();
+                connection.accept_remote_stream(&cx, id).unwrap();
+                // Seed only the bounded capacity precondition. All three
+                // admission/recovery packets use real TLS keys and UDP below.
+                for fragment in 0..4095u64 {
+                    connection
+                        .receive_stream_bytes(
+                            &cx,
+                            id,
+                            1 + fragment * 2,
+                            Bytes::from_static(b"x"),
+                            false,
+                        )
+                        .unwrap();
+                }
+                connection
+                    .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65535)
+                    .unwrap();
+                let overflow = vec![
+                    QuicFrame::Datagram {
+                        data: Bytes::from_static(b"once"),
+                    },
+                    QuicFrame::Stream {
+                        stream_id: VarInt(id.0),
+                        offset: Some(VarInt(8191)),
+                        data: Bytes::from_static(b"z"),
+                        fin: true,
+                    },
+                ];
+                let repair = vec![QuicFrame::Stream {
+                    stream_id: VarInt(id.0),
+                    offset: Some(VarInt(0)),
+                    data: Bytes::from_static(b"h"),
+                    fin: false,
+                }];
+                let mut packets = Vec::new();
+                for frames in [&overflow, &repair, &overflow] {
+                    let mut payload = BytesMut::new();
+                    NativeQuicConnection::encode_frames(frames, &mut payload).unwrap();
+                    let data = assemble_protected_1rtt_packet(
+                        &cx,
+                        server_cid,
+                        client.connection.inner_mut(),
+                        &mut client.protection,
+                        frames,
+                        &payload,
+                        1,
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                    packets.push(OutgoingPacket {
+                        dst_addr: address,
+                        data,
+                        send_time: None,
+                    });
+                }
+                let sent = client.endpoint.send_batch(&cx, &packets).await.unwrap();
+                assert_eq!(sent.packets_processed, 3);
+                assert!(sent.error.is_none());
+                if routed {
+                    let (mut router, mut endpoint, early) =
+                        ConnectionRouter::from_authenticated_parts(
+                            server.into_managed_parts(),
+                            config,
+                            1,
+                            None,
+                            Instant::now(),
+                        );
+                    assert!(early.is_empty());
+                    let mut outcomes = Vec::new();
+                    while outcomes.len() < 3 {
+                        let packets = timeout(
+                            crate::time::wall_now(),
+                            Duration::from_secs(10),
+                            endpoint.receive_batch(&cx, 3 - outcomes.len()),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        for packet in packets {
+                            outcomes.push(router.route_packet(&cx, packet).await.unwrap());
+                        }
+                    }
+                    assert!(matches!(&outcomes[0], RoutingResult::Drop { reason }
+                        if reason == "stream reassembly backpressure"));
+                    assert!(matches!(&outcomes[1], RoutingResult::Routed { .. }));
+                    assert!(matches!(&outcomes[2], RoutingResult::Routed { .. }));
+                    let connection = router.connection_mut_for_testing(&cx, server_cid).unwrap();
+                    assert_reassembly_recovered(&cx, connection);
+                    let frames = connection
+                        .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65535)
+                        .unwrap();
+                    assert!(frames.iter().any(|frame| matches!(frame,
+                        QuicFrame::Ack { largest_acknowledged, first_ack_range, ack_ranges, .. }
+                            if largest_acknowledged.value() == 2 && first_ack_range.value() == 1 && ack_ranges.is_empty()
+                    )), "only packets 1 and 2 were admitted");
+                } else {
+                    let mut received = 0;
+                    let mut dropped = 0;
+                    for _ in 0..3 {
+                        let progress = server
+                            .drive_io_once(&cx, Duration::from_secs(10))
+                            .await
+                            .unwrap();
+                        received += progress.packets_received;
+                        dropped += progress.packets_dropped;
+                        if received + dropped == 3 {
+                            break;
+                        }
+                    }
+                    assert_eq!((received, dropped), (2, 1));
+                    assert_reassembly_recovered(&cx, server.connection.inner_mut());
+                }
+            }
+        });
+    }
 }

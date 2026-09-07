@@ -2,6 +2,7 @@
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::protocol::varint::VARINT_MAX;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -352,6 +353,46 @@ struct QueuedStreamFrame {
 struct RecvRun {
     pieces: VecDeque<Bytes>,
     len: u64,
+}
+
+/// Payload-free projection used only when a packet could reach the run cap.
+/// Its size depends on holes, never on the number of retained payload slices.
+struct RecvPacketRuns {
+    read_offset: u64,
+    runs: Vec<(u64, u64)>,
+    reset: bool,
+}
+
+impl RecvPacketRuns {
+    fn insert(&mut self, offset: u64, end: u64) {
+        if self.reset || offset == end || end <= self.read_offset {
+            return;
+        }
+        let mut start = offset.max(self.read_offset);
+        let mut end = end;
+        let first = self
+            .runs
+            .partition_point(|&(_, known_end)| known_end < start);
+        let mut last = first;
+        while let Some(&(known_start, known_end)) = self.runs.get(last) {
+            if known_start > end {
+                break;
+            }
+            start = start.min(known_start);
+            end = end.max(known_end);
+            last += 1;
+        }
+        self.runs.splice(first..last, [(start, end)]);
+    }
+
+    fn exceeds(&self, limit: usize) -> bool {
+        let head = self
+            .runs
+            .first()
+            .is_some_and(|&(start, _)| start == self.read_offset);
+        self.runs.len() > limit
+            || self.runs.len().saturating_sub(usize::from(head)) > limit.saturating_sub(1)
+    }
 }
 
 impl RecvRun {
@@ -1742,6 +1783,81 @@ impl StreamTable {
         Ok(projected > limit || projected_out_of_order > max_out_of_order)
     }
 
+    /// Screen the entire packet's reassembly budget before any frame effects.
+    /// Protocol validation still belongs to the ordinary frame-processing path.
+    /// No payloads, send queues, wakers, or other streams are cloned here.
+    pub(crate) fn packet_reassembly_fragment_limit_would_be_exceeded(
+        &self,
+        frames: &[QuicFrame],
+        limit: usize,
+    ) -> bool {
+        // An interval adds at most one run. Most packets therefore need only
+        // this allocation-free upper bound, even when carrying several streams.
+        let could_reach_limit = frames.iter().any(|frame| {
+            let QuicFrame::Stream { stream_id, .. } = frame else {
+                return false;
+            };
+            self.streams
+                .get(&StreamId(stream_id.value()))
+                .map_or(0, |stream| stream.recv_chunks.len())
+                .saturating_add(frames.len())
+                > limit.saturating_sub(1)
+        });
+        if !could_reach_limit {
+            return false;
+        }
+
+        let mut projected = BTreeMap::<StreamId, RecvPacketRuns>::new();
+        for frame in frames {
+            let stream_id = match frame {
+                QuicFrame::Stream { stream_id, .. } | QuicFrame::ResetStream { stream_id, .. } => {
+                    *stream_id
+                }
+                // No later STREAM can be accepted after a peer close. Leave
+                // close/error processing to the normal connection state machine.
+                QuicFrame::ConnectionClose { .. } => break,
+                _ => continue,
+            };
+            let id = StreamId(stream_id.value());
+            let projection = projected.entry(id).or_insert_with(|| {
+                let stream = self.streams.get(&id);
+                RecvPacketRuns {
+                    read_offset: stream.map_or(0, |stream| stream.read_offset),
+                    runs: stream.map_or_else(Vec::new, |stream| {
+                        stream
+                            .recv_chunks
+                            .iter()
+                            .map(|(&start, run)| (start, start + run.len))
+                            .collect()
+                    }),
+                    reset: stream.is_some_and(|stream| {
+                        stream.recv_reset.is_some() || stream.receive_stopped_error_code.is_some()
+                    }),
+                }
+            });
+            match frame {
+                QuicFrame::Stream { offset, data, .. } => {
+                    let offset = offset.map_or(0, |value| value.value());
+                    let Some(end) = offset.checked_add(data.len() as u64) else {
+                        // The normal processor reports this malformed frame;
+                        // it cannot reach a subsequent reassembly admission.
+                        break;
+                    };
+                    projection.insert(offset, end);
+                    if projection.exceeds(limit) {
+                        return true;
+                    }
+                }
+                QuicFrame::ResetStream { .. } => {
+                    projection.runs.clear();
+                    projection.reset = true;
+                }
+                _ => unreachable!("only STREAM and RESET_STREAM projections are constructed"),
+            }
+        }
+        false
+    }
+
     /// Receive STREAM payload bytes on one stream at an explicit offset.
     pub fn receive_stream_bytes(
         &mut self,
@@ -2349,6 +2465,84 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    #[test]
+    fn packet_reassembly_backpressure_matches_sequential_byte_coverage() {
+        use crate::net::atp::protocol::varint::VarInt;
+
+        // Independent byte-map oracle: two frames may add holes, bridge them,
+        // overlap one another, or retransmit bytes already consumed by a read.
+        for consumed in [0usize, 4] {
+            let mut table = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+            let id = StreamId(0);
+            table.accept_remote_stream(id).unwrap();
+            if consumed > 0 {
+                table
+                    .receive_stream_bytes(id, 0, Bytes::from_static(b"abcd"), false)
+                    .unwrap();
+                assert_eq!(
+                    table.read_stream_bytes(id, consumed).unwrap().len(),
+                    consumed
+                );
+            }
+            let mut initial = [false; 12];
+            for index in [2usize, 5, 9] {
+                if index >= consumed {
+                    table
+                        .receive_stream_bytes(id, index as u64, Bytes::from_static(b"x"), false)
+                        .unwrap();
+                    initial[index] = true;
+                }
+            }
+            let before = table.stream(id).unwrap().clone();
+            for first in 0..12usize {
+                for second in 0..12usize {
+                    for lengths in [(0, 1), (1, 1), (3, 2), (6, 6)] {
+                        let ranges = [
+                            (first, (first + lengths.0).min(12)),
+                            (second, (second + lengths.1).min(12)),
+                        ];
+                        let frames: Vec<_> = ranges
+                            .iter()
+                            .map(|&(start, end)| QuicFrame::Stream {
+                                stream_id: VarInt(id.0),
+                                offset: Some(VarInt(start as u64)),
+                                data: Bytes::from(vec![b'x'; end - start]),
+                                fin: false,
+                            })
+                            .collect();
+                        for limit in 3..=5usize {
+                            let mut covered = initial;
+                            let mut rejected = false;
+                            for (start, end) in ranges {
+                                for byte in start..end {
+                                    if byte >= consumed {
+                                        covered[byte] = true;
+                                    }
+                                }
+                                let runs = covered
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|&(i, present)| *present && (i == 0 || !covered[i - 1]))
+                                    .count();
+                                rejected |= runs > limit
+                                    || runs.saturating_sub(usize::from(covered[consumed]))
+                                        > limit - 1;
+                            }
+                            assert_eq!(
+                                table.packet_reassembly_fragment_limit_would_be_exceeded(
+                                    &frames, limit
+                                ),
+                                rejected,
+                                "consumed={consumed} ranges={ranges:?} limit={limit}"
+                            );
+                        }
+                    }
+                }
+            }
+            assert_eq!(table.stream(id).unwrap(), &before);
+        }
+    }
 
     #[test]
     fn recv_reassembly_coalesces_contiguous_frames_without_copying() {

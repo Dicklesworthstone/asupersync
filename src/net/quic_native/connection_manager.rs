@@ -600,7 +600,7 @@ impl ConnectionRouter {
                 // waker may request cancellation while processing the first
                 // frame: the remaining frames must still commit exactly once.
                 // No socket, timer, or other asynchronous wait is masked.
-                cx.masked(|| -> Result<(), ConnectionRouterError> {
+                let admitted = cx.masked(|| -> Result<bool, ConnectionRouterError> {
                     let payload = packet.data.get(routing_info.header_len..).ok_or_else(|| {
                         ConnectionRouterError::PacketProcessingFailed {
                             connection_id,
@@ -627,19 +627,22 @@ impl ConnectionRouter {
                             reason: error.to_string(),
                         })?;
                     handle.last_activity = packet.receive_time;
-                    handle
-                        .connection
-                        .process_packet_payload(
-                            cx,
-                            routing_info.space,
-                            routing_info.packet_number,
-                            &plaintext,
-                            now_micros,
-                        )
-                        .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                    let processing = handle.connection.process_packet_payload(
+                        cx,
+                        routing_info.space,
+                        routing_info.packet_number,
+                        &plaintext,
+                        now_micros,
+                    );
+                    if let Err(error) = processing {
+                        if error.is_stream_reassembly_backpressure() {
+                            return Ok(false);
+                        }
+                        return Err(ConnectionRouterError::PacketProcessingFailed {
                             connection_id,
                             reason: error.to_string(),
-                        })?;
+                        });
+                    }
                     handle.deferred_spaces[packet_space_index(routing_info.space)] = true;
                     Self::refresh_connection_timer(
                         cx,
@@ -648,8 +651,14 @@ impl ConnectionRouter {
                         self.clock_origin,
                         now_micros,
                         packet.receive_time,
-                    )
+                    )?;
+                    Ok(true)
                 })?;
+                if !admitted {
+                    return Ok(RoutingResult::Drop {
+                        reason: "stream reassembly backpressure".to_string(),
+                    });
+                }
                 // Always acknowledge committed input before a later checkpoint
                 // or await. The driver owns deferred output, so cancellation
                 // cannot turn this accepted ciphertext into a replay retry.
@@ -690,19 +699,24 @@ impl ConnectionRouter {
             } else {
                 payload.to_vec()
             };
-            handle
-                .connection
-                .process_packet_payload(
-                    cx,
-                    routing_info.space,
-                    routing_info.packet_number,
-                    &plaintext_payload,
-                    now_micros,
-                )
-                .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+            let processing = handle.connection.process_packet_payload(
+                cx,
+                routing_info.space,
+                routing_info.packet_number,
+                &plaintext_payload,
+                now_micros,
+            );
+            if let Err(error) = processing {
+                if error.is_stream_reassembly_backpressure() {
+                    return Ok(RoutingResult::Drop {
+                        reason: "stream reassembly backpressure".to_string(),
+                    });
+                }
+                return Err(ConnectionRouterError::PacketProcessingFailed {
                     connection_id,
-                    reason: err.to_string(),
-                })?;
+                    reason: error.to_string(),
+                });
+            }
             let space_index = packet_space_index(routing_info.space);
             handle.deferred_spaces[space_index] = true;
             let retained_start = self.pending_deferred_packets.len();

@@ -365,3 +365,133 @@ fn connection_reassembly_keeps_hostile_fragment_limit_and_head_progress() {
         Bytes::from_static(b"x")
     );
 }
+
+#[test]
+fn packet_reassembly_backpressure_is_atomic_and_recovers() {
+    use asupersync::net::atp::protocol::quic_frames::QuicFrame;
+    use asupersync::net::atp::protocol::varint::VarInt;
+    use asupersync::net::quic_native::{PacketNumberSpace, StreamId};
+
+    let cx = test_cx();
+    let mut connection = reassembly_test_connection(&cx);
+    let stream = connection.open_local_bidi(&cx).unwrap();
+    for fragment in 0..4094u64 {
+        connection
+            .receive_stream_bytes(
+                &cx,
+                stream,
+                1 + fragment * 2,
+                Bytes::from_static(b"x"),
+                false,
+            )
+            .unwrap();
+    }
+    let space = PacketNumberSpace::ApplicationData;
+    connection.generate_frames(&cx, space, 4096).unwrap();
+    let before = connection.streams().stream(stream).unwrap().clone();
+    let receive_credit = connection.streams().connection_recv_remaining();
+    let send_credit = connection.streams().connection_send_remaining();
+    let other = StreamId(0);
+    let packet = [
+        QuicFrame::MaxData {
+            maximum_data: VarInt(1 << 30),
+        },
+        QuicFrame::PathChallenge { data: *b"not-yet!" },
+        QuicFrame::Datagram {
+            data: Bytes::from_static(b"deliver once"),
+        },
+        QuicFrame::Stream {
+            stream_id: VarInt(other.0),
+            offset: Some(VarInt(0)),
+            data: Bytes::from_static(b"other stream"),
+            fin: true,
+        },
+        // Each new run individually fits the old snapshot. Together they
+        // exceed its remaining out-of-order slot, so preflight must compose.
+        QuicFrame::Stream {
+            stream_id: VarInt(stream.0),
+            offset: Some(VarInt(8189)),
+            data: Bytes::from_static(b"y"),
+            fin: false,
+        },
+        QuicFrame::Stream {
+            stream_id: VarInt(stream.0),
+            offset: Some(VarInt(8191)),
+            data: Bytes::from_static(b"z"),
+            fin: true,
+        },
+    ];
+    assert_eq!(
+        connection.process_packet_frames(&cx, space, 999, &packet, 1),
+        Err(NativeQuicConnectionError::InvalidState(
+            "stream receive reassembly fragment limit exceeded"
+        ))
+    );
+    assert_eq!(connection.streams().stream(stream).unwrap(), &before);
+    assert!(connection.streams().stream(other).is_err());
+    assert_eq!(
+        connection.streams().connection_recv_remaining(),
+        receive_credit
+    );
+    assert_eq!(
+        connection.streams().connection_send_remaining(),
+        send_credit
+    );
+    assert!(connection.recv_datagram().is_none());
+    assert_eq!(connection.datagrams_received(), 0);
+    assert!(
+        connection
+            .generate_frames(&cx, space, 4096)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(connection.state(), QuicConnectionState::Established);
+
+    let mut expected = vec![b'.'; 8192];
+    for fragment in 0..4094usize {
+        expected[1 + fragment * 2] = b'x';
+    }
+    expected[8189] = b'y';
+    expected[8191] = b'z';
+    connection
+        .receive_stream_bytes(
+            &cx,
+            stream,
+            0,
+            Bytes::copy_from_slice(&expected[..8191]),
+            false,
+        )
+        .expect("the gap-closing frame remains admissible");
+    connection
+        .process_packet_frames(&cx, space, 1000, &packet, 2)
+        .expect("retransmission after the hole closes");
+    let mut received = Vec::new();
+    while !connection.is_stream_read_eof(stream).unwrap() {
+        let bytes = connection.read_stream_bytes(&cx, stream, 317).unwrap();
+        assert!(!bytes.is_empty());
+        received.extend_from_slice(&bytes);
+    }
+    assert_eq!(received, expected);
+    assert_eq!(
+        connection.recv_datagram().as_deref(),
+        Some(&b"deliver once"[..])
+    );
+    assert!(connection.recv_datagram().is_none());
+    assert_eq!(connection.datagrams_received(), 1);
+    assert_eq!(
+        connection
+            .read_stream_bytes(&cx, other, 100)
+            .unwrap()
+            .as_ref(),
+        b"other stream"
+    );
+    let acknowledgments = connection.generate_frames(&cx, space, 4096).unwrap();
+    assert!(
+        acknowledgments.iter().any(|frame| matches!(frame,
+            QuicFrame::Ack { largest_acknowledged, first_ack_range, ack_ranges, .. }
+                if largest_acknowledged.value() == 1000
+                    && first_ack_range.value() == 0 && ack_ranges.is_empty()
+        )),
+        "only the admitted packet may be acknowledged"
+    );
+}

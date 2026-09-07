@@ -708,6 +708,9 @@ pub fn pump_app_data(
         Ok(()) => from.inner.on_generated_frames_delivered(&frames)?,
         Err(error) => {
             from.inner.on_generated_frames_dropped(&frames)?;
+            if error.is_stream_reassembly_backpressure() {
+                return Ok(0);
+            }
             return Err(error);
         }
     }
@@ -792,6 +795,64 @@ mod tests {
         client.record_verified_server_identity();
         establish_loopback(cx, &mut client, &mut server).expect("loopback establishes");
         (client, server)
+    }
+
+    #[test]
+    fn loopback_reassembly_backpressure_retains_reliable_frames_for_retry() {
+        let cx = test_cx();
+        let (mut client, mut server) = established_pair(&cx);
+        let id = client.open_bidi_stream(&cx).unwrap();
+        let mut expected = vec![b'.'; 8192];
+        for fragment in 0..4095usize {
+            expected[1 + fragment * 2] = b'x';
+        }
+        expected[8191] = b'z';
+        client
+            .write_stream(&cx, id, Bytes::copy_from_slice(&expected[..8191]), false)
+            .unwrap();
+        // Consume the sender's prefix into a fixture hole pattern. The actual
+        // pump below must requeue its rejected tail and deliver it on retry.
+        let prefix = client
+            .inner
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65535)
+            .unwrap();
+        client.inner.on_generated_frames_delivered(&prefix).unwrap();
+        server.inner.accept_remote_stream(&cx, id).unwrap();
+        for fragment in 0..4095u64 {
+            server
+                .inner
+                .receive_stream_bytes(&cx, id, 1 + fragment * 2, Bytes::from_static(b"x"), false)
+                .unwrap();
+        }
+        client
+            .write_stream(&cx, id, Bytes::from_static(b"z"), true)
+            .unwrap();
+        assert_eq!(
+            pump_app_data(&cx, &mut client, &mut server, 1200, 1).unwrap(),
+            0
+        );
+        assert!(client.has_pending_stream_frames(id));
+        assert!(
+            server
+                .inner
+                .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65535)
+                .unwrap()
+                .is_empty()
+        );
+        server
+            .inner
+            .receive_stream_bytes(&cx, id, 0, Bytes::copy_from_slice(&expected[..8191]), false)
+            .unwrap();
+        assert!(pump_app_data(&cx, &mut client, &mut server, 1200, 2).unwrap() > 0);
+        assert!(!client.has_pending_stream_frames(id));
+        let mut received = Vec::new();
+        while !server.is_control_eof(id).unwrap() {
+            let bytes = server.read_stream(&cx, id, 8192).unwrap();
+            assert!(!bytes.is_empty());
+            received.extend_from_slice(&bytes);
+        }
+        assert_eq!(received, expected);
+        assert!(server.is_control_eof(id).unwrap());
     }
 
     #[test]

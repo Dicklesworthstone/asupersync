@@ -1362,6 +1362,12 @@ enum InboundPacketDecode {
     Dropped,
 }
 
+enum InboundPacketDisposition {
+    Applied,
+    DatagramBackpressure,
+    ReassemblyDropped,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct IngestPacketsReport {
     packets_consumed: usize,
@@ -4451,7 +4457,7 @@ impl QuicLink {
         &mut self,
         cx: &Cx,
         packet: &DecodedOneRttPacket,
-    ) -> Result<bool, QuicTransportError> {
+    ) -> Result<InboundPacketDisposition, QuicTransportError> {
         let packet_number = packet.packet_number;
         let decoded_frames = &packet.frames;
         let required_datagram_slots = datagram_frame_count(decoded_frames);
@@ -4521,7 +4527,14 @@ impl QuicLink {
                 self.record_received_source_stream_frames(process_frames);
                 self.one_rtt_packets_ingested = self.one_rtt_packets_ingested.saturating_add(1);
                 self.mark_peer_activity();
-                Ok(true)
+                Ok(InboundPacketDisposition::Applied)
+            }
+            Err(error) if error.is_stream_reassembly_backpressure() => {
+                // Parking this packet would prevent a later gap-closing frame
+                // from making capacity available. Drop without ACK and let
+                // reliable frames return under a fresh packet number instead.
+                cx.trace("atp_quic.receive.stream_reassembly_backpressure");
+                Ok(InboundPacketDisposition::ReassemblyDropped)
             }
             Err(NativeQuicConnectionError::DatagramReceiveQueueFull { capacity }) => {
                 if cx.trace_buffer().is_some() {
@@ -4551,7 +4564,7 @@ impl QuicLink {
                     );
                 }
                 self.mark_peer_activity();
-                Ok(false)
+                Ok(InboundPacketDisposition::DatagramBackpressure)
             }
             Err(err) => Err(err.into()),
         }
@@ -4603,19 +4616,25 @@ impl QuicLink {
         while let Some(packet) = packets.next() {
             match self.decode_and_unprotect_one_rtt(cx, packet)? {
                 InboundPacketDecode::Decoded(decoded) => {
-                    if self.process_decoded_one_rtt_packet(cx, &decoded)? {
-                        report.packets_consumed = report.packets_consumed.saturating_add(1);
-                        report.one_rtt_packets_processed =
-                            report.one_rtt_packets_processed.saturating_add(1);
-                    } else {
-                        // Receive backpressure: park the authenticated packet
-                        // (never re-run AEAD — the replay window would reject
-                        // it) and return the untouched raw remainder to the
-                        // front of the pending queue in arrival order.
-                        self.pending_decoded_packets.push_back(decoded);
-                        self.requeue_received_packets_front(packets);
-                        report.receive_backpressure = true;
-                        break;
+                    match self.process_decoded_one_rtt_packet(cx, &decoded)? {
+                        InboundPacketDisposition::Applied => {
+                            report.packets_consumed = report.packets_consumed.saturating_add(1);
+                            report.one_rtt_packets_processed =
+                                report.one_rtt_packets_processed.saturating_add(1);
+                        }
+                        InboundPacketDisposition::ReassemblyDropped => {
+                            report.packets_consumed = report.packets_consumed.saturating_add(1);
+                        }
+                        InboundPacketDisposition::DatagramBackpressure => {
+                            // Receive backpressure: park the authenticated packet
+                            // (never re-run AEAD — the replay window would reject
+                            // it) and return the untouched raw remainder to the
+                            // front of the pending queue in arrival order.
+                            self.pending_decoded_packets.push_back(decoded);
+                            self.requeue_received_packets_front(packets);
+                            report.receive_backpressure = true;
+                            break;
+                        }
                     }
                 }
                 InboundPacketDecode::Dropped => {
@@ -4641,21 +4660,27 @@ impl QuicLink {
         limit: usize,
     ) -> Result<IngestPacketsReport, QuicTransportError> {
         let mut report = IngestPacketsReport::default();
-        while report.one_rtt_packets_processed < limit {
+        while report.packets_consumed < limit {
             let Some(decoded) = self.pending_decoded_packets.pop_front() else {
                 break;
             };
-            if self.process_decoded_one_rtt_packet(cx, &decoded)? {
-                report.packets_consumed = report.packets_consumed.saturating_add(1);
-                report.one_rtt_packets_processed =
-                    report.one_rtt_packets_processed.saturating_add(1);
-            } else {
-                self.pending_decoded_packets.push_front(decoded);
-                report.receive_backpressure = true;
-                return Ok(report);
+            match self.process_decoded_one_rtt_packet(cx, &decoded)? {
+                InboundPacketDisposition::Applied => {
+                    report.packets_consumed = report.packets_consumed.saturating_add(1);
+                    report.one_rtt_packets_processed =
+                        report.one_rtt_packets_processed.saturating_add(1);
+                }
+                InboundPacketDisposition::ReassemblyDropped => {
+                    report.packets_consumed = report.packets_consumed.saturating_add(1);
+                }
+                InboundPacketDisposition::DatagramBackpressure => {
+                    self.pending_decoded_packets.push_front(decoded);
+                    report.receive_backpressure = true;
+                    return Ok(report);
+                }
             }
         }
-        let remaining = limit.saturating_sub(report.one_rtt_packets_processed);
+        let remaining = limit.saturating_sub(report.packets_consumed);
         if remaining == 0 || self.pending_received_packets.is_empty() {
             return Ok(report);
         }
@@ -10775,6 +10800,230 @@ mod tests {
         conn.on_handshake_confirmed(&cx)
             .expect("handshake confirmed");
         conn
+    }
+
+    #[test]
+    fn reassembly_backpressure_drops_without_parking_or_ack_over_real_udp() {
+        use crate::net::atp::protocol::varint::VarInt;
+        use crate::net::quic_native::handshake_driver::tests::{
+            CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert,
+        };
+        use crate::net::quic_native::handshake_driver::{client_config, server_config};
+        use futures_lite::future::{block_on, zip};
+
+        block_on(async {
+            for fill_datagram_queue in [false, true] {
+                let cx = Cx::for_testing();
+                let config = QuicConfig::default();
+                let endpoint = bind_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+                    .await
+                    .unwrap();
+                let address = endpoint.local_addr();
+                let client_tls = QuicClientTls {
+                    server_name: ServerName::try_from("localhost").unwrap(),
+                    config: client_config(
+                        vec![parse_one_cert(CA_CERT_PEM)],
+                        vec![ATP_QUIC_ALPN.to_vec()],
+                    )
+                    .unwrap(),
+                };
+                let server_tls = QuicServerTls {
+                    config: server_config(
+                        vec![parse_one_cert(LEAF_CERT_PEM)],
+                        leaf_key(),
+                        vec![ATP_QUIC_ALPN.to_vec()],
+                    )
+                    .unwrap(),
+                };
+                let (client, server) = zip(
+                    connect(&cx, address, &client_tls, &config),
+                    accept(&cx, endpoint, &server_tls, &config),
+                )
+                .await;
+                let mut client = client.unwrap();
+                let (mut server, early) = server.unwrap();
+                server.ingest_packets(&cx, early).unwrap();
+                let id = StreamId(0);
+                server.conn.accept_remote_stream(&cx, id).unwrap();
+                // Plant a precise, bounded hole pattern in the real receiver;
+                // the overflow, repair, and retry below cross actual TLS/UDP.
+                for fragment in 0..4095u64 {
+                    server
+                        .conn
+                        .receive_stream_bytes(
+                            &cx,
+                            id,
+                            1 + fragment * 2,
+                            Bytes::from_static(b"x"),
+                            false,
+                        )
+                        .unwrap();
+                }
+                if fill_datagram_queue {
+                    while server.conn.inbound_datagram_remaining_capacity() > 0 {
+                        server
+                            .conn
+                            .process_frame(
+                                &cx,
+                                &QuicFrame::Datagram {
+                                    data: Bytes::from_static(b"queued"),
+                                },
+                                PacketNumberSpace::ApplicationData,
+                            )
+                            .unwrap();
+                    }
+                }
+                let prior_datagrams = server.conn.datagrams_received();
+                server
+                    .conn
+                    .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65535)
+                    .unwrap();
+                let mut expected = vec![b'.'; 8192];
+                for fragment in 0..4095usize {
+                    expected[1 + fragment * 2] = b'x';
+                }
+                expected[8191] = b'z';
+                let overflow = vec![
+                    QuicFrame::Datagram {
+                        data: Bytes::from_static(b"delivered once"),
+                    },
+                    QuicFrame::Stream {
+                        stream_id: VarInt(id.0),
+                        offset: Some(VarInt(8191)),
+                        data: Bytes::from_static(b"z"),
+                        fin: true,
+                    },
+                ];
+                let repair = vec![QuicFrame::Stream {
+                    stream_id: VarInt(id.0),
+                    offset: Some(VarInt(0)),
+                    data: Bytes::copy_from_slice(&expected[..8191]),
+                    fin: false,
+                }];
+                let mut packets = Vec::new();
+                for (number, frames) in [(10, &overflow), (11, &repair), (12, &overflow)] {
+                    let mut payload = BytesMut::new();
+                    for frame in frames {
+                        frame.encode(&mut payload).unwrap();
+                    }
+                    let header = encode_one_rtt_header(number);
+                    let request = PacketProtectionRequest {
+                        space: PacketProtectionSpace::OneRtt,
+                        key_phase: false,
+                        packet_number: number,
+                        associated_data: &header,
+                        payload: &payload,
+                    };
+                    let protected =
+                        protection_result(client.protection.protect_packets(&cx, &[request]))
+                            .unwrap()
+                            .pop()
+                            .unwrap();
+                    let mut data = header.to_vec();
+                    data.extend_from_slice(&protected.ciphertext);
+                    data.extend_from_slice(&protected.tag);
+                    packets.push(OutgoingPacket {
+                        dst_addr: address,
+                        data,
+                        send_time: None,
+                    });
+                }
+                client.endpoint.send_batch(&cx, &packets).await.unwrap();
+                let mut received = Vec::new();
+                while received.len() < 3 {
+                    let batch = crate::time::timeout(
+                        crate::time::wall_now(),
+                        Duration::from_secs(10),
+                        server.endpoint.receive_batch(&cx, 3 - received.len()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    received.extend(batch);
+                }
+                let report = server.ingest_packets(&cx, received).unwrap();
+                assert_eq!(report.packets_consumed, 3);
+                assert_eq!(report.one_rtt_packets_processed, 2);
+                assert!(!report.receive_backpressure);
+                assert!(server.pending_decoded_packets.is_empty());
+                assert!(server.pending_received_packets.is_empty());
+                assert_eq!(server.one_rtt_packets_ingested, 2);
+                assert_eq!(
+                    server.conn.datagrams_received(),
+                    prior_datagrams + u64::from(!fill_datagram_queue)
+                );
+                let mut actual = Vec::new();
+                while !server.conn.is_stream_read_eof(id).unwrap() {
+                    let bytes = server.conn.read_stream_bytes(&cx, id, 317).unwrap();
+                    assert!(!bytes.is_empty());
+                    actual.extend_from_slice(&bytes);
+                }
+                assert_eq!(actual, expected);
+                let ack = server
+                    .conn
+                    .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65535)
+                    .unwrap();
+                assert!(ack.iter().any(|frame| matches!(frame,
+                    QuicFrame::Ack { largest_acknowledged, first_ack_range, ack_ranges, .. }
+                        if largest_acknowledged.value() == 12 && first_ack_range.value() == 1 && ack_ranges.is_empty()
+                )), "discarded packet 10 must not be acknowledged, including the DATAGRAM-shedding path");
+
+                // Already-decoded pending input must also discard a saturated
+                // packet within its work budget rather than park it forever.
+                let other = StreamId(4);
+                server.conn.accept_remote_stream(&cx, other).unwrap();
+                for fragment in 0..4095u64 {
+                    server
+                        .conn
+                        .receive_stream_bytes(
+                            &cx,
+                            other,
+                            1 + fragment * 2,
+                            Bytes::from_static(b"x"),
+                            false,
+                        )
+                        .unwrap();
+                }
+                server
+                    .pending_decoded_packets
+                    .push_back(DecodedOneRttPacket {
+                        packet_number: 20,
+                        frames: vec![QuicFrame::Stream {
+                            stream_id: VarInt(other.0),
+                            offset: Some(VarInt(8191)),
+                            data: Bytes::from_static(b"z"),
+                            fin: false,
+                        }],
+                    });
+                server
+                    .pending_decoded_packets
+                    .push_back(DecodedOneRttPacket {
+                        packet_number: 21,
+                        frames: vec![QuicFrame::Stream {
+                            stream_id: VarInt(other.0),
+                            offset: Some(VarInt(0)),
+                            data: Bytes::from_static(b"h"),
+                            fin: false,
+                        }],
+                    });
+                let dropped = server.ingest_pending_received_packets(&cx, 1).unwrap();
+                assert_eq!(dropped.packets_consumed, 1);
+                assert_eq!(dropped.one_rtt_packets_processed, 0);
+                assert!(!dropped.receive_backpressure);
+                assert_eq!(server.pending_decoded_packets.len(), 1);
+                let repaired = server.ingest_pending_received_packets(&cx, 1).unwrap();
+                assert_eq!(repaired.one_rtt_packets_processed, 1);
+                assert!(server.pending_decoded_packets.is_empty());
+                assert_eq!(
+                    server
+                        .conn
+                        .read_stream_bytes(&cx, other, 1)
+                        .unwrap()
+                        .as_ref(),
+                    b"h"
+                );
+            }
+        });
     }
 
     fn clean_window(bps: u64) -> DeliveryWindow {
