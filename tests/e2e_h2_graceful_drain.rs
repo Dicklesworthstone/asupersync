@@ -727,9 +727,10 @@ mod external_h2spec {
                     "H2SPEC_ARTIFACT_EXPORT_FAILED dir={} {error}",
                     self.0.display()
                 );
-                if !std::thread::panicking() {
-                    panic!("raw external evidence export failed: {error}");
-                }
+                assert!(
+                    std::thread::panicking(),
+                    "raw external evidence export failed: {error}"
+                );
             }
         }
     }
@@ -828,7 +829,7 @@ mod external_h2spec {
     // case ID. Join to discovery from that exact pinned binary, rather than
     // inventing IDs from the subset's XML position. Python's standard XML
     // parser handles escaping; no ad-hoc XML string matching decides success.
-    const PARSE_REPORT: &str = r#"
+    const PARSE_REPORT: &str = r"
 import json, pathlib, re, sys, xml.etree.ElementTree as ET
 directory, stage, selection = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
 titles = {'Generic tests for HTTP/2 server':'generic',
@@ -881,7 +882,7 @@ summary = dict(selected=len(rows), passed=sum(row['result']=='passed' for row in
                skipped=sum(row['result']=='skipped' for row in rows),
                cases=sorted(rows,key=lambda row:row['id']))
 print(json.dumps(summary,sort_keys=True))
-"#;
+";
 
     fn report(dir: &Path, stage: &str, selection: &[&str]) -> Value {
         let mut args = vec![

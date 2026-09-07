@@ -2174,9 +2174,7 @@ mod tests {
                 if self.gate.poll_recv_uninterruptible(ctx).is_pending() {
                     return Poll::Pending;
                 }
-                if self.mode == 1 || self.mode == 5 {
-                    panic!("ATP primary worker poll panic");
-                }
+                assert!(!matches!(self.mode, 1 | 5), "ATP primary worker poll panic");
                 Poll::Ready(self.outcome.take().expect("worker returns once"))
             }
         }
@@ -2190,9 +2188,7 @@ mod tests {
                         Some("ATP worker capture retired"),
                     );
                 }
-                if self.mode == 3 || self.mode == 5 {
-                    panic!("ATP worker destructor panic");
-                }
+                assert!(!matches!(self.mode, 3 | 5), "ATP worker destructor panic");
             }
         }
 

@@ -10111,8 +10111,7 @@ worker_threads = 16
         assert!(resource.try_lock_owned().is_err());
         assert_eq!(driver.pending_count(), 0);
         let mut expected_deadline = None;
-        let mut activation_poll_receipt = None;
-        if case == 3 {
+        let activation_poll_receipt = if case == 3 {
             commands.try_send(NativeShutdownCommand::Legacy).unwrap();
             wait_native_shutdown_condition(
                 || polls.load(Ordering::SeqCst) == 1,
@@ -10186,7 +10185,7 @@ worker_threads = 16
                 || receipt.lock().is_some(),
                 "expired ceiling must retire cleanup and publish actual close",
             );
-            activation_poll_receipt = Some((activation_polls, active_poll_limit));
+            Some((activation_polls, active_poll_limit))
         } else {
             let budget = match case {
                 0 => Budget::INFINITE.with_poll_quota(0),
@@ -10216,7 +10215,8 @@ worker_threads = 16
                 assert_eq!(drops.load(Ordering::SeqCst), 0);
                 assert!(receipt.lock().is_none());
             }
-        }
+            None
+        };
         // This receive observes the actual future destructor. No host sleep,
         // manual timer processing, or synthetic wake drives deadline progress.
         retired_rx
