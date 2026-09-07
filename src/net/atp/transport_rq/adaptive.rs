@@ -3,11 +3,11 @@
 //! `br-asupersync-mixdaw` adaptive layer.
 //! See `docs/atp_rq_adaptive_design.md` for the full derivation. This module is
 //! the **runnable mathematical core**: four pure, deterministic, unit-testable
-//! functions plus a seeded EXP3 controller. It is **opt-in** — a caller that
-//! does not construct an [`AdaptiveController`] gets today's fixed behaviour
-//! byte-for-byte, and [`AdaptiveController::next_block_plan`] returns `None`
-//! until enough evidence has accrued, so the conservative fixed config is the
-//! always-available fallback.
+//! functions plus a seeded EXP3-style controller. The native RQ sender constructs
+//! it with a single configured `(K, N)` arm and uses its overhead/pacing model;
+//! constructing a multi-arm policy is a separate caller choice.
+//! [`AdaptiveController::next_block_plan`] returns `None` until enough evidence
+//! has accrued, allowing the caller to retain its fixed configuration.
 //!
 //! # What it computes
 //!
@@ -22,8 +22,9 @@
 //!   coding-bound;
 //! - the UDP fan-out `N*` (smallest that nears the bandwidth cap).
 //!
-//! An EXP3 bandit over the `(K, N)` grid, warm-started at the model `K*`, hedges
-//! model error with vanishing regret vs the best static arm.
+//! The model chooses the first `(K, N)` arm; later choices use seeded exploration
+//! and importance-weighted loss updates. Fixed `exp3_eta` and a running loss
+//! scale do not establish vanishing regret or a transfer-time improvement bound.
 
 #![allow(
     clippy::many_single_char_names,
@@ -755,13 +756,14 @@ fn max_burst_datagrams_for_flow_credit(symbol_size: u16, credit_bytes: u64) -> O
     )
 }
 
-// ─── EXP3 bandit controller over (K, N) arms (no-regret hedge) ───────────────
+// ─── EXP3-style controller over (K, N) arms ─────────────────────────────────
 
 /// Per-block adaptive controller.
 ///
-/// Closed-form `optimal_block` warm start plus an EXP3 bandit over `(K, N)` arms
-/// that corrects model error with vanishing regret. Deterministic given the seed
-/// and the observation stream.
+/// Model-selected first arm plus seeded exploration over `(K, N)` arms.
+/// Deterministic given the policy, seed and observation stream. Its fixed
+/// exploration rate and running loss normalization are heuristic; this type
+/// makes no asymptotic regret or wall-clock performance guarantee.
 pub struct AdaptiveController {
     policy: AdaptivePolicy,
     est: PathEstimate,

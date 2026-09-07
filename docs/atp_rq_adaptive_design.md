@@ -1,8 +1,11 @@
 # Adaptive Block-Size & Transport-Parameter Optimizer for ATP-over-RaptorQ
 
 > Design artifact for `br-asupersync-mixdaw` adaptive layer. Status: design +
-> runnable mathematical core (`src/net/atp/transport_rq/adaptive.rs`). Off by
-> default; opt-in until fleet-validated.
+> runnable model/controller (`src/net/atp/transport_rq/adaptive.rs`). Reconciled
+> 2026-09-07: the native RQ sender already constructs this controller with one
+> configured `(K, N)` arm for overhead/pacing decisions. Multi-arm exploration,
+> statistical guarantees and the proposed rollout below are distinct scope;
+> source wiring is not fleet-performance evidence.
 
 ## 0. Is adaptive block sizing a smart idea? Yes — and it is the highest-leverage knob.
 
@@ -28,7 +31,7 @@ So the optimum is a genuine multi-objective trade-off with a clean structure,
 not a guess. The design below makes "what block size?" an **algebraic fixed
 point** (where the network-useful-rate curve crosses the coding-throughput
 curve), with overhead set by a **conformal concentration margin**, both
-estimated online, and a **no-regret bandit** hedging model error. It degrades to
+estimated online, and an **EXP3-style heuristic** exploring model error. It degrades to
 the current fixed config whenever evidence is thin.
 
 ---
@@ -115,7 +118,7 @@ G(K,ε,N) = min(  λ(N) / (1+ε) ,            # network-useful rate (overhead wa
 ```
 T(S) ≈ startup(RTT, probe)
      + S / G(K,ε,N)                                   # steady-state transport
-     + (#blocks) · P_fail · ( RTT + retransmit_frac ) # feedback-round penalty
+     + (#blocks) · P_fail · ( RTT + retransmit_bytes / λ ) # seconds
 ```
 
 ### 2.4 The optimizer (closed-form skeleton, refined by search)
@@ -174,7 +177,9 @@ The receiver already returns `symbols_accepted` and `feedback_rounds` in the
 `Proof`/`NeedMore` frames. Add per-block `(sent, received, wall_ms,
 decode_ms)`. From these:
 
-- `p̂_block = 1 − received/sent`; `λ̂_block = received·s / wall_ms`.
+- `p̂_block = 1 − received/sent`; `λ̂_block = received·s / (wall_ms/1000)`
+  in bytes/s. The `_bps` fields in `PathEstimate` also mean bytes/s; the
+  separately named `raw_pacing_bits_per_s` output uses bits/s.
 - `μ_dec` fit from `decode_ms` vs `K`.
 
 ### 3.3 Bayesian + conformal fusion
@@ -205,7 +210,7 @@ Three controllers on **separated timescales** (so they don't fight):
 | Send-rate pacing | per burst (~1 ms) | **AIMD / token bucket** targeting `λ̃`, clamped to `λ_lo` | new, control-theoretic |
 | Estimator window | per regime | e-process changepoint → window restart | `src/obligation/eprocess.rs` |
 
-### 4.1 Block-size bandit (no-regret)
+### 4.1 Block-size bandit (implemented heuristic; theorem target)
 
 Arms `a = (K, N)` on the grid (overhead `ε` is then `ε*(K, p̄, α)` analytically,
 not an arm — keeps the arm count small). Loss per block:
@@ -222,22 +227,37 @@ p_t(a) = (1−η)·w_t(a)/Σ_b w_t(b)  +  η/|A|
 w_{t+1}(a) = w_t(a)·exp(−η·ℓ̂_t(a))
 ```
 
-**Warm start** the weights from the model `K*` (concentrate prior mass there) so
-we don't pay full exploration cost — the model gets us to the right
-neighbourhood; the bandit only corrects residual error.
+The implementation starts with equal weights and chooses its first arm from
+the model `K*`; it does not concentrate the initial weight distribution.
+`observe` divides measured seconds per useful byte by a running maximum,
+then applies an importance-weighted exponential update. `observe_path_signals`
+adds a path penalty before that normalization. `exp3_eta` stays fixed.
 
-**Regret guarantee:** EXP3 gives `E[R_T] ≤ O(√(|A|·T·log|A|))` external regret
-vs the best fixed arm in hindsight — i.e. asymptotically no worse than an oracle
-that knew the single best static block size for this transfer, with the gap
-vanishing as `1/√T`. With sliding-window restart on changepoints, **dynamic
-regret** `O(√(Ŝ·T))` for `Ŝ` regime shifts (§4.2).
+**The theorem is a design target, not an implementation guarantee.** Standard
+EXP3 bounds require the specified algorithm, bounded losses on a common scale
+and a horizon-dependent parameter choice (or a justified anytime construction).
+The cumulative bound is of order `sqrt(|A| T log |A|)`; its per-round average,
+not cumulative regret, decays with `T`. See Auer et al., Theorem 3.1 and
+Corollary 3.2 in
+[The Nonstochastic Multiarmed Bandit Problem](https://homepages.math.uic.edu/~lreyzin/papers/auer02.pdf).
+
+This implementation uses a different fixed learning/exploration parameter and
+an observation-dependent scale. The stated theorem has not been established
+for it. With two fixed arms separated by loss gap `Δ`, its exploration floor
+alone assigns at least `eta/2` probability to the worse arm on every sampled
+round: expected regret is at least `Δ eta (T-1)/2`. Therefore fixed positive
+exploration does not imply vanishing average regret. Nor do normalized loss
+units directly measure percentage transfer-time overhead.
 
 ### 4.2 Nonstationarity
 
-The e-process raises an alarm when the loss/bandwidth supermartingale crosses
+The proposed e-process raises an alarm when the loss/bandwidth supermartingale crosses
 `1/α'`. On alarm: halve the estimator window and reset EXP3 weights toward the
-fresh model `K*`. This bounds dynamic regret to `O(√(Ŝ·T))` (sliding-window
-EXP3), matching the §4 table.
+fresh model `K*`. This is a proposed estimator/controller integration, not a
+proved dynamic-regret bound. `AdaptiveController` itself has no changepoint
+restart operation. A guarantee needs a concrete comparator, arm and switch
+dependence, detector assumptions, reset schedule and proof for the actual
+update; an alarm alone supplies none of those.
 
 ### 4.3 Pacing (control-theoretic)
 
@@ -253,26 +273,31 @@ the same AIMD that makes TCP stable, applied to the symbol spray, with a
 
 ## 5. Formal guarantees & explicit no-claim boundaries
 
-**Provides:**
+**Design obligations, not established end-to-end guarantees:**
 
-1. **Calibrated per-block reliability.** Under the exchangeability assumption of
-   recent blocks, `P(decode fails | committed plan) ≤ α` to finite-sample
-   split-conformal coverage (overhead sized against `p̄`, not `p̂`).
-2. **No-regret block sizing.** `E[R_T] = O(√(|A|T log|A|))` vs the best static
-   arm in hindsight (EXP3); `O(√(ŜT))` dynamic regret across `Ŝ` regimes.
-3. **Pacing stability.** The AIMD rate process is Lyapunov-stable around `r* =
-   λ̃` with bounded oscillation (standard AIMD).
+1. **Calibrated per-block reliability.** Establish the connection between a
+   calibrated loss bound and actual decoder failure. Exchangeability-based
+   coverage of a loss estimate does not by itself prove
+   `P(decode fails | committed plan) ≤ α`; the Gaussian decoder approximation,
+   burst dependence and plan selection require separate justification.
+2. **Regret analysis.** Establish a bound for the actual policy, normalization,
+   horizon and comparator before claiming no-regret block sizing. The current
+   fixed-parameter controller does not inherit the textbook bound (§4.1).
+3. **Pacing stability.** Analyze the implemented feedback delays, clamps and
+   interacting controllers. An analogy with standard AIMD does not establish
+   stability of this composition.
 4. **Deterministic conservative fallback.** With no/insufficient evidence the
    controller returns *exactly* the current fixed `RqConfig` — adaptivity is a
-   strict superset that can only help once evidence accrues.
-5. **Deterministic replay.** All randomness (EXP3 sampling, probe scheduling)
-   flows through the project's `Cx`-seeded RNG, so a lab run with a fixed seed
-   and a recorded path trace is bit-reproducible.
+   fallback. Activation can help or hurt; improvement requires measurements.
+5. **Deterministic replay.** The core owns a `DetRng` initialized from the
+   constructor's explicit seed. Repeated policy, seed and observations support
+   deterministic core tests; complete transport replay additionally needs the
+   same host/probe observations and execution semantics.
 
 **Does NOT claim:**
 
-- It does not beat an offline oracle that knew the full path trace in advance
-  (only vanishing regret vs the best *static* choice).
+- It establishes neither an offline-oracle comparison nor vanishing regret
+  against the best static choice for the implemented controller.
 - The Gaussian `P_fail` approximation is not exact for tiny `K` (<~50); there we
   fall back to the conservative fixed overhead.
 - Conformal coverage assumes recent-block exchangeability; a sharp regime change
@@ -287,19 +312,24 @@ the same AIMD that makes TCP stable, applied to the symbol spray, with a
 
 ## 6. Implementation plan (`src/net/atp/transport_rq/adaptive.rs`)
 
-Fallback-safe, opt-in, deterministic-in-lab. **No change to the default path
-until fleet-validated.**
+The native `RqAdaptiveSendState::new` in `transport_rq/mod.rs` already constructs
+the controller with `arm_grid_k = [fixed_k]` and `arm_grid_fanout = [fanout]`.
+`round_tuning` uses its overhead/pacing model after activation. This existing
+single-arm wiring is not proof of multi-arm block-size optimization. Changes
+to policy defaults or broader rollout still require the campaign's fleet and
+compatibility evidence.
 
 ### 6.1 Types
 
 ```rust
-/// Estimated path properties (all Option: None ⇒ thin evidence ⇒ fall back).
+/// Abbreviated design sketch; use the public source types for compiling callers.
+/// Path estimates use numeric fields and a sample-count activation threshold.
 pub struct PathEstimate {
     pub rtt_s: f64,
     pub loss_p_hat: f64,
     pub loss_p_bar: f64,      // conformal upper bound used for sizing
-    pub bw_median_bps: f64,
-    pub bw_trough_bps: f64,   // CVaR_β of instantaneous rate
+    pub bw_median_bps: f64,   // bytes/s despite the historical suffix
+    pub bw_trough_bps: f64,   // bytes/s
     pub enc_symbols_per_s: f64,
     pub dec_symbols_per_s: f64,
     pub coding_gamma: f64,    // superlinearity exponent in [1,2]
@@ -330,7 +360,7 @@ pub struct AdaptiveController { /* weights, estimators, rng-seeded */ }
 pub fn decode_fail_probability(k: u32, overhead: f64, loss: f64) -> f64;
 
 /// ε*(K,p,α) closed form (§2.3).  Pure, monotone in its args.
-pub fn overhead_for_target(k: u32, loss_p_bar: f64, alpha: f64) -> f64;
+pub fn overhead_for_target(k: u32, loss_p_bar: f64, alpha: f64, max_overhead: f64) -> f64;
 
 /// Steady-state goodput G(K,ε,N) (§2.3).  Pure.
 pub fn goodput_bps(k: u32, overhead: f64, fanout: usize, est: &PathEstimate, symbol_size: u16) -> f64;
@@ -339,9 +369,9 @@ pub fn goodput_bps(k: u32, overhead: f64, fanout: usize, est: &PathEstimate, sym
 pub fn optimal_block(est: &PathEstimate, policy: &AdaptivePolicy, symbol_size: u16) -> BlockPlan;
 ```
 
-These four functions are the mathematical core and are **100% deterministic and
-unit-testable with synthetic `PathEstimate`s** — no network needed. They encode
-every theorem above and are where the proof artifacts live.
+These functions can be unit-tested with synthetic `PathEstimate`s without a
+network. Such tests check the implemented model and its numerical behavior;
+they do not establish the statistical or transport guarantees proposed above.
 
 ### 6.3 Controller surface
 
@@ -350,8 +380,8 @@ impl AdaptiveController {
     pub fn new(policy: AdaptivePolicy, seed: u64) -> Self;
     /// Returns None until ≥ min_samples_to_activate (⇒ caller uses fixed RqConfig).
     pub fn next_block_plan(&mut self, symbol_size: u16) -> Option<BlockPlan>;
-    /// Feed back measured outcome → update EXP3 + estimators + e-process.
-    pub fn observe(&mut self, plan: &BlockPlan, sent: u64, received: u64, wall_s: f64, decode_s: f64);
+    /// Update the last selected arm from measured seconds per useful byte.
+    pub fn observe(&mut self, sent: u64, received: u64, wall_s: f64, useful_bytes: u64);
 }
 ```
 
@@ -367,8 +397,9 @@ byte-for-byte.
   - `optimal_block` lands network-bound→raise-K, coding-bound→lower-K on
     synthetic estimates (crossing-point correctness).
   - `decode_fail_probability ≤ α` at the chosen `(K,ε)` across a grid of `p`.
-  - EXP3 cumulative-regret trace is sublinear on a synthetic loss sequence; an
-    adversarial sequence does not induce linear regret.
+  - Record finite-horizon loss/regret on specified synthetic sequences, with
+    a fixed comparator and units. Include a fixed-exploration counterexample;
+    a favorable finite trace cannot establish asymptotic sublinear regret.
   - Conservative fallback: `samples < min` ⇒ `next_block_plan() == None`.
 - `artifacts/atp_rq_adaptive_replay_v1.json`: recorded synthetic path traces +
   expected decisions (deterministic golden).
@@ -390,7 +421,7 @@ byte-for-byte.
 | Family | Impact | Conf | Effort | Score | Role |
 |---|---|---|---|---|---|
 | Coding theory (P_fail, ε*, K* model) | 5 | 5 | 2 | 12.5 | core cost model |
-| Online learning / EXP3 (no-regret arms) | 5 | 4 | 2 | 10.0 | model-error hedge, reuses existing EXP3 |
+| Online learning / EXP3-style exploration | 5 | 4 | 2 | 10.0 | heuristic model-error exploration; theorem requirements in §4.1 |
 | Conformal + CVaR/EVT (tail-aware p̄, λ_lo) | 4 | 4 | 2 | 8.0 | calibrated constraint |
 | Control theory (AIMD pacing) | 4 | 4 | 2 | 8.0 | pipe-fill + stability |
 | e-process changepoint | 3 | 4 | 2 | 6.0 | nonstationarity |
@@ -432,12 +463,11 @@ readiness 5 (the core is four pure functions), operability 5
 - Changes the decision if: CPU is fast (`γ→1` ⇒ push `K` up) or slow (`γ→2` ⇒
   pull `K` down).
 
-**Card C — EXP3 hedges model error with vanishing regret.**
-- Equation: `E[R_T] ≤ 2√(e−1)·√(|A|T·ln|A|)`.
-- Substituted (`|A|=24 arms, T=200 blocks`): regret `≲ 2·1.31·√(24·200·3.18) ≈
-  324` loss-units vs `T·ℓ_max` budget ⇒ <a few % overhead vs the best static arm.
-- Intuition: even if the closed-form `K*` is biased, the bandit converges to the
-  empirically best arm without ever doing much worse than it along the way.
-- Assumptions: bounded loss `ℓ∈[0,ℓ_max]`; warm-started near `K*`.
-- Changes the decision if: regime shift (⇒ window restart, dynamic-regret mode).
-```
+**Card C — Check the horizon and loss units before interpreting a bound.**
+- Textbook comparator bound: `2√(e−1)·√(|A|T·ln|A|)` under §4.1's assumptions.
+- At `|A|=24`, `T=200`, this is approximately `323.8` normalized cumulative
+  loss units: `323.8/200 ≈ 1.62`, or 162% of the full unit-loss horizon.
+  It is weaker than the trivial 200-unit bound, not evidence of a few-percent
+  overhead. Conversion back to seconds requires a common physical loss scale.
+- The implemented fixed eta and changing scale do not satisfy the cited
+  theorem merely by using exponential weights; no throughput conclusion follows.
