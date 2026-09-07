@@ -4704,9 +4704,16 @@ mod tests {
         assert_eq!(conn.active_stream_count(), 1);
         assert!(!conn.graceful_shutdown_complete());
 
-        // Server finishes the response: stream closes, drain completes.
+        // Queuing the final response cannot complete drain before it is emitted.
         conn.send_headers(1, vec![Header::new(":status", "200")], true)
             .unwrap();
+        assert_eq!(conn.active_stream_count(), 1);
+        assert!(!conn.graceful_shutdown_complete());
+        let Some(Frame::Headers(final_headers)) = conn.next_frame() else {
+            panic!("final response must be emitted before drain completes")
+        };
+        assert_eq!(final_headers.stream_id, 1);
+        assert!(final_headers.end_stream);
         assert_eq!(conn.active_stream_count(), 0);
         assert!(conn.graceful_shutdown_complete());
     }

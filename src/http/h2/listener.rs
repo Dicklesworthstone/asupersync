@@ -6501,6 +6501,29 @@ mod tests {
             Some(ReceivedFrame::Headers { stream_id: 1, .. })
         ));
 
+        // The peer's limit applies to streams we initiate, not its request.
+        // Occupy its one slot with an actual active pushed response first.
+        let occupied = conn
+            .send_push_promise(
+                1,
+                vec![
+                    Header::new(":method", "GET"),
+                    Header::new(":scheme", "https"),
+                    Header::new(":path", "/held.css"),
+                    Header::new(":authority", "push.example"),
+                ],
+            )
+            .expect("the first push is independent of the incoming request limit");
+        assert_eq!(occupied, 2);
+        conn.send_headers(occupied, vec![Header::new(":status", "200")], false)
+            .unwrap();
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::PushPromise(frame)) if frame.promised_stream_id == occupied)
+        );
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::Headers(frame)) if frame.stream_id == occupied && !frame.end_stream)
+        );
+
         let response = Http2Response::new(Response::new(200, "OK", Vec::new())).with_push(
             Http2ServerPush::get(
                 "/style.css",
@@ -6536,7 +6559,14 @@ mod tests {
             }
             other => panic!("expected typed max-concurrent push rejection, got {other:?}"),
         }
-        assert!(conn.stream(2).is_none());
+        assert!(
+            conn.stream(occupied).is_some(),
+            "existing push must survive rejection"
+        );
+        assert!(
+            conn.stream(4).is_none(),
+            "rejected push cannot reserve a stream"
+        );
         match conn.next_frame().expect("parent response still queues") {
             Frame::Headers(headers) => {
                 assert_eq!(headers.stream_id, 1);
@@ -6544,6 +6574,11 @@ mod tests {
             }
             other => panic!("expected parent response HEADERS, got {other:?}"),
         }
+        conn.reset_stream(occupied, ErrorCode::Cancel);
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::RstStream(frame)) if frame.stream_id == occupied)
+        );
+        assert_eq!(conn.active_stream_count(), 0);
     }
 
     #[test]
