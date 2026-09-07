@@ -1510,6 +1510,11 @@ impl SessionNegotiator {
     }
 
     /// Finish client negotiation after receiving a server hello.
+    ///
+    /// `hello` must canonically match the hello passed to
+    /// [`Self::start_client_hello`]. Existing reply validation errors retain
+    /// their retry behavior; otherwise, substituted negotiation inputs reject
+    /// the session before the server reply is added to the transcript.
     pub fn finish_client(
         &mut self,
         hello: &ClientHello,
@@ -1522,6 +1527,17 @@ impl SessionNegotiator {
             return self.reject(SessionError::PeerConfusion);
         }
         validate_server_hello(hello, server_hello, policy)?;
+        // ClientHelloSent contains exactly the original hello. Compare against
+        // that capture before publishing any resupplied fields. Keep the pure
+        // reply validation above this check to preserve existing retry errors.
+        let mut offered_transcript = SessionTranscript::new();
+        offered_transcript.add_frame(&hello.to_frame()?);
+        if offered_transcript.current_hash() != self.transcript.current_hash() {
+            return self.reject(SessionError::InvalidTransition {
+                from: format!("{:?}", self.state),
+                expected: "the original ClientHello".to_owned(),
+            });
+        }
         let server_frame = server_hello.to_frame()?;
         self.transcript.add_frame(&server_frame);
         self.state = SessionNegotiationState::Established(server_hello.session_id);

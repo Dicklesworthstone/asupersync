@@ -226,6 +226,195 @@ mod binary_framing {
     }
 }
 
+// Real native stream reassembly with an in-memory packet pump. The handshake
+// helper installs key states directly, so these are not TLS or UDP proofs.
+#[cfg(feature = "test-internals")]
+mod native_control_eof {
+    use asupersync::Cx;
+    use asupersync::bytes::Bytes;
+    use asupersync::net::atp::protocol::frames::{Frame, FrameError, FrameType, ProtocolVersion};
+    use asupersync::net::atp::transport_quic::{
+        QuicConfig, QuicFrameTransport, QuicTransportError, receive_connection,
+    };
+    use asupersync::net::quic_native::{
+        DEFAULT_MAX_PACKET_BYTES, NativeQuicConnectionConfig, QuicConnection, StreamId,
+        establish_loopback, pump_until_idle,
+    };
+
+    fn pair() -> (Cx, QuicConnection, QuicConnection, StreamId) {
+        let cx = Cx::for_testing();
+        let mut client = QuicConnection::client(NativeQuicConnectionConfig::default());
+        let mut server = QuicConnection::server(NativeQuicConnectionConfig::default());
+        client.record_verified_server_identity();
+        establish_loopback(&cx, &mut client, &mut server).unwrap();
+        let stream = client.open_control_stream(&cx).unwrap();
+        (cx, client, server, stream)
+    }
+
+    fn deliver(
+        cx: &Cx,
+        client: &mut QuicConnection,
+        server: &mut QuicConnection,
+        stream: StreamId,
+        bytes: &[u8],
+        fin: bool,
+    ) {
+        client
+            .write_control(cx, stream, Bytes::from(bytes.to_vec()), fin)
+            .unwrap();
+        pump_until_idle(cx, client, server, DEFAULT_MAX_PACKET_BYTES, 2_000).unwrap();
+    }
+
+    fn payload_frame() -> Frame {
+        Frame::new(
+            ProtocolVersion::V0,
+            FrameType::ObjectData,
+            vec![11, 22, 33, 44],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fin_refuses_every_nonempty_truncated_frame_prefix() {
+        let wire = payload_frame().to_wire_bytes().unwrap();
+        for split in 1..wire.len() {
+            let (cx, mut client, mut server, stream) = pair();
+            let mut rx = QuicFrameTransport::for_stream(stream);
+            deliver(&cx, &mut client, &mut server, stream, &wire[..split], true);
+            let result = rx.try_recv(&cx, &mut server);
+            assert!(server.is_control_eof(stream).unwrap());
+            assert!(
+                matches!(&result, Err(QuicTransportError::Frame(message))
+                    if message == &FrameError::UnexpectedEof.to_string()),
+                "split={split}, result={result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_prefix_resumes_before_clean_fin_at_every_split() {
+        let frame = payload_frame();
+        let wire = frame.to_wire_bytes().unwrap();
+        for split in 1..wire.len() {
+            let (cx, mut client, mut server, stream) = pair();
+            let mut rx = QuicFrameTransport::for_stream(stream);
+            deliver(&cx, &mut client, &mut server, stream, &wire[..split], false);
+            assert!(rx.try_recv(&cx, &mut server).unwrap().is_none());
+            assert!(!server.is_control_eof(stream).unwrap());
+            // Repeated readiness probes must preserve the buffered prefix.
+            assert!(rx.try_recv(&cx, &mut server).unwrap().is_none());
+            deliver(&cx, &mut client, &mut server, stream, &wire[split..], true);
+            assert_eq!(rx.try_recv(&cx, &mut server).unwrap(), Some(frame.clone()));
+            assert!(server.is_control_eof(stream).unwrap());
+            assert!(rx.try_recv(&cx, &mut server).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn fin_drains_complete_frames_before_refusing_truncated_successor() {
+        let complete = payload_frame();
+        let successor = Frame::new(ProtocolVersion::V0, FrameType::Close, vec![55]).unwrap();
+        let mut wire = complete.to_wire_bytes().unwrap();
+        wire.extend_from_slice(&complete.to_wire_bytes().unwrap());
+        wire.extend_from_slice(
+            &successor.to_wire_bytes().unwrap()[..successor.header.encoded_len()],
+        );
+        let (cx, mut client, mut server, stream) = pair();
+        let mut rx = QuicFrameTransport::for_stream(stream);
+        deliver(&cx, &mut client, &mut server, stream, &wire, true);
+        for _ in 0..2 {
+            assert_eq!(
+                rx.try_recv(&cx, &mut server).unwrap(),
+                Some(complete.clone())
+            );
+        }
+        let result = rx.try_recv(&cx, &mut server);
+        assert!(
+            matches!(&result, Err(QuicTransportError::Frame(message))
+                if message == &FrameError::UnexpectedEof.to_string()),
+            "result={result:?}"
+        );
+    }
+
+    #[test]
+    fn empty_fin_remains_clean_eof() {
+        let (cx, mut client, mut server, stream) = pair();
+        let mut rx = QuicFrameTransport::for_stream(stream);
+        deliver(&cx, &mut client, &mut server, stream, &[], true);
+        assert!(rx.try_recv(&cx, &mut server).unwrap().is_none());
+        assert!(server.is_control_eof(stream).unwrap());
+    }
+
+    #[test]
+    fn accepted_receiver_distinguishes_truncated_fin_from_pending_prefix() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let frame = Frame::new(ProtocolVersion::V0, FrameType::Handshake, vec![1, 2]).unwrap();
+        let wire = frame.to_wire_bytes().unwrap();
+        for split in 1..wire.len() {
+            for fin in [false, true] {
+                let (cx, mut client, mut server, stream) = pair();
+                deliver(&cx, &mut client, &mut server, stream, &wire[..split], fin);
+                let mut receive = std::pin::pin!(receive_connection(
+                    &cx,
+                    server.inner().clone(),
+                    "127.0.0.1:4433".parse().unwrap(),
+                    // A regular source file cannot become a destination directory.
+                    // Framing must refuse before any filesystem operation.
+                    std::path::Path::new(file!()),
+                    QuicConfig::default().allow_unauthenticated_for_trusted_transport(),
+                    "native-eof-receiver",
+                ));
+                let result = receive
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()));
+                let expected = if fin {
+                    FrameError::UnexpectedEof.to_string()
+                } else {
+                    "receive sender handshake: no complete frame ready".to_owned()
+                };
+                assert!(
+                    matches!(&result, Poll::Ready(Err(QuicTransportError::Frame(message)))
+                        if message == &expected),
+                    "split={split}, fin={fin}, result={result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_receiver_classifies_complete_frame_before_fin() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let (cx, mut client, mut server, stream) = pair();
+        let wire = payload_frame().to_wire_bytes().unwrap();
+        deliver(&cx, &mut client, &mut server, stream, &wire, true);
+        let mut receive = std::pin::pin!(receive_connection(
+            &cx,
+            server.inner().clone(),
+            "127.0.0.1:4433".parse().unwrap(),
+            std::path::Path::new(file!()),
+            QuicConfig::default().allow_unauthenticated_for_trusted_transport(),
+            "native-eof-receiver",
+        ));
+        let result = receive
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert!(
+            matches!(
+                &result,
+                Poll::Ready(Err(QuicTransportError::Unexpected {
+                    got: FrameType::ObjectData,
+                    expected: "Handshake",
+                }))
+            ),
+            "result={result:?}"
+        );
+    }
+}
+
 fn peer(label: &str) -> PeerId {
     PeerId::from_label(label)
 }
@@ -318,6 +507,235 @@ fn e2e_first_contact_pairing_logs_transcript_proof() {
             .contains(&"encryption_policy")
     );
     assert!(!client_proof.transcript_hash.is_empty());
+}
+
+mod captured_client_hello {
+    use super::*;
+    use asupersync::net::atp::protocol::frames::ProtocolVersion;
+    use asupersync::net::atp::protocol::session::{SessionError, SessionNegotiationState};
+    use asupersync::net::atp::protocol::transcript::SessionTranscript;
+
+    type HelloMutation = (&'static str, fn(&mut ClientHello));
+
+    fn original() -> ClientHello {
+        let mut hello = hello(
+            SessionContextKind::Direct,
+            CapabilityAction::Write,
+            &[AtpFeature::EncryptionPolicy, AtpFeature::Swarm],
+        );
+        hello.grants[0].actions.insert(CapabilityAction::Read);
+        hello.grants[0].scope = CapabilityScope::unrestricted();
+        hello
+    }
+
+    fn accepting_policy(hello: &ClientHello) -> SessionPolicy {
+        let mut policy =
+            SessionPolicy::new(hello.responder, 1_000).with_supported_features(&AtpFeature::ALL);
+        policy.trusted_grant_issuers.insert(peer("bob"));
+        policy.supported_versions.insert(hello.version);
+        policy
+    }
+
+    fn assert_terminal_refusal(
+        client: &mut SessionNegotiator,
+        hello: &ClientHello,
+        reply: &asupersync::net::atp::protocol::ServerHello,
+        policy: &SessionPolicy,
+        error: SessionError,
+    ) {
+        assert!(matches!(error, SessionError::InvalidTransition { .. }));
+        assert_eq!(
+            client.state(),
+            &SessionNegotiationState::Rejected("invalid_transition".to_owned())
+        );
+        assert!(matches!(
+            client.finish_client(hello, reply, policy),
+            Err(SessionError::InvalidTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn finish_refuses_resupplied_negotiation_inputs() {
+        let mutations: [HelloMutation; 10] = [
+            ("responder", |hello| hello.responder = peer("carol")),
+            ("nonce", |hello| {
+                hello.nonce = TransferNonce::from_seed("changed");
+            }),
+            ("version", |hello| hello.version = ProtocolVersion(1)),
+            ("manifest_root", |hello| hello.manifest_root = Some([7; 32])),
+            ("path_id", |hello| {
+                hello.path_id = Some(PathCandidateId::new(7));
+            }),
+            ("context", |hello| hello.context = SessionContextKind::Swarm),
+            ("offered_features", |hello| {
+                hello.offered_features.insert(AtpFeature::Resume);
+            }),
+            ("grants", |hello| {
+                hello.grants[0].expires_at_micros = Some(2_000);
+            }),
+            ("requested_actions", |hello| {
+                hello.requested_actions.insert(CapabilityAction::Read);
+            }),
+            ("trace_id", |hello| {
+                hello.trace_id = SessionTraceId::new(9002);
+            }),
+        ];
+        let mut accepted_changes = Vec::new();
+        for (field, mutate) in mutations {
+            let original = original();
+            let mut changed = original.clone();
+            mutate(&mut changed);
+            assert_ne!(original.to_frame().unwrap(), changed.to_frame().unwrap());
+            let mut policy = accepting_policy(&changed);
+            let mut server = SessionNegotiator::server(changed.responder);
+            let (reply, _, server_proof) =
+                server.accept_client_hello(&changed, &mut policy).unwrap();
+
+            // The changed input is valid on its own: only substituting it after
+            // the original hello was sent must fail.
+            let mut control = SessionNegotiator::client(changed.initiator);
+            control.start_client_hello(&changed).unwrap();
+            let (_, control_proof) = control.finish_client(&changed, &reply, &policy).unwrap();
+            assert_eq!(control_proof.transcript_hash, server_proof.transcript_hash);
+
+            let mut client = SessionNegotiator::client(original.initiator);
+            client.start_client_hello(&original).unwrap();
+            match client.finish_client(&changed, &reply, &policy) {
+                Ok(_) => accepted_changes.push(field),
+                Err(error) => {
+                    assert_terminal_refusal(&mut client, &original, &reply, &policy, error)
+                }
+            }
+        }
+        assert!(
+            accepted_changes.is_empty(),
+            "accepted changed fields: {accepted_changes:?}"
+        );
+    }
+
+    #[test]
+    fn finish_refuses_hello_drift_with_original_server_reply() {
+        let mutations: [HelloMutation; 4] = [
+            ("offered_features", |hello| {
+                hello.offered_features.insert(AtpFeature::Resume);
+            }),
+            ("grants", |hello| {
+                hello.grants[0].expires_at_micros = Some(2_000);
+            }),
+            ("requested_actions", |hello| {
+                hello.requested_actions.insert(CapabilityAction::Read);
+            }),
+            ("trace_id", |hello| {
+                hello.trace_id = SessionTraceId::new(9002);
+            }),
+        ];
+        let mut accepted_changes = Vec::new();
+        for (field, mutate) in mutations {
+            let original = original();
+            let mut policy = accepting_policy(&original);
+            let mut server = SessionNegotiator::server(original.responder);
+            let (reply, _, _) = server.accept_client_hello(&original, &mut policy).unwrap();
+            let mut client = SessionNegotiator::client(original.initiator);
+            client.start_client_hello(&original).unwrap();
+            let mut changed = original.clone();
+            mutate(&mut changed);
+            match client.finish_client(&changed, &reply, &policy) {
+                Ok(_) => accepted_changes.push(field),
+                Err(error) => {
+                    assert_terminal_refusal(&mut client, &original, &reply, &policy, error)
+                }
+            }
+        }
+        assert!(
+            accepted_changes.is_empty(),
+            "accepted changed fields: {accepted_changes:?}"
+        );
+    }
+
+    #[test]
+    fn finish_accepts_decoded_original_hello_and_cloned_negotiator() {
+        let hello = original();
+        let mut client = SessionNegotiator::client(hello.initiator);
+        let frame = client.start_client_hello(&hello).unwrap();
+        let decoded = ClientHello::from_frame(&frame).unwrap();
+        let mut policy = accepting_policy(&decoded);
+        let mut server = SessionNegotiator::server(decoded.responder);
+        let (reply, reply_frame, server_proof) =
+            server.accept_client_hello(&decoded, &mut policy).unwrap();
+        let mut expected = SessionTranscript::new();
+        expected.add_frame(&frame);
+        expected.add_frame(&reply_frame);
+        for mut client in [client.clone(), client] {
+            let (session, proof) = client.finish_client(&decoded, &reply, &policy).unwrap();
+            assert_eq!(session.transcript_hash, expected.current_hash());
+            assert_eq!(proof.transcript_hash, server_proof.transcript_hash);
+            assert_eq!(
+                client.state(),
+                &SessionNegotiationState::Established(session.session_id)
+            );
+        }
+    }
+
+    #[test]
+    fn existing_reply_refusals_preserve_error_and_retry_behavior() {
+        let cases: [(HelloMutation, &str); 5] = [
+            (
+                ("responder", |hello| {
+                    hello.responder = peer("carol");
+                }),
+                "peer_confusion",
+            ),
+            (
+                ("nonce", |hello| {
+                    hello.nonce = TransferNonce::from_seed("changed");
+                }),
+                "peer_confusion",
+            ),
+            (
+                ("context", |hello| {
+                    hello.context = SessionContextKind::Swarm;
+                }),
+                "peer_confusion",
+            ),
+            (
+                ("manifest_root", |hello| {
+                    hello.manifest_root = Some([7; 32]);
+                }),
+                "session_id_mismatch",
+            ),
+            (
+                ("path_id", |hello| {
+                    hello.path_id = Some(PathCandidateId::new(7));
+                }),
+                "session_id_mismatch",
+            ),
+        ];
+        let mut changed_refusals = Vec::new();
+        for ((field, mutate), expected_code) in cases {
+            let original = original();
+            let mut policy = accepting_policy(&original);
+            let mut server = SessionNegotiator::server(original.responder);
+            let (reply, _, server_proof) =
+                server.accept_client_hello(&original, &mut policy).unwrap();
+            let mut client = SessionNegotiator::client(original.initiator);
+            client.start_client_hello(&original).unwrap();
+            let mut changed = original.clone();
+            mutate(&mut changed);
+            let error = client.finish_client(&changed, &reply, &policy).unwrap_err();
+            if error.code() != expected_code
+                || client.state() != &SessionNegotiationState::ClientHelloSent
+            {
+                changed_refusals.push(field);
+                continue;
+            }
+            let (_, proof) = client.finish_client(&original, &reply, &policy).unwrap();
+            assert_eq!(proof.transcript_hash, server_proof.transcript_hash);
+        }
+        assert!(
+            changed_refusals.is_empty(),
+            "changed existing reply refusals: {changed_refusals:?}"
+        );
+    }
 }
 
 #[test]
