@@ -346,6 +346,48 @@ struct QueuedStreamFrame {
     retransmit: bool,
 }
 
+/// One contiguous receive range. Keep the original payload slices so joining
+/// adjacent frames does not repeatedly copy an entire receive window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RecvRun {
+    pieces: VecDeque<Bytes>,
+    len: u64,
+}
+
+impl RecvRun {
+    fn push_back(&mut self, bytes: Bytes) {
+        self.len += bytes.len() as u64;
+        self.pieces.push_back(bytes);
+    }
+
+    fn append(&mut self, mut other: Self) {
+        self.len += other.len;
+        // Move the smaller set of slice handles. Prepending many individual
+        // frames to a large run must remain amortized linear, just like append.
+        if self.pieces.len() < other.pieces.len() {
+            while let Some(piece) = self.pieces.pop_back() {
+                other.pieces.push_front(piece);
+            }
+            self.pieces = other.pieces;
+        } else {
+            self.pieces.append(&mut other.pieces);
+        }
+    }
+
+    fn read(&mut self, max_len: usize) -> Bytes {
+        let Some(mut piece) = self.pieces.pop_front() else {
+            return Bytes::new();
+        };
+        let n = piece.len().min(max_len);
+        let out = piece.slice(..n);
+        if n < piece.len() {
+            self.pieces.push_front(piece.split_off(n));
+        }
+        self.len -= n as u64;
+        out
+    }
+}
+
 /// One stream's flow + offset state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuicStream {
@@ -379,8 +421,10 @@ pub struct QuicStream {
     reset_buffered_prefix: Bytes,
     /// Buffered receive ranges keyed by start offset, value = exclusive end.
     recv_ranges: BTreeMap<u64, u64>,
-    /// Buffered receive bytes keyed by absolute stream offset.
-    recv_chunks: BTreeMap<u64, Bytes>,
+    /// Nonempty, disjoint receive runs keyed by absolute stream offset.
+    /// Adjacent runs are merged, so each node after the readable head represents
+    /// a hole rather than another packet's payload slice.
+    recv_chunks: BTreeMap<u64, RecvRun>,
     /// Bounded receive-window size for this stream. `None` keeps the historic
     /// unbounded-credit behavior; `Some(w)` makes the local receive limit track
     /// `read_offset + w` and drives MAX_STREAM_DATA advertisements so the peer
@@ -574,17 +618,14 @@ impl QuicStream {
         if max_len == 0 {
             return Bytes::new();
         }
-        let Some(mut chunk) = self.recv_chunks.remove(&self.read_offset) else {
+        let Some(mut run) = self.recv_chunks.remove(&self.read_offset) else {
             return Bytes::new();
         };
-        let n = chunk.len().min(max_len);
-        let out = chunk.slice(..n);
-        if n < chunk.len() {
-            let tail = chunk.split_off(n);
-            self.recv_chunks
-                .insert(self.read_offset.saturating_add(n as u64), tail);
+        let out = run.read(max_len);
+        self.read_offset = self.read_offset.saturating_add(out.len() as u64);
+        if run.len > 0 {
+            self.recv_chunks.insert(self.read_offset, run);
         }
-        self.read_offset = self.read_offset.saturating_add(n as u64);
         out
     }
 
@@ -597,14 +638,9 @@ impl QuicStream {
     /// Contiguous payload bytes actually buffered at the application read offset.
     #[must_use]
     fn readable_bytes(&self) -> u64 {
-        let mut cursor = self.read_offset;
-        for (&offset, chunk) in self.recv_chunks.range(self.read_offset..) {
-            if offset != cursor {
-                break;
-            }
-            cursor = cursor.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
-        }
-        cursor.saturating_sub(self.read_offset)
+        self.recv_chunks
+            .get(&self.read_offset)
+            .map_or(0, |run| run.len)
     }
 
     /// Whether packet assembly has STREAM frames waiting for this stream.
@@ -839,14 +875,14 @@ impl QuicStream {
         }
         if self.recv_reset.is_none() {
             let mut prefix = BytesMut::with_capacity(8);
-            let mut cursor = self.read_offset;
-            for (&offset, chunk) in self.recv_chunks.range(self.read_offset..) {
-                if offset != cursor || prefix.len() == 8 {
-                    break;
+            if let Some(run) = self.recv_chunks.get(&self.read_offset) {
+                for piece in &run.pieces {
+                    let take = piece.len().min(8usize.saturating_sub(prefix.len()));
+                    prefix.extend_from_slice(&piece[..take]);
+                    if prefix.len() == 8 {
+                        break;
+                    }
                 }
-                let take = chunk.len().min(8usize.saturating_sub(prefix.len()));
-                prefix.extend_from_slice(&chunk[..take]);
-                cursor = cursor.saturating_add(u64::try_from(take).unwrap_or(u64::MAX));
             }
             self.reset_buffered_prefix = prefix.freeze();
         }
@@ -949,9 +985,9 @@ impl QuicStream {
         let mut data_cursor = cursor.saturating_sub(offset) as usize;
         let overlapping: Vec<(u64, u64)> = self
             .recv_chunks
-            .range(..end)
-            .filter_map(|(&start, chunk)| {
-                let chunk_end = start.saturating_add(chunk.len() as u64);
+            .range(self.recv_run_range_start(cursor)..end)
+            .filter_map(|(&start, run)| {
+                let chunk_end = start.saturating_add(run.len);
                 if chunk_end > cursor && start < end {
                     Some((start, chunk_end))
                 } else {
@@ -963,8 +999,7 @@ impl QuicStream {
         for (known_start, known_end) in overlapping {
             if cursor < known_start {
                 let gap_len = (known_start - cursor) as usize;
-                self.recv_chunks
-                    .insert(cursor, data.slice(data_cursor..data_cursor + gap_len));
+                self.insert_recv_gap(cursor, data.slice(data_cursor..data_cursor + gap_len));
                 cursor = known_start;
                 data_cursor += gap_len;
             }
@@ -977,42 +1012,48 @@ impl QuicStream {
 
         if cursor < end {
             let tail_len = (end - cursor) as usize;
-            self.recv_chunks
-                .insert(cursor, data.slice(data_cursor..data_cursor + tail_len));
+            self.insert_recv_gap(cursor, data.slice(data_cursor..data_cursor + tail_len));
         }
         Ok(())
     }
 
-    fn additional_recv_chunk_count(&self, offset: u64, len: u64) -> Result<usize, QuicStreamError> {
+    /// Include at most one predecessor that overlaps or abuts this offset.
+    /// Older runs cannot participate, so neither insertion nor admission needs
+    /// to scan the already-buffered prefix of a large stream.
+    fn recv_run_range_start(&self, offset: u64) -> u64 {
+        self.recv_chunks
+            .range(..=offset)
+            .next_back()
+            .filter(|(start, run)| start.saturating_add(run.len) >= offset)
+            .map_or(offset, |(&start, _)| start)
+    }
+
+    /// Insert a nonempty, previously uncovered slice and join its neighbors.
+    fn insert_recv_gap(&mut self, offset: u64, data: Bytes) {
+        let end = offset + data.len() as u64;
+        let start = self.recv_run_range_start(offset);
+        let mut run = self.recv_chunks.remove(&start).unwrap_or_default();
+        run.push_back(data);
+        if let Some(successor) = self.recv_chunks.remove(&end) {
+            run.append(successor);
+        }
+        self.recv_chunks.insert(start, run);
+    }
+
+    fn projected_recv_chunk_count(&self, offset: u64, len: u64) -> Result<usize, QuicStreamError> {
         let end = offset
             .checked_add(len)
             .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
         if len == 0 || end <= self.read_offset {
-            return Ok(0);
+            return Ok(self.recv_chunks.len());
         }
 
-        let mut cursor = offset.max(self.read_offset);
-        let mut additional = 0usize;
-        for (&start, chunk) in self.recv_chunks.range(..end) {
-            let chunk_end =
-                start
-                    .checked_add(chunk.len() as u64)
-                    .ok_or(QuicStreamError::OffsetOverflow {
-                        offset: start,
-                        len: chunk.len() as u64,
-                    })?;
-            if chunk_end <= cursor {
-                continue;
-            }
-            if cursor < start {
-                additional = additional.saturating_add(1);
-            }
-            cursor = cursor.max(chunk_end);
-        }
-        if cursor < end {
-            additional = additional.saturating_add(1);
-        }
-        Ok(additional)
+        let start = self.recv_run_range_start(offset.max(self.read_offset));
+        // The incoming interval connects every intersecting or adjacent run
+        // into one. A bridge may reduce the count, which an unsigned
+        // "additional fragments" estimate cannot represent.
+        let merged = self.recv_chunks.range(start..=end).count();
+        Ok(self.recv_chunks.len() - merged + 1)
     }
 }
 
@@ -1683,8 +1724,7 @@ impl StreamTable {
             .can_consume(connection_delta)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
         stream.validate_receive_segment(offset, len, is_fin)?;
-        let additional = stream.additional_recv_chunk_count(offset, len)?;
-        let projected = stream.recv_chunks.len().saturating_add(additional);
+        let projected = stream.projected_recv_chunk_count(offset, len)?;
 
         // Reserve one node for the chunk at `read_offset`. Without that
         // reservation, a peer can fill every slot with out-of-order chunks and
@@ -2309,6 +2349,257 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    #[test]
+    fn recv_reassembly_coalesces_contiguous_frames_without_copying() {
+        const FRAME_LEN: usize = 1024;
+        const FRAMES: usize = 8192;
+        let payload = Bytes::from(vec![0x5a; FRAME_LEN * FRAMES]);
+        for reverse in [false, true] {
+            let mut stream = QuicStream::new(StreamId(0), 0, payload.len() as u64);
+            for index in 0..FRAMES {
+                let frame = if reverse { FRAMES - 1 - index } else { index };
+                let offset = frame * FRAME_LEN;
+                stream
+                    .receive_bytes(
+                        offset as u64,
+                        payload.slice(offset..offset + FRAME_LEN),
+                        false,
+                    )
+                    .expect("contiguous frame");
+            }
+            assert_eq!(stream.recv_chunks.len(), 1, "reverse={reverse}");
+            assert_eq!(stream.readable_bytes(), payload.len() as u64);
+            let mut consumed = 0;
+            while consumed < payload.len() {
+                let data = stream.read_bytes(317);
+                assert!(!data.is_empty());
+                assert_eq!(data.as_ptr(), payload[consumed..].as_ptr());
+                assert_eq!(&data[..], &payload[consumed..consumed + data.len()]);
+                consumed += data.len();
+            }
+            assert!(stream.recv_chunks.is_empty());
+        }
+    }
+
+    #[test]
+    fn recv_reassembly_counts_one_hole_as_two_runs() {
+        const FRAME_LEN: usize = 1024;
+        const FRAMES: usize = 8192;
+        let payload = Bytes::from(
+            (0..FRAME_LEN * FRAMES)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        let mut table = StreamTable::new(StreamRole::Server, 0, 0, 1 << 24, 1 << 23);
+        let id = StreamId(0);
+        table.accept_remote_stream(id).expect("stream");
+        let hole = FRAMES / 2;
+        for frame in (0..FRAMES).filter(|frame| *frame != hole) {
+            let offset = frame * FRAME_LEN;
+            assert!(
+                !table
+                    .stream_reassembly_fragment_limit_would_be_exceeded(
+                        id,
+                        offset as u64,
+                        FRAME_LEN as u64,
+                        false,
+                        4,
+                    )
+                    .expect("preflight"),
+                "frame {frame} behind one hole must not exhaust the fragment budget"
+            );
+            table
+                .receive_stream_bytes(
+                    id,
+                    offset as u64,
+                    payload.slice(offset..offset + FRAME_LEN),
+                    false,
+                )
+                .expect("frame");
+        }
+        assert_eq!(table.stream(id).unwrap().recv_chunks.len(), 2);
+        let offset = hole * FRAME_LEN;
+        assert!(
+            !table
+                .stream_reassembly_fragment_limit_would_be_exceeded(
+                    id,
+                    offset as u64,
+                    FRAME_LEN as u64,
+                    false,
+                    1,
+                )
+                .expect("bridging the hole leaves only the readable run")
+        );
+        table
+            .receive_stream_bytes(
+                id,
+                offset as u64,
+                payload.slice(offset..offset + FRAME_LEN),
+                false,
+            )
+            .expect("fill hole");
+        assert_eq!(table.stream(id).unwrap().recv_chunks.len(), 1);
+        let mut received = Vec::with_capacity(payload.len());
+        while received.len() < payload.len() {
+            let data = table.read_stream_bytes(id, 1709).expect("read");
+            assert!(!data.is_empty());
+            received.extend_from_slice(&data);
+        }
+        assert_eq!(received, &payload[..]);
+    }
+
+    #[test]
+    fn recv_reassembly_guard_preserves_hostile_holes_and_admits_bridges() {
+        let mut table = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let id = StreamId(0);
+        table.accept_remote_stream(id).expect("stream");
+        for (offset, byte) in [(2, b'c'), (4, b'e'), (6, b'g')] {
+            table
+                .receive_stream_bytes(id, offset, Bytes::from(vec![byte]), false)
+                .expect("separate run");
+        }
+        let before = table.stream(id).unwrap().clone();
+        assert!(
+            table
+                .stream_reassembly_fragment_limit_would_be_exceeded(id, 8, 1, false, 4)
+                .expect("a fourth out-of-order run is refused")
+        );
+        assert!(
+            !table
+                .stream_reassembly_fragment_limit_would_be_exceeded(id, 2, 1, false, 4)
+                .expect("duplicate at the cap")
+        );
+        assert!(
+            !table
+                .stream_reassembly_fragment_limit_would_be_exceeded(id, 3, 3, false, 2)
+                .expect("bridge reduces three out-of-order runs to one")
+        );
+        assert_eq!(table.stream(id).unwrap(), &before, "preflight is read-only");
+        table
+            .receive_stream_bytes(id, 3, Bytes::from_static(b"dXf"), false)
+            .expect("bridge preserves the previously accepted e");
+        assert_eq!(table.stream(id).unwrap().recv_chunks.len(), 1);
+        table
+            .receive_stream_bytes(id, 0, Bytes::from_static(b"ab"), false)
+            .expect("head closes the remaining gap");
+        let mut received = Vec::new();
+        while received.len() < 7 {
+            let data = table.read_stream_bytes(id, 7).unwrap();
+            assert!(!data.is_empty());
+            received.extend_from_slice(&data);
+        }
+        assert_eq!(received, b"abcdefg");
+    }
+
+    #[test]
+    fn recv_reassembly_reset_retains_prefix_across_run_pieces_after_partial_read() {
+        let mut stream = QuicStream::new(StreamId(0), 0, 100);
+        for (offset, bytes) in [(0, &b"abcd"[..]), (4, b"efgh"), (8, b"ijkl")] {
+            stream
+                .receive_bytes(offset, Bytes::copy_from_slice(bytes), false)
+                .expect("frame");
+        }
+        assert_eq!(stream.read_bytes(2), Bytes::from_static(b"ab"));
+        stream.reset_receive(42, 12).expect("reset");
+        assert_eq!(
+            stream.reset_buffered_prefix(),
+            Bytes::from_static(b"cdefghij")
+        );
+        assert!(stream.read_bytes(100).is_empty());
+        assert!(stream.recv_chunks.is_empty());
+        assert_eq!(stream.readable_bytes(), 0);
+    }
+
+    #[test]
+    fn recv_reassembly_preflight_matches_byte_coverage_after_partial_reads() {
+        for consumed in [0usize, 4] {
+            for offset in 0..16usize {
+                for len in 0..=16 - offset {
+                    let mut table = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+                    let id = StreamId(0);
+                    table.accept_remote_stream(id).unwrap();
+                    if consumed > 0 {
+                        table
+                            .receive_stream_bytes(id, 0, Bytes::from_static(b"abcd"), false)
+                            .unwrap();
+                        assert_eq!(
+                            table.read_stream_bytes(id, consumed).unwrap().len(),
+                            consumed
+                        );
+                    }
+                    let mut covered = [false; 16];
+                    for index in [2usize, 3, 7, 10, 11] {
+                        if index >= consumed {
+                            table
+                                .receive_stream_bytes(
+                                    id,
+                                    index as u64,
+                                    Bytes::from(vec![index as u8]),
+                                    false,
+                                )
+                                .unwrap();
+                            covered[index] = true;
+                        }
+                    }
+                    for index in offset..offset + len {
+                        if index >= consumed {
+                            covered[index] = true;
+                        }
+                    }
+                    let expected_runs = covered
+                        .iter()
+                        .enumerate()
+                        .filter(|&(index, present)| *present && (index == 0 || !covered[index - 1]))
+                        .count();
+                    let before = table.stream(id).unwrap().clone();
+                    for limit in 0..=6usize {
+                        let expected_rejection = expected_runs > limit
+                            || expected_runs.saturating_sub(usize::from(covered[consumed]))
+                                > limit.saturating_sub(1);
+                        assert_eq!(
+                            table
+                                .stream_reassembly_fragment_limit_would_be_exceeded(
+                                    id,
+                                    offset as u64,
+                                    len as u64,
+                                    false,
+                                    limit,
+                                )
+                                .unwrap(),
+                            expected_rejection,
+                            "consumed={consumed} offset={offset} len={len} limit={limit}"
+                        );
+                    }
+                    assert_eq!(table.stream(id).unwrap(), &before);
+                    table
+                        .receive_stream_bytes(
+                            id,
+                            offset as u64,
+                            Bytes::from(
+                                (offset..offset + len).map(|i| i as u8).collect::<Vec<_>>(),
+                            ),
+                            false,
+                        )
+                        .unwrap();
+                    assert_eq!(table.stream(id).unwrap().recv_chunks.len(), expected_runs);
+                    let mut next = consumed;
+                    loop {
+                        let data = table.read_stream_bytes(id, 3).unwrap();
+                        if data.is_empty() {
+                            assert!(next == 16 || !covered[next]);
+                            break;
+                        }
+                        for &byte in &data[..] {
+                            assert!(covered[next]);
+                            assert_eq!(byte, next as u8);
+                            next += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// Adversarial reassembly property: deliver a stream as randomized,
     /// reordered, duplicated segments with shifted (coalesced-retransmit)

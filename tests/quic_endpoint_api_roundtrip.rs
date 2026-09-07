@@ -20,6 +20,15 @@ use asupersync::net::quic_native::{
 };
 use asupersync::net::quic_native::{QuicConnectionState, StreamRole};
 
+// Compile the production stream source and its inline tests in this focused
+// target as well. This keeps private run/admission invariants executable without
+// requiring the entire runtime's monolithic lib-test executable. The public
+// connection regressions below independently exercise the linked runtime crate.
+pub use asupersync::{bytes, io, net};
+/// The production stream module and its focused unit tests.
+#[path = "../src/net/quic_native/streams.rs"]
+pub mod stream_module_tests;
+
 fn test_cx() -> Cx {
     Cx::for_testing()
 }
@@ -243,4 +252,112 @@ fn path_stats_exposed_for_phase_c() {
     assert!(stats.congestion_window_bytes > 0);
     assert_eq!(stats.bytes_in_flight, 0);
     assert_eq!(stats.pto_count, 0);
+}
+
+fn reassembly_test_connection(cx: &Cx) -> asupersync::net::quic_native::NativeQuicConnection {
+    let mut connection =
+        asupersync::net::quic_native::NativeQuicConnection::new(NativeQuicConnectionConfig {
+            role: StreamRole::Server,
+            recv_window: 8 * 1024 * 1024,
+            connection_recv_limit: 16 * 1024 * 1024,
+            ..NativeQuicConnectionConfig::default()
+        });
+    // Drive transport state only; these tests make no TLS or UDP wire claim.
+    connection.begin_handshake(cx).unwrap();
+    connection.on_handshake_keys_available(cx).unwrap();
+    connection.on_1rtt_keys_available(cx).unwrap();
+    connection.on_handshake_confirmed(cx).unwrap();
+    connection
+}
+
+#[test]
+fn connection_reassembly_accepts_eight_mib_behind_one_hole() {
+    const FRAME_LEN: usize = 1024;
+    const FRAMES: usize = 8192;
+    let cx = test_cx();
+    let mut connection = reassembly_test_connection(&cx);
+    let stream = connection.open_local_bidi(&cx).unwrap();
+    let payload = Bytes::from(
+        (0..FRAME_LEN * FRAMES)
+            .map(|index| u8::try_from(index % 251).unwrap())
+            .collect::<Vec<_>>(),
+    );
+    let hole = FRAMES / 2;
+    for frame in (0..FRAMES).filter(|frame| *frame != hole) {
+        let offset = frame * FRAME_LEN;
+        connection
+            .receive_stream_bytes(
+                &cx,
+                stream,
+                u64::try_from(offset).unwrap(),
+                payload.slice(offset..offset + FRAME_LEN),
+                frame == FRAMES - 1,
+            )
+            .unwrap_or_else(|error| panic!("frame {frame} behind one hole: {error}"));
+    }
+    assert_eq!(
+        connection.streams().stream(stream).unwrap().recv_offset,
+        u64::try_from(hole * FRAME_LEN).unwrap()
+    );
+    let offset = hole * FRAME_LEN;
+    connection
+        .receive_stream_bytes(
+            &cx,
+            stream,
+            u64::try_from(offset).unwrap(),
+            payload.slice(offset..offset + FRAME_LEN),
+            false,
+        )
+        .expect("fill the single missing frame");
+    let mut received = Vec::with_capacity(payload.len());
+    while received.len() < payload.len() {
+        let data = connection.read_stream_bytes(&cx, stream, 1709).unwrap();
+        assert!(!data.is_empty(), "complete stream must keep draining");
+        received.extend_from_slice(&data);
+    }
+    assert_eq!(received, &payload[..]);
+    assert!(connection.streams().stream(stream).unwrap().is_read_eof());
+}
+
+#[test]
+fn connection_reassembly_keeps_hostile_fragment_limit_and_head_progress() {
+    let cx = test_cx();
+    let mut connection = reassembly_test_connection(&cx);
+    let stream = connection.open_local_bidi(&cx).unwrap();
+    // The production limit is 4096, with one slot reserved for the readable
+    // head. Separated one-byte frames must continue to consume that budget.
+    for fragment in 0..4095u64 {
+        connection
+            .receive_stream_bytes(
+                &cx,
+                stream,
+                1 + fragment * 2,
+                Bytes::from_static(b"x"),
+                false,
+            )
+            .unwrap();
+    }
+    let before = connection.streams().stream(stream).unwrap().clone();
+    assert_eq!(
+        connection.receive_stream_bytes(&cx, stream, 8191, Bytes::from_static(b"x"), false),
+        Err(NativeQuicConnectionError::InvalidState(
+            "stream receive reassembly fragment limit exceeded"
+        ))
+    );
+    assert_eq!(connection.streams().stream(stream).unwrap(), &before);
+    connection
+        .receive_stream_bytes(&cx, stream, 1, Bytes::from_static(b"x"), false)
+        .expect("duplicate at the cap");
+    assert_eq!(connection.streams().stream(stream).unwrap(), &before);
+    connection
+        .receive_stream_bytes(&cx, stream, 0, Bytes::from_static(b"h"), false)
+        .expect("head remains admissible at the cap");
+    assert_eq!(
+        connection.read_stream_bytes(&cx, stream, 1).unwrap(),
+        Bytes::from_static(b"h")
+    );
+    assert_eq!(
+        connection.read_stream_bytes(&cx, stream, 1).unwrap(),
+        Bytes::from_static(b"x")
+    );
 }
