@@ -1,4 +1,4 @@
-//! Production reference AppSpec journey (bead asupersync-idea-wizard-fifth-wave-3gaiun.2.4 / [APPSPEC][A4]).
+//! Declarative AppSpec and Lab lifecycle reference journey (bead asupersync-idea-wizard-fifth-wave-3gaiun.2.4 / [APPSPEC][A4]).
 //!
 //! A runnable, inspectable end-to-end journey a new user can read top to bottom
 //! to see why AppSpec beats ad-hoc wiring **without hiding `Cx` or region
@@ -24,12 +24,19 @@
 //! The journey factories are caller-supplied `ChildSpec`s that create tasks via
 //! `state.create_task(region, budget, ..)` — the region and budget come from the
 //! `Scope`, so `Cx`/region ownership stays explicit and visible.
+//! Their bodies are `async {}`: route/resource/SLO declarations are metadata in
+//! this example. It does not bind the declared socket, serve HTTP, enqueue work,
+//! or execute an ingest drainer. Production handlers require real caller-supplied
+//! factories and independent service tests; the topology compiler does not
+//! resolve handler names into Rust functions.
+//! Managed service bindings and their public journey remain tracked by
+//! `asupersync-bi2462.46` and `asupersync-bi2462.47`.
 //!
 //! Run it:
-//!   cargo run --example appspec_reference_journey
+//!   RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_appspec_reference cargo run --example appspec_reference_journey
 //!
 //! Remote-required RCH validation:
-//!   RCH_REQUIRE_REMOTE=1 rch exec -- cargo run --example appspec_reference_journey
+//!   RCH_REQUIRE_REMOTE=1 bash scripts/run_appspec_reference_journey_e2e.sh
 //!
 //! Scope note: this exercises the **single-supervision-group** lowering the A2
 //! compiler implements. Per-unit handler symbol resolution and multi-group
