@@ -15,6 +15,7 @@ cargo +nightly install cargo-fuzz
 
 | Target | Description | Priority |
 |--------|-------------|----------|
+| `atp_quic_frame_parse` | Native QUIC parser plus ATP v0 stream fragmentation, canonical extensions, transcript replay/order, typed EOF and size-limit invariants | High |
 | `fuzz_http1_request` | HTTP/1.1 request parser | High |
 | `fuzz_http1_response` | HTTP/1.1 response parser | High |
 | `dns_resolver_name_compression` | Real resolver RFC 1035 compression and RDATA name parsing | High |
@@ -91,6 +92,7 @@ Initial seed files are in `seeds/`. These provide starting points for fuzzing:
 - `seeds/http1/` - Valid HTTP/1.1 messages
 - `seeds/http2/` - Valid HTTP/2 frames
 - `seeds/hpack/` - Valid HPACK-encoded headers
+- `corpus/atp_quic_frame_parse/` - Existing QUIC datagram regressions plus ATP empty, valid hello/payload, duplicate-extension, and oversized-length seeds. Each input also generates a valid frame from one of the 22 v0 families. Transcript replay here is an in-process codec check, not authenticated session resumption.
 - `corpus/dns_resolver_name_compression/` - Resolver name-compression and rdlen-bound scenarios
 - `corpus/h1_parsed_url/` - Valid and invalid HTTP/1 client URLs
 - `corpus/length_delimited_encode_width/` - Width-sensitive length-delimited encode scenarios
