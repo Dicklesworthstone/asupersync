@@ -6,11 +6,18 @@ failures with high-signal traces and minimal manual digging.
 
 ## Quick Commands
 
+Run these from the repository root on the pinned toolchain. Require remote
+execution for the entire shell session; an unavailable worker or local fallback
+is a failed attempt. For changes covered by the native cancellation boundary
+below, run that unfiltered target before broader checks.
+
 ```bash
-# Build hygiene check (always run first)
+export RCH_REQUIRE_REMOTE=1
+
+# Build hygiene check (compilation only)
 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_check cargo check --lib -p asupersync --features test-internals
 
-# Unit + integration tests (library only)
+# Library unit tests; this does not select tests/*.rs integration targets
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_lib cargo test --lib --features test-internals
 
 # Stream logs
@@ -19,13 +26,18 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_
 # Run a specific test file
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_http_verification cargo test --test http_verification --features test-internals
 
-# Run a specific test by name (substring match)
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_cancellation cargo test cancellation_conformance --features test-internals
+# Run the complete cancellation integration target
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_cancellation cargo test --test cancellation_conformance --features test-internals
 
 # Phase 2 differential policy contract checks
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_time_policy cargo test --test lab_live_time_normalization_policy_contract --features test-internals -- --nocapture
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_virtualized_surface cargo test --test lab_live_virtualized_surface_matrix_contract --features test-internals -- --nocapture
 ```
+
+Cargo's positional test argument is a substring filter on test names;
+`--test cancellation_conformance` selects the integration executable. Require
+nonzero executed tests and inspect failed, ignored and filtered counts. A
+successful command with zero selected tests proves no behavior.
 
 ## Mandatory Native Parked-Task Cancellation Boundary
 
@@ -226,10 +238,10 @@ All cargo-heavy validation for Track-Z work must follow this policy:
   `${TMPDIR:-/tmp}/rch-<suite>-<run_id>-<stage>`.
 - Repeated commands in the same validation lane should reuse the same isolated
   target dir to preserve remote cache locality.
-- If a scripted `rch` attempt falls back to local execution, the run must not
-  silently count as compliant. Record `execution_backend="rch_local_fallback"`
-  and preserve the attempt log that showed the fallback. The downgrade must
-  also be called out in the bead thread or handoff note.
+- Set `RCH_REQUIRE_REMOTE=1` before invoking these commands. Local fallback is
+  forbidden for this project. Preserve any unexpected fallback log as a failed
+  attempt with `execution_backend="rch_local_fallback"`; that label records a
+  violation and does not authorize continuing locally.
 - Dry-run or contract-only paths that intentionally skip cargo must record
   `execution_backend="dry_run"` and explain why no remote execution occurred.
 - Summary artifacts for cargo-backed runs must record both `rch_routed` and
@@ -552,7 +564,7 @@ Sample `repro_manifest.json`:
   "invariant_ids": ["losers_drained", "no_obligation_leaks"],
   "seed": 57005,
   "trace_fingerprint": "trace_fp_v1",
-  "replay_command": "rch exec -- env ASUPERSYNC_SEED=0xDEAD CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_manifest cargo test cancellation_conformance -- --nocapture",
+  "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env ASUPERSYNC_SEED=0xDEAD CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_manifest cargo test --test cancellation_conformance --features test-internals -- --nocapture",
   "failure_class": "assertion_failure",
   "artifact_paths": [
     "target/test-artifacts/cancellation_conformance/event_log.txt",
@@ -667,7 +679,7 @@ Run the following for a maintenance pass:
 python3 scripts/check_no_mock_policy.py --policy .github/no_mock_policy.json
 scripts/run_all_e2e.sh --verify-matrix
 NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile forensics --bundle
-cargo llvm-cov --lib --all-features \
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_coverage cargo llvm-cov --lib --all-features \
   --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
   --text --output-path coverage/coverage.txt
 ```
@@ -719,9 +731,11 @@ False-positive / noise profile:
 
 ## Coverage Audit Matrix (bd-2alu)
 
-This is the current audit matrix mapping subsystems and invariants to tests.
-It favors deterministic lab runtime where possible and calls out gaps where
-coverage is missing or relies on mocks.
+This historical audit matrix maps subsystems and invariants to candidate tests.
+Its names and gap annotations are discovery leads, not a current execution or
+coverage report. Verify each target against the selected source and profile.
+The maintained native workflows below provide executable entry points for the
+channel, supervision and HTTP/2 work added since this inventory.
 
 | Subsystem | Invariants (examples) | Unit tests (src/) | Integration tests (tests/) | E2E tests (tests/e2e/) | Logging/trace expectations | Gaps / notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -737,10 +751,11 @@ coverage is missing or relies on mocks.
 | Lab runtime + testing infra | Deterministic scheduling, replay, oracles | `src/lab/runtime.rs::empty_runtime_is_quiescent`, `src/lab/oracle/*` unit tests | `tests/lab_determinism.rs::test_lab_deterministic_scheduling_same_seed`, `tests/property_region_ops.rs::property_invariant_coverage`, `tests/algebraic_laws.rs::algebraic_law_coverage` | `tests/runtime_e2e.rs::e2e_task_spawn_and_quiescence` | Determinism oracles must log seed and schedule | Some tests still use mocks for pool/transport (see gap list) |
 | Config + CLI + observability | Config validation, CLI tooling, metrics | `src/config.rs::default_config_valid`, `src/observability/metrics.rs::test_counter_increment` | `tests/builder_verification.rs::builder_verify_001_default_build`, `tests/otel_metrics.rs::test_provider_receives_task_events`, `tests/tracing_integration.rs::trace_with_fields_emits_structured_entry` | `tests/e2e_console.rs::console_plain_text_never_mode_no_ansi` | CLI outputs should be deterministic | gRPC CLI paths still have stubbed behavior |
 
-### Quantitative Summary (rough estimates, partially refreshed 2026-04-28; baseline 2026-02-03)
+### Historical Quantitative Summary (2026-04-28 partial refresh; 2026-02-03 baseline)
 
-These counts are rough and were derived from grep-based tallies; they are not a substitute
-for a per-module audit. Treat them as directional signals until we re-run a scripted count.
+These old source-text tallies are retained for audit history. They are not
+current selected-test counts, passing-test counts or coverage measurements.
+Do not use their totals or qualitative ratings to close a present-day gap.
 
 The Cancellation and Obligations rows were re-counted against current `src/` on 2026-04-28
 (`grep -c '#\[test\]' src/cancel/*.rs` and `src/obligation/leak_check.rs`); the rest of the
@@ -770,19 +785,23 @@ the high-churn modules (Net, HTTP, Trace).
 **Tooling choice:** `cargo llvm-cov` (LLVM source-based coverage). We standardize on this tool for
 local runs and CI, using a shared ignore regex to exclude tests/benches/examples/fuzz/conformance.
 
-**Local run (library coverage):**
+**Remote all-feature library coverage attempt:**
 
 ```bash
-cargo llvm-cov --lib --all-features \
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_coverage_all_features cargo llvm-cov --lib --all-features \
   --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
   --text --output-path coverage/coverage.txt
 ```
 
 **CI gating (current floor):**
-- CI runs the same `--lib --all-features` coverage command and fails if **line coverage < 5%**.
-- This floor is intentionally low to avoid blocking while known integration-test compile issues
-  are resolved; it will be ratcheted upward once `cargo llvm-cov --all-targets --all-features`
-  completes cleanly.
+- The `coverage` job in `.github/workflows/ci.yml` sets
+  `COVERAGE_MIN_LINE_PCT=5` and selects `--lib --features "$TEST_FEATURES"` using
+  `scripts/ci/release_test_features.sh`. That helper excludes the two legacy
+  harness features; it does not select `--all-features`. The broader command
+  above can therefore fail on surfaces outside that CI profile.
+- The same job subsequently runs `scripts/check_coverage_ratchet.py` against
+  `.github/coverage_policy.json`. Inspect the actual workflow artifacts before
+  claiming either gate passed; the configured floor is not a measured result.
 - No-mock policy is enforced separately in CI via an allowlisted `rg` scan.
 
 **Minimum coverage thresholds per invariant (v1):**
@@ -815,7 +834,9 @@ cargo llvm-cov --lib --all-features \
 
 ### Oracle Coverage (src/lab/oracle/)
 
-These oracles verify the core invariants during lab runtime execution:
+These oracles check the listed invariants during lab execution. The counts
+below belong to the historical inventory, not a fresh test run; they do not
+establish native scheduler or operating-system behavior.
 
 | Oracle | Invariant | Unit tests | Used in integration tests |
 | --- | --- | --- | --- |
@@ -843,9 +864,22 @@ Files using mocks or fakes (candidates for `bd-1z5u` remediation):
 
 ### Property Tests
 
-Only 6 files use proptest: `tests/algebraic_laws.rs`, `tests/property_region_ops.rs`, `tests/security/property_tests.rs`, `src/combinator/laws.rs`, `src/trace/geodesic.rs`, `tests/common/mod.rs`. Consider expanding property testing to obligation invariants and channel semantics.
+The historical inventory named `tests/algebraic_laws.rs`,
+`tests/property_region_ops.rs`, `tests/security/property_tests.rs`,
+`src/combinator/laws.rs`, `src/trace/geodesic.rs`, and `tests/common/mod.rs`.
+This is not the current complete set. Discover current uses with
+`rg -l 'proptest' src tests`, then inspect the actual properties and selected
+test results before deciding whether an invariant lacks coverage.
 
 ### Gap List (prioritized)
+
+This is the historical prioritization associated with the `bd-*` graph below.
+Its numeric and stub claims are not current findings. Preserve the invariant
+goals, but check live implementation and tracker status before creating a
+duplicate task or treating an old count as evidence of a gap. Current
+follow-through belongs to `asupersync-bi2462`, including cancellation/channel
+work `.28`–`.31`, supervision `.34`–`.35`, independent H2 `.36`, and native
+QUIC `.76`.
 
 1. `bd-38kk` **Cancellation unit gaps (CRITICAL):** Only 15 unit tests in `src/cancel/` (1 file). The obligation leak oracle has only 3 unit tests. Add direct unit tests for request/drain/finalize sequencing and loser drain invariants.
 2. `bd-2tlx` **Scheduler unit gaps:** Fairness and lane ordering should have explicit invariant tests. The 486 tests are spread across reactor/config; scheduler-specific invariant tests (lane priority ordering, work-stealing correctness) need dedicated coverage.
@@ -1135,17 +1169,43 @@ The conformance suite lives in the `conformance/` crate and is designed to be
 runtime-agnostic. To run it:
 
 ```bash
-rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_conformance cargo test -p asupersync-conformance --features test-internals
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_conformance cargo test -p asupersync-conformance
 ```
 
 The `asupersync` crate also exposes conformance tooling in the CLI when the
 `cli` feature is enabled (see `src/bin/asupersync.rs`).
+
+`conformance/Cargo.toml` enables the runtime's `test-internals` dependency
+feature itself. This satellite suite is distinct from the independent
+`h2spec` process against the native listener; use the maintained invocation in
+[`conformance/http2_h2spec.md`](conformance/http2_h2spec.md) for that proof.
 
 ## E2E Tests
 
 E2E tests are organized under `tests/e2e/` and cover protocol-level behavior
 with structured logging. Use `-- --nocapture` for logs and prefer deterministic
 lab runtime variants where available.
+
+### Native supervision and channel admission
+
+The maintained obligation runner has separate `--managed-supervision`,
+`--checked-admission`, and `--responsiveness` modes. Each starts with the
+unfiltered native cancellation audit and then runs the selected feature's
+unit and public boundary stages. For a committed candidate on `main`:
+
+```bash
+candidate_base=$(git rev-parse HEAD)
+RCH_REQUIRE_REMOTE=1 bash scripts/test_obligation_cleanup_e2e.sh \
+  --managed-supervision --base "$candidate_base" --no-overlay
+```
+
+`--no-overlay` excludes uncommitted edits. For owned changes, use the exact
+reserved-path recipe in [`docs/channel_supervision_e2e.md`](docs/channel_supervision_e2e.md).
+The [supervision guide](docs/signal_graceful_shutdown_supervision_tree_e2e.md)
+describes actual native SIGTERM delivery, parked cleanup, finalizer ordering,
+negative controls and the explicit limits of that evidence. Retain the
+runner's selected source, stage logs and terminal summary; discovering this
+command or seeing it compile is not an executed supervision result.
 
 ### E2E Environment Orchestration (bd-76y5)
 
@@ -1321,10 +1381,13 @@ Example:
 
 ```bash
 cd fuzz
-cargo +nightly fuzz run fuzz_http2_frame -- -max_total_time=60
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_fuzz cargo fuzz run fuzz_http2_frame -- -max_total_time=60
 ```
 
-Crashes and corpora are stored under `fuzz/artifacts/` and `fuzz/corpus/`.
+This requires `cargo-fuzz` and the repository's pinned nightly toolchain on
+the selected remote worker. RCH refusal or missing tools do not authorize a
+local retry. Preserve the worker's `fuzz/artifacts/` and `fuzz/corpus/` outputs;
+do not assume an RCH command automatically retrieved them.
 
 ## Phase 6 End-to-End Suites
 
@@ -1332,11 +1395,11 @@ Phase 6 E2E suites validate cross-module integration, determinism, and artifact
 stability for the five major subsystems. They are intentionally separate from
 unit tests: units validate local invariants, E2E validates the full pipeline.
 
-### Single command (local)
+### Single command (remote Cargo stages)
 
 ```bash
 # Via runner script (produces summary + per-suite logs in target/phase6-e2e/):
-./scripts/run_phase6_e2e.sh
+RCH_REQUIRE_REMOTE=1 ./scripts/run_phase6_e2e.sh
 
 # Or via cargo directly:
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_e2e cargo test --test e2e_geodesic_normalization \
@@ -1347,7 +1410,7 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_
            --features test-internals -- --nocapture
 
 # Run a single suite:
-./scripts/run_phase6_e2e.sh --suite geo
+RCH_REQUIRE_REMOTE=1 ./scripts/run_phase6_e2e.sh --suite geo
 ```
 
 ### Suite breakdown
