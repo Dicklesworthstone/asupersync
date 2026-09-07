@@ -707,7 +707,6 @@ impl<E> PipelineOwner<E> {
                     usize::MAX,
                     Outcome::Err(PipelineExecutionError::Disconnected),
                 );
-                return;
             }
         }
     }
