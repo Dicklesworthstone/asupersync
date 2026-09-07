@@ -210,6 +210,10 @@ pub struct Stream {
     priority: PrioritySpec,
     /// Pending data to send (buffered due to flow control).
     pending_data: VecDeque<PendingData>,
+    /// The API has accepted END_STREAM but the connection has not emitted it.
+    queued_end_stream: bool,
+    /// Temporarily retain an over-limit field block only to synchronize HPACK.
+    refused_headers: bool,
     /// Error code if stream was reset.
     error_code: Option<ErrorCode>,
     /// Whether we've received END_HEADERS.
@@ -279,6 +283,8 @@ impl Stream {
                 weight: 16,
             },
             pending_data: VecDeque::new(),
+            queued_end_stream: false,
+            refused_headers: false,
             error_code: None,
             headers_complete: true,
             initial_headers_decoded: false,
@@ -423,6 +429,26 @@ impl Stream {
     #[must_use]
     pub fn has_pending_data(&self) -> bool {
         !self.pending_data.is_empty()
+    }
+
+    pub(crate) fn queue_end_stream(&mut self, end_stream: bool) {
+        self.queued_end_stream |= end_stream;
+    }
+
+    pub(crate) fn emit_end_stream(&mut self) {
+        self.queued_end_stream = false;
+    }
+
+    pub(crate) fn headers_refused(&self) -> bool {
+        self.refused_headers
+    }
+
+    pub(crate) fn wire_closed(&self) -> bool {
+        self.state.is_closed() && !self.queued_end_stream
+    }
+
+    fn wire_active(&self) -> bool {
+        self.state.is_active() || self.queued_end_stream
     }
 
     /// Update send window size.
@@ -846,6 +872,7 @@ impl Stream {
     pub fn reset(&mut self, error_code: ErrorCode) {
         self.state = StreamState::Closed;
         self.error_code = Some(error_code);
+        self.queued_end_stream = false;
         // Release buffered data to avoid holding memory until prune.
         self.header_fragments.clear();
         self.header_fragments_bytes = 0;
@@ -931,6 +958,9 @@ pub struct StreamStore {
     next_server_stream_id: u32,
     /// Maximum concurrent streams.
     max_concurrent_streams: u32,
+    /// Our advertised limit when negotiated independently. None preserves the
+    /// public store API's legacy aggregate limit across both directions.
+    local_max_concurrent_streams: Option<u32>,
     /// Initial window size for new streams.
     initial_window_size: u32,
     /// Initial receive window size advertised by our local SETTINGS.
@@ -968,6 +998,7 @@ impl StreamStore {
             next_client_stream_id: 1,
             next_server_stream_id: 2,
             max_concurrent_streams: u32::MAX,
+            local_max_concurrent_streams: None,
             initial_window_size,
             initial_recv_window_size,
             max_header_list_size,
@@ -1189,6 +1220,15 @@ impl StreamStore {
     /// Set the maximum concurrent streams.
     pub fn set_max_concurrent_streams(&mut self, max: u32) {
         self.max_concurrent_streams = max;
+        self.local_max_concurrent_streams = None;
+    }
+
+    pub(crate) fn set_local_max_concurrent_streams(&mut self, max: u32) {
+        self.local_max_concurrent_streams = Some(max);
+    }
+
+    pub(crate) fn set_remote_max_concurrent_streams(&mut self, max: u32) {
+        self.max_concurrent_streams = max;
     }
 
     /// Set the initial window size for new streams.
@@ -1200,7 +1240,7 @@ impl StreamStore {
         // windows are irrelevant and applying a large delta could trigger
         // a spurious overflow error that blocks the entire SETTINGS update.
         for stream in self.iter_streams_mut() {
-            if !stream.state.is_closed() {
+            if !stream.wire_closed() {
                 stream.update_initial_window_size(size)?;
             }
         }
@@ -1212,7 +1252,7 @@ impl StreamStore {
     pub fn check_initial_window_size(&self, size: u32) -> Result<(), H2Error> {
         let delta = i64::from(size) - i64::from(self.initial_window_size);
         for stream in self.iter_streams() {
-            if !stream.state.is_closed() {
+            if !stream.wire_closed() {
                 let new_window = i64::from(stream.send_window()) + delta;
                 if new_window > i64::from(i32::MAX) || new_window < i64::from(i32::MIN) {
                     return Err(H2Error::flow_control("flow-control window overflow"));
@@ -1272,7 +1312,22 @@ impl StreamStore {
 
     /// Get or create a stream.
     pub fn get_or_create(&mut self, id: u32) -> Result<&mut Stream, H2Error> {
+        self.get_or_create_inner(id, false)
+    }
+
+    /// The connection must decode even a refused stream's field block before
+    /// resetting it. At most one incomplete field block is legal at a time.
+    pub(crate) fn get_or_create_for_headers(&mut self, id: u32) -> Result<&mut Stream, H2Error> {
+        self.get_or_create_inner(id, true)
+    }
+
+    fn get_or_create_inner(
+        &mut self,
+        id: u32,
+        retain_refused: bool,
+    ) -> Result<&mut Stream, H2Error> {
         if self.get(id).is_none() {
+            let mut refused_headers = false;
             // Validate stream ID
             if id == 0 {
                 return Err(H2Error::protocol("stream ID 0 is reserved"));
@@ -1302,16 +1357,29 @@ impl StreamStore {
             // advertised max_concurrent_streams.  We amortize the O(N) active
             // count by first checking the total tracked stream count (which
             // includes closed streams kept for GOAWAY bookkeeping).
-            if self.occupied >= self.max_concurrent_streams as usize {
-                let active = self.iter_streams().filter(|s| s.state.is_active()).count();
+            let local_limit = self
+                .local_max_concurrent_streams
+                .unwrap_or(self.max_concurrent_streams);
+            if self.occupied >= local_limit as usize {
+                let active = self
+                    .iter_streams()
+                    .filter(|s| {
+                        s.wire_active()
+                            && (self.local_max_concurrent_streams.is_none()
+                                || (s.id % 2 == 1) != self.is_client)
+                    })
+                    .count();
                 // Prune closed streams while we're scanning.
-                self.retain_streams(|_, s| !s.state.is_closed());
-                if active >= self.max_concurrent_streams as usize {
-                    return Err(H2Error::stream(
-                        id,
-                        ErrorCode::RefusedStream,
-                        "max concurrent streams exceeded",
-                    ));
+                self.retain_streams(|_, s| !s.wire_closed());
+                if active >= local_limit as usize {
+                    if !retain_refused {
+                        return Err(H2Error::stream(
+                            id,
+                            ErrorCode::RefusedStream,
+                            "max concurrent streams exceeded",
+                        ));
+                    }
+                    refused_headers = true;
                 }
             }
 
@@ -1329,12 +1397,13 @@ impl StreamStore {
                 self.next_client_stream_id = id.saturating_add(2);
             }
 
-            let stream = Stream::new_with_recv_window(
+            let mut stream = Stream::new_with_recv_window(
                 id,
                 self.initial_window_size,
                 self.initial_recv_window_size,
                 self.max_header_list_size,
             );
+            stream.refused_headers = refused_headers;
             self.insert_stream(id, stream)?;
         }
         self.get_mut(id).ok_or_else(|| {
@@ -1419,11 +1488,13 @@ impl StreamStore {
         // streams reaches the max_concurrent_streams limit.
         if self.occupied >= self.max_concurrent_streams as usize {
             let mut active_count = 0_u32;
+            let is_client = self.is_client;
+            let directional = self.local_max_concurrent_streams.is_some();
             self.retain_streams(|_, s| {
-                if s.state.is_active() {
+                if s.wire_active() && (!directional || (s.id % 2 == 1) == is_client) {
                     active_count = active_count.saturating_add(1);
                 }
-                !s.state.is_closed()
+                !s.wire_closed()
             });
 
             if active_count >= self.max_concurrent_streams {
@@ -1484,7 +1555,7 @@ impl StreamStore {
 
     /// Remove closed streams.
     pub fn prune_closed(&mut self) {
-        self.retain_streams(|_, stream| !stream.state.is_closed());
+        self.retain_streams(|_, stream| !stream.wire_closed());
     }
 
     /// Remove closed streams unless the caller still needs their stream id
@@ -1493,7 +1564,7 @@ impl StreamStore {
     where
         F: FnMut(u32) -> bool,
     {
-        self.retain_streams(|id, stream| !stream.state.is_closed() || keep_closed(id));
+        self.retain_streams(|id, stream| !stream.wire_closed() || keep_closed(id));
     }
 
     /// Get all active stream IDs.
@@ -1508,7 +1579,7 @@ impl StreamStore {
             .enumerate()
             .filter_map(|(i, slot)| {
                 slot.as_ref().and_then(|s| {
-                    if s.state.is_active() {
+                    if s.wire_active() {
                         Some(base.saturating_add(i as u32))
                     } else {
                         None
@@ -1521,7 +1592,7 @@ impl StreamStore {
     /// Get count of active streams.
     #[must_use]
     pub fn active_count(&self) -> usize {
-        self.iter_streams().filter(|s| s.state.is_active()).count()
+        self.iter_streams().filter(|s| s.wire_active()).count()
     }
 }
 

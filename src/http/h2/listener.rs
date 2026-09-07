@@ -337,6 +337,7 @@ fn request_from_h2_parts(
     let mut path = None;
     let mut authority = None;
     let mut regular = Vec::with_capacity(headers.len());
+    let mut declared_length = None;
     for header in headers {
         match header.name.as_str() {
             ":method" => method = Some(header.value),
@@ -350,8 +351,31 @@ fn request_from_h2_parts(
                     "unexpected request pseudo-header {name}"
                 )));
             }
-            _ => regular.push((header.name, header.value)),
+            _ => {
+                if header.name == "content-length" {
+                    let value = header.value.as_str();
+                    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err(H2Error::protocol("invalid request content-length"));
+                    }
+                    let length = value
+                        .parse::<u64>()
+                        .map_err(|_| H2Error::protocol("invalid request content-length"))?;
+                    if declared_length
+                        .replace(length)
+                        .is_some_and(|old| old != length)
+                    {
+                        return Err(H2Error::protocol("conflicting request content-length"));
+                    }
+                }
+                regular.push((header.name, header.value));
+            }
         }
+    }
+
+    if declared_length.is_some_and(|length| length != body.len() as u64) {
+        return Err(H2Error::protocol(
+            "request content-length does not match DATA bytes",
+        ));
     }
 
     let method_text = method.ok_or_else(|| H2Error::protocol(":method pseudo-header missing"))?;
@@ -4559,6 +4583,55 @@ mod tests {
 
     fn h2_listener_test_time() -> Time {
         H2_LISTENER_TEST_NOW.with(|now| Time::from_nanos(now.get()))
+    }
+
+    #[test]
+    fn h2spec_request_content_length_matches_assembled_data() {
+        for declared in [
+            "0",
+            "2",
+            "4",
+            "-3",
+            "+3",
+            " 3",
+            "3,3",
+            "",
+            "18446744073709551616",
+        ] {
+            let result = request_from_h2_parts(
+                request_block(&[("content-length", declared)]),
+                b"abc".to_vec(),
+                Vec::new(),
+                None,
+            );
+            assert!(result.is_err(), "accepted malformed length {declared:?}");
+        }
+        let result = request_from_h2_parts(
+            request_block(&[("content-length", "3")]),
+            b"abc".to_vec(),
+            vec![Header::new("x-checksum", "yes")],
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.body, b"abc");
+        assert!(
+            request_from_h2_parts(
+                request_block(&[("content-length", "3"), ("content-length", "4")]),
+                b"abc".to_vec(),
+                Vec::new(),
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            request_from_h2_parts(
+                request_block(&[("content-length", "0")]),
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .is_ok()
+        );
     }
 
     fn request_block(extra: &[(&str, &str)]) -> Vec<Header> {

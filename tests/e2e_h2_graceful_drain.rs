@@ -26,8 +26,10 @@
 
 #![cfg(feature = "test-internals")]
 
+use std::future::Future;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -46,6 +48,15 @@ use asupersync::server::shutdown::ShutdownPhase;
 use asupersync::sync::Notify;
 use asupersync::web::handler::AsyncCxFnHandler;
 use asupersync::web::router::{Router, get};
+
+// Keep the listener's nested future separate from the runtime's task wrappers
+// during Send checking. This changes only the test's spawn boundary; the same
+// listener body, runtime ownership, and result are still exercised.
+fn boxed_listener_run<T: Send + 'static>(
+    future: impl Future<Output = T> + Send + 'static,
+) -> Pin<Box<dyn Future<Output = T> + Send>> {
+    Box::pin(future)
+}
 
 fn drain_config(drain: Duration, hard: Duration) -> Http2ListenerConfig {
     Http2ListenerConfig::default()
@@ -185,7 +196,9 @@ fn h2_serves_request_response_round_trip() {
 
         let run_handle = handle
             .clone()
-            .try_spawn(async move { listener.run(&handle).await })
+            .try_spawn(boxed_listener_run(
+                async move { listener.run(&handle).await },
+            ))
             .expect("spawn listener run");
 
         let client = h2_blocking_client(addr, "/round-trip", false);
@@ -257,7 +270,7 @@ fn h2_router_composes_over_live_listener_with_request_cx() {
         let manager = listener.connection_manager().clone();
         let run_handle = handle
             .clone()
-            .try_spawn(async move { listener.run(&handle).await })
+            .try_spawn(boxed_listener_run(async move { listener.run(&handle).await }))
             .expect("spawn Router-backed listener run");
 
         let matched = h2_blocking_client(addr, "/router-h2", false)
@@ -319,7 +332,9 @@ fn h2_rejects_disallowed_host_with_421() {
 
         let run_handle = handle
             .clone()
-            .try_spawn(async move { listener.run(&handle).await })
+            .try_spawn(boxed_listener_run(
+                async move { listener.run(&handle).await },
+            ))
             .expect("spawn listener run");
 
         let client = h2_blocking_client(addr, "/blocked", false);
@@ -377,7 +392,9 @@ fn h2_drain_completes_in_flight_requests() {
 
         let run_handle = handle
             .clone()
-            .try_spawn(async move { listener.run(&handle).await })
+            .try_spawn(boxed_listener_run(
+                async move { listener.run(&handle).await },
+            ))
             .expect("spawn listener run");
 
         let clients: Vec<_> = (0..IN_FLIGHT)
@@ -476,7 +493,9 @@ fn h2_drain_escalates_stragglers() {
 
         let run_handle = handle
             .clone()
-            .try_spawn(async move { listener.run(&handle).await })
+            .try_spawn(boxed_listener_run(
+                async move { listener.run(&handle).await },
+            ))
             .expect("spawn listener run");
 
         let clients: Vec<_> = (0..STRAGGLERS)
@@ -565,7 +584,9 @@ fn h2_lb_compat_keeps_socket_until_drain_completes() {
 
         let run_handle = handle
             .clone()
-            .try_spawn(async move { listener.run(&handle).await })
+            .try_spawn(boxed_listener_run(
+                async move { listener.run(&handle).await },
+            ))
             .expect("spawn listener run");
 
         // One request parked in its handler keeps the drain window open.
@@ -829,7 +850,11 @@ assert {key.split('/')[0] for key, _ in known} == {'generic','http2','hpack'}
 expected = {identity for identity in known.values()
             if any(identity == item or identity.startswith(item+'/') for item in selection)}
 assert expected, selection
-tree = ET.parse(directory/(stage+'.xml')).getroot()
+# h2spec v2.6.0 writes the two trailing PING payload NULs literally into
+# diagnostic attributes, which XML 1.0 cannot represent. Preserve the raw
+# artifact and render only NUL as visible backslash-x00 for XML parsing.
+# All case identities, counts, selection and failure checks remain strict.
+tree = ET.fromstring((directory/(stage+'.xml')).read_bytes().replace(b'\x00', br'\x00'))
 assert tree.tag == 'testsuites'
 rows, seen = [], set()
 for suite in tree.findall('testsuite'):
@@ -1224,8 +1249,11 @@ print(json.dumps(summary,sort_keys=True))
         fn drop(&mut self) {
             // Failure cleanup requests actual connection shutdown, and cannot
             // fabricate the joined/zero-ownership receipt above.
-            if self.runtime.is_some() {
+            if let Some(runtime) = self.runtime.take() {
                 self.manager.force_close();
+                drop(self.run.take());
+                let completed = runtime.shutdown_timeout(Duration::from_secs(5));
+                eprintln!("h2spec failure cleanup runtime shutdown: {completed}");
             }
         }
     }
@@ -1393,6 +1421,9 @@ print(json.dumps(summary,sort_keys=True))
         // Hash again after execution, so replacing the explicitly selected tool
         // while the suite ran cannot produce a successful identity receipt.
         assert_eq!(digest(&fs::read(&binary).unwrap()), BINARY_SHA256);
+        // Complete the native ownership journey before report parsing, so a
+        // broken external report cannot bypass the open-stream cleanup probe.
+        let cleanup = server.stop_with_open_stream(&dir);
         let full_report = report(&dir, "full", &["generic", "http2", "hpack"]);
         write_json(
             &dir,
@@ -1402,7 +1433,6 @@ print(json.dumps(summary,sort_keys=True))
         let negative_report = report(&dir, "negative", &["generic/3.7/1"]);
         let negative = json!({"terminal":negative_terminal,"report":negative_report,"peer":peer});
         write_json(&dir, "negative.verdict.json", &negative);
-        let cleanup = server.stop_with_open_stream(&dir);
         assert_eq!(negative["terminal"]["timed_out"], false, "{negative}");
         assert_eq!(negative["terminal"]["exit_code"], 1, "{negative}");
         assert_eq!(negative["report"]["selected"], 1, "{negative}");

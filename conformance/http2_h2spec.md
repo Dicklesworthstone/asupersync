@@ -1,21 +1,31 @@
 # Native HTTP/2 h2spec conformance
 
-Updated: 2026-09-06. Active bead: `asupersync-bi2462.36`.
+Updated: 2026-09-07. Active bead: `asupersync-bi2462.36`.
 
 The independent harness is implemented in
 `tests/e2e_h2_graceful_drain.rs`, under
-`external_h2spec::native_h2spec_strict_conformance`. Three remote attempts
-passed the 40-test native prerequisite, then failed to compile the external
-test because its listener future exceeded the compiler's trait recursion depth.
-Boxing the handler's returned `Send` future, callable, and outer listener
-future was insufficient; the private connection-spawn boundary is being
-repaired without changing the test's body or assertions. The next run includes
-that correction and the request-ownership repairs. No external case has
-executed, so no pre-repair behavioral baseline exists. Tool installation and
-discovery have succeeded; neither is a
-conformance result. Static review also identified request-task admission and
-force-close cancellation gaps in the existing listener. The strict ownership
-checks remain in place while those paths are repaired.
+`external_h2spec::native_h2spec_strict_conformance`. The first executed sweep
+passed 140 of 147 cases and exposed seven protocol failures. After repairs,
+the 2026-09-06 23:46 UTC candidate passed all 147 cases with zero skips. Its
+40-test native prerequisite and actual held-request cancellation/shutdown
+probe also passed, with no remaining tasks, connections, or obligations.
+
+That run's aggregate result remained failed: h2spec placed literal NUL bytes
+in the intentionally invalid PING response's XML diagnostic, and strict XML
+parsing rejected them. The parser now renders those NULs visibly in memory
+while preserving the raw artifact and all case/count checks. The latest
+candidate also preserves HPACK state when refusing an over-limit stream.
+The next run completed on 2026-09-07 at 00:05 UTC: the maintained workflow
+passed, including the strict positive and negative reports and ownership
+cleanup. A compatibility adjustment preserves the public stream store's
+aggregate limit setter while the connection negotiates directional limits.
+The runner now also requires the complete H2 unit suite before h2spec;
+that new stage and the compiler/lint gates remain outstanding. The bead is
+still in progress.
+
+The earlier compiler failures and the initial seven-case failure report are
+retained. Private connection-future and test-boundary erasure resolved the
+compiler recursion without increasing its limit or relaxing assertions.
 
 ## Pinned external tool
 
@@ -64,7 +74,8 @@ directory's parent must exist. `H2SPEC_CARGO_HOME` is optional;
 
 The runner requires installed RCH clean-overlay support and remote execution,
 disables target reuse, and first runs the unfiltered native cancellation audit.
-It then explicitly selects the external test with `--ignored --exact`.
+It runs all `http::h2::` library tests, then explicitly selects the external
+test with `--ignored --exact`.
 Ordinary test runs leave this tool-dependent test ignored and provide no
 external conformance evidence.
 
@@ -77,6 +88,8 @@ PING payload; the external oracle must reject exactly that case without a
 startup failure or timeout. The native shutdown case parks a real request,
 checks its registered task identity, then verifies cancellation, terminal
 completion, connection/task cleanup, and runtime shutdown.
+The shutdown probe runs before report parsing so a malformed external report
+cannot bypass the ownership check.
 
 ## Read the result
 

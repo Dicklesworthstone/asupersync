@@ -173,7 +173,7 @@ def stage(name, test_args, extra_environment=()):
     require(not re.search(r"^test result: FAILED", text, re.M), f"{name} contains a failed test result")
     if name == "native":
         require(counts[0][4] == "0", "native prerequisite must remain unfiltered")
-    else:
+    elif name == "external":
         require(counts[0][0] == "1", "external mode must execute exactly its one independent test")
         rows = re.findall(r"^ASUPERSYNC_H2SPEC_SUMMARY (.+)$", text, re.M)
         require(len(rows) == 1, "external summary absent or duplicated")
@@ -229,6 +229,7 @@ def stage(name, test_args, extra_environment=()):
 
 try:
     stage("native", ["--test", "runtime_abort_vs_cancel_semantics_audit", "--", "--nocapture", "--test-threads=1"])
+    stage("h2-units", ["--lib", "http::h2::", "--", "--nocapture", "--test-threads=1"])
     stage("external", ["--test", "e2e_h2_graceful_drain", "--", "--ignored", "--exact",
                        "external_h2spec::native_h2spec_strict_conformance", "--nocapture", "--test-threads=1"],
           [f"H2SPEC_BIN={binary}", f"H2SPEC_ARTIFACT_DIR={remote_directory}",

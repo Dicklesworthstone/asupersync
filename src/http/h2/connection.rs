@@ -96,6 +96,9 @@ pub struct FrameCodec {
     max_frame_size: u32,
     /// Partial header being decoded.
     partial_header: Option<FrameHeader>,
+    /// Unknown extensions cannot interrupt a field block, even though the
+    /// public codec otherwise skips them.
+    awaiting_continuation: bool,
 }
 
 impl FrameCodec {
@@ -105,6 +108,7 @@ impl FrameCodec {
         Self {
             max_frame_size: super::frame::DEFAULT_MAX_FRAME_SIZE,
             partial_header: None,
+            awaiting_continuation: false,
         }
     }
 
@@ -155,10 +159,21 @@ impl Decoder for FrameCodec {
             // endpoints to ignore them while preserving connection state.
             let payload = src.split_to(payload_len).freeze();
             if FrameType::from_u8(header.frame_type).is_none() {
+                if self.awaiting_continuation {
+                    return Err(H2Error::protocol(
+                        "extension frame interrupted header block",
+                    ));
+                }
                 continue;
             }
 
             let frame = parse_frame(&header, payload)?;
+            match &frame {
+                Frame::Headers(frame) => self.awaiting_continuation = !frame.end_headers,
+                Frame::PushPromise(frame) => self.awaiting_continuation = !frame.end_headers,
+                Frame::Continuation(frame) => self.awaiting_continuation = !frame.end_headers,
+                _ => {}
+            }
             return Ok(Some(frame));
         }
     }
@@ -363,18 +378,20 @@ impl Connection {
         // 4096 default, so advertising a larger table would make us kill a
         // spec-conforming peer with a COMPRESSION_ERROR.
         decoder.set_allowed_table_size(settings.header_table_size as usize);
+        let mut streams = StreamStore::new_with_local_recv_window(
+            true,
+            initial_send_window,
+            initial_recv_window,
+            max_header_list_size,
+        );
+        streams.set_local_max_concurrent_streams(settings.max_concurrent_streams);
         Self {
             state: ConnectionState::Handshaking,
             is_client: true,
             local_settings: settings,
             remote_settings: Settings::default(),
             received_settings: false,
-            streams: StreamStore::new_with_local_recv_window(
-                true,
-                initial_send_window,
-                initial_recv_window,
-                max_header_list_size,
-            ),
+            streams,
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
@@ -417,18 +434,20 @@ impl Connection {
         // 4096 default, so advertising a larger table would make us kill a
         // spec-conforming peer with a COMPRESSION_ERROR.
         decoder.set_allowed_table_size(settings.header_table_size as usize);
+        let mut streams = StreamStore::new_with_local_recv_window(
+            false,
+            initial_send_window,
+            initial_recv_window,
+            max_header_list_size,
+        );
+        streams.set_local_max_concurrent_streams(settings.max_concurrent_streams);
         Self {
             state: ConnectionState::Handshaking,
             is_client: false,
             local_settings: settings,
             remote_settings: Settings::default(),
             received_settings: false,
-            streams: StreamStore::new_with_local_recv_window(
-                false,
-                initial_send_window,
-                initial_recv_window,
-                max_header_list_size,
-            ),
+            streams,
             hpack_encoder: hpack::Encoder::new(),
             hpack_decoder: decoder,
             send_window: DEFAULT_CONNECTION_WINDOW_SIZE,
@@ -714,6 +733,7 @@ impl Connection {
             )
         })?;
         stream.send_headers(end_stream)?;
+        stream.queue_end_stream(end_stream);
 
         self.pending_ops.push_back(PendingOp::Headers {
             stream_id,
@@ -736,6 +756,7 @@ impl Connection {
         })?;
 
         stream.send_data(end_stream)?;
+        stream.queue_end_stream(end_stream);
 
         self.pending_ops.push_back(PendingOp::Data {
             stream_id,
@@ -758,6 +779,7 @@ impl Connection {
         })?;
 
         stream.send_headers(end_stream)?;
+        stream.queue_end_stream(end_stream);
 
         self.pending_ops.push_back(PendingOp::Headers {
             stream_id,
@@ -1126,19 +1148,30 @@ impl Connection {
 
     /// Process HEADERS frame.
     fn process_headers(&mut self, frame: HeadersFrame) -> Result<Option<ReceivedFrame>, H2Error> {
+        if self
+            .streams
+            .get(frame.stream_id)
+            .is_some_and(|stream| stream.wire_closed() && stream.error_code().is_none())
+        {
+            return Err(H2Error::connection(
+                ErrorCode::StreamClosed,
+                "HEADERS received after both directions ended",
+            ));
+        }
         // RFC 9113 §6.8: After sending GOAWAY, refuse new streams with IDs
         // above the advertised last_stream_id. Without this, a misbehaving
         // peer could open unbounded streams during the drain phase.
         // We MUST still process the headers through HPACK to keep compression state
         // synchronized, but we will discard the result and send a RST_STREAM.
-        let refused = self.stream_exceeds_sent_goaway(frame.stream_id);
+        let mut refused = self.stream_exceeds_sent_goaway(frame.stream_id);
 
         // Validate stream creation before tracking last_stream_id.
         // If get_or_create fails (e.g., invalid stream parity or monotonicity
         // violation), we must not pollute last_stream_id — GOAWAY must only
         // report the highest actually-processed stream (RFC 7540 §6.8).
         {
-            let _ = self.streams.get_or_create(frame.stream_id)?;
+            let stream = self.streams.get_or_create_for_headers(frame.stream_id)?;
+            refused |= stream.headers_refused();
         }
 
         if !refused {
@@ -1232,7 +1265,8 @@ impl Connection {
                 stream.state(),
                 StreamState::HalfClosedRemote | StreamState::Closed
             );
-            let refused = self.stream_exceeds_sent_goaway(frame.stream_id);
+            let headers_refused = stream.headers_refused();
+            let refused = headers_refused || self.stream_exceeds_sent_goaway(frame.stream_id);
             let result = self.decode_headers(frame.stream_id, end_stream);
             if refused {
                 self.pending_ops.push_back(PendingOp::RstStream {
@@ -1547,7 +1581,7 @@ impl Connection {
                     self.hpack_encoder.set_max_table_size(capped);
                 }
                 Setting::MaxConcurrentStreams(max) => {
-                    self.streams.set_max_concurrent_streams(*max);
+                    self.streams.set_remote_max_concurrent_streams(*max);
                 }
                 Setting::MaxFrameSize(size) => {
                     // Update frame codec when we have one
@@ -1775,6 +1809,9 @@ impl Connection {
                     if !self.stream_can_emit_queued_frames(stream_id) {
                         continue;
                     }
+                    if end_stream {
+                        self.streams.get_mut(stream_id)?.emit_end_stream();
+                    }
                     // Encode headers
                     let mut encoded = BytesMut::new();
                     self.hpack_encoder.encode(&headers, &mut encoded);
@@ -1942,6 +1979,9 @@ impl Connection {
                     self.send_window -= consumed.cast_signed();
                     if let Some(stream) = self.streams.get_mut(stream_id) {
                         stream.consume_send_window(consumed);
+                        if actually_end {
+                            stream.emit_end_stream();
+                        }
                     }
 
                     returned_frame = Some(Frame::Data(DataFrame::new(
@@ -2244,6 +2284,9 @@ fn validate_h2_pseudo_headers(
                         return Err("duplicate :path pseudo-header");
                     }
                     seen_path = true;
+                    if h.value.is_empty() {
+                        return Err("empty :path pseudo-header");
+                    }
                 }
                 b":authority" => {
                     if seen_authority {
@@ -2667,6 +2710,265 @@ mod tests {
         match decoded {
             Frame::Ping(p) => assert_eq!(p.opaque_data, [9, 8, 7, 6, 5, 4, 3, 2]),
             _ => panic!("expected PING frame"),
+        }
+    }
+
+    #[test]
+    fn h2spec_extension_cannot_interrupt_a_fragmented_header_block() {
+        for start in [
+            Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, false)),
+            Frame::PushPromise(PushPromiseFrame {
+                stream_id: 1,
+                promised_stream_id: 2,
+                header_block: Bytes::new(),
+                end_headers: false,
+            }),
+        ] {
+            let mut codec = FrameCodec::new();
+            let mut bytes = BytesMut::new();
+            start.encode(&mut bytes).unwrap();
+            FrameHeader {
+                length: 1,
+                frame_type: 0xfe,
+                flags: 0,
+                stream_id: 0,
+            }
+            .write(&mut bytes);
+            bytes.extend_from_slice(&[42]);
+            assert!(codec.decode(&mut bytes).unwrap().is_some());
+            let error = codec.decode(&mut bytes).unwrap_err();
+            assert_eq!(error.code, ErrorCode::ProtocolError);
+            assert_eq!(error.stream_id, None);
+        }
+    }
+
+    #[test]
+    fn h2spec_negative_window_survives_a_queued_final_response() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![
+            Setting::InitialWindowSize(3),
+        ])))
+        .unwrap();
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/window"),
+            true,
+            true,
+        )))
+        .unwrap();
+        conn.send_headers(1, vec![Header::new(":status", "200")], false)
+            .unwrap();
+        conn.send_data(1, Bytes::from_static(b"abcdef"), true)
+            .unwrap();
+        let mut data = Vec::new();
+        while let Some(frame) = conn.next_frame() {
+            if let Frame::Data(frame) = frame {
+                assert!(!frame.end_stream);
+                data.extend_from_slice(&frame.data);
+            }
+        }
+        assert_eq!(data, b"abc");
+        assert_eq!(conn.active_stream_count(), 1);
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![
+            Setting::InitialWindowSize(2),
+        ])))
+        .unwrap();
+        assert_eq!(conn.stream(1).unwrap().send_window(), -1);
+        assert!(matches!(conn.next_frame(), Some(Frame::Settings(_))));
+        assert!(conn.next_frame().is_none());
+        conn.process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(1, 2)))
+            .unwrap();
+        let Some(Frame::Data(one)) = conn.next_frame() else {
+            panic!("one byte resumes")
+        };
+        assert_eq!(one.data.as_ref(), b"d");
+        assert!(!one.end_stream);
+        assert!(conn.next_frame().is_none());
+        conn.process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(1, 2)))
+            .unwrap();
+        let Some(Frame::Data(last)) = conn.next_frame() else {
+            panic!("final two bytes")
+        };
+        assert_eq!(last.data.as_ref(), b"ef");
+        assert!(last.end_stream);
+        assert_eq!(conn.active_stream_count(), 0);
+    }
+
+    #[test]
+    fn h2spec_local_stream_limit_retains_flow_blocked_responses() {
+        let mut settings = Settings::default();
+        settings.max_concurrent_streams = 1;
+        let mut conn = Connection::server(settings);
+        conn.state = ConnectionState::Open;
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![
+            Setting::InitialWindowSize(0),
+            Setting::MaxConcurrentStreams(100),
+        ])))
+        .unwrap();
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/first"),
+            true,
+            true,
+        )))
+        .unwrap();
+        conn.send_headers(1, vec![Header::new(":status", "200")], false)
+            .unwrap();
+        conn.send_data(1, Bytes::from_static(b"retained"), true)
+            .unwrap();
+        while conn.next_frame().is_some() {}
+        let received = conn
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                3,
+                test_request_headers("/over-limit"),
+                true,
+                true,
+            )))
+            .unwrap();
+        assert!(
+            received.is_none(),
+            "refused request cannot reach the handler"
+        );
+        let Some(Frame::RstStream(reset)) = conn.next_frame() else {
+            panic!("over-limit stream must be reset")
+        };
+        assert_eq!(reset.error_code, ErrorCode::RefusedStream);
+        assert_eq!(reset.stream_id, 3);
+        assert_eq!(conn.active_stream_count(), 1);
+        conn.process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(1, 8)))
+            .unwrap();
+        let Some(Frame::Data(last)) = conn.next_frame() else {
+            panic!("retained response survives admission")
+        };
+        assert_eq!(last.data.as_ref(), b"retained");
+        assert!(last.end_stream);
+        assert_eq!(conn.active_stream_count(), 0);
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            5,
+            test_request_headers("/recovered"),
+            true,
+            true,
+        )))
+        .unwrap();
+    }
+
+    #[test]
+    fn h2spec_empty_path_and_headers_after_normal_close_are_rejected() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+        let error = conn
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                1,
+                test_request_headers(""),
+                true,
+                true,
+            )))
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert_eq!(error.stream_id, Some(1));
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            3,
+            test_request_headers("/valid"),
+            true,
+            true,
+        )))
+        .unwrap();
+        conn.send_headers(3, vec![Header::new(":status", "204")], true)
+            .unwrap();
+        assert!(conn.next_frame().is_some());
+        let error = conn
+            .process_frame(Frame::Headers(HeadersFrame::new(
+                3,
+                test_request_headers("/closed"),
+                true,
+                true,
+            )))
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::StreamClosed);
+        assert_eq!(error.stream_id, None);
+    }
+
+    #[test]
+    fn h2spec_refused_headers_preserve_dynamic_compression_state() {
+        for fragmented in [false, true] {
+            let mut settings = Settings::default();
+            settings.max_concurrent_streams = 1;
+            let mut conn = Connection::server(settings);
+            conn.state = ConnectionState::Open;
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                1,
+                test_request_headers("/held"),
+                false,
+                true,
+            )))
+            .unwrap();
+            let headers = vec![
+                Header::new(":method", "GET"),
+                Header::new(":scheme", "https"),
+                Header::new(":path", "/indexed-after-refusal"),
+                Header::new("x-refused-dynamic", "preserve-this-value"),
+            ];
+            let mut encoder = hpack::Encoder::new();
+            let mut first = BytesMut::new();
+            encoder.encode(&headers, &mut first);
+            let first = first.freeze();
+            let split = if fragmented {
+                first.len() / 2
+            } else {
+                first.len()
+            };
+            assert!(
+                conn.process_frame(Frame::Headers(HeadersFrame::new(
+                    3,
+                    first.slice(..split),
+                    true,
+                    !fragmented,
+                )))
+                .unwrap()
+                .is_none()
+            );
+            if fragmented {
+                assert!(conn.next_frame().is_none(), "finish HPACK before refusal");
+                assert!(
+                    conn.process_frame(Frame::Continuation(ContinuationFrame {
+                        stream_id: 3,
+                        header_block: first.slice(split..),
+                        end_headers: true,
+                    }))
+                    .unwrap()
+                    .is_none()
+                );
+            }
+            let Some(Frame::RstStream(reset)) = conn.next_frame() else {
+                panic!("refusal")
+            };
+            assert_eq!(reset.stream_id, 3);
+            assert_eq!(reset.error_code, ErrorCode::RefusedStream);
+            assert_eq!(conn.active_stream_count(), 1);
+            conn.reset_stream(1, ErrorCode::Cancel);
+            while conn.next_frame().is_some() {}
+            let mut indexed = BytesMut::new();
+            encoder.encode(&headers, &mut indexed);
+            assert!(
+                indexed.len() < first.len(),
+                "exercise actual dynamic references"
+            );
+            let received = conn
+                .process_frame(Frame::Headers(HeadersFrame::new(
+                    5,
+                    indexed.freeze(),
+                    true,
+                    true,
+                )))
+                .unwrap();
+            let Some(ReceivedFrame::Headers {
+                headers: decoded, ..
+            }) = received
+            else {
+                panic!("subsequent valid request must be delivered")
+            };
+            assert_eq!(decoded, headers);
         }
     }
 
