@@ -1736,7 +1736,7 @@ mod stock_responsiveness_runtime {
             Case::Udp => {
                 let raw = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
                 raw.set_nonblocking(true).unwrap();
-                let socket = asupersync::net::UdpSocket::from_std(raw).unwrap();
+                let mut socket = asupersync::net::UdpSocket::from_std(raw).unwrap();
                 let mut bytes = [0_u8; 8];
                 let error = measured(cx, probe, socket.peek_from(&mut bytes), || {})
                     .await

@@ -935,14 +935,13 @@ impl ManagedQuicEndpoint {
         }
         // Decode retained short-header ownership while its CID is still known.
         // Mutating the route first would lose its CID length during dispatch.
-        let retained_ids: Vec<_> = self
-            .pending_incoming
-            .iter()
-            .map(|packet| {
+        let mut retained_ids = Vec::with_capacity(self.pending_incoming.len());
+        for packet in &self.pending_incoming {
+            retained_ids.push(
                 self.connection_router
-                    .retained_packet_connection_id(&packet.packet)
-            })
-            .collect();
+                    .retained_packet_connection_id(&packet.packet),
+            );
+        }
         self.connection_router
             .remove_connection(cx, connection_id)?;
         let mut ids = retained_ids.into_iter();

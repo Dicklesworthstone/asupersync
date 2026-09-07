@@ -1784,7 +1784,12 @@ pub use managed::{
 };
 
 mod managed {
-    use super::*;
+    use super::{
+        Arc, BTreeMap, Budget, BudgetRefusal, CancelReason, ChildName, ChildSpec,
+        CompiledSupervisor, Duration, EscalationPolicy, NameRegistrationPolicy, Outcome, RegionId,
+        RestartPolicy, RestartTracker, RestartVerdict, SpawnError, SupervisionConfig,
+        SupervisorBuilder, SupervisorCompileError, TaskId, Time,
+    };
     use crate::cx::{ChildRegion, ChildRegionError, ChildRegionSpec, Cx};
     use crate::runtime::{JoinError, TaskHandle};
     use crate::types::PanicPayload;
@@ -1801,7 +1806,7 @@ mod managed {
     /// Stopping the controller or cancelling its parent never restarts a child.
     /// A replacement batch may restart live collateral siblings according to
     /// these modes. These modes do not change the legacy
-    /// Err-only [`SupervisionStrategy`] planning functions.
+    /// Err-only [`super::SupervisionStrategy`] planning functions.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ManagedRestartMode {
         /// Restart any independently terminated generation, including success.
@@ -3069,6 +3074,7 @@ mod managed {
     #[cfg(test)]
     mod tests {
         #![allow(clippy::pedantic, clippy::nursery, clippy::future_not_send)]
+        use super::super::{BackoffStrategy, NameCollisionPolicy, RuntimeState};
         use super::*;
         use crate::channel::{mpsc, oneshot};
         use crate::lab::{LabConfig, LabRuntime};
