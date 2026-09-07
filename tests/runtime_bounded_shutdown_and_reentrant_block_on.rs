@@ -18,8 +18,127 @@
 //! runtime's retained state.
 
 use asupersync::runtime::RuntimeBuilder;
+use std::future::Future;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+/// A teardown regression must not strand the test harness if destruction
+/// deadlocks. This guard owns only the subprocess created by this test.
+struct TeardownChild(Option<std::process::Child>);
+
+impl Drop for TeardownChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut()
+            && child.try_wait().ok().flatten().is_none()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[test]
+fn last_runtime_owner_dropped_on_worker_finishes_without_self_join() {
+    const NAME: &str = "last_runtime_owner_dropped_on_worker_finishes_without_self_join";
+    const CHILD: &str = "ASUPERSYNC_LAST_OWNER_TEARDOWN_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .blocking_threads(0, 0)
+            .on_thread_stop(move || {
+                stopped_tx
+                    .send(std::thread::current().id())
+                    .expect("teardown observer remains alive");
+            })
+            .build()
+            .expect("build two-worker runtime");
+        let owner = runtime.clone();
+        let cx = runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE);
+        let (release_tx, mut release_rx) = asupersync::channel::oneshot::channel();
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let join = runtime.handle().spawn(async move {
+            let mut parked_tx = Some(parked_tx);
+            let mut release = std::pin::pin!(release_rx.recv(&cx));
+            std::future::poll_fn(|context| {
+                let result = release.as_mut().poll(context);
+                if result.is_pending()
+                    && let Some(sender) = parked_tx.take()
+                {
+                    sender
+                        .send(std::thread::current().id())
+                        .expect("parent observes the actual Pending boundary");
+                }
+                result
+            })
+            .await
+            .expect("parent releases the parked owner");
+            // The parent has already dropped its Runtime. This is the last
+            // strong owner, and destruction happens inside an actual poll.
+            drop(owner);
+            dropped_tx.send(()).expect("report completed owner drop");
+            42_u32
+        });
+        let worker = parked_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("task reached Pending before ownership transfer");
+        assert_ne!(worker, std::thread::current().id());
+        println!("last-owner: held Pending on {worker:?}");
+        drop(runtime);
+        release_tx.send_blocking(()).expect("release owned task");
+        dropped_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("last owner drop must return without a self-join panic");
+        let first = stopped_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("first worker exits its run loop");
+        let second = stopped_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("second worker exits its run loop");
+        assert_ne!(first, second, "both distinct workers must stop");
+        assert!(
+            join.is_finished(),
+            "the owned task reaches a terminal result"
+        );
+        let mut join = std::pin::pin!(join);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert_eq!(join.as_mut().poll(&mut context), std::task::Poll::Ready(42));
+        println!("last-owner: drop returned; task result=42; stopped workers=2");
+        return;
+    }
+
+    let mut child = TeardownChild(Some(
+        std::process::Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", NAME, "--nocapture"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn owned teardown regression child"),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        if child.0.as_mut().unwrap().try_wait().unwrap().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "owned teardown child timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!("{stdout}");
+    eprintln!("{stderr}");
+    assert!(
+        output.status.success(),
+        "teardown child failed: {}",
+        output.status
+    );
+    assert!(stdout.contains("1 passed; 0 failed; 0 ignored;"));
+    assert!(stdout.contains("last-owner: held Pending on "));
+    assert!(stdout.contains("last-owner: drop returned; task result=42; stopped workers=2"));
+}
 
 /// Run `f` on a helper thread and wait at most `limit` for its result.
 ///
