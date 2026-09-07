@@ -35,7 +35,7 @@ From JavaScript, you get:
 Quick example (vanilla JS):
 
 ```js
-import init, { runtimeCreate, scopeEnter, taskSpawn, scopeClose, runtimeClose } from "@asupersync/browser";
+import init, { runtimeCreate, scopeEnter, scopeClose, runtimeClose } from "@asupersync/browser";
 
 await init();
 
@@ -43,20 +43,36 @@ const rt = runtimeCreate();
 if (rt.outcome !== "ok") throw new Error(rt.failure.message);
 
 const scope = scopeEnter({ parent: rt.value });
-// ... spawn tasks, fetch, etc. ...
-scopeClose(scope.value);
-runtimeClose(rt.value);
+if (scope.outcome !== "ok") throw new Error(scope.failure.message);
+
+// This example creates and closes handles; it does not execute task bodies.
+const closed = scopeClose(scope.value);
+if (closed.outcome !== "ok") throw new Error(closed.failure.message);
+const stopped = runtimeClose(rt.value);
+if (stopped.outcome !== "ok") throw new Error(stopped.failure.message);
 ```
 
-### Core semantic guarantees preserved in browser
+### Browser ownership and lifecycle scope
 
-The browser runtime preserves all core Asupersync invariants:
+The browser boundary records structured ownership and validates lifecycle
+transitions. In `src/types/wasm_abi.rs`, `task_spawn` allocates and pins a task
+handle; it accepts no Rust future. `task_join` accepts the caller's outcome
+and releases that handle. These operations do not run or independently observe
+an arbitrary task body.
 
-1. **No orphan tasks**: structured ownership (task belongs to exactly one region)
-2. **Cancel-correctness**: cancellation protocol is `request -> drain -> finalize`
-3. **No obligation leaks**: two-phase commit-or-abort for all effects
-4. **Region close implies quiescence**: all child tasks must complete before region closes
-5. **Explicit capability boundaries**: no ambient authority to browser globals
+The SDK connects specific host operations to those handles, including fetch,
+WebSocket and WebTransport lifecycle/cancellation paths. The guarantees of
+each adapter require its actual host-operation tests. Closing a ledger scope
+is not proof that unrelated JavaScript promises, browser callbacks or Rust
+futures have completed; arbitrary browser globals remain accessible to the
+embedding application. Native no-orphan, obligation and cancellation proofs
+cannot be transferred to that application merely by using these handles.
+
+The native-style browser scheduler and full structured task execution remain
+implementation goals in
+[`PLAN_TO_BUILD_ASUPERSYNC_IN_WASM_FOR_USE_IN_BROWSERS.md`](../PLAN_TO_BUILD_ASUPERSYNC_IN_WASM_FOR_USE_IN_BROWSERS.md).
+The ownership ledger is useful existing functionality, not completion of those
+goals.
 
 ### Build profiles
 
@@ -688,10 +704,10 @@ The current browser runtime model (Phase 1) is:
 
 | Guarantee | Native | Browser | Notes |
 |---|---|---|---|
-| No orphan tasks | Full | Full | Structured scopes enforce ownership |
-| Cancel-correctness | Full | Full | Three-phase protocol is target-agnostic |
-| Bounded cleanup | Full | Cooperative | Depends on cooperative yielding; no preemption |
-| Deterministic scheduling | Full (lab mode) | Partial | Browser event loop introduces nondeterminism unless strictly serialized |
+| No orphan tasks | Runtime-owned tasks under structured scopes | Ledger ownership plus adapter-specific host cleanup | Handle completion alone does not prove an arbitrary host task stopped |
+| Cancel-correctness | Covered primitives and their documented partial effects | Covered browser adapters and lifecycle transitions | Requires execution/cleanup evidence for each adapter; no blanket promise cancellation |
+| Bounded cleanup | Conditional on cooperation and the applicable budget | Conditional on host-operation and application cooperation | Neither lane preempts arbitrary synchronous user code |
+| Deterministic scheduling | LabRuntime controls modeled work | ABI transition tests; host event loop remains external | No full browser task scheduler or host-event replay follows from a deterministic ledger |
 | CPU parallelism | Full (work-stealing) | None (single-threaded) | See "Future: threaded WASM" below |
 
 ## Known Limitations and Constraints
@@ -780,8 +796,9 @@ This would enable closer parity with native scheduling semantics but requires:
 3. A different cancellation propagation model across worker boundaries
 
 This is explicitly Phase 2 and will only be pursued if demand materializes.
-The single-threaded, event-loop-driven model provides the core structured
-concurrency guarantees that matter most.
+The current single-threaded boundary provides handle ownership and explicit
+adapter lifecycle operations. Full task-execution and cleanup guarantees still
+require the implementation and browser proof described above.
 
 ## Crate Map
 
