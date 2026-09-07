@@ -1,64 +1,34 @@
-//! Snapshot/restore functionality with quiescence proof.
+//! Runtime snapshot metadata, structural validation and artifact codecs.
 //!
-//! This module provides mechanisms for saving and restoring runtime state
-//! with formal guarantees about eventual quiescence.
+//! [`SnapshotRestore`] captures [`RuntimeState`] metadata. [`RestorableSnapshot`]
+//! validates references, region structure and recorded terminal states, while
+//! [`SnapshotArtifact`] encodes full snapshots or materializes incremental
+//! metadata against a matching base.
 //!
-//! # Quiescence Proof Sketch
+//! # Execution boundary
 //!
-//! **Theorem**: If a snapshot S is valid, then restoring S into a fresh
-//! runtime state R and running to completion yields quiescence.
+//! These artifacts contain no executable futures, suspended stacks, live
+//! wakers or host I/O registrations. Materializing metadata does not recreate
+//! runnable tasks in a fresh [`crate::lab::LabRuntime`]. In particular, this
+//! module supplies no `LabRuntime::restore_from_snapshot` operation.
 //!
-//! **Proof sketch**:
-//!
-//! 1. **Well-formedness invariant**: A valid snapshot satisfies:
-//!    - All task IDs reference valid regions
-//!    - All obligation IDs reference valid tasks
-//!    - The region tree is acyclic (parent references valid)
-//!    - No completed regions have non-terminal children
-//!
-//! 2. **Restoration preserves invariants**: The restore procedure:
-//!    - Creates regions in topological order (parents before children)
-//!    - Creates tasks only in their owning regions
-//!    - Restores obligations only for existing tasks
-//!    - Validates structural invariants before returning
-//!
-//! 3. **Quiescence convergence**: After restoration:
-//!    - All tasks are either terminal or schedulable
-//!    - The scheduler drains runnable tasks to completion
-//!    - Cancelled tasks follow the cancellation protocol (request→drain→finalize)
-//!    - Obligations are resolved by task completion or abort
-//!    - Region close waits for all children (by construction)
-//!
-//! 4. **Termination**: The system terminates because:
-//!    - Task count is finite and monotonically decreasing
-//!    - Each poll either completes or checkpoints
-//!    - Budgets bound the number of polls
-//!    - Finalizers have bounded budgets
-//!
-//! Therefore: restore(S) + run_to_completion() ⇒ quiescence(R)
+//! Structural validity and finite task counts do not prove eventual quiescence:
+//! a future can remain pending indefinitely or fail to return from a poll.
+//! Executable recovery remains separate work requiring explicit task factories,
+//! effect reconciliation and the runtime's cooperation/progress assumptions.
+//! That implementation and its resumed-workload proof are tracked by
+//! `asupersync-bi2462.49` and `asupersync-bi2462.50`.
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```
 //! use asupersync::lab::{LabRuntime, LabConfig, SnapshotRestore};
 //!
-//! // Create and run a runtime
-//! let mut runtime = LabRuntime::new(LabConfig::new(42));
-//! // ... do work ...
-//!
-//! // Take a restorable snapshot
+//! let runtime = LabRuntime::new(LabConfig::new(42));
 //! let snapshot = runtime.state.restorable_snapshot();
-//!
-//! // Later, restore into a fresh runtime
-//! let mut restored = LabRuntime::new(LabConfig::new(42));
-//! restored.restore_from_snapshot(&snapshot)?;
-//!
-//! // Run to quiescence
-//! restored.run_until_quiescent();
-//!
-//! // Verify invariants
-//! assert!(restored.oracles.quiescence.check().is_ok());
-//! assert!(restored.oracles.obligation_leak.check().is_ok());
+//! assert!(snapshot.verify_integrity());
+//! assert!(snapshot.validate().is_valid);
+//! // These checks validate captured metadata, not resumed task execution.
 //! ```
 
 use crate::runtime::RuntimeState;
@@ -577,9 +547,10 @@ impl fmt::Display for SnapshotCodecError {
 
 impl std::error::Error for SnapshotCodecError {}
 
-/// A snapshot that can be restored into a runtime state.
+/// Validated, hash-bearing runtime snapshot metadata.
 ///
-/// Extends `RuntimeSnapshot` with validation and restoration capabilities.
+/// Extends `RuntimeSnapshot` with structural validation and schema migration.
+/// The historical name does not imply restoration of executable task futures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestorableSnapshot {
     /// The underlying runtime snapshot.
@@ -1193,7 +1164,8 @@ impl SnapshotArtifact {
         }
     }
 
-    /// Materializes complete runtime state, applying a delta when necessary.
+    /// Materializes complete snapshot metadata, applying a delta when necessary.
+    /// This does not populate an executable runtime or resume task bodies.
     pub fn materialize(
         &self,
         base: Option<&RestorableSnapshot>,
