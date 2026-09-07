@@ -7099,6 +7099,8 @@ impl QuicFrameTransport {
     }
 
     /// Try to decode the next complete ATP frame from the control stream.
+    ///
+    /// Pending reads preserve partial frames; FIN refuses a truncated frame.
     pub fn try_recv(
         &mut self,
         cx: &Cx,
@@ -7115,6 +7117,12 @@ impl QuicFrameTransport {
 
             let chunk = conn.read_control(cx, self.stream, CONTROL_READ_CHUNK)?;
             if chunk.is_empty() {
+                if conn.is_control_eof(self.stream)? {
+                    return self
+                        .codec
+                        .decode_eof(&mut self.rbuf)
+                        .map_err(|err| QuicTransportError::Frame(err.to_string()));
+                }
                 return Ok(None);
             }
             self.rbuf.extend_from_slice(&chunk);
@@ -7215,6 +7223,12 @@ impl NativeQuicFrameTransport {
                 Err(err) => return Err(err.into()),
             };
             if chunk.is_empty() {
+                if conn.is_stream_read_eof(self.stream)? {
+                    return self
+                        .codec
+                        .decode_eof(&mut self.rbuf)
+                        .map_err(|err| QuicTransportError::Frame(err.to_string()));
+                }
                 return Ok(None);
             }
             self.rbuf.extend_from_slice(&chunk);

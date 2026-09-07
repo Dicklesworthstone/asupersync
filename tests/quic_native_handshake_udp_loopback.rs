@@ -523,7 +523,7 @@ mod managed_quiet {
     use super::*;
     use asupersync::net::quic_core::TransportParameters;
     use asupersync::net::quic_native::{
-        ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint, NativeQuicUdpConnection,
+        ManagedEndpointConfig, ManagedEndpointError, NativeQuicUdpConnection,
     };
     use serde_json::{Value, json};
     use std::collections::VecDeque;

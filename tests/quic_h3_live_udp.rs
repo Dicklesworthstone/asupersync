@@ -2495,7 +2495,7 @@ mod managed_kernel_backpressure {
         println!("MANAGED_QUIC_KERNEL_PEER {receipt}");
     }
 
-    pub(super) fn run() {
+    pub fn run() {
         if let Ok(role) = std::env::var("ASUPERSYNC_MANAGED_QUIC_KERNEL_ROLE") {
             peer(
                 role,
