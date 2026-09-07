@@ -4,7 +4,7 @@
 >
 > Audit date: 2026-07-23 (SapphireHill). **Rev 3 (2026-07-24):** execution-ready revision incorporating Sol Max's external review of Rev 2. Major changes: an explicit safety taxonomy that prohibits algorithmic unsafe in replacements by default (§3); prioritization by *marginal* dependency cost via a generated ledger (§4); a public-API-decision phase inserted before all codec work (§7 Phase 3); the parking_lot replacement redesigned for stable-lane compatibility; the X.509 work re-scoped as a security epic that delegates to rustls/webpki first; Kafka native rewrite descoped to an independent future campaign; and a set of verdicts flipped to KEEP where marginal ROI was poor (semver, thiserror, pin-project, crossbeam-queue, smallvec, memchr, socket2, polling, unicode-normalization). Rev-2 factual errors fixed: rdkafka builds bundled C via configure/make (cmake declared but inactive); `parking_lot::Condvar` *is* used in production; the x509 surface includes validity/EKU/KU/BasicConstraints checks, not just SPKI+SAN.
 >
-> Phase beads: paused pending this revision per review; re-scoped bead mapping in §7.
+> Governing scope, reconciled 2026-09-07: the accepted DEP-ADR decisions and current `AGENTS.md` override the original Rev-3 removal proposals. Preserve every shipped 0.4.x public signature, exhaustive type, foreign trait/error identity, accepted input, default and wire format. Better ergonomics or private implementation parity does not authorize a public break. Additive implementations and compatible adapters remain allowed under their existing task gates. Consult live beads for status; the old blanket pause is historical.
 
 ---
 
@@ -124,7 +124,11 @@ Raw closure size overstates wins because shared subtrees don't leave when one pa
 | `opentelemetry`+`_sdk` | — | ~13 (metrics graph) |
 | `clap` (+time/chrono/env_logger/serde_yaml) | — | ~40+ (cli graph) |
 
-The big wins are therefore: the **C evictions** (sqlite, kafka), **nkeys**, **prost**, the **cli cluster**, and **otel** — not the hot-path primitives, whose marginals are ~0–3 and whose risk class is the worst.
+These July measurements identify potential graph costs, not authorized exits.
+The accepted ADRs retain SQLite, Kafka, nkeys, prost, CLI and OpenTelemetry
+capabilities and their incumbents until the respective gates are met. Rank
+implementation work using a fresh marginal ledger and the cost of achieving
+complete compatible behavior; a large historical closure alone is not a win.
 
 ---
 
@@ -154,10 +158,10 @@ The big wins are therefore: the **C evictions** (sqlite, kafka), **nkeys**, **pr
 | `socket2` | **KEEP** | — | flipped: marginal ~1; real scope (socket creation, SockAddr conversion, abstract-Unix, SockRef, keepalive, cross-platform options) was understated. Evidence-gated revisit in Phase 8 |
 | `polling` | **KEEP** | — | flipped: marginal ~1; replacement must own EINTR, fd reuse, generation tokens, wakeups, fork behavior, registration races, oneshot/edge, kqueue, IOCP. Evidence-gated revisit in Phase 8 |
 | `signal-hook`, `sysinfo`, `xattr` | OWN (BOUNDARY) — deferred | 8 | consolidation candidates with small marginals; each needs a measured or maintenance-driven justification before build |
-| `parking_lot` | OWN (SAFE wrapper) | 8 | `sync/oslock.rs`: owned wrapper over `std::sync::{Mutex, RwLock, Condvar}` that recovers poisoned guards internally, exposes our own guard types (fixing the current leak of parking-lot guards into visible signatures), and **compiles on the audited stable lane**. Optional nightly `nonpoison` backend behind a feature. Gate metrics per §6.6. Marginal −3 (parking_lot, parking_lot_core, lock_api) and unblocks smallvec's marginal |
+| `parking_lot` | Additive SAFE wrapper experiment; KEEP public incumbent | 8 | `sync/oslock.rs` may provide owned guards on new/private surfaces while preserving existing public parking-lot types and non-poisoning behavior. Require audited stable-lane compilation and §6.6 metrics. The historical −3-package marginal applies only if every required edge can compatibly exit; it is not a guaranteed result. |
 | `prost` | **KEEP_UNTIL_PARITY** | — | **DEP-ADR-002 resolved: KEEP.** `ProstCodec<T, U>` is an unrestricted public generic over arbitrary downstream `prost::Message` types and `prost` is a non-optional dependency, so protobuf ships at default features. The finite sets a replacement would hand-write are already prost-free, so replacement removes capability and gains nothing. Marginal 6 stands as a measurement, not a licence. **Not** a prerequisite for native OTLP — an owned OTLP message set can use prost derives as `otlp_logs_proto` already does |
-| `toml` | **REMOVE (migrate)** | 3/5 | flipped from OWN: current call sites are generic serde deserialization + pretty serialization — a "subset TOML" is really a serde data-format implementation. Configs migrate to **versioned JSON** (serde_json is permanent). Owner-visible behavior change; documented in the Phase-3 API decisions |
-| `serde_yaml` | REMOVE (migrate) | 5 | deprecated upstream. JSON migration with **data-preservation rules**: comments/anchors/scalar-distinction loss is enumerated per file, semantic goldens for every scenario, manual review of the converted corpus, and old YAML files are deleted only with explicit owner permission |
+| `toml` | **KEEP_UNTIL_PARITY / KEEP_INCUMBENT** | 3/5 | DEP-ADR-004 preserves accepted TOML configuration, precedence and diagnostics. JSON is additive. A subset parser or corpus conversion does not authorize dropping TOML acceptance or its incumbent. |
+| `serde_yaml` | **KEEP_UNTIL_PARITY / KEEP_INCUMBENT** | 5 | DEP-ADR-004 preserves accepted YAML scenarios and replay semantics. Additive JSON needs lossless round-trip evidence; no format migration or file deletion is authorized by this plan. |
 | `clap` | **KEEP_UNTIL_PARITY** | — | **DEP-ADR-005 resolved: KEEP.** The XL re-scope below stands and is adopted verbatim as the replacement precondition — ~33.8k CLI lines, hundreds of attr sites; an owned parser must cover OsString/invalid-UTF-8, `--`, short clusters, negative values, global/flattened args, counts, custom parsers, defaults, value delimiters/enums, help text, exit codes, error goldens. Only the disposition label changes, so this row cannot be read as authorizing implementation. **Parity is currently unmeasurable: there is NO `--help` golden for any of the four binaries**, the help/OsString/accessibility contract is prose guarded by one substring assertion, and no test asserts a nonzero semantic exit code from a real binary run. Goldens first. Also frozen: `wrap_help` is OFF (help wraps at clap's fixed width, not the terminal's) and `env` is OFF (zero clap `env=` attrs; all env reads are hand-rolled) |
 | `chrono` | **PRESERVE_AND_REPLACE_IF_PARITY, blocked** | — | **DEP-ADR-011 resolved.** Owned `UtcTimestamp` authorized as **additive** work. Scope is bigger than formatting: **10 public serde-derived `DateTime<Utc>` fields** feed **3 JSON index stores that are read as well as written**, so a swap must *parse* an existing on-disk corpus and is semver-breaking under `cli`/`benchmark-adapters`. Nothing owned parses RFC 3339 today, and `types::Time` is process-epoch relative + calendar-free so it is **not** a rename target. **No round-trip test and no byte golden exist** for any of it. Keep the chrono **dev-dep** as the PostgreSQL temporal oracle |
 | `regex` | KEEP_UNTIL_PARITY (DEP-ADR-012) | — | **superseded.** The accepted pattern language may not narrow — downstream supplies arbitrary patterns via `pii_patterns` / `try_with_pii_pattern`, and a fail-closed *subset* matcher would reject patterns that work today. There is also nothing to promote: all four built-in detectors are themselves regex-backed. Separately, `mod regex` in `net/atp/chunk/artifact.rs` is a **mock** that ignores its pattern and is compiled unconditionally — a no-mock violation, not a consumer |
@@ -167,7 +171,7 @@ The big wins are therefore: the **C evictions** (sqlite, kafka), **nkeys**, **pr
 | `nkeys` | **KEEP_UNTIL_PARITY** | — | **DEP-ADR-007 resolved: KEEP.** §9.5 sizes this at ~200 lines and frames it as NATS work, but `nkeys` is load-bearing in **four subsystems** (NATS, ATP identity + capability-token verification, agent-swarm admission, runtime signed-profile bundles) across 6 production files, and the registry demands every prefix form, Curve keys, JWT signer policy and zeroization. Also note the trade direction: `ed25519-dalek` is **not** a direct dep today (transitive via nkeys), so the swap *adds* a direct crypto dep plus hand-rolled base32/CRC-16. Blocking: the differential oracle **does not exist** (harness dir absent; nkeys is not a dev-dep) and the declared security review has not happened |
 | `x509-parser` | OWN (BOUNDARY) — **security epic** | 8 | re-scoped (§9.4): delegate maximally to rustls/webpki; own only extraction that cannot be delegated; full checklist (canonicality, full-input consumption, ASN.1 time, KU/EKU/BasicConstraints, SAN, SPKI, duplicate/critical-extension policy, error-mapping parity) |
 | `flate2` | OWN (stretch) | 8 | pure-Rust miniz_oxide meanwhile |
-| `brotli` | **DECISION REQUIRED** | 3 | flipped from REMOVE: it is a real public HTTP compressor/decompressor and an ATP manifest capability — removal reduces interoperability. Owner must either keep the pure-Rust dep or explicitly approve capability removal with the HTTP + ATP impact documented. Until then: KEEP |
+| `brotli` | **KEEP_UNTIL_PARITY / KEEP_INCUMBENT** | 3/8 | DEP-ADR-006 resolved the decision: preserve RFC 7932 compression/decompression, negotiation and bounds. Any owned implementation belongs to its separate complete parity campaign; DEFLATE evidence does not establish Brotli parity. |
 | `lz4_flex` | OWN (SAFE) | 8 | ~1–1.5k lines realistic |
 | `unicode-normalization` | **KEEP** | — | flipped: hand-maintaining Unicode tables/versioning/security semantics is a poor target. The dependency-free alternative — rejecting non-ASCII paths — is an owner-level product decision, offered but not assumed |
 | `serde` + `serde_json` | KEEP | — | keystone; suite-level decision later |
@@ -217,15 +221,35 @@ hashbrown→std/DetHashMap · num_cpus/whoami→std · env_logger removal · `ti
 3.6 Brotli: **RESOLVED — see `docs/adr/dep_plan_adr_006_brotli_compression.md` (DEP-ADR-006).** Terminal decision `KEEP_UNTIL_PARITY`/`KEEP_INCUMBENT`; the removal branch is closed. HTTP and ATP impact is documented in the ADR. An owned RFC 7932 codec may only proceed as a **separate security-sensitive codec epic** — a DEFLATE parity result confers nothing about Brotli. Two corrections recorded: the real codec is `src/http/compress.rs` (the registry names `src/web/compress.rs`, whose only Brotli refs are in its test module), and `src/net/atp/compress/` is **orphaned and has never compiled** (its gzip path imports `flate2` with no feature gate), so it must not be counted as partial work.
 Each ADR updates `artifacts/api_surface_map_v1.json` and docs in the same commit.
 
-**Phase 4 — nkeys replacement under a security contract (independent of Phase 3).**
-`security/nkey.rs` (SAFE-OWN): base32/RFC 4648 no-pad + CRC-16/XMODEM + prefix codec on a direct `ed25519-dalek` dep; NATS-fixture differential vectors vs nkeys (dev-dep); security-review bead before merge. Marginal ~16.
+**Phase 4 — nkeys parity campaign under DEP-ADR-007 (KEEP incumbent).**
+The original base32/CRC-16/NATS-only proposal is insufficient. The existing
+campaign must cover all four consumers, every accepted key/prefix form,
+signer policy, zeroization, differential vectors and security review before
+an incumbent transition can be considered. See the governing §5 row and
+`docs/adr/dep_plan_adr_007_nkey_auth.md`; the historical marginal is not exit
+evidence.
 
 **Phase 5 — Codec/CLI implementation in dependency order (after Phase 3).**
-5.1 Owned protobuf types + wire codec — **re-scoped by DEP-ADR-002 to additive work only**: it plugs into the existing `Codec` seam alongside `ProstCodec` and retires nothing; test-only varint helpers stay an oracle, not a partial implementation. 5.2 native OTLP exporter (XL) — **re-scoped by DEP-ADR-003**: additive, and it does not gate on 5.1. In parallel where files are disjoint: typed-symbol/snapshot/trace format redesign — **re-scoped by DEP-ADR-001 to additive work only**; ~~bincode+rmp exit together — same files, one bead~~ (**withdrawn**: they do not exit, and they do not share one file set — bincode is used by `typed_symbol.rs` and `distributed/snapshot.rs`, rmp-serde by `typed_symbol.rs` and five files under `src/trace/`), **additive** JSON alongside TOML and YAML (DEP-ADR-004 preserves acceptance of both; these are no longer "migrations"), chrono replacement, clap replacement (XL), regex→fail-closed scanners.
+5.1 Owned protobuf types and wire codec are additive under DEP-ADR-002: use the
+existing `Codec` seam alongside `ProstCodec`; the test-only varint helpers remain
+an oracle. 5.2 Native OTLP export is additive under DEP-ADR-003 and does not
+depend on 5.1. Typed-symbol/snapshot/trace work preserves the generic formats
+and existing persisted corpus under DEP-ADR-001; bincode and rmp-serde do not
+exit. JSON remains additive alongside TOML/YAML under DEP-ADR-004. The chrono
+and clap campaigns preserve public types, accepted inputs and diagnostics under
+DEP-ADR-011/005. Fixed privacy scanners may provide a fast path under
+DEP-ADR-012, but the full accepted regex language and public `regex::Error`
+identity remain supported. Each campaign retains its implementation and
+behavioral evidence obligations; KEEP is not completion of that work.
 
 **Phase 6 — FrankenSQLite integration (independent campaign; §9.1 gates).**
 
-**Phase 7 — Kafka feature removal** after downstream-inventory confirmation; native client explicitly out of scope (§9.3).
+**Phase 7 — Kafka capability preservation and native parity campaign.**
+DEP-ADR-009 keeps the existing feature and no-feature typed refusal. The native
+client remains a separate implementation campaign (§9.3); downstream inventory
+alone does not authorize removal. K10's public/configuration contract is
+`asupersync-dep-p7-kafka-removal-sarszu.2.10`, whose governing scope preserves
+the shipped 0.4.x facade and requires real broker/user-journey evidence.
 
 **Phase 8 — Evidence-gated deferrals (each needs a measured/maintenance justification + owner sign-off before build).**
 parking_lot→SAFE `sync/oslock.rs` wrapper (stable-lane-compatible; §9.2) · signal-hook/sysinfo/xattr consolidation (BOUNDARY) · x509 security epic (§9.4) · polling/socket2 revisit (only with measured defect or a suite-wide platform-boundary project) · flate2/lz4/DEFLATE work · crossbeam-queue SAFE prototype benchmark.
@@ -233,7 +257,7 @@ parking_lot→SAFE `sync/oslock.rs` wrapper (stable-lane-compatible; §9.2) · s
 **Phase 9 — Continuous enforcement.**
 Dependency budget contract from the marginal ledger (synthesized consumer, per-platform, ratchet-down) · `cargo deny`/`cargo audit` over the full workspace incl. dev/build graphs · GitHub Actions pinned by commit SHA · npm `packages/` + pnpm lockfile audit · `fuzz/` graph in the sweep · consumer guidance (library lockfiles don't protect consumers; minimal-versions lane; `cargo vendor` posture) · AGENTS.md dep table generated from the contract.
 
-**Bead re-mapping (beads paused per review, resume against this list):** `d24mms` = Phases 1–2 · `5z2scg` = Phases 3+5 · `ym2wtv` = Phases 4, 6, 7 · `3u3tej` + `0h6myr` = Phase 8 (evidence-gated; do not start without gate evidence) · `mnotoo` = Phase 9. Epic `ir2uf0` unchanged; `bm3tty` tracks the pre-existing HEAD test redness.
+**Historical bead mapping (consult current tracker status and governing scope):** `d24mms` = Phases 1–2 · `5z2scg` = Phases 3+5 · `ym2wtv` = Phases 4, 6, 7 · `3u3tej` + `0h6myr` = Phase 8 (evidence-gated; do not start without gate evidence) · `mnotoo` = Phase 9. Epic `ir2uf0` owns the dependency program; the old `bm3tty` reference is not a current whole-HEAD test result.
 
 **End-state projection:** replaced by generated forecasts. The ledger (Phase 1.2) emits per-phase projected graphs with confidence ranges; the static "~40–50 names" figure from Rev 2 is retired. Direction, not destination, is the commitment: every phase must reduce trusted upstreams, native/unsafe surface, or marginal weight — and prove it with the recomputed ledger.
 
@@ -248,7 +272,7 @@ Dependency budget contract from the marginal ledger (synthesized consumer, per-p
 Keep rustls. For the ring provider: **Graviola is a provider *experiment*, not a default switch** — it is very new, incorporates (formally verified) assembly, supports only x86_64/aarch64, and requires substantial CPU features; it does not satisfy a literal no-unsafe/no-assembly rule and needs runtime/fleet eligibility handling. Trial it on the encrypted ATP matrix; adopt only with owner sign-off on the assembly trade. FrankenTLS remains out of scope.
 
 ### 8.3 serde / serde_json
-Keystone (~4,600 derives, ~1,450 `json!`). Keep; any `franken-serde` is a suite-level decision after this plan completes. serde_json's permanence is also why JSON is the migration target for TOML/YAML and why memchr's marginal is zero.
+Keystone (~4,600 derives, ~1,450 `json!` in the historical census). Keep; any `franken-serde` is a suite-level decision after this plan completes. JSON is an additive machine-output/input option under DEP-ADR-004; it does not replace accepted TOML/YAML. Recompute shared dependency marginals from the selected current graph.
 
 ### 8.4 FFI bedrock and the mature-unsafe principle
 `libc`/`nix`/`windows-sys`/`io-uring`/wasm-bindgen family: the platform boundary. The same reasoning now explicitly protects `crossbeam-queue`/`smallvec`/`pin-project` (§3): mature, widely-fuzzed algorithmic unsafe beats fresh first-party algorithmic unsafe until measurement says otherwise.
@@ -260,13 +284,25 @@ Keystone (~4,600 derives, ~1,450 `json!`). Keep; any `franken-serde` is a suite-
 
 ## 9. Flagship designs (Rev-3-scoped)
 
-### 9.1 FrankenSQLite (replaces `rusqlite` + `sqlparser`)
+### 9.1 FrankenSQLite (downstream integration; KEEP incumbent SQLite feature)
 **Superseded by DEP-ADR-010 on the terminal outcome: KEEP.** The deprecate/remove-and-invert direction below is *not* authorized. Cargo cannot make the root `sqlite` feature depend on the downstream adapter without a cycle, so removing it would strand the one-stop supported path and force users to reconstruct the integration themselves — the bead makes KEEP the default terminal result absent explicit owner approval after user-journey trials. Two gates are **added** to the three below: (d) **data compatibility** — files written by the incumbent must be readable, including WAL and unclean-shutdown state; and (e) an **equivalent `ToSql` trait**, because `impl rusqlite::ToSql for SqliteValue` is a public foreign-trait impl and the only engine leak in the API (no signature names the engine, so a signature-grep audit misses it). Note also that the parity matrix in (b) **cannot run in this workspace** — fsqlite may not be added back in any form, not even as a dev-dependency oracle.
 
 Direction as originally written: fsqlite-core's asupersync dependency is unconditional, so integration would have to be inverted — asupersync's `sqlite` feature deprecated/removed; fsqlite's existing `async-api` grows the `Cx`-threaded glue. This is **capability relocation, not zero dependency cost**: fsqlite's async graph carries its own external crates and currently resolves the published asupersync 0.3.9 graph. Gates before the swap: (a) a **combined fsqlite + asupersync consumer budget** measured with the §4 ledger; (b) a **semantic parity matrix** — transactions, prepared statements + cache, interruption, budget-derived timeouts, typed rows, cancellation behavior — proven against the existing sqlite e2e suite running on both engines during overlap; (c) honest maturity framing: fsqlite's native mode is partial per its own README — the claim is *owned, safe, concurrent-writer SQLite on our runtime*, not "MVCC and RaptorQ durability for free."
 
-### 9.2 parking_lot → `sync/oslock.rs` (SAFE-OWN, stable-compatible)
-An owned wrapper over `std::sync::{Mutex, RwLock, Condvar}` that (a) recovers poisoned guards internally (`PoisonError::into_inner`) so call sites keep non-poisoning ergonomics, (b) exposes **our own guard types** — fixing the current leak of parking-lot guards into visible signatures, (c) compiles identically on the audited stable lane (`--no-default-features --features proc-macros`), with an optional nightly `nonpoison` backend behind a feature for contributor lanes, and (d) covers `Condvar` (production-load-bearing in `blocking_pool`/`discover`). Ships only through the §6.6 multi-axis gate on 1/8/32/64 cores. Marginal: −3 packages + unblocks smallvec's.
+### 9.2 Additive `sync/oslock.rs` experiment (SAFE-OWN, stable-compatible)
+
+The original wrapper design below may introduce owned guards on new/private
+surfaces. It must preserve existing public parking-lot guard identities and
+behavior throughout 0.4.x; changing those signatures to owned guards is not
+authorized. KEEP the incumbent wherever that public contract requires it.
+An owned wrapper over `std::sync::{Mutex, RwLock, Condvar}` must recover poisoned
+guards internally (`PoisonError::into_inner`), cover the load-bearing Condvar
+behavior, and compile on the audited stable lane
+(`--no-default-features --features proc-macros`). An optional nightly
+`nonpoison` backend may serve contributor lanes. Owned guards belong on
+additive/private APIs; compatible adapters preserve shipped public types.
+The experiment must pass the §6.6 multi-axis gate on 1/8/32/64 cores. Recompute
+the marginal only after accounting for every retained compatibility edge.
 
 ### 9.3 Kafka: keep now, campaign later
 **Superseded by DEP-ADR-009 on "remove now": the feature stays.** The registry's no-claim boundary governs — a wire codec or simple producer is not a Kafka client — and the gating downstream inventory has never been run. Removal would also delete the *owned*, rdkafka-free fail-closed lane: the modules are not feature-gated, so the types compile on every build and a no-feature production call returns a typed feature-disabled error plus a diagnostic. Worth recording for whoever picks up the campaign: the public API is **already completely rdkafka-free** (the upstream error is aliased and mapped, never re-exported; the context type is private), so this is a backend swap behind a facade we own — but the surface to match also has two holes that bound what "parity" means, namely **no transactional consumer offsets** (so no read-process-write EOS) and **no admin surface at all**. Any native client remains an **independent protocol campaign** with its own epic: API-version negotiation matrix, flexible/tagged fields, coordinator protocols (groups/heartbeats/rebalance), idempotence epochs/sequences, transactions, isolation levels, offset management, compression codecs, TLS/SASL, metadata refresh + retry semantics, fuzzing, and real-broker conformance. The current surface it would have to match is ~7k lines of wrapper API including transactional producers and consumer groups — no line estimate is retained here by design.
@@ -290,10 +326,10 @@ Unchanged from Rev 2 except honest accounting: ~200 lines SAFE-OWN codec (base32
 | Public API redesigns (SerdeCodec/ProstCodec/Meter/CLI/config) ship half-decided | Phase 3 ADR gate blocks implementation; api_surface_map + docs updated per ADR |
 | X.509 replacement drops an active security check | §9.4 delegate-first strategy; residue checklist; differential fuzz; security-review bead; error-mapping parity requirement |
 | Stable lane breaks (parking_lot replacement, nightly-only APIs) | §9.2 stable-first design; `run_stable_lane_e2e.sh` added to the gate set for every Phase-8 primitive |
-| PII-redaction subset silently weakens operator configs | fail-closed pattern compiler; migration guide |
-| YAML/TOML→JSON migration loses semantic content | per-file preservation notes, semantic goldens, manual corpus review, owner permission before any YAML deletion |
-| Brotli removal degrades HTTP/ATP interop | Phase-3 decision item with documented impact; default KEEP until decided |
-| Kafka removal strands an unknown consumer | downstream inventory check gates the removal |
+| PII-redaction subset silently weakens operator configs | DEP-ADR-012 retains the full accepted pattern language and public error identity; fixed scanners are an additive fast path, not a replacement gate |
+| Additive JSON changes accepted TOML/YAML semantics | DEP-ADR-004 preserves both input formats, precedence and replay behavior; use round-trip/corpus evidence without deleting existing files |
+| Brotli replacement degrades HTTP/ATP interop | DEP-ADR-006 resolves KEEP; require the independent complete codec parity campaign |
+| Native Kafka transition strands an existing consumer | DEP-ADR-009 retains the feature and typed refusal; require complete public/configuration and real-broker parity, not inventory alone |
 | FrankenSQLite swap regresses semantics or inflates the combined graph | §9.1 parity matrix + combined-graph budget + overlap period |
 | Trace/snapshot format churn breaks replay tooling | format-version bumps + `trace/compat.rs`; registry-consumer exposure checked (frankensqlite pins 0.3.9) |
 | Marginal-ledger drift makes priorities stale | ledger regenerated and committed after every phase; budget contract fails closed on drift |
@@ -309,11 +345,11 @@ Pre-Phase-0: 132 crate-versions / 124 names. Post-Phase-0 (`a86bfb3a6`): 130 / 1
 |---|---|---|
 | (default) | 121 | generated forecast (Phase 1.2 ledger) |
 | `tls` | +26 | the measured rustls/provider/webpki closure (~12–15; forecast-generated) |
-| `sqlite` | +10 + bundled C | 0 external here; capability relocates to FrankenSQLite's own measured graph (§9.1 combined budget) |
-| `kafka` | +13 + bundled C | 0 (feature removed; future native client is first-party code, tracked separately) |
+| `sqlite` | +10 + bundled C | KEEP incumbent feature under DEP-ADR-010. A downstream/neutral adapter must avoid a reverse dependency edge and preserve the old public `rusqlite::ToSql` path; no zero-external outcome is authorized. |
+| `kafka` | +13 + bundled C | KEEP incumbent feature and no-feature refusal under DEP-ADR-009. Native implementation and complete compatible cutover evidence remain separate work. |
 | `metrics` | +13 | **+13 retained.** DEP-ADR-003 did not approve dropping external-SDK interop; the zero-external end-state is not an authorized outcome. Any future reduction is gated behind an owned tokio-free OTLP wire encoder for metrics and traces plus proven provider-bridge parity. |
-| `cli` | +43 | approaches 0 external **minus** the retained tracing crates while `cli` keeps its `tracing-integration` edge (dropping that edge is part of ADR 3.5) |
-| `compression` | +8 | per Brotli decision (ADR 3.6); flate2 interim |
+| `cli` | +43 | KEEP accepted parser/configuration/diagnostic behavior under DEP-ADR-004/005/011. Additive work does not authorize removing clap, TOML/YAML, chrono or the tracing feature edge. |
+| `compression` | +8 | KEEP Brotli and flate2 under DEP-ADR-006 until complete codec-specific parity; no capability removal. |
 
 ## Appendix C — Measurement methodology (Rev 3)
 ```bash
