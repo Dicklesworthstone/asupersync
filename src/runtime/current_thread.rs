@@ -149,16 +149,20 @@ pub struct CurrentThreadDriver {
     /// This runtime's spawn gateway: identifies the runtime whose worker is
     /// active on a thread (the thread's local-spawn lane owner).
     gateway: Option<Arc<SpawnGateway>>,
+    /// Key of this runtime's per-thread local-task stores (the worker's
+    /// [`ThreeLaneWorker::local_store_key`]), retired on shutdown.
+    store_key: usize,
 }
 
 impl CurrentThreadDriver {
-    pub fn new(gateway: Option<Arc<SpawnGateway>>) -> Self {
+    pub fn new(gateway: Option<Arc<SpawnGateway>>, store_key: usize) -> Self {
         Self {
             slot: Mutex::new(WorkerSlot::Background),
             changed: Condvar::new(),
             handover_requested: AtomicBool::new(false),
             background_thread: Mutex::new(None),
             gateway,
+            store_key,
         }
     }
 
@@ -184,11 +188,17 @@ impl CurrentThreadDriver {
     /// Marks the driver closed and wakes every waiter. Called from the
     /// runtime's shutdown paths next to `ThreeLaneScheduler::shutdown`; a
     /// worker still held by the driver is dropped here, one on loan is
-    /// dropped when the borrower returns it.
+    /// dropped when the borrower returns it. Also retires the calling
+    /// thread's store of this runtime's `!Send` tasks (abort-by-drop of
+    /// whatever is still parked there); stores held by other threads are
+    /// released when those threads exit.
     pub fn shutdown(&self) {
-        let mut slot = self.lock_slot();
-        *slot = WorkerSlot::Closed;
-        self.changed.notify_all();
+        {
+            let mut slot = self.lock_slot();
+            *slot = WorkerSlot::Closed;
+            self.changed.notify_all();
+        }
+        crate::runtime::local::retire_local_store(self.store_key);
     }
 
     /// Body of the runtime's background worker thread: runs the worker until
@@ -645,5 +655,57 @@ impl RootStub {
         if !self.is_finished() {
             worker.execute(self.handle.task_id());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ScopedLocalStoreKey` restores the key of the thread that created it,
+    /// so it must not be movable to another thread. The call below is
+    /// ambiguous, and fails to compile, if the type ever becomes `Send`.
+    #[test]
+    fn scoped_local_store_key_is_not_send() {
+        trait AmbiguousIfSend<A> {
+            fn check() {}
+        }
+        impl<T> AmbiguousIfSend<()> for T {}
+        impl<T: Send> AmbiguousIfSend<u8> for T {}
+        <ScopedLocalStoreKey as AmbiguousIfSend<_>>::check();
+    }
+
+    /// The loan protocol object is shared between the background thread and
+    /// `block_on` callers through an `Arc`, so it must stay `Send + Sync`.
+    #[test]
+    fn current_thread_driver_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CurrentThreadDriver>();
+    }
+
+    /// Shutdown retires the calling thread's keyed store for this runtime
+    /// (and only that one).
+    #[test]
+    fn shutdown_retires_the_calling_threads_keyed_store() {
+        use crate::runtime::local::{
+            ScopedLocalStoreKey, keyed_local_store_count, local_task_count,
+        };
+        let before = keyed_local_store_count();
+        let driver = CurrentThreadDriver::new(None, 0x5eed);
+        let other = CurrentThreadDriver::new(None, 0x5eee);
+        {
+            let _key = ScopedLocalStoreKey::new(0x5eed);
+            // Touching the store materializes this runtime's entry.
+            assert_eq!(local_task_count(), 0);
+        }
+        {
+            let _key = ScopedLocalStoreKey::new(0x5eee);
+            assert_eq!(local_task_count(), 0);
+        }
+        assert_eq!(keyed_local_store_count(), before + 2);
+        driver.shutdown();
+        assert_eq!(keyed_local_store_count(), before + 1);
+        other.shutdown();
+        assert_eq!(keyed_local_store_count(), before);
     }
 }

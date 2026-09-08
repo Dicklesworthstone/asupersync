@@ -6,6 +6,7 @@
 use crate::runtime::stored_task::LocalStoredTask;
 use crate::types::TaskId;
 use std::cell::{Cell, RefCell};
+use std::marker::PhantomData;
 
 /// Arena-indexed local task storage, replacing `HashMap<TaskId, LocalStoredTask>`
 /// with `Vec<Option<LocalStoredTask>>` for O(1) insert/remove on the spawn_local
@@ -80,17 +81,50 @@ thread_local! {
 ///
 /// Workers install their runtime's key for the guard's lifetime before
 /// admitting, polling, or counting local tasks; nested installs restore the
-/// previous key on drop.
-pub struct ScopedLocalStoreKey {
+/// previous key on drop. The guard is `!Send`: it restores the key of the
+/// thread that created it, so it must be dropped on that thread.
+pub(crate) struct ScopedLocalStoreKey {
     prev: usize,
+    _thread_affine: PhantomData<*const ()>,
 }
 
 impl ScopedLocalStoreKey {
     #[must_use]
-    pub fn new(key: usize) -> Self {
+    pub(crate) fn new(key: usize) -> Self {
         let prev = CURRENT_LOCAL_STORE_KEY.with(|current| current.replace(key));
-        Self { prev }
+        Self {
+            prev,
+            _thread_affine: PhantomData,
+        }
     }
+}
+
+/// Drops the current thread's store for `key` together with every task still
+/// parked in it (runtime teardown: abort-by-drop of this thread's `!Send`
+/// tasks of that runtime). The default store (`key == 0`) is never retired.
+pub(crate) fn retire_local_store(key: usize) {
+    if key == 0 {
+        return;
+    }
+    let retired = KEYED_LOCAL_TASKS
+        .try_with(|stores| {
+            let mut stores = stores.borrow_mut();
+            stores
+                .iter()
+                .position(|(stored_key, _)| *stored_key == key)
+                .map(|index| stores.swap_remove(index))
+        })
+        .ok()
+        .flatten();
+    // Task destructors run after the store borrow is released.
+    drop(retired);
+}
+
+/// Number of per-runtime local-task stores currently held by this thread.
+#[cfg(any(test, feature = "test-internals"))]
+#[must_use]
+pub fn keyed_local_store_count() -> usize {
+    KEYED_LOCAL_TASKS.with(|stores| stores.borrow().len())
 }
 
 impl Drop for ScopedLocalStoreKey {

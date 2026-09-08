@@ -3562,7 +3562,10 @@ impl Runtime {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .spawn_gateway();
                 let _ = inner.current_thread_driver.set(Arc::new(
-                    crate::runtime::current_thread::CurrentThreadDriver::new(gateway),
+                    crate::runtime::current_thread::CurrentThreadDriver::new(
+                        gateway,
+                        Arc::as_ptr(&inner.state).addr(),
+                    ),
                 ));
             }
             let worker_threads = host_services.spawn_workers(&inner, workers).map_err(|e| {

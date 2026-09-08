@@ -674,3 +674,64 @@ fn current_thread_block_on_returns_despite_cancellation_blind_self_waker() {
         "the self-waking task must have been polled at least once by the drain"
     );
 }
+
+/// Teardown: a `!Send` task admitted by this thread and still parked when
+/// the runtime is dropped is dropped with it (abort-by-drop at teardown),
+/// and the runtime's per-thread local store is retired, not leaked.
+#[cfg(feature = "test-internals")]
+#[test]
+fn dropping_the_runtime_retires_the_caller_thread_local_store() {
+    use asupersync::runtime::local::keyed_local_store_count;
+
+    struct DropFlag(Rc<Cell<bool>>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    let stores_before = keyed_local_store_count();
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+    let dropped = Rc::new(Cell::new(false));
+    let started = Rc::new(Cell::new(false));
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("root Cx is installed");
+        let flag = DropFlag(Rc::clone(&dropped));
+        let task_started = Rc::clone(&started);
+        let _parked = cx
+            .spawn_local(move |_| async move {
+                let _flag = flag;
+                task_started.set(true);
+                std::future::pending::<()>().await;
+            })
+            .expect("current_thread root must accept a local task");
+        while !started.get() {
+            yield_now().await;
+        }
+    });
+
+    assert!(
+        !dropped.get(),
+        "a parked local task must stay alive after block_on returns"
+    );
+    assert_eq!(
+        keyed_local_store_count(),
+        stores_before + 1,
+        "the runtime's local store must exist on the admitting thread"
+    );
+
+    drop(runtime);
+
+    assert!(
+        dropped.get(),
+        "the parked local task must be dropped when the runtime is dropped"
+    );
+    assert_eq!(
+        keyed_local_store_count(),
+        stores_before,
+        "the runtime's local store must be retired when the runtime is dropped"
+    );
+}
