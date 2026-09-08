@@ -321,6 +321,18 @@ impl AtpPacketProtection {
             .sum()
     }
 
+    /// Largest packet number authenticated so far in `space`.
+    ///
+    /// This is the reference a receiver reconstructs truncated packet numbers
+    /// against (RFC 9000 §A.3). `None` until the first packet in that space
+    /// authenticates.
+    #[must_use]
+    pub fn highest_accepted_packet_number(&self, space: PacketProtectionSpace) -> Option<u64> {
+        self.accepted_packets
+            .get(&space)
+            .and_then(|window| window.highest_seen)
+    }
+
     /// Derive and install packet protection keys with ATP error handling.
     pub async fn derive_keys(
         &mut self,
@@ -753,6 +765,55 @@ impl AtpPacketProtection {
         self.unprotect_packet_now(cx, packet, associated_data)
     }
 
+    /// Header-protection mask for protecting an outgoing header (this
+    /// endpoint's key), on the current task. See
+    /// [`QuicPacketProtectionProvider::header_protection_mask`].
+    pub fn header_protection_mask_now(
+        &self,
+        cx: &Cx,
+        space: PacketProtectionSpace,
+        sample: &[u8],
+    ) -> AtpOutcome<HeaderProtectionMask> {
+        self.trace_header_mask(cx, "atp_packet_protection_header_mask", space, sample);
+        self.provider
+            .header_protection_mask(space, sample)
+            .map_err(|e| self.map_tls_error(e))
+            .into()
+    }
+
+    /// Header-protection mask for removing protection from a received header
+    /// (the peer's key), on the current task. See
+    /// [`QuicPacketProtectionProvider::header_protection_mask_remote`].
+    pub fn header_protection_mask_remote_now(
+        &self,
+        cx: &Cx,
+        space: PacketProtectionSpace,
+        sample: &[u8],
+    ) -> AtpOutcome<HeaderProtectionMask> {
+        self.trace_header_mask(
+            cx,
+            "atp_packet_protection_header_mask_remote",
+            space,
+            sample,
+        );
+        self.provider
+            .header_protection_mask_remote(space, sample)
+            .map_err(|e| self.map_tls_error(e))
+            .into()
+    }
+
+    fn trace_header_mask(&self, cx: &Cx, event: &str, space: PacketProtectionSpace, sample: &[u8]) {
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields(
+                event,
+                &[
+                    ("space", &format!("{:?}", space)),
+                    ("sample_len", &sample.len().to_string()),
+                ],
+            );
+        }
+    }
+
     /// Generate header protection mask with ATP error handling.
     pub async fn header_protection_mask(
         &self,
@@ -760,20 +821,18 @@ impl AtpPacketProtection {
         space: PacketProtectionSpace,
         sample: &[u8],
     ) -> AtpOutcome<HeaderProtectionMask> {
-        if cx.trace_buffer().is_some() {
-            cx.trace_with_fields(
-                "atp_packet_protection_header_mask",
-                &[
-                    ("space", &format!("{:?}", space)),
-                    ("sample_len", &sample.len().to_string()),
-                ],
-            );
-        }
+        self.header_protection_mask_now(cx, space, sample)
+    }
 
-        self.provider
-            .header_protection_mask(space, sample)
-            .map_err(|e| self.map_tls_error(e))
-            .into()
+    /// Generate the peer-direction header protection mask with ATP error
+    /// handling.
+    pub async fn header_protection_mask_remote(
+        &self,
+        cx: &Cx,
+        space: PacketProtectionSpace,
+        sample: &[u8],
+    ) -> AtpOutcome<HeaderProtectionMask> {
+        self.header_protection_mask_remote_now(cx, space, sample)
     }
 
     /// Update keys for next phase with ATP error handling.

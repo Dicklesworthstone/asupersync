@@ -51,7 +51,11 @@ use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::protocol::varint::VarInt;
-use crate::net::quic_core::{ConnectionId, LongHeader, LongPacketType, PacketHeader};
+use crate::net::quic_core::{
+    ConnectionId, LongHeader, LongPacketType, PacketHeader, ProtectedHeaderPrefix,
+    ProtectedLongHeaderPrefix, apply_header_protection, decode_packet_number_reconstruct,
+    header_protection_sample, remove_header_protection,
+};
 use crate::net::quic_native::endpoint::{OutgoingPacket, QuicUdpEndpoint, ReceivedPacket};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -100,11 +104,39 @@ fn handshake_failure(code: &'static str) -> QuicTlsError {
     }
 }
 
+/// Failure code: authentication failed under live keys.
+///
+/// A packet in a space with *live* keys failed header-protection removal or
+/// AEAD authentication in [`QuicHandshakeDriver::recv_handshake_packet`].
+/// This is never stale traffic.
+pub(crate) const PACKET_UNPROTECT_CODE: &str = "packet_unprotect";
+/// Failure code: the packet's space keys were already discarded.
+///
+/// Old traffic, e.g. an Initial arriving after Initial keys were dropped.
+pub(crate) const PACKET_KEYS_DISCARDED_CODE: &str = "packet_keys_discarded";
+/// Failure code: the packet's space keys are not derived yet.
+///
+/// Traffic ahead of this endpoint's handshake progress, e.g. a Handshake
+/// packet whose Initial predecessor was lost.
+pub(crate) const PACKET_KEYS_UNAVAILABLE_CODE: &str = "packet_keys_unavailable";
+
+/// True for long-header traffic this driver holds no live keys for.
+///
+/// That is keys already discarded ([`PACKET_KEYS_DISCARDED_CODE`]) or not yet
+/// derived ([`PACKET_KEYS_UNAVAILABLE_CODE`]). The drive loops drop such a
+/// packet and re-offer their last flight so the peer can catch up.
+///
+/// An authentication failure under live keys ([`PACKET_UNPROTECT_CODE`]) is
+/// deliberately *not* stale: it is a real crypto/protocol error and surfaces
+/// to the caller. GH#70: classifying every unprotect failure as stale made the
+/// loops silently retransmit forever, which is how the missing header
+/// protection of GH#69 stayed invisible.
 pub(crate) fn is_stale_handshake_packet_error(error: &QuicTlsError) -> bool {
     matches!(
         error,
         QuicTlsError::CryptoProviderFailure { provider, code }
-            if *provider == "rustls-quic-handshake" && *code == "packet_unprotect"
+            if *provider == "rustls-quic-handshake"
+                && (*code == PACKET_KEYS_DISCARDED_CODE || *code == PACKET_KEYS_UNAVAILABLE_CODE)
     )
 }
 
@@ -490,8 +522,18 @@ pub struct QuicHandshakeDriver {
     crypto_send_offset: [u64; 3],
     /// Exact authenticated packet numbers already accepted for Initial/Handshake.
     handshake_recv_packet_numbers: [BTreeSet<u64>; 2],
+    /// Largest authenticated packet number per Initial/Handshake space: the
+    /// reference for reconstructing truncated packet numbers (RFC 9000 §A.3).
+    handshake_recv_largest_packet_number: [Option<u64>; 2],
     /// Per-level QUIC CRYPTO stream reassembly for reordered packets.
     handshake_crypto_reassembly: [HandshakeCryptoReassembler; 2],
+    /// Outbound segments produced while installing keys *between* the packets
+    /// of one coalesced datagram.
+    ///
+    /// RFC 9000 §12.2: the server's Initial unlocks the Handshake keys its own
+    /// coalesced Handshake packet needs. [`Self::pump_outbound`] hands these
+    /// out ahead of fresh TLS output so no flight is lost.
+    staged_segments: Vec<HandshakeSegment>,
     /// The last handshake flight this side sent before completing, retained so
     /// the data plane can re-send it if the peer provably never finished. A
     /// TLS 1.3 client completes upon *sending* Finished; if that flight is
@@ -596,10 +638,12 @@ impl QuicHandshakeDriver {
             peer_connection_id: None,
             crypto_send_offset: [0; 3],
             handshake_recv_packet_numbers: [BTreeSet::new(), BTreeSet::new()],
+            handshake_recv_largest_packet_number: [None, None],
             handshake_crypto_reassembly: [
                 HandshakeCryptoReassembler::default(),
                 HandshakeCryptoReassembler::default(),
             ],
+            staged_segments: Vec::new(),
             final_flight: Vec::new(),
             path_rtt_estimate_micros: None,
         }
@@ -619,11 +663,13 @@ impl QuicHandshakeDriver {
         &mut self.provider
     }
 
-    /// Assemble a protected long-header (Initial/Handshake) QUIC packet carrying
-    /// `segment`'s CRYPTO bytes. Mirrors the data-plane 1-RTT assembly pattern:
-    /// the long header is sent in the clear and authenticated as AEAD associated
-    /// data; this implementation does not apply QUIC header protection (both ends
-    /// are asupersync), so a packet is `header || ciphertext || tag`.
+    /// Assemble a protected long-header (Initial/Handshake) QUIC packet
+    /// carrying `segment`'s CRYPTO bytes.
+    ///
+    /// The long header is authenticated as AEAD associated data, then header
+    /// protection masks the first byte's low bits and the packet number (RFC
+    /// 9001 §5.4, GH#69), so the datagram is `protected-header || ciphertext
+    /// || tag` as any RFC 9000 peer expects.
     pub fn assemble_handshake_packet(
         &mut self,
         segment: &HandshakeSegment,
@@ -697,75 +743,151 @@ impl QuicHandshakeDriver {
             .encode(&mut header_bytes)
             .map_err(|_| handshake_failure("long_header_encode"))?;
 
-        let protected = self.provider.protect_packet(PacketProtectionRequest {
-            space,
-            key_phase: false,
-            packet_number,
-            associated_data: &header_bytes,
-            payload: &plaintext,
-        })?;
-
-        let mut packet = Vec::with_capacity(
-            header_bytes.len() + protected.ciphertext.len() + protected.tag.len(),
-        );
-        packet.extend_from_slice(&header_bytes);
-        packet.extend_from_slice(&protected.ciphertext);
-        packet.extend_from_slice(&protected.tag);
+        let packet =
+            self.protect_long_header_packet(space, &header_bytes, packet_number, &plaintext)?;
 
         self.crypto_send_offset[level_index(segment.level)] += segment.data.len() as u64;
         Ok(packet)
     }
 
-    /// Parse a received protected long-header (Initial/Handshake) packet, unprotect
-    /// it with the installed keys for its space, and feed its CRYPTO bytes to the
-    /// TLS state machine. Returns the peer's source connection ID (so a server can
-    /// address its replies to the client's chosen CID). CRYPTO data is reassembled
-    /// by offset within each packet-number space, so reordered packets are fed to
-    /// TLS only after every preceding byte is available.
-    pub fn recv_handshake_packet(&mut self, packet: &[u8]) -> Result<ConnectionId, QuicTlsError> {
-        let (header, consumed) = PacketHeader::decode(packet, 0)
-            .map_err(|_| handshake_failure("packet_header_decode"))?;
-        let PacketHeader::Long(long_header) = header else {
-            return Err(handshake_failure("expected_long_header"));
-        };
-        let peer_src_cid = long_header.src_cid;
-        let Some(space) = long_packet_type_space(long_header.packet_type) else {
-            return Err(handshake_failure("unexpected_long_packet_type"));
-        };
-        let space_index = handshake_packet_space_index(space)
-            .ok_or_else(|| handshake_failure("unexpected_crypto_packet_space"))?;
-        let already_seen =
-            self.handshake_recv_packet_numbers[space_index].contains(&long_header.packet_number);
-        if consumed > packet.len() {
-            return Err(handshake_failure("packet_header_overrun"));
-        }
-        let header_bytes = &packet[..consumed];
-        let body = &packet[consumed..];
-        if body.len() < QUIC_AEAD_TAG_LEN {
-            return Err(handshake_failure("packet_body_too_short"));
-        }
-        let tag_offset = body.len() - QUIC_AEAD_TAG_LEN;
-        let mut tag = [0u8; QUIC_AEAD_TAG_LEN];
-        tag.copy_from_slice(&body[tag_offset..]);
-        let protected = ProtectedPacket {
+    /// Protect one long-header packet exactly as RFC 9001 §5 describes.
+    ///
+    /// AEAD-seal `plaintext` under `space` keys with `header_bytes` (an
+    /// unprotected long header whose packet-number width is announced by its
+    /// first byte) as associated data, then apply header protection with the
+    /// mask sampled from the ciphertext (§5.4.2). The result is
+    /// `protected-header || ciphertext || tag`.
+    pub(crate) fn protect_long_header_packet(
+        &mut self,
+        space: PacketProtectionSpace,
+        header_bytes: &[u8],
+        packet_number: u64,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, QuicTlsError> {
+        let first = *header_bytes
+            .first()
+            .ok_or_else(|| handshake_failure("long_header_encode"))?;
+        let packet_number_len = usize::from(first & 0x03) + 1;
+        let packet_number_offset = header_bytes
+            .len()
+            .checked_sub(packet_number_len)
+            .ok_or_else(|| handshake_failure("long_header_encode"))?;
+
+        let protected = self.provider.protect_packet(PacketProtectionRequest {
             space,
             key_phase: false,
-            packet_number: long_header.packet_number,
-            ciphertext: body[..tag_offset].to_vec(),
-            tag,
-            proof: ProtectionProof {
-                provider_kind: self.provider.provider_kind(),
-                space,
-                key_phase: false,
-                generation: 0,
-                transcript_hash: TranscriptHash::from_bytes([0; 32]),
-                failure_code: None,
-            },
-        };
-        let unprotected = self
-            .provider
-            .unprotect_packet(&protected, header_bytes)
-            .map_err(|_| handshake_failure("packet_unprotect"))?;
+            packet_number,
+            associated_data: header_bytes,
+            payload: plaintext,
+        })?;
+
+        let mut packet = Vec::with_capacity(
+            header_bytes.len() + protected.ciphertext.len() + protected.tag.len(),
+        );
+        packet.extend_from_slice(header_bytes);
+        packet.extend_from_slice(&protected.ciphertext);
+        packet.extend_from_slice(&protected.tag);
+
+        let sample = header_protection_sample(&packet, packet_number_offset)
+            .map_err(|_| handshake_failure("header_protection_sample"))?;
+        let mask = self.provider.header_protection_mask(space, &sample)?;
+        apply_header_protection(&mut packet, packet_number_offset, mask.bytes)
+            .map_err(|_| handshake_failure("header_protection_apply"))?;
+        Ok(packet)
+    }
+
+    /// Process one UDP datagram of protected long-header (Initial/Handshake)
+    /// packets.
+    ///
+    /// Separates the coalesced packets by their Length fields (RFC 9000
+    /// §12.2), removes header protection and AEAD-unprotects each with the
+    /// installed keys for its space, and feeds the CRYPTO bytes to the TLS
+    /// state machine. Returns the peer's source connection ID (so a server can
+    /// address its replies to the client's chosen CID). CRYPTO data is
+    /// reassembled by offset within each packet-number space, so reordered
+    /// packets are fed to TLS only after every preceding byte is available.
+    ///
+    /// Keys unlocked by one packet are installed before the next coalesced
+    /// packet is tried (the server's Initial carries the ServerHello that
+    /// derives the Handshake keys its coalesced Handshake packet needs);
+    /// segments TLS emits meanwhile are staged for [`Self::pump_outbound`].
+    ///
+    /// Trailing datagram padding and a coalesced 1-RTT short-header packet end
+    /// processing (the latter belongs to the data plane). A packet for a space
+    /// without live keys is skipped with a stale classification
+    /// ([`is_stale_handshake_packet_error`]); an authentication failure under
+    /// live keys fails the call with [`PACKET_UNPROTECT_CODE`]. The result is
+    /// `Ok` when at least one packet authenticated, otherwise the first
+    /// packet's error.
+    pub fn recv_handshake_packet(&mut self, datagram: &[u8]) -> Result<ConnectionId, QuicTlsError> {
+        if datagram.is_empty() {
+            return Err(handshake_failure("packet_header_decode"));
+        }
+        let mut offset = 0usize;
+        let mut accepted: Option<ConnectionId> = None;
+        let mut skipped: Option<QuicTlsError> = None;
+        while offset < datagram.len() {
+            let rest = &datagram[offset..];
+            if rest[0] & 0x80 == 0 {
+                if offset == 0 {
+                    return Err(handshake_failure("expected_long_header"));
+                }
+                // Datagram padding or a coalesced 1-RTT packet: not handshake input.
+                break;
+            }
+            let prefix = match ProtectedHeaderPrefix::decode(rest, 0) {
+                Ok(ProtectedHeaderPrefix::Long(prefix)) => prefix,
+                Ok(ProtectedHeaderPrefix::Retry(_)) if offset == 0 => {
+                    return Err(handshake_failure("unexpected_long_packet_type"));
+                }
+                Err(_) if offset == 0 => return Err(handshake_failure("packet_header_decode")),
+                // A malformed trailer after an authenticated packet is dropped,
+                // not fatal: the authenticated part already advanced TLS.
+                Ok(ProtectedHeaderPrefix::Retry(_) | ProtectedHeaderPrefix::Short { .. })
+                | Err(_) => break,
+            };
+            let packet_len = match prefix.packet_len(rest.len()) {
+                Ok(len) => len,
+                Err(_) if offset == 0 => return Err(handshake_failure("packet_length_overrun")),
+                Err(_) => break,
+            };
+            match self.process_long_header_packet(&prefix, &rest[..packet_len]) {
+                Ok(peer_cid) => accepted = Some(peer_cid),
+                Err(err) if is_stale_handshake_packet_error(&err) => {
+                    if skipped.is_none() {
+                        skipped = Some(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+            offset += packet_len;
+            if accepted.is_some() && datagram.get(offset).is_some_and(|byte| byte & 0x80 != 0) {
+                // Install any keys the packet just fed to TLS unlocked before
+                // the coalesced follower that needs them is tried.
+                self.stage_outbound()?;
+            }
+        }
+        match (accepted, skipped) {
+            (Some(peer_cid), _) => Ok(peer_cid),
+            (None, Some(err)) => Err(err),
+            (None, None) => Err(handshake_failure("expected_long_header")),
+        }
+    }
+
+    /// Unprotect exactly one long-header packet (`packet` is
+    /// `protected-header || ciphertext || tag`, already bounded by its Length
+    /// field) and feed its CRYPTO frames to TLS.
+    fn process_long_header_packet(
+        &mut self,
+        prefix: &ProtectedLongHeaderPrefix,
+        packet: &[u8],
+    ) -> Result<ConnectionId, QuicTlsError> {
+        let peer_src_cid = prefix.src_cid;
+        let (header, plaintext) = self.unprotect_long_header_packet(prefix, packet)?;
+        let space = long_packet_type_space(header.packet_type)
+            .ok_or_else(|| handshake_failure("unexpected_long_packet_type"))?;
+        let space_index = handshake_packet_space_index(space)
+            .ok_or_else(|| handshake_failure("unexpected_crypto_packet_space"))?;
 
         match self.peer_connection_id {
             None => self.peer_connection_id = Some(peer_src_cid),
@@ -778,7 +900,7 @@ impl QuicHandshakeDriver {
         // cleartext long header of a previously seen packet number and have the
         // receive loop treat it as successful handshake traffic (including RTT
         // sampling) without possessing the packet-protection key.
-        if already_seen {
+        if self.handshake_recv_packet_numbers[space_index].contains(&header.packet_number) {
             return Ok(peer_src_cid);
         }
         if self.handshake_recv_packet_numbers[space_index].len() >= MAX_SEEN_HANDSHAKE_PACKETS {
@@ -792,7 +914,7 @@ impl QuicHandshakeDriver {
 
         // asupersync's frame codec decodes over a `&[u8]` (which implements the
         // crate `Buf`), advancing the slice; mirror `NativeQuicConnection::decode_frames`.
-        let mut buf: &[u8] = &unprotected.plaintext;
+        let mut buf: &[u8] = &plaintext;
         while !buf.is_empty() {
             match QuicFrame::decode(&mut buf).map_err(|_| handshake_failure("frame_decode"))? {
                 Some(QuicFrame::Crypto { offset, data }) => {
@@ -808,8 +930,103 @@ impl QuicHandshakeDriver {
                 None => break,
             }
         }
-        self.handshake_recv_packet_numbers[space_index].insert(long_header.packet_number);
+        self.handshake_recv_packet_numbers[space_index].insert(header.packet_number);
+        let largest = &mut self.handshake_recv_largest_packet_number[space_index];
+        *largest =
+            Some(largest.map_or(header.packet_number, |seen| seen.max(header.packet_number)));
         Ok(peer_src_cid)
+    }
+
+    /// Remove header protection from one long-header packet and authenticate
+    /// it.
+    ///
+    /// RFC 9001 §5.4.1 receiver order: classify the key state for the
+    /// packet's space, sample the ciphertext, unmask the first byte and the
+    /// packet number, reconstruct the full packet number, AEAD-open with the
+    /// unmasked header as associated data, and only then validate the
+    /// reserved bits (RFC 9000 §17.2 checks them after packet protection is
+    /// removed, so a forgery cannot trigger a protocol violation).
+    ///
+    /// Returns the authenticated header (with the reconstructed packet
+    /// number) and the plaintext payload.
+    pub(crate) fn unprotect_long_header_packet(
+        &mut self,
+        prefix: &ProtectedLongHeaderPrefix,
+        packet: &[u8],
+    ) -> Result<(LongHeader, Vec<u8>), QuicTlsError> {
+        let space = long_packet_type_space(prefix.packet_type)
+            .ok_or_else(|| handshake_failure("unexpected_long_packet_type"))?;
+        let space_index = handshake_packet_space_index(space)
+            .ok_or_else(|| handshake_failure("unexpected_crypto_packet_space"))?;
+        match self.provider.key_snapshot(space, false) {
+            Ok(_) => {}
+            Err(QuicTlsError::KeyDiscarded { .. }) => {
+                return Err(handshake_failure(PACKET_KEYS_DISCARDED_CODE));
+            }
+            Err(QuicTlsError::MissingKeys { .. }) => {
+                return Err(handshake_failure(PACKET_KEYS_UNAVAILABLE_CODE));
+            }
+            Err(_) => return Err(handshake_failure(PACKET_UNPROTECT_CODE)),
+        }
+
+        let packet_number_offset = prefix.packet_number_offset;
+        let sample = header_protection_sample(packet, packet_number_offset)
+            .map_err(|_| handshake_failure("packet_body_too_short"))?;
+        let mask = self
+            .provider
+            .header_protection_mask_remote(space, &sample)
+            .map_err(|_| handshake_failure(PACKET_UNPROTECT_CODE))?;
+        let mut unmasked = packet.to_vec();
+        let packet_number_len =
+            remove_header_protection(&mut unmasked, packet_number_offset, mask.bytes)
+                .map_err(|_| handshake_failure(PACKET_UNPROTECT_CODE))?;
+        let header_len = packet_number_offset + usize::from(packet_number_len);
+        if unmasked.len() < header_len + QUIC_AEAD_TAG_LEN {
+            return Err(handshake_failure("packet_body_too_short"));
+        }
+        let truncated = unmasked[packet_number_offset..header_len]
+            .iter()
+            .fold(0u32, |acc, byte| (acc << 8) | u32::from(*byte));
+        let largest = self.handshake_recv_largest_packet_number[space_index].unwrap_or(0);
+        let packet_number = decode_packet_number_reconstruct(truncated, packet_number_len, largest)
+            .map_err(|_| handshake_failure(PACKET_UNPROTECT_CODE))?;
+
+        let tag_offset = unmasked.len() - QUIC_AEAD_TAG_LEN;
+        let mut tag = [0u8; QUIC_AEAD_TAG_LEN];
+        tag.copy_from_slice(&unmasked[tag_offset..]);
+        let protected = ProtectedPacket {
+            space,
+            key_phase: false,
+            packet_number,
+            ciphertext: unmasked[header_len..tag_offset].to_vec(),
+            tag,
+            proof: ProtectionProof {
+                provider_kind: self.provider.provider_kind(),
+                space,
+                key_phase: false,
+                generation: 0,
+                transcript_hash: TranscriptHash::from_bytes([0; 32]),
+                failure_code: None,
+            },
+        };
+        let unprotected = self
+            .provider
+            .unprotect_packet(&protected, &unmasked[..header_len])
+            .map_err(|_| handshake_failure(PACKET_UNPROTECT_CODE))?;
+
+        // The header is authentic now: reserved bits and the Length/packet
+        // number consistency are validated on the unmasked bytes.
+        let (PacketHeader::Long(mut header), consumed) =
+            PacketHeader::decode(&unmasked[..header_len], 0)
+                .map_err(|_| handshake_failure("packet_header_invalid"))?
+        else {
+            return Err(handshake_failure("expected_long_header"));
+        };
+        if consumed != header_len {
+            return Err(handshake_failure("packet_header_invalid"));
+        }
+        header.packet_number = packet_number;
+        Ok((header, unprotected.plaintext))
     }
 
     /// Install Initial-space packet-protection keys derived from the client's
@@ -828,7 +1045,24 @@ impl QuicHandshakeDriver {
     /// handshake crosses encryption boundaries. Returns one segment per level
     /// that produced data.
     pub fn pump_outbound(&mut self) -> Result<Vec<HandshakeSegment>, QuicTlsError> {
-        let mut segments = Vec::new();
+        let mut segments = std::mem::take(&mut self.staged_segments);
+        self.pump_outbound_into(&mut segments)?;
+        Ok(segments)
+    }
+
+    /// Install newly available keys between the packets of one coalesced
+    /// datagram, keeping any TLS output for the next [`Self::pump_outbound`].
+    fn stage_outbound(&mut self) -> Result<(), QuicTlsError> {
+        let mut staged = std::mem::take(&mut self.staged_segments);
+        let result = self.pump_outbound_into(&mut staged);
+        self.staged_segments = staged;
+        result
+    }
+
+    fn pump_outbound_into(
+        &mut self,
+        segments: &mut Vec<HandshakeSegment>,
+    ) -> Result<(), QuicTlsError> {
         loop {
             let mut buf = Vec::new();
             let key_change = self.tls.write_hs(&mut buf);
@@ -861,7 +1095,7 @@ impl QuicHandshakeDriver {
                 }
             }
         }
-        Ok(segments)
+        Ok(())
     }
 
     /// Feed received plaintext handshake bytes (the payload of CRYPTO frames) to
@@ -1731,17 +1965,25 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             MIN_INITIAL_DATAGRAM_BYTES,
             "the Initial datagram is expanded to exactly the RFC minimum"
         );
-        let (header, consumed) = PacketHeader::decode(&initial, 0).expect("padded Initial header");
-        let PacketHeader::Long(header) = header else {
+        // The packet is header-protected (GH#69), so only the invariant prefix
+        // is readable on the wire; its Length field covers the packet number,
+        // the padded ciphertext and the tag.
+        let ProtectedHeaderPrefix::Long(header) =
+            ProtectedHeaderPrefix::decode(&initial, 0).expect("padded Initial prefix")
+        else {
             panic!("Initial packets use the long header");
         };
         assert_eq!(header.packet_type, LongPacketType::Initial);
-        // `consumed` includes the packet number; the Length field covers the
-        // packet number, the padded ciphertext and the tag.
         assert_eq!(
             header.payload_length as usize,
-            initial.len() - consumed + usize::from(header.packet_number_len),
+            initial.len() - header.packet_number_offset,
             "the Length field accounts for the padding inside the AEAD envelope"
+        );
+        assert_eq!(
+            header
+                .packet_len(initial.len())
+                .expect("Length bounds the packet"),
+            initial.len()
         );
 
         // The padded packet authenticates, and TLS consumes the ClientHello
@@ -2113,5 +2355,475 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             !client.is_complete(),
             "client must not complete against an untrusted server"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // GH#69 / GH#70: header protection and coalesced datagrams.
+    // -----------------------------------------------------------------------
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    /// RFC 9001 Appendix A: the client-chosen Destination Connection ID both
+    /// sides derive Initial keys from.
+    const RFC9001_DCID: &str = "8394c8f03e515708";
+    /// RFC 9001 A.2: unprotected client Initial header (packet number 2, 4 bytes).
+    const RFC9001_A2_HEADER: &str = "c300000001088394c8f03e5157080000449e00000002";
+    /// RFC 9001 A.2: the CRYPTO frame; PADDING frames fill the payload to 1162 bytes.
+    const RFC9001_A2_CRYPTO_FRAME: &str = concat!(
+        "060040f1010000ed0303ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c000004130113",
+        "02010000c000000010000e00000b6578616d706c652e636f6dff01000100000a00080006001d00170018001000070005",
+        "04616c706e000500050100000000003300260024001d00209370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce1",
+        "5d43e994ec74d748002b0003020304000d0010000e0403050306030203080408050806002d00020101001c0002400100",
+        "3900320408ffffffffffffffff05048000ffff07048000ffff0801100104800075300901100f088394c8f03e51570806",
+        "048000ffff",
+    );
+    /// RFC 9001 A.2: the complete protected client Initial (1200 bytes).
+    const RFC9001_A2_PROTECTED_PACKET: &str = concat!(
+        "c000000001088394c8f03e5157080000449e7b9aec34d1b1c98dd7689fb8ec11d242b123dc9bd8bab936b47d92ec356c",
+        "0bab7df5976d27cd449f63300099f3991c260ec4c60d17b31f8429157bb35a1282a643a8d2262cad67500cadb8e7378c",
+        "8eb7539ec4d4905fed1bee1fc8aafba17c750e2c7ace01e6005f80fcb7df621230c83711b39343fa028cea7f7fb5ff89",
+        "eac2308249a02252155e2347b63d58c5457afd84d05dfffdb20392844ae812154682e9cf012f9021a6f0be17ddd0c208",
+        "4dce25ff9b06cde535d0f920a2db1bf362c23e596d11a4f5a6cf3948838a3aec4e15daf8500a6ef69ec4e3feb6b1d98e",
+        "610ac8b7ec3faf6ad760b7bad1db4ba3485e8a94dc250ae3fdb41ed15fb6a8e5eba0fc3dd60bc8e30c5c4287e53805db",
+        "059ae0648db2f64264ed5e39be2e20d82df566da8dd5998ccabdae053060ae6c7b4378e846d29f37ed7b4ea9ec5d82e7",
+        "961b7f25a9323851f681d582363aa5f89937f5a67258bf63ad6f1a0b1d96dbd4faddfcefc5266ba6611722395c906556",
+        "be52afe3f565636ad1b17d508b73d8743eeb524be22b3dcbc2c7468d54119c7468449a13d8e3b95811a198f3491de3e7",
+        "fe942b330407abf82a4ed7c1b311663ac69890f4157015853d91e923037c227a33cdd5ec281ca3f79c44546b9d90ca00",
+        "f064c99e3dd97911d39fe9c5d0b23a229a234cb36186c4819e8b9c5927726632291d6a418211cc2962e20fe47feb3edf",
+        "330f2c603a9d48c0fcb5699dbfe5896425c5bac4aee82e57a85aaf4e2513e4f05796b07ba2ee47d80506f8d2c25e50fd",
+        "14de71e6c418559302f939b0e1abd576f279c4b2e0feb85c1f28ff18f58891ffef132eef2fa09346aee33c28eb130ff2",
+        "8f5b766953334113211996d20011a198e3fc433f9f2541010ae17c1bf202580f6047472fb36857fe843b19f5984009dd",
+        "c324044e847a4f4a0ab34f719595de37252d6235365e9b84392b061085349d73203a4a13e96f5432ec0fd4a1ee65accd",
+        "d5e3904df54c1da510b0ff20dcc0c77fcb2c0e0eb605cb0504db87632cf3d8b4dae6e705769d1de354270123cb11450e",
+        "fc60ac47683d7b8d0f811365565fd98c4c8eb936bcab8d069fc33bd801b03adea2e1fbc5aa463d08ca19896d2bf59a07",
+        "1b851e6c239052172f296bfb5e72404790a2181014f3b94a4e97d117b438130368cc39dbb2d198065ae3986547926cd2",
+        "162f40a29f0c3c8745c0f50fba3852e566d44575c29d39a03f0cda721984b6f440591f355e12d439ff150aab7613499d",
+        "bd49adabc8676eef023b15b65bfc5ca06948109f23f350db82123535eb8a7433bdabcb909271a6ecbcb58b936a88cd4e",
+        "8f2e6ff5800175f113253d8fa9ca8885c2f552e657dc603f252e1a8e308f76f0be79e2fb8f5d5fbbe2e30ecadd220723",
+        "c8c0aea8078cdfcb3868263ff8f0940054da48781893a7e49ad5aff4af300cd804a6b6279ab3ff3afb64491c85194aab",
+        "760d58a606654f9f4400e8b38591356fbf6425aca26dc85244259ff2b19c41b9f96f3ca9ec1dde434da7d2d392b905dd",
+        "f3d1f9af93d1af5950bd493f5aa731b4056df31bd267b6b90a079831aaf579be0a39013137aac6d404f518cfd4684064",
+        "7e78bfe706ca4cf5e9c5453e9f7cfd2b8b4c8d169a44e55c88d4a9a7f9474241e221af44860018ab0856972e194cd934",
+    );
+    /// RFC 9001 A.3: unprotected server Initial header (packet number 1, 2 bytes).
+    const RFC9001_A3_HEADER: &str = "c1000000010008f067a5502a4262b50040750001";
+    /// RFC 9001 A.3: ACK + CRYPTO payload, no padding.
+    const RFC9001_A3_PAYLOAD: &str = concat!(
+        "02000000000600405a020000560303eefce7f7b37ba1d1632e96677825ddf73988cfc79825df566dc5430b9a045a1200",
+        "130100002e00330024001d00209d3c940d89690b84d08a60993c144eca684d1081287c834d5311bcf32bb9da1a002b00",
+        "020304",
+    );
+    /// RFC 9001 A.3: the complete protected server Initial (135 bytes).
+    const RFC9001_A3_PROTECTED_PACKET: &str = concat!(
+        "cf000000010008f067a5502a4262b5004075c0d95a482cd0991cd25b0aac406a5816b6394100f37a1c69797554780bb3",
+        "8cc5a99f5ede4cf73c3ec2493a1839b3dbcba3f6ea46c5b7684df3548e7ddeb9c3bf9c73cc3f3bded74b562bfb19fb84",
+        "022f8ef4cdd93795d77d06edbb7aaf2f58891850abbdca3d20398c276456cbc42158407dd074ee",
+    );
+
+    fn rfc9001_client() -> QuicHandshakeDriver {
+        let client_cfg =
+            client_config(vec![ca_cert()], vec![ATP_QUIC_ALPN.to_vec()]).expect("client config");
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            Vec::new(),
+        )
+        .expect("client driver");
+        client
+            .install_initial_keys(&hex(RFC9001_DCID))
+            .expect("client initial keys");
+        client
+    }
+
+    fn rfc9001_server() -> QuicHandshakeDriver {
+        let server_cfg = server_config(vec![leaf_cert()], leaf_key(), vec![ATP_QUIC_ALPN.to_vec()])
+            .expect("server config");
+        let mut server =
+            QuicHandshakeDriver::server(server_cfg, Vec::new()).expect("server driver");
+        server
+            .install_initial_keys(&hex(RFC9001_DCID))
+            .expect("server initial keys");
+        server
+    }
+
+    fn long_prefix(packet: &[u8]) -> ProtectedLongHeaderPrefix {
+        match ProtectedHeaderPrefix::decode(packet, 0).expect("protected prefix") {
+            ProtectedHeaderPrefix::Long(prefix) => prefix,
+            other => panic!("expected a long header, got {other:?}"),
+        }
+    }
+
+    fn failure_code(error: &QuicTlsError) -> &'static str {
+        match error {
+            QuicTlsError::CryptoProviderFailure { provider, code } => {
+                assert_eq!(*provider, "rustls-quic-handshake");
+                *code
+            }
+            other => panic!("expected a handshake failure code, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rfc9001_a2_client_initial_protects_to_the_published_packet() {
+        let mut client = rfc9001_client();
+        let header = hex(RFC9001_A2_HEADER);
+        let mut payload = hex(RFC9001_A2_CRYPTO_FRAME);
+        payload.resize(1162, 0x00);
+        let packet = client
+            .protect_long_header_packet(PacketProtectionSpace::Initial, &header, 2, &payload)
+            .expect("protect A.2");
+        let expected = hex(RFC9001_A2_PROTECTED_PACKET);
+        assert_eq!(packet.len(), 1200);
+        assert_eq!(&packet[..22], &expected[..22], "protected header bytes");
+        assert_eq!(packet, expected, "RFC 9001 A.2 protected client Initial");
+
+        // The server removes header protection with the client's hp key,
+        // reconstructs the packet number and authenticates the payload.
+        let mut server = rfc9001_server();
+        let prefix = long_prefix(&packet);
+        assert_eq!(prefix.payload_length, 1182);
+        assert_eq!(prefix.packet_number_offset, 18);
+        assert_eq!(prefix.packet_len(packet.len()).expect("bounded"), 1200);
+        let (recovered, plaintext) = server
+            .unprotect_long_header_packet(&prefix, &packet)
+            .expect("server unprotects A.2");
+        assert_eq!(recovered.packet_type, LongPacketType::Initial);
+        assert_eq!(recovered.packet_number, 2);
+        assert_eq!(recovered.packet_number_len, 4);
+        assert_eq!(recovered.dst_cid.as_bytes(), &hex(RFC9001_DCID)[..]);
+        assert!(recovered.src_cid.is_empty());
+        assert_eq!(plaintext, payload);
+    }
+
+    #[test]
+    fn rfc9001_a3_server_initial_protects_to_the_published_packet() {
+        let mut server = rfc9001_server();
+        let header = hex(RFC9001_A3_HEADER);
+        let payload = hex(RFC9001_A3_PAYLOAD);
+        let packet = server
+            .protect_long_header_packet(PacketProtectionSpace::Initial, &header, 1, &payload)
+            .expect("protect A.3");
+        assert_eq!(
+            packet,
+            hex(RFC9001_A3_PROTECTED_PACKET),
+            "RFC 9001 A.3 protected server Initial"
+        );
+
+        let mut client = rfc9001_client();
+        let prefix = long_prefix(&packet);
+        assert_eq!(prefix.payload_length, 0x75);
+        assert_eq!(
+            prefix.packet_len(packet.len()).expect("bounded"),
+            packet.len()
+        );
+        let (recovered, plaintext) = client
+            .unprotect_long_header_packet(&prefix, &packet)
+            .expect("client unprotects A.3");
+        assert_eq!(
+            recovered.packet_number, 1,
+            "2-byte packet number reconstructed"
+        );
+        assert_eq!(recovered.packet_number_len, 2);
+        assert!(recovered.dst_cid.is_empty());
+        assert_eq!(recovered.src_cid.as_bytes(), &hex("f067a5502a4262b5")[..]);
+        assert_eq!(plaintext, payload);
+    }
+
+    /// Planted negatives: every protected bit is bound to the AEAD.
+    ///
+    /// Flipping a masked first-byte bit, a protected packet-number byte, a
+    /// ciphertext byte or a tag byte must fail authentication — and that
+    /// failure is a live-key failure, never "stale".
+    #[test]
+    fn rfc9001_a2_planted_bit_flips_fail_authentication_and_are_not_stale() {
+        let mut server = rfc9001_server();
+        let packet = hex(RFC9001_A2_PROTECTED_PACKET);
+        let prefix = long_prefix(&packet);
+        let cases: [(&str, usize, u8); 5] = [
+            ("masked packet-number-length bit", 0, 0x01),
+            ("masked reserved bit", 0, 0x08),
+            ("protected packet-number byte", 21, 0x80),
+            ("ciphertext byte", 400, 0x01),
+            ("authentication tag byte", packet.len() - 1, 0x01),
+        ];
+        for (label, index, bit) in cases {
+            let mut tampered = packet.clone();
+            tampered[index] ^= bit;
+            let err = server
+                .unprotect_long_header_packet(&prefix, &tampered)
+                .expect_err(label);
+            assert_eq!(failure_code(&err), PACKET_UNPROTECT_CODE, "{label}");
+            assert!(
+                !is_stale_handshake_packet_error(&err),
+                "{label}: a live-key authentication failure is not stale traffic"
+            );
+            let err = server
+                .recv_handshake_packet(&tampered)
+                .expect_err("datagram entry point rejects it too");
+            assert_eq!(failure_code(&err), PACKET_UNPROTECT_CODE, "{label}");
+            assert!(!is_stale_handshake_packet_error(&err), "{label}");
+        }
+        let (recovered, _) = server
+            .unprotect_long_header_packet(&prefix, &packet)
+            .expect("the untampered packet still authenticates afterwards");
+        assert_eq!(recovered.packet_number, 2);
+    }
+
+    fn protected_pair() -> (QuicHandshakeDriver, QuicHandshakeDriver) {
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let server_cfg =
+            server_config(vec![leaf_cert()], leaf_key(), alpn.clone()).expect("server config");
+        let client_cfg = client_config(vec![ca_cert()], alpn).expect("client config");
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server = QuicHandshakeDriver::server(server_cfg, b"server-params".to_vec())
+            .expect("server driver");
+        client
+            .install_initial_keys(DCID_BYTES)
+            .expect("client initial keys");
+        server
+            .install_initial_keys(DCID_BYTES)
+            .expect("server initial keys");
+        (client, server)
+    }
+
+    /// GH#70 / RFC 9000 §12.2: a coalesced Initial + Handshake datagram is
+    /// processed completely.
+    ///
+    /// Each packet is bounded by its own Length field, the Handshake keys the
+    /// first packet unlocks are installed before the second is tried, and
+    /// output TLS emits mid-datagram is not lost.
+    #[test]
+    fn coalesced_initial_and_handshake_datagram_is_fully_processed() {
+        let (mut client, mut server) = protected_pair();
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x44]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).expect("server scid");
+
+        let mut client_flight = client.pump_outbound().expect("client flight");
+        assert_eq!(client_flight.len(), 1);
+        let client_initial = client
+            .assemble_handshake_packet(&client_flight.remove(0), dcid, client_scid, 0)
+            .expect("client Initial");
+        server
+            .recv_handshake_packet(&client_initial)
+            .expect("server accepts ClientHello");
+
+        let server_flight = server.pump_outbound().expect("server flight");
+        let mut datagram = Vec::new();
+        let mut boundaries = Vec::new();
+        let mut handshake_packets = 0usize;
+        for (packet_number, segment) in server_flight
+            .iter()
+            .filter(|segment| segment.level != HandshakeLevel::OneRtt)
+            .enumerate()
+        {
+            handshake_packets += usize::from(segment.level == HandshakeLevel::Handshake);
+            let packet = server
+                .assemble_handshake_packet(segment, client_scid, server_scid, packet_number as u64)
+                .expect("server packet");
+            datagram.extend_from_slice(&packet);
+            boundaries.push(datagram.len());
+        }
+        assert!(
+            boundaries.len() >= 2 && handshake_packets >= 1,
+            "the server flight must span Initial and Handshake packets: {boundaries:?}"
+        );
+        // A duplicate of the Initial after the Handshake flight forces the
+        // driver to stage TLS output (the client Finished) mid-datagram.
+        let duplicate_start = datagram.len();
+        let duplicate_initial = datagram[..boundaries[0]].to_vec();
+        datagram.extend_from_slice(&duplicate_initial);
+        // Trailing datagram padding must be ignored.
+        datagram.extend_from_slice(&[0u8; 7]);
+
+        // Each coalesced packet is bounded by its own Length field, not the
+        // datagram end.
+        let first = long_prefix(&datagram);
+        assert_eq!(first.packet_type, LongPacketType::Initial);
+        assert_eq!(
+            first.packet_len(datagram.len()).expect("first bound"),
+            boundaries[0]
+        );
+        let second = long_prefix(&datagram[boundaries[0]..]);
+        assert_eq!(second.packet_type, LongPacketType::Handshake);
+        assert_eq!(
+            second
+                .packet_len(datagram.len() - boundaries[0])
+                .expect("second bound")
+                + boundaries[0],
+            boundaries[1]
+        );
+        let duplicate = long_prefix(&datagram[duplicate_start..]);
+        assert_eq!(duplicate.packet_type, LongPacketType::Initial);
+
+        assert!(!client.handshake_keys_installed());
+        let peer = client
+            .recv_handshake_packet(&datagram)
+            .expect("coalesced datagram");
+        assert_eq!(peer, server_scid);
+        assert!(
+            client.handshake_keys_installed(),
+            "the ServerHello in the first packet installed Handshake keys mid-datagram"
+        );
+        assert!(
+            client.handshake_recv_packet_numbers[0].contains(&0),
+            "Initial packet 0 authenticated"
+        );
+        assert_eq!(
+            client.handshake_recv_packet_numbers[1].len(),
+            handshake_packets,
+            "every coalesced Handshake packet authenticated"
+        );
+        assert!(
+            client.is_complete(),
+            "the client read the server Finished from the coalesced Handshake packet"
+        );
+        assert!(
+            client
+                .staged_segments
+                .iter()
+                .any(|segment| segment.level == HandshakeLevel::Handshake),
+            "the client Finished emitted between coalesced packets is staged, not dropped"
+        );
+        let client_flight = client.pump_outbound().expect("client pump");
+        assert!(
+            client_flight
+                .iter()
+                .any(|segment| segment.level == HandshakeLevel::Handshake),
+            "pump_outbound hands out the staged Finished"
+        );
+        assert!(client.staged_segments.is_empty());
+
+        // The staged flight is a real Finished: the server completes on it.
+        let mut client_pn = 1u64;
+        for segment in client_flight
+            .iter()
+            .filter(|segment| segment.level != HandshakeLevel::OneRtt)
+        {
+            let packet = client
+                .assemble_handshake_packet(segment, server_scid, client_scid, client_pn)
+                .expect("client packet");
+            client_pn += 1;
+            server
+                .recv_handshake_packet(&packet)
+                .expect("server accepts client Finished");
+        }
+        assert!(server.is_complete());
+    }
+
+    /// GH#70: `recv_handshake_packet` failures are classified by key state.
+    /// Only traffic this driver holds no live keys for is stale; a bad tag
+    /// under live keys surfaces as `packet_unprotect`.
+    #[test]
+    fn handshake_unprotect_failures_are_classified_by_key_state() {
+        let (mut client, mut server) = protected_pair();
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x44]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).expect("server scid");
+
+        let mut client_flight = client.pump_outbound().expect("client flight");
+        let client_initial = client
+            .assemble_handshake_packet(&client_flight.remove(0), dcid, client_scid, 0)
+            .expect("client Initial");
+        server
+            .recv_handshake_packet(&client_initial)
+            .expect("server accepts ClientHello");
+        let server_flight = server.pump_outbound().expect("server flight");
+        let server_initial_segment = server_flight
+            .iter()
+            .find(|segment| segment.level == HandshakeLevel::Initial)
+            .expect("ServerHello segment");
+        let server_handshake_segment = server_flight
+            .iter()
+            .find(|segment| segment.level == HandshakeLevel::Handshake)
+            .expect("server Handshake segment");
+        let server_initial = server
+            .assemble_handshake_packet(server_initial_segment, client_scid, server_scid, 0)
+            .expect("server Initial");
+        let server_handshake = server
+            .assemble_handshake_packet(server_handshake_segment, client_scid, server_scid, 1)
+            .expect("server Handshake");
+
+        // (1) Keys not derived yet: a Handshake packet before the ServerHello
+        // was processed. Stale-class (ignorable), TLS state untouched.
+        let err = client
+            .recv_handshake_packet(&server_handshake)
+            .expect_err("no Handshake keys yet");
+        assert_eq!(failure_code(&err), PACKET_KEYS_UNAVAILABLE_CODE);
+        assert!(is_stale_handshake_packet_error(&err));
+        assert!(client.handshake_recv_packet_numbers[1].is_empty());
+
+        // (2) Live keys, corrupted tag: a real authentication failure.
+        let mut forged = server_initial.clone();
+        *forged.last_mut().expect("tag byte") ^= 0x01;
+        let err = client
+            .recv_handshake_packet(&forged)
+            .expect_err("bad tag under live Initial keys");
+        assert_eq!(failure_code(&err), PACKET_UNPROTECT_CODE);
+        assert!(
+            !is_stale_handshake_packet_error(&err),
+            "a live-key authentication failure must surface, not retry"
+        );
+        assert!(client.handshake_recv_packet_numbers[0].is_empty());
+
+        // (3) The same packets in order authenticate once the keys exist.
+        client
+            .recv_handshake_packet(&server_initial)
+            .expect("ServerHello");
+        let _ = client.pump_outbound().expect("install Handshake keys");
+        assert!(client.handshake_keys_installed());
+        client
+            .recv_handshake_packet(&server_handshake)
+            .expect("Handshake packet after keys exist");
+
+        // (4) Keys discarded: a retransmitted client Initial after the server
+        // dropped its Initial keys is stale-class.
+        server
+            .provider_mut()
+            .discard_keys(PacketProtectionSpace::Initial)
+            .expect("discard Initial keys");
+        let err = server
+            .recv_handshake_packet(&client_initial)
+            .expect_err("Initial after Initial keys were discarded");
+        assert_eq!(failure_code(&err), PACKET_KEYS_DISCARDED_CODE);
+        assert!(is_stale_handshake_packet_error(&err));
+
+        // (5) A coalesced datagram whose first packet is stale but whose second
+        // authenticates is a success; one that only contains stale packets
+        // reports the first packet's classification.
+        let mut mixed = client_initial.clone();
+        let client_flight = client.pump_outbound().expect("client Finished");
+        let finished = client_flight
+            .iter()
+            .find(|segment| segment.level == HandshakeLevel::Handshake)
+            .expect("client Finished segment");
+        let client_handshake = client
+            .assemble_handshake_packet(finished, server_scid, client_scid, 1)
+            .expect("client Handshake");
+        mixed.extend_from_slice(&client_handshake);
+        assert_eq!(
+            server
+                .recv_handshake_packet(&mixed)
+                .expect("stale Initial + live Handshake"),
+            client_scid
+        );
+        assert!(server.is_complete());
+        let mut only_stale = client_initial.clone();
+        only_stale.extend_from_slice(&client_initial);
+        let err = server
+            .recv_handshake_packet(&only_stale)
+            .expect_err("two stale packets");
+        assert_eq!(failure_code(&err), PACKET_KEYS_DISCARDED_CODE);
+        assert!(is_stale_handshake_packet_error(&err));
     }
 }

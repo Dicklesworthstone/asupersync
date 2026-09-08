@@ -11,7 +11,9 @@ use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::AtpPacketProtection;
 use crate::net::quic_core::{
-    ConnectionId, LongPacketType, PacketHeader, QuicCoreError, ShortHeader,
+    ConnectionId, LongPacketType, PacketHeader, ProtectedHeaderPrefix, QuicCoreError, ShortHeader,
+    apply_header_protection, decode_packet_number_reconstruct, header_protection_sample,
+    remove_header_protection,
 };
 use crate::net::quic_native::{
     NativeQuicConnection, NativeQuicConnectionConfig, OutgoingPacket, ReceivedPacket,
@@ -601,23 +603,14 @@ impl ConnectionRouter {
                 // frame: the remaining frames must still commit exactly once.
                 // No socket, timer, or other asynchronous wait is masked.
                 let admitted = cx.masked(|| -> Result<bool, ConnectionRouterError> {
-                    let payload = packet.data.get(routing_info.header_len..).ok_or_else(|| {
-                        ConnectionRouterError::PacketProcessingFailed {
-                            connection_id,
-                            reason: "header length exceeded datagram length".to_string(),
-                        }
-                    })?;
                     let protection = handle.packet_protection.as_mut().ok_or(
                         ConnectionRouterError::PacketProtectionUnavailable { connection_id },
                     )?;
-                    let plaintext = unprotect_1rtt_packet_now(
+                    let unprotected = unprotect_1rtt_packet_now(
                         cx,
                         connection_id,
                         &mut protection.protection,
-                        &packet.data[..routing_info.header_len],
-                        payload,
-                        routing_info.packet_number,
-                        routing_info.key_phase,
+                        &packet.data,
                     )?;
                     handle
                         .connection
@@ -630,8 +623,8 @@ impl ConnectionRouter {
                     let processing = handle.connection.process_packet_payload(
                         cx,
                         routing_info.space,
-                        routing_info.packet_number,
-                        &plaintext,
+                        unprotected.header.packet_number,
+                        &unprotected.plaintext,
                         now_micros,
                     );
                     if let Err(error) = processing {
@@ -675,34 +668,26 @@ impl ConnectionRouter {
                     connection_id,
                     reason: err.to_string(),
                 })?;
-            let payload = packet.data.get(routing_info.header_len..).ok_or_else(|| {
-                ConnectionRouterError::PacketProcessingFailed {
-                    connection_id,
-                    reason: "header length exceeded datagram length".to_string(),
-                }
-            })?;
-            let plaintext_payload = if routing_info.space == PacketNumberSpace::ApplicationData {
-                let packet_protection = handle
-                    .packet_protection
-                    .as_mut()
-                    .ok_or(ConnectionRouterError::PacketProtectionUnavailable { connection_id })?;
-                unprotect_1rtt_packet(
-                    cx,
-                    connection_id,
-                    &mut packet_protection.protection,
-                    &packet.data[..routing_info.header_len],
-                    payload,
-                    routing_info.packet_number,
-                    routing_info.key_phase,
-                )
-                .await?
-            } else {
-                payload.to_vec()
-            };
+            let (packet_number, plaintext_payload) =
+                if routing_info.kind == PacketRoutingKind::OneRtt {
+                    let packet_protection = handle.packet_protection.as_mut().ok_or(
+                        ConnectionRouterError::PacketProtectionUnavailable { connection_id },
+                    )?;
+                    let unprotected = unprotect_1rtt_packet(
+                        cx,
+                        connection_id,
+                        &mut packet_protection.protection,
+                        &packet.data,
+                    )
+                    .await?;
+                    (unprotected.header.packet_number, unprotected.plaintext)
+                } else {
+                    plaintext_packet_payload(connection_id, &packet.data)?
+                };
             let processing = handle.connection.process_packet_payload(
                 cx,
                 routing_info.space,
-                routing_info.packet_number,
+                packet_number,
                 &plaintext_payload,
                 now_micros,
             );
@@ -1411,26 +1396,31 @@ impl ConnectionRouter {
         }
     }
 
+    /// Routing needs only the header-protection-invariant prefix.
+    ///
+    /// RFC 9001 §5.4: form/type bits and the destination CID are readable on
+    /// the wire; the packet number and key phase are masked and only become
+    /// readable inside the connection's own unprotect step.
     fn decode_routing_info(
         &self,
         packet: &ReceivedPacket,
     ) -> Result<PacketRoutingInfo, QuicCoreError> {
         if packet.data.first().is_some_and(|first| first & 0x80 != 0) {
-            let (header, header_len) = PacketHeader::decode(&packet.data, 0)?;
-            return PacketRoutingInfo::from_header(header, header_len);
+            let prefix = ProtectedHeaderPrefix::decode(&packet.data, 0)?;
+            return Ok(PacketRoutingInfo::from_prefix(&prefix));
         }
 
         for cid_len in self.known_connection_id_lengths() {
-            if let Ok((header, header_len)) = PacketHeader::decode(&packet.data, cid_len) {
-                let info = PacketRoutingInfo::from_header(header, header_len)?;
+            if let Ok(prefix) = ProtectedHeaderPrefix::decode(&packet.data, cid_len) {
+                let info = PacketRoutingInfo::from_prefix(&prefix);
                 if self.connections.contains_key(&info.destination_cid) {
                     return Ok(info);
                 }
             }
         }
 
-        let (header, header_len) = PacketHeader::decode(&packet.data, 0)?;
-        PacketRoutingInfo::from_header(header, header_len)
+        let prefix = ProtectedHeaderPrefix::decode(&packet.data, 0)?;
+        Ok(PacketRoutingInfo::from_prefix(&prefix))
     }
 
     fn known_connection_id_lengths(&self) -> Vec<usize> {
@@ -1476,15 +1466,12 @@ struct PacketRoutingInfo {
     destination_cid: ConnectionId,
     kind: PacketRoutingKind,
     space: PacketNumberSpace,
-    packet_number: u64,
-    key_phase: bool,
-    header_len: usize,
 }
 
 impl PacketRoutingInfo {
-    fn from_header(header: PacketHeader, header_len: usize) -> Result<Self, QuicCoreError> {
-        match header {
-            PacketHeader::Long(header) => {
+    fn from_prefix(prefix: &ProtectedHeaderPrefix) -> Self {
+        match prefix {
+            ProtectedHeaderPrefix::Long(header) => {
                 let (kind, space) = match header.packet_type {
                     LongPacketType::Initial => {
                         (PacketRoutingKind::Initial, PacketNumberSpace::Initial)
@@ -1498,33 +1485,52 @@ impl PacketRoutingInfo {
                     }
                     LongPacketType::Retry => (PacketRoutingKind::Retry, PacketNumberSpace::Initial),
                 };
-                Ok(Self {
+                Self {
                     destination_cid: header.dst_cid,
                     kind,
                     space,
-                    packet_number: header.packet_number,
-                    key_phase: false,
-                    header_len,
-                })
+                }
             }
-            PacketHeader::Retry(header) => Ok(Self {
+            ProtectedHeaderPrefix::Retry(header) => Self {
                 destination_cid: header.dst_cid,
                 kind: PacketRoutingKind::Retry,
                 space: PacketNumberSpace::Initial,
-                packet_number: 0,
-                key_phase: false,
-                header_len,
-            }),
-            PacketHeader::Short(header) => Ok(Self {
-                destination_cid: header.dst_cid,
+            },
+            ProtectedHeaderPrefix::Short { dst_cid, .. } => Self {
+                destination_cid: *dst_cid,
                 kind: PacketRoutingKind::OneRtt,
                 space: PacketNumberSpace::ApplicationData,
-                packet_number: header.packet_number,
-                key_phase: header.key_phase,
-                header_len,
-            }),
+            },
         }
     }
+}
+
+/// Packet number and payload of a legacy plaintext long-header packet.
+///
+/// The lab/loopback transitions never derive keys, so their headers carry no
+/// protection and are fully decodable on the wire.
+fn plaintext_packet_payload(
+    connection_id: ConnectionId,
+    data: &[u8],
+) -> Result<(u64, Vec<u8>), ConnectionRouterError> {
+    let (header, header_len) = PacketHeader::decode(data, connection_id.len()).map_err(|err| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!("invalid QUIC header: {err}"),
+        }
+    })?;
+    let packet_number = match header {
+        PacketHeader::Long(header) => header.packet_number,
+        PacketHeader::Retry(_) => 0,
+        PacketHeader::Short(header) => header.packet_number,
+    };
+    let payload =
+        data.get(header_len..)
+            .ok_or_else(|| ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: "header length exceeded datagram length".to_string(),
+            })?;
+    Ok((packet_number, payload.to_vec()))
 }
 
 fn instant_micros_from(origin: Instant, instant: Instant) -> u64 {
@@ -1756,6 +1762,48 @@ async fn assemble_protected_1rtt_packet_inner(
         }
     };
 
+    // Finish the wire bytes, including header protection (RFC 9001 §5.4,
+    // GH#69), before the packet is committed as sent: a failure here must
+    // not leave the connection believing a packet left that never did.
+    let mut packet =
+        Vec::with_capacity(header_bytes.len() + protected.ciphertext.len() + protected.tag.len());
+    packet.extend_from_slice(&header_bytes);
+    packet.extend_from_slice(&protected.ciphertext);
+    packet.extend_from_slice(&protected.tag);
+    let packet_number_offset = 1 + connection_id.len();
+    let sample = header_protection_sample(&packet, packet_number_offset).map_err(|err| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!("1-RTT header protection sample: {err}"),
+        }
+    })?;
+    let mask = match packet_protection.header_protection_mask_now(
+        cx,
+        PacketProtectionSpace::OneRtt,
+        &sample,
+    ) {
+        Outcome::Ok(mask) => mask,
+        Outcome::Err(err) => {
+            return Err(ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: format!("1-RTT header protection failed: {err:?}"),
+            });
+        }
+        Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+        Outcome::Panicked(payload) => {
+            return Err(ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: format!("1-RTT header protection panicked: {payload:?}"),
+            });
+        }
+    };
+    apply_header_protection(&mut packet, packet_number_offset, mask.bytes).map_err(|err| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!("1-RTT header protection apply: {err}"),
+        }
+    })?;
+
     let committed_packet_number = if pto_probe {
         connection.on_pto_probe_packet_sent(cx, packet_len as u64, now_micros, frames)
     } else {
@@ -1774,63 +1822,114 @@ async fn assemble_protected_1rtt_packet_inner(
         reason: err.to_string(),
     })?;
     debug_assert_eq!(committed_packet_number, packet_number);
-
-    let mut packet =
-        Vec::with_capacity(header_bytes.len() + protected.ciphertext.len() + protected.tag.len());
-    packet.extend_from_slice(&header_bytes);
-    packet.extend_from_slice(&protected.ciphertext);
-    packet.extend_from_slice(&protected.tag);
     Ok(packet)
 }
 
+/// One authenticated 1-RTT packet: the unmasked short header (with the full,
+/// reconstructed packet number) and the plaintext payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unprotected1RttPacket {
+    pub(crate) header: ShortHeader,
+    pub(crate) plaintext: Vec<u8>,
+}
+
+/// Remove header protection from a received 1-RTT datagram addressed to
+/// `connection_id` and authenticate it. See [`unprotect_1rtt_packet_now`].
 pub(crate) async fn unprotect_1rtt_packet(
     cx: &Cx,
     connection_id: ConnectionId,
     packet_protection: &mut AtpPacketProtection,
-    associated_data: &[u8],
-    protected_payload: &[u8],
-    packet_number: u64,
-    key_phase: bool,
-) -> Result<Vec<u8>, ConnectionRouterError> {
-    unprotect_1rtt_packet_now(
-        cx,
-        connection_id,
-        packet_protection,
-        associated_data,
-        protected_payload,
-        packet_number,
-        key_phase,
-    )
+    packet: &[u8],
+) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
+    unprotect_1rtt_packet_now(cx, connection_id, packet_protection, packet)
 }
 
+/// Unmask and authenticate one short-header packet on the current task.
+///
+/// RFC 9001 §5.4.1 receiver order (GH#69): read the invariant prefix, sample
+/// the ciphertext, unmask the first byte and the packet number with the
+/// peer's header-protection key, reconstruct the full packet number against
+/// the largest one accepted so far, AEAD-open with the unmasked header as
+/// associated data, and only then validate the reserved bits (RFC 9000
+/// §17.3.1 checks them after packet protection is removed).
 fn unprotect_1rtt_packet_now(
     cx: &Cx,
     connection_id: ConnectionId,
     packet_protection: &mut AtpPacketProtection,
-    associated_data: &[u8],
-    protected_payload: &[u8],
-    packet_number: u64,
-    key_phase: bool,
-) -> Result<Vec<u8>, ConnectionRouterError> {
-    if protected_payload.len() < PROTECTED_1RTT_TAG_LEN {
-        return Err(ConnectionRouterError::PacketProcessingFailed {
-            connection_id,
-            reason: format!(
-                "protected 1-RTT packet too short: payload_len={}, tag_len={PROTECTED_1RTT_TAG_LEN}",
-                protected_payload.len()
-            ),
-        });
+    packet: &[u8],
+) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
+    let failed = |reason: String| ConnectionRouterError::PacketProcessingFailed {
+        connection_id,
+        reason,
+    };
+    let prefix = ProtectedHeaderPrefix::decode(packet, connection_id.len())
+        .map_err(|err| failed(format!("invalid 1-RTT header: {err}")))?;
+    let ProtectedHeaderPrefix::Short {
+        dst_cid,
+        packet_number_offset,
+    } = prefix
+    else {
+        return Err(failed("expected a 1-RTT short header".to_string()));
+    };
+    if dst_cid != connection_id {
+        return Err(failed(format!(
+            "1-RTT packet addressed to {dst_cid:?}, not {connection_id:?}"
+        )));
     }
+    let sample = header_protection_sample(packet, packet_number_offset).map_err(|_| {
+        failed(format!(
+            "protected 1-RTT packet too short: len={}, header_len={packet_number_offset}, tag_len={PROTECTED_1RTT_TAG_LEN}",
+            packet.len()
+        ))
+    })?;
+    let mask = match packet_protection.header_protection_mask_remote_now(
+        cx,
+        PacketProtectionSpace::OneRtt,
+        &sample,
+    ) {
+        Outcome::Ok(mask) => mask,
+        Outcome::Err(err) => {
+            return Err(failed(format!(
+                "1-RTT header protection removal failed: {err:?}"
+            )));
+        }
+        Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+        Outcome::Panicked(payload) => {
+            return Err(failed(format!(
+                "1-RTT header protection removal panicked: {payload:?}"
+            )));
+        }
+    };
+    let mut unmasked = packet.to_vec();
+    let packet_number_len =
+        remove_header_protection(&mut unmasked, packet_number_offset, mask.bytes)
+            .map_err(|err| failed(format!("1-RTT header protection removal: {err}")))?;
+    let header_len = packet_number_offset + usize::from(packet_number_len);
+    if unmasked.len() < header_len + PROTECTED_1RTT_TAG_LEN {
+        return Err(failed(format!(
+            "protected 1-RTT packet too short: len={}, header_len={header_len}, tag_len={PROTECTED_1RTT_TAG_LEN}",
+            unmasked.len()
+        )));
+    }
+    let truncated = unmasked[packet_number_offset..header_len]
+        .iter()
+        .fold(0u32, |acc, byte| (acc << 8) | u32::from(*byte));
+    let largest = packet_protection
+        .highest_accepted_packet_number(PacketProtectionSpace::OneRtt)
+        .unwrap_or(0);
+    let packet_number = decode_packet_number_reconstruct(truncated, packet_number_len, largest)
+        .map_err(|err| failed(format!("1-RTT packet number: {err}")))?;
+    let key_phase = unmasked[0] & 0b0000_0100 != 0;
 
-    let tag_offset = protected_payload.len() - PROTECTED_1RTT_TAG_LEN;
-    let tag: [u8; PROTECTED_1RTT_TAG_LEN] = protected_payload[tag_offset..]
+    let tag_offset = unmasked.len() - PROTECTED_1RTT_TAG_LEN;
+    let tag: [u8; PROTECTED_1RTT_TAG_LEN] = unmasked[tag_offset..]
         .try_into()
         .expect("tag length checked above");
     let protected = ProtectedPacket {
         space: PacketProtectionSpace::OneRtt,
         key_phase,
         packet_number,
-        ciphertext: protected_payload[..tag_offset].to_vec(),
+        ciphertext: unmasked[header_len..tag_offset].to_vec(),
         tag,
         proof: ProtectionProof {
             provider_kind: packet_protection.provider_kind(),
@@ -1842,18 +1941,32 @@ fn unprotect_1rtt_packet_now(
         },
     };
 
-    match packet_protection.unprotect_packet_now(cx, &protected, associated_data) {
-        Outcome::Ok(packet) => Ok(packet.plaintext),
-        Outcome::Err(err) => Err(ConnectionRouterError::PacketProcessingFailed {
-            connection_id,
-            reason: format!("1-RTT packet unprotection failed: {err:?}"),
-        }),
-        Outcome::Cancelled(_) => Err(ConnectionRouterError::Cancelled),
-        Outcome::Panicked(payload) => Err(ConnectionRouterError::PacketProcessingFailed {
-            connection_id,
-            reason: format!("1-RTT packet unprotection panicked: {payload:?}"),
-        }),
+    let plaintext =
+        match packet_protection.unprotect_packet_now(cx, &protected, &unmasked[..header_len]) {
+            Outcome::Ok(packet) => packet.plaintext,
+            Outcome::Err(err) => {
+                return Err(failed(format!("1-RTT packet unprotection failed: {err:?}")));
+            }
+            Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+            Outcome::Panicked(payload) => {
+                return Err(failed(format!(
+                    "1-RTT packet unprotection panicked: {payload:?}"
+                )));
+            }
+        };
+
+    // Authenticated: the reserved bits are now trustworthy and must be zero.
+    let (PacketHeader::Short(mut header), consumed) =
+        PacketHeader::decode(&unmasked[..header_len], connection_id.len())
+            .map_err(|err| failed(format!("invalid 1-RTT header: {err}")))?
+    else {
+        return Err(failed("expected a 1-RTT short header".to_string()));
+    };
+    if consumed != header_len {
+        return Err(failed("1-RTT header length mismatch".to_string()));
     }
+    header.packet_number = packet_number;
+    Ok(Unprotected1RttPacket { header, plaintext })
 }
 
 pub(crate) const PROTECTED_1RTT_MAX_PACKET_BYTES: usize = 1_200;
@@ -2603,25 +2716,60 @@ mod tests {
             let packet = &packets[0].data;
             assert_ne!(packet.as_slice(), raw_frame_payload.as_ref());
 
-            let (decoded, header_len) =
-                PacketHeader::decode(packet, connection_id.len()).expect("decode short header");
-            let PacketHeader::Short(header) = decoded else {
+            // On the wire only the invariant prefix is readable (RFC 9001
+            // §5.4): the packet number and key phase are masked until the
+            // receiver removes header protection with the sender's key.
+            let ProtectedHeaderPrefix::Short {
+                dst_cid,
+                packet_number_offset,
+            } = ProtectedHeaderPrefix::decode(packet, connection_id.len())
+                .expect("decode protected short prefix")
+            else {
                 panic!("expected a protected 1-RTT short header packet");
             };
-            assert!(!header.spin);
-            assert!(!header.key_phase);
-            assert_eq!(header.dst_cid, connection_id);
-            assert_eq!(header.packet_number, 0);
-            assert_eq!(header.packet_number_len, PROTECTED_1RTT_PACKET_NUMBER_LEN);
-
-            let protected_payload = &packet[header_len..];
+            assert_eq!(dst_cid, connection_id);
+            assert_eq!(packet_number_offset, 1 + connection_id.len());
+            let header_len = packet_number_offset + usize::from(PROTECTED_1RTT_PACKET_NUMBER_LEN);
             assert_eq!(
-                protected_payload.len(),
-                raw_frame_payload.len() + PROTECTED_1RTT_TAG_LEN
+                packet.len(),
+                header_len + raw_frame_payload.len() + PROTECTED_1RTT_TAG_LEN
             );
             assert_ne!(
-                &protected_payload[..raw_frame_payload.len()],
+                &packet[header_len..header_len + raw_frame_payload.len()],
                 raw_frame_payload.as_ref()
+            );
+            let mut verifier = deterministic_one_rtt_protection(&cx).await;
+            let unprotected = unprotect_1rtt_packet(&cx, connection_id, &mut verifier, packet)
+                .await
+                .expect("unmask and authenticate");
+            assert!(!unprotected.header.spin);
+            assert!(!unprotected.header.key_phase);
+            assert_eq!(unprotected.header.dst_cid, connection_id);
+            assert_eq!(unprotected.header.packet_number, 0);
+            assert_eq!(
+                unprotected.header.packet_number_len,
+                PROTECTED_1RTT_PACKET_NUMBER_LEN
+            );
+            assert_eq!(unprotected.plaintext, raw_frame_payload.as_ref());
+            // Planted negative: a flipped masked bit (packet-number length)
+            // changes the AEAD associated data, so authentication fails.
+            let mut flipped = packet.clone();
+            flipped[0] ^= 0x01;
+            let mut verifier = deterministic_one_rtt_protection(&cx).await;
+            assert!(
+                unprotect_1rtt_packet(&cx, connection_id, &mut verifier, &flipped)
+                    .await
+                    .is_err(),
+                "flipping a header-protected bit must fail authentication"
+            );
+            let mut flipped_pn = packet.clone();
+            flipped_pn[packet_number_offset] ^= 0x80;
+            let mut verifier = deterministic_one_rtt_protection(&cx).await;
+            assert!(
+                unprotect_1rtt_packet(&cx, connection_id, &mut verifier, &flipped_pn)
+                    .await
+                    .is_err(),
+                "flipping a protected packet-number byte must fail authentication"
             );
 
             {
@@ -2762,26 +2910,20 @@ mod tests {
                 "one broken protection provider must not erase healthy output"
             );
             for packet in packets {
-                let (header, header_len) = PacketHeader::decode(&packet.data, 4).unwrap();
-                let PacketHeader::Short(header) = header else {
+                let ProtectedHeaderPrefix::Short { dst_cid, .. } =
+                    ProtectedHeaderPrefix::decode(&packet.data, 4).unwrap()
+                else {
                     panic!("protected short packet required")
                 };
-                assert!(header.dst_cid == ids[0] || header.dst_cid == ids[2]);
+                assert!(dst_cid == ids[0] || dst_cid == ids[2]);
                 let mut protection = deterministic_one_rtt_protection(&cx).await;
-                let payload = unprotect_1rtt_packet(
-                    &cx,
-                    header.dst_cid,
-                    &mut protection,
-                    &packet.data[..header_len],
-                    &packet.data[header_len..],
-                    header.packet_number,
-                    header.key_phase,
-                )
-                .await
-                .unwrap();
+                let unprotected =
+                    unprotect_1rtt_packet(&cx, dst_cid, &mut protection, &packet.data)
+                        .await
+                        .unwrap();
                 let mut expected = BytesMut::new();
                 QuicFrame::Ping.encode(&mut expected).unwrap();
-                assert_eq!(payload, expected.as_ref());
+                assert_eq!(unprotected.plaintext, expected.as_ref());
             }
             assert!(router.next_timer_deadline().unwrap() > now);
             assert!(
@@ -3116,22 +3258,16 @@ mod tests {
                 0
             );
             let packet = &output[0].packet.data;
-            let (PacketHeader::Short(header), header_len) =
-                PacketHeader::decode(packet, cid.len()).unwrap()
+            let ProtectedHeaderPrefix::Short { dst_cid, .. } =
+                ProtectedHeaderPrefix::decode(packet, cid.len()).unwrap()
             else {
                 panic!("protected short packet")
             };
-            let plaintext = unprotect_1rtt_packet(
-                &cx,
-                cid,
-                &mut protection,
-                &packet[..header_len],
-                &packet[header_len..],
-                header.packet_number,
-                header.key_phase,
-            )
-            .await
-            .unwrap();
+            assert_eq!(dst_cid, cid);
+            let plaintext = unprotect_1rtt_packet(&cx, cid, &mut protection, packet)
+                .await
+                .unwrap()
+                .plaintext;
             let mut decoded = plaintext.as_slice();
             let frame = QuicFrame::decode(&mut decoded).unwrap().unwrap();
             assert!(

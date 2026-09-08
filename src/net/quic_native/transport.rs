@@ -389,21 +389,31 @@ impl LossRecovery {
             let time_threshold_lost = pkt.space == space
                 && pkt.packet_number <= global_largest_acked
                 && time_threshold.is_some_and(|boundary| pkt.time_sent_micros <= boundary);
-            let lost = packet_threshold_lost || time_threshold_lost;
-            if lost {
-                event.lost_packets += 1;
-                self.newly_lost_packet_numbers[space.idx()].push(pkt.packet_number);
-                newest_lost_packet_sent_micros = Some(
-                    newest_lost_packet_sent_micros
-                        .map_or(pkt.time_sent_micros, |seen| seen.max(pkt.time_sent_micros)),
-                );
-                if pkt.in_flight {
-                    event.lost_bytes = event.lost_bytes.saturating_add(pkt.bytes);
-                    self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.bytes);
-                }
-            } else {
+            if !(packet_threshold_lost || time_threshold_lost) {
                 survivors.push_back(pkt);
+                continue;
             }
+            if !pkt.in_flight {
+                // RFC 9002 §6.1 / Appendix A.10: only in-flight packets can be
+                // declared lost. A packet that is not in flight (ACK-only)
+                // and sits behind the largest acknowledged packet is simply
+                // forgotten: RFC 9000 §13.2.3 lets a receiver leave
+                // non-ack-eliciting packets out of its ACK ranges, it carries
+                // no retransmittable frame, and it never counted toward
+                // bytes_in_flight. Counting it as lost is what collapsed cwnd
+                // to two packets on clean ~30 ms paths (GH#71): every ACK-only
+                // packet a cwnd-limited sender emitted was "lost" three
+                // packets later and halved the window once per round trip.
+                continue;
+            }
+            event.lost_packets += 1;
+            self.newly_lost_packet_numbers[space.idx()].push(pkt.packet_number);
+            newest_lost_packet_sent_micros = Some(
+                newest_lost_packet_sent_micros
+                    .map_or(pkt.time_sent_micros, |seen| seen.max(pkt.time_sent_micros)),
+            );
+            event.lost_bytes = event.lost_bytes.saturating_add(pkt.bytes);
+            self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.bytes);
         }
         self.sent_packets = survivors;
 
@@ -1468,6 +1478,162 @@ mod tests {
             "pkt 1 should be lost via time threshold"
         );
         assert_eq!(event2.lost_bytes, 100);
+    }
+
+    // ---- GH#71: ACK-only packets are never "lost" ----
+
+    fn ack_only(space: PacketNumberSpace, pn: u64, t: u64) -> SentPacketMeta {
+        SentPacketMeta {
+            space,
+            packet_number: pn,
+            bytes: 40,
+            ack_eliciting: false,
+            in_flight: false,
+            time_sent_micros: t,
+        }
+    }
+
+    /// The exact field sequence from GH#71: a cwnd-limited sender emits an
+    /// ACK-only packet between data packets, the receiver leaves that number
+    /// out of its ACK ranges, and three later data packets get acknowledged.
+    #[test]
+    fn ack_only_packet_behind_acked_data_is_forgotten_without_loss() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+
+        t.on_packet_sent(sent(space, 0, 10_000));
+        t.on_packet_sent(ack_only(space, 1, 10_050));
+        t.on_packet_sent(sent(space, 2, 10_100));
+        t.on_packet_sent(sent(space, 3, 10_200));
+        t.on_packet_sent(sent(space, 4, 10_300));
+        assert_eq!(
+            t.bytes_in_flight(),
+            400,
+            "ACK-only bytes never count as in flight"
+        );
+        let cwnd_before = t.congestion_window_bytes();
+
+        // pn 1 is unacknowledged with pn 4 acked: packet threshold satisfied.
+        let event = t.on_ack_received(space, &[0, 2, 3, 4], 0, 40_000);
+        assert_eq!(event.acked_packets, 4);
+        assert_eq!(event.acked_bytes, 400);
+        assert_eq!(event.lost_packets, 0, "an ACK-only packet cannot be lost");
+        assert_eq!(event.lost_bytes, 0);
+        assert_eq!(t.packets_lost_total(), 0);
+        assert!(t.packet_loss_rate().abs() < f64::EPSILON);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(
+            t.congestion_window_bytes(),
+            cwnd_before + 400,
+            "no congestion event: slow start keeps growing"
+        );
+        assert_eq!(
+            t.ssthresh_bytes(),
+            u64::MAX,
+            "no recovery epoch was entered"
+        );
+        assert!(
+            t.take_newly_lost_packet_numbers(space).is_empty(),
+            "nothing is handed to the retransmission ledger"
+        );
+
+        // The forgotten packet is no longer tracked: a late ACK for it is a
+        // no-op rather than a second accounting of the same number.
+        let late = t.on_ack_received(space, &[1], 0, 50_000);
+        assert_eq!(late, AckEvent::empty());
+        assert_eq!(t.packets_acked_total(), 4);
+    }
+
+    /// Same defect through the time threshold: the ACK-only packet is older
+    /// than loss_delay and behind the largest acked packet.
+    #[test]
+    fn ack_only_packet_older_than_loss_delay_is_forgotten_without_loss() {
+        let mut t = QuicTransportMachine::new();
+        let space = PacketNumberSpace::ApplicationData;
+        // RTT sample of 10 ms => loss_delay 11.25 ms.
+        t.on_packet_sent(sent(space, 0, 10_000));
+        let _ = t.on_ack_received(space, &[0], 0, 20_000);
+        let cwnd_before = t.congestion_window_bytes();
+
+        t.on_packet_sent(ack_only(space, 1, 30_000));
+        t.on_packet_sent(sent(space, 2, 30_100));
+        // now - loss_delay = 48_750 > 30_000, pn 1 <= largest acked (2), but
+        // pn 1 + 3 > 2 so only the time threshold applies.
+        let event = t.on_ack_received(space, &[2], 0, 60_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.lost_packets, 0);
+        assert_eq!(t.packets_lost_total(), 0);
+        assert_eq!(t.congestion_window_bytes(), cwnd_before + 100);
+        assert_eq!(t.ssthresh_bytes(), u64::MAX);
+        assert_eq!(t.on_ack_received(space, &[1], 0, 70_000), AckEvent::empty());
+    }
+
+    /// Planted negative: the identical sequence with an in-flight packet in
+    /// the ACK-only packet's place must still be declared lost, still hand the
+    /// number to the retransmission ledger, and still halve the window.
+    #[test]
+    fn in_flight_packet_in_the_same_gap_is_still_lost() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+
+        t.on_packet_sent(sent(space, 0, 10_000));
+        t.on_packet_sent(sent(space, 1, 10_050));
+        t.on_packet_sent(sent(space, 2, 10_100));
+        t.on_packet_sent(sent(space, 3, 10_200));
+        t.on_packet_sent(sent(space, 4, 10_300));
+        let cwnd_before = t.congestion_window_bytes();
+
+        let event = t.on_ack_received(space, &[0, 2, 3, 4], 0, 40_000);
+        assert_eq!(event.acked_packets, 4);
+        assert_eq!(event.lost_packets, 1);
+        assert_eq!(event.lost_bytes, 100);
+        assert_eq!(t.packets_lost_total(), 1);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.take_newly_lost_packet_numbers(space), vec![1]);
+        let expected = ((cwnd_before + 400) / 2).max(2_400);
+        assert_eq!(t.congestion_window_bytes(), expected, "loss halves cwnd");
+        assert_eq!(t.ssthresh_bytes(), expected);
+    }
+
+    /// The steady state of GH#71: one ACK-only packet per round trip must not
+    /// keep halving the window until it pins at two packets.
+    #[test]
+    fn repeated_ack_only_packets_never_collapse_cwnd() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+        let mut pn = 0u64;
+        let mut now = 100_000u64;
+        for _ in 0..40 {
+            let data_a = pn;
+            t.on_packet_sent(sent(space, data_a, now));
+            t.on_packet_sent(ack_only(space, pn + 1, now + 10));
+            let data_b = pn + 2;
+            let data_c = pn + 3;
+            let data_d = pn + 4;
+            t.on_packet_sent(sent(space, data_b, now + 20));
+            t.on_packet_sent(sent(space, data_c, now + 30));
+            t.on_packet_sent(sent(space, data_d, now + 40));
+            pn += 5;
+            now += 30_000;
+            let event = t.on_ack_received(space, &[data_a, data_b, data_c, data_d], 0, now);
+            assert_eq!(event.acked_packets, 4);
+            assert_eq!(event.lost_packets, 0);
+        }
+        assert_eq!(t.packets_lost_total(), 0);
+        assert_eq!(t.packets_acked_total(), 160);
+        assert_eq!(t.ssthresh_bytes(), u64::MAX);
+        assert_eq!(
+            t.congestion_window_bytes(),
+            12_000 + 160 * 100,
+            "slow start grows by every acked byte and never halves"
+        );
+        assert_eq!(t.bytes_in_flight(), 0);
     }
 
     // ---- Gap 5: Congestion avoidance branch (AIMD after loss) ----

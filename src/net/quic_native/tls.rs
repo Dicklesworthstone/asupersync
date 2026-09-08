@@ -642,12 +642,36 @@ pub trait QuicPacketProtectionProvider {
         Ok(plaintext_len)
     }
 
-    /// Produce QUIC header-protection mask bytes.
+    /// Produce QUIC header-protection mask bytes for **protecting** an
+    /// outgoing header (RFC 9001 §5.4), i.e. with this endpoint's own
+    /// header-protection key for `space`.
+    ///
+    /// `bytes[0]` is applied to the first byte (low four bits of a long
+    /// header, low five of a short header) and `bytes[1..]` to the
+    /// packet-number bytes; see
+    /// [`crate::net::quic_core::apply_header_protection`].
     fn header_protection_mask(
         &self,
         space: PacketProtectionSpace,
         sample: &[u8],
     ) -> Result<HeaderProtectionMask, QuicTlsError>;
+
+    /// Produce QUIC header-protection mask bytes for **removing** protection
+    /// from a received header.
+    ///
+    /// This uses the *peer's* header-protection key for `space` (RFC 9001
+    /// §5.4.1 applies the sender's key on both ends).
+    ///
+    /// Providers whose keys are direction-symmetric (the deterministic lab
+    /// provider) inherit this default; a TLS-derived provider must override
+    /// it, or every received header would be unmasked with the wrong key.
+    fn header_protection_mask_remote(
+        &self,
+        space: PacketProtectionSpace,
+        sample: &[u8],
+    ) -> Result<HeaderProtectionMask, QuicTlsError> {
+        self.header_protection_mask(space, sample)
+    }
 
     /// Derive and install the next key phase.
     fn update_key(
@@ -1131,35 +1155,26 @@ impl QuicPacketProtectionProvider for RustlsQuicCryptoProvider {
         sample: &[u8],
     ) -> Result<HeaderProtectionMask, QuicTlsError> {
         let slot = self.installed_any_phase(space)?;
-        let min = slot.keys.local.header.sample_len();
-        if sample.len() < min {
-            return Err(QuicTlsError::HeaderProtectionSampleTooShort {
-                len: sample.len(),
-                min,
-            });
-        }
+        rustls_header_protection_mask(
+            self.provider_kind(),
+            slot.keys.local.header.as_ref(),
+            space,
+            sample,
+        )
+    }
 
-        let mut first = match space {
-            PacketProtectionSpace::Initial
-            | PacketProtectionSpace::Handshake
-            | PacketProtectionSpace::ZeroRtt => 0x80,
-            PacketProtectionSpace::OneRtt => 0x40,
-        };
-        let original_first = first;
-        let mut packet_number = [0u8; 4];
-        slot.keys
-            .local
-            .header
-            .encrypt_in_place(&sample[..min], &mut first, &mut packet_number)
-            .map_err(|_| QuicTlsError::CryptoProviderFailure {
-                provider: self.provider_kind(),
-                code: "rustls_header_protection_error",
-            })?;
-
-        let mut bytes = [0u8; 5];
-        bytes[0] = first ^ original_first;
-        bytes[1..].copy_from_slice(&packet_number);
-        Ok(HeaderProtectionMask { bytes })
+    fn header_protection_mask_remote(
+        &self,
+        space: PacketProtectionSpace,
+        sample: &[u8],
+    ) -> Result<HeaderProtectionMask, QuicTlsError> {
+        let slot = self.installed_any_phase(space)?;
+        rustls_header_protection_mask(
+            self.provider_kind(),
+            slot.keys.remote.header.as_ref(),
+            space,
+            sample,
+        )
     }
 
     fn update_key(
@@ -1222,6 +1237,52 @@ impl QuicPacketProtectionProvider for RustlsQuicCryptoProvider {
             })
         }
     }
+}
+
+/// Recover the 5-byte RFC 9001 §5.4 header-protection mask from a rustls
+/// header-protection key.
+///
+/// rustls exposes the mask only through its apply routine, which XORs the
+/// first byte's low bits and as many packet-number bytes as the *unmasked*
+/// first byte's length bits announce. Seeding a first byte whose length bits
+/// say "4-byte packet number" (`0x83` long / `0x43` short) and a zero packet
+/// number therefore recovers the whole mask: `bytes[0]` holds the masked low
+/// bits (the only bits ever applied to a real header) and `bytes[1..5]` the
+/// packet-number mask. Seeding `0x80`/`0x40` instead would announce a 1-byte
+/// packet number and leave `bytes[2..5]` zero.
+#[cfg(feature = "tls")]
+fn rustls_header_protection_mask(
+    provider: &'static str,
+    key: &dyn rustls::quic::HeaderProtectionKey,
+    space: PacketProtectionSpace,
+    sample: &[u8],
+) -> Result<HeaderProtectionMask, QuicTlsError> {
+    let min = key.sample_len();
+    if sample.len() < min {
+        return Err(QuicTlsError::HeaderProtectionSampleTooShort {
+            len: sample.len(),
+            min,
+        });
+    }
+
+    let seed = match space {
+        PacketProtectionSpace::Initial
+        | PacketProtectionSpace::Handshake
+        | PacketProtectionSpace::ZeroRtt => 0x83,
+        PacketProtectionSpace::OneRtt => 0x43,
+    };
+    let mut first = seed;
+    let mut packet_number = [0u8; 4];
+    key.encrypt_in_place(&sample[..min], &mut first, &mut packet_number)
+        .map_err(|_| QuicTlsError::CryptoProviderFailure {
+            provider,
+            code: "rustls_header_protection_error",
+        })?;
+
+    let mut bytes = [0u8; 5];
+    bytes[0] = first ^ seed;
+    bytes[1..].copy_from_slice(&packet_number);
+    Ok(HeaderProtectionMask { bytes })
 }
 
 #[cfg(feature = "tls")]
@@ -2262,5 +2323,133 @@ mod tests {
         m.disable_resumption();
         assert!(!m.resumption_enabled());
         assert!(!m.can_send_0rtt());
+    }
+
+    #[cfg(feature = "tls")]
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    /// RFC 9001 Appendix A.1-A.3 header-protection masks in both directions.
+    ///
+    /// Initial keys derived from the client DCID `0x8394c8f03e515708` produce
+    /// the published masks, the client's sending mask is the server's
+    /// receiving mask (and vice versa), and the two directions differ.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn rustls_header_protection_masks_match_rfc9001_appendix_a_in_both_directions() {
+        let dcid = hex("8394c8f03e515708");
+        let transcript = QuicHandshakeTranscript::new();
+        let mut client =
+            RustlsQuicCryptoProvider::new_v1(RustlsQuicProviderSide::Client).expect("client");
+        let mut server =
+            RustlsQuicCryptoProvider::new_v1(RustlsQuicProviderSide::Server).expect("server");
+        client
+            .derive_keys(PacketProtectionSpace::Initial, &transcript, &dcid)
+            .expect("client initial keys");
+        server
+            .derive_keys(PacketProtectionSpace::Initial, &transcript, &dcid)
+            .expect("server initial keys");
+
+        // A.2: sample from the client Initial, masked with the client hp key.
+        let a2_sample = hex("d1b1c98dd7689fb8ec11d242b123dc9b");
+        let a2_mask = [0x43u8, 0x7b, 0x9a, 0xec, 0x36];
+        let client_local = client
+            .header_protection_mask(PacketProtectionSpace::Initial, &a2_sample)
+            .expect("client local mask");
+        let server_remote = server
+            .header_protection_mask_remote(PacketProtectionSpace::Initial, &a2_sample)
+            .expect("server remote mask");
+        // Byte 0 is delivered pre-masked to the bits a long header applies.
+        assert_eq!(client_local.bytes[0], a2_mask[0] & 0x0f);
+        assert_eq!(
+            &client_local.bytes[1..],
+            &a2_mask[1..],
+            "all four pn mask bytes"
+        );
+        assert_eq!(
+            server_remote, client_local,
+            "server unmasks with the client key"
+        );
+
+        // A.3: sample from the server Initial, masked with the server hp key.
+        let a3_sample = hex("2cd0991cd25b0aac406a5816b6394100");
+        let a3_mask = [0x2eu8, 0xc0, 0xd8, 0x35, 0x6a];
+        let server_local = server
+            .header_protection_mask(PacketProtectionSpace::Initial, &a3_sample)
+            .expect("server local mask");
+        let client_remote = client
+            .header_protection_mask_remote(PacketProtectionSpace::Initial, &a3_sample)
+            .expect("client remote mask");
+        assert_eq!(server_local.bytes[0], a3_mask[0] & 0x0f);
+        assert_eq!(&server_local.bytes[1..], &a3_mask[1..]);
+        assert_eq!(
+            client_remote, server_local,
+            "client unmasks with the server key"
+        );
+
+        // Direction matters: each side's own key is not the peer's key.
+        assert_ne!(
+            client
+                .header_protection_mask_remote(PacketProtectionSpace::Initial, &a2_sample)
+                .expect("client remote on A.2 sample"),
+            client_local
+        );
+        assert_ne!(
+            server
+                .header_protection_mask_remote(PacketProtectionSpace::Initial, &a3_sample)
+                .expect("server remote on A.3 sample"),
+            server_local
+        );
+
+        // Short samples fail closed in both directions.
+        assert_eq!(
+            client
+                .header_protection_mask_remote(PacketProtectionSpace::Initial, &a2_sample[..15])
+                .expect_err("15-byte sample")
+                .code(),
+            "header_sample_too_short"
+        );
+        // Discarded keys fail closed in both directions.
+        client
+            .discard_keys(PacketProtectionSpace::Initial)
+            .expect("discard");
+        assert!(
+            client
+                .header_protection_mask_remote(PacketProtectionSpace::Initial, &a2_sample)
+                .is_err()
+        );
+        assert!(
+            client
+                .header_protection_mask(PacketProtectionSpace::Initial, &a2_sample)
+                .is_err()
+        );
+    }
+
+    /// The deterministic lab provider is direction-symmetric, so the trait's
+    /// default `header_protection_mask_remote` is its correct implementation.
+    #[test]
+    fn deterministic_header_protection_is_direction_symmetric() {
+        let transcript = QuicHandshakeTranscript::new();
+        let mut provider = DeterministicQuicCryptoProvider::new();
+        provider
+            .derive_keys(
+                PacketProtectionSpace::OneRtt,
+                &transcript,
+                b"symmetric-seed",
+            )
+            .expect("keys");
+        let sample = b"0123456789abcdef";
+        let local = provider
+            .header_protection_mask(PacketProtectionSpace::OneRtt, sample)
+            .expect("local");
+        let remote = provider
+            .header_protection_mask_remote(PacketProtectionSpace::OneRtt, sample)
+            .expect("remote");
+        assert_eq!(local, remote);
+        assert_ne!(local.bytes, [0u8; 5]);
     }
 }

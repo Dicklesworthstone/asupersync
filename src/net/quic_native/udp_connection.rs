@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use crate::bytes::BytesMut;
 use crate::cx::Cx;
 use crate::net::atp::quic::{AtpPacketProtection, AtpPacketProtectionConfig};
-use crate::net::quic_core::{ConnectionId, PacketHeader, TransportParameters};
+use crate::net::quic_core::{ConnectionId, ProtectedHeaderPrefix, TransportParameters};
 use crate::time::timeout;
 
 use super::connection::{NativeQuicConnectionConfig, NativeQuicConnectionError};
@@ -772,36 +772,34 @@ impl NativeQuicUdpConnection {
                 continue;
             }
 
-            let Ok((PacketHeader::Short(header), header_len)) =
-                PacketHeader::decode(&packet.data, self.local_cid.len())
+            // Only the header-protection-invariant prefix is readable before
+            // the peer's HP key unmasks the packet number (RFC 9001 §5.4);
+            // `unprotect_1rtt_packet` does the unmask + AEAD in RFC order.
+            let Ok(ProtectedHeaderPrefix::Short { dst_cid, .. }) =
+                ProtectedHeaderPrefix::decode(&packet.data, self.local_cid.len())
             else {
                 progress.packets_dropped = progress.packets_dropped.saturating_add(1);
                 continue;
             };
-            if header.dst_cid != self.local_cid || header_len > packet.data.len() {
+            if dst_cid != self.local_cid {
                 progress.packets_dropped = progress.packets_dropped.saturating_add(1);
                 continue;
             }
-            let plaintext = match unprotect_1rtt_packet(
-                cx,
-                self.local_cid,
-                &mut self.protection,
-                &packet.data[..header_len],
-                &packet.data[header_len..],
-                header.packet_number,
-                header.key_phase,
-            )
-            .await
-            {
-                Ok(plaintext) => plaintext,
-                Err(ConnectionRouterError::Cancelled) => {
-                    return Err(NativeQuicUdpConnectionError::Cancelled);
-                }
-                Err(_) => {
-                    progress.packets_dropped = progress.packets_dropped.saturating_add(1);
-                    continue;
-                }
-            };
+            let unprotected =
+                match unprotect_1rtt_packet(cx, self.local_cid, &mut self.protection, &packet.data)
+                    .await
+                {
+                    Ok(unprotected) => unprotected,
+                    Err(ConnectionRouterError::Cancelled) => {
+                        return Err(NativeQuicUdpConnectionError::Cancelled);
+                    }
+                    Err(_) => {
+                        progress.packets_dropped = progress.packets_dropped.saturating_add(1);
+                        continue;
+                    }
+                };
+            let header = unprotected.header;
+            let plaintext = unprotected.plaintext;
             self.connection
                 .inner_mut()
                 .on_datagram_received(cx, packet.data.len() as u64)?;

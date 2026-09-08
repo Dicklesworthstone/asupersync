@@ -4,6 +4,7 @@
 //! - QUIC varint codec
 //! - Connection ID representation
 //! - Initial/short packet header codecs
+//! - Header-protection sampling and mask application (RFC 9001 §5.4)
 //! - Transport parameter TLV codec
 //!
 //! This module is intentionally runtime-agnostic and memory-safe.
@@ -14,6 +15,15 @@ use std::fmt;
 pub const QUIC_VARINT_MAX: u64 = (1u64 << 62) - 1;
 /// Maximum QUIC packet number value (2^62 - 1).
 pub const QUIC_PACKET_NUMBER_MAX: u64 = QUIC_VARINT_MAX;
+/// Header-protection sample length (RFC 9001 §5.4.2): every QUIC v1 AEAD
+/// samples 16 bytes of the protected payload.
+pub const HEADER_PROTECTION_SAMPLE_LEN: usize = 16;
+/// Maximum encoded packet-number width in bytes (RFC 9000 §17.1).
+///
+/// The header-protection sample is taken as if the packet number were this
+/// wide (RFC 9001 §5.4.2), which is what makes sampling possible before the
+/// real width is known.
+pub const MAX_PACKET_NUMBER_LEN: usize = 4;
 
 /// Transport parameter: max_idle_timeout.
 pub const TP_MAX_IDLE_TIMEOUT: u64 = 0x01;
@@ -246,6 +256,212 @@ impl PacketHeader {
             decode_short_header(input, short_dcid_len).map(|(h, n)| (Self::Short(h), n))
         }
     }
+}
+
+/// Long-header fields that header protection never covers (RFC 9001 §5.4.1).
+///
+/// Everything a receiver needs to route the packet, bound its ciphertext and
+/// locate the header-protection sample is here; the reserved bits, the
+/// packet-number length and the packet number itself stay masked until
+/// [`remove_header_protection`] runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedLongHeaderPrefix {
+    /// Long-header packet type (never Retry; see [`ProtectedHeaderPrefix::Retry`]).
+    pub packet_type: LongPacketType,
+    /// QUIC version field.
+    pub version: u32,
+    /// Destination connection ID.
+    pub dst_cid: ConnectionId,
+    /// Source connection ID.
+    pub src_cid: ConnectionId,
+    /// Initial token (only present for Initial packets).
+    pub token: Vec<u8>,
+    /// Length field: packet number + AEAD ciphertext + tag, in bytes.
+    pub payload_length: u64,
+    /// Offset of the (still protected) packet-number field.
+    pub packet_number_offset: usize,
+}
+
+impl ProtectedLongHeaderPrefix {
+    /// Wire length of this packet inside a datagram of `datagram_len` bytes:
+    /// the packet-number offset plus the Length field (RFC 9000 §17.2).
+    pub fn packet_len(&self, datagram_len: usize) -> Result<usize, QuicCoreError> {
+        let payload_length =
+            usize::try_from(self.payload_length).map_err(|_| QuicCoreError::UnexpectedEof)?;
+        let end = self
+            .packet_number_offset
+            .checked_add(payload_length)
+            .ok_or(QuicCoreError::UnexpectedEof)?;
+        if end > datagram_len {
+            return Err(QuicCoreError::UnexpectedEof);
+        }
+        Ok(end)
+    }
+}
+
+/// The part of a still-protected QUIC packet header that a receiver may read
+/// before removing header protection (RFC 9001 §5.4).
+///
+/// [`PacketHeader::decode`] validates the reserved bits and reads the
+/// packet-number length from the first byte; on a packet that still carries
+/// header protection those bits are masked, so it must only run after
+/// [`remove_header_protection`]. This prefix decoder is the pre-unmask view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtectedHeaderPrefix {
+    /// Initial / 0-RTT / Handshake packet.
+    Long(ProtectedLongHeaderPrefix),
+    /// Retry packet (carries no header protection; fully decoded).
+    Retry(RetryHeader),
+    /// 1-RTT short-header packet.
+    Short {
+        /// Destination connection ID.
+        dst_cid: ConnectionId,
+        /// Offset of the (still protected) packet-number field.
+        packet_number_offset: usize,
+    },
+}
+
+impl ProtectedHeaderPrefix {
+    /// Decode the unprotected prefix of a packet header.
+    ///
+    /// `short_dcid_len` is required because short headers do not carry CID
+    /// length. Only the invariant fields are validated (form/fixed bits, CID
+    /// lengths, Retry reserved bits); a long header's Length field is checked
+    /// against the buffer by [`Self::packet_len`].
+    pub fn decode(input: &[u8], short_dcid_len: usize) -> Result<Self, QuicCoreError> {
+        if input.is_empty() {
+            return Err(QuicCoreError::UnexpectedEof);
+        }
+        if input[0] & 0x80 == 0 {
+            decode_short_header_prefix(input, short_dcid_len)
+        } else {
+            decode_long_header_prefix(input)
+        }
+    }
+
+    /// Destination connection ID (routing key; never protected).
+    #[must_use]
+    pub fn dst_cid(&self) -> ConnectionId {
+        match self {
+            Self::Long(prefix) => prefix.dst_cid,
+            Self::Retry(header) => header.dst_cid,
+            Self::Short { dst_cid, .. } => *dst_cid,
+        }
+    }
+
+    /// Offset of the packet-number field, or `None` for Retry packets.
+    #[must_use]
+    pub fn packet_number_offset(&self) -> Option<usize> {
+        match self {
+            Self::Long(prefix) => Some(prefix.packet_number_offset),
+            Self::Retry(_) => None,
+            Self::Short {
+                packet_number_offset,
+                ..
+            } => Some(*packet_number_offset),
+        }
+    }
+
+    /// Wire length of this packet inside a datagram of `datagram_len` bytes.
+    ///
+    /// Long-header packets end where their Length field says, which is what
+    /// lets coalesced packets (RFC 9000 §12.2) be separated before any key is
+    /// touched. Short-header and Retry packets extend to the end of the
+    /// datagram.
+    pub fn packet_len(&self, datagram_len: usize) -> Result<usize, QuicCoreError> {
+        match self {
+            Self::Long(prefix) => prefix.packet_len(datagram_len),
+            Self::Retry(_) | Self::Short { .. } => Ok(datagram_len),
+        }
+    }
+}
+
+/// Take the header-protection sample (RFC 9001 §5.4.2): 16 bytes starting
+/// [`MAX_PACKET_NUMBER_LEN`] bytes past the packet-number offset.
+///
+/// The sample position assumes the widest packet number, so the same bytes
+/// are sampled whether the real packet number is 1 or 4 bytes wide; this is
+/// what lets the receiver sample before it knows the width.
+pub fn header_protection_sample(
+    packet: &[u8],
+    packet_number_offset: usize,
+) -> Result<[u8; HEADER_PROTECTION_SAMPLE_LEN], QuicCoreError> {
+    let start = packet_number_offset
+        .checked_add(MAX_PACKET_NUMBER_LEN)
+        .ok_or(QuicCoreError::UnexpectedEof)?;
+    let end = start
+        .checked_add(HEADER_PROTECTION_SAMPLE_LEN)
+        .ok_or(QuicCoreError::UnexpectedEof)?;
+    let bytes = packet.get(start..end).ok_or(QuicCoreError::UnexpectedEof)?;
+    let mut sample = [0u8; HEADER_PROTECTION_SAMPLE_LEN];
+    sample.copy_from_slice(bytes);
+    Ok(sample)
+}
+
+/// Bits of the first byte covered by header protection (RFC 9001 §5.4.1):
+/// the low four bits of a long header, the low five of a short header.
+const fn header_protection_first_byte_bits(first: u8) -> u8 {
+    if first & 0x80 == 0 { 0x1f } else { 0x0f }
+}
+
+/// Apply header protection to an unprotected packet in place (sender side).
+///
+/// RFC 9001 §5.4.1: `packet` must be `header || protected payload` with the
+/// packet number at `packet_number_offset`; the packet-number width is read
+/// from the still-unmasked first byte. `mask` is the 5-byte provider output
+/// for the sample at [`header_protection_sample`].
+pub fn apply_header_protection(
+    packet: &mut [u8],
+    packet_number_offset: usize,
+    mask: [u8; 5],
+) -> Result<(), QuicCoreError> {
+    let first = *packet.first().ok_or(QuicCoreError::UnexpectedEof)?;
+    let pn_len = usize::from(first & 0x03) + 1;
+    mask_packet_number(packet, packet_number_offset, pn_len, mask)?;
+    packet[0] = first ^ (mask[0] & header_protection_first_byte_bits(first));
+    Ok(())
+}
+
+/// Remove header protection from a received packet in place (receiver side).
+///
+/// RFC 9001 §5.4.1: returns the packet-number width the unmasked first byte
+/// reveals. After this returns, [`PacketHeader::decode`] yields the real
+/// header (reserved bits validated, truncated packet number read) and
+/// `packet[..packet_number_offset + width]` is the AEAD associated data.
+pub fn remove_header_protection(
+    packet: &mut [u8],
+    packet_number_offset: usize,
+    mask: [u8; 5],
+) -> Result<u8, QuicCoreError> {
+    let first = *packet.first().ok_or(QuicCoreError::UnexpectedEof)?;
+    let unmasked = first ^ (mask[0] & header_protection_first_byte_bits(first));
+    let pn_len = (unmasked & 0x03) + 1;
+    mask_packet_number(packet, packet_number_offset, usize::from(pn_len), mask)?;
+    packet[0] = unmasked;
+    Ok(pn_len)
+}
+
+fn mask_packet_number(
+    packet: &mut [u8],
+    packet_number_offset: usize,
+    pn_len: usize,
+    mask: [u8; 5],
+) -> Result<(), QuicCoreError> {
+    if packet_number_offset == 0 {
+        return Err(QuicCoreError::InvalidHeader(
+            "packet number cannot start at the first byte",
+        ));
+    }
+    let end = packet_number_offset
+        .checked_add(pn_len)
+        .ok_or(QuicCoreError::UnexpectedEof)?;
+    let packet_number = packet
+        .get_mut(packet_number_offset..end)
+        .ok_or(QuicCoreError::UnexpectedEof)?;
+    for (byte, mask_byte) in packet_number.iter_mut().zip(&mask[1..=pn_len]) {
+        *byte ^= mask_byte;
+    }
+    Ok(())
 }
 
 /// Unknown transport parameter preserved byte-for-byte.
@@ -565,6 +781,50 @@ fn encode_short_header(header: &ShortHeader, out: &mut Vec<u8>) -> Result<(), Qu
 }
 
 fn decode_long_header(input: &[u8]) -> Result<(PacketHeader, usize), QuicCoreError> {
+    let prefix = match decode_long_header_prefix(input)? {
+        ProtectedHeaderPrefix::Retry(header) => {
+            return Ok((PacketHeader::Retry(header), input.len()));
+        }
+        ProtectedHeaderPrefix::Long(prefix) => prefix,
+        ProtectedHeaderPrefix::Short { .. } => {
+            unreachable!("long-header prefix decoder never yields a short header")
+        }
+    };
+    let first = input[0];
+    if first & 0x0c != 0 {
+        return Err(QuicCoreError::InvalidHeader(
+            "long header reserved bits set",
+        ));
+    }
+    let pn_len = (first & 0x03) + 1;
+    if prefix.payload_length < u64::from(pn_len) {
+        return Err(QuicCoreError::InvalidHeader(
+            "payload length smaller than packet number length",
+        ));
+    }
+
+    let mut pos = prefix.packet_number_offset;
+    let packet_number = read_packet_number(input, &mut pos, pn_len)?;
+    Ok((
+        PacketHeader::Long(LongHeader {
+            packet_type: prefix.packet_type,
+            version: prefix.version,
+            dst_cid: prefix.dst_cid,
+            src_cid: prefix.src_cid,
+            token: prefix.token,
+            payload_length: prefix.payload_length,
+            packet_number: packet_number as u64,
+            packet_number_len: pn_len,
+        }),
+        pos,
+    ))
+}
+
+/// Parse the header-protection-invariant part of a long header.
+///
+/// That is everything up to (not including) the packet number. Retry
+/// packets, which carry no header protection, are decoded completely here.
+fn decode_long_header_prefix(input: &[u8]) -> Result<ProtectedHeaderPrefix, QuicCoreError> {
     if input.len() < 6 {
         return Err(QuicCoreError::UnexpectedEof);
     }
@@ -579,18 +839,11 @@ fn decode_long_header(input: &[u8]) -> Result<(PacketHeader, usize), QuicCoreErr
         3 => LongPacketType::Retry,
         _ => unreachable!("2-bit pattern"),
     };
-    if matches!(packet_type, LongPacketType::Retry) {
-        if first & 0x0f != 0 {
-            return Err(QuicCoreError::InvalidHeader(
-                "retry header reserved bits set",
-            ));
-        }
-    } else if first & 0x0c != 0 {
+    if matches!(packet_type, LongPacketType::Retry) && first & 0x0f != 0 {
         return Err(QuicCoreError::InvalidHeader(
-            "long header reserved bits set",
+            "retry header reserved bits set",
         ));
     }
-    let pn_len = (first & 0x03) + 1;
 
     let mut pos = 1usize;
     let version = u32::from_be_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]]);
@@ -615,16 +868,13 @@ fn decode_long_header(input: &[u8]) -> Result<(PacketHeader, usize), QuicCoreErr
         let integrity_tag = input[token_end..]
             .try_into()
             .map_err(|_| QuicCoreError::UnexpectedEof)?;
-        return Ok((
-            PacketHeader::Retry(RetryHeader {
-                version,
-                dst_cid,
-                src_cid,
-                token,
-                integrity_tag,
-            }),
-            input.len(),
-        ));
+        return Ok(ProtectedHeaderPrefix::Retry(RetryHeader {
+            version,
+            dst_cid,
+            src_cid,
+            token,
+            integrity_tag,
+        }));
     }
 
     let token = if matches!(packet_type, LongPacketType::Initial) {
@@ -643,26 +893,35 @@ fn decode_long_header(input: &[u8]) -> Result<(PacketHeader, usize), QuicCoreErr
 
     let (payload_length, consumed) = decode_varint(&input[pos..])?;
     pos += consumed;
-    if payload_length < u64::from(pn_len) {
-        return Err(QuicCoreError::InvalidHeader(
-            "payload length smaller than packet number length",
-        ));
-    }
+    Ok(ProtectedHeaderPrefix::Long(ProtectedLongHeaderPrefix {
+        packet_type,
+        version,
+        dst_cid,
+        src_cid,
+        token,
+        payload_length,
+        packet_number_offset: pos,
+    }))
+}
 
-    let packet_number = read_packet_number(input, &mut pos, pn_len)?;
-    Ok((
-        PacketHeader::Long(LongHeader {
-            packet_type,
-            version,
-            dst_cid,
-            src_cid,
-            token,
-            payload_length,
-            packet_number: packet_number as u64,
-            packet_number_len: pn_len,
-        }),
-        pos,
-    ))
+/// Parse the header-protection-invariant part of a short header: the first
+/// byte's form/fixed bits and the destination connection ID.
+fn decode_short_header_prefix(
+    input: &[u8],
+    short_dcid_len: usize,
+) -> Result<ProtectedHeaderPrefix, QuicCoreError> {
+    if input.is_empty() {
+        return Err(QuicCoreError::UnexpectedEof);
+    }
+    if input[0] & 0x40 == 0 {
+        return Err(QuicCoreError::InvalidHeader("short header fixed bit unset"));
+    }
+    let mut pos = 1usize;
+    let dst_cid = read_cid(input, &mut pos, short_dcid_len)?;
+    Ok(ProtectedHeaderPrefix::Short {
+        dst_cid,
+        packet_number_offset: pos,
+    })
 }
 
 fn decode_short_header(
@@ -685,8 +944,14 @@ fn decode_short_header(
     let spin = first & 0b0010_0000 != 0;
     let key_phase = first & 0b0000_0100 != 0;
 
-    let mut pos = 1usize;
-    let dst_cid = read_cid(input, &mut pos, short_dcid_len)?;
+    let ProtectedHeaderPrefix::Short {
+        dst_cid,
+        packet_number_offset,
+    } = decode_short_header_prefix(input, short_dcid_len)?
+    else {
+        unreachable!("short-header prefix decoder never yields a long header")
+    };
+    let mut pos = packet_number_offset;
     let packet_number = read_packet_number(input, &mut pos, pn_len)?;
     Ok((
         ShortHeader {
@@ -2332,5 +2597,398 @@ mod tests {
                 "RFC 9000 §10.1: local={local:?}, peer={peer:?} → expected {expected:?} ({label}); got {actual:?}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // RFC 9001 §5.4 header protection (GH#69). The masks below are the ones
+    // printed in RFC 9001 Appendix A; the AEAD/HP key derivation that
+    // produces them is exercised against the same vectors in
+    // `quic_native::handshake_driver` (AES-128-GCM via the rustls provider).
+    // ---------------------------------------------------------------------
+
+    fn hex(text: &str) -> Vec<u8> {
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(compact.len() % 2, 0, "even number of hex digits");
+        (0..compact.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&compact[i..i + 2], 16).expect("hex digit"))
+            .collect()
+    }
+
+    /// RFC 9001 A.2: the unprotected client Initial header (pn 2, 4-byte pn).
+    const RFC9001_A2_HEADER: &str = "c300000001088394c8f03e5157080000449e00000002";
+    /// RFC 9001 A.2: mask = AES-ECB(hp, sample)[0..5].
+    const RFC9001_A2_MASK: [u8; 5] = [0x43, 0x7b, 0x9a, 0xec, 0x36];
+    /// RFC 9001 A.2: the first 38 bytes of the protected packet (header + sample).
+    const RFC9001_A2_PROTECTED_PREFIX: &str =
+        "c000000001088394c8f03e5157080000449e7b9aec34d1b1c98dd7689fb8ec11d242b123dc9b";
+    /// RFC 9001 A.3: the unprotected server Initial header (pn 1, 2-byte pn).
+    const RFC9001_A3_HEADER: &str = "c1000000010008f067a5502a4262b50040750001";
+    const RFC9001_A3_MASK: [u8; 5] = [0x2e, 0xc0, 0xd8, 0x35, 0x6a];
+    /// RFC 9001 A.3: the first 38 bytes of the protected packet.
+    const RFC9001_A3_PROTECTED_PREFIX: &str =
+        "cf000000010008f067a5502a4262b5004075c0d95a482cd0991cd25b0aac406a5816b6394100";
+
+    #[test]
+    fn rfc9001_a2_client_initial_header_protection_round_trips() {
+        let header = hex(RFC9001_A2_HEADER);
+        let protected = hex(RFC9001_A2_PROTECTED_PREFIX);
+        let pn_offset = header.len() - 4;
+        assert_eq!(pn_offset, 18, "A.2 packet number starts at byte 18");
+
+        // Sender direction: header || (protected payload) masked with the RFC mask.
+        let mut packet = header.clone();
+        packet.extend_from_slice(&protected[header.len()..]);
+        apply_header_protection(&mut packet, pn_offset, RFC9001_A2_MASK).expect("apply");
+        assert_eq!(packet, protected, "A.2 protected header + sample bytes");
+
+        // Receiver direction: the prefix is readable while still protected.
+        let prefix = ProtectedHeaderPrefix::decode(&packet, 0).expect("protected prefix");
+        let ProtectedHeaderPrefix::Long(long) = &prefix else {
+            panic!("client Initial is a long header");
+        };
+        assert_eq!(long.packet_type, LongPacketType::Initial);
+        assert_eq!(long.version, 1);
+        assert_eq!(long.dst_cid.as_bytes(), &hex("8394c8f03e515708")[..]);
+        assert!(long.src_cid.is_empty());
+        assert!(long.token.is_empty());
+        assert_eq!(long.payload_length, 1182);
+        assert_eq!(long.packet_number_offset, pn_offset);
+        assert_eq!(
+            header_protection_sample(&packet, pn_offset).expect("sample"),
+            &hex("d1b1c98dd7689fb8ec11d242b123dc9b")[..],
+            "sample starts 4 bytes past the packet-number offset"
+        );
+
+        let pn_len =
+            remove_header_protection(&mut packet, pn_offset, RFC9001_A2_MASK).expect("remove");
+        assert_eq!(pn_len, 4);
+        assert_eq!(&packet[..header.len()], &header[..]);
+        let (decoded, consumed) = PacketHeader::decode(&packet, 0).expect("unprotected header");
+        assert_eq!(consumed, header.len());
+        let PacketHeader::Long(decoded) = decoded else {
+            panic!("long header")
+        };
+        assert_eq!(decoded.packet_number, 2);
+        assert_eq!(decoded.packet_number_len, 4);
+    }
+
+    #[test]
+    fn rfc9001_a3_server_initial_header_protection_round_trips_two_byte_pn() {
+        let header = hex(RFC9001_A3_HEADER);
+        let protected = hex(RFC9001_A3_PROTECTED_PREFIX);
+        let pn_offset = header.len() - 2;
+        assert_eq!(pn_offset, 18);
+
+        let mut packet = header.clone();
+        packet.extend_from_slice(&protected[header.len()..]);
+        // The sample is taken as if the packet number were 4 bytes wide, so
+        // it starts inside the ciphertext for a 2-byte packet number.
+        assert_eq!(
+            header_protection_sample(&packet, pn_offset).expect("sample"),
+            &hex("2cd0991cd25b0aac406a5816b6394100")[..]
+        );
+        apply_header_protection(&mut packet, pn_offset, RFC9001_A3_MASK).expect("apply");
+        assert_eq!(packet, protected);
+
+        let pn_len =
+            remove_header_protection(&mut packet, pn_offset, RFC9001_A3_MASK).expect("remove");
+        assert_eq!(pn_len, 2);
+        assert_eq!(&packet[..header.len()], &header[..]);
+        let (PacketHeader::Long(decoded), consumed) =
+            PacketHeader::decode(&packet, 0).expect("unprotected header")
+        else {
+            panic!("long header")
+        };
+        assert_eq!(consumed, header.len());
+        assert_eq!(decoded.packet_number, 1);
+        assert_eq!(decoded.packet_number_len, 2);
+        assert_eq!(decoded.dst_cid.len(), 0);
+        assert_eq!(decoded.src_cid.as_bytes(), &hex("f067a5502a4262b5")[..]);
+        assert_eq!(decoded.payload_length, 0x75);
+    }
+
+    /// RFC 8439 §2.3 ChaCha20 block function, used only to compute the RFC
+    /// 9001 §5.4.4 header-protection mask for the A.5 vector without a
+    /// production dependency on a raw ChaCha20 primitive.
+    fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
+        fn quarter_round(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+            s[a] = s[a].wrapping_add(s[b]);
+            s[d] ^= s[a];
+            s[d] = s[d].rotate_left(16);
+            s[c] = s[c].wrapping_add(s[d]);
+            s[b] ^= s[c];
+            s[b] = s[b].rotate_left(12);
+            s[a] = s[a].wrapping_add(s[b]);
+            s[d] ^= s[a];
+            s[d] = s[d].rotate_left(8);
+            s[c] = s[c].wrapping_add(s[d]);
+            s[b] ^= s[c];
+            s[b] = s[b].rotate_left(7);
+        }
+        let mut state = [0u32; 16];
+        state[0] = 0x6170_7865;
+        state[1] = 0x3320_646e;
+        state[2] = 0x7962_2d32;
+        state[3] = 0x6b20_6574;
+        for (i, word) in key.chunks_exact(4).enumerate() {
+            state[4 + i] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        state[12] = counter;
+        for (i, word) in nonce.chunks_exact(4).enumerate() {
+            state[13 + i] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        let mut working = state;
+        for _ in 0..10 {
+            quarter_round(&mut working, 0, 4, 8, 12);
+            quarter_round(&mut working, 1, 5, 9, 13);
+            quarter_round(&mut working, 2, 6, 10, 14);
+            quarter_round(&mut working, 3, 7, 11, 15);
+            quarter_round(&mut working, 0, 5, 10, 15);
+            quarter_round(&mut working, 1, 6, 11, 12);
+            quarter_round(&mut working, 2, 7, 8, 13);
+            quarter_round(&mut working, 3, 4, 9, 14);
+        }
+        let mut out = [0u8; 64];
+        for (i, chunk) in out.chunks_exact_mut(4).enumerate() {
+            chunk.copy_from_slice(&working[i].wrapping_add(state[i]).to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn rfc9001_a5_chacha20_short_header_protection_vector() {
+        // RFC 9001 §5.4.4: counter = sample[0..4] (little endian),
+        // nonce = sample[4..16], mask = ChaCha20(hp, counter, nonce, {0}^5).
+        let hp: [u8; 32] = hex("25a282b9e82f06f21f488917a4fc8f1b73573685608597d0efcb076b0ab7a7a4")
+            .try_into()
+            .expect("32-byte hp key");
+        let sample_bytes = hex("5e5cd55c41f69080575d7999c25a5bfb");
+        let counter = u32::from_le_bytes([
+            sample_bytes[0],
+            sample_bytes[1],
+            sample_bytes[2],
+            sample_bytes[3],
+        ]);
+        let nonce: [u8; 12] = sample_bytes[4..16].try_into().expect("12-byte nonce");
+        let keystream = chacha20_block(&hp, counter, &nonce);
+        let mut mask = [0u8; 5];
+        mask.copy_from_slice(&keystream[..5]);
+        assert_eq!(mask, [0xae, 0xfe, 0xfe, 0x7d, 0x03], "A.5 mask");
+
+        // Empty DCID: packet number starts at byte 1; 3-byte pn (0x42 & 0x03 = 2).
+        let unprotected = hex("4200bff4655e5cd55c41f69080575d7999c25a5bfb");
+        let protected = hex("4cfe4189655e5cd55c41f69080575d7999c25a5bfb");
+        assert_eq!(protected.len(), 21, "smallest possible packet");
+        let pn_offset = 1;
+        assert_eq!(
+            header_protection_sample(&unprotected, pn_offset).expect("sample"),
+            &sample_bytes[..],
+            "A.5 skips one ciphertext byte to sample past a 4-byte pn"
+        );
+
+        let mut packet = unprotected.clone();
+        apply_header_protection(&mut packet, pn_offset, mask).expect("apply");
+        assert_eq!(packet, protected);
+
+        let ProtectedHeaderPrefix::Short {
+            dst_cid,
+            packet_number_offset,
+        } = ProtectedHeaderPrefix::decode(&packet, 0).expect("protected short prefix")
+        else {
+            panic!("short header")
+        };
+        assert!(dst_cid.is_empty());
+        assert_eq!(packet_number_offset, pn_offset);
+
+        let pn_len = remove_header_protection(&mut packet, pn_offset, mask).expect("remove");
+        assert_eq!(pn_len, 3);
+        assert_eq!(packet, unprotected);
+        let (PacketHeader::Short(header), consumed) =
+            PacketHeader::decode(&packet, 0).expect("unprotected short header")
+        else {
+            panic!("short header")
+        };
+        assert_eq!(consumed, 4);
+        assert_eq!(header.packet_number, 0x00bf_f4);
+        assert_eq!(header.packet_number_len, 3);
+        assert!(!header.spin);
+        assert!(!header.key_phase);
+        // RFC 9001 A.5: 654360564 is encoded as the low 3 bytes 0x00bff4 and
+        // reconstructed from the largest packet number seen so far.
+        assert_eq!(
+            decode_packet_number_reconstruct(0x00bf_f4, 3, 654_360_563).expect("reconstruct"),
+            654_360_564
+        );
+    }
+
+    #[test]
+    fn header_protection_flipped_masked_bits_change_the_recovered_header() {
+        let header = hex(RFC9001_A2_HEADER);
+        let protected = hex(RFC9001_A2_PROTECTED_PREFIX);
+        let pn_offset = 18;
+
+        // Flip the low bit of the protected first byte: the unmasked packet
+        // number length changes (4 -> 3) so the header/AAD no longer matches.
+        let mut flipped_len = protected.clone();
+        flipped_len[0] ^= 0x01;
+        let pn_len = remove_header_protection(&mut flipped_len, pn_offset, RFC9001_A2_MASK)
+            .expect("remove still parses");
+        assert_eq!(
+            pn_len, 3,
+            "bit 0 of the first byte is part of the pn length"
+        );
+        assert_ne!(&flipped_len[..header.len()], &header[..]);
+
+        // Flip a protected reserved bit: the unmasked header is invalid, and
+        // that is only detectable after removal (the protected byte looked fine).
+        let mut flipped_reserved = protected.clone();
+        flipped_reserved[0] ^= 0x04;
+        assert!(
+            ProtectedHeaderPrefix::decode(&flipped_reserved, 0).is_ok(),
+            "reserved bits are not validated while protected"
+        );
+        remove_header_protection(&mut flipped_reserved, pn_offset, RFC9001_A2_MASK)
+            .expect("remove");
+        assert_eq!(
+            PacketHeader::decode(&flipped_reserved, 0).expect_err("reserved bit set"),
+            QuicCoreError::InvalidHeader("long header reserved bits set")
+        );
+
+        // Flip a protected packet-number byte: a different packet number is
+        // recovered, so the AEAD nonce (and therefore the tag) will not verify.
+        let mut flipped_pn = protected;
+        flipped_pn[pn_offset + 3] ^= 0x80;
+        remove_header_protection(&mut flipped_pn, pn_offset, RFC9001_A2_MASK).expect("remove");
+        let (PacketHeader::Long(decoded), _) =
+            PacketHeader::decode(&flipped_pn, 0).expect("still a well-formed header")
+        else {
+            panic!("long header")
+        };
+        assert_eq!(decoded.packet_number, 2 ^ 0x80);
+    }
+
+    #[test]
+    fn header_protection_helpers_fail_closed_on_short_or_malformed_input() {
+        let mask = [0xff; 5];
+        // Sample needs pn_offset + 4 + 16 bytes: the 22-byte A.2 header
+        // (pn at 18..22) plus 16 bytes of payload.
+        let mut too_short = hex(RFC9001_A2_HEADER);
+        too_short.extend_from_slice(&[0u8; 15]);
+        assert_eq!(
+            header_protection_sample(&too_short, 18).expect_err("15 payload bytes"),
+            QuicCoreError::UnexpectedEof
+        );
+        too_short.push(0);
+        assert!(header_protection_sample(&too_short, 18).is_ok());
+
+        // The packet number can never start at byte 0.
+        let mut packet = hex(RFC9001_A2_HEADER);
+        assert!(matches!(
+            apply_header_protection(&mut packet, 0, mask),
+            Err(QuicCoreError::InvalidHeader(_))
+        ));
+        assert!(matches!(
+            remove_header_protection(&mut packet, 0, mask),
+            Err(QuicCoreError::InvalidHeader(_))
+        ));
+        // A pn offset past the buffer is an EOF, and the packet is untouched.
+        let before = packet.clone();
+        let past_end = packet.len();
+        assert_eq!(
+            apply_header_protection(&mut packet, past_end, mask).expect_err("past end"),
+            QuicCoreError::UnexpectedEof
+        );
+        assert_eq!(
+            remove_header_protection(&mut packet, past_end, mask).expect_err("past end"),
+            QuicCoreError::UnexpectedEof
+        );
+        assert_eq!(packet, before, "failed masking must not mutate the packet");
+        assert!(apply_header_protection(&mut [], 1, mask).is_err());
+        assert_eq!(
+            ProtectedHeaderPrefix::decode(&[], 0).expect_err("empty"),
+            QuicCoreError::UnexpectedEof
+        );
+        assert_eq!(
+            ProtectedHeaderPrefix::decode(&[0x00, 0x01, 0x02], 2).expect_err("fixed bit"),
+            QuicCoreError::InvalidHeader("short header fixed bit unset")
+        );
+        assert_eq!(
+            ProtectedHeaderPrefix::decode(&[0x40], 4).expect_err("truncated cid"),
+            QuicCoreError::UnexpectedEof
+        );
+    }
+
+    #[test]
+    fn protected_prefix_length_field_bounds_coalesced_long_header_packets() {
+        // Two long-header packets back to back (RFC 9000 §12.2), each with a
+        // 4-byte pn, 4 bytes of "ciphertext" and a 16-byte "tag".
+        let cid = ConnectionId::new(&[1, 2, 3, 4]).expect("cid");
+        let mut datagram = Vec::new();
+        let mut ends = Vec::new();
+        for (packet_type, pn) in [
+            (LongPacketType::Initial, 7u64),
+            (LongPacketType::Handshake, 9),
+        ] {
+            PacketHeader::Long(LongHeader {
+                packet_type,
+                version: 1,
+                dst_cid: cid,
+                src_cid: cid,
+                token: Vec::new(),
+                payload_length: 4 + 4 + 16,
+                packet_number: pn,
+                packet_number_len: 4,
+            })
+            .encode(&mut datagram)
+            .expect("encode");
+            datagram.extend_from_slice(&[0xab; 20]);
+            ends.push(datagram.len());
+        }
+        // Trailing datagram padding (zero bytes) after the last packet.
+        datagram.extend_from_slice(&[0u8; 3]);
+
+        let first = ProtectedHeaderPrefix::decode(&datagram, 0).expect("first prefix");
+        let first_end = first.packet_len(datagram.len()).expect("first bound");
+        assert_eq!(first_end, ends[0]);
+        let ProtectedHeaderPrefix::Long(first) = &first else {
+            panic!("long")
+        };
+        assert_eq!(first.packet_type, LongPacketType::Initial);
+        assert_eq!(first.packet_number_offset + 24, first_end);
+
+        let rest = &datagram[first_end..];
+        let second = ProtectedHeaderPrefix::decode(rest, 0).expect("second prefix");
+        assert_eq!(
+            second.packet_len(rest.len()).expect("second bound") + first_end,
+            ends[1]
+        );
+        let ProtectedHeaderPrefix::Long(second) = &second else {
+            panic!("long")
+        };
+        assert_eq!(second.packet_type, LongPacketType::Handshake);
+
+        // What remains is padding, not a packet.
+        let padding = &datagram[ends[1]..];
+        assert_eq!(padding, &[0u8; 3]);
+        assert!(ProtectedHeaderPrefix::decode(padding, 0).is_err());
+
+        // A Length field that overruns the datagram is rejected before any
+        // byte of the payload is trusted.
+        let truncated = &datagram[..ends[0] - 1];
+        let prefix = ProtectedHeaderPrefix::decode(truncated, 0).expect("prefix still parses");
+        assert_eq!(
+            prefix.packet_len(truncated.len()).expect_err("overrun"),
+            QuicCoreError::UnexpectedEof
+        );
+
+        // Retry and short-header packets extend to the end of the datagram.
+        let short = ProtectedHeaderPrefix::Short {
+            dst_cid: cid,
+            packet_number_offset: 5,
+        };
+        assert_eq!(short.packet_len(40).expect("short"), 40);
+        assert_eq!(short.packet_number_offset(), Some(5));
+        assert_eq!(short.dst_cid(), cid);
     }
 }

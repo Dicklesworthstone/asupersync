@@ -30,7 +30,7 @@ use std::time::Instant;
 #[cfg(feature = "tls")]
 use super::handshake_driver::{HandshakeLevel, QuicHandshakeDriver};
 #[cfg(feature = "tls")]
-use crate::net::quic_core::{LongPacketType, PacketHeader};
+use crate::net::quic_core::{LongPacketType, ProtectedHeaderPrefix};
 
 #[cfg(feature = "tls")]
 const ACCEPT_PTO: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -111,8 +111,10 @@ impl PendingAuthenticatedAccept {
     ) -> bool {
         let long = packet.data.first().is_some_and(|byte| byte & 0x80 != 0);
         let length = if long { 0 } else { local_cid.len() };
-        PacketHeader::decode(&packet.data, length).is_ok_and(|(header, _)| match header {
-            PacketHeader::Long(header) => {
+        // Only the header-protection-invariant prefix is readable on the
+        // wire (RFC 9001 §5.4); it carries everything routing needs.
+        ProtectedHeaderPrefix::decode(&packet.data, length).is_ok_and(|header| match header {
+            ProtectedHeaderPrefix::Long(header) => {
                 header.dst_cid == initial_cid || header.dst_cid == local_cid
             }
             // Exhaustive match keeps the crate compiling (E0004). This
@@ -120,8 +122,8 @@ impl PendingAuthenticatedAccept {
             // client, so a matching dst_cid is not authority to feed it into
             // this pending server handshake. Client-side routing still uses
             // dst_cid in connection_manager.
-            PacketHeader::Retry(_) => false,
-            PacketHeader::Short(header) => header.dst_cid == local_cid,
+            ProtectedHeaderPrefix::Retry(_) => false,
+            ProtectedHeaderPrefix::Short { dst_cid, .. } => dst_cid == local_cid,
         })
     }
 
@@ -186,14 +188,15 @@ impl PendingAuthenticatedAccept {
         if packet.data.len() > max_packet_size {
             return Err(accept_error("datagram exceeds configured packet bound"));
         }
-        let (header, _) =
-            PacketHeader::decode(&packet.data, self.local_cid.len()).map_err(accept_error)?;
-        if matches!(header, PacketHeader::Retry(_)) {
+        let long = packet.data.first().is_some_and(|byte| byte & 0x80 != 0);
+        let length = if long { 0 } else { self.local_cid.len() };
+        let header = ProtectedHeaderPrefix::decode(&packet.data, length).map_err(accept_error)?;
+        if matches!(header, ProtectedHeaderPrefix::Retry(_)) {
             // Defensive role check for direct callers as well as owns_packet.
             // Retry supplies neither authenticated input credit nor TLS work.
             return Ok(());
         }
-        if let PacketHeader::Short(_) = header {
+        if let ProtectedHeaderPrefix::Short { .. } = header {
             if self.driver.peer_connection_id().is_none() {
                 return Ok(());
             }
@@ -206,7 +209,7 @@ impl PendingAuthenticatedAccept {
             self.early.push(packet);
             return Ok(());
         }
-        let PacketHeader::Long(header) = header else {
+        let ProtectedHeaderPrefix::Long(header) = header else {
             unreachable!()
         };
         if header.version != 1
@@ -1930,23 +1933,23 @@ mod tests {
             let (length, from) = peer.recv_from(&mut bytes).unwrap();
             assert_eq!(from, address);
             assert_eq!(&bytes[..length], expected.as_slice());
-            let (header, header_len) =
-                crate::net::quic_core::PacketHeader::decode(&bytes[..length], cid.len()).unwrap();
-            let crate::net::quic_core::PacketHeader::Short(header) = header else {
+            let crate::net::quic_core::ProtectedHeaderPrefix::Short { dst_cid, .. } =
+                crate::net::quic_core::ProtectedHeaderPrefix::decode(&bytes[..length], cid.len())
+                    .unwrap()
+            else {
                 panic!("actual output must carry a protected 1-RTT header");
             };
+            assert_eq!(dst_cid, cid);
             let mut verifier = selection_packet_protection(&cx).await;
             let plaintext = crate::net::quic_native::connection_manager::unprotect_1rtt_packet(
                 &cx,
                 cid,
                 &mut verifier,
-                &bytes[..header_len],
-                &bytes[header_len..length],
-                header.packet_number,
-                header.key_phase,
+                &bytes[..length],
             )
             .await
-            .unwrap();
+            .unwrap()
+            .plaintext;
             assert!(
                 crate::net::quic_native::NativeQuicConnection::decode_frames(&plaintext)
                     .unwrap()
@@ -2283,24 +2286,23 @@ mod tests {
             let mut bytes = [0u8; 1_200];
             let (length, source) = peer.recv_from(&mut bytes).unwrap();
             assert_eq!(source, endpoint_addr);
-            let (crate::net::quic_core::PacketHeader::Short(header), header_len) =
-                crate::net::quic_core::PacketHeader::decode(&bytes[..length], 8).unwrap()
+            let crate::net::quic_core::ProtectedHeaderPrefix::Short { dst_cid, .. } =
+                crate::net::quic_core::ProtectedHeaderPrefix::decode(&bytes[..length], 8).unwrap()
             else {
                 panic!("due managed PTO must emit an actual protected short packet")
             };
-            assert_eq!(header.dst_cid, cid);
-            assert_eq!(header.packet_number, 1);
-            let plaintext = crate::net::quic_native::connection_manager::unprotect_1rtt_packet(
+            assert_eq!(dst_cid, cid);
+            let unprotected = crate::net::quic_native::connection_manager::unprotect_1rtt_packet(
                 &owner,
                 cid,
                 &mut verifier,
-                &bytes[..header_len],
-                &bytes[header_len..length],
-                header.packet_number,
-                header.key_phase,
+                &bytes[..length],
             )
             .await
             .unwrap();
+            assert_eq!(unprotected.header.dst_cid, cid);
+            assert_eq!(unprotected.header.packet_number, 1);
+            let plaintext = unprotected.plaintext;
             let mut expected = crate::bytes::BytesMut::new();
             crate::net::atp::protocol::quic_frames::QuicFrame::Ping.encode(&mut expected).unwrap();
             assert_eq!(plaintext, expected.as_ref());
@@ -2715,13 +2717,38 @@ mod tests {
             for _ in 0..32 {
                 let (length, source) = peer.recv_from(&mut payload).unwrap();
                 assert_eq!(source, endpoint.local_addr());
-                let (crate::net::quic_core::PacketHeader::Short(header), _) =
-                    crate::net::quic_core::PacketHeader::decode(&payload[..length], 8).unwrap()
+                let crate::net::quic_core::ProtectedHeaderPrefix::Short { dst_cid, .. } =
+                    crate::net::quic_core::ProtectedHeaderPrefix::decode(&payload[..length], 8)
+                        .unwrap()
                 else {
                     panic!("actual protected short packet expected")
                 };
-                assert!(observed.insert(header.dst_cid));
-                assert_eq!(header.packet_number, 1);
+                assert!(observed.insert(dst_cid));
+                // The packet number is header-protected; unmask it with the
+                // same deterministic fixture keys every connection installed.
+                let mut transcript = QuicHandshakeTranscript::new();
+                transcript.record("client_initial", b"retained timer client");
+                transcript.record("server_handshake", b"retained timer server");
+                let mut verifier = AtpPacketProtection::new_client(true).unwrap();
+                verifier
+                    .derive_keys(
+                        &cx,
+                        PacketProtectionSpace::OneRtt,
+                        &transcript,
+                        b"retained timer unit fixture",
+                    )
+                    .await
+                    .unwrap();
+                let unprotected =
+                    crate::net::quic_native::connection_manager::unprotect_1rtt_packet(
+                        &cx,
+                        dst_cid,
+                        &mut verifier,
+                        &payload[..length],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(unprotected.header.packet_number, 1);
             }
             assert_eq!(observed.len(), 32);
             assert_eq!(
@@ -2930,6 +2957,7 @@ mod tests {
     #[cfg(feature = "tls")]
     mod authenticated_accept_tests {
         use super::*;
+        use crate::net::quic_core::PacketHeader;
 
         // The established route comes from selection_fixture's documented
         // recovery-state fixture. These tests prove pending-owner mechanics,

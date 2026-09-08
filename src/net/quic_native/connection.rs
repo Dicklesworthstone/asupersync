@@ -2247,6 +2247,8 @@ impl NativeQuicConnection {
 
         if ack_eliciting {
             self.queue_ack_frame(space, packet_number);
+        } else {
+            self.observe_non_ack_eliciting_packet(space, packet_number);
         }
 
         Ok(())
@@ -2805,6 +2807,21 @@ impl NativeQuicConnection {
         Ok(frames)
     }
 
+    /// Drain only pending ACK frames, exactly as the protected UDP driver's
+    /// congestion-blocked admission branch does.
+    ///
+    /// This deterministic test seam lets socket-free harnesses mirror
+    /// `NativeQuicUdpConnection::flush` (a cwnd-full sender still emits
+    /// ACK-only packets) without duplicating the driver's ACK queue walk.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn generate_ack_only_frames_for_testing(
+        &mut self,
+        cx: &Cx,
+        max_frame_bytes: usize,
+    ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        self.generate_pending_ack_frames(cx, max_frame_bytes)
+    }
+
     /// Generate only STREAM frames for one application stream.
     ///
     /// This is used by ATP's paced source-stream bulk path, where coalescing
@@ -3140,6 +3157,16 @@ impl NativeQuicConnection {
     /// acknowledged even though its payload was intentionally dropped.
     pub fn acknowledge_received_packet(&mut self, space: PacketNumberSpace, packet_number: u64) {
         self.queue_ack_frame(space, packet_number);
+    }
+
+    /// Record a received non-ack-eliciting packet in the ACK ranges without
+    /// eliciting an ACK of its own (RFC 9000 §13.2.1 forbids answering it with
+    /// a packet). Keeping ACK-only packet numbers in the ranges means the peer
+    /// sees contiguous acknowledgements instead of a gap at every ACK-only
+    /// packet it sent (GH#71); the next ACK elicited by an ack-eliciting
+    /// packet carries this number along.
+    fn observe_non_ack_eliciting_packet(&mut self, space: PacketNumberSpace, packet_number: u64) {
+        self.received_ack_trackers[packet_number_space_idx(space)].observe(packet_number);
     }
 
     fn queue_ack_frame(&mut self, space: PacketNumberSpace, packet_number: u64) {
@@ -3712,6 +3739,66 @@ mod tests {
             .expect("queued ping should generate");
 
         assert_eq!(frames, vec![QuicFrame::Ping]);
+    }
+
+    fn ack_frame_shape(frames: &[QuicFrame]) -> Option<(u64, u64, u64)> {
+        frames.iter().find_map(|frame| match frame {
+            QuicFrame::Ack {
+                largest_acknowledged,
+                first_ack_range,
+                ack_range_count,
+                ..
+            } => Some((
+                largest_acknowledged.value(),
+                first_ack_range.value(),
+                ack_range_count.value(),
+            )),
+            _ => None,
+        })
+    }
+
+    /// GH#71: a received ACK-only packet elicits no ACK of its own, but its
+    /// number stays in the ACK ranges so the next elicited ACK is contiguous
+    /// instead of carrying a gap at every ACK-only packet the peer sent.
+    #[test]
+    fn non_ack_eliciting_packets_stay_in_ack_ranges_without_eliciting_an_ack() {
+        let cx = test_cx();
+        let mut conn = established_server_conn();
+        let space = PacketNumberSpace::ApplicationData;
+        // Drain whatever the handshake confirmation queued.
+        let _ = conn.generate_frames(&cx, space, 1_024).expect("drain");
+
+        conn.process_packet_frames(&cx, space, 5, &[QuicFrame::Ping], 10_000)
+            .expect("ping 5");
+        let frames = conn.generate_frames(&cx, space, 1_024).expect("ack for 5");
+        assert_eq!(ack_frame_shape(&frames), Some((5, 0, 0)));
+
+        let zero = VarInt::from_u64_unchecked(0);
+        let ack_only = QuicFrame::Ack {
+            largest_acknowledged: zero,
+            ack_delay: zero,
+            ack_range_count: zero,
+            first_ack_range: zero,
+            ack_ranges: Vec::new(),
+            ecn_counts: None,
+        };
+        conn.process_packet_frames(&cx, space, 6, &[ack_only], 10_100)
+            .expect("ack-only 6");
+        let frames = conn.generate_frames(&cx, space, 1_024).expect("nothing");
+        assert_eq!(
+            ack_frame_shape(&frames),
+            None,
+            "an ACK-only packet must not elicit an ACK (RFC 9000 §13.2.1)"
+        );
+
+        conn.process_packet_frames(&cx, space, 7, &[QuicFrame::Ping], 10_200)
+            .expect("ping 7");
+        let frames = conn.generate_frames(&cx, space, 1_024).expect("ack for 7");
+        assert_eq!(
+            ack_frame_shape(&frames),
+            Some((7, 2, 0)),
+            "5..=7 must be one contiguous range: the ACK-only packet 6 is acknowledged"
+        );
     }
 
     #[test]
