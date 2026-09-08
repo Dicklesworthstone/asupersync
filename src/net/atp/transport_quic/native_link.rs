@@ -3272,6 +3272,10 @@ impl QuicLink {
         operation: &'static str,
     ) -> Result<usize, QuicTransportError> {
         let Some(deadline) = self.conn.pto_deadline_micros(cx, self.clock)? else {
+            // Nothing transport-tracked is in flight, which is the steady
+            // state of the paced source stream: its recovery is ATP-scoped,
+            // so the stall threshold must still back off here.
+            self.back_off_untracked_stall_pto(operation);
             return Ok(0);
         };
         self.clock = self.clock.max(deadline);
@@ -3306,30 +3310,39 @@ impl QuicLink {
                 self.conn.transport().pto_count(),
                 self.app_loss_stall_pto.as_millis(),
             );
-        } else if !self.in_flight_stream_frames.is_empty() {
-            // The paced source stream and control-priority packets are
-            // transport-untracked (`in_flight=false`; their recovery is
-            // ATP-scoped through `in_flight_stream_frames`), so their stall
-            // expiries always report `lost_packets == 0` and the wall-clock
-            // stall threshold never backed off: every 200 ms of ACK silence
-            // re-sent up to 256 packets, and once the receiver acknowledges
-            // per drained batch instead of per packet that burst starves the
-            // sender's own ACK feedback and the storm sustains itself
-            // (GH#67 follow-up). Back off on every expiry that still has
-            // ATP-tracked frames outstanding, as RFC 9002 §6.2.1 does for PTO;
-            // real ACK progress resets it in `apply_source_stream_ack_ranges`.
-            self.app_loss_stall_pto = self
-                .app_loss_stall_pto
-                .saturating_mul(2)
-                .min(APP_LOSS_STALL_PTO_MAX);
-            quic_rqtrace!(
-                "sender: app_data_stall_backoff operation={} in_flight_stream_packets={} stall_pto_ms={}",
-                operation,
-                self.in_flight_stream_frames.len(),
-                self.app_loss_stall_pto.as_millis(),
-            );
+        } else {
+            self.back_off_untracked_stall_pto(operation);
         }
         Ok(event.lost_packets)
+    }
+
+    /// Back off the wall-clock stall threshold after a stall expiry that the
+    /// transport did not turn into declared loss.
+    ///
+    /// The paced source stream and control-priority packets are
+    /// transport-untracked (`in_flight=false`; their recovery is ATP-scoped
+    /// through `in_flight_stream_frames`), so their stall expiries never
+    /// report transport loss and the threshold never backed off: every 200 ms
+    /// of ACK silence re-sent up to 256 packets, and once the receiver
+    /// acknowledges per drained batch instead of per packet that burst starves
+    /// the sender's own ACK feedback and the storm sustains itself (GH#67
+    /// follow-up). Back off on every expiry that still has ATP-tracked frames
+    /// outstanding, as RFC 9002 §6.2.1 does for PTO; real ACK progress resets
+    /// it in `apply_source_stream_ack_ranges`.
+    fn back_off_untracked_stall_pto(&mut self, operation: &'static str) {
+        if self.in_flight_stream_frames.is_empty() {
+            return;
+        }
+        self.app_loss_stall_pto = self
+            .app_loss_stall_pto
+            .saturating_mul(2)
+            .min(APP_LOSS_STALL_PTO_MAX);
+        quic_rqtrace!(
+            "sender: app_data_stall_backoff operation={} in_flight_stream_packets={} stall_pto_ms={}",
+            operation,
+            self.in_flight_stream_frames.len(),
+            self.app_loss_stall_pto.as_millis(),
+        );
     }
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
