@@ -860,10 +860,15 @@ mod tests {
         assert!(join.try_join().unwrap().is_some());
         assert_eq!(sibling_drops.load(Ordering::SeqCst), 1);
         assert!(budgets[3].read().is_none());
-        let sibling_receipt = receipts[2].lock();
-        let sibling_receipt = sibling_receipt.as_ref().unwrap();
-        assert!(matches!(sibling_receipt.outcome, Outcome::Ok(())));
-        assert!(matches!(sibling_receipt.cleanup_outcome, Some(Outcome::Ok(()))));
+        {
+            let sibling_receipt = receipts[2].lock();
+            let sibling_receipt = sibling_receipt.as_ref().unwrap();
+            assert!(matches!(sibling_receipt.outcome, Outcome::Ok(())));
+            assert!(matches!(
+                sibling_receipt.cleanup_outcome,
+                Some(Outcome::Ok(()))
+            ));
+        }
         let outcome = result.lock().take().unwrap();
         assert!(matches!(outcome.outcome, Outcome::Cancelled(ref actual) if *actual == reason));
         assert!(matches!(
