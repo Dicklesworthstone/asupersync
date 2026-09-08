@@ -87,6 +87,11 @@ collects the changes since the published `v0.4.10` source.
   also restores timely HTTP/2 graceful-drain completion. A native regression
   observes the reactor's selected wait before inserting the earlier timer and
   checks the exact task result and future cleanup.
+- Updated entry macros remain compatible with the published `0.4.3` runtime:
+  an omitted `drain_ms` uses the runtime's drain API when available and retains
+  legacy teardown otherwise. Explicit positive bounds require that API.
+  The current runtime keeps its existing worker, blocking-pool and drain
+  defaults; a cross-version consumer checks the older-runtime pairing.
 
 ### QUIC reassembly and ATP framing
 

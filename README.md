@@ -670,12 +670,16 @@ nightly `Outcome` `Try` surface is migrated or disabled by default.
 
 Asupersync's repository `Cargo.lock` governs this workspace; it does not pin a
 downstream consumer's resolution. Default-feature consumers should use the
-current contributor/release pin, `nightly-2026-07-05`, from
+current contributor/release pin, `nightly-2026-08-31`, from
 `rust-toolchain.toml`. That exact snapshot is a compatibility instruction, not
 a numeric stable MSRV or promised lower bound. The stable subset currently has
 no numeric MSRV claim because `Cargo.toml` does not declare `rust-version`, and
 the stable lane remains limited to `--no-default-features --features
 proc-macros`.
+
+Updated entry macros also support older `0.4.x` runtimes. When the runtime
+lacks `Runtime::drain_root_region`, omitting `drain_ms` preserves its legacy
+teardown. An explicit positive `drain_ms` requires that runtime API.
 
 The standalone downstream fixture now commits its own direct-minimal lock. The
 pinned-nightly `downstream-consumer-direct-minimal-check` lane verifies that
