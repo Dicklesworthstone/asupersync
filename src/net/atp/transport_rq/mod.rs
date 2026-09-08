@@ -11357,7 +11357,12 @@ pub async fn receive_connection_with_options(
         //
         // To keep v1 correct on the current runtime without a select primitive,
         // we structure it as: pump UDP until the control frame arrives.
-        let frame = pump_until_control(
+        // Boxed behind `dyn Future + Send` (one allocation per round): the
+        // pump and tail-drain subtrees are the deep end of the receive
+        // pipeline, and erasing them here keeps every caller's `Send` proof
+        // (`receive_once`, `serve`, the atp binary, integration tests) within
+        // rustc's default recursion depth (br-asupersync-lf8muy).
+        let frame = erase_send(pump_until_control(
             cx,
             &mut control,
             &mut udp,
@@ -11370,7 +11375,7 @@ pub async fn receive_connection_with_options(
             &mut symbols_accepted,
             &mut round_stats,
             trace_receiver_intake,
-        )
+        ))
         .await?;
         rqtrace!(
             "receiver: pump returned {:?}, symbols_accepted={symbols_accepted}",
@@ -11382,7 +11387,7 @@ pub async fn receive_connection_with_options(
                 let round_complete = parse_round_complete(&frame)?;
                 let completion_digests =
                     CompletionDigestIndex::from_round_complete(&round_complete, &manifest, false)?;
-                let drained = drain_round_tail(
+                let drained = erase_send(drain_round_tail(
                     cx,
                     &mut udp,
                     tag,
@@ -11395,7 +11400,7 @@ pub async fn receive_connection_with_options(
                     &mut symbols_accepted,
                     &mut round_stats,
                     trace_receiver_intake,
-                )
+                ))
                 .await?;
                 if drained > 0 {
                     rqtrace!("receiver: tail-drained {drained} datagrams after ObjectComplete");
@@ -16438,6 +16443,21 @@ where
             }
         }
     }
+}
+
+/// Box a deep `async fn` future behind `dyn Future + Send`.
+///
+/// Proving `Send` for the receive pipeline walks one solver frame per async
+/// link, and the whole chain (`receive_once` -> `receive_connection_with_options`
+/// -> `drain_round_tail` -> `feed_datagram_to_decoders` -> ...) exceeds rustc's
+/// default recursion depth when a caller spawns it. Erasing the deep subtrees
+/// at their per-round await sites starts a fresh proof there, so no crate that
+/// spawns a receive needs `#![recursion_limit]` (br-asupersync-lf8muy). One
+/// allocation per call; never used on the per-datagram path.
+fn erase_send<'a, T>(
+    future: impl std::future::Future<Output = T> + Send + 'a,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>> {
+    Box::pin(future)
 }
 
 /// Drain UDP symbols that raced behind the TCP round marker.
