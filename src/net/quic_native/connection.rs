@@ -345,6 +345,11 @@ pub struct NativeQuicConnection {
     datagrams_dropped_on_send: u64,
     /// Peer-advertised maximum DATAGRAM frame size.
     max_datagram_frame_size: usize,
+    /// Largest frame payload that fits one protected 1-RTT packet on this
+    /// connection (GH#66). Admission bounds DATAGRAM frames by the smaller of
+    /// this and `max_datagram_frame_size`, so an admitted payload can never
+    /// produce a packet that assembly must refuse.
+    one_rtt_frame_budget: usize,
 }
 
 /// Default cap on remotely-initiated streams (per direction) accepted from the
@@ -422,6 +427,16 @@ const MAX_OUTBOUND_DATAGRAMS: usize = 256;
 /// is rejected so a single datagram always fits one 1-RTT packet.
 const MAX_DATAGRAM_FRAME_SIZE: usize = 1200;
 
+/// Largest frame payload that fits one protected 1-RTT packet when the
+/// destination connection ID has its maximum length (GH#66). Every connection
+/// starts here; the packet assemblers narrow it to the exact destination CID
+/// through [`NativeQuicConnection::set_one_rtt_frame_budget`].
+const CONSERVATIVE_ONE_RTT_FRAME_BUDGET: usize =
+    super::connection_manager::PROTECTED_1RTT_MAX_PACKET_BYTES
+        - (1 + crate::net::quic_core::ConnectionId::MAX_LEN
+            + super::connection_manager::PROTECTED_1RTT_PACKET_NUMBER_LEN as usize
+            + super::connection_manager::PROTECTED_1RTT_TAG_LEN);
+
 /// Opt-in stderr tracing for QUIC transport bring-up/diagnosis. Off unless the
 /// `ATP_QUIC_TRACE` env var is set, so the production path stays silent.
 macro_rules! quictrace {
@@ -480,7 +495,26 @@ impl NativeQuicConnection {
             datagrams_sent: 0,
             datagrams_dropped_on_send: 0,
             max_datagram_frame_size: config.max_datagram_frame_size,
+            one_rtt_frame_budget: CONSERVATIVE_ONE_RTT_FRAME_BUDGET,
         }
+    }
+
+    /// Bound outbound DATAGRAM admission by this connection's protected 1-RTT
+    /// packet budget (GH#66).
+    ///
+    /// `max_frame_bytes` is the largest frame payload that fits one protected
+    /// packet for the destination connection ID in use; the packet assemblers
+    /// call this with the same value they enforce, so admission and assembly
+    /// agree. Until it is called, the conservative maximum-CID budget applies.
+    pub(crate) fn set_one_rtt_frame_budget(&mut self, max_frame_bytes: usize) {
+        self.one_rtt_frame_budget = max_frame_bytes.max(1);
+    }
+
+    /// Largest frame payload that fits one protected 1-RTT packet here.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn one_rtt_frame_budget(&self) -> usize {
+        self.one_rtt_frame_budget
     }
 
     /// Select the owner of reliable STREAM/RESET_STREAM/STOP_SENDING recovery.
@@ -2556,15 +2590,18 @@ impl NativeQuicConnection {
         payload: Bytes,
     ) -> Result<(), NativeQuicConnectionError> {
         // RFC 9221: a sender MUST NOT send a DATAGRAM frame larger than the
-        // peer-advertised max_datagram_frame_size. Bound the encoded frame so a
-        // single datagram always fits one 1-RTT packet.
+        // peer-advertised max_datagram_frame_size. The frame must also fit one
+        // protected 1-RTT packet on this connection (GH#66): a peer may
+        // advertise 65535, but the packet assemblers refuse anything above the
+        // protected packet cap, and that refusal is connection-fatal on the
+        // sender's own drive path. Admission is where a typed refusal belongs.
         let payload_len = payload.len();
         let frame = QuicFrame::Datagram {
             data: payload.clone(),
         };
         let mut probe = BytesMut::new();
         frame.encode(&mut probe)?;
-        let max_frame_size = self.max_datagram_frame_size;
+        let max_frame_size = self.max_datagram_frame_size.min(self.one_rtt_frame_budget);
         if probe.len() > max_frame_size {
             let encoded_len_s = probe.len().to_string();
             let max_frame_size_s = max_frame_size.to_string();
@@ -2931,6 +2968,21 @@ impl NativeQuicConnection {
                     let mut encoded = BytesMut::new();
                     frame.encode(&mut encoded)?;
                     let frame_len = encoded.len();
+                    if frame_len > max_frame_bytes {
+                        // A DATAGRAM that cannot fit even an otherwise empty
+                        // packet must never be emitted: the packet assembler
+                        // would refuse it and take the connection down (GH#66).
+                        // Admission normally prevents this; drop and count it
+                        // rather than trust that the budget never shrank.
+                        self.datagrams_dropped_on_send =
+                            self.datagrams_dropped_on_send.saturating_add(1);
+                        quictrace!(
+                            "event=datagram_send_drop reason=exceeds_packet_budget encoded_len={} max_frame_bytes={}",
+                            frame_len,
+                            max_frame_bytes
+                        );
+                        continue;
+                    }
                     if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
                         let QuicFrame::Datagram { data } = frame else {
                             unreachable!("frame was just constructed as a DATAGRAM");
@@ -5698,6 +5750,78 @@ mod tests {
                 .any(|frame| matches!(frame, QuicFrame::Datagram { .. }))
         );
         assert_eq!(conn.pending_outbound_datagram_count(), 0);
+        assert_eq!(conn.datagrams_sent(), 1);
+    }
+
+    /// GH#66: the peer may advertise a 65535-byte DATAGRAM frame limit, but a
+    /// frame that cannot fit one protected 1-RTT packet must be refused at
+    /// admission with a typed error, not admitted and then killed at assembly.
+    #[test]
+    fn datagram_admission_is_bounded_by_the_one_rtt_packet_budget() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.max_datagram_frame_size = 65_535;
+        // 1200 - (1 + 8-byte destination CID + 4-byte packet number + 16-byte tag).
+        conn.set_one_rtt_frame_budget(1_171);
+        assert_eq!(conn.one_rtt_frame_budget(), 1_171);
+
+        // 1168-byte payload -> 1 (type) + 2 (length) + 1168 = 1171-byte frame: fits exactly.
+        conn.send_datagram(&cx, Bytes::from(vec![7u8; 1_168]))
+            .expect("a payload whose frame fits the packet budget is admitted");
+        let err = conn
+            .send_datagram(&cx, Bytes::from(vec![7u8; 1_169]))
+            .expect_err("a payload whose frame exceeds the packet budget is refused");
+        assert!(
+            matches!(
+                err,
+                NativeQuicConnectionError::DatagramTooLarge {
+                    payload_len: 1_169,
+                    encoded_len: 1_172,
+                    max_frame_size: 1_171,
+                }
+            ),
+            "{err:?}"
+        );
+
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1_171)
+            .expect("the admitted datagram generates");
+        for frame in &frames {
+            let mut encoded = BytesMut::new();
+            frame.encode(&mut encoded).expect("encode generated frame");
+            assert!(encoded.len() <= 1_171, "generated frame exceeds the budget");
+        }
+        assert_eq!(conn.datagrams_sent(), 1);
+        assert_eq!(conn.datagrams_dropped_on_send(), 0);
+    }
+
+    /// GH#66, defence in depth: a queued DATAGRAM that can never fit the
+    /// packet budget is dropped and counted, never emitted alone into an
+    /// oversize packet.
+    #[test]
+    fn generation_drops_a_datagram_that_can_never_fit_the_packet_budget() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        conn.max_datagram_frame_size = 65_535;
+        conn.set_one_rtt_frame_budget(5_000);
+        conn.send_datagram(&cx, Bytes::from(vec![1u8; 1_180]))
+            .expect("admitted under a loose budget");
+        conn.send_datagram(&cx, Bytes::from(vec![2u8; 64]))
+            .expect("a small payload is admitted");
+
+        let frames = conn
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1_171)
+            .expect("generation succeeds");
+        let emitted: Vec<usize> = frames
+            .iter()
+            .filter_map(|frame| match frame {
+                QuicFrame::Datagram { data } => Some(data.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(emitted, vec![64], "only the fitting datagram is emitted");
+        assert_eq!(conn.pending_outbound_datagram_count(), 0);
+        assert_eq!(conn.datagrams_dropped_on_send(), 1);
         assert_eq!(conn.datagrams_sent(), 1);
     }
 

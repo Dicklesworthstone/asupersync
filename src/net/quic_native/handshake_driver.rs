@@ -82,6 +82,10 @@ const HANDSHAKE_SERVER_NO_PEER_IDLE_LIMIT: usize = 8;
 
 /// AEAD authentication tag length for the QUIC AES-128-GCM suite.
 const QUIC_AEAD_TAG_LEN: usize = 16;
+/// RFC 9000 §14.1: a UDP datagram carrying an Initial packet is expanded to at
+/// least this many bytes (clients for every Initial, servers for ack-eliciting
+/// ones). Compliant peers drop smaller Initial datagrams (GH#68).
+const MIN_INITIAL_DATAGRAM_BYTES: usize = 1200;
 /// Fixed packet-number length used for handshake packets (4 bytes).
 const HANDSHAKE_PACKET_NUMBER_LEN: u8 = 4;
 
@@ -642,7 +646,37 @@ impl QuicHandshakeDriver {
         }
         .encode(&mut payload)
         .map_err(|_| handshake_failure("crypto_frame_encode"))?;
-        let plaintext = payload.to_vec();
+        let mut plaintext = payload.to_vec();
+
+        if matches!(packet_type, LongPacketType::Initial) {
+            // RFC 9000 §14.1 (GH#68): every Initial packet leaves here as its
+            // own datagram, so expand the packet itself to the 1200-byte
+            // minimum with PADDING frames inside the AEAD envelope. The header
+            // is sized with a placeholder length of the same varint width the
+            // final length lands in, so the padded packet is exactly 1200 bytes.
+            let probe = PacketHeader::Long(LongHeader {
+                packet_type,
+                version: 1,
+                dst_cid,
+                src_cid,
+                token: Vec::new(),
+                payload_length: MIN_INITIAL_DATAGRAM_BYTES as u64,
+                packet_number,
+                packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
+            });
+            let mut probe_bytes = Vec::new();
+            probe
+                .encode(&mut probe_bytes)
+                .map_err(|_| handshake_failure("long_header_encode"))?;
+            // `probe_bytes` already includes the packet number.
+            let unpadded = probe_bytes.len() + plaintext.len() + QUIC_AEAD_TAG_LEN;
+            if unpadded < MIN_INITIAL_DATAGRAM_BYTES {
+                plaintext.resize(
+                    plaintext.len() + (MIN_INITIAL_DATAGRAM_BYTES - unpadded),
+                    0x00,
+                );
+            }
+        }
 
         // payload_length covers the packet number + AEAD ciphertext + tag.
         let payload_length = u64::from(HANDSHAKE_PACKET_NUMBER_LEN)
@@ -1652,6 +1686,94 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
                 code: "packet_unprotect",
             })
         ));
+    }
+
+    /// GH#68 / RFC 9000 §14.1: an Initial packet leaves as a datagram of at
+    /// least 1200 bytes, and the padded packet still authenticates and feeds
+    /// TLS on the receiving side. Handshake-level packets are not expanded.
+    #[test]
+    fn initial_packets_are_padded_to_the_rfc_minimum_and_still_parse() {
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let server_cfg =
+            server_config(vec![leaf_cert()], leaf_key(), alpn.clone()).expect("server config");
+        let client_cfg = client_config(vec![ca_cert()], alpn).expect("client config");
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-params".to_vec(),
+        )
+        .expect("client driver");
+        let mut server = QuicHandshakeDriver::server(server_cfg, b"server-params".to_vec())
+            .expect("server driver");
+        client
+            .install_initial_keys(DCID_BYTES)
+            .expect("client initial keys");
+        server
+            .install_initial_keys(DCID_BYTES)
+            .expect("server initial keys");
+
+        let mut flight = client.pump_outbound().expect("client initial flight");
+        assert_eq!(flight.len(), 1, "test expects one Initial CRYPTO segment");
+        let client_hello = flight.pop().expect("ClientHello segment");
+        assert!(
+            client_hello.data.len() < MIN_INITIAL_DATAGRAM_BYTES / 2,
+            "a bare ClientHello is far below the datagram minimum: {}",
+            client_hello.data.len()
+        );
+
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x44]).expect("client scid");
+        let initial = client
+            .assemble_handshake_packet(&client_hello, dcid, client_scid, 0)
+            .expect("assemble ClientHello Initial");
+        assert_eq!(
+            initial.len(),
+            MIN_INITIAL_DATAGRAM_BYTES,
+            "the Initial datagram is expanded to exactly the RFC minimum"
+        );
+        let (header, consumed) = PacketHeader::decode(&initial, 0).expect("padded Initial header");
+        let PacketHeader::Long(header) = header else {
+            panic!("Initial packets use the long header");
+        };
+        assert_eq!(header.packet_type, LongPacketType::Initial);
+        // `consumed` includes the packet number; the Length field covers the
+        // packet number, the padded ciphertext and the tag.
+        assert_eq!(
+            header.payload_length as usize,
+            initial.len() - consumed + usize::from(header.packet_number_len),
+            "the Length field accounts for the padding inside the AEAD envelope"
+        );
+
+        // The padded packet authenticates, and TLS consumes the ClientHello
+        // through the PADDING frames.
+        server
+            .recv_handshake_packet(&initial)
+            .expect("padded Initial authenticates and parses");
+        let server_flight = server
+            .pump_outbound()
+            .expect("server flight after ClientHello");
+        assert!(
+            !server_flight.is_empty(),
+            "TLS must have consumed the ClientHello behind the padding"
+        );
+
+        // Handshake-level packets are not expanded: header + CRYPTO frame
+        // framing + tag stay well under 64 bytes of overhead.
+        if let Some(segment) = server_flight
+            .iter()
+            .find(|segment| segment.level == HandshakeLevel::Handshake)
+        {
+            let server_scid = ConnectionId::new(&[0x55, 0x66]).expect("server scid");
+            let packet = server
+                .assemble_handshake_packet(segment, client_scid, server_scid, 0)
+                .expect("assemble Handshake packet");
+            assert!(
+                packet.len() <= segment.data.len() + 64,
+                "Handshake packets carry no padding: {} bytes for a {}-byte segment",
+                packet.len(),
+                segment.data.len()
+            );
+        }
     }
 
     #[test]

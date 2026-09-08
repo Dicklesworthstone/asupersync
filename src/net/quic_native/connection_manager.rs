@@ -1585,6 +1585,11 @@ async fn drain_connection_frames_inner(
     } else {
         PROTECTED_1RTT_MAX_PACKET_BYTES
     };
+    if space == PacketNumberSpace::ApplicationData {
+        // Keep DATAGRAM admission in step with the exact packet budget this
+        // assembler enforces (GH#66).
+        handle.connection.set_one_rtt_frame_budget(max_frame_bytes);
+    }
     let frames = if pto_probe {
         handle
             .connection

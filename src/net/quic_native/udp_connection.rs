@@ -548,6 +548,11 @@ impl NativeQuicUdpConnection {
         }
         connection.confirm_handshake(cx)?;
 
+        // DATAGRAM admission must know this connection's exact packet budget
+        // before the first flush (GH#66).
+        connection.inner_mut().set_one_rtt_frame_budget(
+            PROTECTED_1RTT_MAX_PACKET_BYTES.saturating_sub(protected_1rtt_packet_len(peer_cid, 0)),
+        );
         let final_handshake_flight = driver.take_final_flight();
         let protection = AtpPacketProtection::from_provider(
             Box::new(driver.into_provider()),
@@ -612,6 +617,9 @@ impl NativeQuicUdpConnection {
         let now_micros = self.instant_micros(now);
         let max_frame_bytes = PROTECTED_1RTT_MAX_PACKET_BYTES
             .saturating_sub(protected_1rtt_packet_len(self.peer_cid, 0));
+        self.connection
+            .inner_mut()
+            .set_one_rtt_frame_budget(max_frame_bytes);
         let mut packets = Vec::new();
 
         for _ in 0..MAX_PACKETS_PER_FLUSH {
