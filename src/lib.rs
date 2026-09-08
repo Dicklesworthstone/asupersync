@@ -61,16 +61,17 @@
 // platform-gated and appear dead on non-Unix targets.
 #![cfg_attr(not(target_family = "windows"), deny(dead_code))]
 #![cfg_attr(target_family = "windows", warn(dead_code))]
-// The ATP bonded receive path is a long linear chain of `async fn`s
-// (`BondedTransfer::run_receive` -> `receive_bonded` ->
-// `receive_bonded_with_options` -> `..._and_advertised_ips` ->
-// `drain_bonded_round_tail` -> ...), and `Cx::spawn` requires the whole
-// coroutine witness to be `Send`. Proving that walks one solver frame per
-// link, which overflows the default depth of 128 with
-// `error: overflow evaluating the requirement {async block@sdk/bonded.rs}:
-// Send` — a compile error, not a lint, and one that only the `--locked`
-// cancel-contract lane surfaced. The chain is deep, not recursive, so the
-// depth is the thing to raise; keep new async links in that path in mind.
+// Proving `Send` for a spawned deep chain of `async fn`s walks one solver
+// frame per link; past the default depth of 128 rustc raises the
+// future-incompatible `recursion_depth_exceeding_limit` lint (an error under
+// `-D warnings`). Measured on 2026-09-08 with this attribute removed
+// (br-asupersync-lf8muy): the one remaining overflow in this crate is the
+// HTTP/1 listener drain chain (`Http1StreamingServer::serve_produced_with_peer_addr`
+// -> `serve_produced_connection` -> `race_force_close` -> `PollFn` ...) behind
+// `runtime.try_spawn` in `src/http/h1/listener.rs`. The ATP RaptorQ receive
+// chain no longer needs it: its deep subtrees are type-erased at their
+// per-round await sites in `net/atp/transport_rq` (`erase_send`). Cut the H1
+// chain the same way before removing this.
 #![recursion_limit = "256"]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]

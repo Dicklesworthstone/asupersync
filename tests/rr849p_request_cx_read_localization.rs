@@ -21,8 +21,12 @@
 //! the read for the full timeout.
 
 #![cfg(all(feature = "postgres", feature = "test-internals"))]
-// See `atp_bond_isomorphism_e2e`: an integration test is its own crate and does
-// not inherit the `recursion_limit` from `src/lib.rs`.
+// An integration test is its own crate and does not inherit the
+// `recursion_limit` from `src/lib.rs`. Measured 2026-09-08 with this attribute
+// removed (br-asupersync-lf8muy): the overflow here is the web request-region
+// drain chain (`ServerRequestRegion::run_with_protocol_drain` ->
+// `drain_handler` -> `PollFn` over `AmbientCxScope<CatchUnwind<..>>`), not the
+// ATP receive chain, which is now type-erased in `net/atp/transport_rq`.
 #![recursion_limit = "256"]
 
 use std::io::{Read, Write};
