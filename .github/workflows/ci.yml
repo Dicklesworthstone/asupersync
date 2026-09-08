@@ -2720,7 +2720,13 @@ jobs:
             cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path \
             abort_does_not_have_separate_force_kill_method \
             abort_with_reason_does_not_call_drop_guard_bypass_machinery \
-            cross_reference_to_prior_audits
+            cross_reference_to_prior_audits \
+            checked_zero_quota_refuses_before_publication_on_native_current_thread \
+            checked_zero_quota_refuses_before_publication_on_native_sharded_workers \
+            checked_owned_permit_cancellation_and_same_poll_reuse_on_native_current_thread \
+            checked_owned_permit_cancellation_and_same_poll_reuse_on_native_sharded_workers \
+            checked_other_primitives_refuse_cancel_and_reuse_on_native_current_thread \
+            checked_other_primitives_refuse_cancel_and_reuse_on_native_sharded_workers
           do
             if ! grep -Fq "test ${required_test} ... ok" <<<"$output"; then
               echo "native parked-task cancellation proof did not pass required sentinel ${required_test}" >&2

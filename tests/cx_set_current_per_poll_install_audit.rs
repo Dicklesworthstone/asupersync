@@ -267,20 +267,53 @@ fn scheduler_installs_cx_per_poll() {
 
 #[test]
 fn scheduler_install_is_raii_guard_dropped_after_poll() {
-    // Pin: the install is via a guard that drops AFTER
-    // the poll returns. Without this, the thread-local
-    // frame leaks beyond the poll boundary.
+    // Pin the actual guard and catch scopes rather than a fixed byte window.
+    // worker::tests::native_obligation_completion_retires_panicking_future_fields_before_audit
+    // separately checks that the actual native future destructor still sees Cx.
     let source = read("src/runtime/scheduler/three_lane.rs");
+    let (_, execute) = source
+        .split_once("pub(crate) fn execute(&mut self, task_id: TaskId) {")
+        .expect("ThreeLaneWorker::execute body");
+    let (execute, _) = execute.split_once("\n    }\n").expect("execute close");
 
     let install_marker = "let _cx_guard = crate::cx::Cx::set_current(task_cx);";
-    let pos = source.find(install_marker).expect("set_current install");
-    let window = &source[pos..pos + 1500];
+    let install = execute.find(install_marker).expect("set_current install");
+    let execution_guard = execute
+        .find("let mut guard = TaskExecutionGuard {")
+        .expect("task execution guard");
+    let catch_marker =
+        "let poll_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {";
+    let catch = execute.find(catch_marker).expect("isolated task poll");
+    let (poll, after_poll) = execute[catch + catch_marker.len()..]
+        .split_once("\n        }));")
+        .expect("poll catch closure close");
+    let compact_poll: String = poll.split_whitespace().collect();
 
     assert!(
-        window.contains("std::panic::catch_unwind(") && window.contains("stored.poll("),
-        "REGRESSION: scheduler no longer wraps the poll() \
-         call in catch_unwind after installing Cx. Either \
-         panic safety or the install order has changed.",
+        install < execution_guard && execution_guard < catch,
+        "Cx must be installed before the execution guard and isolated poll",
+    );
+    assert!(
+        compact_poll
+            .contains("guard.stored.as_mut().expect(\"executingtaskstorage\").poll(&mutcx)"),
+        "catch_unwind must poll the future owned by TaskExecutionGuard",
+    );
+
+    let (_, completion) = after_poll
+        .split_once("match poll_result {")
+        .expect("poll outcome handling");
+    let (completion, after_completion) = completion
+        .split_once("\n        }\n")
+        .expect("poll outcome match close");
+    assert!(
+        after_completion.trim_start().starts_with("drop(guard);"),
+        "the execution guard must survive poll outcome handling",
+    );
+    assert!(
+        !execute[..catch].contains("drop(_cx_guard)")
+            && !poll.contains("drop(_cx_guard)")
+            && !completion.contains("drop(_cx_guard)"),
+        "Cx must remain installed through polling and execution-guard cleanup",
     );
 }
 

@@ -27,7 +27,7 @@ expression: inventory
 1	Env	decoding.rs	std::env::var_os(
 1	Env	net/atp/bonding/receiver.rs	std::env::var_os(
 3	Env	net/atp/transport_quic/mod.rs	std::env::var_os(
-1	Env	net/atp/transport_quic/native_link.rs	std::env::var(
+2	Env	net/atp/transport_quic/native_link.rs	std::env::var(
 9	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(
 6	Env	net/atp/transport_rq/mod.rs	std::env::var_os(
 2	Env	net/quic_native/connection.rs	std::env::var_os(
@@ -126,7 +126,7 @@ expression: inventory
 1	Output	net/quic_native/endpoint_api.rs	eprintln!(
 1	Spawn	database/mysql.rs	std::thread::Builder
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn
-3	Spawn	runtime/builder.rs	std::thread::Builder
+4	Spawn	runtime/builder.rs	std::thread::Builder
 1	Spawn	runtime/spawn_blocking.rs	thread::Builder
 2	Spawn	signal/shutdown.rs	std::thread::Builder
 2	Spawn	signal/signal.rs	thread::Builder
@@ -217,10 +217,9 @@ expression: inventory
 2	Time	net/atp/udp/mod.rs	Instant::now()
 2	Time	net/dns/resolver.rs	Instant::now()
 5	Time	net/quic_native/connection_manager.rs	Instant::now()
-3	Time	net/quic_native/endpoint.rs	Instant::now()
+4	Time	net/quic_native/endpoint.rs	Instant::now()
 3	Time	net/quic_native/handshake_driver.rs	Instant::now()
-2	Time	net/quic_native/managed_endpoint.rs	Instant::now()
-1	Time	net/quic_native/managed_endpoint.rs	std::time::SystemTime::now()
+1	Time	net/quic_native/managed_endpoint.rs	Instant::now()
 4	Time	net/quic_native/udp_connection.rs	Instant::now()
 1	Time	net/stun.rs	SystemTime::now()
 1	Time	observability/mod.rs	std::time::SystemTime::now()
@@ -284,7 +283,7 @@ expression: inventory
 1	Env	decoding.rs	std::env::var_os(	if std::env::var_os().is_none() {
 1	Env	net/atp/bonding/receiver.rs	std::env::var_os(	if std::env::var_os(ATP_BOND_TRACE_ENV).is_some() {
 3	Env	net/atp/transport_quic/mod.rs	std::env::var_os(	if std::env::var_os().is_some() {
-1	Env	net/atp/transport_quic/native_link.rs	std::env::var(	std::env::var()
+2	Env	net/atp/transport_quic/native_link.rs	std::env::var(	std::env::var()
 1	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(	*ENABLED.get_or_init(|| std::env::var_os().is_some())
 1	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(	if packets == 0 || std::env::var_os().is_none() {
 3	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(	if std::env::var_os().is_none() {
@@ -439,7 +438,7 @@ expression: inventory
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn	let handle = thread::spawn(move || {
 1	Spawn	runtime/builder.rs	std::thread::Builder	let mut builder = std::thread::Builder::new().name(name);
 1	Spawn	runtime/builder.rs	std::thread::Builder	let thread = std::thread::Builder::new()
-1	Spawn	runtime/builder.rs	std::thread::Builder	std::thread::Builder::new()
+2	Spawn	runtime/builder.rs	std::thread::Builder	std::thread::Builder::new()
 1	Spawn	runtime/spawn_blocking.rs	thread::Builder	let thread_result = thread::Builder::new()
 2	Spawn	signal/shutdown.rs	std::thread::Builder	std::thread::Builder::new()
 1	Spawn	signal/signal.rs	thread::Builder	let poller_handle = thread::Builder::new()
@@ -718,18 +717,14 @@ expression: inventory
 1	Time	net/atp/udp/mod.rs	Instant::now()	receive_time: Instant::now(),
 2	Time	net/dns/resolver.rs	Instant::now()	started: Instant::now(),
 1	Time	net/quic_native/connection_manager.rs	Instant::now()	clock_origin: Instant::now(),
-1	Time	net/quic_native/connection_manager.rs	Instant::now()	handle.last_activity = Instant::now();
+3	Time	net/quic_native/connection_manager.rs	Instant::now()	instant_origin: Instant::now(),
 1	Time	net/quic_native/connection_manager.rs	Instant::now()	last_activity: Instant::now(),
-1	Time	net/quic_native/connection_manager.rs	Instant::now()	let duration_from_now = deadline.saturating_duration_since(Instant::now());
-1	Time	net/quic_native/connection_manager.rs	Instant::now()	let now = Instant::now();
-2	Time	net/quic_native/endpoint.rs	Instant::now()	let batch_start = Instant::now();
+3	Time	net/quic_native/endpoint.rs	Instant::now()	let batch_start = Instant::now();
 1	Time	net/quic_native/endpoint.rs	Instant::now()	receive_time: Instant::now(),
 1	Time	net/quic_native/handshake_driver.rs	Instant::now()	flight_sent_at = Instant::now();
 1	Time	net/quic_native/handshake_driver.rs	Instant::now()	last_early_data_resend = Some(Instant::now());
 1	Time	net/quic_native/handshake_driver.rs	Instant::now()	let mut flight_sent_at = Instant::now();
-1	Time	net/quic_native/managed_endpoint.rs	Instant::now()	let closed_connections = self.connection_router.close_all(cx, Instant::now(), 0)?;
-1	Time	net/quic_native/managed_endpoint.rs	Instant::now()	let now = Instant::now();
-1	Time	net/quic_native/managed_endpoint.rs	std::time::SystemTime::now()	std::time::SystemTime::now()
+1	Time	net/quic_native/managed_endpoint.rs	Instant::now()	.unwrap_or_else(|_| Instant::now());
 1	Time	net/quic_native/udp_connection.rs	Instant::now()	clock_origin: Instant::now(),
 2	Time	net/quic_native/udp_connection.rs	Instant::now()	let now = Instant::now();
 1	Time	net/quic_native/udp_connection.rs	Instant::now()	let now_micros = self.instant_micros(Instant::now());

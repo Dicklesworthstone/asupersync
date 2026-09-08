@@ -1493,11 +1493,20 @@ fn test_function() {
     // 724 -> 723 (br-asupersync-bi2462.22): the wall-clock bounded spin in
     // cancel/symbol_cancel.rs was removed by publishing `cancelled_at`
     // before the cancelled flag, so `child()` no longer needs a clock.
+    // 2026-09-08 (br-asupersync-ghxhvm): reviewed fc892d50cc's bounded
+    // ATP receive-window maximum env override and 38736205d9's managed
+    // send elapsed metric, explicit runtime-clock origins, and shutdown
+    // fallback. Removed managed wall-clock sites offset the two additions;
+    // the total remains 723 while the reviewed occurrence inventory changes.
+    // 723 -> 724 (br-asupersync-bi2462.79): RuntimeInner now creates an
+    // owned teardown thread when its final owner drops on a worker. This
+    // runtime-provider OS spawn retains the joins and state off-worker so
+    // the current poll can return; it introduces no application task spawn.
     // The snapshot itself is keyed without line numbers since
     // br-asupersync-bi2462.23, so this count and the snapshot text move only
     // when a site is added, removed or rewritten — never when code above a
     // site shifts.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 723;
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 724;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

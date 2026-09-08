@@ -400,9 +400,9 @@ fn cancel_request_falls_back_to_strengthen_when_begin_close_returns_false() {
 #[test]
 fn complete_close_enforces_structural_quiescence_before_final_transition() {
     // Pin (link 7): complete_close (Finalizing → Closed)
-    // checks children/tasks/pending_obligations/finalizers
-    // are all empty. Without this, a region could be marked
-    // Closed while live work is still in flight — UB.
+    // checks children, tasks, obligations, finalizers, and pending spawns.
+    // Finalizers moved to a separate lock in 70a87ebf65; unapplied
+    // obligations joined this gate in 81c81b4c72. Both still block close.
     let source = read("src/record/region.rs");
 
     let fn_marker = "pub fn complete_close(&self) -> bool {";
@@ -416,11 +416,13 @@ fn complete_close_enforces_structural_quiescence_before_final_transition() {
         body.contains("inner.children.is_empty()")
             && body.contains("inner.tasks.is_empty()")
             && body.contains("inner.pending_obligations == 0")
-            && body.contains("inner.finalizers.is_empty()"),
+            && body.contains("inner.unapplied_obligations == 0")
+            && body.contains("self.finalizers.read().is_empty()")
+            && body.contains("self.pending_spawns.count() == 0"),
         "REGRESSION: complete_close no longer enforces \
          structural quiescence (children/tasks/obligations/\
-         finalizers all empty). A region could be Closed \
-         while live work persists — UB pathway.",
+         finalizers/pending spawns all empty). A region could be Closed \
+         while live work persists.",
     );
 
     // The transition is also CAS-protected.

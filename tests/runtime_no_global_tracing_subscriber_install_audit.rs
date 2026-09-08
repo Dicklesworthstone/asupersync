@@ -48,14 +48,11 @@
 //!     - User installs in `main()` (typically via
 //!       `tracing_subscriber::registry().init()`).
 //!     - User's subscriber lives for the entire process lifetime.
-//!     - When the user's `Runtime` drops, the runtime stops
-//!       emitting events but the user's subscriber is still
-//!       registered to handle any further events from other
-//!       sources (the user's own code, third-party libs, etc.).
-//!     - Post-drop emissions from the runtime simply don't
-//!       happen — `RuntimeInner::drop` joins all worker
-//!       threads before returning, so there is no live
-//!       runtime code emitting events after drop.
+//!     - Caller-thread final-owner drop joins workers before returning.
+//!       Worker-thread final-owner drop transfers those joins and retained
+//!       state to a teardown thread, allowing the current poll to finish.
+//!       The user's subscriber remains registered through either path; the
+//!       runtime does not install or uninstall it.
 //!
 //! Verdict: **SOUND**. The "post-drop log emissions panicking"
 //! failure mode the operator flags is structurally impossible
@@ -64,8 +61,9 @@
 //!     could be left dangling.
 //!   - All scoped installs are RAII-bounded by `with_default`,
 //!     which always uninstalls on guard drop.
-//!   - `RuntimeInner::drop` joins all worker threads, so no
-//!     post-drop emissions can occur from the runtime.
+//!   - `RuntimeInner::drop` retains every worker join. Worker-originated
+//!     teardown can emit until its poll and owned joins finish; it does not
+//!     mutate the user's subscriber during that interval.
 //!
 //! A regression that:
 //!   - introduced `tracing::subscriber::set_global_default(...)`
@@ -287,12 +285,11 @@ fn runtime_inner_drop_does_not_touch_tracing() {
 }
 
 #[test]
-fn runtime_inner_drop_joins_worker_threads_no_post_drop_emissions() {
-    // Pin: RuntimeInner::drop joins all worker threads via
-    // handle.join(). After drop returns, no runtime code is
-    // running — so there are NO post-drop tracing emissions
-    // from the runtime even if the user has a subscriber
-    // installed.
+fn runtime_inner_drop_retains_worker_joins_without_touching_subscriber_lifecycle() {
+    // Caller-thread drop remains synchronous. Worker-thread drop transfers
+    // all joins to an owned reaper so it cannot join itself inside poll.
+    // The native teardown regressions establish completion behavior; these
+    // source checks only guard ownership and subscriber separation.
     let path = project_dir("src/runtime/builder.rs");
     let content = std::fs::read_to_string(&path).expect("read builder.rs");
 
@@ -302,14 +299,10 @@ fn runtime_inner_drop_joins_worker_threads_no_post_drop_emissions() {
     let body = &content[start..start + end_rel];
 
     assert!(
-        body.contains("for handle in handles.drain(..) {"),
-        "REGRESSION: RuntimeInner::drop no longer drains and \
-         joins worker thread handles. Without join, runtime \
-         worker threads can keep running after drop returns — \
-         emitting tracing events into the user's still-live \
-         subscriber from a 'logically dead' runtime. While this \
-         doesn't cause a panic, it DOES surface 'phantom' \
-         events that confuse SREs.\n\nimpl body:\n{body}",
+        body.contains("std::mem::take(self.worker_threads.get_mut())")
+            && body.contains("for handle in handles {"),
+        "REGRESSION: RuntimeInner::drop must transfer every worker handle \
+         into its teardown job and join every transferred handle.\n\n{body}",
     );
 
     assert!(
@@ -326,6 +319,14 @@ fn runtime_inner_drop_joins_worker_threads_no_post_drop_emissions() {
          scheduler to shutdown. Without the signal, worker \
          threads continue running until they observe shutdown \
          via some other path — delaying the join.",
+    );
+    assert!(
+        body.contains("handle.thread().id() == current_thread")
+            && body.contains(
+                "if on_worker {\n            Self::finish_teardown_off_worker(teardown);"
+            )
+            && body.contains("} else {\n            teardown();"),
+        "worker-owned teardown must transfer joins off-worker while caller-thread teardown stays synchronous"
     );
 }
 

@@ -3663,9 +3663,12 @@ impl Runtime {
 
     /// Shut down the runtime, waiting at most `timeout` for teardown to finish.
     ///
-    /// Ordinary `Runtime` drop performs a blocking teardown: it signals the
-    /// scheduler, then joins every worker thread with no bound. A future that
-    /// blocks inside `poll` (in violation of the cooperative contract) keeps
+    /// Ordinary `Runtime` drop from outside its workers performs a blocking
+    /// teardown: it signals the scheduler, then joins every worker thread with
+    /// no bound. A final owner dropped by an async worker transfers those joins
+    /// and the retained runtime state to a teardown thread so that its own poll
+    /// can finish. A future that blocks inside `poll` (in violation of the
+    /// cooperative contract) keeps
     /// its worker from returning, so plain drop can wait forever ([#60]).
     ///
     /// This method is the bounded alternative. It synchronously closes every
@@ -5124,6 +5127,41 @@ impl RuntimeInner {
             .as_ref()
             .map(crate::runtime::blocking_pool::BlockingPool::handle)
     }
+
+    fn finish_teardown_off_worker(teardown: impl FnOnce() + Send + 'static) {
+        Self::finish_teardown_with_spawner(teardown, |job| {
+            std::thread::Builder::new()
+                .name("asupersync-worker-teardown".into())
+                .spawn(job)
+                .map(|_| ())
+        });
+    }
+
+    fn finish_teardown_with_spawner(
+        teardown: impl FnOnce() + Send + 'static,
+        mut spawn: impl FnMut(Box<dyn FnOnce() + Send + 'static>) -> io::Result<()>,
+    ) {
+        // A refused spawn drops its closure on this worker. Keep ownership of
+        // the joins and state outside that closure so refusal cannot detach
+        // workers, drop their state, or re-enter teardown on the current worker.
+        let retained = Arc::new(Mutex::new(Some(teardown)));
+        loop {
+            let reaper_retained = Arc::clone(&retained);
+            let job = Box::new(move || {
+                let teardown = reaper_retained.lock().take();
+                if let Some(teardown) = teardown {
+                    teardown();
+                }
+            });
+            if spawn(job).is_ok() {
+                return;
+            }
+            // Ordinary drop has no timeout. Under thread-resource exhaustion,
+            // retain teardown ownership and wait for capacity; do not report a
+            // completed teardown or silently discard a worker's join handle.
+            std::thread::park_timeout(Duration::from_millis(1));
+        }
+    }
 }
 
 impl Drop for RuntimeInner {
@@ -5151,38 +5189,59 @@ impl Drop for RuntimeInner {
             Self::wait_for_spawn_publishers(Some(liveness));
         }
 
-        // Signal deadline monitor to stop, then join its thread.
+        // Signal consumers before transferring their join handles. In the
+        // worker-owned case the current poll must return before it can join.
         if let Some(shutdown) = self.deadline_monitor_shutdown.take() {
             let _ = shutdown.send(());
         }
-        if let Some(thread) = self.deadline_monitor_thread.take() {
-            let _ = thread.join();
-        }
         self.scheduler.shutdown();
-        // Shutdown blocking pool first (it may have tasks that need to drain)
-        if let Some(pool) = self.blocking_pool.take() {
-            pool.shutdown();
+        let handles = std::mem::take(self.worker_threads.get_mut());
+        let current_thread = std::thread::current().id();
+        let on_worker = handles
+            .iter()
+            .any(|handle| handle.thread().id() == current_thread);
+        let deadline_monitor = self.deadline_monitor_thread.take();
+        let blocking_pool = self.blocking_pool.take();
+        if let Some(pool) = &blocking_pool {
+            pool.close_admission();
         }
-        let mut handles = lock_state(&self.worker_threads);
-        for handle in handles.drain(..) {
-            let _ = handle.join();
-        }
-        drop(handles);
-
-        if let Some(mailbox) = gateway_mailbox {
-            let mut cancelled = Vec::new();
-            while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
-                for request in cancelled.drain(..) {
-                    if let Some(slot) = request.admitted_slot {
-                        slot.abandon_unpublished_spawn_effects();
+        // Workers retain their scheduler handles. Also retain the runtime's
+        // unified and sharded state until every worker has exited and pending
+        // mailbox publications have been resolved, including during unwind.
+        let state = Arc::clone(&self.state);
+        let sharded_state = self.sharded_state.clone();
+        let teardown = move || {
+            if let Some(thread) = deadline_monitor {
+                let _ = thread.join();
+            }
+            if let Some(pool) = blocking_pool {
+                pool.shutdown();
+            }
+            for handle in handles {
+                let _ = handle.join();
+            }
+            if let Some(mailbox) = gateway_mailbox {
+                let mut cancelled = Vec::new();
+                while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
+                    for request in cancelled.drain(..) {
+                        if let Some(slot) = request.admitted_slot {
+                            slot.abandon_unpublished_spawn_effects();
+                        }
                     }
                 }
+                while let Some(request) = mailbox.dequeue() {
+                    request
+                        .into_parts()
+                        .resolve_failed(SpawnError::RuntimeUnavailable);
+                }
             }
-            while let Some(request) = mailbox.dequeue() {
-                request
-                    .into_parts()
-                    .resolve_failed(SpawnError::RuntimeUnavailable);
-            }
+            drop(sharded_state);
+            drop(state);
+        };
+        if on_worker {
+            Self::finish_teardown_off_worker(teardown);
+        } else {
+            teardown();
         }
     }
 }
@@ -5734,6 +5793,44 @@ mod tests {
                 |message| (*message).to_string(),
             ),
         }
+    }
+
+    #[test]
+    fn worker_teardown_retains_job_when_first_reaper_spawn_is_refused() {
+        let payload = Arc::new(());
+        let weak_payload = Arc::downgrade(&payload);
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let mut attempts = 0;
+        let mut reaper = None;
+
+        RuntimeInner::finish_teardown_with_spawner(
+            move || {
+                drop(payload);
+                finished_tx.send(()).expect("observe completed teardown");
+            },
+            |job| {
+                attempts += 1;
+                if attempts == 1 {
+                    drop(job);
+                    assert!(
+                        weak_payload.upgrade().is_some(),
+                        "a refused spawn must leave the teardown payload owned"
+                    );
+                    assert!(finished_rx.try_recv().is_err());
+                    Err(io::Error::other("injected thread creation refusal"))
+                } else {
+                    let handle = std::thread::Builder::new().spawn(job)?;
+                    reaper = Some(handle);
+                    Ok(())
+                }
+            },
+        );
+
+        assert_eq!(attempts, 2);
+        reaper.unwrap().join().expect("teardown thread completes");
+        finished_rx.try_recv().expect("teardown ran exactly once");
+        assert!(finished_rx.try_recv().is_err());
+        assert!(weak_payload.upgrade().is_none());
     }
 
     #[test]
