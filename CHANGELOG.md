@@ -82,6 +82,11 @@ collects the changes since the published `v0.4.10` source.
 - A refused teardown-thread spawn preserves the cleanup job for retry.
   Permanent thread-resource exhaustion can still block ordinary drop;
   the explicit bounded-shutdown APIs retain their separate timeout policy.
+- Publishing an earlier timer deadline wakes the native reactor, so a worker
+  already waiting on a later deadline observes the new timer promptly. This
+  also restores timely HTTP/2 graceful-drain completion. A native regression
+  observes the reactor's selected wait before inserting the earlier timer and
+  checks the exact task result and future cleanup.
 
 ### QUIC reassembly and ATP framing
 
