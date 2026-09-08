@@ -700,3 +700,244 @@ fn dispatch_latency_under_100ms() {
         panic!("task was never dispatched");
     }
 }
+
+/// An earlier timer published after the reactor selected a long timeout must
+/// interrupt that wait and retire the actual task without another timer pump.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly",
+    target_os = "windows",
+))]
+#[test]
+fn earlier_timer_publication_interrupts_selected_native_reactor_timeout() {
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::runtime::reactor::{
+        Events, Interest, IoReactorCapabilitySnapshot, Reactor, Source, Token, create_reactor,
+    };
+    use std::future::Future;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Mutex, mpsc};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    const WAIT: Duration = Duration::from_secs(2);
+    const FAR: Duration = Duration::from_secs(60);
+    const NEAR: Duration = Duration::from_millis(10);
+
+    struct ControlledReactor {
+        inner: Arc<dyn Reactor>,
+        arm: AtomicBool,
+        selected: mpsc::Sender<Duration>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Reactor for ControlledReactor {
+        fn capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+            self.inner.capability_snapshot()
+        }
+
+        fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+            self.inner.register(source, token, interest)
+        }
+
+        fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+            self.inner.modify(token, interest)
+        }
+
+        fn deregister(&self, token: Token) -> io::Result<()> {
+            self.inner.deregister(token)
+        }
+
+        fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+            if let Some(selected) = timeout.filter(|duration| *duration > FAR / 2)
+                && self.arm.swap(false, Ordering::AcqRel)
+            {
+                // Remove startup/spawn wake permits before exposing the frozen
+                // timeout. No sources are registered in this test. A timer
+                // publication during the gate must create a NEW native permit.
+                if self.inner.poll(events, Some(Duration::ZERO))? != 0 {
+                    return Err(io::Error::other("unexpected I/O in timer-only probe"));
+                }
+                self.selected
+                    .send(selected)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                self.release
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .recv_timeout(WAIT)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
+            // Preserve the timeout the scheduler already selected. The real
+            // kernel backend, including its wake permit, decides when to return.
+            self.inner.poll(events, timeout)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            self.inner.wake()
+        }
+
+        fn registration_count(&self) -> usize {
+            self.inner.registration_count()
+        }
+    }
+
+    struct ReadyWake {
+        ready: Arc<AtomicBool>,
+        task: Option<Waker>,
+    }
+
+    impl Wake for ReadyWake {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.ready.store(true, Ordering::Release);
+            if let Some(task) = &self.task {
+                task.wake_by_ref();
+            }
+        }
+    }
+
+    struct Probe {
+        ready: Arc<AtomicBool>,
+        first_poll: Option<mpsc::Sender<Waker>>,
+        dropped: Arc<AtomicUsize>,
+        retired: mpsc::Sender<()>,
+    }
+
+    impl Future for Probe {
+        type Output = usize;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<usize> {
+            if self.ready.load(Ordering::Acquire) {
+                Poll::Ready(42)
+            } else {
+                if let Some(first_poll) = self.first_poll.take() {
+                    let _ = first_poll.send(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
+    }
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::AcqRel);
+            let _ = self.retired.send(());
+        }
+    }
+
+    init_test_logging();
+    let (selected_tx, selected_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let reactor = Arc::new(ControlledReactor {
+        inner: create_reactor().expect("create native platform reactor"),
+        arm: AtomicBool::new(false),
+        selected: selected_tx,
+        release: Mutex::new(release_rx),
+    });
+    let timer = TimerDriverHandle::with_wall_clock();
+    let far_fired = Arc::new(AtomicBool::new(false));
+    let far = timer.register(
+        timer.now() + FAR,
+        Waker::from(Arc::new(ReadyWake {
+            ready: Arc::clone(&far_fired),
+            task: None,
+        })),
+    );
+    // A single worker excludes an incidental second-worker timer pump while
+    // its reactor timeout is frozen. The caller never uses Runtime::block_on.
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .with_reactor(reactor.clone())
+        .with_timer_driver(timer.clone())
+        .build()
+        .expect("build native timer probe runtime");
+    let (first_tx, first_rx) = mpsc::channel();
+    let (retired_tx, retired_rx) = mpsc::channel();
+    let ready = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let mut task = runtime
+        .handle()
+        .try_spawn(Probe {
+            ready: Arc::clone(&ready),
+            first_poll: Some(first_tx),
+            dropped: Arc::clone(&dropped),
+            retired: retired_tx,
+        })
+        .expect("spawn native timer probe");
+    let mut near = None;
+    let observed = (|| -> Result<(Duration, usize, bool), String> {
+        let task_waker = first_rx
+            .recv_timeout(WAIT)
+            .map_err(|error| format!("probe first Pending poll: {error}"))?;
+        reactor.arm.store(true, Ordering::Release);
+        // This setup wake precedes the controlled handoff and is explicitly
+        // drained by the wrapper; it cannot deliver the later timer's wake.
+        reactor.wake().map_err(|error| error.to_string())?;
+        let selected = selected_rx
+            .recv_timeout(WAIT)
+            .map_err(|error| format!("selected long reactor timeout: {error}"))?;
+        near = Some(timer.register(
+            timer.now() + NEAR,
+            Waker::from(Arc::new(ReadyWake {
+                ready: Arc::clone(&ready),
+                task: Some(task_waker),
+            })),
+        ));
+        release_tx.send(()).map_err(|error| error.to_string())?;
+        retired_rx.recv_timeout(WAIT).map_err(|error| {
+            format!(
+                "earlier timer did not retire task while native reactor held {selected:?}: {error}"
+            )
+        })?;
+        Ok((
+            selected,
+            dropped.load(Ordering::Acquire),
+            far_fired.load(Ordering::Acquire),
+        ))
+    })();
+
+    // Release both the handshake and native poll before asserting, including
+    // the expected old-code failure. Shutdown then joins the worker normally.
+    let _ = release_tx.send(());
+    if let Some(near) = near {
+        let _ = timer.cancel(&near);
+    }
+    let _ = timer.cancel(&far);
+    let _ = reactor.wake();
+    drop(runtime);
+
+    let (selected, dropped_before_cleanup, far_fired_before_cleanup) =
+        observed.expect("earlier timer publication must interrupt the selected native wait");
+    assert!(
+        selected > FAR / 2,
+        "the old long timeout was actually selected"
+    );
+    assert_eq!(
+        dropped_before_cleanup, 1,
+        "actual future retired before cleanup"
+    );
+    assert!(
+        !far_fired_before_cleanup,
+        "near timer must beat the far timer"
+    );
+    assert_eq!(
+        dropped.load(Ordering::Acquire),
+        1,
+        "future drops exactly once"
+    );
+    assert!(ready.load(Ordering::Acquire), "the timer delivered readiness");
+    assert_eq!(
+        Pin::new(&mut task).poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(42),
+        "actual task result survives terminal publication and shutdown",
+    );
+}
