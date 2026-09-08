@@ -12,8 +12,12 @@
 use crate::cx::Cx;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::net::lookup_all;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::runtime::reactor::create_reactor;
 use crate::stream::Stream;
 #[cfg(any(
     target_os = "linux",
@@ -40,6 +44,8 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket as StdUd
 use std::os::fd::AsRawFd;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
 #[cfg(windows)]
@@ -1437,11 +1443,114 @@ fn dissolve_udp_association(socket: &StdUdpSocket, next_peer: SocketAddr) -> io:
     }
 }
 
+/// Process-global fallback I/O driver for sockets polled with no ambient
+/// reactor (GH#67 / asupersync-t64ggs).
+///
+/// `UdpSocket`'s low-level polling API selects its reactor from the current
+/// `Cx`. The documented caller-driven composition — a plain executor such as
+/// `futures_lite::block_on` plus an explicit capability context, no runtime
+/// turning a reactor — therefore reaches `register_interest` with no I/O
+/// driver at all. That path used to fall back to an immediate self-wake
+/// (`fallback_rewake` without a timer driver), so a bounded receive wait such
+/// as `NativeQuicUdpConnection::drive_io_once` re-polled the socket in a hot
+/// loop and burned a full core until its timeout fired.
+///
+/// This shared driver mirrors the process-global fallback timer in
+/// `time::sleep` (br-asupersync-runtime-cpu-overhaul-5vt09v.3.5): ONE
+/// process-lifetime pump thread owns a standard reactor, sockets without an
+/// ambient driver register their readiness interest here, and the pump blocks
+/// in the reactor until an fd becomes ready and wakes the registered waker.
+/// A `block_on` caller then parks on its own waker for the whole wait instead
+/// of spinning. The pump is started lazily on the first driverless registration
+/// and never joined; `IoDriverHandle::register`/`IoRegistration::rearm` wake
+/// the reactor before every mutation, so registrations made while the pump is
+/// blocked take effect immediately.
+///
+/// A socket parked here migrates back to the ambient driver as soon as it is
+/// polled under a `Cx` that carries one (see `register_interest`), so the
+/// fallback never captures a socket that a runtime later adopts.
+#[cfg(not(target_arch = "wasm32"))]
+struct GlobalFallbackIoDriver {
+    driver: IoDriverHandle,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static GLOBAL_FALLBACK_IO: OnceLock<Option<GlobalFallbackIoDriver>> = OnceLock::new();
+
+/// Park applied by the fallback pump after a reactor error other than `EINTR`
+/// so a persistently failing backend cannot turn the pump into a hot loop.
+#[cfg(not(target_arch = "wasm32"))]
+const FALLBACK_IO_PUMP_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Returns the process-global fallback I/O driver, starting its pump thread on
+/// first use. `None` when no reactor backend could be created on this target
+/// (or the pump thread could not be spawned); callers then keep the legacy
+/// self-wake path so progress is still made.
+#[cfg(not(target_arch = "wasm32"))]
+fn global_fallback_io_driver() -> Option<&'static IoDriverHandle> {
+    GLOBAL_FALLBACK_IO
+        .get_or_init(|| {
+            let reactor = match create_reactor() {
+                Ok(reactor) => reactor,
+                Err(err) => {
+                    crate::tracing_compat::warn!(
+                        target: "asupersync::net::udp",
+                        error = %err,
+                        "GH#67: no reactor backend for the process-global fallback I/O driver; \
+                         driverless UDP polls keep the immediate self-wake path"
+                    );
+                    return None;
+                }
+            };
+            let driver = IoDriverHandle::new(reactor);
+            let pump_driver = driver.clone();
+            // ubs:ignore - intentional process-lifetime daemon reactor pump shared by all driverless UDP polls
+            match std::thread::Builder::new()
+                .name("asupersync-fallback-io".to_string())
+                .spawn(move || fallback_io_pump_loop(&pump_driver))
+            {
+                Ok(_handle) => Some(GlobalFallbackIoDriver { driver }),
+                Err(err) => {
+                    crate::tracing_compat::warn!(
+                        target: "asupersync::net::udp",
+                        error = %err,
+                        "GH#67: could not spawn the process-global fallback I/O pump; \
+                         driverless UDP polls keep the immediate self-wake path"
+                    );
+                    None
+                }
+            }
+        })
+        .as_ref()
+        .map(|global| &global.driver)
+}
+
+/// The shared fallback pump loop: block in the reactor until at least one
+/// registered fd is ready (or a registration mutation wakes the reactor), fire
+/// the ready wakers, repeat. With no registrations the reactor wait is
+/// indefinite, so an idle pump costs nothing.
+#[cfg(not(target_arch = "wasm32"))]
+fn fallback_io_pump_loop(driver: &IoDriverHandle) -> ! {
+    loop {
+        match driver.turn_with(None, |_, _| {}) {
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => std::thread::park_timeout(FALLBACK_IO_PUMP_ERROR_BACKOFF),
+        }
+    }
+}
+
 /// A UDP socket.
 #[derive(Debug)]
 pub struct UdpSocket {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     registration: Option<IoRegistration>,
+    /// Whether `registration` lives on the process-global fallback I/O driver
+    /// rather than an ambient `Cx` driver (GH#67). Such a registration is
+    /// dropped and re-made on the ambient driver the next time the socket is
+    /// polled under a `Cx` that carries one.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    registration_on_fallback: bool,
     inner: Arc<StdUdpSocket>,
     gso_demoted: bool,
 }
@@ -1474,6 +1583,7 @@ impl UdpSocket {
                         return Ok(Self {
                             inner: Arc::new(socket),
                             registration: None,
+                            registration_on_fallback: false,
                             gso_demoted: false,
                         });
                     }
@@ -2882,6 +2992,7 @@ impl UdpSocket {
         Ok(Self {
             inner: Arc::new(self.inner.try_clone()?),
             registration: None,
+            registration_on_fallback: false,
             gso_demoted: self.gso_demoted,
         })
     }
@@ -2889,6 +3000,7 @@ impl UdpSocket {
     /// Release readiness ownership without requiring a live cancellation context.
     pub(crate) fn clear_registration(&mut self) {
         self.registration = None;
+        self.registration_on_fallback = false;
     }
 
     /// Consume this wrapper and return the underlying std socket if unique.
@@ -2921,6 +3033,7 @@ impl UdpSocket {
             Ok(Self {
                 inner: Arc::new(socket),
                 registration: None,
+                registration_on_fallback: false,
                 gso_demoted: false,
             })
         }
@@ -2934,19 +3047,40 @@ impl UdpSocket {
     }
 
     /// Register interest with the reactor.
+    ///
+    /// The reactor is selected from the current `Cx`. With no ambient I/O
+    /// driver (the caller-driven composition: a plain executor plus an explicit
+    /// `Cx`) the socket registers with the process-global fallback I/O driver
+    /// so the caller parks until the fd is ready instead of self-waking into a
+    /// hot loop (GH#67); see [`GlobalFallbackIoDriver`].
     #[cfg(not(target_arch = "wasm32"))]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let target_interest = interest;
+
+        // GH#67: a registration parked on the process-global fallback driver
+        // migrates back to the ambient driver as soon as one is present, so a
+        // socket bound before a runtime adopted it is driven by that runtime's
+        // reactor from then on. Dropping the registration deregisters the fd
+        // from the fallback reactor before the ambient one registers it. An
+        // ambient registration re-arms below without consulting the `Cx`.
+        if self.registration_on_fallback
+            && Cx::current()
+                .and_then(|current| current.io_driver_handle())
+                .is_some()
+        {
+            self.clear_registration();
+        }
+
         if let Some(registration) = &mut self.registration {
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition (will_wake guard skips the clone).
             match registration.rearm(target_interest, cx.waker()) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
-                    self.registration = None;
+                    self.clear_registration();
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                    self.registration = None;
+                    self.clear_registration();
                     crate::net::tcp::stream::fallback_rewake(cx);
                     return Ok(());
                 }
@@ -2954,18 +3088,14 @@ impl UdpSocket {
             }
         }
 
-        let Some(current) = Cx::current() else {
-            crate::net::tcp::stream::fallback_rewake(cx);
-            return Ok(());
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            crate::net::tcp::stream::fallback_rewake(cx);
-            return Ok(());
+        let Some(driver) = Cx::current().and_then(|current| current.io_driver_handle()) else {
+            return self.register_interest_with_fallback_driver(cx, target_interest);
         };
 
         match driver.register(&*self.inner, target_interest, cx.waker().clone()) {
             Ok(registration) => {
                 self.registration = Some(registration);
+                self.registration_on_fallback = false;
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::Unsupported => {
@@ -2973,6 +3103,39 @@ impl UdpSocket {
                 Ok(())
             }
             Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                crate::net::tcp::stream::fallback_rewake(cx);
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Register readiness interest with the process-global fallback I/O driver
+    /// (no ambient driver on the current `Cx`). When no fallback driver could
+    /// be created on this target, keep the legacy immediate self-wake so the
+    /// caller still makes progress.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn register_interest_with_fallback_driver(
+        &mut self,
+        cx: &Context<'_>,
+        interest: Interest,
+    ) -> io::Result<()> {
+        let Some(driver) = global_fallback_io_driver() else {
+            crate::net::tcp::stream::fallback_rewake(cx);
+            return Ok(());
+        };
+        match driver.register(&*self.inner, interest, cx.waker().clone()) {
+            Ok(registration) => {
+                self.registration = Some(registration);
+                self.registration_on_fallback = true;
+                Ok(())
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
+                ) =>
+            {
                 crate::net::tcp::stream::fallback_rewake(cx);
                 Ok(())
             }
@@ -4677,5 +4840,198 @@ mod tests {
             // Normal size should pass through unchanged
             assert_eq!(stream_normal.buf.len(), 512);
         });
+    }
+
+    /// GH#67 (asupersync-t64ggs): driverless UDP polls park on the
+    /// process-global fallback I/O driver instead of self-waking.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod gh67_fallback_io_driver {
+        use super::*;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc::{Sender, channel};
+        use std::time::Duration;
+
+        /// A waker that counts wakes and signals a channel so a test can wait
+        /// (bounded) for the wake that the fallback reactor pump delivers.
+        struct SignalWaker {
+            hits: AtomicUsize,
+            tx: Mutex<Sender<()>>,
+        }
+
+        impl std::task::Wake for SignalWaker {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.hits.fetch_add(1, Ordering::SeqCst);
+                let _ = self
+                    .tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .send(());
+            }
+        }
+
+        fn signal_waker() -> (Arc<SignalWaker>, Waker, std::sync::mpsc::Receiver<()>) {
+            let (tx, rx) = channel();
+            let signal = Arc::new(SignalWaker {
+                hits: AtomicUsize::new(0),
+                tx: Mutex::new(tx),
+            });
+            let waker = Waker::from(Arc::clone(&signal));
+            (signal, waker, rx)
+        }
+
+        fn bound_socket() -> UdpSocket {
+            let std_socket = StdUdpSocket::bind("127.0.0.1:0").expect("bind");
+            UdpSocket::from_std(std_socket).expect("wrap socket")
+        }
+
+        /// The defect: with no I/O driver on the current `Cx`, a `WouldBlock`
+        /// poll re-woke its own waker synchronously, so an executor re-polled
+        /// in a hot loop. The fixed path must (1) return `Pending` without any
+        /// wake, (2) stay silent while the fd is idle, and (3) wake exactly
+        /// once when a datagram arrives, from the fallback reactor pump.
+        #[test]
+        fn poll_recv_without_io_driver_parks_until_datagram_arrives() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let mut socket = bound_socket();
+            let local_addr = socket.local_addr().expect("local addr");
+            let peer = StdUdpSocket::bind("127.0.0.1:0").expect("bind peer");
+            let (signal, waker, rx) = signal_waker();
+            let task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 64];
+
+            assert!(matches!(
+                socket.poll_recv_from(&task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert_eq!(
+                signal.hits.load(Ordering::SeqCst),
+                0,
+                "driverless poll must park, not self-wake (GH#67)"
+            );
+            assert!(
+                socket.registration_on_fallback,
+                "driverless poll registers with the process-global fallback I/O driver"
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "no wake may arrive while the socket is idle"
+            );
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 0);
+
+            peer.send_to(b"wake", local_addr).expect("send datagram");
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("fallback reactor pump delivers the readiness wake");
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
+
+            match socket.poll_recv_from(&task_cx, &mut buf) {
+                Poll::Ready(Ok((len, from))) => {
+                    assert_eq!(&buf[..len], b"wake");
+                    assert_eq!(from, peer.local_addr().expect("peer addr"));
+                }
+                other => panic!("expected the datagram after the wake, got {other:?}"),
+            }
+        }
+
+        /// Re-arming a fallback registration after it fired must deliver the
+        /// next readiness wake too (oneshot reactor interest is re-armed per
+        /// poll), and a second poll while idle must again stay silent.
+        #[test]
+        fn fallback_registration_rearms_after_each_wake() {
+            assert!(Cx::current().is_none());
+            let mut socket = bound_socket();
+            let local_addr = socket.local_addr().expect("local addr");
+            let peer = StdUdpSocket::bind("127.0.0.1:0").expect("bind peer");
+            let (signal, waker, rx) = signal_waker();
+            let task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 64];
+
+            for round in 1..=3u8 {
+                assert!(matches!(
+                    socket.poll_recv_from(&task_cx, &mut buf),
+                    Poll::Pending
+                ));
+                assert!(
+                    rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                    "round {round}: idle socket must not wake"
+                );
+                peer.send_to(&[round], local_addr).expect("send datagram");
+                rx.recv_timeout(Duration::from_secs(5))
+                    .unwrap_or_else(|_| panic!("round {round}: readiness wake never arrived"));
+                match socket.poll_recv_from(&task_cx, &mut buf) {
+                    Poll::Ready(Ok((1, _))) => assert_eq!(buf[0], round),
+                    other => panic!("round {round}: expected datagram, got {other:?}"),
+                }
+            }
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 3);
+        }
+
+        /// A socket parked on the fallback driver is handed to the ambient
+        /// driver as soon as it is polled under a `Cx` that carries one.
+        #[test]
+        fn fallback_registration_migrates_to_ambient_io_driver() {
+            assert!(Cx::current().is_none());
+            let mut socket = bound_socket();
+            let waker = noop_waker();
+            let task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 8];
+
+            assert!(matches!(
+                socket.poll_recv_from(&task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(socket.registration_on_fallback);
+
+            let driver = IoDriverHandle::new(Arc::new(LabReactor::new()));
+            assert_eq!(driver.waker_count(), 0);
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(ambient));
+
+            assert!(matches!(
+                socket.poll_recv_from(&task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(
+                !socket.registration_on_fallback,
+                "ambient driver must take over the registration"
+            );
+            assert!(socket.registration.is_some());
+            assert_eq!(
+                driver.waker_count(),
+                1,
+                "the ambient driver now owns the socket's readiness waker"
+            );
+
+            // Re-arming under the ambient driver keeps it there.
+            assert!(matches!(
+                socket.poll_recv_from(&task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(!socket.registration_on_fallback);
+            assert_eq!(driver.waker_count(), 1);
+        }
+
+        /// One pump serves the whole process: repeated lookups return the same
+        /// driver, so driverless sockets never spawn a thread each.
+        #[test]
+        fn global_fallback_io_driver_is_process_shared() {
+            let first = global_fallback_io_driver().expect("fallback I/O driver on this target");
+            let second = global_fallback_io_driver().expect("fallback I/O driver on this target");
+            assert!(std::ptr::eq(first, second));
+        }
     }
 }

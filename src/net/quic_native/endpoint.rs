@@ -10,6 +10,13 @@
 //! - Exposes clean hooks for lab packet injection and qlog/trace capture
 //! - Cancellation drains and deregisters reactor state cleanly
 //! - No live workers, wakeups, socket registrations, or obligations after region close
+//! - Readiness is selected from the current `Cx` (installed for each
+//!   synchronous poll): a `Cx` that carries an I/O driver registers the socket
+//!   with that runtime's reactor; a `Cx` without one (the caller-driven
+//!   composition, e.g. `futures_lite::block_on` plus an explicit `Cx`)
+//!   registers it with the process-global fallback I/O driver in `net::udp`,
+//!   so a bounded receive wait parks until a datagram arrives or the timeout
+//!   fires instead of re-polling in a hot loop (GH#67)
 
 use crate::cx::Cx;
 use crate::net::{

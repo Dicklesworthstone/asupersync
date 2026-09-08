@@ -5,6 +5,20 @@
 //! endpoint, and the application-facing [`QuicConnection`]. It deliberately
 //! remains caller-driven: no executor, background task, or ambient listener is
 //! created.
+//!
+//! # Caller-driven waits (GH#67)
+//!
+//! [`NativeQuicUdpConnection::drive_io_once`] bounds its receive wait with
+//! [`timeout`] over [`QuicUdpEndpoint::receive_batch`]. Under the documented
+//! composition — a plain executor such as `futures_lite::block_on` plus an
+//! explicit [`Cx`] that carries no runtime drivers — both halves of that wait
+//! park the calling thread: the timeout's `Sleep` registers with the
+//! process-global fallback timer, and the socket's readiness interest
+//! registers with the process-global fallback I/O driver owned by `net::udp`,
+//! whose pump thread wakes the waiter when a datagram arrives. A quiet
+//! connection therefore costs ~0 CPU between wakeups instead of re-polling in
+//! a hot loop until the timeout fires. Under a runtime whose `Cx` carries I/O
+//! and timer drivers, the same wait uses those drivers instead.
 
 use std::fmt;
 use std::net::SocketAddr;
