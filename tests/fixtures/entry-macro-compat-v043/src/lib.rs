@@ -4,6 +4,8 @@
 //! requirement. Checking all targets covers both entry attributes without
 //! replacing the runtime with the current workspace source.
 
+#![forbid(dead_code)]
+
 /// An unconfigured entry point must remain compatible with runtime 0.4.3.
 #[asupersync::main]
 pub async fn main() {}

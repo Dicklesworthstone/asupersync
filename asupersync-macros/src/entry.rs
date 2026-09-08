@@ -161,11 +161,14 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
     // Explicit positive bounds must require that API instead of falling back.
     let legacy_drain_fallback = args.drain_ms.is_none().then(|| {
         quote! {
-            #[allow(dead_code)]
             trait __AsupersyncEntryDrainFallback {
                 fn drain_root_region(&self, _bound: ::core::time::Duration) {}
             }
             impl __AsupersyncEntryDrainFallback for ::asupersync::runtime::Runtime {}
+            // Keep the fallback used without overriding the caller's lint policy
+            // or invoking it when an inherent drain method is available.
+            let _ = <::asupersync::runtime::Runtime as
+                __AsupersyncEntryDrainFallback>::drain_root_region;
         }
     });
     let drain_step = match args.drain_ms.unwrap_or(DEFAULT_DRAIN_MS) {
