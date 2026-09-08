@@ -847,6 +847,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_NOW: AtomicU64 = AtomicU64::new(0);
+    // The injected function pointer is also read by Sleep's helper thread.
+    // Keep that cross-thread clock while isolating parallel fixture owners.
+    static TEST_CLOCK_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -855,6 +858,12 @@ mod tests {
 
     fn set_test_time(nanos: u64) {
         TEST_NOW.store(nanos, Ordering::SeqCst);
+    }
+
+    fn lock_test_clock(nanos: u64) -> parking_lot::MutexGuard<'static, ()> {
+        let guard = TEST_CLOCK_LOCK.lock();
+        set_test_time(nanos);
+        guard
     }
 
     fn test_time() -> Time {
@@ -961,7 +970,7 @@ mod tests {
     #[test]
     fn with_time_getter_controls_deadline_and_duration() {
         init_test("with_time_getter_controls_deadline_and_duration");
-        set_test_time(0);
+        let _clock = lock_test_clock(0);
         let signal = ShutdownSignal::with_time_getter(test_time);
 
         let initiated = signal.begin_drain(Duration::from_nanos(25));
@@ -1115,7 +1124,7 @@ mod tests {
     #[test]
     fn wait_until_with_time_getter_wakes_after_logical_clock_advance() {
         init_test("wait_until_with_time_getter_wakes_after_logical_clock_advance");
-        set_test_time(0);
+        let _clock = lock_test_clock(0);
         let signal = ShutdownSignal::with_time_getter(test_time);
 
         let woke = Arc::new(AtomicBool::new(false));
@@ -1268,7 +1277,7 @@ mod tests {
     #[test]
     fn trigger_immediate_records_force_close_metadata_without_prior_drain() {
         init_test("trigger_immediate_records_force_close_metadata_without_prior_drain");
-        set_test_time(123);
+        let _clock = lock_test_clock(123);
         let signal = ShutdownSignal::with_time_getter(test_time);
 
         signal.trigger_immediate();
@@ -1336,7 +1345,7 @@ mod tests {
     #[test]
     fn trigger_immediate_overrides_interleaved_begin_drain_metadata() {
         init_test("trigger_immediate_overrides_interleaved_begin_drain_metadata");
-        set_test_time(123);
+        let _clock = lock_test_clock(123);
         let signal = ShutdownSignal::with_time_getter(test_time);
         let hook_signal = signal.clone();
         set_trigger_immediate_pre_phase_hook(Some(Box::new(move || {
