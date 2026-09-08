@@ -3306,6 +3306,28 @@ impl QuicLink {
                 self.conn.transport().pto_count(),
                 self.app_loss_stall_pto.as_millis(),
             );
+        } else if !self.in_flight_stream_frames.is_empty() {
+            // The paced source stream and control-priority packets are
+            // transport-untracked (`in_flight=false`; their recovery is
+            // ATP-scoped through `in_flight_stream_frames`), so their stall
+            // expiries always report `lost_packets == 0` and the wall-clock
+            // stall threshold never backed off: every 200 ms of ACK silence
+            // re-sent up to 256 packets, and once the receiver acknowledges
+            // per drained batch instead of per packet that burst starves the
+            // sender's own ACK feedback and the storm sustains itself
+            // (GH#67 follow-up). Back off on every expiry that still has
+            // ATP-tracked frames outstanding, as RFC 9002 §6.2.1 does for PTO;
+            // real ACK progress resets it in `apply_source_stream_ack_ranges`.
+            self.app_loss_stall_pto = self
+                .app_loss_stall_pto
+                .saturating_mul(2)
+                .min(APP_LOSS_STALL_PTO_MAX);
+            quic_rqtrace!(
+                "sender: app_data_stall_backoff operation={} in_flight_stream_packets={} stall_pto_ms={}",
+                operation,
+                self.in_flight_stream_frames.len(),
+                self.app_loss_stall_pto.as_millis(),
+            );
         }
         Ok(event.lost_packets)
     }
