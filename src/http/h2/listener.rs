@@ -1111,6 +1111,16 @@ impl OwnedH2Request {
                     || force.as_mut().poll(poll_cx).is_ready();
                 let cancelled = cx.is_cancel_requested();
                 if forced || cancelled {
+                    // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
+                    #[cfg(feature = "test-internals")]
+                    eprintln!(
+                        "h2-drain-probe owned-join-cancel task={:?} now={} phase={:?} forced={} cancelled={}",
+                        cx.task_id(),
+                        cx.now().as_nanos(),
+                        signal.phase(),
+                        forced,
+                        cancelled,
+                    );
                     let reason = if forced {
                         h2_request_cancel_reason(cx, CancelKind::Shutdown)
                     } else {
@@ -3954,22 +3964,79 @@ impl<F> Http2Listener<F> {
                 {
                     self.stats.record_drain_escalated();
                 }
-                match supervisor.observe(self.in_flight_requests.load(Ordering::Acquire), now) {
+                let step =
+                    supervisor.observe(self.in_flight_requests.load(Ordering::Acquire), now);
+                // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
+                #[cfg(feature = "test-internals")]
+                eprintln!(
+                    "h2-drain-probe supervise task={:?} now={} step={:?} phase={:?}",
+                    Cx::current().map(|cx| cx.task_id()),
+                    now.as_nanos(),
+                    step,
+                    self.shutdown_signal.phase(),
+                );
+                match step {
                     DrainStep::Continue => {
                         let sleep_now = Cx::current()
                             .and_then(|cx| cx.timer_driver())
                             .map_or_else(crate::time::wall_now, |timer| timer.now());
+                        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
+                        #[cfg(feature = "test-internals")]
+                        eprintln!(
+                            "h2-drain-probe supervise-sleep-before task={:?} timer_now={} tick_ns={}",
+                            Cx::current().map(|cx| cx.task_id()),
+                            sleep_now.as_nanos(),
+                            DRAIN_SUPERVISION_TICK.as_nanos(),
+                        );
                         crate::time::sleep(sleep_now, DRAIN_SUPERVISION_TICK).await;
+                        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
+                        #[cfg(feature = "test-internals")]
+                        eprintln!(
+                            "h2-drain-probe supervise-sleep-after task={:?} timer_now={}",
+                            Cx::current().map(|cx| cx.task_id()),
+                            Cx::current()
+                                .and_then(|cx| cx.timer_driver())
+                                .map_or_else(crate::time::wall_now, |timer| timer.now())
+                                .as_nanos(),
+                        );
                     }
                     DrainStep::Escalate => {
                         self.stats.record_drain_escalated();
+                        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
+                        #[cfg(feature = "test-internals")]
+                        eprintln!(
+                            "h2-drain-probe soft-force-before now={} phase={:?}",
+                            (self.config.time_getter)().as_nanos(),
+                            self.shutdown_signal.phase(),
+                        );
                         let _ = self.shutdown_signal.begin_force_close();
+                        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
+                        #[cfg(feature = "test-internals")]
+                        eprintln!(
+                            "h2-drain-probe soft-force-after now={} phase={:?}",
+                            (self.config.time_getter)().as_nanos(),
+                            self.shutdown_signal.phase(),
+                        );
                     }
                     DrainStep::Quiescent => break,
                     DrainStep::HardDeadline => {
                         hard_deadline_hit = true;
                         self.stats.record_drain_hard_deadline();
+                        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
+                        #[cfg(feature = "test-internals")]
+                        eprintln!(
+                            "h2-drain-probe hard-force-before now={} phase={:?}",
+                            (self.config.time_getter)().as_nanos(),
+                            self.shutdown_signal.phase(),
+                        );
                         let _ = self.shutdown_signal.begin_force_close();
+                        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
+                        #[cfg(feature = "test-internals")]
+                        eprintln!(
+                            "h2-drain-probe hard-force-after now={} phase={:?}",
+                            (self.config.time_getter)().as_nanos(),
+                            self.shutdown_signal.phase(),
+                        );
                         break;
                     }
                 }

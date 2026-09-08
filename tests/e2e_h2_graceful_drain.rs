@@ -450,6 +450,32 @@ fn h2_drain_completes_in_flight_requests() {
 fn h2_drain_escalates_stragglers() {
     const STRAGGLERS: usize = 3;
 
+    struct Straggler {
+        cx: Cx,
+        cancelled_polls: Arc<AtomicUsize>,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Future for Straggler {
+        type Output = Response;
+
+        fn poll(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Response> {
+            if self.cx.is_cancel_requested() {
+                self.cancelled_polls.fetch_add(1, Ordering::AcqRel);
+            }
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for Straggler {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
         .build()
@@ -459,26 +485,28 @@ fn h2_drain_escalates_stragglers() {
     runtime.block_on(async move {
         let handlers_parked = Arc::new(AtomicUsize::new(0));
         let handler_parked = Arc::clone(&handlers_parked);
+        let cancelled_polls = Arc::new(AtomicUsize::new(0));
+        let handler_cancelled_polls = Arc::clone(&cancelled_polls);
+        let handlers_dropped = Arc::new(AtomicUsize::new(0));
+        let handler_dropped = Arc::clone(&handlers_dropped);
 
         let listener = Http2Listener::bind_with_config(
             "127.0.0.1:0",
             move |_req| {
                 let handlers_parked = Arc::clone(&handler_parked);
+                let cancelled_polls = Arc::clone(&handler_cancelled_polls);
+                let dropped = Arc::clone(&handler_dropped);
                 async move {
+                    let straggler = Straggler {
+                        cx: Cx::current().expect("owned H2 request context"),
+                        cancelled_polls,
+                        dropped,
+                    };
                     handlers_parked.fetch_add(1, Ordering::AcqRel);
-                    let mut iterations = 0usize;
-                    loop {
-                        asupersync::time::sleep(
-                            asupersync::time::wall_now(),
-                            Duration::from_millis(10),
-                        )
-                        .await;
-                        iterations = iterations.wrapping_add(1);
-                        if iterations == usize::MAX {
-                            break;
-                        }
-                    }
-                    Response::new(200, "OK", Vec::new())
+                    // A straggler never completes, but each poll must return so
+                    // the listener can enforce its force-close deadline. A loop
+                    // of sleeps spins after cancellation makes Sleep ready.
+                    straggler.await
                 }
             },
             drain_config(Duration::from_millis(200), Duration::from_secs(5)),
@@ -521,6 +549,12 @@ fn h2_drain_escalates_stragglers() {
         assert_eq!(shutdown.phase(), ShutdownPhase::Stopped, "clean stop");
 
         let report = stats.drain_report.expect("drain report");
+        assert_eq!(
+            handlers_dropped.load(Ordering::Acquire),
+            STRAGGLERS,
+            "handler retirement; cancelled polls={}: {report}",
+            cancelled_polls.load(Ordering::Acquire)
+        );
         assert_eq!(report.requests_at_drain_start, STRAGGLERS);
         assert_eq!(report.requests_at_escalation, Some(STRAGGLERS), "{report}");
         assert!(!report.hard_deadline_hit, "{report}");

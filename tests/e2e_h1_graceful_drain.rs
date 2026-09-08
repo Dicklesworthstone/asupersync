@@ -26,6 +26,8 @@
 //!     socket only closes once the drain completes.
 
 #![cfg(feature = "test-internals")]
+// Match the runtime crate's limit for the nested produced-body/drain futures.
+#![recursion_limit = "256"]
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
