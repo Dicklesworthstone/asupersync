@@ -9,13 +9,15 @@
 //! `block_on` returns; root panics still propagate; `!Send` roots are
 //! accepted; work spawned outside `block_on` still progresses).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::future::poll_fn;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
+use std::task::{Poll, Waker};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::observability::TaskInspectorConfig;
@@ -186,11 +188,7 @@ fn current_thread_runtime_is_quiescent_after_block_on_returns() {
         .list_tasks();
     assert!(
         runtime.is_quiescent(),
-        "runtime not quiescent after block_on returned; inspector lists {:?}",
-        tasks
-            .iter()
-            .map(|task| (task.id, task.state, task.poll_count))
-            .collect::<Vec<_>>()
+        "runtime not quiescent after block_on returned; inspector lists {tasks:?}"
     );
 }
 
@@ -404,5 +402,275 @@ fn current_thread_abort_of_parked_local_task_from_root_completes_within_bound() 
     assert!(
         typed_cancellation,
         "abort of a parked local task must join as the mutex's typed cancellation"
+    );
+}
+
+/// Proves the background worker thread has resumed the worker: a task
+/// spawned through a handle from outside `block_on` runs and reports back.
+fn wait_for_background_dispatch(runtime: &Runtime, what: &str) {
+    let (tx, rx) = mpsc::channel();
+    runtime.handle().spawn(async move {
+        tx.send(()).expect("receiver alive");
+    });
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|_| panic!("background worker did not dispatch: {what}"));
+}
+
+/// Joins every handle from inside a fresh `block_on`, polling with a bound;
+/// returns how many completed with the expected value.
+fn join_all_within(
+    runtime: &Runtime,
+    handles: Vec<asupersync::runtime::TaskHandle<u32>>,
+    bound: Duration,
+) -> usize {
+    runtime.block_on(async move {
+        let deadline = Instant::now() + bound;
+        let mut pending = handles;
+        let mut completed = 0;
+        while !pending.is_empty() && Instant::now() < deadline {
+            let mut still_pending = Vec::with_capacity(pending.len());
+            for mut handle in pending {
+                match handle.try_join() {
+                    Ok(Some(value)) => {
+                        assert_eq!(value, 42, "surviving local task returned a wrong value");
+                        completed += 1;
+                    }
+                    Ok(None) => still_pending.push(handle),
+                    Err(error) => panic!("surviving local task failed: {error}"),
+                }
+            }
+            pending = still_pending;
+            if !pending.is_empty() {
+                yield_now().await;
+            }
+        }
+        completed
+    })
+}
+
+/// CopperOak survive probe (2026-09-08), ported: a `!Send` task admitted
+/// inside `block_on` and still pending when it returns; the background
+/// worker resumes; the task is made ready and woken from outside; `block_on`
+/// is re-entered and the join must complete. On the swept state the wake
+/// was consumed on the background thread, which does not hold the future,
+/// and dropped ("ready local task lost progress after worker handover").
+#[test]
+fn current_thread_local_task_survives_worker_handover() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+    let started = Rc::new(Cell::new(false));
+    let ready = Rc::new(Cell::new(false));
+    let wake = Rc::new(RefCell::new(None::<Waker>));
+
+    let handle = runtime.block_on(async {
+        let cx = Cx::current().expect("root Cx is installed");
+        let task_started = Rc::clone(&started);
+        let task_ready = Rc::clone(&ready);
+        let task_wake = Rc::clone(&wake);
+        let handle = cx
+            .spawn_local(move |_| async move {
+                poll_fn(|ctx| {
+                    task_started.set(true);
+                    if task_ready.get() {
+                        Poll::Ready(42_u32)
+                    } else {
+                        *task_wake.borrow_mut() = Some(ctx.waker().clone());
+                        Poll::Pending
+                    }
+                })
+                .await
+            })
+            .expect("current_thread root must accept a local task");
+        while !started.get() {
+            yield_now().await;
+        }
+        handle
+    });
+    assert!(started.get());
+    assert!(
+        !handle.is_finished(),
+        "pending local task must survive the first block_on"
+    );
+
+    wait_for_background_dispatch(&runtime, "after the first block_on returned");
+    ready.set(true);
+    wake.borrow_mut()
+        .take()
+        .expect("pending task registered a waker")
+        .wake();
+    wait_for_background_dispatch(&runtime, "after the local wake");
+
+    let completed = join_all_within(&runtime, vec![handle], Duration::from_secs(2));
+    assert_eq!(
+        completed, 1,
+        "ready local task lost progress after worker handover"
+    );
+}
+
+/// Same shape with more pending local tasks than the first implementation's
+/// stranded-wake cap (256): every wake consumed on the background thread
+/// must be preserved and honoured on re-entry.
+#[test]
+fn current_thread_more_than_256_stranded_local_wakes_survive_handover() {
+    const LOCAL_TASKS: usize = 300;
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+    let started = Rc::new(Cell::new(0_usize));
+    let ready = Rc::new(Cell::new(false));
+    let wakers = Rc::new(RefCell::new(Vec::<Waker>::with_capacity(LOCAL_TASKS)));
+
+    let handles = runtime.block_on(async {
+        let cx = Cx::current().expect("root Cx is installed");
+        let mut handles = Vec::with_capacity(LOCAL_TASKS);
+        for _ in 0..LOCAL_TASKS {
+            let task_started = Rc::clone(&started);
+            let task_ready = Rc::clone(&ready);
+            let task_wakers = Rc::clone(&wakers);
+            let mut registered = false;
+            let handle = cx
+                .spawn_local(move |_| async move {
+                    poll_fn(|ctx| {
+                        if !registered {
+                            registered = true;
+                            task_started.set(task_started.get() + 1);
+                        }
+                        if task_ready.get() {
+                            Poll::Ready(42_u32)
+                        } else {
+                            task_wakers.borrow_mut().push(ctx.waker().clone());
+                            Poll::Pending
+                        }
+                    })
+                    .await
+                })
+                .expect("current_thread root must accept a local task");
+            handles.push(handle);
+        }
+        while started.get() < LOCAL_TASKS {
+            yield_now().await;
+        }
+        handles
+    });
+    assert_eq!(started.get(), LOCAL_TASKS);
+    assert!(handles.iter().all(|handle| !handle.is_finished()));
+
+    wait_for_background_dispatch(&runtime, "after the first block_on returned");
+    ready.set(true);
+    let woken = wakers.borrow_mut().drain(..).collect::<Vec<_>>();
+    assert!(
+        woken.len() >= LOCAL_TASKS,
+        "every pending local task must have registered a waker"
+    );
+    for waker in woken {
+        waker.wake();
+    }
+    wait_for_background_dispatch(&runtime, "after the local wakes");
+
+    let completed = join_all_within(&runtime, handles, Duration::from_secs(5));
+    assert_eq!(
+        completed, LOCAL_TASKS,
+        "local wakes consumed while the background thread ran the worker must not be lost"
+    );
+}
+
+/// CopperOak nested probe (2026-09-08), ported: two distinct current-thread
+/// runtimes nested on one thread. Both roots are real tasks and both root
+/// records retire; on the swept state the inner root's `!Send` stub
+/// displaced the outer's in the shared thread-local store, so the outer
+/// runtime never became quiescent.
+#[test]
+fn current_thread_nested_distinct_runtimes_both_roots_retire() {
+    let outer = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build outer runtime");
+    let inner = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build inner runtime");
+    let caller = thread::current().id();
+
+    let value = outer.block_on(async {
+        let outer_cx = Cx::current().expect("outer root Cx is installed");
+        let outer_id = outer_cx.task_id();
+        let (inner_id, inner_spawn_thread) = inner.block_on(async {
+            let inner_cx = Cx::current().expect("inner root Cx is installed");
+            let inner_id = inner_cx.task_id();
+            let spawn_thread = Runtime::current_handle()
+                .expect("inner runtime handle is installed")
+                .spawn(async { thread::current().id() })
+                .await;
+            assert!(
+                !inner.is_quiescent(),
+                "inner root {inner_id:?} must be live inside its block_on"
+            );
+            (inner_id, spawn_thread)
+        });
+        assert_eq!(
+            inner_spawn_thread, caller,
+            "the inner runtime's spawn must run on the nesting thread"
+        );
+        assert!(
+            inner.is_quiescent(),
+            "inner root task record did not retire after the nested block_on"
+        );
+        assert!(
+            !outer.is_quiescent(),
+            "outer root {outer_id:?} must still be live after the inner returned"
+        );
+        assert_eq!(
+            Cx::current().expect("outer root Cx is restored").task_id(),
+            outer_id,
+            "the outer root Cx must be restored after the nested block_on"
+        );
+        (outer_id, inner_id)
+    });
+
+    assert!(
+        inner.is_quiescent(),
+        "inner root task record did not retire (ids {value:?})"
+    );
+    assert!(
+        outer.is_quiescent(),
+        "outer root task record did not retire after nested runtime (ids {value:?})"
+    );
+}
+
+/// Bounded post-root drain: a cancellation-blind self-waking task spawned
+/// from the root must not keep `block_on` from returning.
+#[test]
+fn current_thread_block_on_returns_despite_cancellation_blind_self_waker() {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build asupersync runtime");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let value = runtime.block_on(async {
+            let cx = Cx::current().expect("root Cx is installed");
+            let polls = Arc::clone(&polls);
+            let _detached = cx
+                .spawn(move |_| async move {
+                    loop {
+                        polls.fetch_add(1, Ordering::Relaxed);
+                        yield_now().await;
+                    }
+                })
+                .expect("root Cx has spawn authority");
+            42_u32
+        });
+        let _ = tx.send((value, polls.load(Ordering::Relaxed)));
+        // Dropping the runtime signals shutdown; the self-waker yields
+        // between polls, so the background worker exits at its next turn.
+        drop(runtime);
+    });
+
+    let (value, polls) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("block_on must return within 10 s despite a self-waking task");
+    assert_eq!(value, 42);
+    assert!(
+        polls > 0,
+        "the self-waking task must have been polled at least once by the drain"
     );
 }

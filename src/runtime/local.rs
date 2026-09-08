@@ -102,7 +102,7 @@ impl Drop for ScopedLocalStoreKey {
 fn with_current_store<R>(f: impl FnOnce(&mut LocalTaskStore) -> R) -> R {
     let key = CURRENT_LOCAL_STORE_KEY.with(Cell::get);
     if key == 0 {
-        return LOCAL_TASKS.with(|tasks| f(&mut tasks.borrow_mut()));
+        return LOCAL_TASKS.with(|tasks| f(&mut *tasks.borrow_mut()));
     }
     KEYED_LOCAL_TASKS.with(|stores| {
         let mut stores = stores.borrow_mut();
@@ -145,7 +145,7 @@ pub fn remove_local_task(task_id: TaskId) -> Option<LocalStoredTask> {
 #[inline]
 #[must_use]
 pub fn local_task_count() -> usize {
-    with_current_store(LocalTaskStore::len)
+    with_current_store(|tasks| tasks.len())
 }
 
 #[cfg(test)]

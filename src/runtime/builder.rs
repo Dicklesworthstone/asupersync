@@ -3556,8 +3556,13 @@ impl Runtime {
             // thread exists, so that thread runs the loan protocol from its
             // first dispatch loop.
             if current_thread && inner.config.worker_threads == 1 {
+                let gateway = inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .spawn_gateway();
                 let _ = inner.current_thread_driver.set(Arc::new(
-                    crate::runtime::current_thread::CurrentThreadDriver::new(),
+                    crate::runtime::current_thread::CurrentThreadDriver::new(gateway),
                 ));
             }
             let worker_threads = host_services.spawn_workers(&inner, workers).map_err(|e| {
@@ -9100,6 +9105,7 @@ worker_threads = 16
             None,
             Some(expected),
             &NativeThreadHostServices::new(),
+            false,
         )
         .expect("runtime construction continues without a reactor");
 
