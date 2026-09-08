@@ -6,6 +6,9 @@ publish = false
 
 [workspace]
 
+[features]
+explicit-drain = []
+
 [dependencies]
 asupersync = "=0.4.3"
 

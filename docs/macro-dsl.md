@@ -49,11 +49,19 @@ are not part of the root `asupersync` macro contract.
 They accept `flavor`, `workers`, `budget`, `blocking`, and `drain_ms` arguments
 and reject unsupported signatures at macro expansion time.
 
-When the entry future returns, the macros drain the root region: every task
-that outlived the entry future is protocol-cancelled with `CancelKind::Shutdown`
+When paired with a runtime that provides `Runtime::drain_root_region`, the
+macros drain the root region after the entry future returns: every task that
+outlived the entry future is protocol-cancelled with `CancelKind::Shutdown`
 and given `drain_ms` (default 2000) to run its cleanup before teardown drops
-whatever is still running (`Runtime::drain_root_region`). `drain_ms = 0`
-restores drop-at-teardown.
+whatever is still running. `drain_ms = 0` restores drop-at-teardown.
+
+Published older `0.4.x` runtimes, including `0.4.3`, can resolve newer macro
+versions but do not provide that drain API. When `drain_ms` is omitted, the
+macros preserve those runtimes' drop-at-teardown behavior. An explicit positive
+`drain_ms` requires the real runtime API and fails to compile if it is absent.
+The `tests/fixtures/entry-macro-compat-v043` consumer checks unchanged `main`
+and `test` annotations against published runtime `=0.4.3`; its `explicit-drain`
+feature is a negative compile canary that must report the missing drain method.
 
 Defaults differ by attribute, mirroring tokio: `#[main]` builds
 `RuntimeBuilder::multi_thread()` (the host-independent default worker count,

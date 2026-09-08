@@ -10,3 +10,14 @@ pub async fn main() {}
 
 #[asupersync::test]
 async fn unconfigured_test() {}
+
+/// Explicit draining must fail to compile when the runtime lacks that API.
+#[cfg(feature = "explicit-drain")]
+pub mod explicit_drain {
+    /// This request must not silently use the legacy teardown fallback.
+    #[asupersync::main(drain_ms = 1)]
+    pub async fn main() {}
+
+    #[asupersync::test(drain_ms = 1)]
+    async fn explicit_test() {}
+}

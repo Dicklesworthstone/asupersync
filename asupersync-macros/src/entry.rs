@@ -155,13 +155,29 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
     // Root-region drain: tasks that outlive the entry future are
     // protocol-cancelled and given `drain_ms` to finish cleanup before
     // teardown. `drain_ms = 0` restores drop-at-teardown.
+    // Published 0.4.x runtimes accept newer macro versions. For an omitted
+    // bound, let runtimes without the drain API retain their old teardown;
+    // an inherent method takes precedence when the runtime provides it.
+    // Explicit positive bounds must require that API instead of falling back.
+    let legacy_drain_fallback = args.drain_ms.is_none().then(|| {
+        quote! {
+            #[allow(dead_code)]
+            trait __AsupersyncEntryDrainFallback {
+                fn drain_root_region(&self, _bound: ::core::time::Duration) {}
+            }
+            impl __AsupersyncEntryDrainFallback for ::asupersync::runtime::Runtime {}
+        }
+    });
     let drain_step = match args.drain_ms.unwrap_or(DEFAULT_DRAIN_MS) {
         0 => None,
         millis => {
             let literal = Literal::u64_unsuffixed(millis);
             Some(quote! {
-                let _ = __asupersync_entry_runtime
-                    .drain_root_region(::core::time::Duration::from_millis(#literal));
+                {
+                    #legacy_drain_fallback
+                    let _ = __asupersync_entry_runtime
+                        .drain_root_region(::core::time::Duration::from_millis(#literal));
+                }
             })
         }
     };
@@ -479,6 +495,7 @@ mod tests {
             .to_string();
         assert!(tokens.contains("drain_root_region"));
         assert!(tokens.contains("from_millis (2000)"));
+        assert!(tokens.contains("__AsupersyncEntryDrainFallback"));
 
         let args = EntryArgs {
             drain_ms: Some(0),
@@ -488,6 +505,24 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(!tokens.contains("drain_root_region"));
+    }
+
+    #[test]
+    fn explicit_positive_drain_requires_the_runtime_api_without_a_fallback() {
+        let input: ItemFn = syn::parse2(quote! {
+            async fn main() {}
+        })
+        .unwrap();
+        let args = EntryArgs {
+            drain_ms: Some(7),
+            ..EntryArgs::default()
+        };
+        let tokens = expand_entry(&args, input, EntryKind::Main)
+            .unwrap()
+            .to_string();
+        assert!(tokens.contains("drain_root_region"));
+        assert!(tokens.contains("from_millis (7)"));
+        assert!(!tokens.contains("__AsupersyncEntryDrainFallback"));
     }
 
     #[test]
