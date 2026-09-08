@@ -5,7 +5,7 @@
 
 use crate::runtime::stored_task::LocalStoredTask;
 use crate::types::TaskId;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 /// Arena-indexed local task storage, replacing `HashMap<TaskId, LocalStoredTask>`
 /// with `Vec<Option<LocalStoredTask>>` for O(1) insert/remove on the spawn_local
@@ -64,8 +64,57 @@ impl LocalTaskStore {
 }
 
 thread_local! {
-    /// Local tasks stored on the current thread.
+    /// Local tasks stored on the current thread (the default store, selected
+    /// while no [`ScopedLocalStoreKey`] is installed).
     static LOCAL_TASKS: RefCell<LocalTaskStore> = const { RefCell::new(LocalTaskStore::new()) };
+    /// Per-runtime stores selected by [`ScopedLocalStoreKey`] (GH#58). Task
+    /// ids are per-runtime arena indices, so a thread that drives more than
+    /// one runtime's worker keeps their `!Send` futures apart.
+    static KEYED_LOCAL_TASKS: RefCell<Vec<(usize, LocalTaskStore)>> =
+        const { RefCell::new(Vec::new()) };
+    /// Store key selected on this thread; `0` is the default store.
+    static CURRENT_LOCAL_STORE_KEY: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Selects, for the current thread and the guard's lifetime, which store the
+/// local-task functions operate on. Workers install their runtime's key
+/// before admitting, polling, or counting local tasks; nested installs
+/// restore the previous key on drop.
+pub struct ScopedLocalStoreKey {
+    prev: usize,
+}
+
+impl ScopedLocalStoreKey {
+    #[must_use]
+    pub fn new(key: usize) -> Self {
+        let prev = CURRENT_LOCAL_STORE_KEY.with(|current| current.replace(key));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedLocalStoreKey {
+    fn drop(&mut self) {
+        let prev = self.prev;
+        let _ = CURRENT_LOCAL_STORE_KEY.try_with(|current| current.set(prev));
+    }
+}
+
+fn with_current_store<R>(f: impl FnOnce(&mut LocalTaskStore) -> R) -> R {
+    let key = CURRENT_LOCAL_STORE_KEY.with(Cell::get);
+    if key == 0 {
+        return LOCAL_TASKS.with(|tasks| f(&mut tasks.borrow_mut()));
+    }
+    KEYED_LOCAL_TASKS.with(|stores| {
+        let mut stores = stores.borrow_mut();
+        let index = match stores.iter().position(|(stored_key, _)| *stored_key == key) {
+            Some(index) => index,
+            None => {
+                stores.push((key, LocalTaskStore::new()));
+                stores.len() - 1
+            }
+        };
+        f(&mut stores[index].1)
+    })
 }
 
 /// Stores a local task in the current thread's storage.
@@ -75,8 +124,7 @@ thread_local! {
 #[inline]
 pub fn store_local_task(task_id: TaskId, mut task: LocalStoredTask) {
     task.set_task_id(task_id);
-    LOCAL_TASKS.with(|tasks| {
-        let mut tasks = tasks.borrow_mut();
+    with_current_store(|tasks| {
         if tasks.insert(task_id, task).is_some() {
             crate::tracing_compat::warn!(
                 task_id = ?task_id,
@@ -90,14 +138,14 @@ pub fn store_local_task(task_id: TaskId, mut task: LocalStoredTask) {
 #[inline]
 #[must_use]
 pub fn remove_local_task(task_id: TaskId) -> Option<LocalStoredTask> {
-    LOCAL_TASKS.with(|tasks| tasks.borrow_mut().remove(task_id))
+    with_current_store(|tasks| tasks.remove(task_id))
 }
 
-/// Returns the number of local tasks on this thread.
+/// Returns the number of local tasks on this thread (in the selected store).
 #[inline]
 #[must_use]
 pub fn local_task_count() -> usize {
-    LOCAL_TASKS.with(|tasks| tasks.borrow().len())
+    with_current_store(LocalTaskStore::len)
 }
 
 #[cfg(test)]

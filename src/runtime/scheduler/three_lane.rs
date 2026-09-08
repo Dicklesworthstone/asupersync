@@ -1992,7 +1992,7 @@ impl ThreeLaneScheduler {
                 io_driver: io_driver.clone(),
                 timer_driver: timer_driver.clone(),
                 steal_buffer: Vec::new(),
-                stranded_local_tasks: Vec::new(),
+                stranded_local_tasks: std::collections::BTreeSet::new(),
                 steal_batch_size,
                 enable_parking,
                 empty_backoff: 0,
@@ -3205,9 +3205,10 @@ pub struct ThreeLaneWorker {
     scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
     /// Local (`!Send`) tasks woken while this worker ran on a thread other
     /// than the one holding their future (GH#58: a current-thread worker is
-    /// driven by `block_on` callers). Re-scheduled by the thread that owns
-    /// them the next time it runs this worker.
-    stranded_local_tasks: Vec<TaskId>,
+    /// driven by `block_on` callers). Every such wake is kept (one entry per
+    /// task, never capped) until the thread that owns the task runs this
+    /// worker and re-schedules it.
+    stranded_local_tasks: std::collections::BTreeSet<TaskId>,
 }
 
 /// Worker-local counters for preferred-vs-remote steal outcomes.
@@ -4916,6 +4917,10 @@ impl ThreeLaneWorker {
             crate::runtime::spawn_mailbox::ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox))
         });
 
+        // GH#58: `!Send` futures are kept per runtime on this thread, so a
+        // thread that drives several runtimes never mixes their task ids.
+        let _store_key_guard =
+            crate::runtime::local::ScopedLocalStoreKey::new(self.local_store_key());
         // GH#58: local tasks whose future lives on this thread but that were
         // woken while the worker ran elsewhere are runnable again here.
         self.rescue_stranded_local_tasks();
@@ -6875,16 +6880,17 @@ impl ThreeLaneWorker {
             .now
     }
 
+    /// Key of this runtime's per-thread local-task store (GH#58): the
+    /// address of the runtime state every worker of one runtime shares.
+    pub(crate) fn local_store_key(&self) -> usize {
+        Arc::as_ptr(&self.state).addr()
+    }
+
     /// Records a woken local task whose future is not stored on this thread
-    /// (GH#58). Bounded and de-duplicated; the owning thread re-schedules it
-    /// in [`Self::rescue_stranded_local_tasks`].
+    /// (GH#58). Every wake is kept (one entry per task, no cap); the owning
+    /// thread re-schedules it in [`Self::rescue_stranded_local_tasks`].
     fn note_stranded_local_task(&mut self, task: TaskId) {
-        const STRANDED_LOCAL_TASK_CAP: usize = 256;
-        if self.stranded_local_tasks.len() < STRANDED_LOCAL_TASK_CAP
-            && !self.stranded_local_tasks.contains(&task)
-        {
-            self.stranded_local_tasks.push(task);
-        }
+        self.stranded_local_tasks.insert(task);
     }
 
     /// Re-schedules stranded local tasks whose future lives on this thread;
@@ -6906,7 +6912,7 @@ impl ThreeLaneWorker {
                 }
                 None => {
                     if self.with_task_table_ref(|tt| tt.task(task).is_some()) {
-                        self.stranded_local_tasks.push(task);
+                        self.stranded_local_tasks.insert(task);
                     }
                 }
             }

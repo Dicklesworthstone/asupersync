@@ -32,12 +32,15 @@
 //!   root future completes, so
 //!   [`Runtime::is_quiescent`](crate::runtime::Runtime::is_quiescent) is
 //!   false while the root runs.
-//! - After the root completes, `block_on` retires the stub and keeps
-//!   driving the worker until nothing is runnable (no dispatchable task,
-//!   ready finalizer, queued command, or already-arrived reactor readiness),
-//!   then returns. Tasks parked on later timers or external events stay
-//!   parked; the background thread resumes the worker and runs them when
-//!   they wake. `block_on` never spins waiting for parked work.
+//! - After the root completes, `block_on` retires the stub (one direct poll
+//!   of its record, independent of queue order) and then drains runnable
+//!   work with a bounded policy: dispatch turns continue until nothing is
+//!   runnable (no dispatchable task, ready finalizer, queued command, or
+//!   already-arrived reactor readiness) or [`POST_ROOT_DRAIN_TURNS`] turns
+//!   were spent, never waiting on timers or I/O. A cancellation-blind
+//!   self-waking task therefore cannot keep `block_on` from returning; work
+//!   still runnable or parked afterwards continues on the background thread
+//!   once it resumes the worker.
 //! - A root panic is caught around the poll; the stub is retired, the
 //!   worker is returned, and the original payload is re-raised on the caller
 //!   (`block_on` propagates root panics exactly as before).
@@ -45,22 +48,33 @@
 //! # `!Send` tasks and thread affinity
 //!
 //! A local task's future lives in the thread-local store of the thread that
-//! admitted it and can only be polled there. The loan protocol therefore
-//! never moves the worker away from a thread that still holds live local
-//! tasks: the background thread refuses a handover while its store or lane
-//! is non-empty (that `block_on` call falls back to the caller-polled path),
-//! and a local task admitted on a `block_on` caller that is woken while the
-//! worker runs elsewhere is recorded by the worker and re-scheduled the next
-//! time its owning thread drives the worker (another `block_on`, or the
-//! root-region drain of the entry macros, which also drives from the
-//! caller).
+//! admitted it (keyed per runtime, see [`crate::runtime::local`]) and can
+//! only be polled there. The loan protocol therefore never moves the worker
+//! away from a thread that still holds live local tasks of this runtime: the
+//! background thread refuses a handover while its store or lane is
+//! non-empty (that `block_on` call falls back to the caller-polled path), and
+//! a local task admitted on a `block_on` caller that is woken while the
+//! worker runs elsewhere is recorded by the worker — every such wake, no cap
+//! — and re-scheduled the next time its owning thread drives the worker
+//! (another `block_on`, or the root-region drain of the entry macros, which
+//! also drives from the caller).
 //!
-//! The driver falls back to the pre-existing caller-polled path when the
-//! worker cannot be borrowed: a nested `block_on` on a thread that is already
-//! running a worker (including this runtime's own driving thread or its
-//! background thread), a concurrent `block_on` on another thread, a refused
-//! handover, or a runtime that is shutting down. Multi-thread runtimes never
-//! construct a driver.
+//! # Nesting
+//!
+//! Distinct runtimes may nest on one thread: an outer root may call
+//! `block_on` on another current-thread runtime, which drives that runtime's
+//! worker on the same thread. Every piece of thread-local worker state is a
+//! scoped guard (scheduler, fast queue, local-ready queue, worker id, lane
+//! owner, local-store key, ambient `Cx`) restored when the inner drive ends,
+//! the inner runtime's `!Send` futures live in their own per-runtime store,
+//! and local-spawn requests parked on the thread's lane by the outer root
+//! are set aside for the duration of the inner drive. Re-entering `block_on`
+//! of the *same* runtime from its own driving thread or worker thread cannot
+//! borrow the worker again; that call polls its future directly, as before.
+//!
+//! The driver also falls back to the caller-polled path for a concurrent
+//! `block_on` on another thread, a refused handover, or a runtime that is
+//! shutting down. Multi-thread runtimes never construct a driver.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -75,11 +89,12 @@ use std::time::{Duration, Instant};
 
 use crate::cx::Cx;
 use crate::runtime::io_driver::IoDriverHandle;
-use crate::runtime::scheduler::three_lane::{
-    ScopedWorkerId, ThreeLaneScheduler, ThreeLaneWorker, current_worker_id,
-};
+use crate::runtime::local::ScopedLocalStoreKey;
+use crate::runtime::scheduler::three_lane::{ScopedWorkerId, ThreeLaneScheduler, ThreeLaneWorker};
 use crate::runtime::scheduler::worker::Parker;
-use crate::runtime::spawn_mailbox::{self, ScopedLocalSpawnLaneOwner};
+use crate::runtime::spawn_mailbox::{
+    self, LocalSpawnRequest, ScopedLocalSpawnLaneOwner, SpawnGateway,
+};
 use crate::runtime::state::SpawnError;
 use crate::runtime::task_handle::TaskHandle;
 
@@ -96,6 +111,14 @@ const SHUTDOWN_ROOT_PARK_SLICE: Duration = Duration::from_millis(1);
 /// Observation cadence of the caller-driven root-region drain between idle
 /// dispatch turns (matches the background observation loop it replaces).
 const DRAIN_IDLE_SLICE: Duration = Duration::from_millis(1);
+
+/// Dispatch-turn budget of the post-root drain: `block_on` returns once
+/// nothing is runnable or this many turns were spent, whichever is first.
+pub const POST_ROOT_DRAIN_TURNS: u32 = 64;
+
+/// How often (in dispatch turns) the caller-driven root-region drain
+/// re-checks its deadline while runnable work keeps it busy.
+const DRAIN_DEADLINE_CHECK_TURNS: u32 = 16;
 
 /// Where the runtime's single worker currently is.
 enum WorkerSlot {
@@ -123,15 +146,19 @@ pub struct CurrentThreadDriver {
     /// Identity of the background worker thread, for the nested-`block_on`
     /// fallback (that thread can never wait for itself to yield the worker).
     background_thread: Mutex<Option<ThreadId>>,
+    /// This runtime's spawn gateway: identifies the runtime whose worker is
+    /// active on a thread (the thread's local-spawn lane owner).
+    gateway: Option<Arc<SpawnGateway>>,
 }
 
 impl CurrentThreadDriver {
-    pub fn new() -> Self {
+    pub fn new(gateway: Option<Arc<SpawnGateway>>) -> Self {
         Self {
             slot: Mutex::new(WorkerSlot::Background),
             changed: Condvar::new(),
             handover_requested: AtomicBool::new(false),
             background_thread: Mutex::new(None),
+            gateway,
         }
     }
 
@@ -144,6 +171,14 @@ impl CurrentThreadDriver {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_some_and(|id| id == std::thread::current().id())
+    }
+
+    /// True while this runtime's worker is active on the calling thread
+    /// (its dispatch loop or a drive owns the thread's local-spawn lane).
+    fn worker_active_on_this_thread(&self) -> bool {
+        self.gateway
+            .as_deref()
+            .is_some_and(spawn_mailbox::local_spawn_lane_is_owned_by)
     }
 
     /// Marks the driver closed and wakes every waiter. Called from the
@@ -166,6 +201,7 @@ impl CurrentThreadDriver {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(std::thread::current().id());
         let shutdown = Arc::clone(&worker.shutdown);
+        let _store_key = ScopedLocalStoreKey::new(worker.local_store_key());
         let mut worker = worker;
         loop {
             worker.run_loop_until(
@@ -233,14 +269,11 @@ impl CurrentThreadDriver {
     }
 
     /// Borrows the worker for the calling thread, or returns `None` when it
-    /// cannot be borrowed (a thread already running a worker, the background
-    /// thread, a concurrent borrower, a refused handover, or shutdown).
+    /// cannot be borrowed (this runtime's worker already active on the
+    /// thread, the background thread, a concurrent borrower, a refused
+    /// handover, or shutdown).
     fn acquire(&self, scheduler: &ThreeLaneScheduler) -> Option<ThreeLaneWorker> {
-        // A thread that is already inside a worker loop (this runtime's
-        // driving thread re-entering `block_on`, or any worker thread) keeps
-        // that worker's thread-local task store; a second worker on the same
-        // thread would share it.
-        if current_worker_id().is_some() || self.on_background_thread() {
+        if self.worker_active_on_this_thread() || self.on_background_thread() {
             return None;
         }
         let mut slot = self.lock_slot();
@@ -295,7 +328,7 @@ impl CurrentThreadDriver {
     }
 
     /// Drives `future` to completion on the calling thread as the runtime's
-    /// worker, then drains every runnable task before returning. Returns
+    /// worker, then drains runnable work under the bounded policy. Returns
     /// `Err(future)` untouched when the worker cannot be borrowed, so the
     /// caller can fall back to polling it directly.
     ///
@@ -320,7 +353,7 @@ impl CurrentThreadDriver {
             driver: self,
             worker: Some(worker),
         };
-        let outcome = loan.drive_root(request_cx, future);
+        let outcome = loan.with_thread_context(|worker| drive_root_on(worker, request_cx, future));
         drop(loan);
         match outcome {
             Ok(output) => Ok(output),
@@ -330,10 +363,11 @@ impl CurrentThreadDriver {
 
     /// Caller-driven root-region drain: runs the worker on this thread in
     /// idle-returning turns until `drained` holds (`Some(true)`) or `bound`
-    /// elapses since `started` (`Some(false)`), observing `drained` between
-    /// turns at the same cadence as the background observation loop. Returns
-    /// `None` when the worker cannot be borrowed, in which case the caller's
-    /// own observation loop applies.
+    /// elapses since `started` (`Some(false)`), re-checking the deadline
+    /// inside busy dispatch runs and observing `drained` between turns at
+    /// the same cadence as the background observation loop. Returns `None`
+    /// when the worker cannot be borrowed, in which case the caller's own
+    /// observation loop applies.
     pub fn drain_until(
         &self,
         scheduler: &ThreeLaneScheduler,
@@ -346,25 +380,25 @@ impl CurrentThreadDriver {
             driver: self,
             worker: Some(worker),
         };
-        let worker = loan
-            .worker
-            .as_mut()
-            .expect("worker stays on loan for the whole drain");
-        let _worker_id = ScopedWorkerId::new(worker.id);
-        let _lane_owner = worker
-            .spawn_mailbox
-            .as_ref()
-            .map(|mailbox| ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox)));
-        loop {
-            worker.run_loop_until(&mut || false, true);
-            if drained() {
-                return Some(true);
+        Some(loan.with_thread_context(|worker| {
+            loop {
+                let mut turns = 0_u32;
+                worker.run_loop_until(
+                    &mut || {
+                        turns = turns.wrapping_add(1);
+                        turns % DRAIN_DEADLINE_CHECK_TURNS == 0 && started.elapsed() >= bound
+                    },
+                    true,
+                );
+                if drained() {
+                    return true;
+                }
+                if started.elapsed() >= bound {
+                    return false;
+                }
+                std::thread::sleep(DRAIN_IDLE_SLICE);
             }
-            if started.elapsed() >= bound {
-                return Some(false);
-            }
-            std::thread::sleep(DRAIN_IDLE_SLICE);
-        }
+        }))
     }
 }
 
@@ -375,25 +409,28 @@ struct WorkerLoan<'a> {
 }
 
 impl WorkerLoan<'_> {
-    fn drive_root<F: Future>(
-        &mut self,
-        request_cx: &Cx,
-        future: F,
-    ) -> std::thread::Result<F::Output> {
+    /// Runs `f` with this thread set up as the worker's thread: worker id
+    /// and lane owner (so `Cx::spawn_local` from the root parks on this
+    /// thread's lane), the runtime's local-store key, and the thread's lane
+    /// contents of an outer drive set aside and restored afterwards.
+    fn with_thread_context<R>(&mut self, f: impl FnOnce(&mut ThreeLaneWorker) -> R) -> R {
         let worker = self
             .worker
             .as_mut()
             .expect("worker stays on loan for the whole drive");
-        // Make this thread the worker for lane routing, so `Cx::spawn_local`
-        // from the root parks its request on this thread's lane and the
-        // worker admits it on its next dispatch turn.
+        let _store_key = ScopedLocalStoreKey::new(worker.local_store_key());
         let _worker_id = ScopedWorkerId::new(worker.id);
         let _lane_owner = worker
             .spawn_mailbox
             .as_ref()
             .map(|mailbox| ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox)));
+        // Nested drive: local spawns parked on this thread's lane by an
+        // outer runtime's root belong to that runtime and must not be
+        // admitted here.
+        let mut outer_requests = Vec::new();
+        spawn_mailbox::drain_local_spawn_lane(usize::MAX, &mut outer_requests);
 
-        let result = drive_root_on(worker, request_cx, future);
+        let result = f(worker);
 
         // The loop leaves the lane empty unless shutdown cut it short; a
         // request left behind then can never be admitted by this runtime.
@@ -402,6 +439,7 @@ impl WorkerLoan<'_> {
         for request in orphaned {
             request.resolve_failed(SpawnError::RuntimeUnavailable);
         }
+        restore_local_spawn_lane(outer_requests);
         result
     }
 }
@@ -414,9 +452,15 @@ impl Drop for WorkerLoan<'_> {
     }
 }
 
+fn restore_local_spawn_lane(requests: Vec<LocalSpawnRequest>) {
+    for request in requests {
+        spawn_mailbox::enqueue_local_spawn(request);
+    }
+}
+
 /// Polls the root in place, interleaved with the worker loop, until it
 /// completes; the root stub task brackets the root's lifetime in accounting.
-/// Then drains every runnable task.
+/// Then retires the stub and drains runnable work under the bounded policy.
 fn drive_root_on<F: Future>(
     worker: &mut ThreeLaneWorker,
     request_cx: &Cx,
@@ -466,13 +510,21 @@ fn drive_root_on<F: Future>(
     };
     drop(root_cx_guard);
 
-    // Phase 3: retire the stub so the root leaves task accounting, then keep
-    // dispatching until nothing is runnable (a shutdown cuts this short like
-    // any other task).
+    // Phase 3: retire the stub with one direct poll of its record (so the
+    // root leaves task accounting regardless of queue order), then drain
+    // runnable work: until idle or the turn budget is spent, never waiting
+    // on timers or I/O. A shutdown cuts this short like any other task.
     if let Ok(stub) = stub.as_ref() {
-        stub.finish();
+        stub.finish_now(worker);
     }
-    worker.run_loop_until(&mut || false, true);
+    let mut turns = 0_u32;
+    worker.run_loop_until(
+        &mut || {
+            turns = turns.saturating_add(1);
+            turns > POST_ROOT_DRAIN_TURNS
+        },
+        true,
+    );
     result
 }
 
@@ -539,10 +591,9 @@ impl Wake for RootWaker {
 struct RootStubShared {
     /// The stub's admission-minted Cx, published on its first poll.
     cx: RefCell<Option<Cx>>,
-    /// Set by the driver once the root future completed.
+    /// Set by the driver once the root future completed; the stub's next
+    /// poll then completes it.
     done: Cell<bool>,
-    /// The stub's task waker, used to schedule its completing poll.
-    waker: RefCell<Option<Waker>>,
 }
 
 /// The root's task record: a local task in the root region that stays
@@ -557,16 +608,16 @@ impl RootStub {
         let shared = Rc::new(RootStubShared {
             cx: RefCell::new(None),
             done: Cell::new(false),
-            waker: RefCell::new(None),
         });
         let task_shared = Rc::clone(&shared);
         let handle = parent.spawn_local(move |cx: Cx| async move {
             *task_shared.cx.borrow_mut() = Some(cx);
-            std::future::poll_fn(|ctx| {
+            // No waker registration: the driver polls this record directly
+            // once the root completed (`finish_now`).
+            std::future::poll_fn(|_| {
                 if task_shared.done.get() {
                     Poll::Ready(())
                 } else {
-                    *task_shared.waker.borrow_mut() = Some(ctx.waker().clone());
                     Poll::Pending
                 }
             })
@@ -587,10 +638,12 @@ impl RootStub {
         self.handle.is_finished()
     }
 
-    fn finish(&self) {
+    /// Completes the stub's record now: marks it done and dispatches it
+    /// through the worker's ordinary execute path on this thread.
+    fn finish_now(&self, worker: &mut ThreeLaneWorker) {
         self.shared.done.set(true);
-        if let Some(waker) = self.shared.waker.borrow_mut().take() {
-            waker.wake();
+        if !self.is_finished() {
+            worker.execute(self.handle.task_id());
         }
     }
 }
