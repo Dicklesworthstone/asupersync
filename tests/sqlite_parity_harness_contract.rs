@@ -13,6 +13,7 @@ const VECTORS: &str = include_str!("../artifacts/sqlite_conformance_vectors_v1.j
 const HARNESS: &str = include_str!("../artifacts/sqlite_parity_harness_v1.json");
 const DOC: &str = include_str!("../docs/sqlite_parity_harness.md");
 const SQLITE_SOURCE: &str = include_str!("../src/database/sqlite.rs");
+const SQLITE_TESTS: &str = include_str!("../src/database/sqlite_tests.rs");
 const CONSUMER_SOURCE: &str = include_str!("fixtures/sqlite-parity-consumer/src/main.rs");
 const PREPARED_CONFORMANCE_SOURCE: &str = include_str!("conformance/sqlite_prepared_statements.rs");
 const REAL_DISK_CANCEL_ROLLBACK_SOURCE: &str = include_str!("sqlite_real_disk_cancel_rollback.rs");
@@ -377,7 +378,7 @@ fn phase3_matrix_executes_supported_cells_and_preserves_explicit_differences() {
         "audit_prepare_cached_statement_reuse",
     ] {
         assert!(
-            SQLITE_SOURCE.contains(&format!("fn {test_name}()")),
+            SQLITE_TESTS.contains(&format!("fn {test_name}()")),
             "missing executable P3 source test {test_name}"
         );
     }
@@ -509,7 +510,7 @@ fn phase4_transaction_matrix_executes_both_engines_and_preserves_native_cancel_p
         "busy_timeout_produces_lock_error_under_write_contention",
     ] {
         assert!(
-            SQLITE_SOURCE.contains(&format!("fn {test_name}()")),
+            SQLITE_TESTS.contains(&format!("fn {test_name}()")),
             "missing native P4 transaction test {test_name}"
         );
     }
@@ -693,7 +694,7 @@ fn phase5_matrix_covers_every_race_boundary_without_inventing_cross_engine_suppo
         "sqlite_p5_explicit_interrupt_stops_statement_and_preserves_connection",
     ] {
         assert!(
-            SQLITE_SOURCE.contains(&format!("fn {test_name}()")),
+            SQLITE_TESTS.contains(&format!("fn {test_name}()")),
             "missing executable P5 test {test_name}"
         );
     }
@@ -951,7 +952,7 @@ fn phase7_checked_sql_policy_is_machine_readable_reused_and_adversarial() {
         "transaction query must delegate to the checked connection entry point"
     );
     assert!(
-        SQLITE_SOURCE
+        SQLITE_TESTS
             .contains("fn every_checked_public_entry_point_applies_the_same_fail_closed_policy")
     );
 
@@ -987,7 +988,7 @@ fn phase7_checked_sql_policy_is_machine_readable_reused_and_adversarial() {
     }
 
     assert_eq!(phase7["bounded_fuzz"]["deterministic_cases"], 4096);
-    assert!(SQLITE_SOURCE.contains("fn checked_sql_policy_bounded_adversarial_fuzz_is_panic_free"));
+    assert!(SQLITE_TESTS.contains("fn checked_sql_policy_bounded_adversarial_fuzz_is_panic_free"));
     for lane in ["sqlite_module", "neutral_consumer", "repository_contract"] {
         assert_eq!(phase7["verification"][lane]["status"], "PASS");
         assert!(
@@ -1051,12 +1052,19 @@ fn phase8_stable_diagnostics_are_additive_executable_and_quiescent() {
         "pub async fn commit_diagnosed",
         "pub async fn rollback_diagnosed",
         "pub async fn close_async_diagnosed",
+    ] {
+        assert!(
+            SQLITE_SOURCE.contains(marker),
+            "missing executable SQLite P8 source marker {marker}"
+        );
+    }
+    for marker in [
         "sqlite_p8_engine_codes_map_without_rendered_message_parsing",
         "sqlite_p8_public_diagnosed_apis_preserve_legacy_and_reuse",
         "sqlite_p8_busy_cancel_interrupt_and_pool_shutdown_are_distinct",
     ] {
         assert!(
-            SQLITE_SOURCE.contains(marker),
+            SQLITE_TESTS.contains(marker),
             "missing executable SQLite P8 source marker {marker}"
         );
     }

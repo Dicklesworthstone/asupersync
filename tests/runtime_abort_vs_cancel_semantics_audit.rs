@@ -1952,18 +1952,21 @@ fn checked_native_runtime(sharded: bool, limit: usize) -> asupersync::runtime::R
 }
 
 fn assert_checked_native_cleanup(runtime: &asupersync::runtime::Runtime) {
-    runtime.block_on(async {
-        let started = Instant::now();
-        while !runtime.is_quiescent() {
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "native checked-admission tasks and unapplied obligations must drain; active={:?}, leaks={:?}",
-                runtime.task_inspector(Default::default()).list_active_tasks(),
-                runtime.diagnostics().find_leaked_obligations(),
-            );
-            yield_now().await;
-        }
-    });
+    // GH#58: on a current-thread runtime the root of `block_on` is itself a
+    // live task, so runtime-wide quiescence is observed from outside any
+    // root; the worker keeps draining between `block_on` calls.
+    let started = Instant::now();
+    while !runtime.is_quiescent() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "native checked-admission tasks and unapplied obligations must drain; active={:?}, leaks={:?}",
+            runtime
+                .task_inspector(Default::default())
+                .list_active_tasks(),
+            runtime.diagnostics().find_leaked_obligations(),
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert!(
         runtime
             .task_inspector(Default::default())

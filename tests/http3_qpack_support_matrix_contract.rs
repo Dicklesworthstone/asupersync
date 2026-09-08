@@ -10,6 +10,18 @@ fn repo_text(path: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
 }
 
+fn qpack_source_with_tests() -> String {
+    let source = repo_text("src/http/h3_native.rs");
+    assert_contains(
+        &source,
+        "#[cfg(test)]\ninclude!(\"h3_native_tests.rs\");",
+        "HTTP/3 cfg(test) include boundary",
+    );
+    // Matrix evidence includes both production markers and executable unit-test
+    // scenarios, whose module now resides in the adjacent include file.
+    [source, repo_text("src/http/h3_native_tests.rs")].join("\n")
+}
+
 fn matrix() -> Value {
     serde_json::from_str(&repo_text("artifacts/http3_qpack_support_matrix_v1.json"))
         .expect("HTTP/3 QPACK support matrix must parse")
@@ -93,7 +105,7 @@ fn support_matrix_names_every_http3_qpack_boundary() {
 #[test]
 fn source_markers_back_the_matrix_claims() {
     let matrix = matrix();
-    let source = repo_text("src/http/h3_native.rs");
+    let source = qpack_source_with_tests();
 
     for row in matrix["feature_matrix"].as_array().expect("feature matrix") {
         for marker in row["source_markers"].as_array().expect("source_markers") {
@@ -177,7 +189,7 @@ fn proof_artifact_schema_and_runner_cover_promoted_qpack_boundaries() {
         .expect("proof artifact row");
     let runner_path = proof["runner"].as_str().expect("runner path");
     let runner = repo_text(runner_path);
-    let source = repo_text("src/http/h3_native.rs");
+    let source = qpack_source_with_tests();
 
     assert_contains(
         &runner,

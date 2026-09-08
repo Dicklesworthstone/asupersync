@@ -15,6 +15,29 @@ const CONTRACT_MD: &str = include_str!("../docs/tokio_db_messaging_unit_test_mat
 const CONTRACT_JSON: &str =
     include_str!("../docs/tokio_db_messaging_unit_test_matrix_contract.json");
 
+// Coverage still spans each implementation and its cfg(test) module after
+// the unit-test bodies moved into adjacent include files.
+const POSTGRES_WITH_TESTS: &str = concat!(
+    include_str!("../src/database/postgres.rs"),
+    "\n",
+    include_str!("../src/database/postgres_tests.rs")
+);
+const MYSQL_WITH_TESTS: &str = concat!(
+    include_str!("../src/database/mysql.rs"),
+    "\n",
+    include_str!("../src/database/mysql_tests.rs")
+);
+const SQLITE_WITH_TESTS: &str = concat!(
+    include_str!("../src/database/sqlite.rs"),
+    "\n",
+    include_str!("../src/database/sqlite_tests.rs")
+);
+const REDIS_WITH_TESTS: &str = concat!(
+    include_str!("../src/messaging/redis.rs"),
+    "\n",
+    include_str!("../src/messaging/redis_tests.rs")
+);
+
 fn parse_json() -> serde_json::Value {
     serde_json::from_str(CONTRACT_JSON).expect("T6.12 contract JSON must parse")
 }
@@ -546,7 +569,7 @@ fn inline_tests_database_pool() {
 
 #[test]
 fn inline_tests_database_postgres() {
-    let src = include_str!("../src/database/postgres.rs");
+    let src = POSTGRES_WITH_TESTS;
     let count = count_test_fns(src);
     assert!(
         count >= 3,
@@ -556,7 +579,7 @@ fn inline_tests_database_postgres() {
 
 #[test]
 fn inline_tests_database_mysql() {
-    let src = include_str!("../src/database/mysql.rs");
+    let src = MYSQL_WITH_TESTS;
     let count = count_test_fns(src);
     assert!(
         count >= 10,
@@ -566,7 +589,7 @@ fn inline_tests_database_mysql() {
 
 #[test]
 fn inline_tests_database_sqlite() {
-    let src = include_str!("../src/database/sqlite.rs");
+    let src = SQLITE_WITH_TESTS;
     let count = count_test_fns(src);
     assert!(
         count >= 3,
@@ -616,7 +639,7 @@ fn inline_tests_messaging_jetstream() {
 
 #[test]
 fn inline_tests_messaging_redis() {
-    let src = include_str!("../src/messaging/redis.rs");
+    let src = REDIS_WITH_TESTS;
     let count = count_test_fns(src);
     assert!(
         count >= 5,
@@ -628,12 +651,9 @@ fn inline_tests_messaging_redis() {
 fn total_inline_tests_above_threshold() {
     let modules: &[(&str, &str)] = &[
         ("database/pool", include_str!("../src/database/pool.rs")),
-        (
-            "database/postgres",
-            include_str!("../src/database/postgres.rs"),
-        ),
-        ("database/mysql", include_str!("../src/database/mysql.rs")),
-        ("database/sqlite", include_str!("../src/database/sqlite.rs")),
+        ("database/postgres", POSTGRES_WITH_TESTS),
+        ("database/mysql", MYSQL_WITH_TESTS),
+        ("database/sqlite", SQLITE_WITH_TESTS),
         ("messaging/kafka", include_str!("../src/messaging/kafka.rs")),
         (
             "messaging/kafka_consumer",
@@ -644,7 +664,7 @@ fn total_inline_tests_above_threshold() {
             "messaging/jetstream",
             include_str!("../src/messaging/jetstream.rs"),
         ),
-        ("messaging/redis", include_str!("../src/messaging/redis.rs")),
+        ("messaging/redis", REDIS_WITH_TESTS),
     ];
     let total: usize = modules.iter().map(|(_, src)| count_test_fns(src)).sum();
     assert!(total >= 100, "total inline tests: {total} < 100 threshold");
@@ -658,7 +678,7 @@ fn total_inline_tests_above_threshold() {
 /// This checks inline tests reference the 6 required parity properties.
 #[test]
 fn cross_backend_parity_postgres_coverage() {
-    let src = include_str!("../src/database/postgres.rs");
+    let src = POSTGRES_WITH_TESTS;
     let parity_methods = [
         "is_connection_error",
         "is_transient",
@@ -675,7 +695,7 @@ fn cross_backend_parity_postgres_coverage() {
 
 #[test]
 fn cross_backend_parity_mysql_coverage() {
-    let src = include_str!("../src/database/mysql.rs");
+    let src = MYSQL_WITH_TESTS;
     let parity_methods = [
         "is_connection_error",
         "is_transient",
@@ -692,7 +712,7 @@ fn cross_backend_parity_mysql_coverage() {
 
 #[test]
 fn cross_backend_parity_sqlite_coverage() {
-    let src = include_str!("../src/database/sqlite.rs");
+    let src = SQLITE_WITH_TESTS;
     let parity_methods = [
         "is_connection_error",
         "is_transient",
@@ -709,9 +729,9 @@ fn cross_backend_parity_sqlite_coverage() {
 
 #[test]
 fn cross_backend_parity_all_backends_have_display() {
-    let pg = include_str!("../src/database/postgres.rs");
-    let my = include_str!("../src/database/mysql.rs");
-    let sq = include_str!("../src/database/sqlite.rs");
+    let pg = POSTGRES_WITH_TESTS;
+    let my = MYSQL_WITH_TESTS;
+    let sq = SQLITE_WITH_TESTS;
     // All backends must implement Display (impl fmt::Display or impl Display)
     assert!(
         pg.contains("fmt::Display") || pg.contains("impl Display"),
@@ -730,9 +750,9 @@ fn cross_backend_parity_all_backends_have_display() {
 #[test]
 fn cross_backend_parity_retryable_consistency() {
     // UM-PG-06, UM-MY-06, UM-SQ-05: is_retryable consistent with is_transient
-    let pg = include_str!("../src/database/postgres.rs");
-    let my = include_str!("../src/database/mysql.rs");
-    let sq = include_str!("../src/database/sqlite.rs");
+    let pg = POSTGRES_WITH_TESTS;
+    let my = MYSQL_WITH_TESTS;
+    let sq = SQLITE_WITH_TESTS;
     assert!(
         pg.contains("is_retryable"),
         "postgres.rs missing is_retryable"
@@ -773,7 +793,7 @@ fn messaging_parity_kafka_coverage() {
 
 #[test]
 fn messaging_parity_redis_coverage() {
-    let src = include_str!("../src/messaging/redis.rs");
+    let src = REDIS_WITH_TESTS;
     assert!(
         src.contains("is_transient"),
         "redis.rs missing is_transient"

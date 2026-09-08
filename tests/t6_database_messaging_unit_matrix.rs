@@ -17,12 +17,30 @@ use std::collections::HashSet;
 
 // ─── Source modules under test ───────────────────────────────────────────────
 
-const PG_SRC: &str = include_str!("../src/database/postgres.rs");
-const MY_SRC: &str = include_str!("../src/database/mysql.rs");
-const SQ_SRC: &str = include_str!("../src/database/sqlite.rs");
+// Keep implementation and cfg(test) coverage together in the logical source
+// view; the extracted test modules retain their original `mod tests` boundary.
+const PG_SRC: &str = concat!(
+    include_str!("../src/database/postgres.rs"),
+    "\n",
+    include_str!("../src/database/postgres_tests.rs")
+);
+const MY_SRC: &str = concat!(
+    include_str!("../src/database/mysql.rs"),
+    "\n",
+    include_str!("../src/database/mysql_tests.rs")
+);
+const SQ_SRC: &str = concat!(
+    include_str!("../src/database/sqlite.rs"),
+    "\n",
+    include_str!("../src/database/sqlite_tests.rs")
+);
 const POOL_SRC: &str = include_str!("../src/database/pool.rs");
 const TXN_SRC: &str = include_str!("../src/database/transaction.rs");
-const REDIS_SRC: &str = include_str!("../src/messaging/redis.rs");
+const REDIS_SRC: &str = concat!(
+    include_str!("../src/messaging/redis.rs"),
+    "\n",
+    include_str!("../src/messaging/redis_tests.rs")
+);
 const NATS_SRC: &str = include_str!("../src/messaging/nats.rs");
 const JS_SRC: &str = include_str!("../src/messaging/jetstream.rs");
 const KAFKA_SRC: &str = include_str!("../src/messaging/kafka.rs");

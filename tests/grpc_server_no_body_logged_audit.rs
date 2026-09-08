@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 
 const SCAN_FILES: &[&str] = &[
     "grpc/server.rs",
+    "grpc/server_tests.rs",
     "grpc/interceptor.rs",
     "grpc/streaming.rs",
     "grpc/codec.rs",
@@ -184,8 +185,8 @@ fn production_server_cleanup_is_stdio_silent() {
     let server_rs = std::fs::read_to_string(Path::new(manifest_dir).join("src/grpc/server.rs"))
         .expect("read src/grpc/server.rs");
     let (production, _) = server_rs
-        .split_once("\n#[cfg(test)]\nmod tests {")
-        .expect("src/grpc/server.rs must retain its cfg(test) module boundary");
+        .split_once("\n#[cfg(test)]\ninclude!(\"server_tests.rs\");")
+        .expect("src/grpc/server.rs must retain its cfg(test) include boundary");
 
     assert!(
         production.contains("connection.cleanup_idle_streams(timeout);"),
