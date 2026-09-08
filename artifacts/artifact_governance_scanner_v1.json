@@ -523,6 +523,14 @@
       "path_collapsed_cyclic_component_count": 1,
       "content_addressed_cyclic_component_count": 0
     },
+    "observation_receipt": {
+      "capture_commit": "bf6b361deb3154c56d1450ea679e6d4a3cbf09b9",
+      "capture_date": "2026-09-08",
+      "execution_state": "STATIC_READ_ONLY",
+      "scope": "four-member-topology-only",
+      "member_count": 4,
+      "historical_discovery_receipt_preserved": true
+    },
     "finding_state": "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING",
     "finding": "The path-collapsed graph has three reciprocal aliases around dependency_capability_baseline_v1.json, but the content-addressed graph is acyclic: each reciprocal pair crosses a historical content identity rather than closing over the live nodes.",
     "path_collapsed_component_members": [
@@ -533,8 +541,10 @@
     ],
     "path_collapsed_component_edge_count": 6,
     "path_collapsed_simple_two_edge_cycle_count": 3,
-    "content_addressed_node_count": 7,
+    "content_addressed_node_count": 9,
     "content_addressed_edge_count": 6,
+    "current_edge_count": 0,
+    "historical_edge_count": 6,
     "historical_target_receipt": {
       "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
       "target_sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
@@ -544,61 +554,82 @@
       "verification_state": "STATIC_GIT_OBJECT_RESOLVED"
     },
     "historical_edge_provenance": {
-      "state": "UNRESOLVED_FOR_CURRENT_HISTORICAL_EDGES",
-      "current_historical_edge_count": 3,
+      "state": "PARTIALLY_RESOLVED_FOR_CURRENT_HISTORICAL_EDGES",
+      "current_historical_edge_count": 6,
       "legacy_receipt_matches_current_historical_edge": false,
-      "unresolved_targets": [
+      "resolved_targets": [
         {
-          "target_artifact": "artifacts/base64_capability_inventory_v1.json",
-          "stored_sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
-          "stored_line_count": 417
+          "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
+          "stored_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
+          "stored_line_count": 3210,
+          "commit": "3cb2dc6d0540a961345e61bc9f89b4e930cbb8cf",
+          "blob_oid": "c3a07d91aeb69b610ac85af42e03e7dfbab573dd",
+          "verification_state": "STATIC_GIT_OBJECT_RESOLVED"
+        },
+        {
+          "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
+          "stored_sha256": "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
+          "stored_line_count": 3213,
+          "commit": "caca35cc3a5405cf28448ca3aea97c51b18d6277",
+          "blob_oid": "01d8c8407411db32296e5fe20ffe56c6da36537b",
+          "verification_state": "STATIC_GIT_OBJECT_RESOLVED"
         },
         {
           "target_artifact": "artifacts/dependency_phase1_aggregate_signoff_v1.json",
           "stored_sha256": "f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4",
-          "stored_line_count": 327
+          "stored_line_count": 327,
+          "commit": "a8ab5a9bc8dd38faaaf2c53f0ed9388f8746c69e",
+          "blob_oid": "e6614af99c3fbd1ffc52cab62a37ed543b3b1ae6",
+          "verification_state": "STATIC_GIT_OBJECT_RESOLVED"
+        }
+      ],
+      "unresolved_targets": [
+        {
+          "target_artifact": "artifacts/base64_capability_inventory_v1.json",
+          "stored_sha256": "02f58ff42dd48914ab91c5fc50ad6f44d85f8e3594495fc3ec10958b85a01b74",
+          "stored_line_count": 1018
         },
         {
           "target_artifact": "artifacts/hex_capability_inventory_v1.json",
-          "stored_sha256": "971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478",
-          "stored_line_count": 960
+          "stored_sha256": "70b50e423a89452fc2f47d16a775019c0bc5d7ca6bcdd60971a9c5a159aaedc9",
+          "stored_line_count": 977
         }
       ],
-      "required_follow_up": "Record an immutable commit and blob receipt for each current historical target before claiming that its stored bytes are independently authenticated."
+      "required_follow_up": "Record an immutable commit and blob receipt for each current historical target still unresolved. The two unresolved hashes were not found in a bounded main-history search; preserve them and do not substitute live bytes. Executable metadata validation does not independently authenticate historical target bytes."
     },
     "edges": [
       {
         "path_alias_id": "base64-baseline",
         "source_artifact": "artifacts/base64_capability_inventory_v1.json",
-        "source_artifact_sha256": "b0b6653b09cb3bd7357620b45c1a3f7a2476d1b72c3d369849f44abf17b53f64",
+        "source_artifact_sha256": "d6b521520691d5d5b0516a8fea74770eb4d13791bf0ba85a50b001493bbcadb3",
         "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
-        "stored_target_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-        "stored_target_line_count": 3210,
-        "live_target_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-        "live_target_line_count": 3210,
-        "pin_state_at_capture": "current",
-        "edge_classification": "current_forward_reference",
-        "source_node": "artifacts/base64_capability_inventory_v1.json@b0b6653b09cb3bd7357620b45c1a3f7a2476d1b72c3d369849f44abf17b53f64",
-        "target_node": "artifacts/dependency_capability_baseline_v1.json@168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad"
+        "stored_target_sha256": "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
+        "stored_target_line_count": 3213,
+        "live_target_sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+        "live_target_line_count": 3264,
+        "pin_state_at_capture": "historical",
+        "edge_classification": "historical_back_reference",
+        "source_node": "artifacts/base64_capability_inventory_v1.json@d6b521520691d5d5b0516a8fea74770eb4d13791bf0ba85a50b001493bbcadb3",
+        "target_node": "artifacts/dependency_capability_baseline_v1.json@df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc"
       },
       {
         "path_alias_id": "base64-baseline",
         "source_artifact": "artifacts/dependency_capability_baseline_v1.json",
-        "source_artifact_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
+        "source_artifact_sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
         "target_artifact": "artifacts/base64_capability_inventory_v1.json",
-        "stored_target_sha256": "28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb",
-        "stored_target_line_count": 417,
-        "live_target_sha256": "b0b6653b09cb3bd7357620b45c1a3f7a2476d1b72c3d369849f44abf17b53f64",
+        "stored_target_sha256": "02f58ff42dd48914ab91c5fc50ad6f44d85f8e3594495fc3ec10958b85a01b74",
+        "stored_target_line_count": 1018,
+        "live_target_sha256": "d6b521520691d5d5b0516a8fea74770eb4d13791bf0ba85a50b001493bbcadb3",
         "live_target_line_count": 1018,
         "pin_state_at_capture": "historical",
         "edge_classification": "historical_back_reference",
-        "source_node": "artifacts/dependency_capability_baseline_v1.json@168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-        "target_node": "artifacts/base64_capability_inventory_v1.json@28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb"
+        "source_node": "artifacts/dependency_capability_baseline_v1.json@70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+        "target_node": "artifacts/base64_capability_inventory_v1.json@02f58ff42dd48914ab91c5fc50ad6f44d85f8e3594495fc3ec10958b85a01b74"
       },
       {
         "path_alias_id": "baseline-phase1-signoff",
         "source_artifact": "artifacts/dependency_capability_baseline_v1.json",
-        "source_artifact_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
+        "source_artifact_sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
         "target_artifact": "artifacts/dependency_phase1_aggregate_signoff_v1.json",
         "stored_target_sha256": "f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4",
         "stored_target_line_count": 327,
@@ -606,22 +637,22 @@
         "live_target_line_count": 327,
         "pin_state_at_capture": "historical",
         "edge_classification": "historical_back_reference",
-        "source_node": "artifacts/dependency_capability_baseline_v1.json@168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
+        "source_node": "artifacts/dependency_capability_baseline_v1.json@70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
         "target_node": "artifacts/dependency_phase1_aggregate_signoff_v1.json@f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4"
       },
       {
         "path_alias_id": "baseline-hex",
         "source_artifact": "artifacts/dependency_capability_baseline_v1.json",
-        "source_artifact_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
+        "source_artifact_sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
         "target_artifact": "artifacts/hex_capability_inventory_v1.json",
-        "stored_target_sha256": "971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478",
-        "stored_target_line_count": 960,
-        "live_target_sha256": "a5553b01edd97dc406359f4a6aee5e30f1caa579d2cba6b0c4b7456524bc0d24",
-        "live_target_line_count": 977,
+        "stored_target_sha256": "70b50e423a89452fc2f47d16a775019c0bc5d7ca6bcdd60971a9c5a159aaedc9",
+        "stored_target_line_count": 977,
+        "live_target_sha256": "051710d83dfb4913f37c7f577c53906eaab34a42d898edbd234718950b74e613",
+        "live_target_line_count": 976,
         "pin_state_at_capture": "historical",
         "edge_classification": "historical_back_reference",
-        "source_node": "artifacts/dependency_capability_baseline_v1.json@168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-        "target_node": "artifacts/hex_capability_inventory_v1.json@971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478"
+        "source_node": "artifacts/dependency_capability_baseline_v1.json@70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+        "target_node": "artifacts/hex_capability_inventory_v1.json@70b50e423a89452fc2f47d16a775019c0bc5d7ca6bcdd60971a9c5a159aaedc9"
       },
       {
         "path_alias_id": "baseline-phase1-signoff",
@@ -630,33 +661,33 @@
         "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
         "stored_target_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
         "stored_target_line_count": null,
-        "live_target_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-        "live_target_line_count": 3210,
-        "pin_state_at_capture": "current",
-        "edge_classification": "current_forward_reference",
+        "live_target_sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+        "live_target_line_count": 3264,
+        "pin_state_at_capture": "historical",
+        "edge_classification": "historical_back_reference",
         "source_node": "artifacts/dependency_phase1_aggregate_signoff_v1.json@079f3d2173d6992ed02b0f9be6716eee6f92768c7948cc4731f400b636f13ded",
         "target_node": "artifacts/dependency_capability_baseline_v1.json@168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad"
       },
       {
         "path_alias_id": "baseline-hex",
         "source_artifact": "artifacts/hex_capability_inventory_v1.json",
-        "source_artifact_sha256": "a5553b01edd97dc406359f4a6aee5e30f1caa579d2cba6b0c4b7456524bc0d24",
+        "source_artifact_sha256": "051710d83dfb4913f37c7f577c53906eaab34a42d898edbd234718950b74e613",
         "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
-        "stored_target_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-        "stored_target_line_count": 3210,
-        "live_target_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-        "live_target_line_count": 3210,
-        "pin_state_at_capture": "current",
-        "edge_classification": "current_forward_reference",
-        "source_node": "artifacts/hex_capability_inventory_v1.json@a5553b01edd97dc406359f4a6aee5e30f1caa579d2cba6b0c4b7456524bc0d24",
-        "target_node": "artifacts/dependency_capability_baseline_v1.json@168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad"
+        "stored_target_sha256": "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
+        "stored_target_line_count": 3213,
+        "live_target_sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+        "live_target_line_count": 3264,
+        "pin_state_at_capture": "historical",
+        "edge_classification": "historical_back_reference",
+        "source_node": "artifacts/hex_capability_inventory_v1.json@051710d83dfb4913f37c7f577c53906eaab34a42d898edbd234718950b74e613",
+        "target_node": "artifacts/dependency_capability_baseline_v1.json@df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc"
       }
     ],
     "resolution": {
-      "resolution_state": "CONTENT_GRAPH_ACYCLIC_HISTORICAL_PROVENANCE_UNRESOLVED",
+      "resolution_state": "CONTENT_GRAPH_ACYCLIC_HISTORICAL_PROVENANCE_PARTIAL",
       "minimum_full_file_edges_to_replace": 0,
-      "resolved_by": "content-addressed topology only; the current historical target byte provenance remains unresolved",
-      "operator_rule": "Preserve the three stored historical back-references and do not refresh or relabel them as current. Do not claim immutable target-byte provenance until separate commit and blob receipts authenticate all three targets. Recompute content-addressed topology before treating any future path-only strongly connected component as a blocking cycle."
+      "resolved_by": "content-addressed topology and three static Git object receipts; two historical target identities remain unresolved",
+      "operator_rule": "Preserve all six stored historical back-references and do not refresh or relabel them as current. Do not claim immutable target-byte provenance for the two unresolved identities. Static receipt metadata does not independently authenticate historical bytes during the executable contract. Recompute content-addressed topology before treating any future path-only strongly connected component as a blocking cycle."
     },
     "no_claim_boundaries": [
       "does_not_prove_full_corpus_coverage",

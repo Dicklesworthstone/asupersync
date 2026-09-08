@@ -27,15 +27,27 @@ The scanner is intentionally bounded: it validates a representative corpus and d
 
 ## Versioned Full-File Reference Topology
 
-The scanner also carries a static, read-only `PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING` receipt captured from commit `15391290dce5d259bf491e676d35f3d46564935a`. This audit is orthogonal to the representative ownership rows above. Its discovery scope was the 354 Git-tracked JSON documents under `artifacts/`, recursively recognizing objects that pair a repository-relative `path` with a full-file `sha256`; it is not a full-artifact-corpus claim.
+The scanner retains the original static discovery receipt from commit `15391290dce5d259bf491e676d35f3d46564935a`. Its scope was the 354 Git-tracked JSON documents under `artifacts/`, recursively recognizing objects that pair a repository-relative `path` with a full-file `sha256`. A separate September 8 observation at `bf6b361deb3154c56d1450ea679e6d4a3cbf09b9` refreshes only the four members below. It does not refresh the original whole-discovery counts or make a full-artifact-corpus claim.
 
 Collapsing every version of an artifact to its path produces one strongly connected component with four paths and six directed edges:
 
-- `artifacts/dependency_capability_baseline_v1.json` retains historical pins for Base64 `28171082ff529b93cbe951b9de84db9423b8922fde531c82aa21051b933c83eb`, Phase-1 `f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4`, and Hex `971385dfaf02570e6a02d52b494bc231e089ab8281bbcde812ff529727c10478`.
-- The current Base64, Phase-1, and Hex artifacts each pin the live baseline identity `7d73dc99cf9be276ce6adcd66b631a1e60bfe0e44a419d574e5a2414c967befc`.
-- The standalone historical-target receipt retains SHA-256 `88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8`, the 1,357-line baseline at commit `7390d33f4ac297cd28138c8e1ece38f60b278660` and blob `4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7`. That legacy receipt no longer corresponds to one of the six live-member edges and does not independently authenticate the three stored historical targets above.
+- `artifacts/dependency_capability_baseline_v1.json` retains historical pins for Base64 `02f58ff42dd48914ab91c5fc50ad6f44d85f8e3594495fc3ec10958b85a01b74`, Phase-1 `f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4`, and Hex `70b50e423a89452fc2f47d16a775019c0bc5d7ca6bcdd60971a9c5a159aaedc9`.
+- Base64 and Hex retain baseline `df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc`; Phase-1 retains baseline `168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad`. None pins live baseline `70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858`.
+- The standalone legacy receipt retains SHA-256 `88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8`, the 1,357-line baseline at commit `7390d33f4ac297cd28138c8e1ece38f60b278660` and blob `4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7`. It corresponds to none of the six current edges and does not independently authenticate their targets.
 
-The content-addressed graph has seven nodes, six edges, and no directed cycle. No full-file edge replacement is required. Operators must preserve the three historical back-references as recorded historical pins and must not refresh or relabel them as current; claiming immutable byte provenance for those three targets requires separate receipts. A future path-only strongly connected component is a warning to recompute the versioned topology, not sufficient evidence of a blocking content cycle.
+The content-addressed graph has nine nodes, six edges, and no directed cycle: all six edges are historical. The `PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING` finding covers that topology only. No full-file edge replacement is required, and all upstream approval artifacts retain their bytes.
+
+Three distinct target identities have separately recorded static Git-object receipts:
+
+| Target SHA-256 prefix | Commit | Blob | Lines |
+| --- | --- | --- | --- |
+| Baseline `168e9a0b5f83` | `3cb2dc6d0540` | `c3a07d91aeb6` | 3210 |
+| Baseline `df830fc2663d` | `caca35cc3a54` | `01d8c8407411` | 3213 |
+| Phase-1 `f99bb9e88291` | `a8ab5a9bc8dd` | `e6614af99c3f` | 327 |
+
+The artifact contains their full identities. The first receipt supplies the historical line count absent from the Phase-1 approval, without changing that approval. The executable contract checks receipt metadata and its joins; it does not read Git objects or independently reauthenticate their bytes.
+
+Base64 `02f58ff42dd4` and Hex `70b50e423a89` remain unresolved after a bounded main-history search. Their stored counts are 1,018 and 977 lines, respectively. Claiming their immutable byte provenance requires separate receipts. Preserve all six historical back-references; do not replace them with live hashes to make other evidence current. A future path-only strongly connected component is a warning to recompute the versioned topology, not sufficient evidence of a blocking content cycle.
 
 ## Boundaries
 

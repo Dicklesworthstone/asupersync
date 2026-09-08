@@ -49,6 +49,32 @@ const HISTORICAL_BASELINE_SHA256: &str =
 const HISTORICAL_BASELINE_COMMIT: &str = "7390d33f4ac297cd28138c8e1ece38f60b278660";
 const HISTORICAL_BASELINE_BLOB_OID: &str = "4e56ad4bc05dbd1614583f8cdf8586a0d1f88cc7";
 
+// Exact bytes resolved from main history during the bounded 2026-09-08 review.
+// These pins guard receipt drift; checking them does not reauthenticate Git.
+const RESOLVED_TARGET_RECEIPTS: &[(&str, &str, u64, &str, &str)] = &[
+    (
+        "artifacts/dependency_capability_baseline_v1.json",
+        "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
+        3210,
+        "3cb2dc6d0540a961345e61bc9f89b4e930cbb8cf",
+        "c3a07d91aeb69b610ac85af42e03e7dfbab573dd",
+    ),
+    (
+        "artifacts/dependency_capability_baseline_v1.json",
+        "df830fc2663de19f857ade1e07feed0ee29f41f9cf6eba84f9c85b1d9c1040bc",
+        3213,
+        "caca35cc3a5405cf28448ca3aea97c51b18d6277",
+        "01d8c8407411db32296e5fe20ffe56c6da36537b",
+    ),
+    (
+        "artifacts/dependency_phase1_aggregate_signoff_v1.json",
+        "f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4",
+        327,
+        "a8ab5a9bc8dd38faaaf2c53f0ed9388f8746c69e",
+        "e6614af99c3fbd1ffc52cab62a37ed543b3b1ae6",
+    ),
+];
+
 const REQUIRED_CATEGORIES: &[&str] = &[
     "exact_ownership",
     "inferred_ownership",
@@ -317,6 +343,44 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         return Err("path-collapsed reference member set drifted".to_owned());
     }
 
+    let observation = &audit_value["observation_receipt"];
+    let capture_commit = string(observation, "capture_commit")?;
+    if capture_commit.len() != 40
+        || !capture_commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || string(observation, "capture_date")? != "2026-09-08"
+        || string(observation, "execution_state")? != "STATIC_READ_ONLY"
+        || string(observation, "scope")? != "four-member-topology-only"
+        || u64_field(observation, "member_count")? != members.len() as u64
+        || !bool_field(observation, "historical_discovery_receipt_preserved")?
+    {
+        return Err("bounded topology observation receipt drifted".to_owned());
+    }
+
+    // These are recorded Git-object observations, not Git authentication by
+    // this contract: remote source snapshots need not contain Git history.
+    let provenance = &audit_value["historical_edge_provenance"];
+    let mut resolved_targets = BTreeMap::new();
+    for receipt in array(provenance, "resolved_targets")? {
+        let path = string(receipt, "target_artifact")?.to_owned();
+        let sha256 = string(receipt, "stored_sha256")?.to_owned();
+        let line_count = u64_field(receipt, "stored_line_count")?;
+        let identity = (
+            path.as_str(),
+            sha256.as_str(),
+            line_count,
+            string(receipt, "commit")?,
+            string(receipt, "blob_oid")?,
+        );
+        if !RESOLVED_TARGET_RECEIPTS.contains(&identity)
+            || string(receipt, "verification_state")? != "STATIC_GIT_OBJECT_RESOLVED"
+            || resolved_targets
+                .insert((path, sha256), line_count)
+                .is_some()
+        {
+            return Err("historical target receipt identity drifted".to_owned());
+        }
+    }
+
     let mut discovered = BTreeMap::new();
     for source in &members {
         let source_json = repo_json(source)?;
@@ -381,12 +445,27 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
             "current_forward_reference"
         } else {
             historical_edge_count += 1;
+            let receipt_line_count = resolved_targets
+                .get(&(target.clone(), stored_sha256.clone()))
+                .copied();
+            if let (Some(stored), Some(resolved)) = (*stored_line_count, receipt_line_count)
+                && stored != resolved
+            {
+                return Err(format!(
+                    "{source} -> {target}: historical line count drifted"
+                ));
+            }
+            // Preserve a source approval that originally omitted line_count.
+            // Only a separately recorded receipt for its exact content identity
+            // may supply the missing count; never substitute live target bytes.
+            let historical_line_count =
+                (*stored_line_count).or(receipt_line_count).ok_or_else(|| {
+                    format!("{source} -> {target}: historical pin needs a line count receipt")
+                })?;
             current_historical_targets.insert((
                 target.clone(),
                 stored_sha256.clone(),
-                (*stored_line_count).ok_or_else(|| {
-                    format!("{source} -> {target}: historical pin must retain a line count")
-                })?,
+                historical_line_count,
             ));
             "historical_back_reference"
         };
@@ -441,8 +520,8 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
         .collect::<BTreeSet<_>>();
     if u64_field(&audit_value, "content_addressed_node_count")? != content_nodes.len() as u64
         || u64_field(&audit_value, "content_addressed_edge_count")? != content_edges.len() as u64
-        || historical_edge_count != 3
-        || current_edge_count != 3
+        || u64_field(&audit_value, "historical_edge_count")? != historical_edge_count
+        || u64_field(&audit_value, "current_edge_count")? != current_edge_count
     {
         return Err("content-addressed topology count drifted".to_owned());
     }
@@ -474,7 +553,7 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
 
     let provenance = object(&audit_value, "historical_edge_provenance")?;
     let provenance_value = Value::Object(provenance.clone());
-    if string(&provenance_value, "state")? != "UNRESOLVED_FOR_CURRENT_HISTORICAL_EDGES"
+    if string(&provenance_value, "state")? != "PARTIALLY_RESOLVED_FOR_CURRENT_HISTORICAL_EDGES"
         || u64_field(&provenance_value, "current_historical_edge_count")? != historical_edge_count
         || bool_field(
             &provenance_value,
@@ -483,17 +562,28 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     {
         return Err("current historical-edge provenance state drifted".to_owned());
     }
-    let mut unresolved_targets = BTreeSet::new();
+    let mut declared_historical_targets = resolved_targets
+        .into_iter()
+        .map(|((path, sha256), line_count)| (path, sha256, line_count))
+        .collect::<BTreeSet<_>>();
+    if declared_historical_targets.len() != RESOLVED_TARGET_RECEIPTS.len()
+        || array(&provenance_value, "unresolved_targets")?.len() != 2
+    {
+        return Err(
+            "partial provenance requires three resolved and two unresolved targets".to_owned(),
+        );
+    }
     for target in array(&provenance_value, "unresolved_targets")? {
         let target_artifact = string(target, "target_artifact")?.to_owned();
         let stored_sha256 = string(target, "stored_sha256")?.to_owned();
         let stored_line_count = u64_field(target, "stored_line_count")?;
-        if !unresolved_targets.insert((target_artifact, stored_sha256, stored_line_count)) {
-            return Err("duplicate unresolved historical target".to_owned());
+        let identity = (target_artifact, stored_sha256, stored_line_count);
+        if !declared_historical_targets.insert(identity) {
+            return Err("duplicate or overlapping historical target receipt".to_owned());
         }
     }
-    if unresolved_targets != current_historical_targets {
-        return Err("unresolved historical target set drifted".to_owned());
+    if declared_historical_targets != current_historical_targets {
+        return Err("historical target receipt set drifted".to_owned());
     }
     let follow_up = string(&provenance_value, "required_follow_up")?;
     for required in [
@@ -510,10 +600,10 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     let resolution = object(&audit_value, "resolution")?;
     let resolution_value = Value::Object(resolution.clone());
     if string(&resolution_value, "resolution_state")?
-        != "CONTENT_GRAPH_ACYCLIC_HISTORICAL_PROVENANCE_UNRESOLVED"
+        != "CONTENT_GRAPH_ACYCLIC_HISTORICAL_PROVENANCE_PARTIAL"
         || u64_field(&resolution_value, "minimum_full_file_edges_to_replace")? != 0
         || string(&resolution_value, "resolved_by")?
-            != "content-addressed topology only; the current historical target byte provenance remains unresolved"
+            != "content-addressed topology and three static Git object receipts; two historical target identities remain unresolved"
     {
         return Err("versioned-reference resolution drifted".to_owned());
     }
@@ -843,7 +933,7 @@ fn scanner_report_is_concise_and_matches_artifact_boundaries() {
         "excluded",
         "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING",
         "content-addressed graph",
-        "seven nodes, six edges",
+        "nine nodes, six edges",
         "does not independently authenticate",
         "requires separate receipts",
         "immutable byte provenance",

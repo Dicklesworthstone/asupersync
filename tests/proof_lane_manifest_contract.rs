@@ -1236,7 +1236,7 @@ fn ci_executes_native_cancellation_regression_before_broader_proofs() {
     );
 }
 
-fn native_cancellation_sentinels() -> [&'static str; 34] {
+fn native_cancellation_sentinels() -> [&'static str; 40] {
     [
         "run_test_preserves_typed_cancellation_from_a_parked_spawn",
         "abort_repolls_a_mutex_parked_operation_to_graceful_cancellation",
@@ -1272,6 +1272,12 @@ fn native_cancellation_sentinels() -> [&'static str; 34] {
         "abort_does_not_have_separate_force_kill_method",
         "abort_with_reason_does_not_call_drop_guard_bypass_machinery",
         "cross_reference_to_prior_audits",
+        "checked_zero_quota_refuses_before_publication_on_native_current_thread",
+        "checked_zero_quota_refuses_before_publication_on_native_sharded_workers",
+        "checked_owned_permit_cancellation_and_same_poll_reuse_on_native_current_thread",
+        "checked_owned_permit_cancellation_and_same_poll_reuse_on_native_sharded_workers",
+        "checked_other_primitives_refuse_cancel_and_reuse_on_native_current_thread",
+        "checked_other_primitives_refuse_cancel_and_reuse_on_native_sharded_workers",
     ]
 }
 

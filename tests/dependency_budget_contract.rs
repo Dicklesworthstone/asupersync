@@ -2,13 +2,18 @@
 //!
 //! Bead: asupersync-mnotoo.1
 //! Fixture: artifacts/dependency_budget_contract_v1.json
+//!
+//! CLI execution tests require `dependency-ledger`, matching the generator bin.
 
 #![allow(missing_docs)]
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "dependency-ledger")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "dependency-ledger")]
 use std::process::{Command, Output};
 
 const AGENTS_PATH: &str = "AGENTS.md";
@@ -36,6 +41,7 @@ fn read(path: &str) -> String {
         .unwrap_or_else(|error| panic!("read {path}: {error}"))
 }
 
+#[cfg(feature = "dependency-ledger")]
 fn generated_agents_region(document: &str) -> &str {
     let (_, after_begin) = document
         .split_once(&format!("{AGENTS_BEGIN}\n"))
@@ -46,6 +52,7 @@ fn generated_agents_region(document: &str) -> &str {
     region
 }
 
+#[cfg(feature = "dependency-ledger")]
 fn run_agents_generator(repo: &Path, budget: &Path, mode: &str, extra: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dependency_marginal_ledger"));
     command
@@ -59,6 +66,7 @@ fn run_agents_generator(repo: &Path, budget: &Path, mode: &str, extra: &[&str]) 
         .expect("run dependency_marginal_ledger AGENTS mode")
 }
 
+#[cfg(feature = "dependency-ledger")]
 fn assert_failed_with(output: &Output, marker: &str) {
     assert!(
         !output.status.success(),
@@ -455,6 +463,7 @@ fn agents_key_dependency_projection_joins_exact_budget_metadata() {
     assert_eq!(projected_dependencies.len(), 15);
 }
 
+#[cfg(feature = "dependency-ledger")]
 #[test]
 fn cargo_renderer_reproduces_the_marked_agents_table_and_check_is_read_only() {
     let root = repo_root();
@@ -490,6 +499,7 @@ fn cargo_renderer_reproduces_the_marked_agents_table_and_check_is_read_only() {
     );
 }
 
+#[cfg(feature = "dependency-ledger")]
 #[test]
 fn projection_and_marker_negative_mutations_fail_closed() {
     let root = repo_root();
@@ -612,6 +622,7 @@ fn projection_and_marker_negative_mutations_fail_closed() {
     }
 }
 
+#[cfg(feature = "dependency-ledger")]
 #[test]
 fn agents_modes_reject_ambiguous_or_ledger_generation_options() {
     let root = repo_root();

@@ -629,6 +629,66 @@
       ]
     },
     {
+      "artifact_id": "dependency-ci-provenance-final-signoff-v1",
+      "path": "artifacts/dependency_ci_provenance_final_signoff_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-mnotoo.3.7",
+      "producing_lane": "dependency-ci-provenance-final-signoff",
+      "domain": "dependency CI and provenance",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/dependency_ci_provenance_final_signoff_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_the_recorded_scoped_signoff_after_its_source_pins_and_focused_contract_match_current_main; rerun_dependency_scanners_before_claiming_current_scanner_health",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_authorize_cutover",
+        "does_not_authorize_package_manager_execution",
+        "does_not_prove_current_dependency_scanner_health",
+        "does_not_prove_full_workspace_health",
+        "does_not_prove_release_readiness",
+        "does_not_authorize_deletion"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Scoped aggregation of P1-P5 source and tracker joins, recorded scanner evidence, static JavaScript deferral, fuzz quarantine, and downstream consumer boundaries. Registration preserves the original approval identity and does not refresh its evidence.",
+      "source_references": [
+        "artifacts/dependency_ci_provenance_final_signoff_v1.json",
+        "docs/dependency_ci_provenance_final_signoff.md",
+        "tests/dependency_ci_provenance_final_signoff_contract.rs"
+      ]
+    },
+    {
+      "artifact_id": "github-actions-provenance-v1",
+      "path": "artifacts/github_actions_provenance_v1.json",
+      "path_status": "tracked",
+      "owning_bead": "asupersync-mnotoo.3.1",
+      "producing_lane": "github-actions-provenance-contract",
+      "domain": "workflow source provenance policy",
+      "artifact_family": "artifact_governance",
+      "checked_by_tests": [
+        "tests/github_actions_provenance_contract.rs"
+      ],
+      "citeability_class": "proof-bearing",
+      "freshness_policy": "cite_only_for_reviewed_workflow_source_references_when_the_focused_contract_matches_current_main; never_treat_the_inventory_as_execution_authorization_or_receipt",
+      "superseded_by": null,
+      "no_claim_boundaries": [
+        "does_not_authorize_github_actions_execution",
+        "does_not_prove_workflow_execution",
+        "does_not_prove_publisher_identity",
+        "does_not_prove_full_workspace_health",
+        "does_not_prove_release_readiness",
+        "does_not_authorize_deletion"
+      ],
+      "exclusion_reason": null,
+      "evidence_scope": "Static inventory and policy for reviewed full-SHA workflow action references. It is neither a workflow execution receipt nor authorization to enable or run GitHub Actions.",
+      "source_references": [
+        "artifacts/github_actions_provenance_v1.json",
+        "docs/github_actions_provenance.md",
+        "tests/github_actions_provenance_contract.rs"
+      ]
+    },
+    {
       "artifact_id": "remote-build-target-cache-roots",
       "path": "${TMPDIR:-/tmp}/rch_target_*",
       "path_status": "generated_or_ignored",
