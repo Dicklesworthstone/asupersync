@@ -1896,6 +1896,13 @@ impl ThreeLaneScheduler {
             pending_cancel_dispatch_ready,
         } = handles;
 
+        // Followers leave shared timer deadlines to the reactor leader. A
+        // timer published after that leader selected its timeout must wake the
+        // reactor so the deadline is recomputed before it can oversleep.
+        if let (Some(io), Some(timer)) = (&io_driver, &timer_driver) {
+            timer.register_deadline_reactor(io.downgrade_reactor());
+        }
+
         // Create local schedulers first so we can share references for stealing
         for _ in 0..worker_count {
             local_schedulers.push(Arc::new(Mutex::new(PriorityScheduler::with_capacity(

@@ -4,9 +4,10 @@
 //! using a hierarchical timing wheel. It supports both production (wall clock)
 //! and virtual (lab) time.
 
+use crate::runtime::reactor::Reactor;
 use crate::types::Time;
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::Waker;
 use std::time::Duration;
@@ -432,6 +433,12 @@ pub struct TimerDriver<T: TimeSource = VirtualClock> {
     clock: std::sync::Arc<T>,
     /// Timing wheel (protected by mutex for thread safety).
     wheel: Mutex<TimerWheel>,
+    /// Conservative deadline observed by reactor pollers. Accessed only while
+    /// holding `wheel`; cancellation may leave an earlier, harmless value.
+    observed_deadline: AtomicU64,
+    /// Weak registrations avoid cycles through reactor task wakers and allow
+    /// an explicitly shared timer driver to notify more than one runtime.
+    deadline_reactors: Mutex<Vec<Weak<dyn Reactor>>>,
 }
 
 impl<T: TimeSource> TimerDriver<T> {
@@ -442,6 +449,8 @@ impl<T: TimeSource> TimerDriver<T> {
         Self {
             clock,
             wheel: Mutex::new(TimerWheel::new_at(now)),
+            observed_deadline: AtomicU64::new(u64::MAX),
+            deadline_reactors: Mutex::new(Vec::new()),
         }
     }
 
@@ -462,7 +471,13 @@ impl<T: TimeSource> TimerDriver<T> {
         let now = self.clock.now();
         wheel.synchronize(now);
         crate::runtime::metrics::record_timer_registered();
-        wheel.register(deadline, waker)
+        let handle = wheel.register(deadline, waker);
+        let earlier = self.advance_reactor_deadline(&mut wheel, deadline);
+        drop(wheel);
+        if earlier {
+            self.wake_deadline_reactors();
+        }
+        handle
     }
 
     /// Updates an existing timer registration with a new deadline and waker.
@@ -475,12 +490,68 @@ impl<T: TimeSource> TimerDriver<T> {
         let mut wheel = self.wheel.lock();
         let now = self.clock.now();
         wheel.synchronize(now);
-        if wheel.cancel(handle) {
+        let (updated, earlier) = if wheel.cancel(handle) {
             crate::runtime::metrics::record_timer_cancelled();
             crate::runtime::metrics::record_timer_registered();
-            wheel.register(deadline, waker)
+            let updated = wheel.register(deadline, waker);
+            (updated, self.advance_reactor_deadline(&mut wheel, deadline))
         } else {
-            *handle
+            (*handle, false)
+        };
+        drop(wheel);
+        if earlier {
+            self.wake_deadline_reactors();
+        }
+        updated
+    }
+
+    /// Publish an earlier wake point without scanning all pending timers on
+    /// every insertion. The next poller's full query refreshes this floor.
+    fn advance_reactor_deadline(&self, wheel: &mut TimerWheel, deadline: Time) -> bool {
+        let effective = if wheel.coalescing_config().enabled {
+            // Adding a timer can make a coalescing group ready before its raw
+            // deadline. This optional policy needs the wheel's exact answer.
+            wheel.next_deadline().unwrap_or(deadline)
+        } else {
+            deadline.min(wheel.current_time().saturating_add_nanos(
+                duration_to_nanos_saturating(wheel.config().max_timer_duration),
+            ))
+        };
+        let previous = self.observed_deadline.load(Ordering::Relaxed);
+        if effective.as_nanos() < previous {
+            self.observed_deadline
+                .store(effective.as_nanos(), Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn register_deadline_reactor(&self, reactor: Weak<dyn Reactor>) {
+        let mut reactors = self.deadline_reactors.lock();
+        reactors.retain(|registered| registered.strong_count() != 0);
+        if !reactors.iter().any(|registered| registered.ptr_eq(&reactor)) {
+            reactors.push(reactor);
+        }
+    }
+
+    fn wake_deadline_reactors(&self) {
+        let mut live = smallvec::SmallVec::<[Arc<dyn Reactor>; 2]>::new();
+        {
+            let mut reactors = self.deadline_reactors.lock();
+            reactors.retain(|reactor| {
+                if let Some(reactor) = reactor.upgrade() {
+                    live.push(reactor);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        // A backend may re-enter the timer driver. Release both locks first,
+        // and do not let a custom backend panic prevent other runtimes waking.
+        for reactor in live {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reactor.wake()));
         }
     }
 
@@ -501,7 +572,10 @@ impl<T: TimeSource> TimerDriver<T> {
         let mut wheel = self.wheel.lock();
         let now = self.clock.now();
         wheel.synchronize(now);
-        wheel.next_deadline().map(|deadline| deadline.max(now))
+        let deadline = wheel.next_deadline().map(|deadline| deadline.max(now));
+        self.observed_deadline
+            .store(deadline.map_or(u64::MAX, Time::as_nanos), Ordering::Relaxed);
+        deadline
     }
 
     /// Processes all expired timers, calling their wakers.
@@ -650,6 +724,18 @@ impl<T: TimeSource + std::fmt::Debug + 'static> TimerDriverApi for TimerDriver<T
     }
 }
 
+// Keep runtime wake registration private. Public TimerDriverApi implementors
+// gain no new required method, and TimerDriverHandle stays one Arc wide.
+trait NativeTimerDriverApi: TimerDriverApi {
+    fn register_deadline_reactor(&self, reactor: Weak<dyn Reactor>);
+}
+
+impl<T: TimeSource + std::fmt::Debug + 'static> NativeTimerDriverApi for TimerDriver<T> {
+    fn register_deadline_reactor(&self, reactor: Weak<dyn Reactor>) {
+        Self::register_deadline_reactor(self, reactor);
+    }
+}
+
 /// Shared handle to a timer driver.
 ///
 /// This wrapper provides cloneable access to the runtime's timer driver
@@ -669,7 +755,7 @@ impl<T: TimeSource + std::fmt::Debug + 'static> TimerDriverApi for TimerDriver<T
 /// ```
 #[derive(Clone)]
 pub struct TimerDriverHandle {
-    inner: Arc<dyn TimerDriverApi>,
+    inner: Arc<dyn NativeTimerDriverApi>,
 }
 
 impl std::fmt::Debug for TimerDriverHandle {
@@ -691,6 +777,10 @@ impl TimerDriverHandle {
     #[inline]
     pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub(crate) fn register_deadline_reactor(&self, reactor: Weak<dyn Reactor>) {
+        self.inner.register_deadline_reactor(reactor);
     }
 
     /// Creates a handle with a wall clock timer driver for production use.
@@ -810,6 +900,89 @@ mod tests {
     // =========================================================================
     // VirtualClock Tests
     // =========================================================================
+
+    #[test]
+    fn timer_publication_wakes_shared_reactors_only_for_earlier_deadlines() {
+        use crate::runtime::reactor::LabReactor;
+
+        let driver = TimerDriver::new();
+        let first = Arc::new(LabReactor::new());
+        let second = Arc::new(LabReactor::new());
+        for reactor in [&first, &second] {
+            let erased: Arc<dyn Reactor> = reactor.clone();
+            driver.register_deadline_reactor(Arc::downgrade(&erased));
+        }
+        let far = driver.register(Time::from_secs(60), futures_waker());
+        assert!(first.check_and_clear_wake());
+        assert!(second.check_and_clear_wake());
+        let later = driver.register(Time::from_secs(90), futures_waker());
+        assert!(!first.check_and_clear_wake());
+        assert!(!second.check_and_clear_wake());
+        assert_eq!(driver.next_deadline(), Some(Time::from_secs(60)));
+
+        let near = driver.update(&later, Time::from_secs(10), futures_waker());
+        assert!(first.check_and_clear_wake());
+        assert!(second.check_and_clear_wake());
+        assert_eq!(driver.pending_count(), 2);
+        assert_eq!(
+            driver.update(&later, Time::from_secs(1), futures_waker()),
+            later,
+            "a stale update must not publish a timer or a wake"
+        );
+        assert!(!first.check_and_clear_wake());
+        assert!(!second.check_and_clear_wake());
+        assert_eq!(driver.pending_count(), 2);
+
+        assert!(driver.cancel(&near));
+        assert_eq!(driver.next_deadline(), Some(Time::from_secs(60)));
+        let replacement = driver.register(Time::from_secs(20), futures_waker());
+        assert!(first.check_and_clear_wake());
+        assert!(second.check_and_clear_wake());
+        assert!(driver.cancel(&replacement));
+        assert!(driver.cancel(&far));
+        assert_eq!(driver.next_deadline(), None);
+        driver.register(Time::from_secs(120), futures_waker());
+        assert!(first.check_and_clear_wake());
+        assert!(second.check_and_clear_wake());
+    }
+
+    #[test]
+    fn timer_publication_compares_the_clamped_wake_deadline() {
+        use crate::runtime::reactor::LabReactor;
+
+        let driver = TimerDriver::new();
+        let reactor = Arc::new(LabReactor::new());
+        let erased: Arc<dyn Reactor> = reactor.clone();
+        driver.register_deadline_reactor(Arc::downgrade(&erased));
+        assert_eq!(driver.next_deadline(), None);
+        driver.register(Time::from_nanos(u64::MAX), futures_waker());
+        assert!(reactor.check_and_clear_wake());
+        let horizon = Time::from_nanos(duration_to_nanos_saturating(
+            driver.wheel.lock().config().max_timer_duration,
+        ));
+        assert_eq!(driver.next_deadline(), Some(horizon));
+        driver.register(Time::from_nanos(u64::MAX - 1), futures_waker());
+        assert!(
+            !reactor.check_and_clear_wake(),
+            "the same clamped deadline must not repeatedly wake the reactor"
+        );
+    }
+
+    #[test]
+    fn timer_publication_reactor_registrations_are_weak_and_deduplicated() {
+        use crate::runtime::reactor::LabReactor;
+
+        let driver = TimerDriver::new();
+        let reactor: Arc<dyn Reactor> = Arc::new(LabReactor::new());
+        let weak = Arc::downgrade(&reactor);
+        driver.register_deadline_reactor(weak.clone());
+        driver.register_deadline_reactor(weak.clone());
+        assert_eq!(driver.deadline_reactors.lock().len(), 1);
+        drop(reactor);
+        assert!(weak.upgrade().is_none(), "timer must not retain the reactor");
+        driver.register(Time::from_secs(1), futures_waker());
+        assert!(driver.deadline_reactors.lock().is_empty());
+    }
 
     #[test]
     fn virtual_clock_starts_at_zero() {
@@ -1331,6 +1504,8 @@ mod tests {
         let clock = Arc::new(VirtualClock::new());
         let driver = TimerDriver {
             clock: clock.clone(),
+            observed_deadline: AtomicU64::new(u64::MAX),
+            deadline_reactors: Mutex::new(Vec::new()),
             wheel: Mutex::new(TimerWheel::with_config(
                 Time::ZERO,
                 TimerWheelConfig::default(),

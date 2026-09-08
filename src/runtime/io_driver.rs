@@ -437,6 +437,12 @@ impl IoDriver {
         self.reactor.wake()
     }
 
+    /// Timer publication must interrupt an already-selected reactor timeout
+    /// without retaining the reactor's task registrations through the timer.
+    pub(crate) fn downgrade_reactor(&self) -> Weak<dyn Reactor> {
+        Arc::downgrade(&self.reactor)
+    }
+
     /// Returns current statistics.
     #[inline]
     #[must_use]
