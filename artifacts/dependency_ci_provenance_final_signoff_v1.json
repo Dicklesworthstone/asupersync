@@ -5,6 +5,13 @@
   "program_id": "asupersync-mnotoo.3",
   "input_head": "102a556d0f6f516125a3137676beeb70d4f00d27",
   "generated_at_utc": "2026-08-23T12:35:48Z",
+  "release_retention_review": {
+    "bead_id": "asupersync-release-0411-retention-msh2l1",
+    "reviewed_by": "BeigeGlen",
+    "delegated_release_owner": "CopperOak",
+    "reviewed_at_utc": "2026-09-08T03:26:40Z",
+    "scope": "Reviewed current manifest/lock and supply-policy joins plus reused r5 root/fuzz scanner evidence. Original input_head, generated_at_utc, child implementation identities, JavaScript static-only decision, downstream-minimum and generated-document receipts remain historical; this is not a fresh execution of every P6 lane."
+  },
   "verdict": {
     "outcome": "PASS_SCOPED_KEEP_DEFER",
     "all_required_children_closed": true,
@@ -23,7 +30,7 @@
     },
     {
       "path": "artifacts/dependency_supply_chain_policy_v1.json",
-      "sha256": "16698fa4ba13ed60d6ac8cabe014646046b0c511902709ec9842f9d38ff5fd10",
+      "sha256": "7d7c502fb2d7d9261e4644c4cf6088a3dc97a507ec8f2e081ca232fc196812ee",
       "owner_bead_id": "asupersync-mnotoo.3.4"
     },
     {
@@ -182,15 +189,18 @@
   },
   "fresh_cargo_scanner_receipt": {
     "command": "scripts/ci/audit_dependencies.sh run",
-    "observed_at_utc": "2026-08-23T12:35:48Z",
+    "observed_at_utc": "2026-09-08T00:55:04Z",
+    "receipt_path": "/data/tmp/copperoak-release-0411-dependency-audit-r5/summary.json",
+    "receipt_sha256": "3ca6b57c728790d0499eb366d3001d905372e47d00b0c357069406a896138640",
+    "observation_basis": "Reused r5 execution; database observation is commit timestamp plus recorded age_seconds. No new scanner execution or retroactive validity of the old PEM exception is claimed.",
     "outcome": "PASS",
     "cargo_deny_version": "0.19.4",
     "cargo_audit_version": "0.22.2",
     "advisory_database": {
       "url": "https://github.com/RustSec/advisory-db",
-      "revision": "bf5c0d245a92671908518d7e765914d437954ed6",
-      "commit_timestamp_utc": "2026-08-21T08:28:40+02:00",
-      "age_seconds": 194825,
+      "revision": "8a1eb4f933fb5821add5b4e98601ebd90b8b3538",
+      "commit_timestamp_utc": "2026-09-07T11:19:30-07:00",
+      "age_seconds": 23734,
       "maximum_age_seconds": 604800,
       "fetched": true,
       "fresh": true
@@ -241,10 +251,11 @@
       "normal",
       "target-normal"
     ],
-    "root_manifest_sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
-    "root_lock_sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+    "root_manifest_sha256": "092cae3349fd4c5acf789729ada7dee229a91037c481a5c8b3ae522ed1076034",
+    "root_lock_sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
     "excluded_fuzz_manifest_sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
-    "excluded_fuzz_lock_sha256": "20759c1751928147250b1b385fa78dcdb4e7f8d7f4b61e73222982b71fe838fe"
+    "excluded_fuzz_lock_sha256": "140ccbf6f1351c0531c0b492baef50bd88aba898698e0f4e5a170a0d6ba247ff",
+    "review_scope": "Current source joins after review of release/path versions, packaging, remote-service composition, lint/toolchain settings and the existing ChaCha20 patch. The profile/target catalog remains the prior budget projection; the four fresh Linux oracle graphs are recorded in dependency_oracle_policy_v1.json, not a rerun of this whole consumer matrix."
   },
   "downstream_minimum_version_receipt": {
     "toolchain": "nightly-2026-07-05",

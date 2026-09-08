@@ -50,8 +50,22 @@ policy. Workspace exclusion is an execution boundary, not a safety exemption.
 
 The sole current root advisory exception is `RUSTSEC-2025-0134` for
 `rustls-pemfile` 2.2.0. It is owned by `asupersync-mnotoo.4.3`, expires on
-2026-09-01, and has no automatic renewal. The planned remediation is migration
-to `rustls-pki-types::pem::PemObject`.
+2026-10-01, and has no automatic renewal. Its previous 2026-09-01 deadline
+expired. CopperOak delegated a new bounded review to BeigeGlen under
+`asupersync-release-0411-retention-msh2l1` on 2026-09-08; that review preserves
+the library's complete PKCS8/RSA/EC scan priority, the CLIs' first-key behavior,
+and exact legacy PEM errors while migration tests are completed. The planned
+remediation remains `rustls-pki-types::pem::PemObject`.
+
+This decision reuses the actual r5 root/fuzz scanner receipt at
+`/data/tmp/copperoak-release-0411-dependency-audit-r5/summary.json`, against
+RustSec revision `8a1eb4f933fb5821add5b4e98601ebd90b8b3538`. Its recorded
+commit timestamp plus 23,734-second age places the database observation at
+2026-09-08T00:55:04Z. No new scanner execution is claimed. Both scopes passed
+with zero duplicate expansion under the existing ignore; those results alone
+did not authorize extending the expired exception. Current source review also
+accounts for the release version/packaging changes, composed `remote-service`
+feature, nightly-2026-08-31 and already-landed ChaCha20 patch.
 
 The 2026-08-23 live refresh also advanced `h2` from 0.4.15 to 0.4.18 for
 `RUSTSEC-2026-0258` and `event-listener` from 5.4.1 to 5.4.2 for

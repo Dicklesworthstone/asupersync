@@ -2302,8 +2302,13 @@ fn validate_aggregate_signoff(policy: &Value) -> Vec<String> {
             || string(graph, "observed_status") != "PASS"
             || integer(graph, "observed_exit_code") != 0
             || integer(graph, "observed_unit_count") != unit_count
-            || !command.contains("RCH_REQUIRE_REMOTE=1 rch exec --")
-            || !command.contains("cargo check --locked")
+            || !command.contains("RCH_REQUIRE_REMOTE=1")
+            || !command.contains("RCH_NO_SELF_HEALING=1")
+            || !command.contains("RCH_MAX_REMOTE_ATTEMPTS=1")
+            || !command.contains(" rch exec --base ")
+            || !command
+                .contains("--clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock")
+            || !command.contains("cargo check -j 2 --locked")
             || !command.contains("--target x86_64-unknown-linux-gnu")
             || !command.contains("-Z unstable-options --unit-graph")
         {
@@ -3198,8 +3203,8 @@ fn manifest_reconciliation_metadata_and_required_fields_are_exact() {
         string(reconciliation, "capability_id"),
         "CAP-VERIFICATION-PROFILES"
     );
-    assert_eq!(string(reconciliation, "as_of_release"), "0.4.9");
-    assert_eq!(string(reconciliation, "as_of_date_utc"), "2026-08-30");
+    assert_eq!(string(reconciliation, "as_of_release"), "0.4.11");
+    assert_eq!(string(reconciliation, "as_of_date_utc"), "2026-09-08");
     assert_eq!(
         reconciliation
             .get("cutover_authorized")
@@ -3812,7 +3817,10 @@ fn negative_fixture_unapproved_retirement_renewal_fails_closed() {
 
 #[test]
 fn negative_fixture_live_release_expiry_fails_closed() {
-    let policy = policy();
+    let mut policy = policy();
+    // Pin the negative input independently of the current retention decision.
+    active_row_by_id_mut(&mut policy, "active-httparse-http1-reference")["expiry"]["release"] =
+        Value::String("0.4.11".to_owned());
     let row = active_row_by_id(&policy, "active-httparse-http1-reference");
     let errors = validate_active_expiry_at(row, "0.4.11", "2026-08-21");
     assert!(
@@ -3825,7 +3833,9 @@ fn negative_fixture_live_release_expiry_fails_closed() {
 
 #[test]
 fn negative_fixture_live_date_expiry_fails_closed() {
-    let policy = policy();
+    let mut policy = policy();
+    active_row_by_id_mut(&mut policy, "active-httparse-http1-reference")["expiry"]["date_utc"] =
+        Value::String("2026-10-21".to_owned());
     let row = active_row_by_id(&policy, "active-httparse-http1-reference");
     let errors = validate_active_expiry_at(row, "0.4.10", "2026-10-21");
     assert!(

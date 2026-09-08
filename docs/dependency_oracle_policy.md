@@ -98,7 +98,7 @@ current H2-only sources do not import. The H2 edge in that excluded member is
 differential skeleton similarly has no RaptorQ or asupersync package edge and
 remains blocked.
 
-The reconciliation snapshot is current at release `0.4.9` on `2026-08-30`.
+The reconciliation snapshot is current at release `0.4.11` on `2026-09-08`.
 Renewal belongs to `asupersync-mnotoo.4` and requires a new expiry, owner
 receipt, corpus status, production-exclusion evidence, and one decision for
 every due active row. Removal and the initial retirement sweep belong to
@@ -111,8 +111,9 @@ The `asupersync-mnotoo.4.3` sweep reviewed all 10 active rows after their
 original `0.3.11` release deadline had passed. It retired zero and renewed all
 10 through release `0.4.11` or UTC date `2026-10-21`, whichever is reached
 first. This is a bounded preservation decision, not a claim that indefinite
-retention is acceptable. Removing any row now would discard live comparison
-coverage without an independently sufficient replacement corpus.
+retention is acceptable. The original sweep preserved comparison and harness
+edges pending independently sufficient replacement corpora; the current review
+below distinguishes live comparisons from unavailable reference seams.
 
 | Active oracle | Disposition | Evidence still required before retirement |
 | --- | --- | --- |
@@ -132,6 +133,37 @@ invariants, concrete missing evidence, production-exclusion status, approving
 bead authority, and next action. Because no manifest edge was retired, profile
 remeasurement is explicitly `not-applicable-no-manifest-edge-retired`; no
 manifest, lockfile, public API, fixture, or runtime behavior changed.
+
+### Release 0.4.11 retention review
+
+Under `asupersync-release-0411-retention-msh2l1`, CopperOak delegated the
+release review to BeigeGlen using the owner's release and remaining-Beads
+instructions. The prior initial sweep and August 30 approval remain historical.
+The current decision retains all ten references until release `0.4.12` or UTC
+date `2026-10-21`, whichever arrives first; the calendar deadline was not
+extended. Each decision retains its concrete missing evidence and next action.
+
+All registered fixture paths were reviewed against the August 30 baseline.
+Eight source groups are unchanged. The RaptorQ K2048 comparison now runs its
+real external decoder instead of remaining ignored; the OTLP comparison only
+simplified an equivalent boolean return. Both still depend on the incumbent.
+H2's unwired reference surfaces and the OpenTelemetry XFAIL/unavailable rows
+remain gaps. This review does not make their comparisons complete.
+In particular, registered H2 sources use owned frame expectations, optional
+HPACK goldens, or unavailable/XFAIL peer seams; retention of its declared edge
+does not establish a live external `h2` comparison. Its next action includes
+reviewing harness uses before any separately authorized edge retirement.
+
+Four sequential strict-RCH graph commands completed on `vmi1227854` against
+base `bf6b361deb3154c56d1450ea679e6d4a3cbf09b9` with only the reviewed root
+manifest and lockfile overlaid. Their shared overlay fingerprint is
+`f9b3cb7f40821f92a28d382e5b3d329578df00f6889d0c853a828d82ea846fde`.
+The 197/197/394/277 unit counts and governed-package sets are unchanged.
+The separate seven-profile native quarantine observations remain historical
+August 30 evidence; they were not rerun. Version bumps, packaging exclusions,
+the additive `remote-service = ["cli", "tls"]` composition, Clippy settings,
+and the already-landed ChaCha20 patch were reviewed explicitly. No reference
+edge or fixture was removed, and no runtime or broad release proof is claimed.
 
 The focused contract fails on:
 
@@ -380,7 +412,7 @@ The security/protocol projection covers all four registered rows:
   independent vectors, licenses, hashes, redaction, and resource limits are
   complete;
 - the active OpenTelemetry SDK and protobuf rows remain partial, explicitly
-  fail closed on XFAIL/unavailable surfaces, and expire at release `0.4.11` or
+  fail closed on XFAIL/unavailable surfaces, and expire at release `0.4.12` or
   UTC date `2026-10-21`; and
 - each active row links to its concrete retirement-sweep missing evidence,
   retained invariants, owner, and next action.

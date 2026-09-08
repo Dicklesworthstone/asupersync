@@ -3,7 +3,7 @@
   "artifact_id": "dependency-supply-chain-policy-v1",
   "bead_id": "asupersync-mnotoo.2",
   "capability_id": "CAP-VERIFICATION-PROFILES",
-  "policy_as_of_date_utc": "2026-08-23",
+  "policy_as_of_date_utc": "2026-09-08",
   "decision": "ENFORCE_ROOT_AND_EXCLUDED_FUZZ_GRAPHS",
   "tools": {
     "cargo_deny": {
@@ -42,9 +42,9 @@
   "root_workspace": {
     "manifest_path": "Cargo.toml",
     "lockfile_path": "Cargo.lock",
-    "manifest_sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
-    "lockfile_sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
-    "manifest_line_count": 1074,
+    "manifest_sha256": "092cae3349fd4c5acf789729ada7dee229a91037c481a5c8b3ae522ed1076034",
+    "lockfile_sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+    "manifest_line_count": 1123,
     "lockfile_line_count": 4664,
     "coverage": [
       "normal",
@@ -80,7 +80,7 @@
     "lockfile_path": "fuzz/Cargo.lock",
     "conformance_manifest_path": "fuzz/conformance/Cargo.toml",
     "manifest_sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
-    "lockfile_sha256": "20759c1751928147250b1b385fa78dcdb4e7f8d7f4b61e73222982b71fe838fe",
+    "lockfile_sha256": "140ccbf6f1351c0531c0b492baef50bd88aba898698e0f4e5a170a0d6ba247ff",
     "conformance_manifest_sha256": "0b2f13450fd2c8b7f5376912160cf1fd1f2b5b5d92bae0703cd683805b1c274f",
     "manifest_line_count": 6234,
     "lockfile_line_count": 3752,
@@ -88,8 +88,8 @@
     "lockfile_tracked": true,
     "toolchain": {
       "path": "rust-toolchain.toml",
-      "sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
-      "channel": "nightly-2026-07-05",
+      "sha256": "99838b6a25561af2c5b180941bb81adad3ef25f22ae297a6f7ddec2caa151c6f",
+      "channel": "nightly-2026-08-31",
       "components": ["rustfmt", "clippy"],
       "inheritance": "The excluded fuzz workspace is below the repository root and therefore inherits this parent rustup override."
     },
@@ -141,10 +141,25 @@
       "resolved_version": "2.2.0",
       "classification": "unmaintained",
       "scope": "root workspace direct dependency",
-      "reason": "The current TLS PEM loading surface still declares the thin rustls-pemfile wrapper; there is no patched release.",
+      "reason": "The reviewed 2.2.0 wrapper is an informational unmaintained finding with no patched release. A short retention preserves the 0.4.x PEM contract while direct PemObject migration gains exact error and selection regressions: the library collects complete PKCS8, RSA, then EC passes; CLI loaders select the first encountered supported key; reader-based legacy errors preserve their text and line endings.",
       "remediation": "Migrate callers to rustls-pki-types PemObject and remove the direct edge.",
       "owner": "asupersync-mnotoo.4.3",
-      "expires_date_utc": "2026-09-01",
+      "expires_date_utc": "2026-10-01",
+      "retention_review": {
+        "bead_id": "asupersync-release-0411-retention-msh2l1",
+        "reviewed_by": "BeigeGlen",
+        "delegated_release_owner": "CopperOak",
+        "approved_at_utc": "2026-09-08T03:26:40Z",
+        "previous_expiry_date_utc": "2026-09-01",
+        "basis": "Explicit release/remaining-Beads authorization and CopperOak's bounded delegation; owner-reviewed retention only, with no automatic renewal or dependency removal.",
+        "scanner_evidence": "/data/tmp/copperoak-release-0411-dependency-audit-r5/summary.json",
+        "scanner_observed_at_utc": "2026-09-08T00:55:04Z",
+        "scanner_time_basis": "RustSec receipt commit timestamp plus recorded age_seconds=23734; this reuses the existing r5 execution, not a new scanner run or approval of the expired prior exception.",
+        "rustsec_revision": "8a1eb4f933fb5821add5b4e98601ebd90b8b3538",
+        "scanner_result": "Root and excluded-fuzz cargo-deny/cargo-audit passed with zero duplicate expansion under the existing advisory ignore. Scanner PASS alone does not authorize retention.",
+        "missing_evidence": "Mixed-format priority, duplicate/first-key selection, malformed trailing PEM, missing terminator, invalid base64/UTF-8 and exact legacy error text must be compared before migrating. Existing successful TLS/QUIC handshakes do not prove these boundaries.",
+        "reviewed_input_delta": "Workspace/path version bumps, packaging exclusions, additive remote-service feature composition, Clippy settings, nightly-2026-08-31, and the already-landed root/fuzz chacha20 0.10.2 patch; no oracle package or PEM parser version changed."
+      },
       "renewal_policy": "No automatic renewal. Expiry is a hard policy failure unless an owner records a new reason, evidence, and date."
     }
   ],

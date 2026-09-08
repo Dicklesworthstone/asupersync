@@ -49,6 +49,39 @@ fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
         .unwrap_or_else(|| panic!("{key} must be an array"))
 }
 
+fn pem_retention_is_valid_at(exception: &Value, as_of: chrono::NaiveDate) -> bool {
+    let review = &exception["retention_review"];
+    let Some(expiry) = exception["expires_date_utc"]
+        .as_str()
+        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+    else {
+        return false;
+    };
+    let Some(approval) = review["approved_at_utc"]
+        .as_str()
+        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+    else {
+        return false;
+    };
+    expiry > as_of
+        && approval.date_naive() <= as_of
+        && exception["owner"] == "asupersync-mnotoo.4.3"
+        && [
+            "bead_id",
+            "reviewed_by",
+            "delegated_release_owner",
+            "basis",
+            "previous_expiry_date_utc",
+            "scanner_evidence",
+            "scanner_observed_at_utc",
+            "scanner_time_basis",
+            "rustsec_revision",
+            "missing_evidence",
+        ]
+        .iter()
+        .all(|key| review[key].as_str().is_some_and(|value| !value.is_empty()))
+}
+
 fn sha256(relative: &str) -> String {
     let bytes = std::fs::read(repo_path(relative))
         .unwrap_or_else(|error| panic!("read bytes {relative}: {error}"));
@@ -165,9 +198,30 @@ fn advisory_database_and_exception_policy_fail_closed() {
     );
     assert!(deny.contains("maximum-db-staleness = \"P7D\""));
     assert!(deny.contains("RUSTSEC-2025-0134"));
-    assert!(deny.contains("Temporary direct-edge exception through 2026-09-01"));
+    assert!(deny.contains(&format!(
+        "Temporary direct-edge exception through {}",
+        text(exception, "expires_date_utc")
+    )));
     assert!(audit.contains("RUSTSEC-2025-0134"));
     assert!(audit.contains("stale = false"));
+    assert!(
+        pem_retention_is_valid_at(exception, chrono::Utc::now().date_naive()),
+        "PEM retention requires a current expiry and an explicit owner/evidence receipt"
+    );
+}
+
+#[test]
+fn pem_retention_rejects_expiry_and_missing_owner_receipts() {
+    let policy = json(POLICY_PATH);
+    let mut exception = array(&policy, "advisory_exceptions")[0].clone();
+    let review_date = chrono::NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();
+    assert!(pem_retention_is_valid_at(&exception, review_date));
+    let expiry =
+        chrono::NaiveDate::parse_from_str(text(&exception, "expires_date_utc"), "%Y-%m-%d")
+            .unwrap();
+    assert!(!pem_retention_is_valid_at(&exception, expiry));
+    exception["retention_review"]["delegated_release_owner"] = Value::String(String::new());
+    assert!(!pem_retention_is_valid_at(&exception, review_date));
 }
 
 #[test]
@@ -230,7 +284,7 @@ fn checked_manifest_and_lockfile_fingerprints_match() {
             .expect("fuzz conformance manifest lines")
     );
     assert_eq!(sha256(TOOLCHAIN_PATH), text(&fuzz["toolchain"], "sha256"));
-    assert_eq!(text(&fuzz["toolchain"], "channel"), "nightly-2026-07-05");
+    assert_eq!(text(&fuzz["toolchain"], "channel"), "nightly-2026-08-31");
     assert_eq!(text(fuzz, "cargo_deny_status"), "pass");
     assert_eq!(text(fuzz, "cargo_audit_status"), "pass");
 }

@@ -22,69 +22,69 @@
     "contract_id": "dependency-oracle-manifest-reconciliation-v1",
     "bead_id": "asupersync-mnotoo.4.1",
     "capability_id": "CAP-VERIFICATION-PROFILES",
-    "as_of_release": "0.4.9",
-    "as_of_date_utc": "2026-08-30",
+    "as_of_release": "0.4.11",
+    "as_of_date_utc": "2026-09-08",
     "scope_rule": "Every root workspace member, explicitly excluded Rust harness, standalone conformance Cargo project and Cargo.lock is pinned. A pin drift is an unregistered state until this registry is reconciled. Synthetic manifests under tests/fixtures are contract inputs rather than installed oracle edges and are excluded.",
     "unknown_state": "fail-closed",
     "cutover_authorized": false,
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
-        "line_count": 1074,
+        "sha256": "092cae3349fd4c5acf789729ada7dee229a91037c481a5c8b3ae522ed1076034",
+        "line_count": 1123,
         "scope": "root-package-and-workspace"
       },
       {
         "path": "Cargo.lock",
-        "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+        "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
         "line_count": 4664,
         "scope": "resolved-package-version-source-and-checksum"
       },
       {
         "path": "asupersync-macros/Cargo.toml",
-        "sha256": "11bc6b290b5414ee73d7d4a085ae542725ad2776dfe6e2bada062561b9c2a183",
+        "sha256": "be7311c6a6bfd82797f9666307455606bdb6cba881541e446556bca350b36d2e",
         "line_count": 37,
         "scope": "workspace-member"
       },
       {
         "path": "asupersync-browser-core/Cargo.toml",
-        "sha256": "2dd5e2a24cfc47990b33a85196491df25e2420f68640be4494f4b63e898ec2fa",
+        "sha256": "c4c5a774ae3c13e217e695d1efe3788bf7d7ab060d6f80eddf20778cfe9d4563",
         "line_count": 76,
         "scope": "workspace-member"
       },
       {
         "path": "asupersync-tokio-compat/Cargo.toml",
-        "sha256": "e1e3a701a38ef8f7b2659bfa3e966746ad4a718a9d2447d127926765b21aa0a5",
+        "sha256": "b5e7df7d48ceab9a5ca82a3d130d64a309511e12d043a1ce7fce3d51011507f9",
         "line_count": 68,
         "scope": "workspace-member"
       },
       {
         "path": "conformance/Cargo.toml",
-        "sha256": "00751d9a630847eb13eb57dd4ff57f3d89ee085b083a44228b5a0bd5a4bb7966",
+        "sha256": "df343652b07260dcada2c35c56d4b704f0a6ef33160b8de09a435edd7b31a2cc",
         "line_count": 214,
         "scope": "workspace-conformance-member"
       },
       {
         "path": "franken_kernel/Cargo.toml",
-        "sha256": "a59cfa93fb65b5628dba257026d375511d28fbfdd888dfc2fa25d7fdbe677bdb",
+        "sha256": "db6b89d88fa85ac0765dbda55e27d11299e6047ae35ebdbf8e3faca4e17cef53",
         "line_count": 29,
         "scope": "workspace-member"
       },
       {
         "path": "franken_evidence/Cargo.toml",
-        "sha256": "36115cf528e2f25f8e499e2fa96174d41493ab33aa6260a52b7f7d5584d775da",
+        "sha256": "365847afff641bb55d656a8325b67585afafea4fbc2cf378dcbff5ea83bc7d47",
         "line_count": 31,
         "scope": "workspace-member"
       },
       {
         "path": "franken_decision/Cargo.toml",
-        "sha256": "efe743da122e1497ef3fe6fa36b0c52059809cca646a70cb384c048466cf77fc",
+        "sha256": "e447c367728c11ae69fad05f5a0210142b78e7151025198b2b793f434e9ca85d",
         "line_count": 32,
         "scope": "workspace-member"
       },
       {
         "path": "frankenlab/Cargo.toml",
-        "sha256": "eb2f4304b457daccbda6dae2d569340b2350f2cf664b2e392095b72f3a09e42b",
+        "sha256": "d7e216793bd1e9f802414d6c61c1a1187afb26bce3ccbe646dfdca8a22df0796",
         "line_count": 33,
         "scope": "workspace-member"
       },
@@ -221,7 +221,7 @@
           "evidence": "git log --reverse -S 'httparse = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -297,7 +297,7 @@
           "evidence": "git log --reverse -S 'tokio-util = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -375,7 +375,7 @@
           "evidence": "git log --reverse -S 'sqlx = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -460,7 +460,7 @@
           "evidence": "git log --reverse -S 'redis = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -547,7 +547,7 @@
           "evidence": "git log --reverse -S 'raptorq = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -628,7 +628,7 @@
           "evidence": "git log --reverse -S 'tokio = {' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -674,7 +674,7 @@
             "requested_version": "0.4",
             "features": [],
             "default_features": true,
-            "status": "live-reference"
+            "status": "declared-reference-with-unavailable-peer-seams"
           },
           {
             "edge_id": "conformance/Cargo.toml::dev-dependencies::h2",
@@ -699,7 +699,7 @@
         ],
         "owner": "bead:asupersync-mnotoo.4.3",
         "test_scope": {
-          "status": "partially-live-fuzz-copy-unwired",
+          "status": "owned-conformance-fixtures-reference-peer-unavailable",
           "source_paths": [
             "conformance/src/h2_continuation_conformance.rs",
             "conformance/src/h2_data_end_stream_conformance.rs",
@@ -732,19 +732,19 @@
           "evidence": "git log --reverse -S 'h2 = ' -- conformance/Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
         },
         "independent_corpus": {
-          "status": "partial-live-reference-fuzz-copy-blocked",
+          "status": "owned-frame-fixtures-and-optional-goldens-reference-peer-unavailable",
           "paths": [
             "artifacts/conformance_registry_contract_v1.json",
             "conformance/src/h2_continuation_conformance.rs",
             "conformance/src/h2_data_end_stream_conformance.rs"
           ],
-          "provenance": "Source-owned frame fixtures feed live h2 comparisons in the canonical conformance member; excluded fuzz copies do not authorize PASS."
+          "provenance": "Canonical sources execute owned frame expectations, optional frozen HPACK outputs, or explicit unavailable/XFAIL reference seams; no live external h2 peer call was found in the registered sources. Excluded fuzz copies are unwired. The declared package edge is retained pending an independent corpus and harness-use review, not counted as successful vendor comparison evidence."
         },
         "renewal": {
           "authority": "bead:asupersync-mnotoo.4",
@@ -809,7 +809,7 @@
           "evidence": "git log --reverse -S 'prometheus-client = ' -- conformance/Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -908,7 +908,7 @@
           "evidence": "git log --reverse -S 'opentelemetry_sdk = ' -- conformance/Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -1015,7 +1015,7 @@
           "evidence": "git log --reverse -S 'opentelemetry-proto = ' -- Cargo.toml"
         },
         "expiry": {
-          "release": "0.4.11",
+          "release": "0.4.12",
           "date_utc": "2026-10-21",
           "status": "renewed",
           "max_retention_releases": 2
@@ -1045,8 +1045,9 @@
       "schema_version": "dependency-oracle-quarantine-proof-v1",
       "bead_id": "asupersync-mnotoo.4.2",
       "capability_id": "CAP-VERIFICATION-PROFILES",
-      "as_of_release": "0.4.9",
-      "as_of_date_utc": "2026-08-30",
+      "as_of_release": "0.4.11",
+      "as_of_date_utc": "2026-09-08",
+      "review_scope": "Current manifest reconciliation review; the seven native profile observations remain the historical 2026-08-30 evidence. Only the four aggregate graph receipts were rerun for this release. remote-service composes existing cli/tls features; the reviewed ChaCha20 patch adds no native or oracle edge.",
       "unknown_active_native_state": "block-green",
       "external_process_authorization": "none; these reproducible Cargo/RCH commands are evidence recipes and do not authorize brokers, system package managers, service mutation, or non-Cargo build tooling",
       "detection_contract": {
@@ -1418,13 +1419,21 @@
       "schema_version": "dependency-oracle-retirement-sweep-v1",
       "bead_id": "asupersync-mnotoo.4.3",
       "capability_id": "CAP-VERIFICATION-PROFILES",
-      "as_of_release": "0.4.9",
-      "as_of_date_utc": "2026-08-30",
+      "as_of_release": "0.4.11",
+      "as_of_date_utc": "2026-09-08",
       "decision_policy": "A due oracle is retired only when repository-owned independent evidence preserves every retained invariant without resolving the incumbent. Otherwise the renewal authority may approve one bounded extension with concrete missing evidence and a next action.",
       "owner_approval": {
         "status": "approved",
         "authority": "bead:asupersync-mnotoo.4",
-        "basis": "The project owner directed execution of the remaining graph-ranked Beads; the compatibility-preserving disposition keeps existing test capability, removes no API or fixture, and remains bounded by the next release/date gate."
+        "basis": "CopperOak delegated this bounded release review under the project owner's explicit release and remaining-Beads instructions. BeigeGlen reviewed every manifest/lock delta and registered corpus; four sequential strict-RCH graphs passed on vmi1227854. Retention preserves existing comparison capability while independent corpus and mutation evidence remain incomplete; no API, fixture, or dependency edge is removed.",
+        "reviewed_by": "BeigeGlen",
+        "delegated_release_owner": "CopperOak",
+        "approved_at_utc": "2026-09-08T03:26:40Z",
+        "review_bead": "asupersync-release-0411-retention-msh2l1",
+        "prior_approval_history": "Initial sweep c3901f6c862d8343e6045530102157c9cd0e7334 and Aug30 re-sweep 723100665; parent-bead comment 504340 records the prior 0.4.11/2026-10-21 approval. Those completed receipts remain historical.",
+        "reviewed_source_delta": "Relative to 723100665: workspace/path versions 0.4.9 to 0.4.11; packaging exclusions; additive remote-service=[cli,tls]; two Clippy settings/comments; root/fuzz chacha20 0.10.1 to 0.10.2 with unchanged dependency list. Eight oracle source groups are unchanged. RaptorQ K2048 unignored its real incumbent decoder comparison; OTLP comparison only simplified an equivalent boolean return. Neither supplies an independent replacement corpus.",
+        "graph_base": "bf6b361deb3154c56d1450ea679e6d4a3cbf09b9",
+        "graph_overlay_fingerprint": "f9b3cb7f40821f92a28d382e5b3d329578df00f6889d0c853a828d82ea846fde"
       },
       "summary": {
         "due_count": 10,
@@ -1442,11 +1451,11 @@
         {
           "oracle_id": "active-httparse-http1-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1462,11 +1471,11 @@
         {
           "oracle_id": "active-tokio-util-codec-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1482,11 +1491,11 @@
         {
           "oracle_id": "active-sqlx-mysql-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1502,11 +1511,11 @@
         {
           "oracle_id": "active-redis-rs-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1522,11 +1531,11 @@
         {
           "oracle_id": "active-raptorq-rs-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1542,11 +1551,11 @@
         {
           "oracle_id": "active-tokio-semaphore-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1563,15 +1572,15 @@
         {
           "oracle_id": "active-h2-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
-            "The canonical conformance member has live H2 comparisons while the excluded fuzz copy remains explicitly unwired.",
+            "Registered canonical H2 sources exercise owned expectations, optional HPACK goldens, or explicit unavailable/XFAIL peer seams; a live external h2 peer comparison is not established, and the excluded fuzz copy remains unwired.",
             "The source-owned frame corpus does not independently cover complete RFC 7540/9113 state, HPACK, flow-control, and error behavior."
           ],
           "retained_invariants": [
@@ -1579,16 +1588,16 @@
             "unwired fuzz copies remain fail-closed rather than silently green"
           ],
           "production_exclusion_status": "conformance and excluded-fuzz edges only; ordinary production profiles remain forbidden",
-          "next_action": "Complete or retire the unwired fuzz copy, freeze independent RFC vectors for every retained family, and prove the conformance binaries no longer require the live h2 reference."
+          "next_action": "Resolve the declared-but-unavailable peer seams and audit remaining h2 harness uses; freeze independent RFC vectors for every retained family before an explicitly reviewed edge retirement. No current live vendor-comparison PASS is claimed."
         },
         {
           "oracle_id": "active-prometheus-client-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1604,11 +1613,11 @@
         {
           "oracle_id": "active-opentelemetry-sdk-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1626,11 +1635,11 @@
         {
           "oracle_id": "active-opentelemetry-proto-reference",
           "disposition": "renewed",
-          "reviewed_release": "0.4.9",
-          "reviewed_date_utc": "2026-08-30",
-          "previous_expiry_release": "0.3.11",
-          "previous_expiry_date_utc": "2026-10-24",
-          "new_expiry_release": "0.4.11",
+          "reviewed_release": "0.4.11",
+          "reviewed_date_utc": "2026-09-08",
+          "previous_expiry_release": "0.4.11",
+          "previous_expiry_date_utc": "2026-10-21",
+          "new_expiry_release": "0.4.12",
           "new_expiry_date_utc": "2026-10-21",
           "approved_by": "bead:asupersync-mnotoo.4",
           "missing_evidence": [
@@ -1650,15 +1659,15 @@
       "no_claim_boundaries": [
         "Renewal preserves differential and conformance coverage; it does not prove either implementation correct.",
         "No manifest edge, lockfile package, public API, fixture, or runtime behavior changed in this sweep.",
-        "The renewed rows fail closed at release 0.4.11 or UTC date 2026-10-21, whichever is reached first."
+        "The renewed rows fail closed at release 0.4.12 or UTC date 2026-10-21, whichever is reached first."
       ]
     },
     "aggregate_signoff": {
       "schema_version": "dependency-oracle-aggregate-signoff-v1",
       "bead_id": "asupersync-mnotoo.4.4",
       "capability_id": "CAP-VERIFICATION-PROFILES",
-      "as_of_release": "0.4.9",
-      "as_of_date_utc": "2026-08-30",
+      "as_of_release": "0.4.11",
+      "as_of_date_utc": "2026-09-08",
       "verdict": "PASS_SCOPED_ORACLE_GOVERNANCE",
       "unknown_state": "block-green",
       "cutover_authorized": false,
@@ -1721,15 +1730,19 @@
           "boundary": "root-default-normal-and-build",
           "target_triple": "x86_64-unknown-linux-gnu",
           "host_triple": "x86_64-unknown-linux-gnu",
-          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_root_default\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "exact_command": "env -u CARGO_BUILD_JOBS RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 RCH_MAX_REMOTE_ATTEMPTS=1 RCH_WORKER=vmi1227854 rch exec --base bf6b361deb3154c56d1450ea679e6d4a3cbf09b9 --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock -- env CARGO_HOME=/data/tmp/rch-cargo-cache-vmi1227854 CARGO_TARGET_DIR=/data/tmp/rch_target_oracle_o4_root_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -j 2 --locked -p asupersync --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
           "resolved_governed_package_ids": [],
           "semantic_oracle_ids": [],
           "support_only_registered_package_ids": [],
           "observed_status": "PASS",
-          "observed_worker": "hz4",
+          "observed_worker": "vmi1227854",
           "observed_exit_code": 0,
           "observed_unit_count": 197,
-          "observed_at_utc": "2026-08-30",
+          "observed_at_utc": "2026-09-08T03:22:41.102861Z",
+          "source_base": "bf6b361deb3154c56d1450ea679e6d4a3cbf09b9",
+          "overlay_fingerprint": "f9b3cb7f40821f92a28d382e5b3d329578df00f6889d0c853a828d82ea846fde",
+          "log_path": "/data/tmp/beigeglen-oracle-0411-root-default-r2.log",
+          "log_sha256": "f1f229691273c8f22520c03a9cfeddcf8117e75ee82589606885a7f41ac362b8",
           "no_claim_boundary": "This excludes the ten active oracle packages from the root default Linux normal/build graph only."
         },
         {
@@ -1737,15 +1750,19 @@
           "boundary": "root-default-release",
           "target_triple": "x86_64-unknown-linux-gnu",
           "host_triple": "x86_64-unknown-linux-gnu",
-          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_root_release\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync --release --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "exact_command": "env -u CARGO_BUILD_JOBS RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 RCH_MAX_REMOTE_ATTEMPTS=1 RCH_WORKER=vmi1227854 rch exec --base bf6b361deb3154c56d1450ea679e6d4a3cbf09b9 --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock -- env CARGO_HOME=/data/tmp/rch-cargo-cache-vmi1227854 CARGO_TARGET_DIR=/data/tmp/rch_target_oracle_o4_root_release CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -j 2 --locked -p asupersync --release --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
           "resolved_governed_package_ids": [],
           "semantic_oracle_ids": [],
           "support_only_registered_package_ids": [],
           "observed_status": "PASS",
-          "observed_worker": "hz4",
+          "observed_worker": "vmi1227854",
           "observed_exit_code": 0,
           "observed_unit_count": 197,
-          "observed_at_utc": "2026-08-30",
+          "observed_at_utc": "2026-09-08T03:23:53.391092Z",
+          "source_base": "bf6b361deb3154c56d1450ea679e6d4a3cbf09b9",
+          "overlay_fingerprint": "f9b3cb7f40821f92a28d382e5b3d329578df00f6889d0c853a828d82ea846fde",
+          "log_path": "/data/tmp/beigeglen-oracle-0411-root-release.log",
+          "log_sha256": "0620c339776c57011f586c9e5e39dc1c40a64383ee43ba36232f37d6035cef21",
           "no_claim_boundary": "Release mode changes code generation but does not broaden the root default feature graph."
         },
         {
@@ -1753,7 +1770,7 @@
           "boundary": "root-focused-test-and-dev-dependencies",
           "target_triple": "x86_64-unknown-linux-gnu",
           "host_triple": "x86_64-unknown-linux-gnu",
-          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_root_focused_dev\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync --test dependency_oracle_policy_contract --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "exact_command": "env -u CARGO_BUILD_JOBS RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 RCH_MAX_REMOTE_ATTEMPTS=1 RCH_WORKER=vmi1227854 rch exec --base bf6b361deb3154c56d1450ea679e6d4a3cbf09b9 --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock -- env CARGO_HOME=/data/tmp/rch-cargo-cache-vmi1227854 CARGO_TARGET_DIR=/data/tmp/rch_target_oracle_o4_root_focused_dev CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -j 2 --locked -p asupersync --test dependency_oracle_policy_contract --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
           "resolved_governed_package_ids": [
             "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.18",
             "registry+https://github.com/rust-lang/crates.io-index#httparse@1.10.1",
@@ -1781,10 +1798,14 @@
             "registry+https://github.com/rust-lang/crates.io-index#prometheus-client@0.25.0"
           ],
           "observed_status": "PASS",
-          "observed_worker": "hz4",
+          "observed_worker": "vmi1227854",
           "observed_exit_code": 0,
           "observed_unit_count": 394,
-          "observed_at_utc": "2026-08-30",
+          "observed_at_utc": "2026-09-08T03:25:31.572688Z",
+          "source_base": "bf6b361deb3154c56d1450ea679e6d4a3cbf09b9",
+          "overlay_fingerprint": "f9b3cb7f40821f92a28d382e5b3d329578df00f6889d0c853a828d82ea846fde",
+          "log_path": "/data/tmp/beigeglen-oracle-0411-root-dev.log",
+          "log_sha256": "b66a549fce46724d9d2f9e090f048f580eaf5a2ba080d305958e8d0055c1615b",
           "no_claim_boundary": "Package resolution does not make every resolved package a semantic oracle in this test; only the registered root manifest edges own oracle evidence."
         },
         {
@@ -1792,7 +1813,7 @@
           "boundary": "conformance-member-focused-binary-normal-dependencies",
           "target_triple": "x86_64-unknown-linux-gnu",
           "host_triple": "x86_64-unknown-linux-gnu",
-          "exact_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_oracle_o4_conformance_focused\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check --locked -p asupersync-conformance --bin h2_continuation_conformance --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
+          "exact_command": "env -u CARGO_BUILD_JOBS RCH_REQUIRE_REMOTE=1 RCH_NO_SELF_HEALING=1 RCH_MAX_REMOTE_ATTEMPTS=1 RCH_WORKER=vmi1227854 rch exec --base bf6b361deb3154c56d1450ea679e6d4a3cbf09b9 --clean-overlay --overlay-path Cargo.toml --overlay-path Cargo.lock -- env CARGO_HOME=/data/tmp/rch-cargo-cache-vmi1227854 CARGO_TARGET_DIR=/data/tmp/rch_target_oracle_o4_conformance_focused CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -j 2 --locked -p asupersync-conformance --bin h2_continuation_conformance --target x86_64-unknown-linux-gnu -Z unstable-options --unit-graph",
           "resolved_governed_package_ids": [
             "registry+https://github.com/rust-lang/crates.io-index#h2@0.4.18",
             "registry+https://github.com/rust-lang/crates.io-index#httparse@1.10.1",
@@ -1814,10 +1835,14 @@
             "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.1"
           ],
           "observed_status": "PASS",
-          "observed_worker": "hz3",
+          "observed_worker": "vmi1227854",
           "observed_exit_code": 0,
           "observed_unit_count": 277,
-          "observed_at_utc": "2026-08-30",
+          "observed_at_utc": "2026-09-08T03:26:25.099987Z",
+          "source_base": "bf6b361deb3154c56d1450ea679e6d4a3cbf09b9",
+          "overlay_fingerprint": "f9b3cb7f40821f92a28d382e5b3d329578df00f6889d0c853a828d82ea846fde",
+          "log_path": "/data/tmp/beigeglen-oracle-0411-conformance.log",
+          "log_sha256": "cf3885c98db019fe73dca1b87dac5209988f44b228cbf52d2e68759132356d4c",
           "no_claim_boundary": "Resolved transitive support packages are not promoted to semantic oracle evidence; only the four registered conformance rows are admitted."
         }
       ],
@@ -1846,7 +1871,7 @@
           "oracle_id": "active-opentelemetry-sdk-reference",
           "lifecycle_state": "active",
           "owner": "bead:asupersync-mnotoo.4.3",
-          "disposition": "renewed-until-0.4.11-or-2026-10-21",
+          "disposition": "renewed-until-0.4.12-or-2026-10-21",
           "evidence_source": "active_oracle_registry independent_corpus plus retirement_sweep decision; explicit XFAIL and unavailable conformance rows remain non-green",
           "corpus_requirement": "Owned propagation fixtures and the conformance registry remain normative; missing resource, aggregation, and exporter evidence blocks retirement.",
           "redaction_requirement": "Baggage, trace context, resource attributes, and exporter records used by the corpus must remain synthetic or redacted.",
@@ -1856,7 +1881,7 @@
           "oracle_id": "active-opentelemetry-proto-reference",
           "lifecycle_state": "active",
           "owner": "bead:asupersync-mnotoo.4.3",
-          "disposition": "renewed-until-0.4.11-or-2026-10-21",
+          "disposition": "renewed-until-0.4.12-or-2026-10-21",
           "evidence_source": "active_oracle_registry independent_corpus plus retirement_sweep decision; generated-message XFAIL and unavailable rows remain non-green",
           "corpus_requirement": "Versioned schemas, generated messages, and owned wire fixtures remain normative; missing finite-schema vectors block retirement.",
           "redaction_requirement": "OTLP attributes, baggage, log bodies, and authorization metadata must remain synthetic or redacted.",
