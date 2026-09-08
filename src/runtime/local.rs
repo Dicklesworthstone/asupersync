@@ -76,10 +76,11 @@ thread_local! {
     static CURRENT_LOCAL_STORE_KEY: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Selects, for the current thread and the guard's lifetime, which store the
-/// local-task functions operate on. Workers install their runtime's key
-/// before admitting, polling, or counting local tasks; nested installs
-/// restore the previous key on drop.
+/// Selects which local-task store this thread operates on.
+///
+/// Workers install their runtime's key for the guard's lifetime before
+/// admitting, polling, or counting local tasks; nested installs restore the
+/// previous key on drop.
 pub struct ScopedLocalStoreKey {
     prev: usize,
 }
@@ -102,7 +103,7 @@ impl Drop for ScopedLocalStoreKey {
 fn with_current_store<R>(f: impl FnOnce(&mut LocalTaskStore) -> R) -> R {
     let key = CURRENT_LOCAL_STORE_KEY.with(Cell::get);
     if key == 0 {
-        return LOCAL_TASKS.with(|tasks| f(&mut *tasks.borrow_mut()));
+        return LOCAL_TASKS.with(|tasks| f(&mut tasks.borrow_mut()));
     }
     KEYED_LOCAL_TASKS.with(|stores| {
         let mut stores = stores.borrow_mut();

@@ -1299,19 +1299,26 @@ fn managed_runtime() -> asupersync::runtime::Runtime {
 }
 
 fn managed_assert_runtime_cleanup(runtime: &asupersync::runtime::Runtime) {
-    runtime.block_on(async {
-        let started = Instant::now();
-        while !runtime.is_quiescent() {
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "managed native task and obligation cleanup must drain: {:?}",
-                runtime
-                    .task_inspector(Default::default())
-                    .list_active_tasks(),
-            );
-            asupersync::runtime::yield_now().await;
-        }
-    });
+    // GH#58: this wait used to run inside `block_on` with `yield_now`. On a
+    // current-thread runtime the root of `block_on` is now itself a live
+    // task, so `is_quiescent()` is false by design for as long as the root
+    // runs and the wait can never succeed from inside it. It therefore runs
+    // on this thread, outside any root. That is sufficient because
+    // `block_on` drains runnable work before it returns, and the runtime's
+    // background worker thread resumes the worker afterwards, so the managed
+    // cleanup keeps progressing while this thread sleeps. Same oracle, same
+    // 5 s bound, same diagnostics.
+    let started = Instant::now();
+    while !runtime.is_quiescent() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "managed native task and obligation cleanup must drain: {:?}",
+            runtime
+                .task_inspector(Default::default())
+                .list_active_tasks(),
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert!(runtime.is_quiescent());
     assert!(
         runtime
