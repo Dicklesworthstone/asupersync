@@ -27,11 +27,12 @@
     "scope_rule": "Every root workspace member, explicitly excluded Rust harness, standalone conformance Cargo project and Cargo.lock is pinned. A pin drift is an unregistered state until this registry is reconciled. Synthetic manifests under tests/fixtures are contract inputs rather than installed oracle edges and are excluded.",
     "unknown_state": "fail-closed",
     "cutover_authorized": false,
+    "packaging_followup_review": "CopperOak reviewed 44def7dfb for asupersync-0mhe1w: only the src/cli/** and src/bin/asupersync.rs package exclusions were removed. Parsed Cargo.toml is identical to the four recorded graph inputs after excluding package.include; dependency, feature, target, profile and workspace fields are unchanged. The source pin below joins the restored package manifest; this is not a rerun of those graph commands.",
     "source_pins": [
       {
         "path": "Cargo.toml",
-        "sha256": "092cae3349fd4c5acf789729ada7dee229a91037c481a5c8b3ae522ed1076034",
-        "line_count": 1123,
+        "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+        "line_count": 1121,
         "scope": "root-package-and-workspace"
       },
       {

@@ -589,6 +589,93 @@ fn api_semantic_projection(api_map: &Value) -> String {
 fn selector_matches(selector: &Value, export: &Value) -> bool {
     string(selector, "kind") == string(export, "kind")
         && string(export, "name").starts_with(string(selector, "name_prefix"))
+        && selector
+            .get("required_feature")
+            .and_then(Value::as_str)
+            .is_none_or(|feature| {
+                strings(export, "feature_flags")
+                    .iter()
+                    .any(|flag| flag == feature)
+            })
+}
+
+fn release_addition_mapping_errors(registry: &Value, api_map: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    let recovery = ["CAP-REAL-SERVICE-E2E", "CAP-VERIFICATION-PROFILES"];
+    let service = [
+        "CAP-CLI-ASUPERSYNC",
+        "CAP-CONFIG-TOML-JSON",
+        "CAP-STRUCTURED-CONCURRENCY",
+        "CAP-TLS-X509",
+        "CAP-AUTH-CREDENTIALS",
+    ];
+    for (feature, support, platform, expected) in [
+        (
+            "cross-subsystem-recovery-e2e",
+            "verification-only",
+            "native",
+            recovery.as_slice(),
+        ),
+        (
+            "distributed-hash-snapshot-recovery-e2e",
+            "verification-only",
+            "native",
+            recovery.as_slice(),
+        ),
+        (
+            "remote-service",
+            "production-opt-in",
+            "unix",
+            service.as_slice(),
+        ),
+    ] {
+        let Some(row) = array(registry, "feature_inventory")
+            .iter()
+            .find(|row| string(row, "feature_id") == feature)
+        else {
+            errors.push(format!("missing reviewed feature {feature}"));
+            continue;
+        };
+        let actual = strings(row, "capability_ids");
+        for capability in expected {
+            if !actual.iter().any(|actual| actual == capability) {
+                errors.push(format!("{feature}: missing reviewed owner {capability}"));
+            }
+        }
+        if string(row, "support_class") != support || strings(row, "platforms") != [platform] {
+            errors.push(format!(
+                "{feature}: reviewed support/platform boundary changed"
+            ));
+        }
+    }
+
+    let snapshot = object(registry, "api_surface_snapshot");
+    for export in array(api_map, "root_exports") {
+        let features = strings(export, "feature_flags");
+        let name = string(export, "name");
+        let expected: &[&str] = if name == "real_cross_subsystem_recovery_e2e_tests" {
+            &recovery
+        } else if name.starts_with("remote::")
+            && features.iter().any(|flag| flag == "remote-service")
+        {
+            &service[1..]
+        } else if name.starts_with("remote::") && features.iter().any(|flag| flag == "tls") {
+            &service[3..]
+        } else {
+            continue;
+        };
+        let mapped = array(snapshot, "selectors")
+            .iter()
+            .filter(|selector| selector_matches(selector, export))
+            .flat_map(|selector| strings(selector, "capability_ids"))
+            .collect::<BTreeSet<_>>();
+        for capability in expected {
+            if !mapped.contains(*capability) {
+                errors.push(format!("{name}: missing reviewed API owner {capability}"));
+            }
+        }
+    }
+    errors
 }
 
 fn mapped_capability_ids(registry: &Value) -> BTreeSet<String> {
@@ -902,7 +989,73 @@ fn cargo_features_are_exhaustive_and_mapped() {
         artifact_features, source_features,
         "Cargo feature inventory drifted; update the capability registry before cutover work"
     );
-    assert_eq!(artifact_features.len(), 57);
+    assert_eq!(artifact_features.len(), 60);
+}
+
+#[test]
+fn release_additions_keep_specific_feature_and_api_owners() {
+    let registry = registry();
+    let errors = release_addition_mapping_errors(&registry, &parse_repo_json(API_MAP_PATH));
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+
+    let inventory = object(&registry, "cli_surface_inventory");
+    let root = array(inventory, "command_roots")
+        .iter()
+        .find(|row| string(row, "surface_id") == "asupersync-root")
+        .expect("asupersync root");
+    assert!(
+        strings(root, "commands")
+            .iter()
+            .any(|command| command == "remote")
+    );
+    let remote = array(inventory, "command_roots")
+        .iter()
+        .find(|row| string(row, "surface_id") == "asupersync-remote")
+        .expect("remote command surface");
+    assert_eq!(strings(remote, "commands"), ["serve", "probe"]);
+    assert_eq!(string(remote, "required_feature"), "remote-service");
+    assert_eq!(strings(remote, "platforms"), ["unix"]);
+    let feature = array(&registry, "feature_inventory")
+        .iter()
+        .find(|row| string(row, "feature_id") == "remote-service")
+        .expect("remote-service feature");
+    assert_eq!(
+        strings(remote, "capability_ids"),
+        strings(feature, "capability_ids")
+    );
+}
+
+#[test]
+fn broad_topology_coverage_cannot_replace_reviewed_capability_owners() {
+    let base = registry();
+    let api_map = parse_repo_json(API_MAP_PATH);
+    let mut wrong_feature = base.clone();
+    let feature = wrong_feature["feature_inventory"]
+        .as_array_mut()
+        .expect("features")
+        .iter_mut()
+        .find(|row| string(row, "feature_id") == "remote-service")
+        .expect("remote-service feature");
+    feature["capability_ids"] = serde_json::json!(["CAP-PUBLIC-API-TOPOLOGY"]);
+    assert!(
+        release_addition_mapping_errors(&wrong_feature, &api_map)
+            .iter()
+            .any(|error| error.contains("remote-service: missing reviewed owner CAP-TLS-X509"))
+    );
+
+    let mut generic_only = base;
+    generic_only["api_surface_snapshot"]["selectors"]
+        .as_array_mut()
+        .expect("selectors")
+        .retain(|selector| selector.get("required_feature").is_none());
+    let errors = release_addition_mapping_errors(&generic_only, &api_map).join("\n");
+    assert!(errors.contains("real_cross_subsystem_recovery_e2e_tests: missing reviewed API owner"));
+    assert!(
+        errors.contains("remote::RemoteComputationClient: missing reviewed API owner CAP-TLS-X509")
+    );
+    assert!(errors.contains(
+        "remote::RemoteComputationServiceBootstrap: missing reviewed API owner CAP-CONFIG-TOML-JSON"
+    ));
 }
 
 fn nonempty_feature_row(row: &Value, known_capabilities: &BTreeSet<String>) {
@@ -1140,6 +1293,18 @@ fn public_api_snapshot_and_selectors_are_exhaustive() {
             assert!(
                 known_capabilities.contains(&capability_id),
                 "API selector references unknown capability {capability_id}"
+            );
+        }
+        if let Some(feature) = selector.get("required_feature") {
+            assert!(
+                cargo_feature_ids()
+                    .contains(feature.as_str().expect("required_feature must be a string"))
+            );
+            assert!(
+                array(&api_map, "root_exports")
+                    .iter()
+                    .any(|export| selector_matches(selector, export)),
+                "feature-specific selector must match a real export"
             );
         }
     }
@@ -1894,10 +2059,25 @@ fn diagnostics_are_stable_and_fully_mapped() {
         string(diagnostics, "code_projection_sha256"),
         "ASUP diagnostic code inventory drifted"
     );
-    // 44 = the 43-code zxqaqs.2 seed plus ASUP-E404 (deterministic
-    // snapshot artifact versioning, br-asupersync-5z2scg.3.3, 065615aa1 —
-    // which landed without updating this pin; red at HEAD 07-26..07-29).
-    assert_eq!(codes.len(), 44);
+    // The 44-code v0.4.3 baseline is retained in inventory_review. Streaming
+    // multipart (04e0ef190) and body lifecycle (2b21489e5) add E504..E510.
+    assert_eq!(codes.len(), 51);
+    let reviewed = diagnostics["reviewed_code_names"]
+        .as_object()
+        .expect("reviewed diagnostic names");
+    assert_eq!(reviewed.len(), 7);
+    for number in 504..=510 {
+        let code = format!("ASUP-E{number}");
+        let source = array(&error_registry, "codes")
+            .iter()
+            .find(|row| string(row, "code") == code)
+            .expect("reviewed diagnostic source");
+        assert_eq!(
+            reviewed.get(&code).and_then(Value::as_str),
+            Some(string(source, "name")),
+            "{code}: reviewed diagnostic meaning changed"
+        );
+    }
     assert_eq!(
         strings(diagnostics, "capability_ids"),
         ["CAP-DIAGNOSTICS".to_owned()]

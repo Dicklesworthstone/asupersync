@@ -5,6 +5,26 @@
   "bead_id": "asupersync-dep-p1-foundations-upksjk.5.1",
   "policy_as_of_release": "0.3.9",
   "policy_as_of_date_utc": "2026-07-24",
+  "inventory_review": {
+    "release": "0.4.11",
+    "reviewed_at_utc": "2026-09-08",
+    "owner_bead_id": "asupersync-release-0411-capability-registry-wdx97b",
+    "reviewer": "BeigeGlen under CopperOak release ownership",
+    "prior_api_snapshot": {
+      "source_revision": "v0.4.3",
+      "root_export_count": 315,
+      "semantic_sha256": "1251e67b8086b44f20f478810385b434e40a9bd892621db024562d1e6cbd3ab6"
+    },
+    "api_delta": "54 additions: 53 remote runtime/service reexports and the test-gated cross-subsystem recovery module. No prior root export was removed or changed in the kind/name/features/cfg projection; the 19 entry points are unchanged.",
+    "prior_diagnostic_snapshot": {
+      "source_revision": "v0.4.3",
+      "expected_code_count": 44,
+      "code_projection_sha256": "25b402d84377e5794ff61ed2429a4f48fdbdc4fb00978de75e0c9760103de1a6"
+    },
+    "diagnostic_delta": "04e0ef190 adds streaming multipart ASUP-E504; 2b21489e5 adds body lifecycle ASUP-E505 through ASUP-E510 and extends ASUP-E501 source references without changing its meaning. Every prior code and name remains present.",
+    "graph_delta": "The prior 424/357 issue/non-epic projection omitted asupersync-5z2scg.8.3.7.5, created 2026-08-23. Its existing regex prefix mapping applies; no mapping rule, terminal owner, capability disposition or historical signoff identity changes.",
+    "no_claim_boundary": "This is a reviewed current inventory projection, not renewed historical approval, behavioral parity, a dependency cutover, installed CLI proof, broad workspace health or release readiness. Downstream historical source pins require their own review."
+  },
   "policy": {
     "purpose": "Define the fail-closed, no-feature-loss capability boundary for the dependency-sovereignty program before any implementation or cutover.",
     "preservation_rule": "Every accepted public API, generic extension point, feature/profile, binary, format, protocol, platform behavior, diagnostic, downstream integration, and documented user journey remains available unless a separate owner decision explicitly changes product scope.",
@@ -3513,6 +3533,30 @@
       ]
     },
     {
+      "feature_id": "cross-subsystem-recovery-e2e",
+      "capability_ids": [
+        "CAP-REAL-SERVICE-E2E",
+        "CAP-VERIFICATION-PROFILES"
+      ],
+      "support_class": "verification-only",
+      "platforms": [
+        "native"
+      ],
+      "semantics": "Test-only maintained native recovery composition; enables obligation-cleanup-e2e and proc-macros. Receipt ownership follows src/real_cross_subsystem_recovery_e2e_tests.rs; it does not expose a production recovery service."
+    },
+    {
+      "feature_id": "distributed-hash-snapshot-recovery-e2e",
+      "capability_ids": [
+        "CAP-REAL-SERVICE-E2E",
+        "CAP-VERIFICATION-PROFILES"
+      ],
+      "support_class": "verification-only",
+      "platforms": [
+        "native"
+      ],
+      "semantics": "Opt-in test-internals profile for tests/distributed_hash_snapshot_recovery_e2e.rs: real filesystem, HashRing, authenticated RegionSnapshot bytes and joined host threads. This is not remote-peer behavior evidence."
+    },
+    {
       "feature_id": "debug-server",
       "capability_ids": [
         "CAP-DIAGNOSTICS",
@@ -3781,6 +3825,21 @@
       "platforms": [
         "native"
       ]
+    },
+    {
+      "feature_id": "remote-service",
+      "capability_ids": [
+        "CAP-CLI-ASUPERSYNC",
+        "CAP-CONFIG-TOML-JSON",
+        "CAP-STRUCTURED-CONCURRENCY",
+        "CAP-TLS-X509",
+        "CAP-AUTH-CREDENTIALS"
+      ],
+      "support_class": "production-opt-in",
+      "platforms": [
+        "unix"
+      ],
+      "semantics": "cli plus tls, with Unix-gated remote serve/probe and service bootstrap exports. Requires explicit versioned TOML, mutual TLS identities and admission, bounded runtime shutdown and fail-closed ambiguous-delivery handling; enabling the feature is not service behavior proof."
     },
     {
       "feature_id": "runtime-metrics",
@@ -4163,16 +4222,28 @@
     "snapshot_files": [
       {
         "source_path": "src/bin/asupersync.rs",
-        "line_count": 16791,
-        "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
+        "line_count": 17878,
+        "sha256": "db9679da2c0ba6050f209264fb353da75892b0046429dffe0ba7edce5d74517a",
+        "reviewed_prior_snapshot": {
+          "source_revision": "v0.4.3",
+          "line_count": 16791,
+          "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
+          "delta": "Unix remote-service-gated serve/probe commands, explicit TOML credentials/admission/timeouts, signal-driven drain/force-close and terminal reporting. Existing command variants and shared exit constants remain; 3fe80669a, 2296e369a, e33292210 and 6f0312f26 provide causal implementation history."
+        },
         "capability_ids": [
           "CAP-CLI-ASUPERSYNC"
         ]
       },
       {
         "source_path": "src/bin/atp.rs",
-        "line_count": 12723,
-        "sha256": "fa68f1bfb4f6e59fd3d4a0c781a5e5b7b2cce13ad2d39ee2ec084f068a837c9f",
+        "line_count": 13563,
+        "sha256": "38c928471ded51ce016414a04b18bf476a2f3bbf9590b11a60409e4191fd0a20",
+        "reviewed_prior_snapshot": {
+          "source_revision": "73e00b348c2172ccc528f57546bc9e9d01d0e43e",
+          "line_count": 12723,
+          "sha256": "fa68f1bfb4f6e59fd3d4a0c781a5e5b7b2cce13ad2d39ee2ec084f068a837c9f",
+          "delta": "Explicit RQ/QUIC xattr, special-file and sparse opt-ins with transport/platform refusal; source-integrity dry-run fields; explicit bonded UDP advertisement and control-path affinity; additive QUIC limiter JSON/stderr metrics. Existing root commands and environment/exit inventories remain. Topology tests now assert authenticated metadata preservation, including actual FIFO/sparse reconstruction, rather than old unsupported-topology refusal. Source review is not fresh execution of those tests."
+        },
         "capability_ids": [
           "CAP-CLI-ATP"
         ]
@@ -4231,10 +4302,29 @@
           "trace",
           "conformance",
           "lab",
-          "doctor"
+          "doctor",
+          "remote"
         ],
         "capability_ids": [
           "CAP-CLI-ASUPERSYNC"
+        ]
+      },
+      {
+        "surface_id": "asupersync-remote",
+        "commands": [
+          "serve",
+          "probe"
+        ],
+        "required_feature": "remote-service",
+        "platforms": [
+          "unix"
+        ],
+        "capability_ids": [
+          "CAP-CLI-ASUPERSYNC",
+          "CAP-CONFIG-TOML-JSON",
+          "CAP-STRUCTURED-CONCURRENCY",
+          "CAP-TLS-X509",
+          "CAP-AUTH-CREDENTIALS"
         ]
       },
       {
@@ -4489,11 +4579,11 @@
   },
   "api_surface_snapshot": {
     "source_path": "artifacts/api_surface_map_v1.json",
-    "root_export_count": 315,
+    "root_export_count": 369,
     "entry_point_count": 19,
-    "semantic_sha256": "1251e67b8086b44f20f478810385b434e40a9bd892621db024562d1e6cbd3ab6",
+    "semantic_sha256": "72db91c3814b59d1fe20db2732d224b58c41bf81cf56fc88694fa89513064da9",
     "semantic_projection": "kind TAB name TAB comma-joined-feature-flags TAB cfg NEWLINE in artifact order",
-    "selector_policy": "every root export must match at least one selector",
+    "selector_policy": "every root export must match at least one selector; required_feature selectors also require that explicit API-map feature flag, and recovery/TLS/service additions must retain their specific capability owners",
     "selectors": [
       {
         "selector_id": "all-root-modules",
@@ -4501,6 +4591,38 @@
         "name_prefix": "",
         "capability_ids": [
           "CAP-PUBLIC-API-TOPOLOGY"
+        ]
+      },
+      {
+        "selector_id": "cross-subsystem-recovery-module",
+        "kind": "module",
+        "name_prefix": "real_cross_subsystem_recovery_e2e_tests",
+        "required_feature": "cross-subsystem-recovery-e2e",
+        "capability_ids": [
+          "CAP-REAL-SERVICE-E2E",
+          "CAP-VERIFICATION-PROFILES"
+        ]
+      },
+      {
+        "selector_id": "remote-tls-reexports",
+        "kind": "reexport",
+        "name_prefix": "remote::",
+        "required_feature": "tls",
+        "capability_ids": [
+          "CAP-TLS-X509",
+          "CAP-AUTH-CREDENTIALS"
+        ]
+      },
+      {
+        "selector_id": "remote-service-reexports",
+        "kind": "reexport",
+        "name_prefix": "remote::",
+        "required_feature": "remote-service",
+        "capability_ids": [
+          "CAP-CONFIG-TOML-JSON",
+          "CAP-STRUCTURED-CONCURRENCY",
+          "CAP-TLS-X509",
+          "CAP-AUTH-CREDENTIALS"
         ]
       },
       {
@@ -4804,8 +4926,17 @@
   ],
   "diagnostic_inventory": {
     "source_path": "docs/error_codes/registry.json",
-    "expected_code_count": 44,
-    "code_projection_sha256": "25b402d84377e5794ff61ed2429a4f48fdbdc4fb00978de75e0c9760103de1a6",
+    "expected_code_count": 51,
+    "code_projection_sha256": "a75c6e60f82e81f3875466657bfbd4d8b4128b7b5625294a4b327c1e40122127",
+    "reviewed_code_names": {
+      "ASUP-E504": "streaming-multipart-rejected",
+      "ASUP-E505": "web-total-body-limit-exceeded",
+      "ASUP-E506": "multipart-field-limit-exceeded",
+      "ASUP-E507": "multipart-malformed",
+      "ASUP-E508": "web-body-timeout",
+      "ASUP-E509": "web-client-abort",
+      "ASUP-E510": "web-response-producer-failed"
+    },
     "capability_ids": [
       "CAP-DIAGNOSTICS"
     ],
@@ -6502,8 +6633,8 @@
     "status": "PASS_SCOPED",
     "scope": "All canonical dep-plan issues after excluding explicit superseded duplicates, effective exact-or-longest-prefix capability mappings, terminal evidence owners, cutover-policy gates, and explicit feature-loss authorization phrases.",
     "mapping_resolution": "An exact rule overrides every prefix rule. Otherwise the unique longest matching prefix is authoritative. Missing or equal-precedence competing rules fail closed.",
-    "dep_plan_issue_count": 424,
-    "non_epic_work_count": 357,
+    "dep_plan_issue_count": 425,
+    "non_epic_work_count": 358,
     "capability_count": 50,
     "mapping_rule_count": 109,
     "cutover_target_count": 41,
