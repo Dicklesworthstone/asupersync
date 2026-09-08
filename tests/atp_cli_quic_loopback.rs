@@ -61,10 +61,9 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 -----END CERTIFICATE-----\n";
 
 // P-256 self-signed certificate with IP SAN 127.0.0.1, serverAuth EKU, and
-// CA:TRUE. This mirrors the benchmark CLI path where the same PEM is passed as
-// both --server-cert and --ca; WebPKI rejects it as an end-entity, so the CLI
-// must treat the explicit --ca as a direct leaf pin rather than falling back to
-// an insecure verifier.
+// CA:TRUE. Even an exact pin must not override WebPKI's end-entity role
+// rejection. Keep this certificate as the negative sibling of the CA:FALSE
+// self-signed server certificate below; both use the same test-only key.
 const SELF_SIGNED_CA_TRUE_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIBwzCCAWigAwIBAgIUUipbHRMHoXz+egbfzEh5Q4NuOZ4wCgYIKoZIzj0EAwIw\n\
 FDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MDYyMTE4Mjg1MloYDzIxMjYwNTI4\n\
@@ -83,6 +82,21 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4i+BN3DhwfMiy4pT\n\
 834gbW6xj5Lewo5bjmdOQTuGm8qhRANCAAQSPQ5U0Ubuk7y1Ov22oGgWg1jRDQFd\n\
 LaXeVDisROTsFq6TRJPQBUbCiF/mpdfpOoU7rznm+EKLwi7QvhHJ8hHZ\n\
 -----END PRIVATE KEY-----\n";
+
+// Self-signed P-256 server leaf, valid 2026-09-08 through 2126-08-15, with
+// CA:FALSE, digitalSignature, serverAuth, and localhost/127.0.0.1 SANs.
+const SELF_SIGNED_LEAF_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBvjCCAWWgAwIBAgIUBllJbwDA61qqW05hBeUS9jkh9pkwCgYIKoZIzj0EAwIw\n\
+FDESMBAGA1UEAwwJMTI3LjAuMC4xMCAXDTI2MDkwODAwMDQxNFoYDzIxMjYwODE1\n\
+MDAwNDE0WjAUMRIwEAYDVQQDDAkxMjcuMC4wLjEwWTATBgcqhkjOPQIBBggqhkjO\n\
+PQMBBwNCAAQSPQ5U0Ubuk7y1Ov22oGgWg1jRDQFdLaXeVDisROTsFq6TRJPQBUbC\n\
+iF/mpdfpOoU7rznm+EKLwi7QvhHJ8hHZo4GSMIGPMB0GA1UdDgQWBBQMm+XYIbOs\n\
+3uarxHpVbY+tEJPDqjAfBgNVHSMEGDAWgBQMm+XYIbOs3uarxHpVbY+tEJPDqjAa\n\
+BgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwDAYDVR0TAQH/BAIwADAOBgNVHQ8B\n\
+Af8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCgYIKoZIzj0EAwIDRwAwRAIg\n\
+FHbkrmR3bCunFqLDPier7bG1urwYVd0VH1q5/d2pm6QCIBhI1o89O5N2NX1C4VcV\n\
+UQ/gnh4OFIMruDITkKwCvJvs\n\
+-----END CERTIFICATE-----\n";
 
 fn unique_tmp(label: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -1518,10 +1532,19 @@ fn atp_send_recv_quic_loopback_moves_file_bytes() {
 
 #[test]
 fn atp_send_recv_quic_loopback_accepts_explicit_self_signed_leaf_pin() {
+    check_self_signed_leaf_pin(SELF_SIGNED_LEAF_CERT_PEM, true);
+}
+
+#[test]
+fn atp_send_recv_quic_loopback_rejects_explicit_self_signed_ca_as_leaf_pin() {
+    check_self_signed_leaf_pin(SELF_SIGNED_CA_TRUE_CERT_PEM, false);
+}
+
+fn check_self_signed_leaf_pin(cert_pem: &str, expected_success: bool) {
     let root = unique_tmp("self-signed-leaf-pin");
     let cert = root.join("tls/self-signed.pem");
     let key = root.join("tls/self-signed.key");
-    write_file(&cert, SELF_SIGNED_CA_TRUE_CERT_PEM.as_bytes());
+    write_file(&cert, cert_pem.as_bytes());
     write_file(&key, SELF_SIGNED_CA_TRUE_KEY_PEM.as_bytes());
 
     let source_dir = root.join("source");
@@ -1533,7 +1556,7 @@ fn atp_send_recv_quic_loopback_accepts_explicit_self_signed_leaf_pin() {
     write_file(&payload_path, &payload);
     std::fs::create_dir_all(&dest_dir).expect("create dest dir");
 
-    let mut receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
         .args([
             "recv",
             dest_dir.to_str().unwrap(),
@@ -1554,7 +1577,8 @@ fn atp_send_recv_quic_loopback_accepts_explicit_self_signed_leaf_pin() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn atp quic receiver");
-    let receiver_stderr = spawn_stderr_reader(&mut receiver);
+    let mut receiver = ChildKillGuard::new(receiver);
+    let receiver_stderr = spawn_stderr_reader(receiver.child_mut());
     let listen_addr = wait_for_quic_listen_addr(&receiver_stderr);
 
     let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
@@ -1572,19 +1596,31 @@ fn atp_send_recv_quic_loopback_accepts_explicit_self_signed_leaf_pin() {
             "--server-name",
             "127.0.0.1",
         ])
-        .output()
-        .expect("run atp quic sender");
-    if !sender.status.success() {
-        let _ = receiver.kill();
-        let _ = receiver.wait();
-        panic!(
-            "atp quic sender failed; stdout: {}; stderr: {}",
-            String::from_utf8_lossy(&sender.stdout),
-            String::from_utf8_lossy(&sender.stderr)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn atp quic sender");
+    let sender = wait_with_timeout(sender, "self-signed leaf pin sender");
+    if !expected_success {
+        receiver.kill_and_wait();
+        assert!(!sender.status.success(), "CA certificate accepted as a leaf");
+        let diagnostics = String::from_utf8_lossy(&sender.stderr);
+        assert!(
+            diagnostics.contains("read_hs_fatal_alert"),
+            "expected TLS certificate refusal: {diagnostics}"
         );
+        assert!(!dest_dir.join("payload.bin").exists());
+        assert!(staging_dirs(&dest_dir).is_empty());
+        return;
     }
+    assert!(
+        sender.status.success(),
+        "atp quic sender failed; stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&sender.stdout),
+        String::from_utf8_lossy(&sender.stderr)
+    );
 
-    let receiver = wait_with_timeout(receiver, "atp quic receiver");
+    let receiver = wait_with_timeout(receiver.into_inner(), "atp quic receiver");
     assert!(
         receiver.status.success(),
         "atp quic receiver failed; stdout: {}; stderr: {}",
