@@ -7,8 +7,8 @@
 use crate::runtime::reactor::Reactor;
 use crate::types::Time;
 use parking_lot::Mutex;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::task::Waker;
 use std::time::Duration;
 
@@ -508,15 +508,16 @@ impl<T: TimeSource> TimerDriver<T> {
     /// Publish an earlier wake point without scanning all pending timers on
     /// every insertion. The next poller's full query refreshes this floor.
     fn advance_reactor_deadline(&self, wheel: &mut TimerWheel, deadline: Time) -> bool {
-        let effective = if wheel.coalescing_config().enabled {
-            // Adding a timer can make a coalescing group ready before its raw
-            // deadline. This optional policy needs the wheel's exact answer.
-            wheel.next_deadline().unwrap_or(deadline)
-        } else {
-            deadline.min(wheel.current_time().saturating_add_nanos(
-                duration_to_nanos_saturating(wheel.config().max_timer_duration),
-            ))
-        };
+        let effective =
+            if wheel.coalescing_config().enabled {
+                // Adding a timer can make a coalescing group ready before its raw
+                // deadline. This optional policy needs the wheel's exact answer.
+                wheel.next_deadline().unwrap_or(deadline)
+            } else {
+                deadline.min(wheel.current_time().saturating_add_nanos(
+                    duration_to_nanos_saturating(wheel.config().max_timer_duration),
+                ))
+            };
         let previous = self.observed_deadline.load(Ordering::Relaxed);
         if effective.as_nanos() < previous {
             self.observed_deadline
@@ -530,7 +531,10 @@ impl<T: TimeSource> TimerDriver<T> {
     fn register_deadline_reactor(&self, reactor: Weak<dyn Reactor>) {
         let mut reactors = self.deadline_reactors.lock();
         reactors.retain(|registered| registered.strong_count() != 0);
-        if !reactors.iter().any(|registered| registered.ptr_eq(&reactor)) {
+        if !reactors
+            .iter()
+            .any(|registered| registered.ptr_eq(&reactor))
+        {
             reactors.push(reactor);
         }
     }
@@ -979,7 +983,10 @@ mod tests {
         driver.register_deadline_reactor(weak.clone());
         assert_eq!(driver.deadline_reactors.lock().len(), 1);
         drop(reactor);
-        assert!(weak.upgrade().is_none(), "timer must not retain the reactor");
+        assert!(
+            weak.upgrade().is_none(),
+            "timer must not retain the reactor"
+        );
         driver.register(Time::from_secs(1), futures_waker());
         assert!(driver.deadline_reactors.lock().is_empty());
     }

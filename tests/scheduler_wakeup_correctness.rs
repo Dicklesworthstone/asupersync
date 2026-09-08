@@ -742,7 +742,12 @@ fn earlier_timer_publication_interrupts_selected_native_reactor_timeout() {
             self.inner.capability_snapshot()
         }
 
-        fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
+        fn register(
+            &self,
+            source: &dyn Source,
+            token: Token,
+            interest: Interest,
+        ) -> io::Result<()> {
             self.inner.register(source, token, interest)
         }
 
@@ -934,7 +939,10 @@ fn earlier_timer_publication_interrupts_selected_native_reactor_timeout() {
         1,
         "future drops exactly once"
     );
-    assert!(ready.load(Ordering::Acquire), "the timer delivered readiness");
+    assert!(
+        ready.load(Ordering::Acquire),
+        "the timer delivered readiness"
+    );
     assert_eq!(
         Pin::new(&mut task).poll(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(42),

@@ -437,12 +437,6 @@ impl IoDriver {
         self.reactor.wake()
     }
 
-    /// Timer publication must interrupt an already-selected reactor timeout
-    /// without retaining the reactor's task registrations through the timer.
-    pub(crate) fn downgrade_reactor(&self) -> Weak<dyn Reactor> {
-        Arc::downgrade(&self.reactor)
-    }
-
     /// Returns current statistics.
     #[inline]
     #[must_use]
@@ -614,6 +608,12 @@ impl IoDriverHandle {
     pub fn stats(&self) -> IoStats {
         let driver = self.inner.lock();
         driver.stats().clone()
+    }
+
+    /// Timer publication must interrupt an already-selected reactor timeout
+    /// without retaining the reactor's task registrations through the timer.
+    pub(crate) fn downgrade_reactor(&self) -> Weak<dyn Reactor> {
+        Arc::downgrade(&self.reactor)
     }
 
     /// Returns the immutable reactor backend and capability snapshot.
