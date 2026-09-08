@@ -1,7 +1,5 @@
 //! Level 3: use two-phase effects and make the lab catch an obligation leak.
 
-use asupersync::record::ObligationKind;
-use asupersync::record::region::RegionState;
 use asupersync::{LabConfig, LabRuntime, main, prelude::*};
 
 #[main]
@@ -11,27 +9,23 @@ async fn main(cx: &Cx) {
     permit.send(7);
     assert_eq!(rx.recv(cx).await.expect("receive committed value"), 7);
 
+    // The same reservation inside a deterministic lab task, except that this
+    // permit escapes without `send` or `abort`. Stock permits are runtime
+    // obligations, so the lab's obligation-leak oracle catches it by kind
+    // without any hand-built obligation record.
     let mut lab = LabRuntime::new(LabConfig::new(7).panic_on_leak(false));
     let region = lab.state.create_root_region(Budget::INFINITE);
     let (task, _handle) = lab
         .state
-        .create_task(region, Budget::INFINITE, async {})
+        .create_task(region, Budget::INFINITE, async {
+            let cx = Cx::current().expect("lab task installs a current Cx");
+            let (tx, _rx) = mpsc::channel::<u8>(1);
+            let permit = tx.reserve(&cx).await.expect("reserve channel capacity");
+            std::mem::forget(permit); // deliberate on-ramp leak
+        })
         .expect("create lab task");
-    lab.state
-        .create_obligation(
-            ObligationKind::SendPermit,
-            task,
-            region,
-            Some("deliberate on-ramp leak".to_string()),
-        )
-        .expect("create lab obligation");
-    lab.state
-        .update_task(task, |record| record.complete(Outcome::Ok(())))
-        .expect("complete holder without resolving its obligation");
-    lab.state
-        .region(region)
-        .expect("lab region exists")
-        .set_state(RegionState::Closed);
+    lab.scheduler.lock().schedule(task, 0);
+    lab.run_until_quiescent();
 
     let report = lab.report();
     let leak = report
@@ -39,4 +33,9 @@ async fn main(cx: &Cx) {
         .entry("obligation_leak")
         .expect("obligation leak oracle is registered");
     assert!(!leak.passed, "the lab must catch the deliberate leak");
+    let violation = leak.violation.as_deref().unwrap_or_default();
+    assert!(
+        violation.contains("SendPermit"),
+        "the oracle names the leaked permit kind: {violation}"
+    );
 }

@@ -55,7 +55,21 @@ impl fmt::Display for ObligationLeakViolation {
             self.region,
             self.leaked.len(),
             self.region_close_time
-        )
+        )?;
+        // Name every leaked record (kind and holder) so the report row is
+        // actionable on its own, mirroring the runtime's
+        // `InvariantViolation::ObligationLeak` rendering.
+        if !self.leaked.is_empty() {
+            write!(f, " leaks=[")?;
+            for (index, leak) in self.leaked.iter().enumerate() {
+                if index > 0 {
+                    write!(f, "; ")?;
+                }
+                write!(f, "{leak}")?;
+            }
+            write!(f, "]")?;
+        }
+        Ok(())
     }
 }
 
@@ -530,6 +544,9 @@ mod tests {
         };
         let display = violation.to_string();
         assert!(display.contains("leaked=1"));
+        // The row names every leaked record by kind and holder.
+        assert!(display.contains("Lease"), "{display}");
+        assert!(display.contains(&format!("holder={task:?}")), "{display}");
 
         let dbg = format!("{violation:?}");
         assert!(dbg.contains("ObligationLeakViolation"));

@@ -79,10 +79,11 @@ The channel send in
 `reserve` waits cancel-safely, and `send` commits the reserved slot. Dropping an
 uncommitted permit aborts it cleanly.
 
-The same program then constructs a deterministic lab state whose completed task
-still holds one deliberately unresolved `SendPermit` obligation. Panic-on-leak
+The same program then runs a deterministic lab task that reserves a real
+`mpsc` permit and lets it escape without `send` or `abort`. Stock permits are
+runtime obligations, so no hand-built obligation record is needed: panic-on-leak
 is disabled so the example can inspect the report, and the `obligation_leak`
-oracle must report failure:
+oracle must report the leaked `SendPermit`:
 
 ```bash
 cargo run --example onramp_level3
