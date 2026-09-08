@@ -780,51 +780,12 @@ impl Future for ServerRequestDeadline {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
         self.clear();
-        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
-        #[cfg(feature = "test-internals")]
-        eprintln!(
-            "h2-drain-probe deadline-poll task={:?} now={} deadline={} pending={}",
-            Cx::current().map(|current| current.task_id()),
-            self.timer.now().as_nanos(),
-            self.deadline.as_nanos(),
-            self.timer.pending_count(),
-        );
         if self.timer.now() >= self.deadline {
             return std::task::Poll::Ready(());
         }
         // Refresh the actual waiter, including after an early wheel-horizon
         // wake. Rearming never advances the admitted absolute deadline.
-        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
-        #[cfg(feature = "test-internals")]
-        let waker = {
-            struct DeadlineProbeWaker {
-                inner: Waker,
-                task: Option<crate::types::TaskId>,
-                deadline: Time,
-            }
-            impl std::task::Wake for DeadlineProbeWaker {
-                fn wake(self: std::sync::Arc<Self>) {
-                    Self::wake_by_ref(&self);
-                }
-
-                fn wake_by_ref(self: &std::sync::Arc<Self>) {
-                    eprintln!(
-                        "h2-drain-probe deadline-wake task={:?} deadline={}",
-                        self.task,
-                        self.deadline.as_nanos(),
-                    );
-                    self.inner.wake_by_ref();
-                }
-            }
-            Waker::from(std::sync::Arc::new(DeadlineProbeWaker {
-                inner: cx.waker().clone(),
-                task: Cx::current().map(|current| current.task_id()),
-                deadline: self.deadline,
-            }))
-        };
-        #[cfg(not(feature = "test-internals"))]
-        let waker = cx.waker().clone();
-        self.registration = Some(self.timer.register(self.deadline, waker));
+        self.registration = Some(self.timer.register(self.deadline, cx.waker().clone()));
         std::task::Poll::Pending
     }
 }
@@ -1182,30 +1143,12 @@ impl ServerRequestRegion {
             }
             if let Some(conn) = connection_cancel_waker.as_mut() {
                 if conn.is_cancel_requested() {
-                    // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
-                    #[cfg(feature = "test-internals")]
-                    eprintln!(
-                        "h2-drain-probe phase-a-cancel task={:?} conn={:?} shared={} protocol={}",
-                        self.cx.task_id(),
-                        conn.cx.task_id(),
-                        std::sync::Arc::ptr_eq(&self.cx.inner, &conn.cx.inner),
-                        self.protocol,
-                    );
                     return std::task::Poll::Ready(PhaseA::ConnCancelled);
                 }
                 conn.refresh(task_cx.waker());
                 // Re-check after registration to close the cancel/register
                 // race window.
                 if conn.is_cancel_requested() {
-                    // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
-                    #[cfg(feature = "test-internals")]
-                    eprintln!(
-                        "h2-drain-probe phase-a-cancel-after-register task={:?} conn={:?} shared={} protocol={}",
-                        self.cx.task_id(),
-                        conn.cx.task_id(),
-                        std::sync::Arc::ptr_eq(&self.cx.inner, &conn.cx.inner),
-                        self.protocol,
-                    );
                     return std::task::Poll::Ready(PhaseA::ConnCancelled);
                 }
             }
@@ -1281,15 +1224,6 @@ impl ServerRequestRegion {
     where
         F: Future + Unpin,
     {
-        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
-        #[cfg(feature = "test-internals")]
-        eprintln!(
-            "h2-drain-probe drain-enter task={:?} owned_timer={} grace_ns={} protocol={}",
-            self.cx.task_id(),
-            self.owned_drain_timer.is_some(),
-            grace.as_nanos(),
-            self.protocol,
-        );
         let Some(timer) = &self.owned_drain_timer else {
             return drain_until(&self.cx, grace, fut).await;
         };
@@ -1297,15 +1231,6 @@ impl ServerRequestRegion {
             return None;
         }
         let deadline = timer.now() + grace;
-        // TEMPORARY asupersync-x1y9gu diagnostic; remove before landing.
-        #[cfg(feature = "test-internals")]
-        eprintln!(
-            "h2-drain-probe drain-deadline task={:?} now={} deadline={} pending={}",
-            self.cx.task_id(),
-            timer.now().as_nanos(),
-            deadline.as_nanos(),
-            timer.pending_count(),
-        );
         let mut wait = ServerRequestDeadline::new(timer.clone(), deadline);
         std::future::poll_fn(|cx| {
             if timer.now() > deadline {
