@@ -18,7 +18,7 @@ use std::task::{Context as TaskContext, Poll, Waker};
 
 use super::streams::{
     FlowControlError, QuicStreamError, QuicStreamIo, StreamDirection, StreamId, StreamReadiness,
-    StreamRole, StreamTable, StreamTableError,
+    StreamRole, StreamTable, StreamTableError, StreamWindows,
 };
 use super::tls::{CryptoLevel, KeyUpdateEvent, QuicTlsError, QuicTlsMachine};
 #[cfg(feature = "tls")]
@@ -589,6 +589,15 @@ impl NativeQuicConnection {
     #[must_use]
     pub fn streams(&self) -> &StreamTable {
         &self.streams
+    }
+
+    /// Install the per-type initial stream windows negotiated in the transport
+    /// parameters (RFC 9000 §18.2) before any stream opens.
+    ///
+    /// `send` holds the peer-advertised windows and `recv` the locally
+    /// advertised ones; see [`StreamWindows`] for the stream-type mapping.
+    pub fn set_initial_stream_windows(&mut self, send: StreamWindows, recv: StreamWindows) {
+        self.streams.set_initial_stream_windows(send, recv);
     }
 
     /// Start handshake.

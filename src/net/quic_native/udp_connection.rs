@@ -30,7 +30,7 @@ use super::handshake_driver::{
     QuicHandshakeDriver, client_handshake_over_udp, server_handshake_over_udp_with_early_data,
 };
 use super::managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
-use super::streams::StreamRole;
+use super::streams::{StreamRole, StreamWindows};
 use super::transport::PacketNumberSpace;
 
 const RECEIVE_BATCH_SIZE: usize = 32;
@@ -527,17 +527,20 @@ impl NativeQuicUdpConnection {
                     "peer decode failed: {error}"
                 ))
             })?;
-        let connection_config =
+        let bound =
             bind_transport_parameters(connection_config, &local_parameters, &peer_parameters);
 
         let mut connection = match role {
-            StreamRole::Client => QuicConnection::client(connection_config),
-            StreamRole::Server => QuicConnection::server(connection_config),
+            StreamRole::Client => QuicConnection::client(bound.config),
+            StreamRole::Server => QuicConnection::server(bound.config),
         };
         connection.inner_mut().set_remote_stream_limits(
             local_parameters.initial_max_streams_bidi.unwrap_or(0),
             local_parameters.initial_max_streams_uni.unwrap_or(0),
         );
+        connection
+            .inner_mut()
+            .set_initial_stream_windows(bound.send_windows, bound.recv_windows);
         connection.begin_handshake(cx)?;
         connection.mark_handshake_keys_available(cx)?;
         connection.mark_app_keys_available(cx)?;
@@ -859,11 +862,37 @@ impl NativeQuicUdpConnection {
     }
 }
 
+/// Connection configuration after the authenticated transport parameters of
+/// both endpoints have been applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoundTransportParameters {
+    /// Stream counts, connection-level limits and the DATAGRAM cap, each the
+    /// smaller of the configured value and the negotiated one. `send_window`
+    /// and `recv_window` stay the configured per-stream caps.
+    config: NativeQuicConnectionConfig,
+    /// Per-type initial send windows: the peer's `initial_max_stream_data_*`
+    /// values capped by `config.send_window` (RFC 9000 §18.2).
+    send_windows: StreamWindows,
+    /// Per-type initial receive windows: this endpoint's
+    /// `initial_max_stream_data_*` values capped by `config.recv_window`.
+    recv_windows: StreamWindows,
+}
+
+/// Bind both endpoints' transport parameters onto the connection configuration.
+///
+/// Stream windows are kept per stream type. A locally opened bidirectional
+/// stream sends against the peer's `initial_max_stream_data_bidi_remote` and
+/// receives against the local `initial_max_stream_data_bidi_local`; a
+/// peer-opened bidirectional stream uses the mirrored pair; unidirectional
+/// streams use `initial_max_stream_data_uni` on their data-carrying side. A
+/// parameter an endpoint omits is zero for that type only, so a peer that does
+/// not advertise a unidirectional window still gets its full bidirectional
+/// windows.
 fn bind_transport_parameters(
     mut config: NativeQuicConnectionConfig,
     local: &TransportParameters,
     peer: &TransportParameters,
-) -> NativeQuicConnectionConfig {
+) -> BoundTransportParameters {
     config.max_local_bidi = config
         .max_local_bidi
         .min(peer.initial_max_streams_bidi.unwrap_or(0));
@@ -877,30 +906,28 @@ fn bind_transport_parameters(
         .connection_recv_limit
         .min(local.initial_max_data.unwrap_or(0));
 
-    let peer_stream_send_limit = [
-        peer.initial_max_stream_data_bidi_local.unwrap_or(0),
-        peer.initial_max_stream_data_bidi_remote.unwrap_or(0),
-        peer.initial_max_stream_data_uni.unwrap_or(0),
-    ]
-    .into_iter()
-    .min()
-    .unwrap_or(0);
-    config.send_window = config.send_window.min(peer_stream_send_limit);
-    let local_stream_recv_limit = [
-        local.initial_max_stream_data_bidi_local.unwrap_or(0),
-        local.initial_max_stream_data_bidi_remote.unwrap_or(0),
-        local.initial_max_stream_data_uni.unwrap_or(0),
-    ]
-    .into_iter()
-    .min()
-    .unwrap_or(0);
-    config.recv_window = config.recv_window.min(local_stream_recv_limit);
+    let send_cap = config.send_window;
+    let send_windows = StreamWindows {
+        local_bidi: send_cap.min(peer.initial_max_stream_data_bidi_remote.unwrap_or(0)),
+        remote_bidi: send_cap.min(peer.initial_max_stream_data_bidi_local.unwrap_or(0)),
+        uni: send_cap.min(peer.initial_max_stream_data_uni.unwrap_or(0)),
+    };
+    let recv_cap = config.recv_window;
+    let recv_windows = StreamWindows {
+        local_bidi: recv_cap.min(local.initial_max_stream_data_bidi_local.unwrap_or(0)),
+        remote_bidi: recv_cap.min(local.initial_max_stream_data_bidi_remote.unwrap_or(0)),
+        uni: recv_cap.min(local.initial_max_stream_data_uni.unwrap_or(0)),
+    };
     config.max_datagram_frame_size = config.max_datagram_frame_size.min(
         peer.max_datagram_frame_size
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(0),
     );
-    config
+    BoundTransportParameters {
+        config,
+        send_windows,
+        recv_windows,
+    }
 }
 
 #[cfg(test)]
@@ -918,6 +945,103 @@ mod tests {
     use crate::net::quic_native::{QuicConnectionState, StreamId};
     use futures_lite::future::{block_on, zip};
     use rustls::pki_types::ServerName;
+
+    /// A peer that omits `initial_max_stream_data_uni` (as the managed-quiet
+    /// loopback pair does) must keep full bidirectional windows. The previous
+    /// binding took the minimum over all three per-type parameters with an
+    /// omitted one counted as zero, which left every stream with zero send
+    /// credit and failed the first `write_stream` with `Flow(Exhausted)`.
+    #[test]
+    fn bind_transport_parameters_keeps_bidi_windows_when_uni_is_omitted() {
+        let config = NativeQuicConnectionConfig {
+            max_local_bidi: 4,
+            max_local_uni: 4,
+            send_window: 1 << 18,
+            recv_window: 1 << 18,
+            connection_send_limit: 1 << 20,
+            connection_recv_limit: 1 << 20,
+            ..NativeQuicConnectionConfig::default()
+        };
+        let peer = TransportParameters {
+            initial_max_data: Some(1 << 19),
+            initial_max_stream_data_bidi_local: Some(1_000),
+            initial_max_stream_data_bidi_remote: Some(2_000),
+            initial_max_stream_data_uni: None,
+            initial_max_streams_bidi: Some(2),
+            ..TransportParameters::default()
+        };
+        let local = TransportParameters {
+            initial_max_data: Some(1 << 21),
+            initial_max_stream_data_bidi_local: Some(3_000),
+            initial_max_stream_data_bidi_remote: Some(1 << 20),
+            initial_max_stream_data_uni: None,
+            initial_max_streams_bidi: Some(4),
+            ..TransportParameters::default()
+        };
+
+        let bound = bind_transport_parameters(config, &local, &peer);
+
+        // Send side: a locally opened bidi stream sends against the peer's
+        // `bidi_remote`, a peer-opened one against the peer's `bidi_local`.
+        assert_eq!(
+            bound.send_windows,
+            StreamWindows {
+                local_bidi: 2_000,
+                remote_bidi: 1_000,
+                uni: 0,
+            }
+        );
+        // Receive side mirrors the mapping and is capped by the configured
+        // window: the local `bidi_remote` of 1 MiB clamps to 256 KiB.
+        assert_eq!(
+            bound.recv_windows,
+            StreamWindows {
+                local_bidi: 3_000,
+                remote_bidi: 1 << 18,
+                uni: 0,
+            }
+        );
+        assert_eq!(bound.config.send_window, 1 << 18);
+        assert_eq!(bound.config.recv_window, 1 << 18);
+        assert_eq!(bound.config.max_local_bidi, 2);
+        assert_eq!(bound.config.connection_send_limit, 1 << 19);
+        assert_eq!(bound.config.connection_recv_limit, 1 << 20);
+        assert_eq!(bound.config.max_datagram_frame_size, 0);
+
+        // The windows reach the stream table: a client opening stream 0 gets
+        // the peer's `bidi_remote` credit, not zero.
+        let mut connection = QuicConnection::client(bound.config);
+        connection
+            .inner_mut()
+            .set_initial_stream_windows(bound.send_windows, bound.recv_windows);
+        let cx = Cx::for_testing();
+        connection.begin_handshake(&cx).unwrap();
+        connection.mark_handshake_keys_available(&cx).unwrap();
+        connection.mark_app_keys_available(&cx).unwrap();
+        // The production handoff records the rustls-verified server identity
+        // before confirming; a client cannot confirm without it.
+        connection.record_verified_server_identity();
+        connection.confirm_handshake(&cx).unwrap();
+        let stream = connection.open_bidi_stream(&cx).unwrap();
+        assert_eq!(stream, StreamId(0));
+        assert_eq!(
+            connection
+                .inner()
+                .streams()
+                .stream_send_credit_remaining(stream),
+            2_000
+        );
+        assert_eq!(
+            connection
+                .inner()
+                .streams()
+                .stream(stream)
+                .unwrap()
+                .recv_credit
+                .limit(),
+            3_000
+        );
+    }
 
     fn assert_reassembly_recovered(cx: &Cx, connection: &mut NativeQuicConnection) {
         assert_eq!(connection.state(), QuicConnectionState::Established);

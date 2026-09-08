@@ -1148,6 +1148,46 @@ impl From<QuicStreamError> for StreamTableError {
     }
 }
 
+/// Initial per-stream flow-control windows keyed by stream type (RFC 9000 §18.2).
+///
+/// `local_bidi` applies to bidirectional streams this endpoint opens,
+/// `remote_bidi` to bidirectional streams the peer opens, and `uni` to the
+/// single data-carrying direction of unidirectional streams. The same shape
+/// describes both sides of a connection:
+///
+/// - send windows come from the peer's transport parameters: a locally opened
+///   bidirectional stream may send `initial_max_stream_data_bidi_remote` bytes
+///   (it is remote from the peer's point of view), a peer-opened bidirectional
+///   stream may send `initial_max_stream_data_bidi_local`, and a locally opened
+///   unidirectional stream may send `initial_max_stream_data_uni`;
+/// - receive windows come from this endpoint's own parameters with the
+///   mirrored mapping: `bidi_local` for locally opened, `bidi_remote` for
+///   peer-opened, `uni` for peer-opened unidirectional streams.
+///
+/// A parameter the peer omits is zero for that stream type only; it never
+/// lowers the window of another type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamWindows {
+    /// Window for bidirectional streams this endpoint opened.
+    pub local_bidi: u64,
+    /// Window for bidirectional streams the peer opened.
+    pub remote_bidi: u64,
+    /// Window for the data-carrying direction of unidirectional streams.
+    pub uni: u64,
+}
+
+impl StreamWindows {
+    /// The same window for every stream type.
+    #[must_use]
+    pub const fn uniform(window: u64) -> Self {
+        Self {
+            local_bidi: window,
+            remote_bidi: window,
+            uni: window,
+        }
+    }
+}
+
 /// Stream table with local-open limits.
 #[derive(Debug, Clone)]
 pub struct StreamTable {
@@ -1165,8 +1205,10 @@ pub struct StreamTable {
     next_local_bidi_seq: u64,
     next_local_uni_seq: u64,
     streams: BTreeMap<StreamId, QuicStream>,
-    send_window: u64,
-    recv_window: u64,
+    /// Initial send windows per stream type (peer-advertised).
+    send_windows: StreamWindows,
+    /// Initial receive windows per stream type (locally advertised).
+    recv_windows: StreamWindows,
     send_connection_credit: FlowCredit,
     recv_connection_credit: FlowCredit,
     rr_cursor: Option<StreamId>,
@@ -1220,8 +1262,8 @@ impl StreamTable {
             next_local_bidi_seq: 0,
             next_local_uni_seq: 0,
             streams: BTreeMap::new(),
-            send_window,
-            recv_window,
+            send_windows: StreamWindows::uniform(send_window),
+            recv_windows: StreamWindows::uniform(recv_window),
             send_connection_credit: FlowCredit::new(connection_send_limit),
             recv_connection_credit: FlowCredit::new(connection_recv_limit),
             rr_cursor: None,
@@ -1284,6 +1326,30 @@ impl StreamTable {
     #[must_use]
     pub fn remote_stream_limits(&self) -> (u64, u64) {
         (self.max_remote_bidi, self.max_remote_uni)
+    }
+
+    /// Install the per-type initial stream windows negotiated in the transport
+    /// parameters (RFC 9000 §18.2).
+    ///
+    /// `send` holds the windows the peer advertised and `recv` the windows this
+    /// endpoint advertised; see [`StreamWindows`] for the type mapping. Streams
+    /// opened or accepted afterwards start with the window for their type;
+    /// streams that already exist keep their credit.
+    pub fn set_initial_stream_windows(&mut self, send: StreamWindows, recv: StreamWindows) {
+        self.send_windows = send;
+        self.recv_windows = recv;
+    }
+
+    /// Initial send windows applied to newly opened or accepted streams.
+    #[must_use]
+    pub fn initial_send_windows(&self) -> StreamWindows {
+        self.send_windows
+    }
+
+    /// Initial receive windows applied to newly opened or accepted streams.
+    #[must_use]
+    pub fn initial_recv_windows(&self) -> StreamWindows {
+        self.recv_windows
     }
 
     /// Accept a remotely initiated stream ID.
@@ -2372,8 +2438,20 @@ impl StreamTable {
         if self.streams.contains_key(&id) {
             return Err(StreamTableError::DuplicateStream(id));
         }
+        // RFC 9000 §18.2: each stream type has its own initial window; the
+        // data-carrying direction of a unidirectional stream uses `uni` and
+        // its other direction carries no data, so the same value is harmless.
+        let (send_window, recv_window) = match (id.is_local_for(self.role), id.direction()) {
+            (true, StreamDirection::Bidirectional) => {
+                (self.send_windows.local_bidi, self.recv_windows.local_bidi)
+            }
+            (false, StreamDirection::Bidirectional) => {
+                (self.send_windows.remote_bidi, self.recv_windows.remote_bidi)
+            }
+            (_, StreamDirection::Unidirectional) => (self.send_windows.uni, self.recv_windows.uni),
+        };
         self.streams
-            .insert(id, QuicStream::new(id, self.send_window, self.recv_window));
+            .insert(id, QuicStream::new(id, send_window, recv_window));
         Ok(())
     }
 }
@@ -5080,5 +5158,74 @@ mod tests {
                 "connection_used=40,connection_remaining=40,bidi1_used=40"
             );
         }
+    }
+
+    /// RFC 9000 §18.2: each stream type starts with its own window, and an
+    /// omitted (zero) unidirectional window must not touch bidirectional
+    /// streams. Before per-type windows existed the binding collapsed every
+    /// window to the minimum of the three, so a peer that omitted
+    /// `initial_max_stream_data_uni` left every stream with zero send credit.
+    #[test]
+    fn initial_stream_windows_apply_per_stream_type() {
+        let mut table = StreamTable::new(StreamRole::Client, 4, 4, 100, 100);
+        assert_eq!(table.initial_send_windows(), StreamWindows::uniform(100));
+        assert_eq!(table.initial_recv_windows(), StreamWindows::uniform(100));
+        table.set_initial_stream_windows(
+            StreamWindows {
+                local_bidi: 7,
+                remote_bidi: 5,
+                uni: 0,
+            },
+            StreamWindows {
+                local_bidi: 11,
+                remote_bidi: 13,
+                uni: 17,
+            },
+        );
+
+        let local_bidi = table.open_local_bidi().unwrap();
+        assert_eq!(local_bidi, StreamId(0));
+        assert_eq!(table.stream_send_credit_remaining(local_bidi), 7);
+        assert_eq!(table.stream(local_bidi).unwrap().recv_credit.limit(), 11);
+        table
+            .write_stream_bytes(local_bidi, Bytes::from_static(b"1234567"), false)
+            .unwrap();
+        assert_eq!(
+            table.write_stream_bytes(local_bidi, Bytes::from_static(b"8"), false),
+            Err(StreamTableError::Stream(QuicStreamError::Flow(
+                FlowControlError::Exhausted {
+                    attempted: 1,
+                    remaining: 0,
+                }
+            )))
+        );
+
+        let remote_bidi = StreamId::local(StreamRole::Server, StreamDirection::Bidirectional, 0);
+        table.accept_remote_stream(remote_bidi).unwrap();
+        assert_eq!(table.stream_send_credit_remaining(remote_bidi), 5);
+        assert_eq!(table.stream(remote_bidi).unwrap().recv_credit.limit(), 13);
+
+        let local_uni = table.open_local_uni().unwrap();
+        assert_eq!(local_uni.direction(), StreamDirection::Unidirectional);
+        assert_eq!(table.stream_send_credit_remaining(local_uni), 0);
+        assert_eq!(
+            table.write_stream_bytes(local_uni, Bytes::from_static(b"x"), false),
+            Err(StreamTableError::Stream(QuicStreamError::Flow(
+                FlowControlError::Exhausted {
+                    attempted: 1,
+                    remaining: 0,
+                }
+            )))
+        );
+
+        let remote_uni = StreamId::local(StreamRole::Server, StreamDirection::Unidirectional, 0);
+        table.accept_remote_stream(remote_uni).unwrap();
+        assert_eq!(table.stream(remote_uni).unwrap().recv_credit.limit(), 17);
+
+        // Streams that already exist keep their credit when windows change.
+        table.set_initial_stream_windows(StreamWindows::uniform(1), StreamWindows::uniform(1));
+        assert_eq!(table.stream_send_credit_remaining(remote_bidi), 5);
+        let later_bidi = table.open_local_bidi().unwrap();
+        assert_eq!(table.stream_send_credit_remaining(later_bidi), 1);
     }
 }

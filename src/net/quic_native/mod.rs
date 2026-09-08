@@ -46,7 +46,7 @@ pub use endpoint_api::{
 pub use managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
 pub use streams::{
     FlowControlError, FlowCredit, QuicStream, QuicStreamError, StreamDirection, StreamId,
-    StreamReadiness, StreamRole, StreamTable, StreamTableError,
+    StreamReadiness, StreamRole, StreamTable, StreamTableError, StreamWindows,
 };
 #[cfg(any(test, feature = "test-internals"))]
 pub use tls::DeterministicQuicCryptoProvider;
