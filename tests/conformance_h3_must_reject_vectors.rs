@@ -1,4 +1,4 @@
-//! HTTP/3 RFC 9114 + 9297 + 9298 must-reject conformance vectors.
+//! HTTP/3 RFC 9114 + 9204 + 9297 + 9298 must-reject conformance vectors.
 //!
 //! Each test asserts that asupersync's `H3ConnectionState` /
 //! `H3ControlState` / `H3RequestStreamState` / `validate_*`
@@ -12,9 +12,9 @@
 //!       MAX_PUSH_ID only; HEADERS belong on request streams).
 //!   (2) Request-stream id rejected when not client-initiated bidi —
 //!       RFC 9114 §4.1 (request streams MUST be client-initiated bidi).
-//!   (3) SETTINGS_QPACK_BLOCKED_STREAMS > 0 in static-only QPACK
-//!       policy — RFC 9114 §7.2.4.1 + project policy
-//!       (H3QpackMode::StaticOnly).
+//!   (3) Dynamic field sections in static-only QPACK mode — RFC 9204
+//!       §2.1.2 + project policy (H3QpackMode::StaticOnly). A peer's
+//!       nonzero SETTINGS permit dynamic use but do not require it.
 //!   (4) GOAWAY with stream_id GREATER than previously received —
 //!       RFC 9114 §5.2 (GOAWAY id MUST NOT increase).
 //!   (5) DATAGRAM frame on the control stream — RFC 9297 (DATAGRAM
@@ -26,8 +26,9 @@
 //!       URIs; asupersync's validate_authority_form is the chokepoint.
 
 use asupersync::http::h3_native::{
-    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame,
-    H3PseudoHeaders, H3QpackMode, H3RequestHead, H3Settings,
+    H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
+    H3PseudoHeaders, H3QpackMode, H3RequestHead, H3Settings, QpackBlockedStreamStatus,
+    QpackInstructionStreamState,
 };
 
 /// (1) RFC 9114 §6.2.1: HEADERS frame is not allowed on the control
@@ -71,12 +72,12 @@ fn rfc9114_request_frame_on_non_client_bidi_must_reject() {
     );
 }
 
-/// (3) RFC 9114 §7.2.4.1 + project's static-only QPACK policy:
-/// SETTINGS_QPACK_BLOCKED_STREAMS > 0 must be rejected when the
-/// connection is configured with QPACK in StaticOnly mode (which is
-/// the default per the H3QpackMode enum).
+/// (3) RFC 9204 §2.1.2 + project's static-only QPACK policy:
+/// peer SETTINGS advertise decoder limits, not mandatory encoder use.
+/// Accepting that permission must leave local dynamic capacity and the
+/// blocked-stream budget at zero, and dynamic field sections must fail.
 #[test]
-fn rfc9114_qpack_blocked_streams_exceeds_static_only_policy_must_reject() {
+fn rfc9204_dynamic_field_section_in_static_only_mode_must_reject() {
     let config = H3ConnectionConfig {
         endpoint_role: H3EndpointRole::Server,
         qpack_mode: H3QpackMode::StaticOnly,
@@ -84,15 +85,48 @@ fn rfc9114_qpack_blocked_streams_exceeds_static_only_policy_must_reject() {
     };
     let mut conn = H3ConnectionState::with_config(config);
     let settings = H3Settings {
-        qpack_blocked_streams: Some(16), // > 0 violates StaticOnly
+        qpack_max_table_capacity: Some(128),
+        qpack_blocked_streams: Some(16),
         ..H3Settings::default()
     };
-    let result = conn.on_control_frame(&H3Frame::Settings(settings));
-    assert!(
-        result.is_err(),
-        "qpack_blocked_streams > 0 in StaticOnly mode must be rejected; got {:?}",
-        result.as_ref().map(|_| "Ok")
+    conn.on_control_frame(&H3Frame::Settings(settings.clone()))
+        .expect("peer dynamic QPACK permission must be accepted");
+    let mut qpack = QpackInstructionStreamState::from_settings(config.qpack_mode, &settings)
+        .expect("static-only state must decline peer dynamic permission");
+    assert_eq!(qpack.mode(), H3QpackMode::StaticOnly);
+    assert_eq!(qpack.context().dynamic_table().capacity(), 0);
+    assert_eq!(qpack.settings_blocked_streams(), 0);
+
+    // Zero Required Insert Count and Base, then static index 17 (:method GET).
+    let static_field_section = [0x00, 0x00, 0xD1];
+    assert_eq!(
+        qpack.submit_received_field_section(0, &static_field_section),
+        Ok(QpackBlockedStreamStatus::Ready)
     );
+
+    // Required Insert Count 1 (encoded as 2), Base 1, dynamic relative index 0.
+    let dynamic_field_section = [0x02, 0x00, 0x80];
+    let error = qpack
+        .submit_received_field_section(4, &dynamic_field_section)
+        .expect_err("peer permission must not enable dynamic field sections");
+    assert_eq!(
+        error,
+        H3NativeError::QpackPolicy("required insert count must be zero in static-only mode")
+    );
+    assert_eq!(qpack.first_failure(), Some(&error));
+    assert_eq!(qpack.blocked_stream_count(), 0);
+    assert_eq!(qpack.context().dynamic_table().capacity(), 0);
+
+    // The same dynamic bytes are valid with an explicitly enabled dynamic
+    // context: they wait for the first insert rather than failing to parse.
+    let mut dynamic =
+        QpackInstructionStreamState::from_settings(H3QpackMode::DynamicTableAllowed, &settings)
+            .expect("opt-in dynamic QPACK state");
+    assert_eq!(
+        dynamic.submit_received_field_section(4, &dynamic_field_section),
+        Ok(QpackBlockedStreamStatus::Blocked)
+    );
+    assert_eq!(dynamic.blocked_stream_count(), 1);
 }
 
 /// (4) RFC 9114 §5.2: GOAWAY id MUST NOT increase. After a smaller

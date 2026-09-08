@@ -976,7 +976,7 @@ fn channel_builder_fluent_api() {
         Some(CompressionEncoding::Gzip)
     );
 
-    // TLS remains fail-closed until a TLS-backed gRPC transport exists.
+    // Deterministic loopback cannot use the native transport's TLS support.
     let error =
         futures_lite::future::block_on(Channel::builder("http://loopback:50051").tls().connect())
             .expect_err("TLS-marked loopback channel must fail closed");
@@ -987,9 +987,10 @@ fn channel_builder_fluent_api() {
                 kind,
                 asupersync::grpc::status::TransportErrorKind::ProtocolViolation
             );
-            assert!(
-                message.contains("does not negotiate TLS"),
-                "unexpected TLS enforcement message: {message}"
+            assert_eq!(
+                message,
+                "gRPC TLS is available only on the native localhost transport; \
+                 deterministic loopback channels do not negotiate TLS"
             );
         }
         other => panic!("expected transport error for phantom TLS channel, got {other:?}"),

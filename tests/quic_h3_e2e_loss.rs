@@ -572,22 +572,34 @@ fn pto_backoff_capping() {
         oldest_sent,
     ));
 
-    // Establish RTT.
-    t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 1200, 10_100));
-    let _ = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1], 0, 30_000);
+    // RFC 9002 section 6.2.1 anchors PTO at the latest ack-eliciting send,
+    // even after that packet is acknowledged while an older packet remains.
+    let latest_sent = 10_100;
+    t.on_packet_sent(sent(
+        PacketNumberSpace::ApplicationData,
+        1,
+        1200,
+        latest_sent,
+    ));
+    let ack = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1], 0, 30_000);
+    assert_eq!(ack.acked_packets, 1);
+    assert_eq!(ack.lost_packets, 0);
+    assert_eq!(t.bytes_in_flight(), 1200);
 
     let now = 50_000u64;
 
     // Get base PTO timeout (pto_count=0).
     let base_deadline = t.pto_deadline_micros(now).expect("base deadline");
-    let base_timeout = base_deadline - oldest_sent;
+    // First RTT sample: 19_900 + 4 * 9_950 + max_ack_delay 25_000.
+    let base_timeout = 84_700;
+    assert_eq!(base_deadline, latest_sent + base_timeout);
 
     // Fire PTO 10 times.
     for _ in 0..10 {
         t.on_pto_expired();
     }
     let deadline_at_10 = t.pto_deadline_micros(now).expect("deadline at 10");
-    let timeout_at_10 = deadline_at_10 - oldest_sent;
+    let timeout_at_10 = deadline_at_10 - latest_sent;
 
     // Should be 2^10 = 1024x.
     assert_eq!(
@@ -601,7 +613,7 @@ fn pto_backoff_capping() {
         t.on_pto_expired();
     }
     let deadline_at_15 = t.pto_deadline_micros(now).expect("deadline at 15");
-    let timeout_at_15 = deadline_at_15 - oldest_sent;
+    let timeout_at_15 = deadline_at_15 - latest_sent;
 
     // Should still be capped at 2^10 = 1024x (min(15, 10) = 10).
     assert_eq!(

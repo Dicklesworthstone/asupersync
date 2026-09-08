@@ -1603,7 +1603,10 @@ fn check_self_signed_leaf_pin(cert_pem: &str, expected_success: bool) {
     let sender = wait_with_timeout(sender, "self-signed leaf pin sender");
     if !expected_success {
         receiver.kill_and_wait();
-        assert!(!sender.status.success(), "CA certificate accepted as a leaf");
+        assert!(
+            !sender.status.success(),
+            "CA certificate accepted as a leaf"
+        );
         let diagnostics = String::from_utf8_lossy(&sender.stderr);
         assert!(
             diagnostics.contains("read_hs_fatal_alert"),

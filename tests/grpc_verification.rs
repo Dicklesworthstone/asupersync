@@ -1130,6 +1130,7 @@ fn grpc_verify_036_channel_builder() {
         assert!(!channel.config().use_tls);
         assert_eq!(channel.config().connect_timeout, Duration::from_secs(10));
 
+        // Deterministic loopback cannot use the native transport's TLS support.
         let error = Channel::builder("http://loopback:50051")
             .tls()
             .connect()
@@ -1141,9 +1142,10 @@ fn grpc_verify_036_channel_builder() {
                     kind,
                     asupersync::grpc::status::TransportErrorKind::ProtocolViolation
                 );
-                assert!(
-                    message.contains("does not negotiate TLS"),
-                    "unexpected TLS enforcement message: {message}"
+                assert_eq!(
+                    message,
+                    "gRPC TLS is available only on the native localhost transport; \
+                     deterministic loopback channels do not negotiate TLS"
                 );
             }
             other => panic!("expected transport error for phantom TLS channel, got {other:?}"),

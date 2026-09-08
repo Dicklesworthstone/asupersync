@@ -1,5 +1,8 @@
 //! E2E: Web full stack — route resolution, middleware, handlers, extractors, responses.
 
+// Match the runtime crate's limit for nested streaming listener futures.
+#![recursion_limit = "256"]
+
 mod common;
 
 use asupersync::bytes::Buf;
