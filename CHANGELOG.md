@@ -71,6 +71,18 @@ collects the changes since the published `v0.4.10` source.
 
 ## [v0.4.11] - 2026-09-08
 
+### Runtime lifetime
+
+- Dropping the final runtime owner from one of its async workers transfers
+  worker joins to a teardown thread, allowing the current poll to return
+  without trying to join itself. The teardown job retains runtime state
+  through all joins and cleanup; ordinary caller-thread teardown remains
+  synchronous. Native regressions cover successful results, panic unwind,
+  worker-stop callbacks and released state ownership.
+- A refused teardown-thread spawn preserves the cleanup job for retry.
+  Permanent thread-resource exhaustion can still block ordinary drop;
+  the explicit bounded-shutdown APIs retain their separate timeout policy.
+
 ### QUIC reassembly and ATP framing
 
 - Adjacent received stream ranges coalesce into contiguous runs, keeping the
