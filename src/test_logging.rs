@@ -5655,35 +5655,152 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn fixture_ack_pipe(
+        log_dir: &std::path::Path,
+    ) -> (std::path::PathBuf, std::fs::File, std::fs::File) {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let path = log_dir.join("child-ready.pipe");
+        nix::unistd::mkfifo(
+            &path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("create private fixture acknowledgement pipe");
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .expect("open acknowledgement reader without waiting for the child");
+        // Keep an unwritten writer alive so no-writer EOF/HUP cannot look
+        // like an acknowledgement on platforms with different FIFO polling.
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .expect("open acknowledgement keeper without waiting for the child");
+        (path, reader, writer)
+    }
+
+    #[cfg(unix)]
+    fn wait_for_fixture_ack(mut reader: &std::fs::File, timeout: Duration) -> std::io::Result<()> {
+        use std::io::Read as _;
+        use std::os::fd::AsFd as _;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "child did not acknowledge its completed output",
+                ));
+            }
+            let mut fds = [nix::poll::PollFd::new(
+                reader.as_fd(),
+                nix::poll::PollFlags::POLLIN,
+            )];
+            let poll_timeout = nix::poll::PollTimeout::try_from(remaining)
+                .expect("fixture acknowledgement timeout fits poll");
+            match nix::poll::poll(&mut fds, poll_timeout) {
+                Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
+            }
+            let mut acknowledgement = [0_u8; 1];
+            match reader.read(&mut acknowledgement) {
+                Ok(1) if acknowledgement == *b"R" => return Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error),
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "child closed the acknowledgement pipe without the ready byte",
+                    ));
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn test_process_fixture_pinned_lifecycle_and_redacted_logs() {
         init_test("test_process_fixture_pinned_lifecycle_and_redacted_logs");
         let log_dir = tempfile::tempdir().expect("fixture log dir");
+        let (ack_path, ack_reader, _ack_writer) = fixture_ack_pipe(log_dir.path());
+        let hold_path = log_dir.path().join("child-hold.pipe");
+        nix::unistd::mkfifo(
+            &hold_path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .expect("create private fixture hold pipe");
         let mut fixture = ProcessFixtureService::new(
             "shell-service",
             shell_identity(),
             log_dir.path(),
         )
         .with_secret_env("FIXTURE_SECRET", "fixture-secret-123")
+        .with_env("FIXTURE_READY", ack_path.as_os_str())
+        .with_env("FIXTURE_HOLD", hold_path.as_os_str())
         .with_args([
             "-c",
-            "printf '%s' \"$FIXTURE_SECRET\"; printf '%s' \"$FIXTURE_SECRET\" >&2; exec /bin/sleep 5",
+            "printf '%s' \"$FIXTURE_SECRET\"; printf '%s' \"$FIXTURE_SECRET\" >&2; printf R > \"$FIXTURE_READY\"; IFS= read -r release < \"$FIXTURE_HOLD\"",
         ])
         .with_startup_timeout(Duration::from_secs(1));
 
         fixture.start().expect("start pinned fixture");
         assert!(fixture.is_healthy());
         assert!(fixture.has_live_resource());
+        // Running proves liveness, not that the child has executed either
+        // printf. The child acknowledges both writes, then blocks until stop
+        // kills it; there is no fixed sleep that can expire under host load.
+        let acknowledgement = wait_for_fixture_ack(&ack_reader, Duration::from_secs(1));
         fixture.stop().expect("stop pinned fixture");
         fixture.stop().expect("repeated stop is idempotent");
         assert!(!fixture.has_live_resource());
 
         let logs = fixture.captured_logs();
+        acknowledgement.unwrap_or_else(|error| {
+            panic!("child output acknowledgement failed: {error}; logs={logs:?}")
+        });
         assert_eq!(logs.stdout, "<redacted>");
         assert_eq!(logs.stderr, "<redacted>");
         assert!(!logs.stdout.contains("fixture-secret-123"));
         assert!(!logs.stderr.contains("fixture-secret-123"));
+        assert_eq!(
+            std::fs::read_to_string(&fixture.stdout_path).expect("read sanitized stdout file"),
+            "<redacted>"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fixture.stderr_path).expect("read sanitized stderr file"),
+            "<redacted>"
+        );
         crate::test_complete!("test_process_fixture_pinned_lifecycle_and_redacted_logs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_process_fixture_running_without_child_ack_is_rejected() {
+        init_test("test_process_fixture_running_without_child_ack_is_rejected");
+        let log_dir = tempfile::tempdir().expect("fixture log dir");
+        let (ack_path, ack_reader, _ack_writer) = fixture_ack_pipe(log_dir.path());
+        let mut fixture = ProcessFixtureService::new("no-ack", shell_identity(), log_dir.path())
+            .with_env("FIXTURE_READY", ack_path.as_os_str())
+            .with_args(["-c", "IFS= read -r release < \"$FIXTURE_READY\""])
+            .with_startup_timeout(Duration::from_secs(1));
+
+        fixture.start().expect("start child held before output");
+        assert!(fixture.is_healthy(), "Running observes the live child");
+        let acknowledgement = wait_for_fixture_ack(&ack_reader, Duration::from_millis(75));
+        fixture.stop().expect("stop child without acknowledgement");
+        assert!(!fixture.has_live_resource());
+        let error = acknowledgement.expect_err("liveness must not substitute for child output");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(fixture.captured_logs(), FixtureLogs::default());
+        crate::test_complete!("test_process_fixture_running_without_child_ack_is_rejected");
     }
 
     #[cfg(unix)]
@@ -5752,11 +5869,20 @@ mod tests {
         let mut crashing =
             ProcessFixtureService::new("crashing", shell_identity(), crash_logs.path())
                 .with_args(["-c", "printf crash-detail >&2; exit 17"])
+                // An unscheduled shell can remain Running before its first
+                // instruction. No process can satisfy this readiness probe,
+                // so startup must observe the actual crash instead.
+                .with_readiness(ProcessReadiness::Tcp(
+                    "127.0.0.1:0"
+                        .parse()
+                        .expect("unavailable loopback endpoint"),
+                ))
                 .with_startup_timeout(Duration::from_secs(1));
         let crash_error = crashing
             .start()
             .expect_err("early process exit must fail readiness");
         assert!(crash_error.to_string().contains("exited before readiness"));
+        assert!(crash_error.to_string().contains("exit status: 17"));
         assert!(crash_error.to_string().contains("crash-detail"));
         assert!(!crashing.has_live_resource());
 
