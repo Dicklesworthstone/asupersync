@@ -1,17 +1,27 @@
+# GNU tar (the Windows transport) does not match directory names when these
+# patterns end in a slash. Use names that both rsync and tar exclude.
+.git
+.beads
+target
+target_*
+target-*
+node_modules
+.pnpm-store
+
 # Agent-local RCH scratch directories are transient and can vanish mid-rsync.
-.rch-*/
-.rch_target*/
+.rch-*
+.rch_target*
 
 # Local proof/smoke artifacts and model caches are generated outside Cargo and
 # can vanish while rch is syncing the tree to a worker.
-.fastembed_cache/
-.*-smoke-artifacts/
+.fastembed_cache
+.*-smoke-artifacts
 
 # ATP benchmark matrix outputs are generated evidence roots. The checked source
 # of truth is docs/atp_bench_matrix_spec.md plus scripts/atp_bench/*; local
 # run directories can be multi-GB and must not be part of remote proof sync.
-artifacts/atp_bench_matrix/
+artifacts/atp_bench_matrix
 
 # Local perf profile captures can be root-owned after sudo/netns benchmark runs
 # and must not be part of remote proof sync.
-artifacts/perf/matrix92-small-clean-profile/
+artifacts/perf/matrix92-small-clean-profile
