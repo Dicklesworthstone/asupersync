@@ -144,6 +144,9 @@ pub mod builder;
 pub mod cache;
 pub mod changepoint;
 pub mod config;
+/// Current-thread `block_on` driver: the calling thread runs the single
+/// worker and the root future is a real task (GH#58).
+pub(crate) mod current_thread;
 pub mod deadline_monitor;
 #[cfg(test)]
 mod deadline_monitor_metamorphic_tests;

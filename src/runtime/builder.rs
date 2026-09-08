@@ -366,6 +366,9 @@ impl NativeThreadHostServices {
             let runtime_handle = RuntimeHandle::weak(runtime);
             let on_start = runtime.config.on_thread_start.clone();
             let on_stop = runtime.config.on_thread_stop.clone();
+            // GH#58: a current-thread runtime's worker is loaned to
+            // `Runtime::block_on` callers; the thread parks while it is out.
+            let current_thread_driver = runtime.current_thread_driver.get().map(Arc::clone);
             let mut builder = std::thread::Builder::new().name(name);
             if runtime.config.thread_stack_size > 0 {
                 builder = builder.stack_size(runtime.config.thread_stack_size);
@@ -376,8 +379,13 @@ impl NativeThreadHostServices {
                     if let Some(callback) = on_start.as_ref() {
                         callback();
                     }
-                    let mut worker = worker;
-                    worker.run_loop();
+                    match current_thread_driver {
+                        Some(driver) => driver.run_background(worker),
+                        None => {
+                            let mut worker = worker;
+                            worker.run_loop();
+                        }
+                    }
                     if let Some(callback) = on_stop.as_ref() {
                         callback();
                     }
@@ -2238,6 +2246,9 @@ pub struct RuntimeBuilder {
     timer_driver: Option<TimerDriverHandle>,
     entropy_source: Option<Arc<dyn EntropySource>>,
     host_services: Arc<dyn RuntimeHostServices>,
+    /// Set by [`RuntimeBuilder::current_thread`]: `Runtime::block_on` drives
+    /// the single worker from the calling thread (GH#58).
+    current_thread: bool,
 }
 
 impl RuntimeBuilder {
@@ -2254,6 +2265,7 @@ impl RuntimeBuilder {
             timer_driver: None,
             entropy_source: None,
             host_services: default_runtime_host_services(),
+            current_thread: false,
         }
     }
 
@@ -2884,6 +2896,7 @@ impl RuntimeBuilder {
             timer_driver,
             entropy_source,
             host_services,
+            current_thread,
         } = self;
         #[cfg(target_arch = "wasm32")]
         let _ = (platform_reactor, io_uring_capability_policy);
@@ -2940,6 +2953,7 @@ impl RuntimeBuilder {
             entropy_source,
             terminal_io_reactor_snapshot,
             host_services.as_ref(),
+            current_thread,
         )?;
         if let Some(limit) = scoped_cpu_worker_limit {
             let gateway = {
@@ -3175,7 +3189,26 @@ impl RuntimeBuilder {
 
     /// Preset: single-threaded runtime.
     ///
-    /// Equivalent to `RuntimeBuilder::new().worker_threads(1)`.
+    /// One scheduler worker, driven from the thread that calls
+    /// [`Runtime::block_on`] for the life of that call (GH#58): while
+    /// `block_on` runs, every task spawned on the runtime — through
+    /// [`RuntimeHandle::spawn`], [`Cx::spawn`](crate::cx::Cx::spawn) or
+    /// [`Cx::spawn_local`](crate::cx::Cx::spawn_local) — is polled on the
+    /// calling thread, and the root future is a registered task in the root
+    /// region: `Cx::current()` inside it is a real task context with
+    /// `spawn_local` authority, [`Runtime::is_quiescent`] is false until the
+    /// root completes, and root-region cancellation reaches the root through
+    /// its checkpoints. Between `block_on` calls the runtime's background
+    /// thread runs the worker, so work spawned through a handle keeps
+    /// making progress (unlike Tokio's `current_thread`, which only runs
+    /// inside `block_on`). The root future itself is polled in place on the
+    /// caller and may be `!Send` and non-`'static`. Nested `block_on` calls
+    /// on the driving thread poll their future directly, as before.
+    ///
+    /// Configuring more than one worker after this preset keeps the plain
+    /// worker-thread topology (`worker_threads(1)` alone does not enable the
+    /// caller-driven mode; only this preset does).
+    ///
     /// Suitable for testing, deterministic replay, and Phase 0 usage.
     ///
     /// ```ignore
@@ -3184,7 +3217,9 @@ impl RuntimeBuilder {
     /// ```
     #[must_use]
     pub fn current_thread() -> Self {
-        Self::new().worker_threads(1)
+        let mut builder = Self::new().worker_threads(1);
+        builder.current_thread = true;
+        builder
     }
 
     /// Preset: multi-threaded runtime with the deterministic default worker count.
@@ -3460,9 +3495,13 @@ impl Runtime {
             entropy_source,
             None,
             host_services,
+            false,
         )
     }
 
+    /// `current_thread` selects the caller-driven worker topology of
+    /// [`RuntimeBuilder::current_thread`] (GH#58); it is honoured only for a
+    /// single-worker configuration.
     #[allow(clippy::result_large_err)]
     fn with_config_and_platform_snapshot(
         mut config: RuntimeConfig,
@@ -3472,6 +3511,7 @@ impl Runtime {
         entropy_source: Option<Arc<dyn EntropySource>>,
         terminal_io_reactor_snapshot: Option<IoReactorCapabilitySnapshot>,
         host_services: &dyn RuntimeHostServices,
+        current_thread: bool,
     ) -> Result<Self, Error> {
         config.normalize();
         if let Some(monitor) = config.deadline_monitor.as_mut()
@@ -3495,6 +3535,7 @@ impl Runtime {
                 timer_driver,
                 entropy_source,
                 terminal_io_reactor_snapshot,
+                current_thread,
             );
             Err(Error::new(crate::error::ErrorKind::ConfigError)
                 .with_message(unsupported_browser_bootstrap_message(host_services)))
@@ -3511,6 +3552,14 @@ impl Runtime {
                 host_services,
             );
             let inner = Arc::new(inner);
+            // GH#58: install the current-thread driver before the worker
+            // thread exists, so that thread runs the loan protocol from its
+            // first dispatch loop.
+            if current_thread && inner.config.worker_threads == 1 {
+                let _ = inner.current_thread_driver.set(Arc::new(
+                    crate::runtime::current_thread::CurrentThreadDriver::new(),
+                ));
+            }
             let worker_threads = host_services.spawn_workers(&inner, workers).map_err(|e| {
                 Error::new(crate::error::ErrorKind::Internal)
                     .with_message(format!("runtime init: {e}"))
@@ -3545,7 +3594,21 @@ impl Runtime {
         // mirrors `block_on_with_cx` but builds the Cx for callers
         // who don't have a request-scoped one to thread in.
         let request_cx = self.request_cx_with_budget(Budget::INFINITE);
-        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
+        let _cx_guard = crate::cx::Cx::set_current(Some(request_cx.clone()));
+        // GH#58 / br-asupersync-94jh37: on a `RuntimeBuilder::current_thread()`
+        // runtime the calling thread drives the single worker for the life
+        // of this call and the root is a registered task (see
+        // `crate::runtime::current_thread`). The driver hands the future
+        // back untouched when the worker cannot be borrowed (nested or
+        // concurrent `block_on`, worker thread, shutdown), in which case the
+        // caller-polled path below runs exactly as before.
+        let future = match self.inner.current_thread_driver.get() {
+            Some(driver) => match driver.drive(&self.inner.scheduler, &request_cx, future) {
+                Ok(output) => return output,
+                Err(future) => future,
+            },
+            None => future,
+        };
         run_future_with_budget(future, self.inner.config.poll_budget)
     }
 
@@ -4590,6 +4653,10 @@ struct RuntimeInner {
     /// Shared success latch for every bounded-shutdown caller. The sole reaper
     /// signals it only after `RuntimeInner::drop` returns normally.
     shutdown_completion: Arc<RuntimeShutdownCompletion>,
+    /// Worker loan protocol of a `RuntimeBuilder::current_thread()` runtime
+    /// (GH#58); unset for every other topology.
+    current_thread_driver:
+        std::sync::OnceLock<Arc<crate::runtime::current_thread::CurrentThreadDriver>>,
 }
 
 impl RuntimeInner {
@@ -4617,6 +4684,9 @@ impl RuntimeInner {
 
     fn begin_shutdown(&self) {
         self.scheduler.shutdown();
+        if let Some(driver) = self.current_thread_driver.get() {
+            driver.shutdown();
+        }
         if let Some(pool) = self.blocking_pool.as_ref() {
             // The bounded caller must not wait on the pool's coordination
             // mutex. Atomically close admission here; the reaper performs the
@@ -4894,6 +4964,7 @@ impl RuntimeInner {
                 deadline_monitor_thread: deadline_monitor.thread,
                 request_task_counter: std::sync::atomic::AtomicU32::new(1),
                 shutdown_completion: Arc::new(RuntimeShutdownCompletion::new()),
+                current_thread_driver: std::sync::OnceLock::new(),
             },
             workers,
         )
@@ -5195,6 +5266,9 @@ impl Drop for RuntimeInner {
             let _ = shutdown.send(());
         }
         self.scheduler.shutdown();
+        if let Some(driver) = self.current_thread_driver.get() {
+            driver.shutdown();
+        }
         let handles = std::mem::take(self.worker_threads.get_mut());
         let current_thread = std::thread::current().id();
         let on_worker = handles

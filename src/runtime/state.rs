@@ -6916,7 +6916,7 @@ impl RuntimeState {
         // Each child region's reason chains to its parent's reason.
         let mut region_reasons: HashMap<RegionId, CancelReason> =
             HashMap::with_capacity(regions_to_cancel.len());
-        // Ordinary cancellation needs no allocation when no region has an
+        // This shutdown-budget map needs no allocation when no region has an
         // explicit ceiling. Still visit every descendant to retain its own
         // ceiling, including Some(Budget::INFINITE).
         let mut shutdown_budgets: HashMap<RegionId, Budget> = HashMap::new();
@@ -7077,11 +7077,10 @@ impl RuntimeState {
             for &task_id in &task_id_buf {
                 let Some((effects, task_budget_res, task_live)) =
                     tasks.resolve(&mut self.tasks).update_task(task_id, |task| {
-                        let task_budget =
-                            shutdown_budgets.get(&rid).copied().map_or_else(
-                                || task_reason.cleanup_budget(),
-                                |ceiling| task_reason.cleanup_budget().combine_untraced(ceiling),
-                            );
+                        let task_budget = shutdown_budgets.get(&rid).copied().map_or_else(
+                            || task_reason.cleanup_budget(),
+                            |ceiling| task_reason.cleanup_budget().combine_untraced(ceiling),
+                        );
                         let effects = task.request_cancel_with_budget_and_publication(
                             task_reason.clone(),
                             task_budget,
@@ -9455,8 +9454,7 @@ impl RuntimeState {
                                 let cleanup_outcome = regions
                                     .resolve_ref(&self.regions)
                                     .get(region_id.arena_index())
-                                    .and_then(|region| region.close_receipt_handle().lock().clone())
-                                    .and_then(|receipt| receipt.cleanup_outcome);
+                                    .and_then(|region| region.closed_cleanup_outcome());
                                 // Remove from parent
                                 if let Some(parent_record) = regions
                                     .resolve_ref(&self.regions)

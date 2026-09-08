@@ -4864,6 +4864,20 @@ impl ThreeLaneWorker {
     /// 5. Steal from other workers
     /// 6. Park (with timeout based on next timer deadline)
     pub fn run_loop(&mut self) {
+        self.run_loop_until(&mut || false);
+    }
+
+    /// [`Self::run_loop`] with an additional stop condition.
+    ///
+    /// Returns when shutdown is signalled, or when `should_stop` returns
+    /// true and this thread's local-spawn lane is empty. The predicate is
+    /// checked between dispatches and before every park, so a caller that
+    /// raises a flag and wakes this worker (parker + reactor) regains the
+    /// thread at the next dispatch boundary. The lane condition makes sure
+    /// `!Send` spawns parked by the last dispatched task are admitted to this
+    /// worker before the thread is handed back (GH#58: the current-thread
+    /// driver borrows the worker for `Runtime::block_on`).
+    pub(crate) fn run_loop_until(&mut self, should_stop: &mut dyn FnMut() -> bool) {
         // Set thread-local scheduler for this worker thread.
         let _guard = ScopedLocalScheduler::new(Arc::clone(&self.local));
         // Set thread-local fast queue for O(1) ready-lane operations.
@@ -4879,7 +4893,9 @@ impl ThreeLaneWorker {
             crate::runtime::spawn_mailbox::ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox))
         });
 
-        while !self.shutdown.load(Ordering::Relaxed) {
+        while !self.shutdown.load(Ordering::Relaxed)
+            && !(should_stop() && crate::runtime::spawn_mailbox::local_spawn_lane_is_empty())
+        {
             if let Some(task) = self.next_task() {
                 self.reset_empty_backoff();
                 self.execute(task);
@@ -4909,8 +4925,9 @@ impl ThreeLaneWorker {
             }
 
             loop {
-                // Check shutdown before parking to avoid hanging in the backoff loop.
-                if self.shutdown.load(Ordering::Relaxed) {
+                // Check shutdown (or a stop request) before parking to avoid
+                // hanging in the backoff loop.
+                if self.shutdown.load(Ordering::Relaxed) || should_stop() {
                     break;
                 }
 
