@@ -77,6 +77,7 @@ use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, MetadataApplyReport, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode,
 };
+use crate::net::atp::transport_rq::erase_send;
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::handshake_driver::{
     ATP_QUIC_ALPN, HandshakeLevel, QuicHandshakeDriver, client_handshake_over_udp,
@@ -7720,7 +7721,7 @@ async fn run_sender_session(
             link.data_plane_pacer.byte_pacer_burst_bytes,
             source_stream_max_frame_bytes(),
         );
-        let source_result: Result<SendReport, QuicTransportError> = async {
+        let source_result: Result<SendReport, QuicTransportError> = erase_send(async {
             let bytes_streamed =
                 send_native_source_stream_entries_pumped(cx, link, source_stream, prepared, config)
                     .await?;
@@ -7802,7 +7803,7 @@ async fn run_sender_session(
                     }
                 }
             }
-        }
+        })
         .await;
         link.end_source_stream_rate_control();
         link.paced_source_stream = previous_paced_source_stream;
@@ -7813,7 +7814,7 @@ async fn run_sender_session(
     let pending_all: std::collections::BTreeSet<u32> =
         encoders.iter().map(|entry| entry.index).collect();
     let mut aimd = NativeQuicAimdPacer::default();
-    let mut symbols_sent = spray_round(
+    let mut symbols_sent = erase_send(spray_round(
         cx,
         link,
         &mut control,
@@ -7825,7 +7826,7 @@ async fn run_sender_session(
         symbol_auth.as_ref(),
         true,
         &mut aimd,
-    )
+    ))
     .await?;
     // `spray_round` drains queued DATAGRAMs before returning so ObjectComplete
     // cannot overtake unsent symbols in the connection's outbound queues.
@@ -8026,7 +8027,7 @@ async fn run_sender_session(
                 let symbols_before = symbols_sent;
                 let response_mode = super::quic_need_more_response_mode(&need);
                 let sent = if !need.repair_blocks.is_empty() {
-                    spray_block_repair_requests(
+                    erase_send(spray_block_repair_requests(
                         cx,
                         link,
                         &mut control,
@@ -8037,11 +8038,11 @@ async fn run_sender_session(
                         config,
                         symbol_auth.as_ref(),
                         &mut aimd,
-                    )
+                    ))
                     .await?
                 } else if need.source_symbols.is_empty() {
                     let fallback_pending = need.pending.iter().copied().collect();
-                    spray_round(
+                    erase_send(spray_round(
                         cx,
                         link,
                         &mut control,
@@ -8053,10 +8054,10 @@ async fn run_sender_session(
                         symbol_auth.as_ref(),
                         false,
                         &mut aimd,
-                    )
+                    ))
                     .await?
                 } else {
-                    spray_source_requests(
+                    erase_send(spray_source_requests(
                         cx,
                         link,
                         &mut control,
@@ -8067,7 +8068,7 @@ async fn run_sender_session(
                         config,
                         symbol_auth.as_ref(),
                         &mut aimd,
-                    )
+                    ))
                     .await?
                 };
                 if !need.repair_blocks.is_empty() && sent != repair_symbols_to_emit {
@@ -10717,8 +10718,16 @@ pub(crate) async fn send_prepared_over_udp(
                 .to_string(),
         )
     })?;
-    let mut link = connect(cx, addr, client_tls, &config).await?;
-    let report = run_sender_session(cx, &mut link, prepared, &config, peer_id).await?;
+    // The session bodies are boxed behind `dyn Future + Send` (one allocation
+    // per transfer) so a caller that spawns `send_path` / `receive_path` keeps
+    // its `Send` proof within rustc's default recursion depth
+    // (br-asupersync-lf8muy); the per-round spray/feedback awaits inside the
+    // sessions are erased the same way.
+    let mut link = erase_send(connect(cx, addr, client_tls, &config)).await?;
+    let report = erase_send(run_sender_session(
+        cx, &mut link, prepared, &config, peer_id,
+    ))
+    .await?;
     let limiter = link.limiter_report();
     Ok((report, limiter))
 }
@@ -10771,7 +10780,10 @@ pub async fn receive_on_endpoint_with_options(
     // the same bounded replay path as freshly received UDP packets instead of
     // bulk-ingesting before manifest parsing creates decoders.
     link.queue_received_packets(early_data);
-    run_receiver_session(cx, &mut link, dest_dir, config, peer_id, &options).await
+    erase_send(run_receiver_session(
+        cx, &mut link, dest_dir, config, peer_id, &options,
+    ))
+    .await
 }
 
 /// Bind a server UDP endpoint on `listen` for the native QUIC receive path.

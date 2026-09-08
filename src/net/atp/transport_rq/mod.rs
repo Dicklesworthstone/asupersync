@@ -11317,16 +11317,16 @@ pub async fn receive_connection_with_options(
 
     let receive_result: Result<ReceiveReport, RqError> = async {
         if control_source_stream {
-            return receive_control_source_stream(
-            cx,
-            &mut control,
-            &manifest,
-            symbol_auth.as_ref(),
-            &mut decoders,
-            dest_dir,
-            peer,
-            options,
-        )
+            return erase_send(receive_control_source_stream(
+                cx,
+                &mut control,
+                &manifest,
+                symbol_auth.as_ref(),
+                &mut decoders,
+                dest_dir,
+                peer,
+                options,
+            ))
             .await;
         }
 
@@ -11405,12 +11405,12 @@ pub async fn receive_connection_with_options(
                 if drained > 0 {
                     rqtrace!("receiver: tail-drained {drained} datagrams after ObjectComplete");
                 }
-                let seed_stats = flush_and_seed_source_streaming_round_boundary(
+                let seed_stats = erase_send(flush_and_seed_source_streaming_round_boundary(
                     cx,
                     &mut decoders,
                     symbol_size,
                     symbol_auth.as_ref(),
-                )
+                ))
                 .await?;
                 round_stats.record_decode_stats(seed_stats.decode_stats);
                 if seed_stats.seeded > 0 {
@@ -11421,8 +11421,12 @@ pub async fn receive_connection_with_options(
                 }
                 let decode_width_budget = rq_decode_width_budget_for_cx(cx, &decoders, symbol_size);
                 let pending_decode_jobs_before_join = rq_pending_decode_jobs(&decoders);
-                let completed_decode_stats =
-                    join_all_pending_decodes(cx, &mut decoders, decode_width_budget).await?;
+                let completed_decode_stats = erase_send(join_all_pending_decodes(
+                    cx,
+                    &mut decoders,
+                    decode_width_budget,
+                ))
+                .await?;
                 round_stats.record_decode_stats(completed_decode_stats);
                 let pending_decode_jobs_after_join = rq_pending_decode_jobs(&decoders);
                 if completed_decode_stats.attempts > 0 {
@@ -11445,7 +11449,7 @@ pub async fn receive_connection_with_options(
                         completed_decode_stats.pending_peak
                     );
                 }
-                flush_cached_entry_staging_files(&mut decoders).await?;
+                erase_send(flush_cached_entry_staging_files(&mut decoders)).await?;
 
                 let pending: Vec<u32> = decoders
                     .iter()
@@ -11521,7 +11525,7 @@ pub async fn receive_connection_with_options(
 
                 if pending.is_empty() {
                     // Verify + commit + Proof.
-                    let receipt = verify_and_commit_with_options(
+                    let receipt = erase_send(verify_and_commit_with_options(
                         &manifest,
                         &mut decoders,
                         dest_dir,
@@ -11530,7 +11534,7 @@ pub async fn receive_connection_with_options(
                         &std::collections::BTreeMap::new(),
                         &completion_digests,
                         options,
-                    )
+                    ))
                     .await?;
                     control
                         .send(&json_frame(FrameType::Proof, &receipt)?)
@@ -16454,7 +16458,7 @@ where
 /// at their per-round await sites starts a fresh proof there, so no crate that
 /// spawns a receive needs `#![recursion_limit]` (br-asupersync-lf8muy). One
 /// allocation per call; never used on the per-datagram path.
-fn erase_send<'a, T>(
+pub(crate) fn erase_send<'a, T>(
     future: impl std::future::Future<Output = T> + Send + 'a,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>> {
     Box::pin(future)

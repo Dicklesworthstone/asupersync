@@ -1229,7 +1229,11 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
         auth_key_ref,
     )
     .map_err(|err| RqError::HandshakeRejected(err.to_string()))?;
-    let mut conns = accept_bonded_donors(
+    // Every deep subtree of the bonded receive is boxed behind
+    // `dyn Future + Send` at its per-round await (one allocation per call), so
+    // callers that spawn this future keep their `Send` proof within rustc's
+    // default recursion depth (br-asupersync-lf8muy).
+    let mut conns = erase_send(accept_bonded_donors(
         cx,
         control_listener,
         &mut control_plane,
@@ -1238,7 +1242,7 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
         &udp_ports,
         peer_id,
         config.accept_timeout,
-    )
+    ))
     .await?;
     let enrolled_donors = u32::try_from(conns.len()).unwrap_or(u32::MAX);
     let donor_count = expected_donors;
@@ -1291,7 +1295,7 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
 
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        pump_bonded_round(
+        erase_send(pump_bonded_round(
             cx,
             &mut udp,
             &mut conns,
@@ -1306,9 +1310,9 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
             symbol_size,
             &mut symbols_accepted,
             stall_window,
-        )
+        ))
         .await?;
-        drain_bonded_round_tail(
+        erase_send(drain_bonded_round_tail(
             cx,
             &mut udp,
             tag,
@@ -1321,18 +1325,23 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
             symbol_size,
             &mut symbols_accepted,
             config.round_tail_drain,
-        )
+        ))
         .await?;
-        let _ = flush_and_seed_source_streaming_round_boundary(
+        let _ = erase_send(flush_and_seed_source_streaming_round_boundary(
             cx,
             &mut decoders,
             symbol_size,
             symbol_auth.as_ref(),
-        )
+        ))
         .await?;
         let decode_width_budget = rq_decode_width_budget_for_cx(cx, &decoders, symbol_size);
-        join_all_pending_decodes(cx, &mut decoders, decode_width_budget).await?;
-        flush_cached_entry_staging_files(&mut decoders).await?;
+        erase_send(join_all_pending_decodes(
+            cx,
+            &mut decoders,
+            decode_width_budget,
+        ))
+        .await?;
+        erase_send(flush_cached_entry_staging_files(&mut decoders)).await?;
 
         let pending: Vec<u32> = decoders
             .iter()
@@ -1388,7 +1397,7 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
             // aborted after the last decode round still unwinds here and
             // commits nothing (the module's cancel-correctness contract).
             cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-            let receipt = verify_and_commit_with_options(
+            let receipt = erase_send(verify_and_commit_with_options(
                 &manifest,
                 &mut decoders,
                 dest_dir,
@@ -1397,7 +1406,7 @@ pub async fn receive_bonded_with_options_and_advertised_ips(
                 &BTreeMap::new(),
                 &CompletionDigestIndex::default(),
                 options,
-            )
+            ))
             .await?;
             let proof = json_frame(FrameType::Proof, &receipt)?;
             for conn in conns.iter_mut().filter(|conn| conn.alive) {
