@@ -186,6 +186,41 @@
   ],
   "allowlist_entries": [
     {
+      "pattern": "src/grpc/client.rs",
+      "category": "production_stub",
+      "owner": "grpc-core",
+      "reason": "The exact Status::unimplemented return is the typed refusal for native HTTP/2 transport on wasm32. The cfg-gated branch returns Err with an explicit unavailable-on-wasm32 message; it does not fabricate an RPC response. Only that return line is covered, not the client implementation or any additional completion marker.",
+      "revisit_condition": "Revisit when the wasm32 native-transport refusal changes; additional markers outside the exact typed-refusal line must remain uncovered.",
+      "replacement_issue": "asupersync-ghxhvm",
+      "justified_text": [
+        "^\\s*return Err\\(Status::unimplemented\\($"
+      ]
+    },
+    {
+      "pattern": "src/grpc/service.rs",
+      "category": "production_stub",
+      "owner": "grpc-core",
+      "reason": "ServiceHandler::call_unary preserves compatibility for metadata-only service implementations by returning canonical gRPC UNIMPLEMENTED when no callable handler exists. These two exact lines document and perform that explicit error result; they do not claim successful dispatch or cover other service behavior.",
+      "revisit_condition": "Revisit when the compatibility default changes; any flagged line outside the documented UNIMPLEMENTED refusal must remain uncovered.",
+      "replacement_issue": "asupersync-ghxhvm",
+      "justified_text": [
+        "^\\s*/// service fails closed with gRPC `UNIMPLEMENTED` instead of being mistaken$",
+        "^\\s*Box::pin\\(async move \\{ Err\\(Status::unimplemented\\(message\\)\\) \\}\\)$"
+      ]
+    },
+    {
+      "pattern": "src/net/atp/transport_rq/mod.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "The local placeholder variable holds the existing deterministic 64-zero digest sentinel. validate_rq_topology_content_shape accepts it only for direct zero-length topology entries, alongside the empty-content SHA-256; nonzero sizes and nonempty digests are rejected by rq_special_file_metadata_requires_direct_canonical_empty_content. These exact declaration and comparison lines describe protocol data, not an unfinished transfer or fabricated content verification.",
+      "revisit_condition": "Revisit if the zero-content topology digest representation changes; any additional flagged line in the transport remains uncovered.",
+      "replacement_issue": "asupersync-ghxhvm",
+      "justified_text": [
+        "^\\s*let placeholder = sha256_hex_placeholder\\(\\);$",
+        "^\\s*\\|\\| \\(sha256_hex != empty_sha256_hex\\.as_str\\(\\) && sha256_hex != placeholder\\.as_str\\(\\)\\)\\)$"
+      ]
+    },
+    {
       "pattern": "src/bin/dependency_verification_matrix.rs",
       "category": "production_stub",
       "owner": "runtime-core",

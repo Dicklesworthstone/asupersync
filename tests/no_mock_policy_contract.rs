@@ -207,6 +207,71 @@ fn no_mock_policy_metadata_is_actionable_and_not_overbroad() {
 }
 
 #[test]
+fn no_mock_policy_lexical_exceptions_preserve_uncovered_production_hits() {
+    // Exercise the scanner's real coverage decision with the current source
+    // lines and an extra bad line on each path. The whole-tree gate below
+    // remains independent; no exception covers PBFT production markers.
+    command_output(
+        {
+            let mut command = Command::new("python3");
+            command
+                .arg("-c")
+                .arg(
+                    r#"
+import datetime as dt
+import pathlib
+import runpy
+
+scanner = runpy.run_path("scripts/check_no_mock_policy.py")
+policy = scanner["load_policy"](pathlib.Path(".github/no_mock_policy.json"))
+paths = [
+    "src/grpc/client.rs",
+    "src/grpc/service.rs",
+    "src/net/atp/transport_rq/mod.rs",
+]
+pbft = "src/distributed/consensus/pbft.rs"
+scanned = scanner["run_scan"](paths + [pbft], policy["scan"]["terms"])
+hits, _, undetermined = scanner["partition_test_gated_hits"](scanned, pathlib.Path.cwd())
+for path in undetermined:
+    # An unresolved test boundary must retain every hit as production.
+    assert [hit for hit in hits if hit.path == path] == [
+        hit for hit in scanned if hit.path == path
+    ], path
+now = dt.datetime.now(dt.timezone.utc)
+
+def coverage(path, path_hits, selected_policy=policy):
+    category = scanner["classify_path"](path, selected_policy)
+    return scanner["coverage_for_path"](path, category, selected_policy, now, path_hits)
+
+without_exceptions = dict(policy)
+without_exceptions["allowlist_entries"] = [
+    entry for entry in policy["allowlist_entries"] if entry.get("pattern") not in paths
+]
+for path in paths:
+    path_hits = [hit for hit in hits if hit.path == path]
+    assert path_hits, path
+    status, entry = coverage(path, path_hits)
+    assert status == "allowlist" and entry.get("justified_text"), (path, status)
+    assert coverage(path, path_hits, without_exceptions)[0] == "violation", path
+    invented = scanner["Hit"](path, 0, 'return Ok("fake success");', ("fake",))
+    assert coverage(path, path_hits + [invented])[0] == "violation", path
+
+pbft_hits = [hit for hit in hits if hit.path == pbft]
+if pbft_hits:
+    assert coverage(pbft, pbft_hits)[0] == "violation", "PBFT must not be waived"
+invented_pbft = scanner["Hit"](pbft, 0, 'return Ok("fake success");', ("fake",))
+assert coverage(pbft, [invented_pbft])[0] == "violation", "new PBFT gaps must fail"
+print(f"three lexical exceptions stay narrow; {len(pbft_hits)} live PBFT hits uncovered")
+"#,
+                )
+                .current_dir(repo_path(""));
+            command
+        },
+        "lexical exception coverage and production negatives",
+    );
+}
+
+#[test]
 fn no_mock_policy_report_passes_and_keeps_categories_visible() {
     let report_path = repo_path(&format!(
         "target/{}-code-finder/asupersync-a45-contract-test",
