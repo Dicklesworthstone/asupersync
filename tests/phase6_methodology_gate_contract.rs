@@ -4,6 +4,9 @@ use serde_json::Value as JsonValue;
 use serde_yaml::Value as YamlValue;
 use std::path::{Path, PathBuf};
 
+#[path = "../benches/phase6_gate.rs"]
+mod phase6_gate;
+
 const README_PATH: &str = "README.md";
 const WORKFLOW_PATH: &str = ".github/workflows/methodology-gates.yml";
 const CONTRACT_PATH: &str = "artifacts/phase6_methodology_gate_enforcement_contract_v1.json";
@@ -619,4 +622,183 @@ fn readme_describes_direct_main_lane_and_no_longer_claims_pr_only_enforcement() 
             "README must not preserve stale PR-only claim `{stale}`"
         );
     }
+}
+
+const HOST_FAMILY_MPSC_OPERATIONS: [&str; 9] = [
+    "methodology/channel/mpsc_create_cap16",
+    "methodology/channel/mpsc_create_cap256",
+    "methodology/channel/mpsc_sender_clone",
+    "methodology/channel/mpsc_throughput/10",
+    "methodology/channel/mpsc_throughput/100",
+    "methodology/channel/mpsc_throughput/1000",
+    "methodology/channel/mpsc_try_send_recv/1",
+    "methodology/channel/mpsc_try_send_recv/16",
+    "methodology/channel/mpsc_try_send_recv/256",
+];
+
+fn host_family_rows(current_p50_ns: f64, reverse: bool) -> Vec<JsonValue> {
+    let hostname = std::process::Command::new("hostname")
+        .output()
+        .expect("resolve the real fixture host");
+    assert!(hostname.status.success());
+    let hostname = String::from_utf8(hostname.stdout).expect("UTF-8 hostname");
+    let environment = format!("host:{}", hostname.trim());
+    let other_environment = format!("{environment}-other-fixture-host");
+    let other_p50_ns = if current_p50_ns == 100.0 {
+        1000.0
+    } else {
+        100.0
+    };
+    // A passing control prevents an omitted MPSC family from being caught
+    // only by the unrelated all-hosts-mismatched guard.
+    let mut rows = vec![serde_json::json!({
+        "operation": "methodology/control/present",
+        "environment": environment,
+        "p50_ns": 100.0,
+    })];
+    for operation in HOST_FAMILY_MPSC_OPERATIONS {
+        rows.push(serde_json::json!({
+            "operation": operation,
+            "environment": environment,
+            "p50_ns": current_p50_ns,
+        }));
+        rows.push(serde_json::json!({
+            "operation": operation,
+            "environment": other_environment,
+            "p50_ns": other_p50_ns,
+        }));
+    }
+    if reverse {
+        rows.reverse();
+    }
+    rows
+}
+
+fn run_host_family_fixture(rows: Vec<JsonValue>, omit_first_estimate: bool) -> (bool, String) {
+    // Keep the synthetic input and subprocess receipts for inspection. This
+    // exercises the real comparator, without timing a benchmark or changing
+    // process-global environment variables in a parallel test runner.
+    let fixture_root = tempfile::Builder::new()
+        .prefix("asupersync-phase6-family-")
+        .tempdir()
+        .expect("create host-family fixture")
+        .keep();
+    let baseline_path = fixture_root.join("baseline.json");
+    std::fs::write(
+        &baseline_path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": "1.0.0",
+            "baselines": rows,
+        }))
+        .expect("encode fixture baseline"),
+    )
+    .expect("write fixture baseline");
+    let criterion_home = fixture_root.join("criterion");
+    for (operation, candidate) in std::iter::once(("methodology/control/present", 100.0)).chain(
+        HOST_FAMILY_MPSC_OPERATIONS
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !omit_first_estimate || *index != 0)
+            .map(|(_, operation)| (*operation, 110.0)),
+    ) {
+        let estimates_dir = criterion_home
+            .join(operation.replacen('/', "_", 1))
+            .join("new");
+        std::fs::create_dir_all(&estimates_dir).expect("create fixture estimate directory");
+        std::fs::write(
+            estimates_dir.join("estimates.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "median": {"point_estimate": candidate},
+            }))
+            .expect("encode fixture estimate"),
+        )
+        .expect("write fixture estimate");
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args(["--exact", "phase6_gate_fixture_child", "--nocapture"])
+        .env("ASUPERSYNC_PHASE6_FIXTURE_CHILD", "1")
+        .env("ASUPERSYNC_PHASE6_BASELINE", &baseline_path)
+        .env("ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT", "5")
+        .env("CRITERION_HOME", &criterion_home)
+        .output()
+        .expect("run real comparator in a child process");
+    std::fs::write(fixture_root.join("stdout.log"), &output.stdout).expect("retain stdout");
+    std::fs::write(fixture_root.join("stderr.log"), &output.stderr).expect("retain stderr");
+    eprintln!(
+        "Phase 6 host-family fixture retained: {}",
+        fixture_root.display()
+    );
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    (output.status.success(), text)
+}
+
+#[test]
+fn phase6_gate_fixture_child() {
+    if std::env::var_os("ASUPERSYNC_PHASE6_FIXTURE_CHILD").is_none() {
+        return;
+    }
+    phase6_gate::run_phase6_p50_gate("methodology/").unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn phase6_host_family_compares_all_nine_mpsc_rows_in_both_orders() {
+    for reverse in [false, true] {
+        for current_p50_ns in [100.0, 1000.0] {
+            let (passed, output) =
+                run_host_family_fixture(host_family_rows(current_p50_ns, reverse), false);
+            if current_p50_ns == 100.0 {
+                assert!(
+                    !passed,
+                    "all nine current-host regressions were omitted: {output}"
+                );
+                assert!(
+                    output.contains("p50 regressions"),
+                    "wrong failure: {output}"
+                );
+                for operation in HOST_FAMILY_MPSC_OPERATIONS {
+                    assert!(
+                        output.contains(&format!("{operation}: 100.00 -> 110.00")),
+                        "missing current-host regression for {operation}: {output}"
+                    );
+                }
+            } else {
+                assert!(
+                    passed,
+                    "the stricter sibling must not gate this host: {output}"
+                );
+                assert!(
+                    output.contains("10 of 19 tracked rows compared"),
+                    "matching rows must be compared even when sibling rows are skipped: {output}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn phase6_host_family_requires_matching_estimates_and_unique_host_rows() {
+    let (passed, output) = run_host_family_fixture(host_family_rows(1000.0, false), true);
+    assert!(
+        !passed,
+        "a missing current-host estimate must fail: {output}"
+    );
+    assert!(
+        output.contains("cannot read Phase 6 Criterion estimates"),
+        "{output}"
+    );
+    assert!(
+        output.contains("mpsc_create_cap16/new/estimates.json"),
+        "{output}"
+    );
+
+    let mut rows = host_family_rows(1000.0, false);
+    rows.push(rows[1].clone());
+    let (passed, output) = run_host_family_fixture(rows, false);
+    assert!(!passed, "duplicate current-host rows must fail: {output}");
+    assert!(output.contains("duplicate operation"), "{output}");
+    assert!(output.contains("mpsc_create_cap16"), "{output}");
 }
