@@ -1,0 +1,13 @@
+[package]
+name = "entry-macro-compat-v043"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+asupersync = "=0.4.3"
+
+[patch.crates-io]
+asupersync-macros = { path = "../../../asupersync-macros" }

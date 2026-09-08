@@ -1,0 +1,12 @@
+//! Compile unchanged entry annotations against the published compatibility floor.
+//!
+//! The published runtime accepts newer 0.4.x macros through its dependency
+//! requirement. Checking all targets covers both entry attributes without
+//! replacing the runtime with the current workspace source.
+
+/// An unconfigured entry point must remain compatible with runtime 0.4.3.
+#[asupersync::main]
+pub async fn main() {}
+
+#[asupersync::test]
+async fn unconfigured_test() {}
