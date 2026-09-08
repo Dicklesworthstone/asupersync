@@ -1540,6 +1540,90 @@ fn fallback_io_pump_loop(driver: &IoDriverHandle) -> ! {
     }
 }
 
+/// Socket-side counters for the fallback I/O driver so a test can prove
+/// whether a driverless socket asked to be parked and whether the pump
+/// dispatched its wake (GH#67 follow-up, asupersync-t64ggs). Compiled only
+/// for tests and `test-internals`; production builds carry no counters.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+mod fallback_io_probe {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Registrations accepted by the fallback driver.
+    pub(super) static REGISTRATIONS: AtomicU64 = AtomicU64::new(0);
+    /// Re-arms of a registration living on the fallback driver (one per
+    /// `Pending` poll of such a socket).
+    pub(super) static REARMS: AtomicU64 = AtomicU64::new(0);
+    /// Fallback registrations dropped because an ambient driver appeared.
+    pub(super) static MIGRATIONS: AtomicU64 = AtomicU64::new(0);
+    /// Legacy immediate self-wakes taken instead of parking.
+    pub(super) static SELF_WAKES: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn bump(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn bump_if(condition: bool, counter: &AtomicU64) {
+        if condition {
+            bump(counter);
+        }
+    }
+
+    pub(super) fn load(counter: &AtomicU64) -> u64 {
+        counter.load(Ordering::Relaxed)
+    }
+}
+
+/// Snapshot of the process-global fallback I/O driver (GH#67): the pump's
+/// reactor statistics plus the socket-side counters from
+/// [`fallback_io_probe`]. Tests use it to tell "no datagram reached the
+/// socket" from "the socket was never re-polled after its wake".
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FallbackIoDriverProbe {
+    /// Reactor turns completed by the pump thread.
+    pub polls: u64,
+    /// Readiness events the reactor reported to the pump.
+    pub events_received: u64,
+    /// Wakers the pump fired for those events.
+    pub wakers_dispatched: u64,
+    /// Events whose token no longer had a waker.
+    pub unknown_tokens: u64,
+    /// Waker registrations the driver has accepted.
+    pub registrations: u64,
+    /// Waker deregistrations.
+    pub deregistrations: u64,
+    /// Sockets that registered on the fallback driver (socket-side count).
+    pub fallback_registrations: u64,
+    /// Re-arms of fallback registrations (one per `Pending` poll).
+    pub fallback_rearms: u64,
+    /// Fallback registrations dropped in favour of an ambient driver.
+    pub fallback_migrations: u64,
+    /// Legacy immediate self-wakes taken instead of parking.
+    pub fallback_self_wakes: u64,
+}
+
+/// Returns a snapshot of the fallback I/O driver's counters, or `None` when
+/// the driver was never started (no driverless socket poll happened yet) or
+/// could not be created. Never starts the driver as a side effect.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+#[must_use]
+pub fn fallback_io_driver_probe() -> Option<FallbackIoDriverProbe> {
+    let driver = &GLOBAL_FALLBACK_IO.get()?.as_ref()?.driver;
+    let stats = driver.stats();
+    Some(FallbackIoDriverProbe {
+        polls: stats.polls,
+        events_received: stats.events_received,
+        wakers_dispatched: stats.wakers_dispatched,
+        unknown_tokens: stats.unknown_tokens,
+        registrations: stats.registrations,
+        deregistrations: stats.deregistrations,
+        fallback_registrations: fallback_io_probe::load(&fallback_io_probe::REGISTRATIONS),
+        fallback_rearms: fallback_io_probe::load(&fallback_io_probe::REARMS),
+        fallback_migrations: fallback_io_probe::load(&fallback_io_probe::MIGRATIONS),
+        fallback_self_wakes: fallback_io_probe::load(&fallback_io_probe::SELF_WAKES),
+    })
+}
+
 /// A UDP socket.
 #[derive(Debug)]
 pub struct UdpSocket {
@@ -3068,10 +3152,14 @@ impl UdpSocket {
                 .and_then(|current| current.io_driver_handle())
                 .is_some()
         {
+            #[cfg(any(test, feature = "test-internals"))]
+            fallback_io_probe::bump(&fallback_io_probe::MIGRATIONS);
             self.clear_registration();
         }
 
         if let Some(registration) = &mut self.registration {
+            #[cfg(any(test, feature = "test-internals"))]
+            fallback_io_probe::bump_if(self.registration_on_fallback, &fallback_io_probe::REARMS);
             // Re-arm reactor interest and conditionally update the waker in a
             // single lock acquisition (will_wake guard skips the clone).
             match registration.rearm(target_interest, cx.waker()) {
@@ -3081,6 +3169,8 @@ impl UdpSocket {
                 }
                 Err(err) if err.kind() == io::ErrorKind::NotConnected => {
                     self.clear_registration();
+                    #[cfg(any(test, feature = "test-internals"))]
+                    fallback_io_probe::bump(&fallback_io_probe::SELF_WAKES);
                     crate::net::tcp::stream::fallback_rewake(cx);
                     return Ok(());
                 }
@@ -3121,11 +3211,15 @@ impl UdpSocket {
         interest: Interest,
     ) -> io::Result<()> {
         let Some(driver) = global_fallback_io_driver() else {
+            #[cfg(any(test, feature = "test-internals"))]
+            fallback_io_probe::bump(&fallback_io_probe::SELF_WAKES);
             crate::net::tcp::stream::fallback_rewake(cx);
             return Ok(());
         };
         match driver.register(&*self.inner, interest, cx.waker().clone()) {
             Ok(registration) => {
+                #[cfg(any(test, feature = "test-internals"))]
+                fallback_io_probe::bump(&fallback_io_probe::REGISTRATIONS);
                 self.registration = Some(registration);
                 self.registration_on_fallback = true;
                 Ok(())
@@ -3136,6 +3230,8 @@ impl UdpSocket {
                     io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
                 ) =>
             {
+                #[cfg(any(test, feature = "test-internals"))]
+                fallback_io_probe::bump(&fallback_io_probe::SELF_WAKES);
                 crate::net::tcp::stream::fallback_rewake(cx);
                 Ok(())
             }
@@ -5032,6 +5128,66 @@ mod tests {
             let first = global_fallback_io_driver().expect("fallback I/O driver on this target");
             let second = global_fallback_io_driver().expect("fallback I/O driver on this target");
             assert!(std::ptr::eq(first, second));
+        }
+
+        /// The GH#67 follow-up probe reports what the fallback driver did for
+        /// a driverless socket: a registration on the first idle poll, a
+        /// re-arm on every later idle poll, and a dispatched wake per
+        /// datagram. ATP's wait diagnostics use it to separate "no datagram
+        /// reached the socket" from "the socket was never re-polled after its
+        /// wake". Counters are process-global (other tests run concurrently),
+        /// so every delta is a lower bound.
+        #[test]
+        fn fallback_probe_counts_registration_rearm_and_dispatch() {
+            assert!(Cx::current().is_none());
+            let mut socket = bound_socket();
+            let local_addr = socket.local_addr().expect("local addr");
+            let peer = StdUdpSocket::bind("127.0.0.1:0").expect("bind peer");
+            let (_signal, waker, rx) = signal_waker();
+            let task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 64];
+
+            let before = fallback_io_driver_probe().unwrap_or_default();
+            assert!(matches!(
+                socket.poll_recv_from(&task_cx, &mut buf),
+                Poll::Pending
+            ));
+            let registered =
+                fallback_io_driver_probe().expect("driverless poll starts the fallback driver");
+            assert!(
+                registered.fallback_registrations >= before.fallback_registrations + 1,
+                "idle poll registers on the fallback driver: {registered:?} vs {before:?}"
+            );
+            assert!(registered.registrations >= before.registrations + 1);
+
+            assert!(matches!(
+                socket.poll_recv_from(&task_cx, &mut buf),
+                Poll::Pending
+            ));
+            let rearmed = fallback_io_driver_probe().expect("probe");
+            assert!(
+                rearmed.fallback_rearms >= registered.fallback_rearms + 1,
+                "second idle poll re-arms the fallback registration: {rearmed:?}"
+            );
+            assert_eq!(
+                rearmed.fallback_self_wakes, registered.fallback_self_wakes,
+                "a parked poll never takes the legacy self-wake path"
+            );
+
+            peer.send_to(b"probe", local_addr).expect("send datagram");
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("fallback reactor pump delivers the readiness wake");
+            let woken = fallback_io_driver_probe().expect("probe");
+            assert!(
+                woken.wakers_dispatched >= rearmed.wakers_dispatched + 1,
+                "the pump dispatched the socket's wake: {woken:?} vs {rearmed:?}"
+            );
+            assert!(woken.events_received >= rearmed.events_received + 1);
+            assert!(woken.polls >= rearmed.polls + 1);
+            assert!(matches!(
+                socket.poll_recv_from(&task_cx, &mut buf),
+                Poll::Ready(Ok((5, _)))
+            ));
         }
     }
 }
