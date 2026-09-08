@@ -560,7 +560,7 @@
       ],
       "docs_markers": {
         "README.md": [
-          "dedicated worker support"
+          "thread and dedicated workers"
         ],
         "docs/WASM.md": [
           "DedicatedWorkerGlobalScope",

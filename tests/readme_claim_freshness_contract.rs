@@ -117,8 +117,8 @@ fn live_docs_cover_every_snapshot_marker() {
     let claims = receipt["claims"].as_array().expect("claims array");
     assert_eq!(
         claims.len(),
-        36,
-        "live snapshot should still cover 36 claim rows"
+        37,
+        "live snapshot should cover 37 claim rows, including dependency CI/provenance signoff"
     );
     for claim in claims {
         assert_eq!(claim["fresh"].as_bool(), Some(true));
