@@ -10,12 +10,16 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-08-21, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts; the latest release baseline
-is `v0.4.9`.
+Scope window: current work through 2026-09-08, reconstructed from git history,
+beads, benchmark ledgers, and live repo artifacts. The `v0.4.11` candidate
+collects the changes since the published `v0.4.10` source.
 
 ## Version Timeline
 
+- **v0.4.11 candidate**: runtime cancellation and teardown, root-region drain,
+  non-blocking file traits, Kafka lifecycle fixes, and bounded QUIC receive
+  reassembly. Release validation and publication are tracked in
+  `asupersync-ghxhvm`.
 - **v0.4.10 Release**: lock-free `Cx::published_cancel_requested()` for hot
   cancellation polls and a RaptorQ lib-test build fix, preserving the v0.4.3
   public compatibility floor. Published to crates.io on 2026-09-01 from
@@ -64,6 +68,20 @@ is `v0.4.9`.
 ---
 
 ## [Unreleased]
+
+## [v0.4.11] - 2026-09-08
+
+### QUIC reassembly and ATP framing
+
+- Adjacent received stream ranges coalesce into contiguous runs, keeping the
+  reassembly budget tied to out-of-order holes instead of packet count.
+  Packets that exceed receive capacity are dropped before frame side effects
+  and acknowledgment, so loss recovery can retry after application reads free
+  capacity. The fixed guard remains bounded.
+- ATP binary frame decoding preserves incomplete prefixes, rejects truncated
+  frames at stream FIN, and binds client completion to its original handshake.
+- Self-signed certificate coverage distinguishes a valid server leaf from a
+  CA certificate used as a leaf. Exact pins preserve WebPKI's role checks.
 
 ### Kafka client against a real broker (2026-09-02)
 
