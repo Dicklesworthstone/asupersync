@@ -726,6 +726,163 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_ancestor_cancel_preserves_descendant_shutdown_ceiling_and_unbounded_sibling() {
+        use crate::error::ErrorKind;
+        use crate::lab::{LabConfig, LabRuntime};
+        use crate::types::Outcome;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct CleanupRetirement(Arc<AtomicUsize>);
+
+        impl Drop for CleanupRetirement {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        // br-asupersync-jrdfmh: None at the cancellation root must not hide
+        // a descendant's existing ceiling from that descendant's children.
+        let mut lab = LabRuntime::new(LabConfig::new(0x34_C300).max_steps(4096));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let opened = Arc::new(Mutex::new(None));
+        let opened_slot = Arc::clone(&opened);
+        let result = Arc::new(Mutex::new(None));
+        let result_slot = Arc::clone(&result);
+        let (begin_cancel, mut wait_cancel) = crate::channel::oneshot::channel();
+        let reason = CancelReason::user("ordinary ancestor cancellation");
+        let owner_reason = reason.clone();
+        let (owner, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let ancestor = cx
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                let bounded = ancestor
+                    .cx()
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                let grandchild = bounded
+                    .cx()
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                let sibling = ancestor
+                    .cx()
+                    .open_child_region(ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                *opened_slot.lock() = Some((
+                    ancestor.region_id(),
+                    bounded.region_id(),
+                    grandchild.region_id(),
+                    sibling.region_id(),
+                ));
+                wait_cancel.recv_uninterruptible().await.unwrap();
+                ancestor.cancel(owner_reason).unwrap();
+                *result_slot.lock() = Some(ancestor.close_with_outcome().await.unwrap());
+                drop((bounded, grandchild, sibling));
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        lab.run_until_idle();
+        let (ancestor, bounded, grandchild, sibling) = opened.lock().unwrap();
+        let budgets = [ancestor, bounded, grandchild, sibling].map(|region| {
+            let record = lab.state.region(region).unwrap();
+            assert!(record.shutdown_budget().is_none());
+            record.shutdown_budget_handle()
+        });
+        let receipts = [bounded, grandchild, sibling]
+            .map(|region| lab.state.region(region).unwrap().close_receipt_handle());
+        let ceiling = Budget::INFINITE.with_poll_quota(2);
+        assert!(
+            lab.state
+                .region(bounded)
+                .unwrap()
+                .tighten_shutdown_budget(ceiling)
+        );
+        assert!(budgets[2].read().is_none());
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        assert!(lab.state.register_async_finalizer(
+            grandchild,
+            ShutdownProbe {
+                polls: Arc::clone(&polls),
+                drops: Arc::clone(&drops),
+                wake_again: true,
+            }
+        ));
+        let sibling_started = Arc::new(AtomicBool::new(false));
+        let started = Arc::clone(&sibling_started);
+        let sibling_drops = Arc::new(AtomicUsize::new(0));
+        let retired = Arc::clone(&sibling_drops);
+        let (finish_sibling, mut wait_sibling) = crate::channel::oneshot::channel();
+        assert!(lab.state.register_async_finalizer(sibling, async move {
+            let _retirement = CleanupRetirement(retired);
+            started.store(true, Ordering::SeqCst);
+            wait_sibling.recv_uninterruptible().await.unwrap();
+        }));
+
+        let owner_cx = lab.state.task(owner).unwrap().cx.clone().unwrap();
+        begin_cancel.send(&owner_cx, ()).unwrap();
+        lab.run_until_idle();
+        assert_eq!(*budgets[1].read(), Some(ceiling));
+        assert_eq!(*budgets[2].read(), Some(ceiling));
+        assert!(budgets[0].read().is_none());
+        assert!(budgets[3].read().is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        for receipt in &receipts[..2] {
+            assert!(matches!(
+                receipt.lock().as_ref().unwrap().cleanup_outcome,
+                Some(Outcome::Err(ref error)) if error.kind() == ErrorKind::PollQuotaExhausted
+            ));
+        }
+        assert!(matches!(
+            receipts[1].lock().as_ref().unwrap().outcome,
+            Outcome::Err(ref error) if error.kind() == ErrorKind::PollQuotaExhausted
+        ));
+        assert!(lab.state.region(bounded).is_none());
+        assert!(lab.state.region(grandchild).is_none());
+        assert!(sibling_started.load(Ordering::SeqCst));
+        assert_eq!(sibling_drops.load(Ordering::SeqCst), 0);
+        assert!(receipts[2].lock().is_none());
+        assert!(result.lock().is_none());
+        assert!(join.try_join().unwrap().is_none());
+
+        // The sibling completes through its real wake and success path, without
+        // ever receiving an explicit ceiling to make it retire.
+        finish_sibling.send(&owner_cx, ()).unwrap();
+        lab.run_until_idle();
+        assert!(join.try_join().unwrap().is_some());
+        assert_eq!(sibling_drops.load(Ordering::SeqCst), 1);
+        assert!(budgets[3].read().is_none());
+        let sibling_receipt = receipts[2].lock();
+        let sibling_receipt = sibling_receipt.as_ref().unwrap();
+        assert!(matches!(sibling_receipt.outcome, Outcome::Ok(())));
+        assert!(matches!(sibling_receipt.cleanup_outcome, Some(Outcome::Ok(()))));
+        let outcome = result.lock().take().unwrap();
+        assert!(matches!(outcome.outcome, Outcome::Cancelled(ref actual) if *actual == reason));
+        assert!(matches!(
+            outcome.cleanup_outcome,
+            Some(Outcome::Err(ref error)) if error.kind() == ErrorKind::PollQuotaExhausted
+        ));
+        assert!(lab.state.region(ancestor).is_none());
+        assert!(lab.state.region(sibling).is_none());
+        assert_eq!(lab.state.live_task_count(), 0);
+        assert_eq!(lab.state.pending_obligation_count(), 0);
+        assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+        lab.state
+            .close_region_command(root, &CancelReason::user("test complete"));
+        lab.run_until_idle();
+        assert!(lab.state.region(root).is_none());
+        assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+    }
+
+    #[test]
     fn managed_close_distinguishes_cancelled_body_from_descendant_cleanup_failure() {
         use crate::lab::{LabConfig, LabRuntime};
         use crate::types::Outcome;

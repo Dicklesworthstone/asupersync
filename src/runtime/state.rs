@@ -6916,7 +6916,10 @@ impl RuntimeState {
         // Each child region's reason chains to its parent's reason.
         let mut region_reasons: HashMap<RegionId, CancelReason> =
             HashMap::with_capacity(regions_to_cancel.len());
-        let mut shutdown_budgets = HashMap::with_capacity(regions_to_cancel.len());
+        // Ordinary cancellation needs no allocation when no region has an
+        // explicit ceiling. Still visit every descendant to retain its own
+        // ceiling, including Some(Budget::INFINITE).
+        let mut shutdown_budgets: HashMap<RegionId, Budget> = HashMap::new();
         let mut tightened_finalizers = HashSet::new();
 
         // First pass: mark regions with cancellation reason and transition to Closing
@@ -6930,7 +6933,7 @@ impl RuntimeState {
                 shutdown_budget
             } else {
                 node.parent
-                    .and_then(|parent| shutdown_budgets.get(&parent).copied().flatten())
+                    .and_then(|parent| shutdown_budgets.get(&parent).copied())
             };
             if let Some(region) = regions.resolve_ref(&self.regions).get(rid.arena_index()) {
                 if let Some(budget) = inherited
@@ -6938,7 +6941,9 @@ impl RuntimeState {
                 {
                     tightened_finalizers.insert(rid);
                 }
-                shutdown_budgets.insert(rid, region.shutdown_budget());
+                if let Some(budget) = region.shutdown_budget() {
+                    shutdown_budgets.insert(rid, budget);
+                }
             }
 
             // Build the cancel reason with proper cause chain:
@@ -7073,7 +7078,7 @@ impl RuntimeState {
                 let Some((effects, task_budget_res, task_live)) =
                     tasks.resolve(&mut self.tasks).update_task(task_id, |task| {
                         let task_budget =
-                            shutdown_budgets.get(&rid).copied().flatten().map_or_else(
+                            shutdown_budgets.get(&rid).copied().map_or_else(
                                 || task_reason.cleanup_budget(),
                                 |ceiling| task_reason.cleanup_budget().combine_untraced(ceiling),
                             );
