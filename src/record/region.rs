@@ -934,6 +934,15 @@ impl RegionRecord {
         Arc::clone(&self.close_receipt)
     }
 
+    /// Copies only cleanup evidence when folding a closed child into its parent.
+    /// The retained canonical outcome can contain an allocated cancel cause chain.
+    pub(crate) fn closed_cleanup_outcome(&self) -> Option<TaskOutcome> {
+        self.close_receipt
+            .lock()
+            .as_ref()
+            .and_then(|receipt| receipt.cleanup_outcome.clone())
+    }
+
     pub(crate) fn shutdown_budget_handle(&self) -> crate::record::finalizer::ShutdownBudget {
         Arc::clone(&self.shutdown_budget)
     }

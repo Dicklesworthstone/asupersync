@@ -841,10 +841,17 @@ mod tests {
                 Some(Outcome::Err(ref error)) if error.kind() == ErrorKind::PollQuotaExhausted
             ));
         }
-        assert!(matches!(
-            receipts[1].lock().as_ref().unwrap().outcome,
-            Outcome::Err(ref error) if error.kind() == ErrorKind::PollQuotaExhausted
-        ));
+        // The lab admits finalizer tasks after draining both lifecycle commands.
+        // Their scheduler outcomes retain the unit-error mapping; the separate
+        // cleanup receipts above preserve the exact exhausted quota.
+        {
+            let grandchild_receipt = receipts[1].lock();
+            let outcome = &grandchild_receipt.as_ref().unwrap().outcome;
+            assert!(
+                matches!(outcome, Outcome::Err(error) if error.kind() == ErrorKind::Internal),
+                "canonical grandchild outcome: {outcome:?}"
+            );
+        }
         assert!(lab.state.region(bounded).is_none());
         assert!(lab.state.region(grandchild).is_none());
         assert!(sibling_started.load(Ordering::SeqCst));
@@ -863,7 +870,11 @@ mod tests {
         {
             let sibling_receipt = receipts[2].lock();
             let sibling_receipt = sibling_receipt.as_ref().unwrap();
-            assert!(matches!(sibling_receipt.outcome, Outcome::Ok(())));
+            assert!(
+                matches!(&sibling_receipt.outcome, Outcome::Ok(())),
+                "canonical sibling outcome: {:?}",
+                sibling_receipt.outcome
+            );
             assert!(matches!(
                 sibling_receipt.cleanup_outcome,
                 Some(Outcome::Ok(()))
