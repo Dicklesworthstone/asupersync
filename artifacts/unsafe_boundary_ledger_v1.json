@@ -1710,7 +1710,7 @@
     },
     {
       "site_id": "unsafe-src-channel-mpsc-rs-raw-waker-probe",
-      "path": "src/channel/mpsc.rs",
+      "path": "src/channel/mpsc_tests.rs",
       "category": "channel-test-boundary",
       "scope": "item-boundary",
       "feature_or_platform_gate": "cfg(test) private MPSC RawWaker clone-callback probe",
@@ -1724,79 +1724,79 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 2768,
+          "line": 1167,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 2796,
+          "line": 1195,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 2826,
+          "line": 1225,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 2834,
+          "line": 1233,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 2845,
+          "line": 1244,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 2775,
+          "line": 1174,
           "pattern": "unsafe { Waker::from_raw(raw) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 2802,
+          "line": 1201,
           "pattern": "let probe = ManuallyDrop::new(unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2830,
+          "line": 1229,
           "pattern": "let probe = unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 2839,
+          "line": 1238,
           "pattern": "let probe = ManuallyDrop::new(unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2849,
+          "line": 1248,
           "pattern": "drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });"
         },
         {
           "kind": "unsafe_fn",
-          "line": 2797,
+          "line": 1196,
           "pattern": "unsafe fn clone_waker(data: *const ()) -> RawWaker {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 2827,
+          "line": 1226,
           "pattern": "unsafe fn wake(data: *const ()) {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 2835,
+          "line": 1234,
           "pattern": "unsafe fn wake_by_ref(data: *const ()) {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 2846,
+          "line": 1245,
           "pattern": "unsafe fn drop_waker(data: *const ()) {"
         }
       ]
     },
     {
       "site_id": "unsafe-src-channel-oneshot-rs-raw-waker-probe",
-      "path": "src/channel/oneshot.rs",
+      "path": "src/channel/oneshot_tests.rs",
       "category": "channel-test-boundary",
       "scope": "item-boundary",
       "feature_or_platform_gate": "cfg(test) private oneshot RawWaker clone-callback probe",
@@ -1810,72 +1810,72 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 1470,
+          "line": 339,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 1498,
+          "line": 367,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 1527,
+          "line": 396,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 1535,
+          "line": 404,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 1545,
+          "line": 414,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 1477,
+          "line": 346,
           "pattern": "unsafe { Waker::from_raw(raw) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1503,
+          "line": 372,
           "pattern": "let probe = ManuallyDrop::new(unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1531,
+          "line": 400,
           "pattern": "let probe = unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1539,
+          "line": 408,
           "pattern": "let probe = ManuallyDrop::new(unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1549,
+          "line": 418,
           "pattern": "drop(unsafe { Arc::<RawWakerProbe>::from_raw(data.cast::<RawWakerProbe>()) });"
         },
         {
           "kind": "unsafe_fn",
-          "line": 1499,
+          "line": 368,
           "pattern": "unsafe fn clone_waker(data: *const ()) -> RawWaker {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 1528,
+          "line": 397,
           "pattern": "unsafe fn wake(data: *const ()) {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 1536,
+          "line": 405,
           "pattern": "unsafe fn wake_by_ref(data: *const ()) {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 1546,
+          "line": 415,
           "pattern": "unsafe fn drop_waker(data: *const ()) {"
         }
       ]
@@ -1944,7 +1944,7 @@
     },
     {
       "site_id": "unsafe-src-database-postgres-rs",
-      "path": "src/database/postgres.rs",
+      "path": "src/database/postgres_tests.rs",
       "category": "database-test-or-ffi-boundary",
       "scope": "file-or-item-boundary",
       "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
@@ -1958,22 +1958,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 10035,
+          "line": 940,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 10042,
+          "line": 947,
           "pattern": "unsafe { std::env::set_var(\"SSL_CERT_FILE\", \"/definitely/not/a/postgres-ca.pem\") };"
         },
         {
           "kind": "unsafe_block",
-          "line": 10049,
+          "line": 954,
           "pattern": "unsafe { std::env::set_var(\"SSL_CERT_FILE\", value) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 10053,
+          "line": 958,
           "pattern": "unsafe { std::env::remove_var(\"SSL_CERT_FILE\") };"
         }
       ]
@@ -4986,7 +4986,7 @@
     },
     {
       "site_id": "unsafe-src-sync-pool-rs",
-      "path": "src/sync/pool.rs",
+      "path": "src/sync/pool_tests.rs",
       "category": "sync-internal-cell",
       "scope": "file-or-item-boundary",
       "feature_or_platform_gate": "see source cfg attributes and Cargo feature gates",
@@ -5000,7 +5000,7 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 5255,
+          "line": 3188,
           "pattern": "#[allow(unsafe_code)]"
         }
       ],

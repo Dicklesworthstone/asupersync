@@ -82,6 +82,9 @@ collects the changes since the published `v0.4.10` source.
 - A refused teardown-thread spawn preserves the cleanup job for retry.
   Permanent thread-resource exhaustion can still block ordinary drop;
   the explicit bounded-shutdown APIs retain their separate timeout policy.
+- Ordinary region cancellation avoids allocating the auxiliary shutdown-budget
+  map when no region has an explicit cleanup ceiling. Existing descendant
+  ceilings still propagate, including explicit infinite budgets.
 - Publishing an earlier timer deadline wakes the native reactor, so a worker
   already waiting on a later deadline observes the new timer promptly. This
   also restores timely HTTP/2 graceful-drain completion. A native regression
@@ -192,6 +195,12 @@ collects the changes since the published `v0.4.10` source.
   without a runtime still registers nothing — including `try_acquire`, whose
   signature carries no `Cx` and so registers only when a task-local one is
   current.
+- The lab `obligation_leak` oracle names each leaked record's kind and holder.
+  `tests/channel_permit_runtime_obligations_e2e.rs` exercises stock
+  MPSC, oneshot, broadcast, and semaphore permits through real lab tasks,
+  including leaks and futurelock detection while a permit is held across a
+  parked task. `examples/onramp_level3.rs` now leaks a real permit instead of
+  constructing an obligation record by hand.
 
 ### Kafka consumer close on the cooperative protocol (2026-09-04)
 

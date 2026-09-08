@@ -648,6 +648,14 @@ cd asupersync
 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_readme_docs cargo build --release
 ```
 
+Release archives and `SHA256SUMS.txt` have detached Minisign signatures. After
+downloading an archive and its `.minisig` file, verify it with the established
+[release public key](release/keys/asupersync.pub):
+
+```bash
+minisign -Vm asupersync-linux-amd64.tar.gz -p release/keys/asupersync.pub
+```
+
 ### Minimum Supported Rust Version
 
 Asupersync uses **Rust Edition 2024**. Contributor and release lanes track the
@@ -1331,18 +1339,21 @@ channel; application consumption still depends on the receiver making progress.
 
 The synchronization primitives are deterministic under the lab runtime and
 their wait queues/guards have focused cancellation and cleanup coverage.
-Futurelock detection is narrower: it fires for tasks that stop being polled
-while holding obligations recorded in the runtime's obligation table
-(`RuntimeState::create_obligation`). Today that table is fed by the lab
-harness and by explicit `IoOp::submit` calls; the stock `mpsc`/`oneshot`/
-`broadcast` send permits and `Semaphore` permits do not register there, and
-neither do the session-tracked permits or the database transaction tokens,
-which are standalone typestate tokens (`ObligationToken<K>`). Making those
-permits runtime obligations is tracked as
-`asupersync-gap-permits-as-obligations-cv5sqe`; until it lands the
-futurelock and obligation-leak oracles do not see them. Mutex and RwLock
-guards release on drop and are covered by guard/queue cleanup tests, but
-they are not futurelock-tracked either.
+Futurelock detection and the obligation-leak oracle observe obligations
+recorded in the runtime's obligation table (`RuntimeState::create_obligation`).
+Stock `mpsc`, `oneshot`, and `broadcast` send permits reserved through a
+runtime-built `Cx` register a `SendPermit` through the obligation mailbox;
+sending commits it, while aborting or dropping an unsent permit aborts it.
+`Semaphore` permits likewise register a `SemaphorePermit`, discharged when
+capacity is released. A permit that escapes its task through `mem::forget`
+is reported by the `obligation_leak` oracle by kind and holder. The lab also
+detects a task parked while holding a semaphore permit as a futurelock
+(`tests/channel_permit_runtime_obligations_e2e.rs`). A `Cx` built without a
+runtime keeps the untracked behavior. Session-tracked permits
+(`src/channel/session.rs`) and database transaction tokens remain standalone
+typestate tokens (`ObligationToken<K>`) that those oracles do not see. Mutex
+and RwLock guards release on drop and have guard/queue cleanup tests, but
+they are not obligations either.
 
 ---
 

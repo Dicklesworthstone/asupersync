@@ -34,6 +34,16 @@ line-number locators for existing rows and added rows for the standalone
 test. The worktree was dirty with peer-owned files, so the artifact again
 records committed `HEAD` only.
 
+The 0.4.11 package-size change (`asupersync-0mhe1w`) moves complete test
+modules without changing their bytes. The existing MPSC and oneshot raw-waker
+probes, PostgreSQL environment fixture, and pool test allow scope now live in
+`src/channel/mpsc_tests.rs`, `src/channel/oneshot_tests.rs`,
+`src/database/postgres_tests.rs`, and `src/sync/pool_tests.rs`. Their ledger
+rows retain the existing site IDs, categories, invariants, and evidence
+requirements; only physical paths and the 33 operation locators change.
+Each parent includes its test file under `cfg(test)`. This relocation adds no
+unsafe operation and makes no new runtime or platform safety claim.
+
 ## Row Schema
 
 Each `sites[]` row must include:
