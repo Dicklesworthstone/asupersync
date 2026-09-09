@@ -18,7 +18,7 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str = "faaee61a3340bfa52d36415b718c4bd97831c275ca6be03910266b4433659ba0";
+const ARTIFACT_SHA256: &str = "2228335cc9b1fd4e8d221d8356ce1d6610b271b2a3f4e8b45ab2f23ce982f09c";
 const DOC_SHA256: &str = "23b278530c81ef134c9a15c7e71ce3d1a8900f3abaaff2287daaa7138fab9196";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -29,7 +29,7 @@ const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const INVENTORY_STATE: &str = "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN";
 const K0_3_ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const K0_3_BASELINE_REVISION: &str = "ae22e710d87412b38e546b32e9702106619481d5";
-const K0_3_SHA256: &str = "cf85355ab65ad06690480c145eebc8c4f87d09221c538dc337348be39456fdcb";
+const K0_3_SHA256: &str = "5fda2f3ee1cb081ac840faf5b16cee3dc931af8a00b9c039322584a0db2337e4";
 const K0_3_TEST_GROUP_COUNT: usize = 35;
 const K0_3_TEST_DECLARATION_COUNT: usize = 959;
 const K0_3_EXACT_TEST_DECLARATION_COUNT: usize = 911;
@@ -184,7 +184,7 @@ const DIRECT_FIXTURE_PINS: &[(&str, &str, u64, u64, &str)] = &[
     ),
     (
         "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        "9cca3ee15c6a4da7d7a73277b846e7ade79c2548701bd08520f02edc145e4d44",
+        "724831535bc3f1e3f138607cd472e493791e34197ee4756042096e5cbe631104",
         72_831,
         1_777,
         "UTF8_LINES",
@@ -2084,23 +2084,23 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
         (
             "documentation_occurrence_tuple_sha256",
-            "f0f0c1bde370cfb8076866fc91187db73dea4c73445804f0eb395360a3bf2779",
+            "291365da19d11286d95ddec56de6c70a2afa4dc563677833d93d711ca4223f9f",
         ),
         (
             "documentation_matching_line_tuple_sha256",
-            "1e6a35be1a772c630c9e82bac167670b08e0cad1064766cd8ed5fbcd6edf914c",
+            "4e4260144d3ef18ae85688452895d9ed163474d8a078652d9cb084e8b36eb880",
         ),
         (
             "documentation_occurrence_id_sha256",
-            "d5b3ed77cfd83f233a70e76814b28c2897209b86bcc3f3bf33178d306664880d",
+            "e040eb2ee6f249875d7bb2e0ccf4e7f9cfb818b29110077b8a37a4c6e429167d",
         ),
         (
             "documentation_canonical_occurrence_id_sha256",
-            "81381d8fcd19e6b37beb4325c1b67eed77a7241d68b0e9a75279b64bb29bd3d5",
+            "f9cff795a2ecf3c1b44b0dc2d5f1879adaa49e95bbc8f5379f1c9fde0bb2befa",
         ),
         (
             "documentation_remainder_occurrence_id_sha256",
-            "7832fa790e0e79ec6a0b404f6f28b480b869edf4d0543bc23e05dbd0c229c4d1",
+            "47010cf88a691e3c4da0bdc77ae91de431d142c8f6249284d549059ef2cc7e71",
         ),
         (
             "documentation_group_id_sha256",

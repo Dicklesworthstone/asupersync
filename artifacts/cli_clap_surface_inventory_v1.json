@@ -24,10 +24,10 @@
       {"path": "scripts/run_dependency_sovereignty_e2e.sh", "sha256": "b2d7894ca7412f96602389a591186acf665698416aeebf4989c53f281300f72b", "line_count": 1869}
     ],
     "reviewed_changes": [
-      "The remote-service plus unix gate adds RemoteArgs, RemoteProbeArgs, Command::Remote, and RemoteCommand::{Serve, Probe}; its one payload argument expands normalization from 527 to 528 rows. Counts describe the complete static source union, not every feature/target build.",
+      "The remote-service plus unix gate adds RemoteArgs, RemoteProbeArgs, Command::Remote, and RemoteCommand::{Serve, Probe}, including one payload argument. Eleven standalone ATP arguments additionally cover xattrs, special files, sparse files, and advertised UDP addresses. Together they expand normalization from 527 to 539 rows. Counts describe the complete static source union, not every feature/target build.",
       "CommonArgs.config now reaches run and the remote serve/probe configuration loaders. Root verbosity, quiet, and debug still have no downstream consumer. Config has no new semantics for the five existing command families.",
       "Exact historical atp_config and atp_workflows pins resolve to snapshots that already contain their current production behavior; only tests changed. This review does not label earlier typed configuration work or persisted hash behavior as new.",
-      "Standalone ATP parser declarations and argument counts remain unchanged despite implementation/test additions. Manifest/library pins include release and remote-service admission changes; logging audit pin replacements establish current source identity, not fresh execution of historical parity receipts."
+      "Standalone ATP command variants and parser-derived type counts remain unchanged, while annotated arguments increase from 99 to 110. Ten bool fields are opt-ins; BondRecvArgs.udp_advertise is a repeatable Vec<IpAddr>. Their static parser/dispatch rows do not prove transport behavior. Manifest/library pins include release and remote-service admission changes; logging audit pin replacements establish current source identity, not fresh execution of historical parity receipts."
     ],
     "remote_surface": {
       "cfg": "all(feature = \"remote-service\", unix)",
@@ -403,7 +403,7 @@
         "derive_subcommand": 1,
         "derive_args": 0,
         "derive_value_enum": 4,
-        "arg_attributes": 99,
+        "arg_attributes": 110,
         "command_attributes": 8,
         "value_attributes": 0,
         "clap_env_attributes": 0
@@ -640,11 +640,22 @@
       "src/cli/atp_command_tree.rs"
     ],
     "remaining_primary_sources": [],
-    "annotated_arg_attribute_count": 491,
+    "annotated_arg_attribute_count": 502,
     "implicit_positional_count": 37,
-    "normalized_field_count": 528,
+    "normalized_field_count": 539,
     "spelling_policy": "EXPLICIT names are copied from attributes; DERIVED names are source-review expectations from Rust field spelling and are not byte-capture evidence",
     "rows": [
+      {"field_id":"CLI-ATP-SEND-PRESERVE-XATTRS","source_path":"src/bin/atp.rs","owner_type":"SendArgs","rust_field":"preserve_xattrs","field_declaration":"preserve_xattrs: bool,","cli_spelling":"--preserve-xattrs","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_SEND_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_SEND","consumer_anchors":["src/bin/atp.rs:394","src/bin/atp.rs:1791-1797","src/bin/atp.rs:1027"]},
+      {"field_id":"CLI-ATP-SEND-ALLOW-SPECIAL-FILES","source_path":"src/bin/atp.rs","owner_type":"SendArgs","rust_field":"allow_special_files","field_declaration":"allow_special_files: bool,","cli_spelling":"--allow-special-files","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_SEND_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_SEND","consumer_anchors":["src/bin/atp.rs:399","src/bin/atp.rs:1791-1797","src/bin/atp.rs:1342"]},
+      {"field_id":"CLI-ATP-SEND-SPARSE-FILES","source_path":"src/bin/atp.rs","owner_type":"SendArgs","rust_field":"sparse_files","field_declaration":"sparse_files: bool,","cli_spelling":"--sparse-files","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_SEND_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_SEND","consumer_anchors":["src/bin/atp.rs:403","src/bin/atp.rs:1791-1797","src/bin/atp.rs:1858-1866"]},
+      {"field_id":"CLI-ATP-RECV-PRESERVE-XATTRS","source_path":"src/bin/atp.rs","owner_type":"RecvArgs","rust_field":"preserve_xattrs","field_declaration":"preserve_xattrs: bool,","cli_spelling":"--preserve-xattrs","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_RECV_AND_SERVE_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_RECV","consumer_anchors":["src/bin/atp.rs:513","src/bin/atp.rs:8825-8832","src/bin/atp.rs:1421"]},
+      {"field_id":"CLI-ATP-RECV-ALLOW-SPECIAL-FILES","source_path":"src/bin/atp.rs","owner_type":"RecvArgs","rust_field":"allow_special_files","field_declaration":"allow_special_files: bool,","cli_spelling":"--allow-special-files","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_RECV_AND_SERVE_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_RECV","consumer_anchors":["src/bin/atp.rs:517","src/bin/atp.rs:8825-8832","src/bin/atp.rs:8958"]},
+      {"field_id":"CLI-ATP-RECV-SPARSE-FILES","source_path":"src/bin/atp.rs","owner_type":"RecvArgs","rust_field":"sparse_files","field_declaration":"sparse_files: bool,","cli_spelling":"--sparse-files","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_RECV_AND_SERVE_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_RECV","consumer_anchors":["src/bin/atp.rs:520","src/bin/atp.rs:8825-8832","src/bin/atp.rs:8958"]},
+      {"field_id":"CLI-ATP-BOND-RECV-UDP-ADVERTISE","source_path":"src/bin/atp.rs","owner_type":"BondRecvArgs","rust_field":"udp_advertise","field_declaration":"udp_advertise: Vec<IpAddr>,","cli_spelling":"--udp-advertise <IP>","argument_kind":"OPTION","spelling_basis":"EXPLICIT_LONG_AND_VALUE_NAME","field_type":"Vec<IpAddr>","source_attribute":"#[arg(long = \"udp-advertise\", value_name = \"IP\")]","source_default":"NONE_EXPLICIT","cardinality":"ZERO_OR_MORE","scope":"ATP_BOND_RECV_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_BOND_RECV","consumer_anchors":["src/bin/atp.rs:608-609","src/bin/atp.rs:2087","src/bin/atp.rs:2113-2132"]},
+      {"field_id":"CLI-ATP-BOND-RECV-ALLOW-SPECIAL-FILES","source_path":"src/bin/atp.rs","owner_type":"BondRecvArgs","rust_field":"allow_special_files","field_declaration":"allow_special_files: bool,","cli_spelling":"--allow-special-files","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_BOND_RECV_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_BOND_RECV","consumer_anchors":["src/bin/atp.rs:647","src/bin/atp.rs:2087-2090"]},
+      {"field_id":"CLI-ATP-BOND-RECV-SPARSE-FILES","source_path":"src/bin/atp.rs","owner_type":"BondRecvArgs","rust_field":"sparse_files","field_declaration":"sparse_files: bool,","cli_spelling":"--sparse-files","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_BOND_RECV_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_BOND_RECV","consumer_anchors":["src/bin/atp.rs:651","src/bin/atp.rs:2087-2090"]},
+      {"field_id":"CLI-ATP-BOND-PULL-ALLOW-SPECIAL-FILES","source_path":"src/bin/atp.rs","owner_type":"BondPullArgs","rust_field":"allow_special_files","field_declaration":"allow_special_files: bool,","cli_spelling":"--allow-special-files","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_BOND_PULL_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_BOND_PULL","consumer_anchors":["src/bin/atp.rs:738","src/bin/atp.rs:2591-2593"]},
+      {"field_id":"CLI-ATP-BOND-PULL-SPARSE-FILES","source_path":"src/bin/atp.rs","owner_type":"BondPullArgs","rust_field":"sparse_files","field_declaration":"sparse_files: bool,","cli_spelling":"--sparse-files","argument_kind":"FLAG","spelling_basis":"DERIVED_LONG","field_type":"bool","source_attribute":"#[arg(long)]","source_default":"NONE_EXPLICIT","cardinality":"PRESENCE_BOOL","scope":"ATP_BOND_PULL_LOCAL","consumer_state":"STRUCT_DISPATCHED_TO_RUN_BOND_PULL","consumer_anchors":["src/bin/atp.rs:743","src/bin/atp.rs:2591-2593"]},
       {
         "field_id": "CLI-ATPD-ROOT-CONFIG",
         "source_path": "src/bin/atpd.rs",
@@ -7026,7 +7037,7 @@
       {
         "gap_id": "CLI-FIELD-GAP-05",
         "state": "SOURCE_OBSERVED",
-        "contract": "standalone atp contributes 99 #[arg] declarations plus ten required implicit positional fields across six parser structs and one inline hidden-command field",
+        "contract": "standalone atp contributes 110 #[arg] declarations plus ten required implicit positional fields across six parser structs and one inline hidden-command field; eleven new opt-in metadata and UDP-advertisement rows retain struct-level dispatch scope",
         "anchors": ["src/bin/atp.rs:188", "src/bin/atp.rs:307", "src/bin/atp.rs:699"]
       },
       {
@@ -7586,7 +7597,7 @@
     "No byte-level help, usage, version, stdout, stderr, or exit-code golden was captured.",
     "The broad four-binary byte-golden matrix remains unexecuted; the scoped offline-tuner subreceipt executed one Linux clean-overlay matrix only.",
     "The scoped offline-tuner unit, real-binary integration, and canonical E2E lanes ran remotely; no broad CLI, workspace, benchmark-performance, or cross-platform lane was run.",
-    "Field normalization covers all six primary sources with 528 current static rows, but it is not byte-capture or parser-execution evidence.",
+    "Field normalization covers all six primary sources with 539 current static rows, but it is not byte-capture or parser-execution evidence.",
     "Asupersync consumer states freeze parser-struct dispatch only; they are not independent per-field dataflow or behavioral proof.",
     "Standalone atp consumer states freeze parser-struct dispatch only; they are not independent per-field dataflow or behavioral proof.",
     "Derived long, short, and value-name spellings in normalized rows are static review expectations, not captured help or parser bytes.",

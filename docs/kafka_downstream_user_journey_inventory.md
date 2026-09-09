@@ -128,11 +128,11 @@ The case-insensitive, non-overlapping content scan finds 9,316 literal Kafka
 occurrences on 7,876 distinct matching lines. An occurrence ID has the form
 `KAFKA-K0-3-DOC-OCC-{surface}-L{line}-M{within-line ordinal}`. The exact
 path/line/match-ordinal tuple SHA-256 is
-`f0f0c1bde370cfb8076866fc91187db73dea4c73445804f0eb395360a3bf2779`;
+`291365da19d11286d95ddec56de6c70a2afa4dc563677833d93d711ca4223f9f`;
 the matching-line tuple SHA-256 is
-`1e6a35be1a772c630c9e82bac167670b08e0cad1064766cd8ed5fbcd6edf914c`;
+`4e4260144d3ef18ae85688452895d9ed163474d8a078652d9cb084e8b36eb880`;
 and the corresponding occurrence-ID-list SHA-256 is
-`d5b3ed77cfd83f233a70e76814b28c2897209b86bcc3f3bf33178d306664880d`.
+`e040eb2ee6f249875d7bb2e0ccf4e7f9cfb818b29110077b8a37a4c6e429167d`.
 
 Thirty-one explicit canonical projection groups link the 31 curated claim
 rows to 37 exact occurrences. For each actual surface, a deterministic
@@ -143,9 +143,9 @@ historical surfaces now contain no literal match: both repository copies of
 in the exact path and source-pin sets, and the contract checks their explicit
 zero-literal disposition. This does not establish capability absence. The 37
 canonical occurrence-ID list has SHA-256
-`81381d8fcd19e6b37beb4325c1b67eed77a7241d68b0e9a75279b64bb29bd3d5`;
+`f9cff795a2ecf3c1b44b0dc2d5f1879adaa49e95bbc8f5379f1c9fde0bb2befa`;
 the owned-unresolved occurrence-ID list has SHA-256
-`7832fa790e0e79ec6a0b404f6f28b480b869edf4d0543bc23e05dbd0c229c4d1`;
+`47010cf88a691e3c4da0bdc77ae91de431d142c8f6249284d549059ef2cc7e71`;
 and the 170 group IDs have SHA-256
 `57f2dae42643c7bada450205843b9effa21fb71ac4e353d3c82332f6cec816e8`.
 The canonical and remainder groups are pairwise disjoint and their union is

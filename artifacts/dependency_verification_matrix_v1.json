@@ -2683,7 +2683,7 @@
       "CAP-PROTOBUF-GENERIC": 10,
       "CAP-PUBLIC-API-TOPOLOGY": 7,
       "CAP-REAL-SERVICE-E2E": 14,
-      "CAP-REGEX-PRIVACY": 39,
+      "CAP-REGEX-PRIVACY": 40,
       "CAP-SCENARIO-YAML-JSON": 9,
       "CAP-SERDE-GENERIC": 10,
       "CAP-SIGNALS": 11,
@@ -2700,38 +2700,38 @@
     },
     "capability_invariants": 473,
     "evidence_classes": {
-      "contract": 243,
-      "downstream": 215,
+      "contract": 245,
+      "downstream": 216,
       "e2e": 200,
-      "fuzz": 323,
-      "lab": 270,
-      "property": 315,
-      "unit": 111
+      "fuzz": 325,
+      "lab": 271,
+      "property": 317,
+      "unit": 110
     },
-    "evidence_plans": 1677,
-    "matrix_beads": 354,
+    "evidence_plans": 1684,
+    "matrix_beads": 355,
     "risks": {
-      "boundary": 354,
-      "concurrency": 270,
-      "fuzz": 323,
-      "parser_codec": 275,
-      "property": 315,
-      "public_generic": 215,
-      "security": 214,
+      "boundary": 355,
+      "concurrency": 271,
+      "fuzz": 325,
+      "parser_codec": 277,
+      "property": 317,
+      "public_generic": 216,
+      "security": 216,
       "user_journey": 200
     },
     "roles": {
       "architecture": 15,
       "decision": 16,
-      "implementation": 111,
-      "verification": 212
+      "implementation": 110,
+      "verification": 214
     }
   },
   "inputs": {
     "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
-    "capability_registry_sha256": "a91599a15ed45de4261ebef0207023a2c60fa504a2292c2d6051c3c2bc849df9",
+    "capability_registry_sha256": "3c833e1311654008e2d823c3ea16a454908c9a3bb9038d5683544974d50d3cbb",
     "tracker_path": ".beads/issues.jsonl",
-    "tracker_plan_sha256": "d198eb77367ddef5df615506b3451d9cb971ba2a02452e00fa3cac6369671258"
+    "tracker_plan_sha256": "69b2ba48784c66d0636400346711fb9e5d4c62ff3a240cb1b05fca9108f92882"
   },
   "matrix": [
     {
@@ -37273,6 +37273,252 @@
       "title": "Regex R3.7.4: row-level parity/performance/oracle packet and terminal owned-engine decision"
     },
     {
+      "bead_id": "asupersync-5z2scg.8.3.7.5",
+      "capability_ids": [
+        "CAP-REGEX-PRIVACY"
+      ],
+      "cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "evidence_plans": [
+        {
+          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b/asupersync_5z2scg_8_3_7_5_contract",
+          "class": "contract",
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b__local_invariants -- --nocapture",
+          "covers_case_classes": [
+            "authentication_failure",
+            "cancellation",
+            "downstream_compile",
+            "downstream_runtime",
+            "empty_boundary",
+            "happy_path",
+            "independent_vector",
+            "invalid_state",
+            "loser_drain",
+            "malformed_error",
+            "maximum_overflow",
+            "obligation_leak",
+            "quiescence",
+            "race_shutdown",
+            "regression",
+            "resource_bound",
+            "round_trip",
+            "secret_redaction",
+            "security_misuse",
+            "task_leak",
+            "truncation"
+          ],
+          "evidence_id": "asupersync-5z2scg.8.3.7.5::contract",
+          "evidence_owner": "asupersync-5z2scg.8.3.7.5",
+          "expected_outcome": "pass",
+          "feature_requirements": [
+            "metrics"
+          ],
+          "plan_state": "PLANNED_BLOCKING",
+          "seed_or_fixture_id": "fixture:asupersync-5z2scg.8.3.7.5:local",
+          "stable_test_names": [
+            "ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b__local_invariants"
+          ],
+          "test_file": "tests/dependency_verification_matrix_contract.rs"
+        },
+        {
+          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b/asupersync_5z2scg_8_3_7_5_property",
+          "class": "property",
+          "class_contract": {
+            "deterministic_entropy": true,
+            "minimized_failure_retention": "required",
+            "seed_end_exclusive": 64,
+            "seed_start_inclusive": 0
+          },
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b__property_matrix -- --nocapture",
+          "covers_case_classes": [
+            "authentication_failure",
+            "cancellation",
+            "downstream_compile",
+            "downstream_runtime",
+            "empty_boundary",
+            "happy_path",
+            "independent_vector",
+            "invalid_state",
+            "loser_drain",
+            "malformed_error",
+            "maximum_overflow",
+            "obligation_leak",
+            "quiescence",
+            "race_shutdown",
+            "regression",
+            "resource_bound",
+            "round_trip",
+            "secret_redaction",
+            "security_misuse",
+            "task_leak",
+            "truncation"
+          ],
+          "evidence_id": "asupersync-5z2scg.8.3.7.5::property",
+          "evidence_owner": "asupersync-5z2scg.8.3.7.5",
+          "expected_outcome": "pass",
+          "feature_requirements": [
+            "metrics"
+          ],
+          "plan_state": "PLANNED_BLOCKING",
+          "seed_or_fixture_id": "fixed-seeds:asupersync-5z2scg.8.3.7.5:0..64",
+          "stable_test_names": [
+            "ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b__property_matrix"
+          ],
+          "test_file": "tests/dependency_verification_matrix_contract.rs"
+        },
+        {
+          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b/asupersync_5z2scg_8_3_7_5_lab",
+          "class": "lab",
+          "class_contract": {
+            "required_oracles": [
+              "task_leak",
+              "obligation_leak",
+              "loser_drain",
+              "cancellation_protocol",
+              "quiescence"
+            ],
+            "seed_end_exclusive": 16,
+            "seed_start_inclusive": 0,
+            "virtual_time": true
+          },
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b__lab_lifecycle -- --nocapture",
+          "covers_case_classes": [
+            "cancellation",
+            "race_shutdown",
+            "task_leak",
+            "obligation_leak",
+            "loser_drain",
+            "quiescence"
+          ],
+          "evidence_id": "asupersync-5z2scg.8.3.7.5::lab",
+          "evidence_owner": "asupersync-5z2scg.8.3.7.5",
+          "expected_outcome": "pass",
+          "feature_requirements": [
+            "metrics"
+          ],
+          "plan_state": "PLANNED_BLOCKING",
+          "seed_or_fixture_id": "lab-seeds:asupersync-5z2scg.8.3.7.5:0..16",
+          "stable_test_names": [
+            "ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b__lab_lifecycle"
+          ],
+          "test_file": "tests/dependency_verification_matrix_contract.rs"
+        },
+        {
+          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b/asupersync_5z2scg_8_3_7_5_fuzz",
+          "class": "fuzz",
+          "class_contract": {
+            "corpus_owner": "asupersync-5z2scg.8.3.7.5",
+            "corpus_path": "fuzz/corpus/dependency_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b",
+            "crash_artifact_path": "fuzz/artifacts/dependency_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b",
+            "crash_minimization_command": "cargo fuzz tmin dependency_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b <crash-artifact>",
+            "max_input_bytes": 1048576,
+            "max_total_time_seconds": 60,
+            "oracle_evidence_may_authorize_cutover": false,
+            "oracle_retirement_independent": true
+          },
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_fuzz_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b\" cargo fuzz run dependency_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b -- -max_total_time=60 -max_len=1048576",
+          "covers_case_classes": [
+            "malformed_error",
+            "resource_bound",
+            "regression",
+            "security_misuse",
+            "authentication_failure"
+          ],
+          "evidence_id": "asupersync-5z2scg.8.3.7.5::fuzz",
+          "evidence_owner": "asupersync-5z2scg.8.3.7.5",
+          "expected_outcome": "pass",
+          "feature_requirements": [
+            "metrics"
+          ],
+          "plan_state": "PLANNED_BLOCKING",
+          "seed_or_fixture_id": "fuzz/corpus/dependency_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b",
+          "stable_test_names": [
+            "dependency_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b"
+          ],
+          "test_file": "fuzz/fuzz_targets/dependency_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b.rs"
+        },
+        {
+          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b/asupersync_5z2scg_8_3_7_5_downstream",
+          "class": "downstream",
+          "class_contract": {
+            "compile_fixture_required": true,
+            "public_only": true,
+            "runtime_fixture_required": true,
+            "test_internals_forbidden": true
+          },
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_downstream_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b\" cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture",
+          "covers_case_classes": [
+            "downstream_compile",
+            "downstream_runtime"
+          ],
+          "evidence_id": "asupersync-5z2scg.8.3.7.5::downstream",
+          "evidence_owner": "asupersync-5z2scg.8.3.7.5",
+          "expected_outcome": "pass",
+          "feature_requirements": [
+            "metrics"
+          ],
+          "plan_state": "PLANNED_BLOCKING",
+          "seed_or_fixture_id": "tests/fixtures/dependency-capability-baseline-consumer",
+          "stable_test_names": [
+            "ver_a1_asupersync_5z2scg_8_3_7_5_0c4c4aa90a7b__downstream_consumer"
+          ],
+          "test_file": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs"
+        }
+      ],
+      "feature_requirements": [
+        "metrics"
+      ],
+      "invariant_ids": [
+        "CAP-REGEX-PRIVACY::input",
+        "CAP-REGEX-PRIVACY::output",
+        "CAP-REGEX-PRIVACY::error",
+        "CAP-REGEX-PRIVACY::resource",
+        "CAP-REGEX-PRIVACY::security::01",
+        "CAP-REGEX-PRIVACY::security::02",
+        "CAP-REGEX-PRIVACY::security::03",
+        "CAP-REGEX-PRIVACY::cancellation::01",
+        "CAP-REGEX-PRIVACY::cancellation::02"
+      ],
+      "issue_type": "bug",
+      "no_claim_boundary": "This is a checked future evidence plan. PLANNED_BLOCKING rows are not behavioral proof, do not satisfy a cutover gate, and do not authorize dependency, feature, API, format, protocol, platform, diagnostic, or user-journey removal.",
+      "required_case_classes": [
+        "authentication_failure",
+        "cancellation",
+        "downstream_compile",
+        "downstream_runtime",
+        "empty_boundary",
+        "happy_path",
+        "independent_vector",
+        "invalid_state",
+        "loser_drain",
+        "malformed_error",
+        "maximum_overflow",
+        "obligation_leak",
+        "quiescence",
+        "race_shutdown",
+        "regression",
+        "resource_bound",
+        "round_trip",
+        "secret_redaction",
+        "security_misuse",
+        "task_leak",
+        "truncation"
+      ],
+      "risk_tags": [
+        "boundary",
+        "concurrency",
+        "fuzz",
+        "parser_codec",
+        "property",
+        "public_generic",
+        "security"
+      ],
+      "role": "verification",
+      "target_requirements": [
+        "all-supported"
+      ],
+      "title": "Regex inventory contract pins drifted after Cargo and built-in corpus updates"
+    },
+    {
       "bead_id": "asupersync-5z2scg.8.4",
       "capability_ids": [
         "CAP-REGEX-PRIVACY"
@@ -43716,11 +43962,14 @@
           "class": "contract",
           "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_d24mms_6_2_2c3a20c5502f\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_d24mms_6_2_2c3a20c5502f__local_invariants -- --nocapture",
           "covers_case_classes": [
+            "authentication_failure",
             "cancellation",
             "downstream_compile",
             "downstream_runtime",
             "empty_boundary",
             "happy_path",
+            "independent_vector",
+            "invalid_state",
             "loser_drain",
             "malformed_error",
             "maximum_overflow",
@@ -43729,7 +43978,11 @@
             "race_shutdown",
             "regression",
             "resource_bound",
-            "task_leak"
+            "round_trip",
+            "secret_redaction",
+            "security_misuse",
+            "task_leak",
+            "truncation"
           ],
           "evidence_id": "asupersync-d24mms.6.2::contract",
           "evidence_owner": "asupersync-d24mms.6.2",
@@ -43742,6 +43995,53 @@
           "seed_or_fixture_id": "fixture:asupersync-d24mms.6.2:local",
           "stable_test_names": [
             "ver_a1_asupersync_d24mms_6_2_2c3a20c5502f__local_invariants"
+          ],
+          "test_file": "tests/dependency_verification_matrix_contract.rs"
+        },
+        {
+          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_6_2_2c3a20c5502f/asupersync_d24mms_6_2_property",
+          "class": "property",
+          "class_contract": {
+            "deterministic_entropy": true,
+            "minimized_failure_retention": "required",
+            "seed_end_exclusive": 64,
+            "seed_start_inclusive": 0
+          },
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_d24mms_6_2_2c3a20c5502f\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_d24mms_6_2_2c3a20c5502f__property_matrix -- --nocapture",
+          "covers_case_classes": [
+            "authentication_failure",
+            "cancellation",
+            "downstream_compile",
+            "downstream_runtime",
+            "empty_boundary",
+            "happy_path",
+            "independent_vector",
+            "invalid_state",
+            "loser_drain",
+            "malformed_error",
+            "maximum_overflow",
+            "obligation_leak",
+            "quiescence",
+            "race_shutdown",
+            "regression",
+            "resource_bound",
+            "round_trip",
+            "secret_redaction",
+            "security_misuse",
+            "task_leak",
+            "truncation"
+          ],
+          "evidence_id": "asupersync-d24mms.6.2::property",
+          "evidence_owner": "asupersync-d24mms.6.2",
+          "expected_outcome": "pass",
+          "feature_requirements": [
+            "default",
+            "test-internals"
+          ],
+          "plan_state": "PLANNED_BLOCKING",
+          "seed_or_fixture_id": "fixed-seeds:asupersync-d24mms.6.2:0..64",
+          "stable_test_names": [
+            "ver_a1_asupersync_d24mms_6_2_2c3a20c5502f__property_matrix"
           ],
           "test_file": "tests/dependency_verification_matrix_contract.rs"
         },
@@ -43782,6 +44082,41 @@
             "ver_a1_asupersync_d24mms_6_2_2c3a20c5502f__lab_lifecycle"
           ],
           "test_file": "tests/dependency_verification_matrix_contract.rs"
+        },
+        {
+          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_6_2_2c3a20c5502f/asupersync_d24mms_6_2_fuzz",
+          "class": "fuzz",
+          "class_contract": {
+            "corpus_owner": "asupersync-d24mms.6.2",
+            "corpus_path": "fuzz/corpus/dependency_asupersync_d24mms_6_2_2c3a20c5502f",
+            "crash_artifact_path": "fuzz/artifacts/dependency_asupersync_d24mms_6_2_2c3a20c5502f",
+            "crash_minimization_command": "cargo fuzz tmin dependency_asupersync_d24mms_6_2_2c3a20c5502f <crash-artifact>",
+            "max_input_bytes": 1048576,
+            "max_total_time_seconds": 60,
+            "oracle_evidence_may_authorize_cutover": false,
+            "oracle_retirement_independent": true
+          },
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_fuzz_asupersync_d24mms_6_2_2c3a20c5502f\" cargo fuzz run dependency_asupersync_d24mms_6_2_2c3a20c5502f -- -max_total_time=60 -max_len=1048576",
+          "covers_case_classes": [
+            "malformed_error",
+            "resource_bound",
+            "regression",
+            "security_misuse",
+            "authentication_failure"
+          ],
+          "evidence_id": "asupersync-d24mms.6.2::fuzz",
+          "evidence_owner": "asupersync-d24mms.6.2",
+          "expected_outcome": "pass",
+          "feature_requirements": [
+            "default",
+            "test-internals"
+          ],
+          "plan_state": "PLANNED_BLOCKING",
+          "seed_or_fixture_id": "fuzz/corpus/dependency_asupersync_d24mms_6_2_2c3a20c5502f",
+          "stable_test_names": [
+            "dependency_asupersync_d24mms_6_2_2c3a20c5502f"
+          ],
+          "test_file": "fuzz/fuzz_targets/dependency_asupersync_d24mms_6_2_2c3a20c5502f.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_6_2_2c3a20c5502f/asupersync_d24mms_6_2_downstream",
@@ -43864,11 +44199,14 @@
       "issue_type": "task",
       "no_claim_boundary": "This is a checked future evidence plan. PLANNED_BLOCKING rows are not behavioral proof, do not satisfy a cutover gate, and do not authorize dependency, feature, API, format, protocol, platform, diagnostic, or user-journey removal.",
       "required_case_classes": [
+        "authentication_failure",
         "cancellation",
         "downstream_compile",
         "downstream_runtime",
         "empty_boundary",
         "happy_path",
+        "independent_vector",
+        "invalid_state",
         "loser_drain",
         "malformed_error",
         "maximum_overflow",
@@ -43877,12 +44215,20 @@
         "race_shutdown",
         "regression",
         "resource_bound",
-        "task_leak"
+        "round_trip",
+        "secret_redaction",
+        "security_misuse",
+        "task_leak",
+        "truncation"
       ],
       "risk_tags": [
         "boundary",
         "concurrency",
+        "fuzz",
+        "parser_codec",
+        "property",
         "public_generic",
+        "security",
         "user_journey"
       ],
       "role": "verification",
@@ -46435,8 +46781,8 @@
       "cutover_state": "BLOCKED_PENDING_EVIDENCE",
       "evidence_plans": [
         {
-          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_9_3_a9d28abfe142/asupersync_d24mms_9_3_unit",
-          "class": "unit",
+          "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_9_3_a9d28abfe142/asupersync_d24mms_9_3_contract",
+          "class": "contract",
           "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_ver_a1_asupersync_d24mms_9_3_a9d28abfe142\" cargo test -p asupersync --all-targets --features test-internals ver_a1_asupersync_d24mms_9_3_a9d28abfe142__local_invariants -- --nocapture",
           "covers_case_classes": [
             "authentication_failure",
@@ -46461,7 +46807,7 @@
             "task_leak",
             "truncation"
           ],
-          "evidence_id": "asupersync-d24mms.9.3::unit",
+          "evidence_id": "asupersync-d24mms.9.3::contract",
           "evidence_owner": "asupersync-d24mms.9.3",
           "expected_outcome": "pass",
           "feature_requirements": [
@@ -46475,7 +46821,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_d24mms_9_3_a9d28abfe142__local_invariants"
           ],
-          "test_file": "src/encoding.rs"
+          "test_file": "tests/dependency_verification_matrix_contract.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_9_3_a9d28abfe142/asupersync_d24mms_9_3_property",
@@ -46524,7 +46870,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_d24mms_9_3_a9d28abfe142__property_matrix"
           ],
-          "test_file": "src/encoding.rs"
+          "test_file": "tests/dependency_verification_matrix_contract.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_9_3_a9d28abfe142/asupersync_d24mms_9_3_lab",
@@ -46564,7 +46910,7 @@
           "stable_test_names": [
             "ver_a1_asupersync_d24mms_9_3_a9d28abfe142__lab_lifecycle"
           ],
-          "test_file": "src/encoding.rs"
+          "test_file": "tests/dependency_verification_matrix_contract.rs"
         },
         {
           "artifact_root": "target/test-artifacts/dependency-sovereignty/asupersync_d24mms_9_3_a9d28abfe142/asupersync_d24mms_9_3_fuzz",
@@ -46720,7 +47066,7 @@
         "security",
         "user_journey"
       ],
-      "role": "implementation",
+      "role": "verification",
       "target_requirements": [
         "all-supported"
       ],

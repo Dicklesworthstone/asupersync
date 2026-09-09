@@ -5,6 +5,13 @@ The canonical inventory for `asupersync-mnotoo.3.1` is
 in `.github/workflows/` is selected by a lowercase 40-hex commit SHA and keeps
 a readable tag or dated branch-snapshot comment on the same line.
 
+The September 9 source review reconciles 191 references against the original
+182-reference inventory. The added Lean, TLC, and real-server jobs reuse the
+same reviewed SHAs and comments: three checkout, three cache, two Rust-toolchain,
+and one artifact-upload reference. The original review receipt and prior counts
+remain recorded. This is a static census; no workflow was executed for this
+release, which uses RCH and DSR.
+
 ## Selection policy
 
 A major-version tag such as `@v4`, a branch such as `@main`, and a

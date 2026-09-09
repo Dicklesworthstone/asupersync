@@ -18,7 +18,7 @@
     },
     "subsequent_lexical_review": {
       "source_commits": ["85ee4ef11", "7710807db"],
-      "change": "The UTC inventory's historical-pin negative fixture adds one serde_json::json! token in tests. The driverless-socket CPU regression adds one Linux test-internals Rust test file and no codec call. Tests now contain 1942 Rust files and 3657 JSON tokens; all binary codec and production JSON path counts are unchanged.",
+      "change": "The UTC inventory's historical-pin negative fixture added one serde_json::json! token in tests. The driverless-socket CPU regression added one Linux test-internals Rust test file and no codec call, yielding 1942 Rust files and 3657 JSON tokens at that review. The later release contract repairs through 7532cd44a plus the retained CLI role check add nine JSON tokens: eight historical-provenance serializations and one CLI-role serialization. The current test census is 1942 Rust files and 3666 JSON tokens; all binary codec and production JSON path counts are unchanged.",
       "evidence_boundary": "These test-source census additions do not establish temporal, socket-performance, persisted-format, historical-writer or release behavior."
     },
     "scope": "Reviewed seven changed source pins and the lexical census against the v0.4.9 inventory. Policy authority, generic codec decisions, payload goldens, historical corpus bytes, evidence-state partitions, and the 48-path pin scope are retained.",
@@ -121,7 +121,7 @@
     ],
     "totals": {
       "rust_files": 4385,
-      "serde_json::": 6757,
+      "serde_json::": 6766,
       "rmp_serde::": 70,
       "bincode::": 32,
       "SerializationFormat::": 160,
@@ -144,7 +144,7 @@
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
         "rust_files": 1942,
-        "serde_json::": 3657,
+        "serde_json::": 3666,
         "rmp_serde::": 9,
         "bincode::": 11,
         "SerializationFormat::": 23,

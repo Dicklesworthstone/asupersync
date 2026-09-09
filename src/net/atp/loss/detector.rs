@@ -1550,7 +1550,7 @@ mod tests {
         transport.on_packet_sent(create_test_packet(
             PacketNumberSpace::ApplicationData,
             0,
-            10_000,
+            18_000,
         ));
         transport.on_packet_sent(create_test_packet(
             PacketNumberSpace::ApplicationData,
@@ -1566,7 +1566,9 @@ mod tests {
         );
         assert_eq!(initial_state.latest_rtt_micros, None);
 
-        let _ack = transport.on_ack_received(PacketNumberSpace::ApplicationData, &[1], 0, 50_000);
+        // The new 30 ms RTT sets a 33.75 ms loss delay; packet 0 is only 32 ms old.
+        let ack = transport.on_ack_received(PacketNumberSpace::ApplicationData, &[1], 0, 50_000);
+        assert_eq!(ack.lost_packets, 0);
         let acked_state = LossTransportState::from_transport(&transport);
         assert_eq!(acked_state.bytes_in_flight, 1_200);
         assert_eq!(acked_state.latest_rtt_micros, Some(30_000));

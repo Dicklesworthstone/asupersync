@@ -42,6 +42,10 @@ surfaces. The important ownership flow is:
 3. If epoll construction also fails, `RuntimeBuilder` continues without an
    `IoDriver`, retains a typed `URING-FB-REACTOR-UNAVAILABLE` runtime snapshot,
    emits one startup warning, and socket paths re-poll.
+   A full TCP stream without an ambient driver first attempts the process-global
+   fallback readiness driver. It uses the timer/immediate re-wake helper only
+   when no driver can register the socket; listener and split paths retain their
+   separately documented behavior.
 4. `RuntimeBuilder` otherwise installs the selected platform reactor unless a
    caller injects a reactor or driver, or disables the whole platform path.
 5. `IoDriver` consumes only the generic `Reactor` readiness interface.
@@ -82,7 +86,7 @@ the runtime inspector and cannot establish operation support.
 | TCP borrowed split streams | timer backoff or immediate re-wake | no reactor registration or advanced receive | URING-5 |
 | `Bytes` / `BytesMut` | empty/static/shared heap bytes; exclusive mutable `Vec<u8>` | no kernel-in-flight lease state | URING-3 |
 | Builder | whole-reactor enable/disable, injection, and typed per-capability policy | live operation outcomes remain | URING-2 |
-| No-reactor fallback | runtime continues with socket re-polls and retains a typed terminal snapshot | data-plane behavior remains the incumbent re-poll path | URING-2 |
+| No-reactor fallback | runtime retains a typed terminal snapshot; full TCP streams first try fallback-driver readiness, then re-poll if unavailable | listener and split paths have separate readiness/backoff behavior | URING-2 |
 | Inspector | generic `IoStats` plus immutable driver/runtime capability snapshots | focused executable receipt and target matrix remain | URING-2 |
 | Tests | mock pool, live readiness, filesystem lifecycle | no advanced-capability matrix | URING-7 |
 | Benchmark | synthetic completion bookkeeping | no real-socket comparison | URING-7 |

@@ -9,6 +9,13 @@ The terminal verdict is `PASS_SCOPED_FOUNDATIONS_ONLY`. It releases the later
 Dependency Sovereignty evidence DAG to begin its already-scoped work. It is
 not a dependency-exit, feature-cutover, performance, or release verdict.
 
+The September 9 current-source review records five refreshed input hashes,
+the existing ledger's 2,409 marginal rows, and the expanded tracker matrix of
+340 later rows (108 implementation and 202 verification). The original baseline
+provenance and counts below remain historical. The review does not reissue old
+execution receipts or grant cutover authority; its verifier rejects stale input
+bytes and edits that would rewrite that history.
+
 ## Reconciled foundation
 
 The aggregate joins these checked authorities:

@@ -66,11 +66,16 @@ profiles, four targets, the `x86_64-unknown-linux-gnu` host, and normal plus
 target-normal consumer edges. Root and excluded-fuzz manifest/lock hashes are
 joined from the child policy artifacts.
 
-The downstream lane uses `nightly-2026-07-05` and
-`-Z direct-minimal-versions`. Remote job `29988810699833377` passed. The
-separate full-transitive probe, job `29988810699833376`, remains non-green at
+The refreshed downstream lane uses `nightly-2026-08-31` and
+`-Z direct-minimal-versions`. Remote job `30013852322103469` passed on
+September 9. The separate full-transitive probe, job `30013852322103473`,
+still fails at
 `asupersync -> nkeys 0.4.5 -> ed25519-dalek 2.0.0 -> curve25519-dalek 4.0.0`
-with `E0635 unknown feature stdsimd`. The aggregate must preserve both outcomes.
+with `E0635 unknown feature stdsimd`. The aggregate preserves both outcomes
+and the original July-toolchain receipts in
+`prior_downstream_minimum_version_receipt`. The action-reference count is
+now 191 after nine additional call sites reused existing reviewed SHAs; this
+remains a static review without executing GitHub Actions.
 
 The generated-document child joins 14 displayed rows and 15 dependency names
 to the complete 106-edge budget. Its check mode is read-only. Any missing,

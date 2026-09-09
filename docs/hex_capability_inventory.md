@@ -6,7 +6,7 @@ This is the operator-readable companion to
 `artifacts/hex_capability_inventory_v1.json`. It freezes
 `CAP-HEX-CODEC` for `asupersync-d24mms.9.1` at revision
 `8793ef7097f23622b2bdea1cd9a60afbb11517f1`. The source census and pins were
-reviewed again on 2026-09-09 against `f22fcc160` for the 0.4.11 release.
+reviewed again on 2026-09-09 through `532a412fc` for the 0.4.11 release, including seven later regex receipt-guard encodes in tests.
 The registry authority and codec preservation requirements remain unchanged.
 
 The disposition remains **KEEP_INCUMBENT** and cutover remains
@@ -67,7 +67,7 @@ Only four upstream names are consumed:
 
 | Name | Code/type references |
 | --- | ---: |
-| `encode` | 220 |
+| `encode` | 227 |
 | `decode` | 34 |
 | `decode_to_slice` | 11 |
 | `FromHexError` | 4 |
@@ -132,12 +132,12 @@ non-ASCII bytes, destination mismatch, partial-prefix mutation, and success.
 
 ## Complete call-site census
 
-The source snapshot contains 109 Rust files and 272 literal path tokens. Of
-those, 269 are code or type references, three are comments, and four code
+The source snapshot contains 109 Rust files and 279 literal path tokens. Of
+those, 276 are code or type references, three are comments, and four code
 references are disabled by `cfg(any())`. Another 16 references sit in
 `cfg(test)` sections embedded in four otherwise production-owned files. Both
 references in `src/test_logging.rs` are separately gated to tests or
-`test-internals`. The test/conformance reservation group owns 151 code or type
+`test-internals`. The test/conformance reservation group owns 158 code or type
 references,
 leaving 96 active production references after comment, disabled, and
 non-production separation.
@@ -145,7 +145,7 @@ non-production separation.
 | Root | Files | Literal tokens |
 | --- | ---: | ---: |
 | `src` | 52 | 183 |
-| `tests` | 56 | 87 |
+| `tests` | 56 | 94 |
 | `conformance` | 1 | 2 |
 | `examples` | 0 | 0 |
 | `benches` | 0 | 0 |
@@ -179,7 +179,7 @@ reservation groups. Digest input is byte-sorted
 | `HEX-A3-ATP-PROTOCOL-CLI` | 33/95 | `065bba8c646f36c81ebf6fb74b664598feeadd48a845c882db5fb06b27380312` | A3 |
 | `HEX-A3-SECURITY-OBSERVABILITY` | 9/21 | `3238b9a702154b696580eb534ac15bb3e5e10abb42e6769fa43ea54e3d2ce71a` | A3 |
 | `HEX-A3-DATABASE` | 1/3 | `dbab775870d3d18ebc06a8678efb6eacb7d1ae310a0eedc972c68b835692f620` | A3 |
-| `HEX-A3-TEST-CONFORMANCE` | 66/153 | `188a149d6ca6559299c1af16b6111248e8740af948057e0e3656f573de9772e1` | A3 |
+| `HEX-A3-TEST-CONFORMANCE` | 66/160 | `c764e2e4c3b5fc0bd77fc75db5a9ddd4d6d210405d804409e0352c34ed971f6e` | A3 |
 
 A2 owns the scalar kernel and owned error. A3 migrates one reserved group at a
 time without touching the manifest. A4 owns independent evidence and real

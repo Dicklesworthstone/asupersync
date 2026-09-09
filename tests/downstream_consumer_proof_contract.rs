@@ -55,7 +55,7 @@ fn minimum_version_errors(artifact: &Value, lock: &str) -> Vec<String> {
     }
     let generation = string(policy, "generation_command");
     for marker in [
-        "cargo +nightly-2026-07-05",
+        "cargo +nightly-2026-08-31",
         "-Z direct-minimal-versions",
         "generate-lockfile",
         FIXTURE_MANIFEST_PATH,
@@ -213,7 +213,7 @@ fn direct_minimal_consumer_lock_and_toolchain_are_checked_exactly() {
         sha256(&read_repo_file(TOOLCHAIN_PATH)),
         string(policy, "toolchain_sha256")
     );
-    assert_eq!(string(policy, "toolchain_channel"), "nightly-2026-07-05");
+    assert_eq!(string(policy, "toolchain_channel"), "nightly-2026-08-31");
     assert!(minimum_version_errors(&artifact, &lock).is_empty());
 
     let packages = lock_packages(&lock);
@@ -224,7 +224,7 @@ fn direct_minimal_consumer_lock_and_toolchain_are_checked_exactly() {
                 && package.get("source").and_then(toml::Value::as_str) == source
         })
     };
-    assert!(has_package("asupersync", "0.4.9", None));
+    assert!(has_package("asupersync", env!("CARGO_PKG_VERSION"), None));
     assert!(has_package(
         "asupersync",
         "0.4.4",
@@ -243,7 +243,7 @@ fn direct_minimal_consumer_lock_and_toolchain_are_checked_exactly() {
     assert_eq!(string(profile, "lock_path"), FIXTURE_LOCK_PATH);
     for marker in [
         "RCH_REQUIRE_REMOTE=1 rch exec --",
-        "cargo +nightly-2026-07-05 check -j 2",
+        "cargo +nightly-2026-08-31 check -j 2",
         "-Z direct-minimal-versions --locked",
         "--bin default_consumer",
     ] {

@@ -1,8 +1,8 @@
 # Asupersync Proof Lane Dashboard - [TIMESTAMP]
 
 ## Summary
-Total lanes: 62 | Green: 14 | Yellow: 36 | Red: 0 | Unknown: 12
-Total guarantees: 62 | Green: 14 | Red: 0
+Total lanes: 64 | Green: 16 | Yellow: 36 | Red: 0 | Unknown: 12
+Total guarantees: 64 | Green: 16 | Red: 0
 
 ## Production Graph Proofs
 ✅ default-production-tokio-tree (dependency_graph)
@@ -20,7 +20,7 @@ Total guarantees: 62 | Green: 14 | Red: 0
 
 ## Fuzz Smoke Evidence
 🟡 fuzz-manifest-smoke (compile_frontier)
-   The fuzz manifest and registered fuzz targets typecheck as a cargo-fuzz workspac...
+   The tracked fuzz lock, fuzz manifest, and registered fuzz targets typecheck toge...
 🟡 arq-quic-symbol-envelope-fuzz-smoke (test_frontier)
    Runs the proptest/property fuzz smoke for the RaptorQ-over-QUIC symbol-envelope ...
 
@@ -65,6 +65,8 @@ Total guarantees: 62 | Green: 14 | Red: 0
    Runs an external consumer against the exact published =0.4.4 crate. It proves an...
 🟡 downstream-consumer-default-run (test_frontier)
    Runs the downstream fixture as an external crate against default asupersync feat...
+🟡 downstream-consumer-direct-minimal-check (compile_frontier)
+   Compiles the default external consumer with the independent tracked lock generat...
 🟡 downstream-consumer-default-kafka-test (test_frontier)
    Runs the existing Kafka fail-closed assertions as an integration target of the e...
 🟡 downstream-consumer-metrics-run (test_frontier)

@@ -69,7 +69,7 @@ collects the changes since the published `v0.4.10` source.
 
 ## [Unreleased]
 
-## [v0.4.11] - 2026-09-08
+## [v0.4.11] - 2026-09-09
 
 ### Runtime lifetime
 

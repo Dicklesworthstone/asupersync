@@ -74,12 +74,16 @@ the Linux driverless-socket CPU regression adds one test file with no codec
 calls. These are test-source census additions, with no temporal, socket,
 historical-writer or release-behavior claim.
 
-The 2026-09-09 review records 4,385 Rust files, 6,757 literal JSON tokens and
+The final 2026-09-09 review records 4,385 Rust files, 6,766 literal JSON tokens and
 259 source paths containing direct JSON tokens. Seven inline-test extractions
 replace their original paths; extracted QUIC tests add a second path. Other
 additions cover test receipts, ATP diagnostics, dependency-table tooling,
 private regex configuration, remote transport and bounded web JSON collection.
 The direct MessagePack/Bincode counts and file rosters are unchanged.
+
+The final nine-token increase comes from historical-provenance serialization
+checks and the CLI inventory's role serialization. These are contract checks;
+the production JSON path roster and persisted-format evidence are unchanged.
 
 The seven refreshed source pins include changes with distinct meanings:
 
