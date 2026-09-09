@@ -3152,7 +3152,8 @@
           "cli_atpd_signal_failure",
           "cli_offline_tuner_help",
           "cli_offline_tuner_report",
-          "cli_offline_tuner_interrupt"
+          "cli_offline_tuner_interrupt",
+          "offline-tuner-logging-parity"
         ],
         "e2e_command": "scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario cli_asupersync",
         "adr_contract_scenario_id": "api-adr-registry-contract",
