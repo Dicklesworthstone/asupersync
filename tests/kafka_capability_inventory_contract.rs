@@ -236,6 +236,7 @@ fn validate_source_pins(inventory: &Value) -> Result<(), String> {
             "KAFKA-PIN-ROOT-MANIFEST",
             "KAFKA-PIN-ROOT-LOCK",
             "KAFKA-PIN-FUZZ-MANIFEST",
+            "KAFKA-PIN-FUZZ-LOCK",
             "KAFKA-PIN-CRATE-ROOT",
             "KAFKA-PIN-MESSAGING-MODULE",
             "KAFKA-PIN-PRODUCER-SOURCE",
@@ -254,6 +255,7 @@ fn validate_source_pins(inventory: &Value) -> Result<(), String> {
         "Cargo.toml",
         "Cargo.lock",
         "fuzz/Cargo.toml",
+        "fuzz/Cargo.lock",
         "src/lib.rs",
         "src/messaging/mod.rs",
         "src/messaging/kafka.rs",
@@ -314,14 +316,17 @@ fn validate_dependency_and_profiles(inventory: &Value) -> Result<(), String> {
         "direct_c_ffi",
         "unsafe_block_in_primary_sources",
         "fuzz_workspace_enables_kafka",
-        "fuzz_lock_tracked",
         "ci_cross_platform_enables_kafka",
     ] {
         if dependency.get(key).and_then(Value::as_bool) != Some(false) {
             return Err(format!("dependency_resolution.{key} must remain false"));
         }
     }
-    for key in ["manifest_optional", "native_all_features_enables_kafka"] {
+    for key in [
+        "manifest_optional",
+        "native_all_features_enables_kafka",
+        "fuzz_lock_tracked",
+    ] {
         if dependency.get(key).and_then(Value::as_bool) != Some(true) {
             return Err(format!("dependency_resolution.{key} must remain true"));
         }
@@ -379,6 +384,8 @@ fn validate_public_surface(inventory: &Value) -> Result<(), String> {
             "KafkaConsumerRecord",
             "KafkaError",
             "KafkaProducer",
+            "KafkaRebalanceProtocol",
+            "KafkaRebalanceStats",
             "ProducerConfig",
             "RecordMetadata",
             "TopicPartitionOffset",
@@ -403,6 +410,7 @@ fn validate_public_surface(inventory: &Value) -> Result<(), String> {
             "KafkaSecurityConfig",
             "KafkaTlsConfig",
             "RebalanceResult",
+            "TransientConsumerError",
         ],
     )?;
     require_exact_ids(
@@ -447,6 +455,9 @@ fn validate_public_surface(inventory: &Value) -> Result<(), String> {
             "KCO-PUB-005",
             "KCO-PUB-006",
             "KCO-PUB-007",
+            "KCO-PUB-008",
+            "KCO-PUB-009",
+            "KCO-PUB-010",
         ],
         "public symbols",
     )?;
@@ -465,7 +476,7 @@ fn validate_public_surface(inventory: &Value) -> Result<(), String> {
         .iter()
         .map(|row| array(row, "public_methods").len())
         .sum::<usize>();
-    if field_count != 54 || method_count != 96 {
+    if field_count != 63 || method_count != 105 {
         return Err("public symbol field or method projection drifted".to_owned());
     }
     let projected_facade: BTreeSet<String> = symbols
@@ -484,16 +495,16 @@ fn validate_public_surface(inventory: &Value) -> Result<(), String> {
 
     let census = object(inventory, "occurrence_census");
     for (key, expected) in [
-        ("public_top_level_declarations", 37),
-        ("unique_public_top_level_paths", 36),
-        ("public_symbol_groups", 30),
-        ("syntactic_public_inherent_method_declarations", 95),
-        ("unique_public_inherent_method_paths", 91),
+        ("public_top_level_declarations", 40),
+        ("unique_public_top_level_paths", 39),
+        ("public_symbol_groups", 33),
+        ("syntactic_public_inherent_method_declarations", 104),
+        ("unique_public_inherent_method_paths", 100),
         ("public_trait_methods", 5),
-        ("syntactic_public_fields", 60),
+        ("syntactic_public_fields", 69),
         ("crate_private_record_fields", 6),
-        ("downstream_visible_public_fields", 54),
-        ("facade_export_names", 15),
+        ("downstream_visible_public_fields", 63),
+        ("facade_export_names", 17),
     ] {
         if census.get(key).and_then(Value::as_u64) != Some(expected) {
             return Err(format!("occurrence_census.{key} must remain {expected}"));
@@ -766,9 +777,9 @@ fn validate_static_source_and_docs(inventory: &Value) -> Result<(), String> {
         BEAD_ID,
         CAPABILITY_ID,
         "KEEP_UNTIL_PARITY",
-        "37",
-        "30",
-        "54",
+        "40",
+        "33",
+        "63",
         "15 source-level facts",
         "These are static reachability coordinates. They are not compiler-run receipts.",
         "It also does not prove protocol correctness",
@@ -783,7 +794,7 @@ fn validate_static_source_and_docs(inventory: &Value) -> Result<(), String> {
 
     let registry_doc = read_repo_file(REGISTRY_DOC_PATH);
     if !registry_doc.contains(ARTIFACT_PATH)
-        || !registry_doc.contains("all 424 canonical `dep-plan` issues")
+        || !registry_doc.contains("all 425 canonical `dep-plan` issues")
         || !registry_doc.contains("through 109")
     {
         return Err("capability registry document lost Kafka reconciliation".to_owned());
@@ -831,6 +842,7 @@ fn kafka_inventory_is_source_pinned_and_complete() {
 #[test]
 fn kafka_inventory_rejects_missing_public_symbol_rows() {
     let mut inventory = artifact();
+    validate_inventory(&inventory).expect("positive inventory must validate before mutation");
     inventory["public_symbols"]
         .as_array_mut()
         .expect("public_symbols must be mutable")
@@ -841,6 +853,7 @@ fn kafka_inventory_rejects_missing_public_symbol_rows() {
 #[test]
 fn kafka_inventory_rejects_unowned_routed_gaps() {
     let mut inventory = artifact();
+    validate_inventory(&inventory).expect("positive inventory must validate before mutation");
     inventory["routed_gaps"][0]["owner_bead"] = Value::String(String::new());
     assert!(validate_inventory(&inventory).is_err());
 }
@@ -848,6 +861,7 @@ fn kafka_inventory_rejects_unowned_routed_gaps() {
 #[test]
 fn kafka_inventory_rejects_exact_unknown_states() {
     let mut inventory = artifact();
+    validate_inventory(&inventory).expect("positive inventory must validate before mutation");
     inventory["inventory_state"] = Value::String("UNKNOWN".to_owned());
     assert!(validate_inventory(&inventory).is_err());
 }

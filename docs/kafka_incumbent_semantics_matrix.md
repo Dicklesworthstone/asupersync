@@ -7,7 +7,12 @@ This document is the human companion to
 current Kafka configuration, operation, outcome, lifecycle, security, and
 no-feature semantics for
 `asupersync-dep-p7-kafka-removal-sarszu.1.2` at revision
-`b4997e8fe4de098a5a30ff468418460b59ca414a`.
+`b4997e8fe4de098a5a30ff468418460b59ca414a`. The 2026-09-09 review retains
+that historical authority and capture receipt while updating the source inventory
+for raw properties, rebalance diagnostics/callbacks, leave-group draining,
+transient poll errors, yielding flush, and configuration-value redaction.
+The original census was 43 fields, seven enums, 38 operations, 96 public
+methods, and 97 semantic rows. These are historical counts, not current coverage.
 
 This is incumbent truth, not a future API design. The governing decision is
 still `DEP-ADR-009`: keep `rdkafka` until independently owned parity evidence
@@ -37,12 +42,12 @@ Its static coverage is exact:
 
 | Surface | Rows |
 |---|---:|
-| Configuration fields | 43 |
-| Public enum semantics | 7 |
-| Operational capability rows | 38 |
-| Unique public methods covered exactly once | 96 |
+| Configuration fields | 45 |
+| Public enum semantics | 8 |
+| Operational capability rows | 40 |
+| Unique public methods covered exactly once | 105 |
 | Additional reachable trait operations | 3 |
-| Total explicit public entry points | 99 |
+| Total explicit public entry points | 108 |
 | Public callable test/fuzz helpers | 9 |
 | Explicit missing capabilities | 2 |
 | Routed semantic findings | 23 |
@@ -93,14 +98,17 @@ outcome is not known through the current type. There is no obligation ledger
 or typed sent/acknowledged/ambiguous state.
 
 Native producer/transaction error mapping is exact. `ClientConfig` keeps only
-its rejected value in `Config`; producer `QueueFull` stays typed, invalid or
+the typed rejection code and quoted property key in `Config`, excluding the
+rejected value and free-form description; producer `QueueFull` stays typed, invalid or
 unknown topic becomes `InvalidTopic`, and other production codes become
 `Broker` from their debug form. Cancelled stays typed. Every other native
 error becomes `Authentication` only when its display text contains one of the
 seven literal probes frozen in the artifact; otherwise it becomes `Broker`.
 The primary-consumer mapper keeps cancelled typed, formats `ClientConfig`
-description/key/value into `Config`, maps client creation/subscription to
-`Config`, and collapses every other error to `Broker` display text.
+through the same redacted helper, maps client creation/subscription to
+`Config`, and collapses other errors to `Broker` display text. Primary poll
+intercepts `UnknownTopicOrPartition` consumption errors before that mapping,
+records an informational diagnostic, and continues until its original deadline.
 
 ### Batching, backpressure, and flush
 
@@ -110,8 +118,8 @@ Backpressure is dependency queue rejection. `QueueFull` receives bounded local
 retries, but no record/byte permit, reservation, or two-phase admission exists.
 
 `flush` watches the wrapper active-operation counter and the native in-flight
-count in polling slices. It directly invokes a blocking native poll slice from
-the async function. The implementation subtracts each requested slice from a
+count in waiting slices. It awaits `wait_retry_backoff` while the
+`ThreadedProducer` polls in the background. The implementation subtracts each requested slice from a
 remaining budget without reading a clock, so the source establishes a
 poll-slice budget rather than elapsed-deadline accounting. Exhaustion becomes
 a string-valued `Broker` error, which the classifiers call
@@ -198,10 +206,18 @@ The real path clears assignments until a later snapshot; deterministic mode
 assigns partition zero.
 
 `KafkaConsumer::rebalance` is caller-driven explicit assignment replacement,
-not a librdkafka `ConsumerContext` rebalance callback. Empty input unassigns
+and is separate from the real `BrokerConsumerContext` rebalance callback. Empty input unassigns
 everything. Every successful call increments the local generation, including
 a no-op assignment. That counter is not a Kafka coordinator generation and is
 not reset by close.
+
+The callback selects cooperative incremental assignment from the configured
+`partition.assignment.strategy`, without querying negotiated protocol inside
+the callback. `rebalance_stats()` exposes configured intent and four relaxed
+atomic counters incremented before native assignment attempts; these are not
+success counts or an atomic combined snapshot. `rebalance_protocol()` queries
+the negotiated protocol outside callbacks. Without a backend, these accessors
+return default counters and `Unknown`.
 
 Close does not fence an already-admitted real-broker subscribe. If close wins
 the broker lock and cleans up first, the pending subscribe can subsequently
@@ -214,6 +230,13 @@ re-subscribe the backend, fail its post-await local closed check, and return
 broker mapping or local behavioral use. Native polling runs in at most 50ms
 blocking slices and checks Cx between slices, not during one slice. Caller
 timeout expires as `Ok(None)`.
+
+`UnknownTopicOrPartition` consumption errors are retained as informational
+state and polling continues until that same deadline. `last_transient_error()`
+clones the code, first/last runtime times, and saturating occurrence count.
+Only a distinct code replaces the retained entry and triggers another first
+announcement; successful polls and close do not clear it. Other broker errors
+are still returned through the normal mapping.
 
 All real-backend polls share one `buffered_outcome` slot. A slice writes that
 slot before its caller resumes, so cancellation or post-first-iteration
@@ -282,7 +305,12 @@ topic-partitions and uses a hard-coded one-second native timeout. It does not
 retry. A broker-success/close race can return a local error after broker state
 has changed.
 
-Consumer close marks the atomic closed flag before backend unassignment. If
+Consumer close marks the atomic closed flag before backend cleanup. It first
+unsubscribes and, if previously assigned, drives at most 100 requested 50ms
+polls until assignment clears. Records encountered during this drain are
+discarded without commit. It skips explicit unassign for the negotiated
+cooperative protocol and unassigns otherwise. This slice budget excludes lock
+waiting and native callbacks and does not establish a total close deadline. If
 unassign fails, local state is not cleared, waiters are not notified, and a
 later close short-circuits instead of retrying cleanup. Close performs no
 offset flush. It also leaves the rebalance generation and buffered outcome in
@@ -293,6 +321,10 @@ starting or can let it finish while permanently skipping local map clearing
 and waiter notification. Every later close still short-circuits.
 `is_closed() == true` and a repeated close returning `Ok` are not cleanup
 proof.
+
+Dropping an open consumer locks the broker-operation mutex and performs the
+same leave-group drain synchronously. Drop skips it once the closed flag is
+set, including an abandoned close that never completed cleanup.
 
 The uncleared poll slot is observable in a race: an already-admitted real poll
 can finish after close, consume that buffered outcome without another open
@@ -322,11 +354,20 @@ length validation. The TLS key password is private and Debug-redacted, but it
 is an ordinary cloneable `String` without zeroization. The SASL password uses
 a private `ZeroizeOnDrop` wrapper and Debug redaction. That proves wrapper-drop
 behavior only; it does not prove erasure of allocator history, client-config,
-rdkafka, or librdkafka copies. Upstream authentication strings retained in
-`KafkaError` are not sanitized. Native `ClientConfig` failures can also carry
-the rejected value: producer, primary-consumer, and parallel-client mappings
-expose that value without redaction, so a rejected `sasl.password` or
-`ssl.key.password` can appear in public error Display/Debug.
+rdkafka, or librdkafka copies. Raw properties also remain ordinary strings.
+Configuration Debug preserves their keys and order but hides every raw value;
+the explicit `extra_properties()` accessor intentionally returns the original
+values. Native `ClientConfig` failures omit both rejected values and free-form
+descriptions. Other upstream authentication strings retained in `KafkaError`
+are not comprehensively sanitized. Historical GAP-21 remains recorded with
+its original exposure and current-source disposition; a static review is not
+broker or erasure proof.
+
+`with_property` and `set_property` preserve insertion order and replace an
+existing exact key in place. Native configuration applies raw properties
+first, followed by typed mappings: only typed values that are actually written
+override raw values. The parallel diagnostic consumer builds a separate
+configuration and does not forward producer raw properties.
 
 ### Blocking bridge and consumer ordering
 
@@ -400,6 +441,7 @@ group, subscription, cached topic, and exact same-topic comparison.
 | `KPR-CFG-023` | transactional producer config | caller-supplied |
 | `KPR-CFG-024` | transaction ID | caller-supplied; exactly empty rejected |
 | `KPR-CFG-025` | transaction timeout | 60s; no local bound |
+| `KPR-CFG-026` | raw producer properties | empty; ordered replacement, typed mappings win |
 
 ### Consumer fields
 
@@ -423,12 +465,13 @@ group, subscription, cached topic, and exact same-topic comparison.
 | `KCO-CFG-016` | retries | 3; synchronous commit only |
 | `KCO-CFG-017` | insecure transport bypass | false; debug/test public setter |
 | `KCO-CFG-018` | deterministic broker admission | stored false; crate tests bypass it automatically |
+| `KCO-CFG-019` | raw consumer properties | empty; ordered replacement, typed mappings win |
 
 ## Operational index
 
 The machine artifact carries the complete outcome columns, and the full
-configuration/enum/operation matrix covers all 96 K0.1 public methods exactly
-once. This compact index shows the 38 operational rows, including three
+configuration/enum/operation matrix covers all 105 K0.1 public methods exactly
+once. This compact index shows the 40 operational rows, including three
 additional KafkaError trait entry points and the automatic unfinished-
 transaction drop lifecycle.
 
@@ -445,8 +488,9 @@ transaction drop lifecycle.
 | `KCO-OP-002` | topic/partition/offset construction |
 | `KCO-OP-003`–`KCO-OP-009` | consumer construction, subscribe, rebalance, poll, commit, seek, close |
 | `KCO-OP-010`–`KCO-OP-017` | consumer config/state/cursor accessors |
+| `KCO-OP-018`–`KCO-OP-019` | rebalance counters/protocol and retained transient-error diagnostics |
 
-The seven enum rows are `KAFKA-ENUM-001` through `KAFKA-ENUM-007`. The nine
+The eight enum rows are `KAFKA-ENUM-001` through `KAFKA-ENUM-008`. The nine
 cfg-sensitive helper rows are `KPR-HLP-001` through `KPR-HLP-009`; they cover
 the deterministic broker controls, the two `From<u8>` conversions, and four
 ad hoc parser helpers.
@@ -456,7 +500,7 @@ the `Compression::from(u8)` helper uses modulo four and never produces `Zstd`.
 
 ## No-feature and deterministic profiles
 
-The artifact's 17 profile-disposition groups cover all 97 configuration, enum,
+The artifact's 17 profile-disposition groups cover all 102 configuration, enum,
 operation, and helper semantic IDs exactly once. This keeps profile behavior
 explicit without pretending that every local accessor has the same outcome as
 an operation that reads or writes deterministic broker storage.
@@ -504,11 +548,11 @@ uses full bead IDs for every owner.
 `tests/kafka_incumbent_semantics_matrix_contract.rs` is the paired fail-closed
 static contract. It checks identity and authority, exact source pins, exact
 row counts and key sets, unique IDs, field coverage, exact-once coverage of all
-96 K0.1 public methods plus three KafkaError trait operations, the exact
+105 K0.1 public methods plus three KafkaError trait operations, the exact
 entry-to-row/source-owner/source-anchor digest and declaration boundaries,
-the source-owner/source-anchor digest for all 97 semantic rows, the exact
+the source-owner/source-anchor digest for all 102 semantic rows, the exact
 source-pin identity/path/count/hash/role map, complete artifact/document byte
-digests, exact-once profile disposition for all 97 semantic rows, helper
+digests, exact-once profile disposition for all 102 semantic rows, helper
 coverage, explicit absences, 23 routed owned gaps,
 no-feature/manual-commit/idempotence/rebalance/security/shutdown markers, this
 document's markers, and explicit no-claim boundaries.

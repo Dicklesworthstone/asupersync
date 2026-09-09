@@ -21,20 +21,20 @@ const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.2";
 const CAPABILITY_ID: &str = "CAP-KAFKA";
 const BASELINE_REVISION: &str = "b4997e8fe4de098a5a30ff468418460b59ca414a";
-const ARTIFACT_SHA256: &str = "a746fd5f91619dcea064b5e019ce237378970d6bd9ef45f3045670fe59e0f7c2";
-const DOC_SHA256: &str = "7cf46fb6eaa7ded66b6d1d04a7c711f4ce687252bb42eaa05d77e3a5e4b79ff5";
+const ARTIFACT_SHA256: &str = "0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1";
+const DOC_SHA256: &str = "614de775f7b4a6c9c81f9cfc7b916fd5e7fdc9dc52985e608029fdc049791553";
 const SOURCE_PIN_MAP_SHA256: &str =
-    "04fb238c485c35ae71d69daf2beeb5dbc27c9a9d884f116a36f5f4721b35db0c";
+    "4ca6e56d0cc901c96cfe367864a1dee1e010225fc501d317bb4d696bfd7b2a86";
 const ALL_ROW_SOURCE_ANCHOR_MAP_SHA256: &str =
-    "c9622a5c98a99c533c7566db6292500a1a7e14a7df1fa12351a05d16aa7d3c71";
+    "e06c3bb644ed5898f3ce939bf02824d6419e88a35b63d942eaf363076389d1b6";
 const PUBLIC_ENTRY_ANCHOR_MAP_SHA256: &str =
-    "18bb3f3310348ad48b57ec90c1103baaa7a7234a96a8c075c89f20fa203e336a";
+    "e0cec8a10b4d6f273f346ed906ec6295245aebc9c11b6942e7270c7b76c19b13";
 const ROW_GAP_OWNER_MAP_SHA256: &str =
-    "5c4cb0c1edc74b5f8de090bd8f166de14e8f263d4b681d5fa23cdcb20a1ea760";
+    "9bb4a47d98f56c32ec4b9fad587b2dd46ac55a7814264fed0ae4c13fa262f470";
 const FINDING_OWNER_MAP_SHA256: &str =
     "fb2c14f5416a2499c4d006c36929319afbd0d79a90b68deb7d937c538f46c5cd";
 const PROFILE_MEMBERSHIP_SHA256: &str =
-    "0ec7486c89bbf4555625068ffccfb1d7ee976bb5feb0c459be99f1415ef63d54";
+    "97840e3ef05c3235f6091a466678895502ffa31fe1a714219f4e26db7d9e92fd";
 const PROFILE_GAP_OWNER_MAP_SHA256: &str =
     "05ef0ea1f1b842cc805d2b8a7ec1b2f2a9555fe9d1c71c3f3598a9f5898a0286";
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA INCUMBENT SEMANTICS MATRIX -->";
@@ -652,9 +652,9 @@ fn validate_configuration_coverage(matrix: &Value) -> Result<(), String> {
     let rows = array(matrix, "configuration_fields");
     validate_required_row_shape(rows, "configuration field")?;
 
-    let mut expected_ids = numbered_ids("KPR-CFG-", 25);
-    expected_ids.extend(numbered_ids("KCO-CFG-", 18));
-    if rows.len() != 43 || row_ids(rows, "semantic_id") != expected_ids {
+    let mut expected_ids = numbered_ids("KPR-CFG-", 26);
+    expected_ids.extend(numbered_ids("KCO-CFG-", 19));
+    if rows.len() != 45 || row_ids(rows, "semantic_id") != expected_ids {
         return Err("configuration field ID set must be exact".to_owned());
     }
 
@@ -673,6 +673,7 @@ fn validate_configuration_coverage(matrix: &Value) -> Result<(), String> {
         "ProducerConfig.feature_requirement",
         "ProducerConfig.allow_insecure_transport_for_testing",
         "ProducerConfig.allow_deterministic_broker_for_testing",
+        "ProducerConfig.extra_properties",
         "KafkaTlsConfig.ca_location",
         "KafkaTlsConfig.certificate_location",
         "KafkaTlsConfig.key_location",
@@ -698,6 +699,7 @@ fn validate_configuration_coverage(matrix: &Value) -> Result<(), String> {
         "ConsumerConfig.fetch_max_wait",
         "ConsumerConfig.isolation_level",
         "ConsumerConfig.security",
+        "ConsumerConfig.extra_properties",
         "ConsumerConfig.force_real_kafka",
         "ConsumerConfig.retries",
         "ConsumerConfig.allow_insecure_transport_for_testing",
@@ -779,8 +781,8 @@ fn expected_public_methods(source_inventory: &Value) -> Result<BTreeSet<String>,
 fn validate_public_method_coverage(matrix: &Value) -> Result<(), String> {
     let source_inventory = parse_repo_json(K0_1_ARTIFACT_PATH);
     let expected = expected_public_methods(&source_inventory)?;
-    if expected.len() != 96 {
-        return Err("K0.1 public method authority must contain exactly 96 paths".to_owned());
+    if expected.len() != 105 {
+        return Err("K0.1 public method authority must contain exactly 105 paths".to_owned());
     }
 
     let mut actual = Vec::new();
@@ -798,13 +800,13 @@ fn validate_public_method_coverage(matrix: &Value) -> Result<(), String> {
         "KafkaError::from(io::Error)",
     ]);
     let inherent: BTreeSet<String> = unique.difference(&trait_operations).cloned().collect();
-    if actual.len() != 99
-        || unique.len() != 99
+    if actual.len() != 108
+        || unique.len() != 108
         || !trait_operations.is_subset(&unique)
         || inherent != expected
     {
         return Err(
-            "all 96 K0.1 methods and three KafkaError trait operations must be covered exactly once"
+            "all 105 K0.1 methods and three KafkaError trait operations must be covered exactly once"
                 .to_owned(),
         );
     }
@@ -882,12 +884,12 @@ fn validate_profile_dispositions(matrix: &Value) -> Result<(), String> {
         expected_ids.extend(row_ids(array(matrix, collection), "semantic_id"));
     }
     let unique_covered: BTreeSet<String> = covered_ids.iter().cloned().collect();
-    if expected_ids.len() != 97
-        || covered_ids.len() != 97
-        || unique_covered.len() != 97
+    if expected_ids.len() != 102
+        || covered_ids.len() != 102
+        || unique_covered.len() != 102
         || unique_covered != expected_ids
     {
-        return Err("all 97 semantic rows must have exactly one profile disposition".to_owned());
+        return Err("all 102 semantic rows must have exactly one profile disposition".to_owned());
     }
     if sha256_hex(canonical_membership.as_bytes()) != PROFILE_MEMBERSHIP_SHA256 {
         return Err("profile disposition membership drifted".to_owned());
@@ -934,7 +936,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
             "asupersync-dep-p7-kafka-removal-sarszu.2.12.4",
         ],
     )?;
-    if text(key_password, "source_anchor") != "src/messaging/kafka.rs:934-956,988-993,1169-1171"
+    if text(key_password, "source_anchor") != "src/messaging/kafka.rs:948-970,1002-1007,1183-1185"
         || !text(key_password, "credential_payload_rule").contains("not ZeroizeOnDrop")
         || !text(key_password, "credential_payload_rule").contains("plaintext copies")
     {
@@ -953,7 +955,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
         ],
     )?;
     if text(transaction_timeout, "source_anchor")
-        != "src/messaging/kafka.rs:440-482,1834-1835,1846,1851-1854,2030-2031,2057-2059,2154-2156,2209-2211;src/runtime/spawn_blocking.rs:1-12,40-63,113-130,146-177,239-253,264-315;src/runtime/blocking_pool.rs:284-317,436-457,626-645,866-884,973-990,1293-1310"
+        != "src/messaging/kafka.rs:454-496,1948-1949,1960,1965-1968,2144-2145,2171-2173,2268-2270,2323-2325;src/runtime/spawn_blocking.rs:1-12,40-63,113-130,146-177,239-253,264-315;src/runtime/blocking_pool.rs:284-317,436-457,626-645,866-884,973-990,1293-1310"
         || !text(transaction_timeout, "broker_mapping").contains("u128 decimal text")
         || !text(transaction_timeout, "broker_mapping").contains("does not saturate to u64")
         || !text(transaction_timeout, "broker_mapping").contains("original Duration")
@@ -965,7 +967,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
 
     let producer_admission = find_row(fields, "semantic_id", "KPR-CFG-014");
     if text(producer_admission, "source_anchor")
-        != "src/messaging/kafka.rs:627-745,1229-1231,1250-1251,1386-1410,1605-1609,1672-1676,1903-1918"
+        != "src/messaging/kafka.rs:641-759,1260-1262,1318-1319,1497-1521,1716-1720,1783-1787,2017-2032"
         || !text(producer_admission, "broker_mapping")
             .contains("gates KafkaProducer send and TransactionalProducer::begin_transaction")
         || !text(producer_admission, "broker_mapping")
@@ -995,7 +997,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
 
     let consumer_security = find_row(fields, "semantic_id", "KCO-CFG-014");
     if text(consumer_security, "source_anchor")
-        != "src/messaging/kafka_consumer.rs:133-134,178,292-326,564-579;src/messaging/kafka.rs:894-931,1131-1192"
+        != "src/messaging/kafka_consumer.rs:154-155,240,399-433,896-916;src/messaging/kafka.rs:908-945,1145-1206"
         || text(consumer_security, "source_owner")
             != "src/messaging/kafka_consumer.rs;src/messaging/kafka.rs"
         || !text(consumer_security, "broker_mapping").contains("apply_security_config")
@@ -1097,7 +1099,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
         ],
     )?;
     if text(commit, "source_anchor")
-        != "src/messaging/kafka.rs:351-374,463-482,716-745,1971-2020,2143-2196,2229-2237;src/runtime/spawn_blocking.rs:1-12,40-63,114-133,136-201,224-237,251-348;src/runtime/blocking_pool.rs:284-330,436-457,626-645,737-755,877-905,984-1001,1290-1416"
+        != "src/messaging/kafka.rs:351-376,477-496,730-759,2085-2134,2257-2310,2343-2351;src/runtime/spawn_blocking.rs:1-12,40-63,114-133,136-201,224-237,251-348;src/runtime/blocking_pool.rs:284-330,436-457,626-645,737-755,877-905,984-1001,1290-1416"
         || !text(commit, "error_outcome").contains("empty staged commit succeeds locally")
         || !text(commit, "error_outcome").contains("nonempty staged commit panics")
         || !text(commit, "error_outcome").contains("Duplicate native handles")
@@ -1120,7 +1122,7 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
         ],
     )?;
     if text(abort, "source_anchor")
-        != "src/messaging/kafka.rs:351-374,463-482,1971-2020,2198-2237;src/runtime/spawn_blocking.rs:1-12,40-63,114-133,136-201,224-237,251-348;src/runtime/blocking_pool.rs:284-330,436-457,626-645,737-755,877-905,984-1001,1290-1416"
+        != "src/messaging/kafka.rs:351-376,477-496,2085-2134,2312-2351;src/runtime/spawn_blocking.rs:1-12,40-63,114-133,136-201,224-237,251-348;src/runtime/blocking_pool.rs:284-330,436-457,626-645,737-755,877-905,984-1001,1290-1416"
         || !text(abort, "broker_mapping").contains("every no-feature branch")
         || !text(abort, "error_outcome").contains("succeeds locally")
         || !text(abort, "error_outcome").contains("Duplicate native handles")
@@ -1168,7 +1170,8 @@ fn validate_high_risk_semantics(matrix: &Value) -> Result<(), String> {
     let consumer_constructor = find_row(operations, "semantic_id", "KCO-OP-003");
     if !text(consumer_constructor, "broker_mapping").contains("enable.partition.eof=true")
         || !text(consumer_constructor, "error_outcome").contains("ClientCreation")
-        || !text(consumer_constructor, "credential_payload_rule").contains("can expose a password")
+        || !text(consumer_constructor, "credential_payload_rule")
+            .contains("excludes the rejected value and free-form description")
     {
         return Err("consumer construction semantics drifted".to_owned());
     }
@@ -1265,7 +1268,7 @@ fn validate_exact_owner_maps(matrix: &Value) -> Result<(), String> {
 fn validate_enum_and_operation_rows(matrix: &Value) -> Result<(), String> {
     let enums = array(matrix, "enum_semantics");
     validate_required_row_shape(enums, "enum")?;
-    if enums.len() != 7 || row_ids(enums, "semantic_id") != numbered_ids("KAFKA-ENUM-", 7) {
+    if enums.len() != 8 || row_ids(enums, "semantic_id") != numbered_ids("KAFKA-ENUM-", 8) {
         return Err("enum semantic ID set drifted".to_owned());
     }
     let expected_enum_surfaces = expected_set(&[
@@ -1276,6 +1279,7 @@ fn validate_enum_and_operation_rows(matrix: &Value) -> Result<(), String> {
         "KafkaSecurityConfig",
         "AutoOffsetReset",
         "IsolationLevel",
+        "KafkaRebalanceProtocol",
     ]);
     let actual_enum_surfaces: BTreeSet<String> = enums
         .iter()
@@ -1288,8 +1292,8 @@ fn validate_enum_and_operation_rows(matrix: &Value) -> Result<(), String> {
     let operations = array(matrix, "operations");
     validate_required_row_shape(operations, "operation")?;
     let mut expected_operation_ids = numbered_ids("KPR-OP-", 21);
-    expected_operation_ids.extend(numbered_ids("KCO-OP-", 17));
-    if operations.len() != 38 || row_ids(operations, "semantic_id") != expected_operation_ids {
+    expected_operation_ids.extend(numbered_ids("KCO-OP-", 19));
+    if operations.len() != 40 || row_ids(operations, "semantic_id") != expected_operation_ids {
         return Err("operation semantic ID set drifted".to_owned());
     }
 
@@ -1348,7 +1352,7 @@ fn validate_helpers_and_absences(matrix: &Value) -> Result<(), String> {
         return Err("deterministic broker reset semantics drifted".to_owned());
     }
     let lock = find_row(helpers, "semantic_id", "KPR-HLP-003");
-    if text(lock, "source_anchor") != "src/messaging/kafka.rs:761-782"
+    if text(lock, "source_anchor") != "src/messaging/kafka.rs:775-796"
         || !text(lock, "success_outcome").contains("Returns guard")
         || !text(lock, "shutdown_rule").contains("Guard drop resets")
         || !text(lock, "resource_bound").contains("BTreeMap clear removes entries")
@@ -1409,6 +1413,68 @@ fn validate_helpers_and_absences(matrix: &Value) -> Result<(), String> {
 }
 
 fn validate_shared_semantics_and_findings(matrix: &Value) -> Result<(), String> {
+    let review = object(matrix, "current_source_review");
+    if review.get("reviewed_date_utc").and_then(Value::as_str) != Some("2026-09-09")
+        || review.get("release_owner").and_then(Value::as_str) != Some("asupersync-ghxhvm")
+    {
+        return Err("current-source review must retain its date and release owner".to_owned());
+    }
+    let historical = review
+        .get("historical_census")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "current-source review must retain the historical census".to_owned())?;
+    for (key, expected) in [
+        ("public_methods", 96),
+        ("public_entry_points", 99),
+        ("configuration_fields", 43),
+        ("enum_semantics", 7),
+        ("operations", 38),
+        ("semantic_rows", 97),
+    ] {
+        if historical.get(key).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!("historical census {key} must remain {expected}"));
+        }
+    }
+    for id in ["KPR-CFG-026", "KCO-CFG-019"] {
+        let row = find_row(array(matrix, "configuration_fields"), "semantic_id", id);
+        for (key, marker) in [
+            ("accepted_values", "original insertion position"),
+            ("broker_mapping", "absent optional typed field"),
+            ("error_outcome", "omitting rejected value and description"),
+            ("credential_payload_rule", "redacts every raw value"),
+            ("credential_payload_rule", "without zeroization"),
+        ] {
+            if !text(row, key).contains(marker) {
+                return Err(format!("{id}.{key} must retain {marker}"));
+            }
+        }
+    }
+    for (id, key, marker) in [
+        ("KPR-OP-005", "cancellation_rule", "wait_retry_backoff"),
+        (
+            "KCO-OP-005",
+            "broker_mapping",
+            "separate from BrokerConsumerContext",
+        ),
+        ("KCO-OP-006", "retry_rule", "original deadline"),
+        (
+            "KCO-OP-009",
+            "shutdown_rule",
+            "cannot repair an abandoned close",
+        ),
+        ("KCO-OP-018", "success_outcome", "not success counts"),
+        (
+            "KCO-OP-019",
+            "success_outcome",
+            "saturates count at u32::MAX",
+        ),
+        ("KCO-OP-019", "shutdown_rule", "do not clear"),
+    ] {
+        let row = find_row(array(matrix, "operations"), "semantic_id", id);
+        if !text(row, key).contains(marker) {
+            return Err(format!("current-source {id}.{key} must retain {marker}"));
+        }
+    }
     let shared = object(matrix, "shared_semantics");
     for (key, marker) in [
         ("manual_commit_default", "defaults false"),
@@ -1479,6 +1545,19 @@ fn validate_shared_semantics_and_findings(matrix: &Value) -> Result<(), String> 
     if !string_set(profile_correction, "owner_beads").contains("asupersync-z2kt29") {
         return Err("workspace test profile correction must retain its live owner".to_owned());
     }
+    let config_exposure = find_row(findings, "finding_id", "KAFKA-K0-2-GAP-21");
+    for marker in [
+        "Historical finding retained verbatim",
+        "excluding rejected value and free-form description",
+        "does not prove erasure",
+        "separate execution receipts",
+    ] {
+        if !text(config_exposure, "current_source_disposition").contains(marker) {
+            return Err(format!(
+                "configuration exposure disposition must retain {marker}"
+            ));
+        }
+    }
     let recovery_race = find_row(findings, "finding_id", "KAFKA-K0-2-GAP-17");
     if !text(recovery_race, "finding").contains("admit multiple transaction handles")
         || !text(recovery_race, "finding").contains("leave Idle while a handle remains active")
@@ -1548,17 +1627,17 @@ fn validate_coverage_receipt_and_docs(matrix: &Value) -> Result<(), String> {
         .ok_or_else(|| "coverage_model must exist".to_owned())?;
     let model = object(matrix, "coverage_model");
     for (key, expected) in [
-        ("exact_unique_public_method_count", 96),
+        ("exact_unique_public_method_count", 105),
         ("reachable_trait_operation_count", 3),
-        ("total_public_entry_point_count", 99),
-        ("configuration_field_count", 43),
-        ("enum_semantic_count", 7),
-        ("operation_row_count", 38),
+        ("total_public_entry_point_count", 108),
+        ("configuration_field_count", 45),
+        ("enum_semantic_count", 8),
+        ("operation_row_count", 40),
         ("callable_helper_count", 9),
         ("explicit_absence_count", 2),
         ("routed_finding_count", 23),
         ("profile_disposition_group_count", 17),
-        ("profile_semantic_row_count", 97),
+        ("profile_semantic_row_count", 102),
     ] {
         if model.get(key).and_then(Value::as_u64) != Some(expected) {
             return Err(format!("coverage_model.{key} must be {expected}"));
@@ -1621,9 +1700,9 @@ fn validate_coverage_receipt_and_docs(matrix: &Value) -> Result<(), String> {
         BEAD_ID,
         "src/runtime/spawn_blocking.rs",
         "src/runtime/blocking_pool.rs",
-        "43",
-        "96",
-        "Total explicit public entry points | 99",
+        "45",
+        "105",
+        "Total explicit public entry points | 108",
         "Routed semantic findings | 23",
         "23 routed owned gaps",
         "Manual commit is the default",

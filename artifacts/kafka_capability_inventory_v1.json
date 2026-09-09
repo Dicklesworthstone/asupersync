@@ -8,6 +8,34 @@
   "baseline_revision": "2d811170e956966e960db122a0d634a5b60c56e0",
   "authority_revision": "2d811170e956966e960db122a0d634a5b60c56e0",
   "inventory_state": "K0_1_SOURCE_REACHABILITY_FROZEN",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner_bead": "asupersync-ghxhvm",
+    "historical_baseline_revision": "2d811170e956966e960db122a0d634a5b60c56e0",
+    "historical_baseline_scope": "The baseline and authority revisions identify the original K0 decision. Current source pins and the public inventory below include the reviewed additive incumbent changes; they are not evidence that current bytes existed at the historical baseline.",
+    "source_changes": [
+      "ProducerConfig and ConsumerConfig gained with_property, set_property and extra_properties. Raw librdkafka properties are applied before typed setters; repeated raw keys replace their values in insertion order.",
+      "KafkaConsumer gained rebalance_stats, rebalance_protocol and last_transient_error. RebalanceStats and KafkaRebalanceProtocol are non-exhaustive public types and have messaging facade exports; TransientConsumerError remains module-only.",
+      "Real consumers use BrokerConsumerContext and RebalanceCounters for configured eager versus cooperative callbacks. Close and Drop leave the group through bounded normal polling; cooperative close avoids the eager unassign API.",
+      "Poll records informational UnknownTopicOrPartition occurrences while continuing to its deadline. Other broker errors retain their error path.",
+      "Producer flush yields through the runtime timer while ThreadedProducer performs background polling.",
+      "ProducerConfig and ConsumerConfig now implement Debug manually to hide every raw property value while retaining keys and typed settings. Native ClientConfig rejection paths omit the value and free-form description, preserving the Config category and the parallel-client creation prefix; explicit property getters still expose original values and no erasure claim is made.",
+      "The excluded fuzz lockfile is now tracked. Its current pin records source availability, not fuzz execution or broker parity.",
+      "Root manifest, lock, library root, dependency registry and ledger changed for release packaging, workspace versions and other capabilities. The optional rdkafka edge, locked Kafka package identities, native messaging gate and KEEP_INCUMBENT authority are unchanged."
+    ],
+    "historical_public_census": {
+      "public_top_level_declarations": 37,
+      "unique_public_top_level_paths": 36,
+      "public_symbol_groups": 30,
+      "syntactic_public_inherent_method_declarations": 95,
+      "unique_public_inherent_method_paths": 91,
+      "public_trait_methods": 5,
+      "syntactic_public_fields": 60,
+      "downstream_visible_public_fields": 54,
+      "facade_export_names": 15
+    },
+    "evidence_boundary": "Static source review only. Original semantic, downstream and broker receipts remain historical until their own current-source review and terminal verification. No broker execution, native-client parity, security completeness or cutover is inferred."
+  },
   "authority": {
     "adr_id": "DEP-ADR-009",
     "adr_path": "docs/adr/dep_plan_adr_009_kafka_client.md",
@@ -36,66 +64,66 @@
   "source_pin_scope": {
     "record_count_semantics": "Rust str::lines record count, computed with awk END NR for files without assuming a final newline.",
     "hash_semantics": "SHA-256 of exact working-tree bytes.",
-    "baseline_files": "Source and manifest rows are byte-identical to baseline_revision.",
-    "corrected_policy_files": "Registry and ADR rows pin the reviewed K0.1 correction that will land with this packet.",
-    "untracked_lock_policy": "fuzz/Cargo.lock is ignored and therefore is not reproducible repository evidence; the packet records its absence from version control rather than pinning local bytes."
+    "baseline_files": "Source and manifest rows pin the current_source_review, while baseline_revision retains the original K0 authority identity.",
+    "corrected_policy_files": "Registry and ADR rows pin the current reviewed KEEP_INCUMBENT authority without promoting broker evidence.",
+    "untracked_lock_policy": "The historical baseline did not track fuzz/Cargo.lock. The current repository does, so it is pinned separately without treating source availability as execution evidence."
   },
   "source_pins": [
     {
       "pin_id": "KAFKA-PIN-ROOT-MANIFEST",
       "path": "Cargo.toml",
-      "record_count": 1061,
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
+      "record_count": 1121,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
       "role": "root feature and optional dependency owner",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
     },
     {
       "pin_id": "KAFKA-PIN-ROOT-LOCK",
       "path": "Cargo.lock",
-      "record_count": 4666,
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
+      "record_count": 4664,
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
       "role": "rdkafka and rdkafka-sys resolved identity",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
     },
     {
       "pin_id": "KAFKA-PIN-FUZZ-MANIFEST",
       "path": "fuzz/Cargo.toml",
-      "record_count": 6233,
-      "sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
+      "record_count": 6234,
+      "sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
       "role": "excluded workspace profile owner",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
     },
     {
       "pin_id": "KAFKA-PIN-CRATE-ROOT",
       "path": "src/lib.rs",
-      "record_count": 468,
-      "sha256": "22ce17632d6a98843ebd6b9f855a430aef3ea6da07a6657e3311ad87b78c1b7f",
+      "record_count": 513,
+      "sha256": "baec6f62836d2b3dca6b56ae5bd3d0c2d9717ac60a2d4268b28e509cefe36d36",
       "role": "native messaging module and wasm exclusion owner",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
     },
     {
       "pin_id": "KAFKA-PIN-MESSAGING-MODULE",
       "path": "src/messaging/mod.rs",
-      "record_count": 225,
-      "sha256": "4c5350f58276648f12227ae26578b629d6b510c94f9de77a2d323d1ccca7704b",
+      "record_count": 226,
+      "sha256": "d9e81d4167abacab6a585ac4f265249bf82f077c35d6a80a95d0bc955f8c2b09",
       "role": "module declarations and facade reexports",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
     },
     {
       "pin_id": "KAFKA-PIN-PRODUCER-SOURCE",
       "path": "src/messaging/kafka.rs",
-      "record_count": 4335,
-      "sha256": "1329d49653935c9dc9a1c18cff136d9f8bfb21f204f908f562d6c3da62cc7de7",
+      "record_count": 4521,
+      "sha256": "a737bbe271e70cf830e920426681b6199fc5b9c969243e67aea5ec8b38d27720",
       "role": "producer, transaction, security, parallel client and backend owner",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
     },
     {
       "pin_id": "KAFKA-PIN-CONSUMER-SOURCE",
       "path": "src/messaging/kafka_consumer.rs",
-      "record_count": 2757,
-      "sha256": "82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d",
+      "record_count": 3317,
+      "sha256": "157847de9e5611ba8464131dab28a14aa31f841af264fa56a27efd69c6e7504a",
       "role": "consumer, group, offset, seek and poll owner",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
     },
     {
       "pin_id": "KAFKA-PIN-UNWIRED-CONSUMER-SOURCE",
@@ -108,16 +136,16 @@
     {
       "pin_id": "KAFKA-PIN-CAPABILITY-REGISTRY",
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "record_count": 6929,
-      "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
+      "record_count": 7058,
+      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
       "role": "corrected CAP-KAFKA authority and graph mapping",
       "pin_state": "K0_1_CORRECTED"
     },
     {
       "pin_id": "KAFKA-PIN-CAPABILITY-REGISTRY-DOC",
       "path": "docs/dependency_capability_registry.md",
-      "record_count": 212,
-      "sha256": "e17ec45b39921adcd495692f6741a2f55578a798b360c68ef989fffe0f88471d",
+      "record_count": 248,
+      "sha256": "066632fce37bcf49afd0419bd540783a97d46d2e24c0982800ad34442c86da78",
       "role": "corrected human registry companion",
       "pin_state": "K0_1_CORRECTED"
     },
@@ -133,17 +161,25 @@
       "pin_id": "KAFKA-PIN-ADR-REGISTRY",
       "path": "artifacts/dependency_api_adr_registry_v1.json",
       "record_count": 6831,
-      "sha256": "4765bb6d17b676fd63529ee75047477656851474300601e05cbc5492b32f9dbc",
+      "sha256": "aba29040cbbcc6daba7166bbe0a3eacca1483b4c4522125bd5d93f6c0091d3d1",
       "role": "ADR-to-capability authority mapping",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
     },
     {
       "pin_id": "KAFKA-PIN-MARGINAL-LEDGER",
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "record_count": 188447,
-      "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
+      "record_count": 187615,
+      "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
       "role": "checked dependency reachability projection",
-      "pin_state": "BASELINE_HEAD"
+      "pin_state": "CURRENT_REVIEWED"
+    },
+    {
+      "pin_id": "KAFKA-PIN-FUZZ-LOCK",
+      "path": "fuzz/Cargo.lock",
+      "record_count": 3752,
+      "sha256": "140ccbf6f1351c0531c0b492baef50bd88aba898698e0f4e5a170a0d6ba247ff",
+      "role": "now-tracked excluded fuzz dependency identity; no broker or fuzz execution evidence",
+      "pin_state": "CURRENT_REVIEWED"
     }
   ],
   "dependency_resolution": {
@@ -181,7 +217,7 @@
       "fuzz"
     ],
     "fuzz_workspace_enables_kafka": false,
-    "fuzz_lock_tracked": false,
+    "fuzz_lock_tracked": true,
     "ci_cross_platform_enables_kafka": false,
     "native_all_features_enables_kafka": true,
     "marginal_package_projection": {
@@ -288,7 +324,7 @@
   "module_topology": {
     "crate_module": {
       "rust_path": "asupersync::messaging",
-      "source": "src/lib.rs:239",
+      "source": "src/lib.rs:251",
       "cfg": "not(target_arch=wasm32)"
     },
     "feature_ungated_modules": [
@@ -313,6 +349,8 @@
       "KafkaConsumerRecord",
       "KafkaError",
       "KafkaProducer",
+      "KafkaRebalanceProtocol",
+      "KafkaRebalanceStats",
       "ProducerConfig",
       "RecordMetadata",
       "TopicPartitionOffset",
@@ -330,7 +368,8 @@
       "KafkaSaslMechanism",
       "KafkaSecurityConfig",
       "KafkaTlsConfig",
-      "RebalanceResult"
+      "RebalanceResult",
+      "TransientConsumerError"
     ],
     "cfg_specific_module_only_public_paths": [
       "DeterministicBrokerBackend",
@@ -367,7 +406,7 @@
       "symbol_id": "KPR-PUB-002",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "deterministic helper group",
-      "declarations": ["deterministic_broker_end_offset@654", "reset_deterministic_broker_for_tests@751", "DeterministicBrokerTestGuard@761", "lock_deterministic_broker_for_tests@772"],
+      "declarations": ["deterministic_broker_end_offset@668", "reset_deterministic_broker_for_tests@765", "DeterministicBrokerTestGuard@775", "lock_deterministic_broker_for_tests@786"],
       "cfg": "not(feature=kafka) and test-or-test-internals; reset/guard/lock require test-internals",
       "facade_exports": [],
       "public_fields": [],
@@ -378,7 +417,7 @@
       "symbol_id": "KPR-PUB-003",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "enum",
-      "declarations": ["Compression@833"],
+      "declarations": ["Compression@847"],
       "cfg": "native messaging module",
       "facade_exports": ["Compression"],
       "public_fields": [],
@@ -389,7 +428,7 @@
       "symbol_id": "KPR-PUB-004",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "enum",
-      "declarations": ["Acks@849"],
+      "declarations": ["Acks@863"],
       "cfg": "native messaging module",
       "facade_exports": ["Acks"],
       "public_fields": [],
@@ -400,7 +439,7 @@
       "symbol_id": "KPR-PUB-005",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "enum",
-      "declarations": ["KafkaFeatureRequirement@873"],
+      "declarations": ["KafkaFeatureRequirement@887"],
       "cfg": "native messaging module",
       "facade_exports": [],
       "public_fields": [],
@@ -411,7 +450,7 @@
       "symbol_id": "KPR-PUB-006",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["KafkaTlsConfig@935"],
+      "declarations": ["KafkaTlsConfig@949"],
       "cfg": "native messaging module",
       "facade_exports": [],
       "public_fields": ["ca_location", "certificate_location", "key_location"],
@@ -422,7 +461,7 @@
       "symbol_id": "KPR-PUB-007",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "enum",
-      "declarations": ["KafkaSaslMechanism@998"],
+      "declarations": ["KafkaSaslMechanism@1012"],
       "cfg": "native messaging module",
       "facade_exports": [],
       "public_fields": [],
@@ -433,7 +472,7 @@
       "symbol_id": "KPR-PUB-008",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["KafkaSaslConfig@1064"],
+      "declarations": ["KafkaSaslConfig@1078"],
       "cfg": "native messaging module",
       "facade_exports": [],
       "public_fields": ["mechanism", "username", "tls"],
@@ -444,7 +483,7 @@
       "symbol_id": "KPR-PUB-009",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "enum",
-      "declarations": ["KafkaSecurityConfig@1133"],
+      "declarations": ["KafkaSecurityConfig@1147"],
       "cfg": "native messaging module",
       "facade_exports": [],
       "public_fields": [],
@@ -455,18 +494,18 @@
       "symbol_id": "KPR-PUB-010",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["ProducerConfig@1196"],
+      "declarations": ["ProducerConfig@1227"],
       "cfg": "native messaging module; two builders are cfg-sensitive",
       "facade_exports": ["ProducerConfig"],
       "public_fields": ["bootstrap_servers", "client_id", "batch_size", "linger_ms", "compression", "enable_idempotence", "acks", "retries", "request_timeout", "max_message_size", "security", "feature_requirement"],
       "public_variants": [],
-      "public_methods": ["new", "client_id", "batch_size", "linger_ms", "compression", "enable_idempotence", "acks", "retries", "security", "feature_requirement", "require_kafka_feature", "optional_kafka_feature", "tls", "sasl_scram_sha_256", "sasl_scram_sha_512", "allow_insecure_transport_for_testing", "allow_deterministic_broker_for_testing", "kafka_feature_diagnostic", "validate"]
+      "public_methods": ["new", "client_id", "with_property", "set_property", "extra_properties", "batch_size", "linger_ms", "compression", "enable_idempotence", "acks", "retries", "security", "feature_requirement", "require_kafka_feature", "optional_kafka_feature", "tls", "sasl_scram_sha_256", "sasl_scram_sha_512", "allow_insecure_transport_for_testing", "allow_deterministic_broker_for_testing", "kafka_feature_diagnostic", "validate"]
     },
     {
       "symbol_id": "KPR-PUB-011",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["RecordMetadata@1477"],
+      "declarations": ["RecordMetadata@1588"],
       "cfg": "native messaging module",
       "facade_exports": ["RecordMetadata"],
       "public_fields": ["topic", "partition", "offset", "timestamp"],
@@ -477,7 +516,7 @@
       "symbol_id": "KPR-PUB-012",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["KafkaProducer@1515"],
+      "declarations": ["KafkaProducer@1626"],
       "cfg": "native messaging module; backend field cfg-selected",
       "facade_exports": ["KafkaProducer"],
       "public_fields": [],
@@ -488,7 +527,7 @@
       "symbol_id": "KPR-PUB-013",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["TransactionalConfig@1829"],
+      "declarations": ["TransactionalConfig@1943"],
       "cfg": "native messaging module",
       "facade_exports": ["TransactionalConfig"],
       "public_fields": ["producer", "transaction_id", "transaction_timeout"],
@@ -499,7 +538,7 @@
       "symbol_id": "KPR-PUB-014",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["TransactionalProducer@1864"],
+      "declarations": ["TransactionalProducer@1978"],
       "cfg": "native messaging module; backend field cfg-selected",
       "facade_exports": ["TransactionalProducer"],
       "public_fields": [],
@@ -510,7 +549,7 @@
       "symbol_id": "KPR-PUB-015",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["Transaction@2072"],
+      "declarations": ["Transaction@2186"],
       "cfg": "native messaging module",
       "facade_exports": ["Transaction"],
       "public_fields": [],
@@ -521,7 +560,7 @@
       "symbol_id": "KPR-PUB-016",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "trait",
-      "declarations": ["BrokerBackend@2240"],
+      "declarations": ["BrokerBackend@2354"],
       "cfg": "native messaging module",
       "facade_exports": [],
       "public_fields": [],
@@ -532,7 +571,7 @@
       "symbol_id": "KPR-PUB-017",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "unit struct",
-      "declarations": ["RealBrokerBackend@2250"],
+      "declarations": ["RealBrokerBackend@2364"],
       "cfg": "feature=kafka",
       "facade_exports": [],
       "public_fields": [],
@@ -543,7 +582,7 @@
       "symbol_id": "KPR-PUB-018",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "unit struct",
-      "declarations": ["DeterministicBrokerBackend@2264"],
+      "declarations": ["DeterministicBrokerBackend@2378"],
       "cfg": "not(feature=kafka)",
       "facade_exports": [],
       "public_fields": [],
@@ -554,7 +593,7 @@
       "symbol_id": "KPR-PUB-019",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "trait",
-      "declarations": ["KafkaConsumerTrait@2277"],
+      "declarations": ["KafkaConsumerTrait@2391"],
       "cfg": "native messaging module",
       "facade_exports": [],
       "public_fields": [],
@@ -565,7 +604,7 @@
       "symbol_id": "KPR-PUB-020",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["TopicAwareConsumer@2290"],
+      "declarations": ["TopicAwareConsumer@2404"],
       "cfg": "feature=kafka",
       "facade_exports": [],
       "public_fields": [],
@@ -576,7 +615,7 @@
       "symbol_id": "KPR-PUB-021",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "struct",
-      "declarations": ["DeterministicConsumer@2414"],
+      "declarations": ["DeterministicConsumer@2539"],
       "cfg": "not(feature=kafka) and test",
       "facade_exports": [],
       "public_fields": [],
@@ -587,7 +626,7 @@
       "symbol_id": "KPR-PUB-022",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "cfg-selected struct",
-      "declarations": ["KafkaClient@2326", "KafkaClient@2436"],
+      "declarations": ["KafkaClient@2440", "KafkaClient@2561"],
       "cfg": "mutually exclusive feature=kafka and not(feature=kafka)",
       "facade_exports": [],
       "public_fields": [],
@@ -598,7 +637,7 @@
       "symbol_id": "KPR-PUB-023",
       "owner_path": "src/messaging/kafka.rs",
       "kind": "parser hook group",
-      "declarations": ["From<u8> for Acks@2501", "From<u8> for Compression@2512", "fuzz_parse_kafka_error_response@2525", "fuzz_parse_response_metadata@2573", "fuzz_validate_response_frame@2635", "fuzz_parse_delivery_result@2692"],
+      "declarations": ["From<u8> for Acks@2626", "From<u8> for Compression@2637", "fuzz_parse_kafka_error_response@2650", "fuzz_parse_response_metadata@2698", "fuzz_validate_response_frame@2760", "fuzz_parse_delivery_result@2817"],
       "cfg": "test or cfg(fuzzing) or feature=fuzz",
       "facade_exports": [],
       "public_fields": [],
@@ -609,7 +648,7 @@
       "symbol_id": "KCO-PUB-001",
       "owner_path": "src/messaging/kafka_consumer.rs",
       "kind": "enum",
-      "declarations": ["AutoOffsetReset@68"],
+      "declarations": ["AutoOffsetReset@71"],
       "cfg": "native messaging module",
       "facade_exports": ["AutoOffsetReset"],
       "public_fields": [],
@@ -620,7 +659,7 @@
       "symbol_id": "KCO-PUB-002",
       "owner_path": "src/messaging/kafka_consumer.rs",
       "kind": "enum",
-      "declarations": ["IsolationLevel@80"],
+      "declarations": ["IsolationLevel@83"],
       "cfg": "native messaging module",
       "facade_exports": ["IsolationLevel"],
       "public_fields": [],
@@ -631,18 +670,18 @@
       "symbol_id": "KCO-PUB-003",
       "owner_path": "src/messaging/kafka_consumer.rs",
       "kind": "struct",
-      "declarations": ["ConsumerConfig@90"],
+      "declarations": ["ConsumerConfig@111"],
       "cfg": "native messaging module; two builders are cfg-sensitive",
       "facade_exports": ["KafkaConsumerConfig"],
       "public_fields": ["bootstrap_servers", "group_id", "client_id", "session_timeout", "heartbeat_interval", "auto_offset_reset", "enable_auto_commit", "auto_commit_interval", "max_poll_records", "fetch_min_bytes", "fetch_max_bytes", "fetch_max_wait", "isolation_level", "security", "force_real_kafka", "retries"],
       "public_variants": [],
-      "public_methods": ["new", "client_id", "session_timeout", "heartbeat_interval", "auto_offset_reset", "enable_auto_commit", "auto_commit_interval", "max_poll_records", "fetch_min_bytes", "fetch_max_bytes", "fetch_max_wait", "isolation_level", "force_real_kafka", "retries", "security", "tls", "sasl_scram_sha_256", "sasl_scram_sha_512", "allow_insecure_transport_for_testing", "allow_deterministic_broker_for_testing", "validate"]
+      "public_methods": ["new", "client_id", "with_property", "set_property", "extra_properties", "session_timeout", "heartbeat_interval", "auto_offset_reset", "enable_auto_commit", "auto_commit_interval", "max_poll_records", "fetch_min_bytes", "fetch_max_bytes", "fetch_max_wait", "isolation_level", "force_real_kafka", "retries", "security", "tls", "sasl_scram_sha_256", "sasl_scram_sha_512", "allow_insecure_transport_for_testing", "allow_deterministic_broker_for_testing", "validate"]
     },
     {
       "symbol_id": "KCO-PUB-004",
       "owner_path": "src/messaging/kafka_consumer.rs",
       "kind": "struct",
-      "declarations": ["TopicPartitionOffset@387"],
+      "declarations": ["TopicPartitionOffset@494"],
       "cfg": "native messaging module",
       "facade_exports": ["TopicPartitionOffset"],
       "public_fields": ["topic", "partition", "offset"],
@@ -653,7 +692,7 @@
       "symbol_id": "KCO-PUB-005",
       "owner_path": "src/messaging/kafka_consumer.rs",
       "kind": "struct",
-      "declarations": ["RebalanceResult@410"],
+      "declarations": ["RebalanceResult@517"],
       "cfg": "native messaging module",
       "facade_exports": [],
       "public_fields": ["generation", "assigned", "revoked"],
@@ -664,7 +703,7 @@
       "symbol_id": "KCO-PUB-006",
       "owner_path": "src/messaging/kafka_consumer.rs",
       "kind": "struct",
-      "declarations": ["ConsumerRecord@421"],
+      "declarations": ["ConsumerRecord@528"],
       "cfg": "native messaging module",
       "facade_exports": ["KafkaConsumerRecord"],
       "public_fields": ["topic", "partition", "offset", "key", "payload", "timestamp", "headers"],
@@ -675,12 +714,45 @@
       "symbol_id": "KCO-PUB-007",
       "owner_path": "src/messaging/kafka_consumer.rs",
       "kind": "struct",
-      "declarations": ["KafkaConsumer@454"],
+      "declarations": ["KafkaConsumer@731"],
       "cfg": "native messaging module; backend fields cfg-selected",
       "facade_exports": ["KafkaConsumer"],
       "public_fields": [],
       "public_variants": [],
-      "public_methods": ["new", "subscribe", "rebalance", "poll", "commit_offsets", "seek", "close", "config", "subscriptions", "assigned_partitions", "rebalance_generation", "last_revoked_partitions", "committed_offset", "position", "is_closed"]
+      "public_methods": ["new", "rebalance_stats", "rebalance_protocol", "subscribe", "rebalance", "poll", "commit_offsets", "seek", "close", "config", "subscriptions", "assigned_partitions", "last_transient_error", "rebalance_generation", "last_revoked_partitions", "committed_offset", "position", "is_closed"]
+    },
+    {
+      "symbol_id": "KCO-PUB-008",
+      "owner_path": "src/messaging/kafka_consumer.rs",
+      "kind": "non-exhaustive struct",
+      "declarations": ["RebalanceStats@608"],
+      "cfg": "native messaging module",
+      "facade_exports": ["KafkaRebalanceStats"],
+      "public_fields": ["cooperative", "incremental_assigns", "eager_assigns", "incremental_unassigns", "eager_unassigns"],
+      "public_variants": [],
+      "public_methods": []
+    },
+    {
+      "symbol_id": "KCO-PUB-009",
+      "owner_path": "src/messaging/kafka_consumer.rs",
+      "kind": "non-exhaustive enum",
+      "declarations": ["KafkaRebalanceProtocol@625"],
+      "cfg": "native messaging module",
+      "facade_exports": ["KafkaRebalanceProtocol"],
+      "public_fields": [],
+      "public_variants": ["Unknown", "Eager", "Cooperative"],
+      "public_methods": []
+    },
+    {
+      "symbol_id": "KCO-PUB-010",
+      "owner_path": "src/messaging/kafka_consumer.rs",
+      "kind": "struct",
+      "declarations": ["TransientConsumerError@768"],
+      "cfg": "native messaging module",
+      "facade_exports": [],
+      "public_fields": ["code", "first_seen", "last_seen", "count"],
+      "public_variants": [],
+      "public_methods": []
     }
   ],
   "backend_bindings": [
@@ -697,9 +769,9 @@
       "binding_id": "KAFKA-BACKEND-REAL-CONSUMER",
       "cfg": "feature=kafka",
       "owner_path": "src/messaging/kafka_consumer.rs",
-      "private_types": ["BrokerSnapshot", "BrokerPollOutcome"],
-      "rdkafka_types": ["BaseConsumer", "Consumer", "CommitMode", "KafkaError", "Headers", "Message", "Offset", "TopicPartitionList", "ClientConfig", "BorrowedMessage"],
-      "owned_operations": ["consumer creation", "subscribe", "assignment snapshot", "position snapshot", "assign", "unassign", "poll", "offset store", "sync commit", "seek", "unsubscribe", "close unassign"],
+      "private_types": ["BrokerSnapshot", "BrokerPollOutcome", "BrokerConsumerContext", "RebalanceCounters"],
+      "rdkafka_types": ["BaseConsumer", "Consumer", "ConsumerContext", "ClientContext", "CommitMode", "KafkaError", "Headers", "Message", "Offset", "TopicPartitionList", "ClientConfig", "BorrowedMessage", "RDKafkaErrorCode", "RDKafkaRespErr", "RebalanceProtocol"],
+      "owned_operations": ["consumer creation", "subscribe", "assignment snapshot", "position snapshot", "assign", "unassign", "incremental assign", "incremental unassign", "rebalance protocol query", "poll", "transient poll error accounting", "offset store", "sync commit", "seek", "unsubscribe", "bounded leave-group drain", "cooperative close", "Drop leave-group drain"],
       "direct_native_ffi": false
     },
     {
@@ -849,18 +921,18 @@
     "evidence_class": "DETERMINISTIC_ONLY_NOT_BROKER_EVIDENCE"
   },
   "occurrence_census": {
-    "public_top_level_declarations": 37,
-    "unique_public_top_level_paths": 36,
-    "public_symbol_groups": 30,
-    "syntactic_public_inherent_method_declarations": 95,
-    "unique_public_inherent_method_paths": 91,
+    "public_top_level_declarations": 40,
+    "unique_public_top_level_paths": 39,
+    "public_symbol_groups": 33,
+    "syntactic_public_inherent_method_declarations": 104,
+    "unique_public_inherent_method_paths": 100,
     "public_trait_methods": 5,
-    "syntactic_public_fields": 60,
+    "syntactic_public_fields": 69,
     "crate_private_record_fields": 6,
-    "downstream_visible_public_fields": 54,
-    "facade_export_names": 15,
+    "downstream_visible_public_fields": 63,
+    "facade_export_names": 17,
     "producer_facade_export_names": 9,
-    "consumer_facade_export_names": 6,
+    "consumer_facade_export_names": 8,
     "direct_rdkafka_import_groups": 2,
     "direct_rdkafka_sys_imports": 0,
     "primary_source_unsafe_blocks": 0,
@@ -883,8 +955,8 @@
       "capability_ids": ["CAP-KAFKA"]
     },
     "graph_signoff_counts": {
-      "dep_plan_issue_count": 424,
-      "non_epic_work_count": 357,
+      "dep_plan_issue_count": 425,
+      "non_epic_work_count": 358,
       "mapping_rule_count": 109
     },
     "resolved_gap_id": "KFK-GAP-01",
@@ -979,7 +1051,7 @@
     {
       "gap_id": "KAFKA-K0-1-GAP-15",
       "state": "ROUTED",
-      "finding": "The root and excluded workspace provide no tracked fuzz lockfile; a local ignored lock cannot serve as repository evidence.",
+      "finding": "At the historical K0 baseline the excluded workspace had no tracked fuzz lockfile. The current repository tracks and pins it; this resolves that source-availability fact but does not establish fuzz execution or broker/native provenance.",
       "owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.4"
     }
   ],

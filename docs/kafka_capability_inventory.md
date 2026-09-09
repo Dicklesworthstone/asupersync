@@ -5,8 +5,11 @@
 This document is the human companion to
 `artifacts/kafka_capability_inventory_v1.json`. Together they freeze the K0.1
 incumbent source, Cargo, export, cfg, and reachable-backend surface for
-`asupersync-dep-p7-kafka-removal-sarszu.1.1` at baseline revision
-`2d811170e956966e960db122a0d634a5b60c56e0`.
+`asupersync-dep-p7-kafka-removal-sarszu.1.1`. The original authority baseline is
+`2d811170e956966e960db122a0d634a5b60c56e0`; the source inventory was reviewed
+against the release candidate on 2026-09-09. Current pins and counts include
+the additive incumbent changes below and do not claim those bytes existed at
+the original baseline. The artifact retains the historical public census.
 
 The governing decision remains `DEP-ADR-009`: keep the incumbent Kafka client
 until independently owned parity evidence exists. This packet does not permit
@@ -34,7 +37,7 @@ The capability registry names both primary source owners and the root manifest:
 
 It also points to the machine inventory. The K0 prefix mapping now resolves
 `asupersync-dep-p7-kafka-removal-sarszu.1.*` to `CAP-KAFKA`, and the corrected
-graph snapshot contains 424 dep-plan issues, 357 non-epic work items, and 109
+graph snapshot contains 425 dep-plan issues, 358 non-epic work items, and 109
 mapping rules.
 
 ## Dependency identity
@@ -55,9 +58,9 @@ primary Kafka source imports `rdkafka_sys`, declares direct native FFI, or
 contains an unsafe block. Those facts identify source ownership only; they do
 not establish the native library identity or optional codec/auth availability.
 
-`fuzz/Cargo.toml` does not enable the Kafka feature. Its ignored local lockfile
-is not version-controlled evidence and is deliberately not pinned by this
-packet.
+`fuzz/Cargo.toml` does not enable the Kafka feature. Its lockfile was absent
+from the historical baseline but is now tracked and separately pinned. This
+establishes source availability only, not fuzz execution or broker parity.
 
 ## Module and export topology
 
@@ -66,17 +69,19 @@ and `kafka_consumer` modules are present even when the Kafka feature is off.
 The Kafka feature selects real backend fields and operations; it does not gate
 the public modules themselves.
 
-The messaging facade exports exactly these 15 names:
+The messaging facade exports exactly these 17 names:
 
 `Acks`, `AutoOffsetReset`, `Compression`, `IsolationLevel`, `KafkaConsumer`,
 `KafkaConsumerConfig`, `KafkaConsumerRecord`, `KafkaError`, `KafkaProducer`,
+`KafkaRebalanceProtocol`, `KafkaRebalanceStats`,
 `ProducerConfig`, `RecordMetadata`, `TopicPartitionOffset`, `Transaction`,
 `TransactionalConfig`, and `TransactionalProducer`.
 
 There are no crate-root Kafka reexports. General module-only public names are
 `BrokerBackend`, `KafkaClient`, `KafkaConsumerTrait`,
 `KafkaFeatureRequirement`, `KafkaSaslConfig`, `KafkaSaslMechanism`,
-`KafkaSecurityConfig`, `KafkaTlsConfig`, and `RebalanceResult`. Additional
+`KafkaSecurityConfig`, `KafkaTlsConfig`, `RebalanceResult`, and
+`TransientConsumerError`. Additional
 module-only names are cfg-sensitive deterministic/real backend types, test
 controls, and parser helpers; the machine artifact records each group and its
 cfg expression.
@@ -85,20 +90,47 @@ The frozen public census contains:
 
 | Measure | Count |
 |---|---:|
-| Syntactic top-level public declarations | 37 |
-| Unique top-level public paths | 36 |
-| Stable symbol groups | 30 |
-| Syntactic public inherent methods | 95 |
-| Unique public inherent method paths | 91 |
+| Syntactic top-level public declarations | 40 |
+| Unique top-level public paths | 39 |
+| Stable symbol groups | 33 |
+| Syntactic public inherent methods | 104 |
+| Unique public inherent method paths | 100 |
 | Public trait methods | 5 |
-| Syntactic public fields | 60 |
+| Syntactic public fields | 69 |
 | Crate-private record fields included above | 6 |
-| Downstream-visible public fields | 54 |
+| Downstream-visible public fields | 63 |
 
 The machine inventory assigns `KPR-PUB-001` through `KPR-PUB-023` to the
-producer/transaction/client source and `KCO-PUB-001` through `KCO-PUB-007` to
+producer/transaction/client source and `KCO-PUB-001` through `KCO-PUB-010` to
 the consumer source. Every row records declarations, cfg ownership, facade
 aliases, fields, variants, and methods.
+
+## Current incumbent additions
+
+Producer and consumer configurations now expose `with_property`,
+`set_property`, and `extra_properties`. They preserve raw-key insertion order
+and replace repeated values in place; typed librdkafka setters are applied
+after raw properties. These additions do not change the `kafka` feature edge.
+
+Configuration Debug now hides every raw property value while retaining keys
+and typed settings. Native configuration rejection retains its error category
+and diagnostic key but omits the rejected value and free-form description.
+Explicit property accessors still return original values; no secure-erasure
+or comprehensive upstream-error sanitation claim follows.
+
+The consumer now exposes rebalance protocol and callback counters through
+`rebalance_protocol` and `rebalance_stats`. The two non-exhaustive result types
+are also exported by the messaging facade. `last_transient_error` returns a
+module-only `TransientConsumerError` with first/last runtime time and a
+saturating occurrence count. Its current informational code is
+`UnknownTopicOrPartition`; other broker errors remain errors.
+
+The real consumer backend uses a configured eager/cooperative callback and
+bounded normal polling when leaving a group through close or Drop. Cooperative
+close avoids the eager unassign API. Producer flush yields through its runtime
+timer while `ThreadedProducer` polls in the background. This source review does
+not establish broker execution or replace the independent lifecycle and
+downstream evidence lanes.
 
 ## Compilation profiles
 
@@ -159,7 +191,7 @@ K0.1 found and routed 15 source-level facts instead of changing behavior:
 | Consumer retries apply only to synchronous offset commit | K0.2 |
 | Producer notification has no observed waiter | K0.2 |
 | Parallel consumer trait exposes diagnostics but no consumer operations | `asupersync-dep-p7-kafka-removal-sarszu.2.10.1` |
-| Ignored excluded-workspace lockfile is not repository evidence | K0.4 |
+| Historical missing excluded-workspace lockfile; now tracked, execution still separate | K0.4 |
 
 Here K0.2, K0.3, and K0.4 mean the exact owner IDs in the authority table. The
 machine artifact carries a stable ID, full finding, and exact owner for every
