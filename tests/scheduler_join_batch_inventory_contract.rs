@@ -265,18 +265,18 @@ fn post_capture_provenance_refresh_is_exact_and_non_semantic() {
     let current = Value::Object(current.clone());
     assert_eq!(
         text(&current, "reconciliation_id"),
-        "SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-08-11"
+        "SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-09-09"
     );
     assert_eq!(
         text(&current, "reference_commit"),
-        "f4c40a298e15ac0a8b173c72d4e9a64227c87858"
+        "5af6299e1860b2f5f5cc4ea6188999867385a4c3"
     );
     assert_eq!(unsigned(&current, "source_pin_path_count"), 15);
-    assert_eq!(unsigned(&current, "reconciled_path_count"), 4);
+    assert_eq!(unsigned(&current, "reconciled_path_count"), 10);
     assert_eq!(unsigned(&current, "exact_anchor_count"), 76);
     assert!(boolean(&current, "all_exact_anchors_match"));
+    assert!(boolean(&current, "semantic_contract_changed"));
     for key in [
-        "semantic_contract_changed",
         "measurement_state_changed",
         "benchmark_source_changed",
         "baseline_registry_changed",
@@ -286,9 +286,15 @@ fn post_capture_provenance_refresh_is_exact_and_non_semantic() {
     assert_eq!(
         row_id_set(&current, "reconciled_paths", "path"),
         expected_set(&[
+            "Cargo.toml",
+            "src/channel/oneshot.rs",
             "src/cx/cx.rs",
+            "src/cx/scope.rs",
+            "src/record/region.rs",
+            "src/runtime/builder.rs",
             "src/runtime/scheduler/three_lane.rs",
             "src/runtime/spawn_mailbox.rs",
+            "src/runtime/state.rs",
             "src/runtime/task_handle.rs",
         ])
     );

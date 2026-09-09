@@ -40,20 +40,40 @@ registry row, measurement state, candidate, threshold, or disposition. The
 Rust contract was not executed, and the missing p50, p95, allocation,
 repetition, and admitted two-host observations still keep the bead open.
 
-### Current source reconciliation (2026-08-11)
+### Current source reconciliation (2026-09-09)
 
-`SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-08-11` preserves the historical
-refresh above and separately reconciles the live pins and all 76 exact anchors
-against the current tree. Four pinned sources moved after the 2026-08-06
-capture: `src/runtime/task_handle.rs`, `src/cx/cx.rs`,
-`src/runtime/spawn_mailbox.rs`, and
-`src/runtime/scheduler/three_lane.rs`. Their cancellation-publication,
-mailbox-maintenance, and waker changes leave the recorded join terminal
-semantics and the batch-one/batch-sixteen fairness anchors intact.
+`SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-09-09` reviews candidate
+`5af6299e1` and preserves the historical refresh above. Ten of the fifteen
+source pins changed since the August 11 reconciliation. All 76 exact anchors
+now resolve to their reviewed current locations, including production
+`JoinProducer::complete` in place of the now test-only `complete_task` helper.
 
-This current reconciliation changes no benchmark source or baseline row,
-records no measurement, and does not satisfy the p50, p95, allocation,
-repetition, or two-host evidence blocker.
+The legacy completion state now tracks producer leases and cancellation.
+Dropping the final producer without a result publishes shutdown and wakes the
+observer. The mailbox denial callback owns a separate lease, so its specific
+reason cannot lose to premature generic shutdown. `CheckedJoinHandle` and
+`spawn_checked` are additive APIs; the two comparator families below retain
+their distinct legacy panic and canonical typed-result contracts.
+
+Ordinary `Cx` spawn now classifies completion using per-poll cancellation
+facts, then publishes through a Cx-independent terminal sender. Legacy
+state-threaded `Scope` still preserves returned values unconditionally.
+Factory invocation happens on the first poll inside the panic boundary.
+Oneshot adds checked obligation admission and extracts its unit tests, while
+the join receive remains uninterruptible and mutex-backed.
+
+The mailbox retains per-request FIFO publication, a producer liveness guard,
+and one notification per Send member. Admission checks the identity slot and
+links obligation authority before publishing the stored successor and
+releasing pending credit. Current-thread lifecycle and timer repairs preserve
+global batch-one and owner-local batch-sixteen admission bounds. The scheduler
+stop-predicate documentation was corrected separately without changing code.
+
+This reconciliation updates completion descriptions as well as pins and
+anchors. It changes no benchmark source or baseline row, records no
+measurement, and does not satisfy the p50, p95, allocation, repetition, or
+two-host evidence blocker. The original capture's validation flags remain
+historical; they do not describe a fresh release test or benchmark result.
 
 The two completion families are intentionally separate:
 
@@ -77,13 +97,13 @@ safe semantic experiment, not a lock-free or performance claim.
 | Event | Incumbent observable behavior |
 |---|---|
 | synchronous spawn failure | `try_spawn` returns `SpawnError`; `spawn` panics through `expect` |
-| success | `complete_task` stores one value, takes the registered waker, unlocks, and wakes; polling takes the value once |
+| success | `JoinProducer::complete` publishes one value unless already terminal, releases its lease, takes the registered waker, unlocks, and wakes; polling takes the value once |
 | pending poll | one equivalent waker is retained or replaced under the completion mutex |
 | task panic | the task panic payload is caught for worker isolation, stored, and resumed in the awaiter |
 | cancellation or denial after mailbox publication | the unadmitted callback resolves the handle with a payload that becomes an awaiter panic, not a typed cancellation |
-| shutdown or executor-side disappearance | pending mailbox work is resolved during drain; a result-less handle whose executor-side `Arc` disappeared reports finished and panics when polled |
+| shutdown or executor-side disappearance | pending mailbox work is resolved during drain; final producer drop publishes shutdown and wakes the observer; cancellation or executor-side disappearance makes the handle report finished and panic when polled |
 | handle drop | no `Drop` implementation requests cancellation; dropping the observer leaves the runtime-owned task running |
-| `is_finished` | true after local terminal consumption, while a result is stored, or after executor-side state disappears |
+| `is_finished` | true after local terminal consumption, while a result or cancellation is stored, or after executor-side state disappears |
 | terminal repoll | assertion panic |
 
 Any safe transport experiment in `.3.2` targets this family first and must
@@ -96,7 +116,7 @@ replacement.
 | Event | Incumbent observable behavior |
 |---|---|
 | synchronous gateway/setup failure | `Cx::spawn` and `Cx::spawn_in` return `SpawnError::RuntimeUnavailable`; no handle is returned |
-| success | the sender commits `Ok(value)`; `join`, `try_join`, or `poll_join` consumes one result |
+| success | after completion-policy classification, the Cx-independent sender commits the terminal result; `join`, `try_join`, or `poll_join` consumes once |
 | pending `join` | the temporary uninterruptible receive future owns its waiter and retires it on drop |
 | pending `poll_join` | the receiver owns a persistent waiter so a JoinSet scan remains wakeable across polls |
 | task panic | `JoinError::Panicked(PanicPayload)` |
@@ -105,6 +125,14 @@ replacement.
 | `JoinFuture` drop | requests abort unless the result is already terminal or internal control flow defused the drop action |
 | `TaskHandle` drop | no handle-level `Drop` implementation; the region still owns the task |
 | terminal repoll | `JoinError::PolledAfterCompletion` |
+
+For ordinary `Cx` spawn, a returned value after cancellation survives only
+when attributed cancellation arrived after the first user poll and user code
+acknowledged it. Cancellation before the first poll, unacknowledged
+cancellation, and reasonless legacy requests retain task-level cancellation.
+Legacy state-threaded `Scope` preserves returned values unconditionally;
+structured combinators and low-level tasks can select cancellation-dominant
+policy. These producer policies do not add cancellation checks to join receive.
 
 `Scope::join_all` and `JoinSet::join_all` preserve input or spawn order.
 `JoinSet::join_next` preserves completion order and uses the earliest-spawned
@@ -263,10 +291,11 @@ values are not rewritten. JOIN and BATCH receive independent decisions.
 
 ## Validation and no-claim boundary
 
-This slice used source inspection, Git history, hashes, exact anchors, and
-baseline JSON inspection. The Rust contract is authored but intentionally not
-executed. No compiler, formatter, test, benchmark, runtime process, or remote
-worker was invoked.
+The original capture used source inspection, Git history, hashes, exact
+anchors, and baseline JSON inspection. Its Rust contract was authored without
+execution, and its validation flags retain that historical scope. The current
+source reconciliation above records reviewed implementation changes; it does
+not turn the original capture into runtime or benchmark evidence.
 
 This packet does not prove compilation, runtime correctness, completion or
 wake correctness, cancellation correctness, p50, p95, allocations,
