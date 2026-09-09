@@ -28,6 +28,38 @@ fn extract_gap_ids(doc: &str) -> BTreeSet<String> {
     ids
 }
 
+fn gap_summary_counts(doc: &str) -> (usize, usize) {
+    let summary = doc
+        .split_once("## 10. Gap Summary Table")
+        .expect("gap summary table")
+        .1
+        .split("\n## ")
+        .next()
+        .expect("gap summary section");
+    let mut ids = BTreeSet::new();
+    let mut closed = 0;
+    for line in summary.lines().filter(|line| line.starts_with('|')) {
+        let columns: Vec<_> = line.trim_matches('|').split('|').map(str::trim).collect();
+        let id = columns[0];
+        if !["WEB-G", "MW-G", "GRPC-G", "HT-G", "WS-G"]
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+        {
+            continue;
+        }
+        assert_eq!(columns.len(), 5, "gap row must have five columns: {id}");
+        assert!(ids.insert(id), "duplicate gap row: {id}");
+        if columns[2].contains("(Closed —") {
+            assert_eq!(columns[3], "—", "closed gap still has a severity: {id}");
+            closed += 1;
+        } else {
+            assert!(matches!(columns[3], "High" | "Medium" | "Low"));
+        }
+    }
+    assert!(!ids.is_empty(), "gap summary must contain gap rows");
+    (ids.len() - closed, closed)
+}
+
 #[test]
 fn parity_document_exists_and_is_nonempty() {
     let doc = load_parity_doc();
@@ -876,17 +908,9 @@ fn parity_t54_gap_closures_reflected_in_table() {
 #[test]
 fn parity_t54_gap_total_updated() {
     let doc = load_parity_doc();
-    // Originally 7 closed after T5.4; now >= 11 with GRPC-G1, GRPC-G2, GRPC-G11, HT-G1
-    assert!(
-        doc.contains("7 closed")
-            || doc.contains("8 closed")
-            || doc.contains("9 closed")
-            || doc.contains("10 closed")
-            || doc.contains("11 closed")
-            || doc.contains("12 closed")
-            || doc.contains("13 closed"),
-        "gap total must reflect closures (>= 7 closed)"
-    );
+    let (_, closed) = gap_summary_counts(&doc);
+    // Count the current rows; later closures must not require a prose total.
+    assert!(closed >= 7, "gap total must reflect closures (>= 7 closed)");
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,15 +1256,11 @@ fn parity_grpc_g1_g2_g11_ht_g1_closed_in_gap_summary() {
 #[test]
 fn parity_gap_count_updated_for_closures() {
     let doc = load_parity_doc();
+    let (open, closed) = gap_summary_counts(&doc);
     // Total should reflect 4 additional closures (GRPC-G1, GRPC-G2, GRPC-G11, HT-G1)
     assert!(
-        doc.contains("34 open gaps")
-            || doc.contains("33 open gaps")
-            || doc.contains("32 open gaps"),
+        open <= 34,
         "total gap count must be updated to reflect closures (34 or fewer)"
     );
-    assert!(
-        doc.contains("11 closed") || doc.contains("12 closed") || doc.contains("13 closed"),
-        "closed gap count must be >= 11"
-    );
+    assert!(closed >= 11, "closed gap count must be >= 11");
 }
