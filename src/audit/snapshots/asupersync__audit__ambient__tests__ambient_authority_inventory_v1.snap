@@ -28,7 +28,7 @@ expression: inventory
 1	Env	net/atp/bonding/receiver.rs	std::env::var_os(
 3	Env	net/atp/transport_quic/mod.rs	std::env::var_os(
 2	Env	net/atp/transport_quic/native_link.rs	std::env::var(
-9	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(
+10	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(
 6	Env	net/atp/transport_rq/mod.rs	std::env::var_os(
 2	Env	net/quic_native/connection.rs	std::env::var_os(
 2	Env	net/quic_native/endpoint.rs	std::env::var_os(
@@ -125,6 +125,7 @@ expression: inventory
 1	Output	net/quic_native/connection.rs	eprintln!(
 1	Output	net/quic_native/endpoint_api.rs	eprintln!(
 1	Spawn	database/mysql.rs	std::thread::Builder
+1	Spawn	net/udp.rs	std::thread::Builder
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn
 4	Spawn	runtime/builder.rs	std::thread::Builder
 1	Spawn	runtime/spawn_blocking.rs	thread::Builder
@@ -212,7 +213,7 @@ expression: inventory
 9	Time	net/atp/sink/writer.rs	Instant::now()
 10	Time	net/atp/sink/writer.rs	SystemTime::now()
 4	Time	net/atp/transport_quic/mod.rs	Instant::now()
-53	Time	net/atp/transport_quic/native_link.rs	Instant::now()
+65	Time	net/atp/transport_quic/native_link.rs	Instant::now()
 17	Time	net/atp/transport_rq/mod.rs	Instant::now()
 2	Time	net/atp/udp/mod.rs	Instant::now()
 2	Time	net/dns/resolver.rs	Instant::now()
@@ -290,6 +291,7 @@ expression: inventory
 2	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(	if std::env::var_os().is_some() {
 1	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(	if symbols == 0 || std::env::var_os().is_none() {
 1	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(	let recv_profile = std::env::var_os().is_some();
+1	Env	net/atp/transport_quic/native_link.rs	std::env::var_os(	std::env::var_os().is_some()
 1	Env	net/atp/transport_rq/mod.rs	std::env::var_os(	*ENABLED.get_or_init(|| std::env::var_os().is_some())
 1	Env	net/atp/transport_rq/mod.rs	std::env::var_os(	if std::env::var_os().is_none() {
 2	Env	net/atp/transport_rq/mod.rs	std::env::var_os(	if std::env::var_os().is_some() {
@@ -428,13 +430,13 @@ expression: inventory
 1	Output	messaging/kafka.rs	eprintln!(	eprintln!(
 1	Output	net/atp/bonding/receiver.rs	eprintln!(	eprintln!();
 2	Output	net/atp/transport_quic/mod.rs	eprintln!(	eprintln!();
-2	Output	net/atp/transport_quic/native_link.rs	eprintln!(	eprintln!(
-1	Output	net/atp/transport_quic/native_link.rs	eprintln!(	eprintln!(, format!($($arg)*));
+3	Output	net/atp/transport_quic/native_link.rs	eprintln!(	eprintln!(
 2	Output	net/atp/transport_rq/mod.rs	eprintln!(	eprintln!(
 2	Output	net/atp/transport_rq/mod.rs	eprintln!(	eprintln!(, format!($($arg)*));
 1	Output	net/quic_native/connection.rs	eprintln!(	eprintln!(, format!($($arg)*));
 1	Output	net/quic_native/endpoint_api.rs	eprintln!(	eprintln!(, format!($($arg)*));
 1	Spawn	database/mysql.rs	std::thread::Builder	std::thread::Builder::new()
+1	Spawn	net/udp.rs	std::thread::Builder	match std::thread::Builder::new()
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn	let handle = thread::spawn(move || {
 1	Spawn	runtime/builder.rs	std::thread::Builder	let mut builder = std::thread::Builder::new().name(name);
 1	Spawn	runtime/builder.rs	std::thread::Builder	let thread = std::thread::Builder::new()
@@ -676,28 +678,40 @@ expression: inventory
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	.map(|deadline| deadline.saturating_duration_since(Instant::now()));
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	.next_action(Instant::now(), measurement)
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	beacons: BeaconScheduler::new(1, Instant::now()),
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	commit_clock = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	crate::runtime::spawn_blocking_io(|| Ok::<Instant, std::io::Error>(Instant::now()))
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	if !cadence.due(Instant::now(), LOCAL_WORK_KEEP_ALIVE_CADENCE) {
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	last_early_data_resend = Some(Instant::now());
 10	Time	net/atp/transport_quic/native_link.rs	Instant::now()	last_progress = Instant::now();
 5	Time	net/atp/transport_quic/native_link.rs	Instant::now()	last_retransmit = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let accept_started = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let before = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let drain_started = Instant::now();
 2	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let enqueue_start = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let flush_start = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let gate_started = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let generate_started = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let liveness_start = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut cadence = LocalWorkKeepAlive::new(Instant::now());
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut commit_clock = Instant::now();
 4	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut last_progress = Instant::now();
 2	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut last_retransmit = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut member_clock = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut member_keep_alive = LocalWorkKeepAlive::new(Instant::now());
 4	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let now = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let pacer_wait_started = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let protect_started = Instant::now();
 2	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let pump_started = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let resumed = Instant::now();
 3	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let send_start = Instant::now();
 2	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let started = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let trace_start = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let udp_send_started = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let verify_started = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let wait_started = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let write_started = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let zero_progress_deadline = Instant::now().checked_add(timeout);
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	member_clock = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	self.beacons.mark_peer_activity(Instant::now());
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	self.last_final_flight_resend = Some(Instant::now());
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	stream_rate_epoch: Instant::now(),

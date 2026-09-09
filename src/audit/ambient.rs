@@ -1502,11 +1502,19 @@ fn test_function() {
     // owned teardown thread when its final owner drops on a worker. This
     // runtime-provider OS spawn retains the joins and state off-worker so
     // the current poll can return; it introduces no application task spawn.
+    // 724 -> 738 (br-asupersync-ghxhvm): GH#67's UDP fallback provider
+    // adds one process-lifetime reactor-pump spawn. ATP native QUIC adds
+    // one read of the existing ATP_RQ_TRACE switch and twelve clock reads:
+    // three keep-alive cadence sites, three blocking-roundtrip probe sites,
+    // and six commit/receive timing sites. These remain native transport
+    // provider and diagnostic effects; they do not establish lab determinism.
+    // The timestamped trace macro also changes one occurrence signature
+    // without adding an output site. Each addition is recorded below.
     // The snapshot itself is keyed without line numbers since
     // br-asupersync-bi2462.23, so this count and the snapshot text move only
     // when a site is added, removed or rewritten — never when code above a
     // site shifts.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 724;
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 738;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
