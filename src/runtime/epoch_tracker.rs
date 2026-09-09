@@ -40,7 +40,7 @@ use crate::tracing_compat::{debug, error, info, warn};
 use crate::types::Time;
 use crate::util::det_hash::DetHashMap;
 use parking_lot::{Mutex, MutexGuard, RwLock};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1235,19 +1235,15 @@ impl EpochConsistencyTracker {
         now: Time,
         suppress_single_step_batch: bool,
     ) -> Option<EpochConsistencyViolation> {
-        let mut epochs: BTreeMap<EpochId, Vec<ModuleId>> = BTreeMap::new();
-
-        for (&module, record) in records {
-            epochs.entry(record.current_epoch).or_default().push(module);
-        }
-
-        if epochs.len() <= 1 {
+        let mut epochs = records.values().map(|record| record.current_epoch);
+        let first_epoch = epochs.next()?;
+        let (min_epoch, max_epoch) = epochs
+            .fold((first_epoch, first_epoch), |(min, max), epoch| {
+                (min.min(epoch), max.max(epoch))
+            });
+        if min_epoch == max_epoch {
             return None;
         }
-
-        let epoch_ids: Vec<EpochId> = epochs.keys().copied().collect();
-        let min_epoch = epoch_ids.first().copied().unwrap_or(EpochId::GENESIS);
-        let max_epoch = epoch_ids.last().copied().unwrap_or(EpochId::GENESIS);
         let skew = max_epoch.distance(min_epoch);
 
         if skew <= self.config.max_epoch_skew {
@@ -1265,12 +1261,10 @@ impl EpochConsistencyTracker {
             return None;
         }
 
-        let mut modules_with_epochs = Vec::new();
-        for (&epoch, modules) in &epochs {
-            for &module in modules {
-                modules_with_epochs.push((module, epoch));
-            }
-        }
+        let mut modules_with_epochs: Vec<_> = records
+            .iter()
+            .map(|(&module, record)| (module, record.current_epoch))
+            .collect();
         modules_with_epochs.sort_by_key(|(module, epoch)| (*epoch, *module));
 
         Some(EpochConsistencyViolation::ModuleDesync {
@@ -2293,6 +2287,107 @@ mod tests {
             );
         }
         crate::test_complete!("epoch_telemetry_dispatch_contains_enabled_and_on_event_panics");
+    }
+
+    #[test]
+    fn desync_range_scan_matches_grouped_reference() {
+        // Preserve the previous grouping algorithm as an independent oracle
+        // for the allocation-free range scan, including its report ordering.
+        fn grouped_reference(
+            tracker: &EpochConsistencyTracker,
+            records: &DetHashMap<ModuleId, EpochTransitionRecord>,
+            now: Time,
+            suppress_batch: bool,
+        ) -> Option<(Vec<(ModuleId, EpochId)>, Time, u64)> {
+            let mut epochs = std::collections::BTreeMap::<EpochId, Vec<ModuleId>>::new();
+            for (&module, record) in records {
+                epochs.entry(record.current_epoch).or_default().push(module);
+            }
+            if epochs.len() <= 1 {
+                return None;
+            }
+            let epoch_ids: Vec<_> = epochs.keys().copied().collect();
+            let min = epoch_ids[0];
+            let max = epoch_ids[epoch_ids.len() - 1];
+            let skew = max.distance(min);
+            if skew <= tracker.config.max_epoch_skew
+                || (suppress_batch
+                    && tracker.is_single_step_batch_transition(records, min, max, now))
+            {
+                return None;
+            }
+            let mut modules = Vec::new();
+            for (&epoch, group) in &epochs {
+                for &module in group {
+                    modules.push((module, epoch));
+                }
+            }
+            modules.sort_by_key(|(module, epoch)| (*epoch, *module));
+            Some((modules, now, skew))
+        }
+
+        let modules = [
+            ModuleId::Scheduler,
+            ModuleId::TaskTable,
+            ModuleId::RegionTable,
+        ];
+        let epochs = [
+            None,
+            Some(0),
+            Some(1),
+            Some(2),
+            Some(u64::MAX - 1),
+            Some(u64::MAX),
+        ];
+        let now = Time::from_nanos(1000);
+        let mut tracker = EpochConsistencyTracker::new();
+        for shape in 0..216 {
+            for timestamp_mask in 0..8 {
+                for reverse in [false, true] {
+                    let mut records = DetHashMap::default();
+                    for position in 0..3 {
+                        let index = if reverse { 2 - position } else { position };
+                        let Some(epoch) = epochs[(shape / 6_usize.pow(index as u32)) % 6] else {
+                            continue;
+                        };
+                        records.insert(
+                            modules[index],
+                            EpochTransitionRecord {
+                                current_epoch: EpochId::new(epoch),
+                                last_transition_time: Time::from_nanos(
+                                    999 + ((timestamp_mask >> index) & 1),
+                                ),
+                                transition_start_time: None,
+                                transition_count: 1,
+                            },
+                        );
+                    }
+                    for skew in [0, 1, 2, u64::MAX] {
+                        tracker.config.max_epoch_skew = skew;
+                        for suppress_batch in [false, true] {
+                            let expected =
+                                grouped_reference(&tracker, &records, now, suppress_batch);
+                            let actual = tracker
+                                .current_module_desync_violation(&records, now, suppress_batch)
+                                .map(|violation| match violation {
+                                    EpochConsistencyViolation::ModuleDesync {
+                                        modules,
+                                        detected_at,
+                                        max_skew,
+                                    } => (modules, detected_at, max_skew),
+                                    _ => {
+                                        unreachable!("desync check returned another violation type")
+                                    }
+                                });
+                            assert_eq!(
+                                actual, expected,
+                                "shape={shape} timestamps={timestamp_mask} reverse={reverse} skew={skew} suppress={suppress_batch}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
