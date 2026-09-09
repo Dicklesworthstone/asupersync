@@ -1697,16 +1697,18 @@ impl ReactorRegistration {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn is_some(&self) -> bool {
         self.registration.is_some()
     }
 
+    #[cfg(test)]
     pub(crate) const fn is_none(&self) -> bool {
         self.registration.is_none()
     }
 
     /// Whether the live registration is parked on the fallback driver.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg(test)]
     pub(crate) const fn on_fallback(&self) -> bool {
         self.on_fallback
     }

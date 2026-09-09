@@ -16,6 +16,7 @@
 //! }
 //! ```
 
+use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::udp::{Armed, ReactorRegistration};
 use crate::net::unix::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
@@ -206,7 +207,7 @@ impl UnixStream {
     ) -> Self {
         Self {
             inner,
-            registration: Mutex::new(ReactorRegistration::from_registration(registration)), // Lazy registration on first I/O
+            registration: Mutex::new(ReactorRegistration::from_registration(registration)),
         }
     }
 
@@ -318,11 +319,11 @@ impl UnixStream {
         Ok((
             Self {
                 inner: Arc::new(s1),
-                registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first I/O
+                registration: Mutex::new(ReactorRegistration::new()),
             },
             Self {
                 inner: Arc::new(s2),
-                registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first I/O
+                registration: Mutex::new(ReactorRegistration::new()),
             },
         ))
     }
@@ -344,7 +345,7 @@ impl UnixStream {
         stream.set_nonblocking(true)?;
         Ok(Self {
             inner: Arc::new(stream),
-            registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first I/O
+            registration: Mutex::new(ReactorRegistration::new()),
         })
     }
 

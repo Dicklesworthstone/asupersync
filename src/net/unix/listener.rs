@@ -27,6 +27,7 @@
 //! For abstract namespace sockets (Linux only), no cleanup is needed as the
 //! kernel handles it automatically.
 
+use crate::cx::Cx;
 use crate::net::udp::{Armed, ReactorRegistration};
 use crate::net::unix::stream::UnixStream;
 use crate::runtime::reactor::Interest;
