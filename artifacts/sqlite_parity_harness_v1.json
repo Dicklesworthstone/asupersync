@@ -1646,8 +1646,13 @@
     "source_contracts": [
       {
         "path": "src/database/sqlite.rs",
-        "sha256": "3686beab168e685ae1fa83bc2bad71243c30c34a9a7413da372e02c6a319b55d",
-        "line_count": 10539
+        "sha256": "42633435d6944e432f8de8d5665132689eeefb1218551805c2b523f62f59373d",
+        "line_count": 4754
+      },
+      {
+        "path": "src/database/sqlite_tests.rs",
+        "sha256": "53c125fa94b1d82a06a39a77f8a33bf8635ab9ebbfb3bf1c59f5e097fbc6d952",
+        "line_count": 5809
       },
       {
         "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",

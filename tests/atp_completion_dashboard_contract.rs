@@ -199,6 +199,9 @@ fn dashboard_json_answers_user_questions_and_lists_live_gates() {
     let all_done_artifact_blockers = answers["all_done"]["blocking_artifact_paths"]
         .as_array()
         .expect("all_done blocking artifacts");
+    let all_done_workstream_blockers = answers["all_done"]["blocking_workstream_ids"]
+        .as_array()
+        .expect("all_done blocking workstreams");
 
     let gates = dashboard["release_gates"]
         .as_array()
@@ -240,6 +243,15 @@ fn dashboard_json_answers_user_questions_and_lists_live_gates() {
         14,
         "dashboard must list ATP-A through ATP-N"
     );
+    let expected_workstream_blockers = workstreams
+        .iter()
+        .filter(|row| row["release_blocking"].as_bool() == Some(true))
+        .map(|row| row["workstream_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        all_done_workstream_blockers, &expected_workstream_blockers,
+        "all_done must attribute every blocking workstream"
+    );
     let release_blocking_count = dashboard["summary"]["release_blocking_count"]
         .as_u64()
         .expect("release_blocking_count");
@@ -250,8 +262,10 @@ fn dashboard_json_answers_user_questions_and_lists_live_gates() {
             "ATP should be marked done only when live gates and proof artifacts are green"
         );
         assert!(
-            all_done_gate_blockers.is_empty() && all_done_artifact_blockers.is_empty(),
-            "green all_done must not name blocking gates or proof artifacts"
+            all_done_gate_blockers.is_empty()
+                && all_done_artifact_blockers.is_empty()
+                && all_done_workstream_blockers.is_empty(),
+            "green all_done must not name blocking gates, proof artifacts, or workstreams"
         );
         assert_eq!(
             dashboard["summary"]["ready_to_close_top_epic"].as_bool(),
@@ -264,8 +278,10 @@ fn dashboard_json_answers_user_questions_and_lists_live_gates() {
             "ATP cannot be marked done while release-blocking rows remain"
         );
         assert!(
-            !all_done_gate_blockers.is_empty() || !all_done_artifact_blockers.is_empty(),
-            "red all_done must name blocking gates or proof artifacts"
+            !all_done_gate_blockers.is_empty()
+                || !all_done_artifact_blockers.is_empty()
+                || !all_done_workstream_blockers.is_empty(),
+            "red all_done must name blocking gates, proof artifacts, or workstreams"
         );
         assert_eq!(
             dashboard["summary"]["ready_to_close_top_epic"].as_bool(),

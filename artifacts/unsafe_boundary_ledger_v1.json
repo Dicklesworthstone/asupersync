@@ -2,12 +2,12 @@
   "schema_version": 1,
   "artifact": "unsafe_boundary_ledger_v1",
   "generated_from": {
-    "source_revision": "3ad241b4d50d31e86b565dcaf5f1bd637c99e73a",
-    "scan_mode": "current_worktree_exact",
+    "source_revision": "227451925b014cd3a47c351d204a401b82d633d8",
+    "scan_mode": "committed_head_exact",
     "worktree_dirty_at_generation": true,
     "scan_command": "tests/unsafe_boundary_ledger_contract.rs exact syntax scan over repository Rust sources, excluding build, dependency-cache, VCS, and coordination directories; comments and string literals ignored for unsafe syntax matches",
     "notes": [
-      "The release repair reconciled every operation locator against the exact current worktree selected for the v0.4.4 remote release gates.",
+      "The v0.4.11 release reconciliation maps existing locators to committed main, excluding unselected peer worktree edits; the exact syntax contract remains the verification authority.",
       "The scanner excludes RCH temporary Cargo homes so third-party registry sources cannot be misclassified as repository unsafe boundaries.",
       "asupersync-ntizv refreshed the src/process.rs live locators and safety contract for exact-image Windows pipes, process attributes, CreateProcessW, and Job Object ownership.",
       "Passing the contract proves source/ledger locator alignment only; category evidence still controls any safety claim."
@@ -1647,12 +1647,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 12677,
+          "line": 13511,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 12685,
+          "line": 13519,
           "pattern": "unsafe {"
         }
       ]
@@ -1932,12 +1932,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 1205,
+          "line": 1214,
           "pattern": "#[allow(unsafe_code)] // see SAFETY note below."
         },
         {
           "kind": "unsafe_block",
-          "line": 1213,
+          "line": 1222,
           "pattern": "unsafe {"
         }
       ]
@@ -2245,12 +2245,12 @@
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 2422,
+          "line": 2614,
           "pattern": "#[allow(unsafe_code)] // Stable Win32 file identity query over an RAII-owned std::fs::File."
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 2698,
+          "line": 2897,
           "pattern": "#[allow(unsafe_code)] // Win32 metadata update through an RAII-owned file handle."
         },
         {
@@ -2260,12 +2260,12 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 2456,
+          "line": 2648,
           "pattern": "let queried = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2720,
+          "line": 2919,
           "pattern": "if unsafe {"
         }
       ]
@@ -2322,12 +2322,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 46,
+          "line": 52,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 63,
+          "line": 69,
           "pattern": "let result = unsafe {"
         }
       ]
@@ -2368,52 +2368,52 @@
         },
         {
           "kind": "unsafe_block",
-        "line": 2643,
+          "line": 2645,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2677,
+          "line": 2679,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2694,
+          "line": 2697,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2730,
+          "line": 2733,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2744,
+          "line": 2747,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2758,
+          "line": 2761,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2796,
+          "line": 2799,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2838,
+          "line": 2841,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2883,
+          "line": 2886,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-        "line": 2897,
+          "line": 2902,
           "pattern": "let result = unsafe {"
         }
       ]
@@ -2460,27 +2460,27 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 7632,
+          "line": 8355,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 7643,
+          "line": 8366,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 7649,
+          "line": 8372,
           "pattern": "unsafe {"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 7665,
+          "line": 8388,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 7668,
+          "line": 8391,
           "pattern": "unsafe {"
         }
       ]
@@ -2694,62 +2694,62 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 4088,
+          "line": 4097,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4128,
+          "line": 4137,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4312,
+          "line": 4324,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4355,
+          "line": 4367,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 4781,
-          "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
           "line": 4793,
+          "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 4805,
           "pattern": "let still_alive = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 4804,
+          "line": 4816,
           "pattern": "let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4874,
+          "line": 4886,
           "pattern": "let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }"
         },
         {
           "kind": "unsafe_block",
-          "line": 4950,
+          "line": 4962,
           "pattern": "let our_pgid = unsafe { libc::getpgid(0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4955,
+          "line": 4967,
           "pattern": "let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5009,
+          "line": 5021,
           "pattern": "let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5073,
+          "line": 5085,
           "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
         }
       ]
@@ -3805,22 +3805,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 5355,
+          "line": 5837,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 8077,
+          "line": 8597,
           "pattern": "unsafe { std::env::set_var(k, v) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 8082,
+          "line": 8602,
           "pattern": "unsafe { std::env::remove_var(k) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 8107,
+          "line": 8627,
           "pattern": "unsafe { std::env::remove_var(var) };"
         }
       ]
@@ -3974,7 +3974,7 @@
         {
           "kind": "unsafe_block",
           "line": 528,
-          "pattern": "let borrowed_fd = unsafe { BorrowedFd::borrow_raw(info.raw_fd) };"
+          "pattern": "let borrowed_fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };"
         },
         {
           "kind": "unsafe_block",
@@ -5120,22 +5120,22 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 4156,
+          "line": 4164,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "allow_unsafe_code",
-          "line": 5227,
+          "line": 5240,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 5235,
+          "line": 5248,
           "pattern": "unsafe { std::env::set_var(\"ASUPERSYNC_TEST_ARTIFACTS_DIR\", tmp.display().to_string()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5292,
+          "line": 5305,
           "pattern": "unsafe { std::env::remove_var(\"ASUPERSYNC_TEST_ARTIFACTS_DIR\") };"
         }
       ]
@@ -5578,27 +5578,27 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 51,
+          "line": 77,
           "pattern": "unsafe { System.alloc(layout) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 55,
+          "line": 81,
           "pattern": "unsafe { System.dealloc(ptr, layout) }"
         },
         {
           "kind": "unsafe_fn",
-          "line": 46,
+          "line": 71,
           "pattern": "unsafe fn alloc(&self, layout: Layout) -> *mut u8 {"
         },
         {
           "kind": "unsafe_fn",
-          "line": 54,
+          "line": 80,
           "pattern": "unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {"
         },
         {
           "kind": "unsafe_impl",
-          "line": 45,
+          "line": 70,
           "pattern": "unsafe impl GlobalAlloc for CountingAllocator {"
         }
       ]

@@ -94,6 +94,9 @@ pub use tcp::socket::TcpSocket;
 pub use tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, ReuniteError, WriteHalf};
 pub use tcp::stream::TcpStream;
 pub use tcp::stream::TcpStreamBuilder;
+/// Opt-in fallback-driver diagnostics for native integration tests.
+#[cfg(all(not(target_arch = "wasm32"), feature = "test-internals"))]
+pub use udp::{FallbackIoDriverProbe, fallback_io_driver_probe};
 pub use udp::{
     RecvStream, SendSink, UDP_DEFAULT_GSO_SEGMENT_BYTES, UDP_MAX_GSO_SEGMENTS,
     UDP_MAX_SENDMMSG_BATCH, UDP_RENDEZVOUS_MAX_ATTEMPTS, UDP_RENDEZVOUS_MAX_CANDIDATES,

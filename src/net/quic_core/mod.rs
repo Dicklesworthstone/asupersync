@@ -2810,14 +2810,14 @@ mod tests {
             panic!("short header")
         };
         assert_eq!(consumed, 4);
-        assert_eq!(header.packet_number, 0x00bf_f4);
+        assert_eq!(header.packet_number, 0x0000_bff4);
         assert_eq!(header.packet_number_len, 3);
         assert!(!header.spin);
         assert!(!header.key_phase);
         // RFC 9001 A.5: 654360564 is encoded as the low 3 bytes 0x00bff4 and
         // reconstructed from the largest packet number seen so far.
         assert_eq!(
-            decode_packet_number_reconstruct(0x00bf_f4, 3, 654_360_563).expect("reconstruct"),
+            decode_packet_number_reconstruct(0x0000_bff4, 3, 654_360_563).expect("reconstruct"),
             654_360_564
         );
     }

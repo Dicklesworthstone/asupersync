@@ -2512,16 +2512,16 @@ mod stock_responsiveness_runtime {
         let rows = runtime.block_on(runtime.handle().spawn(coordinator));
         assert_eq!(rows["journeys"].as_array().unwrap().len(), 20);
         assert_eq!(rows["controls"].as_array().unwrap().len(), 5);
-        runtime.block_on(async {
-            let started = Instant::now();
-            while !runtime.is_quiescent() {
-                assert!(
-                    started.elapsed() < Duration::from_secs(10),
-                    "native ownership did not drain"
-                );
-                asupersync::runtime::yield_now().await;
-            }
-        });
+        // GH#58: the root of `block_on` is itself a live task on a
+        // current-thread runtime, so quiescence is observed outside the root.
+        let started = Instant::now();
+        while !runtime.is_quiescent() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "native ownership did not drain"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert!(
             runtime
                 .task_inspector(Default::default())

@@ -306,15 +306,6 @@ impl LossRecovery {
         if ack_ranges.is_empty() {
             return AckEvent::empty();
         }
-        let loss_delay = self.loss_delay_micros();
-        // RFC 9002 §6.1.2: a packet is only time-threshold lost once
-        // `now - time_sent >= loss_delay`. A saturating subtraction would floor
-        // the boundary to 0 when `now < loss_delay` (true early in a connection,
-        // where the default loss delay is ~375ms with no RTT samples), causing
-        // packets sent at t=0 to be falsely declared lost. Use checked_sub and
-        // skip the time test until the boundary is reachable (mirrors the fix in
-        // `net/atp/loss/detector.rs` and `net/atp/quic/recovery.rs`).
-        let time_threshold = now_micros.checked_sub(loss_delay);
         let mut event = AckEvent::empty();
         let mut newest_lost_packet_sent_micros: Option<u64> = None;
         // RFC 9002 B.5: Only grow cwnd for packets sent AFTER the recovery
@@ -322,9 +313,10 @@ impl LossRecovery {
         // congestion_recovery_start_time) must not contribute to cwnd growth.
         let mut acked_bytes_for_growth: u64 = 0;
 
+        let largest_acked_pn = ack_ranges.iter().map(|range| range.largest).max();
         let mut largest_newly_acked_pn: Option<u64> = None;
-        let mut largest_newly_acked_ack_eliciting_time: Option<u64> = None;
-        let mut largest_newly_acked_ack_eliciting_pn: Option<u64> = None;
+        let mut largest_acked_time: Option<u64> = None;
+        let mut newly_acked_ack_eliciting = false;
 
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
@@ -349,12 +341,10 @@ impl LossRecovery {
                 if largest_newly_acked_pn.is_none_or(|pn| pkt.packet_number > pn) {
                     largest_newly_acked_pn = Some(pkt.packet_number);
                 }
-                if pkt.ack_eliciting
-                    && largest_newly_acked_ack_eliciting_pn.is_none_or(|pn| pkt.packet_number > pn)
-                {
-                    largest_newly_acked_ack_eliciting_pn = Some(pkt.packet_number);
-                    largest_newly_acked_ack_eliciting_time = Some(pkt.time_sent_micros);
+                if Some(pkt.packet_number) == largest_acked_pn {
+                    largest_acked_time = Some(pkt.time_sent_micros);
                 }
+                newly_acked_ack_eliciting |= pkt.ack_eliciting;
             } else {
                 retained.push_back(pkt);
             }
@@ -370,8 +360,11 @@ impl LossRecovery {
             });
         self.largest_acked[space.idx()] = Some(global_largest_acked);
 
-        if let Some(time_sent) = largest_newly_acked_ack_eliciting_time {
-            debug_assert!(largest_newly_acked_ack_eliciting_pn.is_some());
+        // RFC 9002 section 5.1: the frame's largest packet must itself be
+        // newly acknowledged, and at least one newly acknowledged packet
+        // must be ack-eliciting. They need not be the same packet. A frame
+        // repeating its largest packet cannot sample an older new ACK.
+        if newly_acked_ack_eliciting && let Some(time_sent) = largest_acked_time {
             let sample = now_micros.saturating_sub(time_sent);
             let effective_ack_delay = if space == PacketNumberSpace::ApplicationData {
                 ack_delay_micros
@@ -380,6 +373,15 @@ impl LossRecovery {
             };
             self.rtt.update(sample, effective_ack_delay);
         }
+
+        // RFC 9002 Appendix A.7 updates RTT before detecting losses from the
+        // same ACK. Using the previous estimate can falsely lose packets when
+        // path latency grows, or retain expired packets when it shrinks.
+        let loss_delay = self.loss_delay_micros();
+        // RFC 9002 section 6.1.2: use checked subtraction so an early clock
+        // does not floor the boundary to zero and falsely lose packets sent
+        // at t=0 before a complete loss-delay interval has elapsed.
+        let time_threshold = now_micros.checked_sub(loss_delay);
 
         // Packet-threshold loss detection (kPacketThreshold = 3)
         let mut survivors = VecDeque::with_capacity(self.sent_packets.len());
@@ -1037,6 +1039,78 @@ mod tests {
         let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[9], 2_000, 70_000);
         assert_eq!(event.acked_packets, 1);
         assert!(t.rtt().smoothed_rtt_micros().is_some());
+    }
+
+    #[test]
+    fn rtt_sample_uses_largest_acked_packet_even_when_it_is_ack_only() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(SentPacketMeta {
+            space: PacketNumberSpace::ApplicationData,
+            packet_number: 2,
+            bytes: 50,
+            ack_eliciting: false,
+            in_flight: false,
+            time_sent_micros: 19_000,
+        });
+
+        // RFC 9002 section 5.1: packet 1 makes this ACK eligible for a
+        // sample, but the frame's largest packet (2) supplies its send time.
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1, 2], 0, 20_000);
+        assert_eq!(event.acked_packets, 2);
+        assert_eq!(event.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(1_000));
+        assert_eq!(t.rtt().smoothed_rtt_micros(), Some(1_000));
+    }
+
+    #[test]
+    fn rtt_sample_ignores_repeated_largest_ack_with_new_older_packet() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 11_000));
+        let first = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 20_000);
+        assert_eq!(first.acked_packets, 1);
+        assert_eq!(first.lost_packets, 0);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(9_000));
+        let original_rtt = t.rtt().clone();
+
+        // The older packet is newly acknowledged and still retires, but
+        // packet 2 was already sampled: its repeated ACK cannot sample 1.
+        let repeated = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1, 2], 0, 20_500);
+        assert_eq!(repeated.acked_packets, 1);
+        assert_eq!(repeated.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.rtt(), &original_rtt);
+    }
+
+    #[test]
+    fn ack_loss_detection_uses_the_rtt_sample_from_that_ack() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 0));
+        t.on_ack_received(PacketNumberSpace::ApplicationData, &[0], 0, 10_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(10_000));
+
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 20_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 21_000));
+        // This ACK witnesses the path growing from 10ms to 100ms. Packet 1
+        // is only 101ms old, below 9/8 of the newly observed RTT; using the
+        // previous 10ms estimate would falsely declare it lost.
+        let delayed = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 121_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(100_000));
+        assert_eq!(delayed.acked_packets, 1);
+        assert_eq!(delayed.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 100);
+
+        // A subsequent fast ACK must still detect the genuinely old packet.
+        // The packet-number gap is only two, so this is time-threshold loss.
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 3, 130_000));
+        let recovered = t.on_ack_received(PacketNumberSpace::ApplicationData, &[3], 0, 131_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(1_000));
+        assert_eq!(recovered.acked_packets, 1);
+        assert_eq!(recovered.lost_packets, 1);
+        assert_eq!(recovered.lost_bytes, 100);
+        assert_eq!(t.bytes_in_flight(), 0);
     }
 
     #[test]

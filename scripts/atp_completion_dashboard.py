@@ -290,6 +290,7 @@ def answer_questions(
     contract: dict[str, Any],
     gate_rows: list[dict[str, Any]],
     artifact_rows: list[dict[str, Any]] | None = None,
+    workstream_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     gates_by_id = {row["gate_id"]: row for row in gate_rows}
     release_artifact_blockers = [
@@ -305,9 +306,22 @@ def answer_questions(
             if question_id in {"all_done", "release_proof_green"}
             else []
         )
-        if all(status == "green" for status in statuses) and not artifact_blockers:
+        workstream_blockers = [
+            row
+            for row in (workstream_rows or [])
+            if question_id == "all_done" and row.get("release_blocking")
+        ]
+        if (
+            all(status == "green" for status in statuses)
+            and not artifact_blockers
+            and not workstream_blockers
+        ):
             answer = "yes"
-        elif any(status.startswith("yellow") for status in statuses) and not artifact_blockers:
+        elif (
+            any(status.startswith("yellow") for status in statuses)
+            and not artifact_blockers
+            and not workstream_blockers
+        ):
             answer = "partial"
         else:
             answer = "no"
@@ -325,6 +339,11 @@ def answer_questions(
                 or artifact_blockers[0].get("path")
                 or "release-blocking proof artifact"
             )
+        elif workstream_blockers:
+            first_blocker = str(
+                workstream_blockers[0].get("first_blocker")
+                or workstream_blockers[0]["workstream_id"]
+            )
         answers[question_id] = {
             "question": question["question"],
             "answer": answer,
@@ -332,6 +351,9 @@ def answer_questions(
             "blocking_gate_ids": [row["gate_id"] for row in blockers],
             "blocking_artifact_paths": [
                 str(row["path"]) for row in artifact_blockers if row.get("path")
+            ],
+            "blocking_workstream_ids": [
+                str(row["workstream_id"]) for row in workstream_blockers
             ],
             "first_blocker": first_blocker,
         }
@@ -370,7 +392,7 @@ def build_dashboard(
     ]
     workstream_rows = classify_workstreams(contract, issues)
     artifacts = proof_artifacts(contract, as_of)
-    answers = answer_questions(contract, gate_rows, artifacts)
+    answers = answer_questions(contract, gate_rows, artifacts, workstream_rows)
     release_blocking_rows = [
         row
         for row in [*gate_rows, *workstream_rows, *artifacts]
@@ -379,13 +401,6 @@ def build_dashboard(
     release_blocking_count = sum(
         1 for row in release_blocking_rows
     )
-    if release_blocking_rows and answers["all_done"]["answer"] == "yes":
-        first = release_blocking_rows[0]
-        answers["all_done"]["answer"] = "no"
-        answers["all_done"]["first_blocker"] = str(
-            first.get("first_blocker") or first.get("path") or "release-blocking row"
-        )
-
     return {
         "schema_version": contract["schema_version"],
         "contract_version": contract["contract_version"],
@@ -533,6 +548,41 @@ def run_self_tests() -> None:
     assert answers["release_proof_green"]["blocking_artifact_paths"] == [
         "target/atp-completion-dashboard-self-test/missing-proof-source.json"
     ]
+    workstream_contract = {
+        "required_workstreams": [{"workstream_id": "ATP-A", "title": "A"}],
+        "required_questions": [
+            {
+                "question_id": question,
+                "question": question,
+                "requires_gate_ids": ["ATP-Z"],
+            }
+            for question in ["all_done", "release_proof_green"]
+        ],
+    }
+    green_gates = [
+        {"gate_id": "ATP-Z", "dashboard_status": "green", "first_blocker": ""}
+    ]
+    for issues in [
+        {},
+        {"a": {"id": "a", "title": "ATP-A1: pending", "status": "open"}},
+    ]:
+        workstreams = classify_workstreams(workstream_contract, issues)
+        answers = answer_questions(workstream_contract, green_gates, [], workstreams)
+        assert answers["all_done"]["answer"] == "no"
+        assert answers["all_done"]["blocking_workstream_ids"] == ["ATP-A"]
+        assert answers["all_done"]["first_blocker"] == workstreams[0]["first_blocker"]
+        assert answers["all_done"]["blocking_gate_ids"] == []
+        assert answers["all_done"]["blocking_artifact_paths"] == []
+        assert answers["release_proof_green"]["answer"] == "yes"
+        assert answers["release_proof_green"]["blocking_workstream_ids"] == []
+    workstreams = classify_workstreams(
+        workstream_contract,
+        {"a": {"id": "a", "title": "ATP-A1: complete", "status": "closed"}},
+    )
+    answers = answer_questions(workstream_contract, green_gates, [], workstreams)
+    assert answers["all_done"]["answer"] == "yes"
+    assert answers["all_done"]["blocking_workstream_ids"] == []
+    assert answers["all_done"]["first_blocker"] == ""
     print("atp completion dashboard self-test: pass")
 
 

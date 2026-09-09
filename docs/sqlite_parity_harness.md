@@ -313,6 +313,16 @@ does not claim process-global task/resource quiescence, arbitrary engine
 equivalence, or permission to remove rusqlite/sqlparser or perform a dependency
 cutover.
 
+The 0.4.11 source-contract refresh pins the runtime module and its extracted
+`sqlite_tests.rs` separately, plus the unchanged neutral consumer. Recombining
+the two module files reproduces the source immediately before the test
+extraction byte for byte. Compared with 0.4.9, the reviewed changes retain a
+stable-compatible atomic method under a narrow deprecation allowance and
+compare restricted `/etc` paths against their canonical form on macOS; the
+corresponding path test accepts that canonical spelling. The P8 diagnostic
+implementation is unchanged. These current source pins do not refresh the
+historical cross-engine or platform execution receipts below.
+
 ## SQLite P9 aggregate signoff
 
 P9 runs the real neutral consumer once and treats its single structured output
