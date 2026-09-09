@@ -8,6 +8,20 @@
   "adr_id": "DEP-ADR-009",
   "baseline_revision": "4b99ef71dbb1b7adbfbef4a3a9a4c2377fcbd6dd",
   "captured_date_utc": "2026-08-04",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "release_owner": "asupersync-ghxhvm",
+    "historical_scope": "The original capture, baseline, 42 resource classes, 19 lifecycle rows, 133 transitions, required policy, and disposition receipt remain historical K1.4 authority. Current source inventory expands 97 semantic rows to 102 and 43 configuration bindings to 45; it does not promote lifecycle or broker evidence.",
+    "reviewed_changes": [
+      "Ordered raw producer and consumer properties join retained configuration resource K1R-025. Their keys and values are unbounded Strings; Debug and ClientConfig error redaction do not erase explicit accessor values or clones.",
+      "K1R-016 includes four relaxed wrapping u64 callback-attempt counters and configured cooperative intent. Those counters and the negotiated protocol are distinct snapshots, not successful assignment or ownership receipts.",
+      "K1R-025 includes the one retained transient error with saturating u32 count. Poll continues UnknownTopicOrPartition to its original deadline; successful poll and close do not clear the diagnostic. Its one-slot count does not bound all diagnostics or accessor clones.",
+      "Producer flush/close now await the Cx timer/yield path instead of directly polling ThreadedProducer on the async worker. Requested wait slices still decrement the budget without elapsed-time accounting or a stable flush barrier.",
+      "Consumer close and unclosed Drop unsubscribe and drain at most 100 requested 50ms native polls. Cooperative close avoids eager unassign. Lock wait, callbacks, and dependency Drop remain outside the nominal slice budget, and Drop skips cleanup once closed is set, so abandoned close remains unresolved.",
+      "The blocking bridge and pool pins retain reviewed shutdown rejection and failed-last-worker recovery: queued closures can run inline; pending admission remains unbounded and this does not establish Cx quiescence."
+    ],
+    "evidence_boundary": "Current-source static review only. No new cancellation, shutdown, resource-bound, broker, performance, or release acceptance is established."
+  },
   "authority": {
     "k1_1_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
     "k1_1_artifact": "artifacts/kafka_k1_obligation_index_v1.json",
@@ -85,9 +99,9 @@
       "input_id": "K1-4-INPUT-K0-2",
       "role": "INCUMBENT_RESOURCE_AND_LIFECYCLE_SEMANTIC_AUTHORITY",
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-      "byte_count": 229415,
-      "record_count": 2560,
-    "sha256": "a746fd5f91619dcea064b5e019ce237378970d6bd9ef45f3045670fe59e0f7c2"
+      "byte_count": 244004,
+      "record_count": 2687,
+      "sha256": "0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1"
     },
     {
       "input_id": "K1-4-INPUT-K0-4",
@@ -109,17 +123,17 @@
       "input_id": "K1-4-INPUT-PRODUCER",
       "role": "CURRENT_PRODUCER_TRANSACTION_AND_CLIENT_SOURCE",
       "path": "src/messaging/kafka.rs",
-      "byte_count": 149141,
-      "record_count": 4335,
-      "sha256": "1329d49653935c9dc9a1c18cff136d9f8bfb21f204f908f562d6c3da62cc7de7"
+      "byte_count": 156720,
+      "record_count": 4521,
+      "sha256": "a737bbe271e70cf830e920426681b6199fc5b9c969243e67aea5ec8b38d27720"
     },
     {
       "input_id": "K1-4-INPUT-CONSUMER",
       "role": "CURRENT_CONSUMER_SOURCE",
       "path": "src/messaging/kafka_consumer.rs",
-      "byte_count": 102484,
-      "record_count": 2757,
-      "sha256": "82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d"
+      "byte_count": 126897,
+      "record_count": 3317,
+      "sha256": "157847de9e5611ba8464131dab28a14aa31f841af264fa56a27efd69c6e7504a"
     },
     {
       "input_id": "K1-4-INPUT-SPAWN-BLOCKING",
@@ -141,17 +155,17 @@
       "input_id": "K1-4-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_GRAPH_SOURCE",
       "path": "Cargo.toml",
-      "byte_count": 37889,
-      "record_count": 1061,
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b"
+      "byte_count": 41393,
+      "record_count": 1121,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e"
     },
     {
       "input_id": "K1-4-INPUT-LOCKFILE",
       "role": "CURRENT_DEPENDENCY_GRAPH_LOCK",
       "path": "Cargo.lock",
-      "byte_count": 114614,
-      "record_count": 4666,
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236"
+      "byte_count": 114587,
+      "record_count": 4664,
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb"
     }
   ],
   "authority_views": {
@@ -165,17 +179,17 @@
       "canonical_row_sha256": "33d6b682820cff9f656ea6a3b6a88a32393c0f927ebce7a6b5ab2d5ab955752c"
     },
     "k0_2_semantic_rows": {
-      "row_count": 97,
+      "row_count": 102,
       "id_key": "semantic_id",
-      "id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
-      "canonical_row_sha256": "ada6796514f5502ddd095dc05904f312bff387bc3a7fe70caf1cae0384ce3396",
+      "id_set_sha256": "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121",
+      "canonical_row_sha256": "1ba55c44beb8b1c7e6c8048d197150f3987bb9ecd9b1d69c00d1f2c0fe999624",
       "coverage_rule": "Every configuration, enum, operation, and callable-helper semantic ID appears exactly once in semantic_coverage; context-only classification does not discard its retry, timeout, cancellation, shutdown, or resource-bound authority."
     },
     "k0_2_routed_findings": {
       "row_count": 23,
       "id_key": "finding_id",
       "id_set_sha256": "752d9b0be528ea09c4eb06100e6b1ab1992d92f52cd8a8f9400f0d805e5223b0",
-      "canonical_row_sha256": "b8786f5521bfdcfbba786844fea0e41242fcbe65d8ad886069470dfc5540c404"
+      "canonical_row_sha256": "896c3cb88e234fd40ab9b886a01cfafc41e69d00c08122f0f49b314238991c84"
     },
     "k0_4_fault_vectors": {
       "row_count": 6,
@@ -211,12 +225,13 @@
           "KPR-CFG-011", "KPR-CFG-012", "KPR-CFG-013", "KPR-CFG-014", "KPR-CFG-015",
           "KPR-CFG-016", "KPR-CFG-017", "KPR-CFG-018", "KPR-CFG-019", "KPR-CFG-020",
           "KPR-CFG-021", "KPR-CFG-022", "KPR-CFG-023", "KPR-CFG-024", "KPR-CFG-025",
+          "KPR-CFG-026",
           "KCO-CFG-001", "KCO-CFG-002", "KCO-CFG-003", "KCO-CFG-004", "KCO-CFG-005",
           "KCO-CFG-006", "KCO-CFG-007", "KCO-CFG-008", "KCO-CFG-009", "KCO-CFG-010",
           "KCO-CFG-011", "KCO-CFG-012", "KCO-CFG-013", "KCO-CFG-014", "KCO-CFG-015",
-          "KCO-CFG-016", "KCO-CFG-017", "KCO-CFG-018"
+          "KCO-CFG-016", "KCO-CFG-017", "KCO-CFG-018", "KCO-CFG-019"
         ],
-        "reason": "All 43 configuration rows carry resource-bound authority; timer and retry settings remain configuration facts rather than runtime guarantees."
+        "reason": "All 45 configuration rows carry resource-bound authority, including ordered raw-property storage; timer and retry settings remain configuration facts rather than runtime guarantees."
       },
       {
         "classification": "RESOURCE_AND_LIFECYCLE",
@@ -235,20 +250,20 @@
         "classification": "CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION",
         "semantic_ids": [
           "KAFKA-ENUM-001", "KAFKA-ENUM-002", "KAFKA-ENUM-003", "KAFKA-ENUM-004",
-          "KAFKA-ENUM-005", "KAFKA-ENUM-006", "KAFKA-ENUM-007",
+          "KAFKA-ENUM-005", "KAFKA-ENUM-006", "KAFKA-ENUM-007", "KAFKA-ENUM-008",
           "KPR-OP-002", "KPR-OP-007", "KPR-OP-008", "KPR-OP-011", "KPR-OP-015",
           "KPR-OP-016", "KPR-OP-018", "KPR-OP-019", "KCO-OP-001", "KCO-OP-002",
-          "KCO-OP-010", "KCO-OP-017",
+          "KCO-OP-010", "KCO-OP-017", "KCO-OP-018", "KCO-OP-019",
           "KPR-HLP-001", "KPR-HLP-002", "KPR-HLP-003", "KPR-HLP-004", "KPR-HLP-005",
           "KPR-HLP-006", "KPR-HLP-007", "KPR-HLP-008", "KPR-HLP-009"
         ],
-        "reason": "These 28 enum, helper, validation, value-construction, diagnostic, and accessor rows remain exact semantic authority but do not independently acquire a long-lived resource or operation owner. Their fields are not promoted to runtime evidence."
+        "reason": "These 31 enum, helper, validation, value-construction, diagnostic, and accessor rows remain exact semantic authority but do not independently acquire a long-lived resource or operation owner. Diagnostic storage is covered by K1R-016 and K1R-025; these fields are not promoted to runtime evidence."
       }
     ],
-    "classified_row_count": 97,
+    "classified_row_count": 102,
     "unclassified_row_count": 0,
     "duplicate_classification_count": 0,
-    "classification_projection_sha256": "6bfbbd0e034be578cc508b99b2f7256f9511650632249fa485c5ab5bf1519e35"
+    "classification_projection_sha256": "f4127207a9f0c4678e970b25e43a9c5833b85b13c03722fa6c2f55211048c087"
   },
   "semantic_resource_bindings": [
     {"semantic_id":"KPR-CFG-001","resource_ids":["K1R-001","K1R-025"]},
@@ -276,6 +291,7 @@
     {"semantic_id":"KPR-CFG-023","resource_ids":["K1R-012","K1R-025"]},
     {"semantic_id":"KPR-CFG-024","resource_ids":["K1R-014","K1R-025"]},
     {"semantic_id":"KPR-CFG-025","resource_ids":["K1R-031"]},
+    {"semantic_id":"KPR-CFG-026","resource_ids":["K1R-025"]},
     {"semantic_id":"KCO-CFG-001","resource_ids":["K1R-001","K1R-025"]},
     {"semantic_id":"KCO-CFG-002","resource_ids":["K1R-016","K1R-025"]},
     {"semantic_id":"KCO-CFG-003","resource_ids":["K1R-025"]},
@@ -293,7 +309,8 @@
     {"semantic_id":"KCO-CFG-015","resource_ids":["K1R-025"]},
     {"semantic_id":"KCO-CFG-016","resource_ids":["K1R-021","K1R-034"]},
     {"semantic_id":"KCO-CFG-017","resource_ids":["K1R-025"]},
-    {"semantic_id":"KCO-CFG-018","resource_ids":["K1R-011","K1R-020"]}
+    {"semantic_id":"KCO-CFG-018","resource_ids":["K1R-011","K1R-020"]},
+    {"semantic_id":"KCO-CFG-019","resource_ids":["K1R-016","K1R-025"]}
   ],
   "resource_limit_dimensions": [
     {"resource_id":"K1R-003","dimension_id":"broker_entry_count","unit":"broker entries","current_default":null,"current_minimum":null,"current_maximum_or_hard_cap":null,"current_numeric_state":"DEPENDENCY_OWNED_UNKNOWN","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
@@ -315,6 +332,7 @@
     {"resource_id":"K1R-016","dimension_id":"assigned_partition_count","unit":"assigned topic-partition entries","current_default":0,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"UNBOUNDED_LOCAL_SET","required_default":0,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-016","dimension_id":"revoked_partition_count","unit":"retained revoked topic-partition entries","current_default":0,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"UNBOUNDED_LOCAL_SET","required_default":0,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-016","dimension_id":"rebalance_generation","unit":"generation scalar","current_default":0,"current_minimum":0,"current_maximum_or_hard_cap":18446744073709551615,"current_numeric_state":"SATURATING_U64_COUNTER","required_default":0,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
+    {"resource_id":"K1R-016","dimension_id":"callback_attempt_counter","unit":"each of four callback attempt counters","current_default":0,"current_minimum":0,"current_maximum_or_hard_cap":18446744073709551615,"current_numeric_state":"WRAPPING_U64_RELAXED_COUNTER_NOT_SUCCESS_OR_ADMISSION_LIMIT","required_default":0,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-018","dimension_id":"record_count_per_public_poll","unit":"records returned per public poll","current_default":0,"current_minimum":0,"current_maximum_or_hard_cap":1,"current_numeric_state":"EXACT_OPTIONAL_SINGLE_RECORD_MAX_POLL_RECORDS_FIELD_INERT","required_default":0,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-018","dimension_id":"payload_bytes_per_record","unit":"payload bytes per returned record","current_default":null,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"BROKER_HINT_NOT_LOCAL_COPY_CAP","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-018","dimension_id":"key_topic_and_header_bytes_per_record","unit":"key topic and header bytes per returned record","current_default":null,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"UNBOUNDED_LOCAL_COPY","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
@@ -328,6 +346,9 @@
     {"resource_id":"K1R-022","dimension_id":"running_task_count","unit":"blocking tasks occupying configured workers","current_default":0,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"CONFIGURED_WORKER_COUNT_NOT_FROZEN_HERE","required_default":0,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-025","dimension_id":"configuration_scalar_count","unit":"retained configuration scalar fields","current_default":null,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"PROFILE_DEPENDENT_COUNT_NOT_AGGREGATE_BUDGET","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-025","dimension_id":"configuration_string_bytes","unit":"retained configuration string bytes","current_default":null,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"UNBOUNDED_CALLER_INPUT","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
+    {"resource_id":"K1R-025","dimension_id":"raw_property_entry_count","unit":"ordered raw key-value entries per configuration","current_default":0,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"UNBOUNDED_CALLER_VECTOR","required_default":0,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
+    {"resource_id":"K1R-025","dimension_id":"retained_transient_error_count","unit":"retained transient error slots per consumer","current_default":0,"current_minimum":0,"current_maximum_or_hard_cap":1,"current_numeric_state":"EXACT_SINGLE_OPTION_SLOT_EXCLUDES_ACCESSOR_CLONES_AND_SINKS","required_default":0,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
+    {"resource_id":"K1R-025","dimension_id":"transient_error_occurrences","unit":"occurrences of the retained transient code","current_default":null,"current_minimum":1,"current_maximum_or_hard_cap":4294967295,"current_numeric_state":"SATURATING_U32_COUNTER_PRESENT_ONLY_AFTER_FIRST_OCCURRENCE","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-025","dimension_id":"diagnostic_record_count","unit":"retained diagnostic records","current_default":null,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"DEPENDENCY_AND_SINK_OWNED_UNKNOWN","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-025","dimension_id":"diagnostic_bytes","unit":"retained diagnostic bytes","current_default":null,"current_minimum":0,"current_maximum_or_hard_cap":null,"current_numeric_state":"DEPENDENCY_AND_SINK_OWNED_UNKNOWN","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
     {"resource_id":"K1R-026","dimension_id":"background_thread_count","unit":"dependency-owned background threads","current_default":null,"current_minimum":null,"current_maximum_or_hard_cap":null,"current_numeric_state":"DEPENDENCY_OWNED_UNKNOWN","required_default":null,"required_minimum":0,"required_maximum_or_hard_cap":null,"required_numeric_state":"BLOCKING_OWNER_MUST_FREEZE"},
@@ -724,8 +745,8 @@
     {
       "resource_id": "K1R-016",
       "resource_class": "consumer_group_assignment_and_rebalance_state",
-      "source_authority_ids": ["KAFKA-K1-SHARED-010", "KCO-OP-005", "KCO-OP-012", "KCO-OP-013", "KCO-OP-014", "KAFKA-K0-2-GAP-20", "KAFKA-K0-2-GAP-22"],
-      "unit": "assigned or revoked topic-partition entries plus one generation scalar",
+      "source_authority_ids": ["KAFKA-K1-SHARED-010", "KCO-CFG-019", "KCO-OP-005", "KCO-OP-012", "KCO-OP-013", "KCO-OP-014", "KCO-OP-018", "KAFKA-ENUM-008", "KAFKA-K0-2-GAP-20", "KAFKA-K0-2-GAP-22"],
+      "unit": "assigned or revoked topic-partition entries, generation scalar, configured cooperative flag, and four callback attempt counters",
       "current_default": 0,
       "current_minimum": 0,
       "current_maximum_or_hard_cap": null,
@@ -736,7 +757,7 @@
       "required_numeric_state": "BLOCKING_OWNER_MUST_FREEZE",
       "admission_outcome": "Assignment input validates uniqueness and nonnegative fields but not partition count or topic bytes.",
       "owner_scope": "Consumer member epoch and rebalance generation.",
-      "overflow_behavior": "Collections allocate without a local cap; generation saturates at u64::MAX without a typed terminal state.",
+      "overflow_behavior": "Collections allocate without a local cap; generation saturates at u64::MAX without a typed terminal state. Four relaxed callback attempt counters wrap at u64::MAX; they increment before the native result and are not one atomic success snapshot.",
       "release_point": "Revocation drain, replacement assignment, close cleanup, or explicit residue owner.",
       "accounting_invariant": "A partition has at most one live local owner per generation; revoked work reaches a terminal state before reassignment.",
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.8.3",
@@ -931,7 +952,7 @@
     {
       "resource_id": "K1R-025",
       "resource_class": "retained_configuration_state_errors_and_diagnostics",
-      "source_authority_ids": ["KAFKA-K1-SHARED-010", "KPR-OP-001", "KPR-OP-003", "KCO-OP-003", "KAFKA-K0-2-GAP-12", "KAFKA-K0-2-GAP-21"],
+      "source_authority_ids": ["KAFKA-K1-SHARED-010", "KPR-OP-001", "KPR-OP-003", "KCO-OP-003", "KPR-CFG-026", "KCO-CFG-019", "KCO-OP-019", "KAFKA-K0-2-GAP-12", "KAFKA-K0-2-GAP-21"],
       "unit": "retained configuration scalars, strings, bytes, labels, and diagnostic records",
       "current_default": null,
       "current_minimum": null,
@@ -941,10 +962,10 @@
       "required_minimum": 0,
       "required_maximum_or_hard_cap": null,
       "required_numeric_state": "BLOCKING_OWNER_MUST_FREEZE_BOUNDED_CARDINALITY_AND_RETENTION",
-      "admission_outcome": "Configuration scalars and strings are retained without one aggregate budget; dependency error strings can be arbitrarily long, and diagnostics have no common byte, count, cardinality, or retention budget.",
+      "admission_outcome": "Configuration scalars, strings, and raw-property vectors are retained without one aggregate budget. One transient error slot retains a code, first/last runtime times, and a saturating u32 occurrence count; accessor clones and all other diagnostics have no common byte, count, cardinality, or retention budget.",
       "owner_scope": "Operation receipt, client diagnostics owner, and bounded observability sink.",
-      "overflow_behavior": "Allocation growth, unbounded cardinality, or sink-defined behavior; no typed local result.",
-      "release_point": "Receipt consumption, bounded eviction, client close, or explicit retained-residue handoff.",
+      "overflow_behavior": "Raw-property mutation scans and replaces repeated keys in place or grows the vector. A distinct transient code replaces the one slot; repeats saturate its count. Other allocation, cardinality, or sink behavior remains unbounded with no typed local result.",
+      "release_point": "Required release is receipt consumption, bounded eviction, close, or explicit residue handoff. Current close retains configuration and the transient diagnostic; successful poll does not clear it, and raw-property accessor/Clone values outlive redacted formatting.",
       "accounting_invariant": "Every retained diagnostic has a byte/cardinality charge, expiry, privacy class, and exactly one owner.",
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.10.4",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.11.1",
@@ -1036,7 +1057,7 @@
       "admission_outcome": "Every caller Duration is accepted; zero can return timeout immediately while extreme values can keep the wrapper loop live indefinitely in practice.",
       "owner_scope": "One producer flush or close invocation and all polling slices it admits.",
       "overflow_behavior": "No local maximum or typed excessive-deadline rejection exists.",
-      "release_point": "Drain success, elapsed wrapper budget, cancellation, panic residue transfer, or shutdown handoff.",
+      "release_point": "Drain success, requested-slice budget exhaustion, cancellation, panic residue transfer, or shutdown handoff; the wrapper does not measure elapsed time for this budget.",
       "accounting_invariant": "Every polling slice decrements the same caller budget and no retry or wait phase silently resets it.",
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.5.3",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.11.2",
@@ -1056,10 +1077,10 @@
       "required_minimum": 1,
       "required_maximum_or_hard_cap": null,
       "required_numeric_state": "BLOCKING_OWNER_MUST_FREEZE_POLL_SLICE_POLICY",
-      "admission_outcome": "Zero remaining returns timeout before polling; otherwise each loop admits min(remaining,10ms), so a positive slice can be as small as one nanosecond and the native poll call is synchronous for that slice.",
+      "admission_outcome": "Zero remaining returns timeout before waiting; otherwise each loop admits min(remaining,10ms), so a positive slice can be as small as one nanosecond. The wrapper awaits wait_retry_backoff through Cx while ThreadedProducer polls on its background thread.",
       "owner_scope": "One slice within one producer flush or close operation.",
       "overflow_behavior": "The slice is locally capped at 10ms, but scheduling delay and dependency behavior are not bounded by that scalar.",
-      "release_point": "Poll return, cancellation observed by the next wrapper checkpoint, timeout exhaustion, or panic residue transfer.",
+      "release_point": "Timer/yield completion, cancellation observed by the wait or next checkpoint, requested-slice exhaustion, or panic residue transfer.",
       "accounting_invariant": "At most one slice is charged at a time and every returned slice is subtracted exactly once from its caller budget.",
       "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.5.3",
       "verification_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.11.2",
@@ -1397,7 +1418,7 @@
       "entry_admission": "Open-state and Cx checks admit a polling loop, but concurrent new sends are not fenced and no stable barrier epoch is captured.",
       "transitions": [
         {"dimension":"timeout","from_states":["POLLING"],"current_to_states":["FLUSHED","TIMED_OUT_AMBIGUOUS"],"current_rule":"Caller duration is decremented by requested poll slices without a clock and exhaustion is a Broker string, not a typed timeout.","certainty":"AMBIGUOUS","required_to_state":"TYPED_TIMEOUT_WITH_EXACT_UNFLUSHED_RECEIPTS","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.5.3","gate_state":"BLOCKING"},
-        {"dimension":"cancellation","from_states":["ENTRY","POLLING"],"current_to_states":["CANCELLED_AMBIGUOUS"],"current_rule":"Cx is checked between direct blocking poll slices; already queued records remain dependency-owned.","certainty":"AMBIGUOUS","required_to_state":"CX_CANCELLED_WITH_EXACT_PENDING_RECEIPTS","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
+        {"dimension":"cancellation","from_states":["ENTRY","POLLING"],"current_to_states":["CANCELLED_AMBIGUOUS"],"current_rule":"Cx is checked between wait slices and by wait_retry_backoff through the runtime timer/yield path; ThreadedProducer polls in the background and already queued records remain dependency-owned.","certainty":"AMBIGUOUS","required_to_state":"CX_CANCELLED_WITH_EXACT_PENDING_RECEIPTS","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
         {"dimension":"shutdown","from_states":["POLLING"],"current_to_states":["FLUSHED","CLOSED_REJECTED","TIMED_OUT_AMBIGUOUS"],"current_rule":"Public flush rejects after close, while close uses internal flush and no admission epoch makes either a stable barrier.","certainty":"AMBIGUOUS","required_to_state":"QUIESCENT_BARRIER_OR_TYPED_RESIDUE","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
         {"dimension":"panic","from_states":["POLLING"],"current_to_states":["PANICKED_AMBIGUOUS"],"current_rule":"No panic receipt enumerates remaining dependency queue entries or callbacks.","certainty":"AMBIGUOUS","required_to_state":"PANIC_CONTAINED_WITH_PENDING_LEDGER","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.3","gate_state":"BLOCKING"},
         {"dimension":"retry","from_states":["TIMED_OUT_AMBIGUOUS","CANCELLED_AMBIGUOUS"],"current_to_states":["ENTRY","CLOSED_REJECTED"],"current_rule":"A caller can invoke flush again only while open; no prior-attempt or pending-receipt join is exposed.","certainty":"UNKNOWN","required_to_state":"RETRY_JOINS_PRIOR_BARRIER_EPOCH","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
@@ -1574,7 +1595,7 @@
       "transitions": [
         {"dimension":"timeout","from_states":["DEPENDENCY_CONSTRUCTING"],"current_to_states":["DEPENDENCY_CONSTRUCTING","CONSTRUCTION_FAILED"],"current_rule":"Session and fetch settings do not bound constructor work.","certainty":"UNKNOWN","required_to_state":"TYPED_TIMEOUT_WITH_ZERO_OR_EXPLICIT_RESIDUE","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.3.1","gate_state":"BLOCKING"},
         {"dimension":"cancellation","from_states":["VALIDATING","DEPENDENCY_CONSTRUCTING"],"current_to_states":["DEPENDENCY_CONSTRUCTING","CONSTRUCTION_FAILED"],"current_rule":"No Cx parameter or constructor cancellation transition exists.","certainty":"NOT_APPLICABLE_CURRENTLY","required_to_state":"CX_CANCELLED_BEFORE_ADMISSION_OR_WITH_RESIDUE_OWNER","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
-        {"dimension":"shutdown","from_states":["OPEN"],"current_to_states":["DROPPED_WITHOUT_DRAIN_RECEIPT"],"current_rule":"Explicit close exists but Drop does not require it or produce a dependency drain receipt.","certainty":"AMBIGUOUS","required_to_state":"QUIESCENT_OR_TYPED_CONSUMER_RESIDUE","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.1","gate_state":"BLOCKING"},
+        {"dimension":"shutdown","from_states":["OPEN"],"current_to_states":["DROPPED_WITHOUT_DRAIN_RECEIPT"],"current_rule":"Unclosed Drop locks broker_ops, unsubscribes, and drains at most 100 requested 50ms polls when previously assigned; consumed records are discarded without commit. Lock waiting, callbacks, and dependency Drop have no total bound or drain receipt. Once close has marked closed, Drop skips this fallback.","certainty":"AMBIGUOUS","required_to_state":"QUIESCENT_OR_TYPED_CONSUMER_RESIDUE","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.1","gate_state":"BLOCKING"},
         {"dimension":"panic","from_states":["VALIDATING","DEPENDENCY_CONSTRUCTING","OPEN"],"current_to_states":["PANICKED_WITH_POSSIBLE_RESIDUE"],"current_rule":"No constructor or lifetime panic guard accounts for partially admitted dependency resources.","certainty":"UNKNOWN","required_to_state":"PANIC_CONTAINED_AND_ALL_RESOURCES_ACCOUNTED","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.3","gate_state":"BLOCKING"},
         {"dimension":"retry","from_states":["CONSTRUCTION_FAILED"],"current_to_states":["UNCONSTRUCTED"],"current_rule":"Caller may construct again without joining prior dependency residue.","certainty":"DEFINITIVE_LOCAL_ONLY","required_to_state":"RETRY_AFTER_DEFINITIVE_PRIOR_RESIDUE_DISPOSITION","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.3.1","gate_state":"BLOCKING"},
         {"dimension":"restart","from_states":["OPEN","DROPPED_WITHOUT_DRAIN_RECEIPT","PANICKED_WITH_POSSIBLE_RESIDUE"],"current_to_states":["RESTART_UNKNOWN"],"current_rule":"No persisted group, assignment, offset, fetch, or residue state is reconciled after restart.","certainty":"UNKNOWN","required_to_state":"RESTART_FROM_PERSISTED_OR_DEFINITIVELY_EMPTY_STATE","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.3","gate_state":"BLOCKING"},
@@ -1642,7 +1663,7 @@
         {"dimension":"cancellation","from_states":["ENTRY","WAITING","BLOCKING_SLICE","BUFFERED","APPLYING"],"current_to_states":["ERROR","CANCELLED_WITH_BUFFERED_OUTCOME","RECORD_DELIVERED"],"current_rule":"Cx is checked between slices; in-flight blocking work continues and can leave a shared outcome for another caller.","certainty":"AMBIGUOUS_AFTER_SLICE_START","required_to_state":"CX_CANCELLED_PRE_EFFECT_OR_MATCHED_OUTCOME_TRANSFER","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
         {"dimension":"shutdown","from_states":["WAITING","BLOCKING_SLICE","BUFFERED","APPLYING"],"current_to_states":["ERROR","POST_CLOSE_RECORD","RECORD_DELIVERED"],"current_rule":"Close does not clear or epoch-fence buffered outcome and an admitted poll can return a record after close.","certainty":"AMBIGUOUS","required_to_state":"CLOSED_WITH_NO_RECORD_OR_TYPED_PRE_CLOSE_HANDOFF","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
         {"dimension":"panic","from_states":["BLOCKING_SLICE","BUFFERED","APPLYING"],"current_to_states":["PANICKED_AMBIGUOUS","BUFFERED"],"current_rule":"Blocking panic propagates and can skip the matching caller continuation while shared outcome or dependency effects remain.","certainty":"AMBIGUOUS","required_to_state":"PANIC_CONTAINED_WITH_POLL_AND_RECORD_RECEIPTS","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.3","gate_state":"BLOCKING"},
-        {"dimension":"retry","from_states":["ERROR","EMPTY_TIMEOUT","CANCELLED_WITH_BUFFERED_OUTCOME"],"current_to_states":["ENTRY","RECORD_DELIVERED","OVERWRITTEN_OUTCOME"],"current_rule":"No broker-error retry exists; a later poll can consume a prior caller's buffered outcome or overwrite it.","certainty":"AMBIGUOUS","required_to_state":"RETRY_WITH_FRESH_RECEIPT_AND_ASSIGNMENT_EPOCH","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.7.4","gate_state":"BLOCKING"},
+        {"dimension":"retry","from_states":["ERROR","EMPTY_TIMEOUT","CANCELLED_WITH_BUFFERED_OUTCOME"],"current_to_states":["ENTRY","RECORD_DELIVERED","OVERWRITTEN_OUTCOME"],"current_rule":"MessageConsumption(UnknownTopicOrPartition) is retained as an informational diagnostic and polling continues to the original deadline; other broker errors are not retried. A later poll can consume a prior caller's buffered outcome or overwrite it.","certainty":"AMBIGUOUS","required_to_state":"RETRY_WITH_FRESH_RECEIPT_AND_ASSIGNMENT_EPOCH","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.7.4","gate_state":"BLOCKING"},
         {"dimension":"restart","from_states":["BLOCKING_SLICE","BUFFERED","APPLYING","CANCELLED_WITH_BUFFERED_OUTCOME","POST_CLOSE_RECORD","OVERWRITTEN_OUTCOME","PANICKED_AMBIGUOUS"],"current_to_states":["RESTART_UNKNOWN"],"current_rule":"No persisted cursor, assignment epoch, buffered receipt, or auto-store reconciliation survives restart.","certainty":"UNKNOWN","required_to_state":"RESTART_FROM_PERSISTED_CURSOR_AND_OFFSET_POLICY","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.7.4","gate_state":"BLOCKING"},
         {"dimension":"ambiguous_outcome","from_states":["BLOCKING_SLICE","BUFFERED","APPLYING","CANCELLED_WITH_BUFFERED_OUTCOME","POST_CLOSE_RECORD","OVERWRITTEN_OUTCOME","PANICKED_AMBIGUOUS"],"current_to_states":["RECORD_DELIVERED","ERROR","CANCELLED_WITH_BUFFERED_OUTCOME","POST_CLOSE_RECORD","OVERWRITTEN_OUTCOME","PANICKED_AMBIGUOUS","RESTART_UNKNOWN"],"current_rule":"Concurrent slices can overwrite outcomes and auto-store can precede an unobserved, cancelled, stale, or post-close record.","certainty":"AMBIGUOUS","required_to_state":"TYPED_MATCHED_RECORD_EMPTY_ERROR_OR_STALE_RECEIPT","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.10.3","gate_state":"BLOCKING"}
       ],
@@ -1704,8 +1725,8 @@
       "state_set": ["OPEN", "MARKED_CLOSED", "CLEANING_BACKEND", "CLEARING_LOCAL", "CLOSED_CLEAN", "CLOSED_WITH_RESIDUE", "CONCURRENT_CLOSE_RETURNED_EARLY", "PANICKED_AMBIGUOUS", "RESTART_UNKNOWN"],
       "entry_admission": "The first successful entry atomically marks closed before cleanup; every concurrent or later close immediately returns success instead of joining or retrying the first cleanup.",
       "transitions": [
-        {"dimension":"timeout","from_states":["CLEANING_BACKEND","CLEARING_LOCAL"],"current_to_states":["CLEANING_BACKEND","CLEARING_LOCAL","CLOSED_WITH_RESIDUE"],"current_rule":"No close timeout bounds fallback wait, backend unsubscribe or unassign, or local clearing.","certainty":"UNKNOWN","required_to_state":"TYPED_CLOSE_TIMEOUT_WITH_EXACT_RESIDUE","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
-        {"dimension":"cancellation","from_states":["OPEN","MARKED_CLOSED","CLEANING_BACKEND","CLEARING_LOCAL"],"current_to_states":["OPEN","CLOSED_WITH_RESIDUE","CLOSED_CLEAN"],"current_rule":"Entry cancellation leaves open; later future drop can prevent cleanup start or discard completion after closed is permanently set.","certainty":"AMBIGUOUS_AFTER_CLOSE_MARK","required_to_state":"OPEN_PRE_EFFECT_OR_CLOSED_WITH_RESIDUE_RECEIPT","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
+        {"dimension":"timeout","from_states":["CLEANING_BACKEND","CLEARING_LOCAL"],"current_to_states":["CLEANING_BACKEND","CLEARING_LOCAL","CLOSED_WITH_RESIDUE"],"current_rule":"Leave-group draining admits at most 100 requested 50ms native polls. No total close timeout bounds fallback/mutex wait, native callbacks, unsubscribe, unassign, local clearing, or dependency Drop. The negotiated cooperative path skips eager unassign after the drain.","certainty":"UNKNOWN","required_to_state":"TYPED_CLOSE_TIMEOUT_WITH_EXACT_RESIDUE","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
+        {"dimension":"cancellation","from_states":["OPEN","MARKED_CLOSED","CLEANING_BACKEND","CLEARING_LOCAL"],"current_to_states":["OPEN","CLOSED_WITH_RESIDUE","CLOSED_CLEAN"],"current_rule":"Entry cancellation leaves open; later future drop can prevent cleanup start or discard completion after closed is permanently set. KafkaConsumer Drop checks that flag and cannot repair the abandoned close.","certainty":"AMBIGUOUS_AFTER_CLOSE_MARK","required_to_state":"OPEN_PRE_EFFECT_OR_CLOSED_WITH_RESIDUE_RECEIPT","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
         {"dimension":"shutdown","from_states":["OPEN","MARKED_CLOSED","CLEANING_BACKEND","CLEARING_LOCAL"],"current_to_states":["CLOSED_CLEAN","CLOSED_WITH_RESIDUE","CONCURRENT_CLOSE_RETURNED_EARLY"],"current_rule":"Concurrent close is not joined, admitted subscribe or poll is not fenced, and is_closed does not prove cleanup or quiescence.","certainty":"AMBIGUOUS","required_to_state":"SINGLE_FLIGHT_CLOSED_QUIESCENT_OR_RESIDUE_RECEIPT","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.1","gate_state":"BLOCKING"},
         {"dimension":"panic","from_states":["MARKED_CLOSED","CLEANING_BACKEND","CLEARING_LOCAL"],"current_to_states":["PANICKED_AMBIGUOUS","CLOSED_WITH_RESIDUE"],"current_rule":"Panic after the close mark skips remaining cleanup and later close cannot retry it.","certainty":"AMBIGUOUS","required_to_state":"PANIC_CONTAINED_CLOSED_WITH_EXACT_RESIDUE","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.3","gate_state":"BLOCKING"},
         {"dimension":"retry","from_states":["CLOSED_WITH_RESIDUE","CONCURRENT_CLOSE_RETURNED_EARLY"],"current_to_states":["CONCURRENT_CLOSE_RETURNED_EARLY"],"current_rule":"Later close short-circuits and cannot retry backend or local cleanup.","certainty":"DEFINITIVE_LOCAL_ONLY","required_to_state":"RETRY_JOINS_SINGLE_CLOSE_AND_RESIDUE_LEDGER","owner":"asupersync-dep-p7-kafka-removal-sarszu.2.11.2","gate_state":"BLOCKING"},
@@ -1837,27 +1858,27 @@
   ],
   "coverage_receipt": {
     "resource_class_count": 42,
-    "resource_semantic_binding_count": 43,
-    "resource_limit_dimension_count": 43,
+    "resource_semantic_binding_count": 45,
+    "resource_limit_dimension_count": 47,
     "composite_resource_count": 16,
     "lifecycle_operation_count": 19,
     "transition_dimension_count": 7,
     "transition_cell_count": 133,
-    "unique_source_authority_reference_count": 63,
+    "unique_source_authority_reference_count": 68,
     "resource_id_sha256": "e21f2fbe16b7d974b60cda3958e35e7cd0736eaa62c7003a8b7f6a0dbb194fcd",
-    "resource_contract_sha256": "79c551cc99f036bc9b0a2bb9ca31aa794b02fe51db7400136fcc57040abec83b",
-    "semantic_resource_binding_sha256": "bc625fbcca3de75d72d2bc2919cecc7636a94d6b25943bb37743d6c92b63ead9",
-    "resource_limit_dimension_sha256": "3aaf18e4916c55d659cb5e89bdc0f474d60d54fa1472957e549fd9138c06ee6e",
+    "resource_contract_sha256": "a0c124cf63018c60cc7951c3ca4865efe76d05d57042618e7bddb3f27c732ea7",
+    "semantic_resource_binding_sha256": "cacb6c3934f763dd7f51ae32b5e2ab6cbb2d62acfe96f4f8c289ae2876add408",
+    "resource_limit_dimension_sha256": "e85c11abe74b5bab968fc71fe198be6eeb10c04ab8dc0558fc73bc8aabd0f550",
     "operation_id_sha256": "e608943f31a0b005a825e5a70a3ee926462ed24c1bb5ae155ada73acae2a77ec",
-    "operation_contract_sha256": "678914aed5298760076fd50b510a1862498805aab87f5295856da54d7d13d974",
-    "transition_contract_sha256": "2e3005cb5fec2a8f5aeef551619c65e22817e3dac4e2e2413d71e06771c499f3",
-    "source_authority_reference_sha256": "634bb51f85fe7d54015ccc24a83b52590d23b77c11c9aa522dc89d9af88357e7",
+    "operation_contract_sha256": "64211a73f04a9b5299639af83591afd9cdc33a287e56c887aa7b3d1b1f4ec865",
+    "transition_contract_sha256": "7143650cc37656e0fcb209c2b1b5b1e0adb364ce15bd675d2b2eba80fc40b658",
+    "source_authority_reference_sha256": "447712b9a06cd2c2e4b30f3ce18e8b340e90f345fe1bbe6224d0bdcc5bb88ccf",
     "no_claim_boundary_sha256": "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3",
     "authority_contract_sha256": "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7",
     "authority_input_contract_sha256": "a2c8b4f9b38cc27a24cdc75a747fe5957dcb57684338e5b5a4781acf06d149fc",
-    "authority_views_contract_sha256": "3ab13136432c2ae21e0db3f592ac08e63a843fb20879a0d97287ad3e3a20a21e",
+    "authority_views_contract_sha256": "4cb31018206bd0f69799aea9d28e1a6ede182565cbdd0fb589aaf0606f167b1d",
     "policy_contract_sha256": "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396",
-    "semantic_coverage_contract_sha256": "b86d984aa4061fe4770c4aeb7f639750193540deb4226522e48e1dfd6a441b27",
+    "semantic_coverage_contract_sha256": "871a8ac39453ef174f11425426c6657ebc1dd58a376d552cc09773491ac71c70",
     "cross_cutting_invariant_sha256": "88438c4ffdb88a2320e223c994da4974d201d7569326dccf121bc4f6cd819492",
     "ownership_and_gates_sha256": "e9158de45af6a6143374b2770dfb28f3dffd969bca527a65a080221c05a8e88f",
     "disposition_receipt_sha256": "a07ad3388a220f670c68c8c01a3b4e7bc99aaf0ed641d4aacdf1556758f72023",

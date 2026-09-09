@@ -8,6 +8,19 @@
   "adr_id": "DEP-ADR-009",
   "captured_date_utc": "2026-08-03",
   "baseline_revision": "03dea9e1556eac3d60a393a61bbcf875d49a96dd",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "release_owner": "asupersync-ghxhvm",
+    "historical_scope": "The original capture date, baseline revisions, owner handoffs and execution limitations remain historical. Current input pins and namespace projections incorporate reviewed incumbent changes; they do not assert that current bytes or observations existed at the original capture.",
+    "historical_counts": {"primary_definitions": 903, "authority_references": 127, "obligations": 279, "low_evidence_rows": 446},
+    "added_public_symbols": ["KCO-PUB-008", "KCO-PUB-009", "KCO-PUB-010"],
+    "added_semantic_rows": ["KCO-CFG-019", "KPR-CFG-026", "KAFKA-ENUM-008", "KCO-OP-018", "KCO-OP-019"],
+    "added_source_pin": "KAFKA-PIN-FUZZ-LOCK",
+    "removed_definitions": [],
+    "local_reference_reclassifications": ["KPR-CFG-003", "KPR-CFG-004", "KPR-CFG-012", "KPR-CFG-013", "KCO-CFG-004", "KCO-CFG-005", "KCO-CFG-009", "KCO-CFG-013", "KCO-CFG-017", "KPR-OP-007", "KPR-OP-008", "KCO-OP-017"],
+    "reclassification_boundary": "These twelve K0.3 usage-knowledge rows now have KNOWN_LOCAL_REFERENCES, not runtime or broker receipts. The selected low-evidence projection falls from 446 to 434 solely because those UNKNOWN usage labels are replaced; no execution or broker-evidence state is promoted.",
+    "evidence_boundary": "Static source reconciliation only. Raw-property diagnostics now redact values while explicit accessors retain them; rebalance diagnostics and source availability are additive obligations. No broker authentication, parity, owner closure, release readiness or cutover is established."
+  },
   "inventory_state": "K1_1_AUTHORITY_AND_OBLIGATION_NAMESPACE_FROZEN_KEEP_INCUMBENT",
   "authority": {
     "k0_baseline_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
@@ -63,25 +76,25 @@
       "input_id": "K1-INPUT-K0-5-ARTIFACT",
       "role": "SOLE_K0_BASELINE_ARTIFACT",
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
-      "byte_count": 29494,
-      "record_count": 284,
-    "sha256": "f4f2012b475793d57f5ef2f5ed40f08f985dff9a7c709cf1c67416a3eb9f9f09"
+      "byte_count": 31779,
+      "record_count": 299,
+      "sha256": "f57eccb9f506b37721d46a7d0b15fecdb5621e3603690f8a21c7dcda5cbd19e9"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
       "role": "SOLE_K0_BASELINE_DOCUMENT",
       "path": "docs/kafka_k0_baseline_disposition.md",
-      "byte_count": 21799,
-      "record_count": 349,
-    "sha256": "a0323113a57e4b42860fcf8be9ba09b54538d673c856daff96e793b1291fc244"
+      "byte_count": 22466,
+      "record_count": 358,
+      "sha256": "af43062736f0d1dff7b9982f4ccd15308c4f7819e6d4601a2c6687e2d4e0e4c6"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
       "role": "SOLE_K0_BASELINE_CONTRACT_SOURCE",
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
-      "byte_count": 106003,
-      "record_count": 2599,
-      "sha256": "a40a303676ae47fe54d512971341d386106687da054fc4f6a16ad611eb50e9dd"
+      "byte_count": 107239,
+      "record_count": 2629,
+      "sha256": "8445644d44482e8ec963fed0671b72834e46e722e164e0d7ce68a10884a1c0a5"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -95,33 +108,33 @@
       "input_id": "K1-INPUT-PRODUCER-SOURCE",
       "role": "CURRENT_SOURCE_TRUTH",
       "path": "src/messaging/kafka.rs",
-      "byte_count": 149141,
-      "record_count": 4335,
-      "sha256": "1329d49653935c9dc9a1c18cff136d9f8bfb21f204f908f562d6c3da62cc7de7"
+      "byte_count": 156720,
+      "record_count": 4521,
+      "sha256": "a737bbe271e70cf830e920426681b6199fc5b9c969243e67aea5ec8b38d27720"
     },
     {
       "input_id": "K1-INPUT-CONSUMER-SOURCE",
       "role": "CURRENT_SOURCE_TRUTH",
       "path": "src/messaging/kafka_consumer.rs",
-      "byte_count": 102484,
-      "record_count": 2757,
-      "sha256": "82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d"
+      "byte_count": 126897,
+      "record_count": 3317,
+      "sha256": "157847de9e5611ba8464131dab28a14aa31f841af264fa56a27efd69c6e7504a"
     },
     {
       "input_id": "K1-INPUT-FACADE-SOURCE",
       "role": "CURRENT_FACADE_TRUTH",
       "path": "src/messaging/mod.rs",
-      "byte_count": 10963,
-      "record_count": 225,
-      "sha256": "4c5350f58276648f12227ae26578b629d6b510c94f9de77a2d323d1ccca7704b"
+      "byte_count": 11030,
+      "record_count": 226,
+      "sha256": "d9e81d4167abacab6a585ac4f265249bf82f077c35d6a80a95d0bc955f8c2b09"
     },
     {
       "input_id": "K1-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_GRAPH_TRUTH",
       "path": "Cargo.toml",
-      "byte_count": 37889,
-      "record_count": 1061,
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b"
+      "byte_count": 41393,
+      "record_count": 1121,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e"
     },
     {
       "input_id": "K1-INPUT-RECORD-BATCH-CODEC",
@@ -205,17 +218,17 @@
     },
     "definition_reference_census": {
       "source": "K0.5 contract collect_definitions projection",
-      "all_definition_and_reference_row_count": 1030,
-      "primary_definition_count": 903,
-      "sanctioned_authority_reference_count": 127,
-      "sanctioned_authority_reference_id_set_sha256": "a2336ba563186e1bc4a0a935ced3731e2292e8a6d54b0858311662113b267a94",
-      "sanctioned_authority_reference_mapping_sha256": "0a88e36135222e48bfeab5095be3896ef946cc9fa05f38cbd19d2cb656107cf9",
+      "all_definition_and_reference_row_count": 1047,
+      "primary_definition_count": 912,
+      "sanctioned_authority_reference_count": 135,
+      "sanctioned_authority_reference_id_set_sha256": "90457aa8811909a088df43b6f0984b1b8cc262afd5e113f80bc8fcbfdf3bf76e",
+      "sanctioned_authority_reference_mapping_sha256": "83a474e63511cb717689f5f5c9d7206bca7752ebd44c642e277eb0d423d057aa",
       "sanctioned_reference_kinds": ["K0.3_PUBLIC_SYMBOL_DISPOSITION_TO_K0.1_PUBLIC_SYMBOL", "K0.3_SEMANTIC_DISPOSITION_TO_K0.2_SEMANTIC_ROW"],
       "unexpected_definition_collisions": [],
       "state": "EXACT_K0_5_DEFINITION_REFERENCE_CENSUS"
     },
     "k0_5_aggregate_namespace": {
-      "relation": "K0_5_OWNED_DEFINITIONS_OUTSIDE_CHILD_903_127_CENSUS",
+      "relation": "K0_5_OWNED_DEFINITIONS_OUTSIDE_CHILD_912_135_CENSUS",
       "row_count": 32,
       "group_counts": {
         "canonicalization_ids": 2,
@@ -231,30 +244,30 @@
     "primary_definitions": {
       "source": "K0.5 coverage_sets.primary_stable_ids",
       "stage_counts": {
-        "K0.1": 96,
-        "K0.2": 147,
+        "K0.1": 100,
+        "K0.2": 152,
         "K0.3": 469,
         "K0.4": 191
       },
-      "core_definition_count": 892,
-      "core_definition_typed_tuple_sha256": "43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea",
+      "core_definition_count": 901,
+      "core_definition_typed_tuple_sha256": "cf110029938e34e3830462a68441d3f678708137242c69a40657aa1e107a01d1",
       "contradiction_input_count": 11,
       "contradiction_input_typed_tuple_sha256": "60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0",
-      "primary_stable_id_count": 903,
-      "typed_unique_count": 903,
-      "raw_unique_count": 903,
-      "all_primary_typed_tuple_sha256": "38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e",
+      "primary_stable_id_count": 912,
+      "typed_unique_count": 912,
+      "raw_unique_count": 912,
+      "all_primary_typed_tuple_sha256": "cb03e74dd5a207aaf082664741fb629d4330bcec76a3edd0958969c6a064b729",
       "definition_state": "EXACT_UNIQUE_PINNED_BY_K0_5",
       "k1_import_state": "IMPORTED_WITHOUT_ROW_DUPLICATION"
     },
     "k1_obligation_projection": {
-      "raw_row_count": 279,
-      "unique_row_count": 279,
-      "stable_k0_definition_row_count": 267,
+      "raw_row_count": 287,
+      "unique_row_count": 287,
+      "stable_k0_definition_row_count": 275,
       "derived_unided_k0_2_shared_key_count": 12,
       "domain_counts": {
-        "public_symbols": 30,
-        "semantic_rows": 97,
+        "public_symbols": 33,
+        "semantic_rows": 102,
         "shared_semantic_keys": 12,
         "explicit_absences": 2,
         "downstream_journeys": 15,
@@ -262,10 +275,10 @@
         "routed_gaps_and_findings": 87
       },
       "normalized_tuple_rule": "Project stage<TAB>collection<TAB>id. Preserve public_symbols, the four exact K0.2 semantic collection names, shared_semantics, explicit_absences, user_journeys, routed_gaps, and routed_findings; normalize all seven K0.4 vector collections to fixture_vectors. Bytewise sort unique rows and append one LF per row.",
-      "normalized_projection_sha256": "cd4ff24ac2deed867d81d1fb9d81c08f31e57de5c7e77c84e1ea3657e2fa0f37",
+      "normalized_projection_sha256": "59e1ae49f670b9a817c610864ef1b19250657acacf828bef5fc1faceece9084b",
       "source_precise_tuple_rule": "Use the same stage<TAB>collection<TAB>id projection but retain each of the seven exact K0.4 vector collection names. Bytewise sort unique rows and append one LF per row.",
-      "source_precise_projection_sha256": "846a643da80fa9ad9dd78b9e13520981ef8811b91839686608ec7c80a45a4414",
-      "scope_rule": "This is the exact K1 contract-obligation projection, not the full 903-definition K0 census. The full definition/reference census remains separately pinned and mandatory.",
+      "source_precise_projection_sha256": "e84e9b969c38366e8e260ea60ca4536f213e51fee02eebb17282f2a201fdbf06",
+      "scope_rule": "This is the exact K1 contract-obligation projection, not the full 912-definition K0 census. The full definition/reference census remains separately pinned and mandatory.",
       "state": "EXACT_STATIC_OBLIGATION_PROJECTION"
     },
     "named_definition_views": [
@@ -273,8 +286,8 @@
         "view_id": "K1-VIEW-PUBLIC-SYMBOLS",
         "source_locator": "K0.1.public_symbols[].symbol_id",
         "id_field": "symbol_id",
-        "count": 30,
-        "id_set_sha256": "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28",
+        "count": 33,
+        "id_set_sha256": "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a",
         "relation": "OVERLAPPING_VIEW_OF_PRIMARY_DEFINITIONS",
         "k1_policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
         "downstream_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.10.1","asupersync-dep-p7-kafka-removal-sarszu.2.10.5"],
@@ -284,8 +297,8 @@
         "view_id": "K1-VIEW-SEMANTIC-ROWS",
         "source_locator": "K0.2 configuration_fields+enum_semantics+operations+callable_helpers semantic_id",
         "id_field": "semantic_id",
-        "count": 97,
-        "id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
+        "count": 102,
+        "id_set_sha256": "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121",
         "relation": "OVERLAPPING_VIEW_OF_PRIMARY_DEFINITIONS",
         "k1_policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
         "downstream_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.10.1","asupersync-dep-p7-kafka-removal-sarszu.2.11.1"],
@@ -297,7 +310,7 @@
         "id_field": "object_key",
         "count": 12,
         "id_set_sha256": "92ab055d5d14e4971daf298e54c9f5036ecf71c490d579270f4789b889fc86a5",
-        "relation": "DERIVED_KEYED_OBLIGATION_VIEW_OUTSIDE_903_PRIMARY_DEFINITIONS",
+        "relation": "DERIVED_KEYED_OBLIGATION_VIEW_OUTSIDE_912_PRIMARY_DEFINITIONS",
         "k1_policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.4",
         "downstream_owners": ["asupersync-dep-p7-kafka-removal-sarszu.2.11.1"],
         "protocol_binding_policy": "LOCAL_ONLY_OR_CONFIG_MAPPING_PENDING_ROW_REVIEW"
@@ -449,7 +462,7 @@
       }
     ],
     "typed_nested_reference_classes": [
-      {"reference_class":"K0.2_PROFILE_TO_SEMANTIC","reference_count":97,"definition_count":97,"state":"EXACT_INHERITED_K0_2_REFERENCE"},
+      {"reference_class":"K0.2_PROFILE_TO_SEMANTIC","reference_count":102,"definition_count":102,"state":"EXACT_INHERITED_K0_2_REFERENCE"},
       {"reference_class":"K0.3_PROFILE_TO_K0.1_PROFILE","reference_count":17,"definition_count":13,"state":"EXACT_WITH_FOUR_DECLARED_DOUBLE_MAPPINGS"},
       {"reference_class":"K0.4_FIXTURE_TO_SOURCE_PIN","reference_count":67,"definition_count":245,"state":"EXACT_48_INHERITED_19_DIRECT"},
       {"reference_class":"K0.4_FIXTURE_TO_CLASSIFICATION_PROFILE","reference_count":67,"definition_count":8,"state":"EXACT"},
@@ -469,19 +482,19 @@
       {
         "view_id": "K1-REFERENCE-PUBLIC-DISPOSITIONS",
         "source": "K0.5 exact_joins KAFKA-K0-5-JOIN-001-PUBLIC-DISPOSITION",
-        "definition_count": 30,
-        "reference_count": 30,
-        "mapping_count": 30,
-        "id_set_sha256": "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28",
+        "definition_count": 33,
+        "reference_count": 33,
+        "mapping_count": 33,
+        "id_set_sha256": "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a",
         "state": "EXACT_AUTHORITY_REFERENCE"
       },
       {
         "view_id": "K1-REFERENCE-SEMANTIC-DISPOSITIONS",
         "source": "K0.5 exact_joins KAFKA-K0-5-JOIN-002-SEMANTIC-DISPOSITION",
-        "definition_count": 97,
-        "reference_count": 97,
-        "mapping_count": 97,
-        "id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
+        "definition_count": 102,
+        "reference_count": 102,
+        "mapping_count": 102,
+        "id_set_sha256": "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121",
         "state": "EXACT_AUTHORITY_REFERENCE"
       },
       {
@@ -523,15 +536,15 @@
       }
     ],
     "source_pin_rollup": {
-      "row_count": 266,
-      "stage_counts": {"K0.1": 13, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "890b19c9bba9570de2ad374d38deab35a1fb00359c61925a90d25404111f9c5d",
-      "unique_path_count": 247,
-      "unique_path_set_sha256": "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3",
+      "row_count": 267,
+      "stage_counts": {"K0.1": 14, "K0.2": 8, "K0.3": 225, "K0.4": 20},
+      "canonical_json_sha256": "7e72356c31ac6f5ee44ea0bcdc85d69093b77b263debe055757ca1c642135d29",
+      "unique_path_count": 248,
+      "unique_path_set_sha256": "c9f1f8ae0ce140c27e05919606a947d93c660f9aa978e762f1cbcc232c200ddb",
       "overlap_group_count": 15,
       "overlap_pin_row_count": 34,
       "overlap_pin_tuple_rule": "For each source-pin row whose path occurs in more than one child packet, serialize path<TAB>child<TAB>pin_id<TAB>sha256; bytewise sort the records and append one LF per row.",
-      "overlap_pin_projection_sha256": "d2eb5cb6c4f52668f3f3202215709714ebe89c6d7ae8a847544da65e7b83687c",
+      "overlap_pin_projection_sha256": "d8c4628bbde051a595bc53b744d8e9f8c384b66bd718eb4c938d902cf35573f8",
       "conflicting_overlap_groups": []
     },
     "unknown_blockers": {
@@ -541,25 +554,25 @@
       "owner_edge_sha256": "7b36d67eb6a635bf112838ea0104aab9b45ad918798af627ec176d01c61e554c",
       "resolution_owner_count": 7,
       "resolution_owner_id_set_sha256": "54a6d2f9844b771aed0b2b714d4682ea2ba40092447beeef08df0231c9e08df4",
-      "selector_row_count": 142,
-      "selector_projection_sha256": "5c7fb727bc79d4f8be1c979fadda8bcfd261da0953e972a32a89bef27a28b18c",
+      "selector_row_count": 130,
+      "selector_projection_sha256": "4db0a2323e257d602025afc0647109df63c1a401f2bb323a5a1a3f95bc8c8f4a",
       "missing_or_unowned_blocks": true,
       "unexpected_unknown_blocks": true,
       "state": "OWNED_AND_MIGRATION_BLOCKING"
     },
     "low_evidence_state_projection": {
       "selected_states": ["UNKNOWN", "BLOCKED", "BLOCKED_EXTERNAL", "NOT_RUN", "UNPINNED", "LOCAL_MODEL_ONLY", "WIRE_CODEC_ONLY"],
-      "row_count": 446,
-      "child_counts": {"K0.1": 0, "K0.2": 0, "K0.3": 314, "K0.4": 132},
-      "state_counts": {"UNKNOWN": 97, "BLOCKED": 77, "BLOCKED_EXTERNAL": 15, "NOT_RUN": 225, "UNPINNED": 6, "LOCAL_MODEL_ONLY": 6, "WIRE_CODEC_ONLY": 20},
+      "row_count": 434,
+      "child_counts": {"K0.1": 0, "K0.2": 0, "K0.3": 302, "K0.4": 132},
+      "state_counts": {"UNKNOWN": 85, "BLOCKED": 77, "BLOCKED_EXTERNAL": 15, "NOT_RUN": 225, "UNPINNED": 6, "LOCAL_MODEL_ONLY": 6, "WIRE_CODEC_ONLY": 20},
       "projection_rule": "Recursively scan the four K0 child artifacts for exact scalar strings in selected_states. For each match recursively key-sort and compactly serialize {child,path,state}, where path is the exact JSON path array of string keys and numeric indices; bytewise sort unique rows and append one LF per row.",
-      "projection_sha256": "8d8e318ffbbcd5e26cb5320ba3fc03075624a974b214ea0cf2d10e769838543f",
+      "projection_sha256": "288cf0c438852ea0c184c2339c8bf00e69a682a71d6d58bcffed9420b01d6c5c",
       "promotion_allowed": false,
       "state": "EXACT_RETAINED_LOW_EVIDENCE_STATE_CENSUS"
     },
     "route_ownership": {
       "route_row_count": 87,
-      "route_projection_sha256": "e8565a21c4e3cd0e3c520e5d71ab2c04711b8e8954959a96c777cdde5565979f",
+      "route_projection_sha256": "6703f44f112d96e80907809e56c0fbfdb6a3f3719a7a29fa7cf9ec2cf27a3ba2",
       "route_edge_count": 126,
       "route_edge_projection_sha256": "78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc",
       "owner_id_count": 49,
@@ -572,7 +585,7 @@
     },
     "claims_projection": {
       "child_claim_record_count": 93,
-      "child_claim_projection_sha256": "10f7dff0bef49d4ab15cbae2d0641e9618c48b552a820c3ab48de4c4a4fdd48a",
+      "child_claim_projection_sha256": "3198dc4e435a56031af6ccef2548eefc359e1f141253be1cc188f6df07820132",
       "aggregate_claim_count": 7,
       "aggregate_claim_projection_sha256": "2a4867239016cef413e38d68bc1d788de89a23bac7ac08890632256013b4d1b6",
       "migration_claim_state": "BLOCKED",
@@ -582,17 +595,17 @@
   },
   "exposure_model": {
     "allowed_classes": ["FACADE", "MODULE_PUBLIC", "CFG_TEST_ONLY", "CFG_FUZZING", "PRIVATE"],
-    "classification_rule": "For K0.1 public_symbols, a non-empty facade_exports array is FACADE; KPR-PUB-002 and KPR-PUB-021 are CFG_TEST_ONLY; KPR-PUB-023 is CFG_FUZZING because its group is test/fuzz exposed; remaining rows are MODULE_PUBLIC. PRIVATE is reserved for later implementation-only rows and is absent from this 30-row public projection.",
+    "classification_rule": "For K0.1 public_symbols, a non-empty facade_exports array is FACADE; KPR-PUB-002 and KPR-PUB-021 are CFG_TEST_ONLY; KPR-PUB-023 is CFG_FUZZING because its group is test/fuzz exposed; remaining rows are MODULE_PUBLIC. PRIVATE is reserved for later implementation-only rows and is absent from this 33-row public projection.",
     "projection_rule": "Bytewise sort unique symbol_id<TAB>exposure_class rows and append one LF per row.",
-    "row_count": 30,
-    "class_counts": {"FACADE": 15, "MODULE_PUBLIC": 12, "CFG_TEST_ONLY": 2, "CFG_FUZZING": 1, "PRIVATE": 0},
-    "projection_sha256": "cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f",
+    "row_count": 33,
+    "class_counts": {"FACADE": 17, "MODULE_PUBLIC": 13, "CFG_TEST_ONLY": 2, "CFG_FUZZING": 1, "PRIVATE": 0},
+    "projection_sha256": "e5ab5243ac66474b0df051b5716dcdbe9239bc17742c2c5a154094e157786e23",
     "coarse_projection": {
       "classes": ["FACADE_REEXPORTED", "MODULE_PUBLIC_ONLY"],
       "classification_rule": "A non-empty facade_exports array is FACADE_REEXPORTED; an empty facade_exports array is MODULE_PUBLIC_ONLY, including cfg-scoped module-public groups.",
-      "class_counts": {"FACADE_REEXPORTED": 15, "MODULE_PUBLIC_ONLY": 15},
+      "class_counts": {"FACADE_REEXPORTED": 17, "MODULE_PUBLIC_ONLY": 16},
       "projection_rule": "Bytewise sort unique symbol_id<TAB>coarse_exposure_class rows and append one LF per row.",
-      "projection_sha256": "d1ebf84a5bd4654ec12cedb880eab9f7f1751fbd758267ce4395549de8affade"
+      "projection_sha256": "0cfd58553a7278b132a786bf4c64771c266974738d72e140637441c7394daf47"
     },
     "state": "EXACT_STATIC_EXPOSURE_PROJECTION"
   },
@@ -707,13 +720,13 @@
     "tracker_projection_row_count": 9,
     "k1_child_count": 5,
     "k1_child_estimate_minutes": 1920,
-    "primary_definition_count": 903,
+    "primary_definition_count": 912,
     "primary_definitions_complete_and_unique": true,
-    "definition_and_reference_row_count": 1030,
-    "sanctioned_authority_reference_count": 127,
+    "definition_and_reference_row_count": 1047,
+    "sanctioned_authority_reference_count": 135,
     "k0_5_aggregate_definition_count": 32,
-    "k1_obligation_projection_row_count": 279,
-    "low_evidence_state_projection_row_count": 446,
+    "k1_obligation_projection_row_count": 287,
+    "low_evidence_state_projection_row_count": 434,
     "named_definition_view_count": 11,
     "authority_reference_view_count": 6,
     "cross_authority_reference_view_count": 3,

@@ -112,17 +112,17 @@
       "input_id": "K1-3-INPUT-K0-1",
       "role": "PUBLIC_API_AUTHORITY",
       "path": "artifacts/kafka_capability_inventory_v1.json",
-      "byte_count": 41921,
-      "record_count": 1015,
-    "sha256": "ff4cbf408d47ee101af875f00be0218192969aa161dd0ee69931848a042f7912"
+      "byte_count": 47232,
+      "record_count": 1087,
+      "sha256": "f33bb0cf011be141ee45952455b173e859591d7dfd9e2dc2460cf19bafaab800"
     },
     {
       "input_id": "K1-3-INPUT-K0-2",
       "role": "SEMANTIC_AUTHORITY",
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-      "byte_count": 229415,
-      "record_count": 2560,
-    "sha256": "a746fd5f91619dcea064b5e019ce237378970d6bd9ef45f3045670fe59e0f7c2"
+      "byte_count": 244004,
+      "record_count": 2687,
+      "sha256": "0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1"
     },
     {
       "input_id": "K1-3-INPUT-K0-3",
@@ -144,33 +144,33 @@
       "input_id": "K1-3-INPUT-PRODUCER",
       "role": "CURRENT_PRODUCER_AND_TRANSACTION_SOURCE",
       "path": "src/messaging/kafka.rs",
-      "byte_count": 149141,
-      "record_count": 4335,
-      "sha256": "1329d49653935c9dc9a1c18cff136d9f8bfb21f204f908f562d6c3da62cc7de7"
+      "byte_count": 156720,
+      "record_count": 4521,
+      "sha256": "a737bbe271e70cf830e920426681b6199fc5b9c969243e67aea5ec8b38d27720"
     },
     {
       "input_id": "K1-3-INPUT-CONSUMER",
       "role": "CURRENT_CONSUMER_SOURCE",
       "path": "src/messaging/kafka_consumer.rs",
-      "byte_count": 102484,
-      "record_count": 2757,
-      "sha256": "82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d"
+      "byte_count": 126897,
+      "record_count": 3317,
+      "sha256": "157847de9e5611ba8464131dab28a14aa31f841af264fa56a27efd69c6e7504a"
     },
     {
       "input_id": "K1-3-INPUT-FACADE",
       "role": "CURRENT_FACADE_SOURCE",
       "path": "src/messaging/mod.rs",
-      "byte_count": 10963,
-      "record_count": 225,
-      "sha256": "4c5350f58276648f12227ae26578b629d6b510c94f9de77a2d323d1ccca7704b"
+      "byte_count": 11030,
+      "record_count": 226,
+      "sha256": "d9e81d4167abacab6a585ac4f265249bf82f077c35d6a80a95d0bc955f8c2b09"
     },
     {
       "input_id": "K1-3-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_GRAPH_SOURCE",
       "path": "Cargo.toml",
-      "byte_count": 37889,
-      "record_count": 1061,
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b"
+      "byte_count": 41393,
+      "record_count": 1121,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e"
     }
   ],
   "coverage_model": {
@@ -633,18 +633,18 @@
     "canonical_journey_row_sha256": "3124cf3daff343142b56bbadceba66f8d0fb21862f771957e667f4d6c393260f",
     "preservation_rule": "Every K0.3 journey remains PRESERVE with its exact current execution_state, evidence_class, ordered public entry points, and owner. No NOT_RUN, BLOCKED, planned, compile-only, static-source, deterministic-only, mock-or-simulated, or proof-only row is promoted.",
     "usage_coverage": {
-      "public_symbol_rows": 30,
-      "public_known_local_references": 17,
+      "public_symbol_rows": 33,
+      "public_known_local_references": 20,
       "public_unknown": 13,
-      "semantic_rows": 97,
-      "semantic_known_local_references": 45,
-      "semantic_unknown": 52,
-      "public_journey_edge_count": 109,
+      "semantic_rows": 102,
+      "semantic_known_local_references": 62,
+      "semantic_unknown": 40,
+      "public_journey_edge_count": 137,
       "public_journey_edge_rule": "Emit symbol_id<TAB>journey_id from K0.3 k0_1_symbol_dispositions, bytewise sort unique rows, and append one LF per row.",
-      "public_journey_edge_sha256": "2dc041692d554c03a1e123ba9e720967bf88288e402ebdc0ec7ddfe7a821f43a",
-      "semantic_journey_edge_count": 216,
+      "public_journey_edge_sha256": "487bc48ac1339806de47d427ce5a9f108d170d3a48ff3f27b3df265a7cd62bae",
+      "semantic_journey_edge_count": 479,
       "semantic_journey_edge_rule": "Emit semantic_id<TAB>journey_id from K0.3 k0_2_semantic_dispositions, bytewise sort unique rows, and append one LF per row.",
-      "semantic_journey_edge_sha256": "d48356bc797bf7af527f4e77915ae45bf6c442fa178f99a14f7350e7b42ffae9",
+      "semantic_journey_edge_sha256": "f9cc452ded8cd8daccb8bc23f0ea0006708a7dc58f3dd4bb4e06e72cb0b20072",
       "usage_evidence_is_completeness_proof": false,
       "unknown_blocks_migration": true
     },
@@ -773,7 +773,7 @@
     "It does not prove Kafka protocol correctness, request or response coverage, version negotiation, downgrade behavior, flexible-tag handling, broker interoperability, codec availability, or oldest/current broker support.",
     "It does not prove delivery certainty, idempotence, exactly-once behavior, transaction atomicity, group ownership, rebalance correctness, offset durability, cancellation correctness, shutdown correctness, recovery, or residue cleanup.",
     "It does not prove complete credential zeroization or redaction, safe error payloads, stable ASUP-E integration, observability completeness, resource bounds, backpressure, performance, reliability, release readiness, broad workspace health, or absence of defects.",
-    "Journey linkage is known usage evidence, not completeness proof. Thirteen public rows, fifty-two semantic rows, and all external searches remain UNKNOWN or otherwise low-evidence until their named refresh and terminal owners produce admitted evidence.",
+    "Journey linkage is known usage evidence, not completeness proof. Thirteen public rows, forty semantic rows, and all external searches remain UNKNOWN or otherwise low-evidence until their named refresh and terminal owners produce admitted evidence.",
     "The packet does not close or absorb standalone incumbent-maintenance owners and does not authorize production wiring, oracle retirement, dependency or feature removal, API or capability removal, file deletion, or cutover."
   ]
 }

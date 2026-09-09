@@ -6,6 +6,33 @@
   "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
   "captured_date_utc": "2026-08-03",
   "baseline_revision": "012c13714db267a4fba928db9f900b70d6c1d25a",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner_bead": "asupersync-ghxhvm",
+    "scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "historical_fields": "The original capture, baseline revision, environment identities, fixture classification profiles, fixture census classifications, vector states, source-contradiction findings and their inline baseline line ranges, evidence claims, routed gaps, and coverage receipt remain historical. Current source pins and inherited K0.3 counts/digests describe the reviewed files; the current fixture reviews below qualify changed source classifications without rewriting historical receipts.",
+    "reviewed_changes": [
+      "K0.3 now inventories 33 public symbol groups, 102 semantic rows, 959 declarations, and 1521 call-site candidates. Its exact fixture path union remains 67 paths: 48 inherited fixture pins, 19 direct fixture pins, and one separate authority pin.",
+      "The SASL audit retains its synthetic authentication classifier and adds three Debug redaction tests plus three kafka-gated native ClientConfig rejection tests. The historical LOCAL_MODEL_ONLY fixture classification does not describe those new tests; their current source classification is recorded separately below.",
+      "The real-broker integration source adds cooperative assignment, bounded drop, and transient-topic-error cases. It now has 16 declarations, including 11 named real-broker tests and five proof/helper declarations. Existing roundtrip offset selection, coordinated two-consumer polling, and payment subscription ordering changed, but no new terminal broker receipt is present in this packet.",
+      "The idempotence audit adds a kafka-gated native-constructor pre-network validation test. Producer flush now yields while waiting for the threaded producer, and consumer close/drop attempts bounded group departure; neither change supplies broker outcome reconciliation, teardown, or wall-clock resource-bound evidence.",
+      "Producer, consumer, and transactional configuration Debug output now redacts raw property values. Native ClientConfig error paths retain the result/key and creation prefixes while suppressing raw values and native descriptions. These source repairs do not establish authenticated broker transport or resolve the historical negative authentication matrix.",
+      "Manifest and lockfile packaging changed, but the optional rdkafka 0.39.0 and rdkafka-sys 4.10.0+2.12.1 package edge and its disabled native capability declarations are unchanged. The fuzz workflow remains read-only inventory input; no GitHub Actions execution is claimed or authorized by this review."
+    ],
+    "current_fixture_reviews": [
+      {
+        "fixture_id": "KAFKA-K0-4-FIXTURE-056",
+        "path": "tests/kafka_sasl_authentication_audit.rs",
+        "source_pin_id": "KAFKA-K0-3-PIN-SASL",
+        "historical_classification_profile_id": "KAFKA-K0-4-FIXTURE-PROFILE-003-LOCAL-MODEL",
+        "current_evidence_class": "STATIC_SOURCE",
+        "execution_state": "NOT_RECORDED_IN_THIS_ARTIFACT",
+        "limitation": "Mixed synthetic classifier, Debug, and native configuration-rejection test source; no broker authentication handshake or immutable terminal broker receipt."
+      }
+    ],
+    "new_broker_receipts": 0,
+    "dependency_exit_allowed": false
+  },
   "inventory_state": "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN",
   "authority": {
     "registry_disposition": "KEEP_UNTIL_PARITY",
@@ -134,7 +161,7 @@
     "authority_anchor": {
       "artifact_id": "kafka-downstream-user-journey-inventory-v1",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "sha256": "3de6c4b383349c852da4da62187766282b7e833e80b48ca2c7a9d90a24636708",
+      "sha256": "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee",
       "authority_revision": "ae22e710d87412b38e546b32e9702106619481d5",
       "captured_date_utc": "2026-08-03",
       "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN"
@@ -142,42 +169,42 @@
     "inherited_counts": {
       "source_pins": 225,
       "baseline_occurrence_paths": 245,
-      "k0_1_public_symbols": 30,
-      "k0_2_semantic_rows": 97,
+      "k0_1_public_symbols": 33,
+      "k0_2_semantic_rows": 102,
       "test_declaration_groups": 35,
-      "test_declarations": 941,
-      "exact_test_declarations": 893,
+      "test_declarations": 959,
+      "exact_test_declarations": 911,
       "tokio_test_declarations": 48,
       "local_inventory_rows": 34,
       "atomic_test_cases": 16,
       "call_site_groups": 48,
-      "call_sites": 1363,
+      "call_sites": 1521,
       "documentation_claims": 31,
       "user_journeys": 15
     },
     "inherited_digests": {
       "baseline_occurrence_path_map_sha256": "9c815cfcba11f5345e7abced6b0afa21bfb650f9bb280e71bb3da74ebbb55089",
-      "k0_1_public_symbol_id_set_sha256": "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28",
-      "k0_2_semantic_id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
+      "k0_1_public_symbol_id_set_sha256": "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a",
+      "k0_2_semantic_id_set_sha256": "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121",
       "tokio_test_declaration_tuple_sha256": "c21dd6b0021dc189e82e6a3cf95dd37f1cddb100cf9688595fbe7a969b09b80d",
       "test_declaration_group_path_sha256": "720d9d8fca6a4b23d06d5cfa400eef884c016edb39ac71ce74cde44036b26011",
       "test_declaration_group_path_pin_sha256": "5eb3a4a99955992f5a8ef5bbd79969dce668e908499872bd9588fa7214b4b2ae",
       "compilation_profile_semantic_tuple_sha256": "dd718eca06f6c1309e8e073dc65cc4e0c836e4705747bbaa72d7986dc1d31c61",
-      "call_site_id_set_sha256": "27ac17b660888d65f1d6a92c924becec669a96b4b1c09795450c89a350aabe2c",
+      "call_site_id_set_sha256": "f90a1badb93917fb376db77cab81b12987e5b8777c990f35e6551e3890ddefb7",
       "call_site_path_set_sha256": "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c",
       "downstream_helper_tuple_sha256": "a2c49e5cb2519afa11a2d29bee72d97c60532292b2817f725466683b3a93a777",
-      "provider_test_candidate_tuple_sha256": "1c1f5c263973f83026f7a4235cbe21252de23b4f22ba8833d5fd433659a2e255",
+      "provider_test_candidate_tuple_sha256": "976ce2339058cc1879c9f3f9fae63867daea246ff6d071443485c76408ae7d2a",
       "documentation_candidate_path_sha256": "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67",
-      "documentation_occurrence_tuple_sha256": "1045749285eb5a01933adfee3bd79dc34ed30f2e7cd1b7117caab51c89043dbc",
-      "documentation_matching_line_tuple_sha256": "93d84baac784b880d19fc7c790a19488d1c62547aadbce1ce5056582dafb7545",
-      "documentation_occurrence_id_sha256": "577ca40dd5f40101a2c4bdca225fcb6930ed2925353a1419404adc0ca5e30b3d",
-      "documentation_canonical_occurrence_id_sha256": "96dcbefec213d04a2a8f29e5255bf8ca1b55b229c993b9997f28c3209365c5ab",
-      "documentation_remainder_occurrence_id_sha256": "db4e006cdb3cde6fee615f3d64753df484c0848474dcd68a412ab055b0ffced0",
-      "documentation_group_id_sha256": "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd",
+      "documentation_occurrence_tuple_sha256": "195b4358e49dcf76300847bc8eb777a6971b0d2a7310d74cb92f25c8fe3771d1",
+      "documentation_matching_line_tuple_sha256": "b0628aa946606ca3c1c88c50d10e97bb401128cb14035c26581c1f55bbf57e6b",
+      "documentation_occurrence_id_sha256": "9890b99110853fda58aafdb658e4d47d5c9400b84955355972006b33e31d9cac",
+      "documentation_canonical_occurrence_id_sha256": "81381d8fcd19e6b37beb4325c1b67eed77a7241d68b0e9a75279b64bb29bd3d5",
+      "documentation_remainder_occurrence_id_sha256": "00c3bcfbaaee02f9dd405c3011f697e78162dbac7b6be4d628d080a756797841",
+      "documentation_group_id_sha256": "57f2dae42643c7bada450205843b9effa21fb71ac4e353d3c82332f6cec816e8",
       "documentation_source_pin_tuple_sha256": "24425b9d52e7f82a2f0ae596ba4a17ea55c4fdb565ca8f5b8998f334e6d6fb74",
       "documentation_surface_tuple_sha256": "71d1cc5d04e71d3005d4449a11758af96d4d787f28bb63ec86102f902ce32970",
       "documentation_actual_surface_tuple_sha256": "94ccd2b31c37be2c9a899d9d33cdcabc794f035107f1ca69615dbc0cc633082e",
-      "documentation_remainder_group_sha256": "a52b98d4cb5460c4731c64e085e4852990fd408196c67b9c67d46cc9c5acb7d1"
+      "documentation_remainder_group_sha256": "6b89cdec143aaf0f3d147a98466bff49722aaf27697a7e3c5f5e35f733746902"
     },
     "fixture_scope_derivation": {
       "rule_a": "Take every exact path from the K0.3 authority artifact at .test_declaration_groups[].path.",
@@ -266,9 +293,9 @@
     {
       "pin_id": "KAFKA-K0-4-PIN-001-K0-3-AUTHORITY",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "sha256": "3de6c4b383349c852da4da62187766282b7e833e80b48ca2c7a9d90a24636708",
-      "byte_count": 1171976,
-      "record_count": 17987
+      "sha256": "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee",
+      "byte_count": 1295081,
+      "record_count": 19932
     },
     {
       "pin_id": "KAFKA-K0-4-PIN-002-RECORD-BATCH-CONFORMANCE",
@@ -385,16 +412,16 @@
     {
       "pin_id": "KAFKA-K0-4-PIN-018-K0-1-CONTRACT",
       "path": "tests/kafka_capability_inventory_contract.rs",
-      "sha256": "204ff7d5911aa8759a9e5e87df7707e1de406dbdf92bd1ba0787a63093354634",
-      "byte_count": 28870,
-      "record_count": 853
+      "sha256": "1b9e744169d9d7bddcf49c8378a3578a166655d4d54aaada4a635a8fa1b3230d",
+      "byte_count": 29435,
+      "record_count": 867
     },
     {
       "pin_id": "KAFKA-K0-4-PIN-019-K0-2-CONTRACT",
       "path": "tests/kafka_incumbent_semantics_matrix_contract.rs",
-      "sha256": "755d645c6724f709b37441c58d85d9f55dd63c010cbc536c21c27a3b539bed51",
-      "byte_count": 69652,
-      "record_count": 1698
+      "sha256": "af2d9e4d48784c2e9b540781317bdec72bca2080459446e1cd0f2ec1d865a642",
+      "byte_count": 72831,
+      "record_count": 1777
     },
     {
       "pin_id": "KAFKA-K0-4-PIN-020-RECORD-BATCH-INTEGRATION",

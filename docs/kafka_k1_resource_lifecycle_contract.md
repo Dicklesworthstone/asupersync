@@ -30,6 +30,12 @@ The packet is rooted at claim commit
 The tracker remains an unpinned identity lookup. Mutable bead status, comments,
 titles, and timestamps are not K1.4 evidence.
 
+The 2026-09-09 source review preserves that historical capture and disposition.
+It incorporates raw-property storage, rebalance counters, retained transient
+diagnostics, yielding producer flush, and bounded consumer leave-group work.
+These are current implementation observations; required native policy and
+all acceptance gates remain separate.
+
 K1.1 assigns exactly three shared obligations to K1.4:
 
 | Obligation | Source key | Binding |
@@ -38,18 +44,19 @@ K1.1 assigns exactly three shared obligations to K1.4:
 | `KAFKA-K1-SHARED-010` | `resource_model` | `LOCAL_ONLY` |
 | `KAFKA-K1-SHARED-012` | `shutdown_model` | `LOCAL_ONLY` |
 
-The packet also preserves all 97 K0.2 semantic rows. Forty-three
+The packet also preserves all 102 K0.2 semantic rows. Forty-five
 configuration rows are classified as resource authority and 26 operation rows
-as direct resource-and-lifecycle authority. The remaining 28 rows—seven enums,
-nine helpers, nine accessors/diagnostics, two validators, and one value
+as direct resource-and-lifecycle authority. The remaining 31 rows—eight enums,
+nine helpers, eleven accessors/diagnostics, two validators, and one value
 constructor—are context that does not itself acquire a distinct long-lived
 owner. Context-only does not discard those rows' retry, timeout, cancellation,
 shutdown, or resource-bound facts.
 
 K1.2's ten negotiation transitions and ten protocol-binding groups remain
 cross-slice target-policy context. They are not exhaustive lifecycle coverage:
-the binding groups omit important direct operations such as poll, subscribe,
-rebalance, close, commit, seek, and offset accessors. K1.4 therefore resolves
+the corrected binding groups associate poll, subscribe, rebalance, close,
+commit, seek, and offset accessors with their actual semantic IDs, but do not
+describe each operation's resource ownership and transitions. K1.4 therefore resolves
 K0.2 semantic IDs directly rather than treating a nonempty K1.2 binding group
 as lifecycle proof.
 
@@ -92,9 +99,9 @@ backpressure/overflow behavior, release point, accounting invariant,
 implementation owner, independent verification owner, terminal gates, and
 blocking state.
 
-All 43 K0.2 configuration semantics have an explicit machine binding to at
+All 45 K0.2 configuration semantics have an explicit machine binding to at
 least one resource row. Sixteen composite resource classes also have
-43 per-unit limit dimensions, so a bytes cap cannot stand in for an entry-count
+47 per-unit limit dimensions, so a bytes cap cannot stand in for an entry-count
 cap and a worker cap cannot stand in for a pending-task cap.
 
 | ID | Resource class | Current numeric state | Primary implementation owner |
@@ -114,7 +121,7 @@ cap and a worker cap cannot stand in for a pending-task cap.
 | `K1R-013` | Transaction staged records | Unbounded local model and dependency queue | K6.1 |
 | `K1R-014` | Transaction coordinator, partitions, offsets | Dependency-owned or absent | K6.3 |
 | `K1R-015` | Subscription topics | Locally unbounded | K8.3 |
-| `K1R-016` | Group assignment and rebalance state | Unbounded collections; saturating generation | K8.3 |
+| `K1R-016` | Group assignment and rebalance state | Unbounded collections; saturating generation; four wrapping callback-attempt counters | K8.3 |
 | `K1R-017` | Buffered poll outcome | One slot with overwrite-loss risk | K7.3 |
 | `K1R-018` | Copied fetched-record memory | Broker hints, no local copy cap | K7.3 |
 | `K1R-019` | Offset commit batch | Nonempty minimum; caller-sized and uncapped | K9 |
@@ -123,7 +130,7 @@ cap and a worker cap cannot stand in for a pending-task cap.
 | `K1R-022` | Cx blocking-pool pending tasks | Finite workers, unbounded pending queue | K11.1 |
 | `K1R-023` | Fallback blocking threads | 256 global spawned-thread cap, not Cx ownership | K11.1 |
 | `K1R-024` | Fallback blocking waiters | Unbounded and not operation-Cx cancellable | K11.1 |
-| `K1R-025` | Retained configuration, errors, diagnostics | Unbounded local/dependency state | K10.4 |
+| `K1R-025` | Retained configuration, errors, diagnostics | Unbounded raw properties and aggregate diagnostics; one retained transient slot with saturating count | K10.4 |
 | `K1R-026` | Native threads, callbacks, queues, tasks | Dependency-owned unknown | K11.1 |
 | `K1R-027` | Producer linger timer | Default 5ms; full `u64` domain; dependency-owned batching | K5.2 |
 | `K1R-028` | Producer retry backoff timer | Default first delay 5ms; per-delay cap 250ms; no total deadline | K5.4 |
@@ -143,6 +150,18 @@ cap and a worker cap cannot stand in for a pending-task cap.
 | `K1R-042` | Consumer broker-operation mutex holders/waiters | One holder; aggregate waiters unknown because inline execution bypasses the 256 spawned-thread counter | K11.1 |
 
 These counts are inventory, not proof that a limit is safe or effective.
+
+Raw properties retain ordered keys and values without a byte or entry cap.
+Repeated keys replace in place, while accessor results and clones preserve
+values despite redacted `Debug` and native `ClientConfig` diagnostics. The
+transient slot retains one code and first/last runtime timestamps; its count
+saturates at `u32::MAX`. Successful poll and close do not clear it. This
+one-slot fact excludes accessor clones and external diagnostic sinks.
+
+The four rebalance callback counters wrap at `u64::MAX` and count attempts
+before the native result. Their relaxed reads are not one atomic snapshot.
+Configured cooperative intent and negotiated protocol remain separate, and
+neither establishes successful assignment ownership.
 
 ## Numeric facts and non-facts
 
@@ -275,12 +294,21 @@ post-effect continuation may have started, the operation must distinguish:
 - definitely failed effect; and
 - unknown or partially transferred effect with a named recovery owner.
 
+Producer flush now awaits the Cx timer/yield path while `ThreadedProducer`
+polls in the background. It still subtracts requested slices rather than
+elapsed time, and has no stable barrier over concurrent sends.
+
 The current send path can return cancellation after enqueue while the callback
 later completes. Transaction commit or abort can continue after its future is
 dropped. Subscribe, rebalance, commit, and seek can mutate the backend while a
 local continuation is skipped. Poll can leave a completed outcome for another
 caller, return after close, or overwrite an unconsumed outcome. K1.4 preserves
 all of these as blocking ambiguous states.
+
+`UnknownTopicOrPartition` is now retained as an informational poll diagnostic,
+and polling continues to its original deadline. Other broker errors still
+return errors. This does not resolve shared-outcome ownership or prove the
+topic will appear before the deadline.
 
 Retry counts and timeouts must compose into one operation budget. Queue wait,
 blocking-pool wait, fallback-thread wait, mutex acquisition, dependency work,
@@ -303,6 +331,13 @@ before drain. Consumer close marks closed before cleanup, does not join
 concurrent callers, and cannot retry cleanup after failure or future drop.
 TransactionalProducer has no close. Native background threads, queues,
 callbacks, heartbeats, and commits are dependency-owned.
+
+Current consumer close and unclosed `Drop` unsubscribe and drain at most 100
+requested 50ms native polls when previously assigned. Cooperative close skips
+eager unassign afterward. This nominal slice budget excludes lock waiting,
+callbacks, and dependency destruction; consumed records are discarded without
+commit. `Drop` skips that fallback once the closed flag is set, so abandoning
+the close future can still leave cleanup unfinished.
 
 Panic handling must preserve the same ownership and certainty invariants as an
 ordinary error. Restart must consume persisted or independently reconstructed

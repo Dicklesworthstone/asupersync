@@ -2,6 +2,34 @@
 
 <!-- BEGIN KAFKA K1.2 PROTOCOL SECURITY SUPPORT POLICY -->
 
+The 2026-09-09 current-source review preserves the original capture, baseline,
+90 policy states, owners, terminal gates, and absence of accepted numeric
+version ranges. Refreshed source pins and authority joins record subsequent
+incumbent changes; they do not supply new broker evidence.
+
+Raw producer and consumer properties now reach native configuration before
+explicitly mapped typed fields. An absent optional typed mapping does not
+erase a raw value. K2.1 must include that passthrough in reachability review,
+and K12.4 must review its security effects. Configured cooperative callback
+intent remains distinct from the negotiated protocol diagnostic, and callback
+counters count attempts rather than successful assignment changes.
+
+The fetch/group/offset binding arrays now use the actual semantic operations:
+`KCO-OP-006` polls, `KCO-OP-005` performs caller assignment, `KCO-OP-009`
+closes, `KCO-OP-007` commits, and `KCO-OP-008` seeks. The prior arrays
+misclassified several configuration and accessor IDs. Raw-property accessors
+and retained diagnostics also have an explicit local binding, which creates
+no new wire-message claim.
+
+Current configuration `Debug` redacts all raw values, and native
+`ClientConfig` rejection omits values and free-form descriptions, including
+the parallel `KafkaClient` consumer constructor. This supersedes part of
+historical GAP-21. Raw strings and private-key passwords still lack complete
+zeroization, explicit accessors preserve values, property names remain
+visible, and other upstream error variants remain outside that repair.
+Credential diagnostics and private-key-password cells therefore remain
+blocking, with no promotion of authentication or broker support.
+
 This document is the operator-readable companion to
 `artifacts/kafka_k1_protocol_security_support_policy_v1.json`. It freezes the
 static K1.2 policy packet for

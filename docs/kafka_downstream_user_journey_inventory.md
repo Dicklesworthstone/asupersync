@@ -3,10 +3,23 @@
 <!-- BEGIN KAFKA K0.3 DOWNSTREAM INVENTORY -->
 
 This document is the human companion to
-`artifacts/kafka_downstream_user_journey_inventory_v1.json`. It freezes the
-repository-local, static K0.3 census for
+`artifacts/kafka_downstream_user_journey_inventory_v1.json`. It preserves the
+historical authority and path scope of the repository-local K0.3 census for
 `asupersync-dep-p7-kafka-removal-sarszu.1.3` at revision
 `ae22e710d87412b38e546b32e9702106619481d5`.
+
+The 2026-09-09 current-source review updates byte pins, declarations, call
+locations, and explicit local-use joins within that original scope. It retains
+the original capture date, authority, broker receipts, and external-search
+states. The historical packet contained 941 declarations, 1,363 call candidates,
+and 9,180 documentation occurrences; the counts below describe current pinned
+source. Focused release contract results are recorded separately.
+
+The review adds 18 test declarations and removes none. New coverage includes
+raw-property ordering and redaction, native configuration rejection, yielding
+producer flush, cooperative group leave, transient-topic diagnostics, and a
+feature-enabled downstream producer boundary. Source presence supplies no new
+broker execution evidence.
 
 The result is conservative: the incumbent remains `KEEP_INCUMBENT` under
 `KEEP_UNTIL_PARITY`. Local absence, stale tests, and unrun external searches do
@@ -77,9 +90,9 @@ consumers, 34 local inventory rows, 31 documentation claims, 17 compilation
 profiles, eight platform/feature cells, 15 user journeys, six evidence claims,
 seven external search rows, eight owned unknowns, 23 routed gaps, and 16 atomic
 cases. Its 35-row `test_declaration_group_classifications` array owns and
-classifies all 936 named declarations: 888 exact `#[test]` declarations and 48
+classifies all 959 named declarations: 911 exact `#[test]` declarations and 48
 exact `#[tokio::test]` declarations. Sixteen declarations have explicit atomic
-overrides; the other 920 inherit the evidence and disposition of their exact
+overrides; the other 943 inherit the evidence and disposition of their exact
 path-and-source-pin group. This makes the K0.3 static inventory receipt
 complete, but it does not make the capability migration eligible.
 
@@ -111,32 +124,36 @@ Rows are surface-ID ordered and LF-terminated. The explicit
 `source_pin_digest_token` value `EXACT_BASELINE_ABSENCE` is a serialization
 sentinel only; it is not a source pin or evidence of external absence.
 
-The case-insensitive, non-overlapping content scan finds 9,179 literal Kafka
-occurrences on 7,777 distinct matching lines. An occurrence ID has the form
+The case-insensitive, non-overlapping content scan finds 9,311 literal Kafka
+occurrences on 7,872 distinct matching lines. An occurrence ID has the form
 `KAFKA-K0-3-DOC-OCC-{surface}-L{line}-M{within-line ordinal}`. The exact
 path/line/match-ordinal tuple SHA-256 is
-`1045749285eb5a01933adfee3bd79dc34ed30f2e7cd1b7117caab51c89043dbc`;
+`195b4358e49dcf76300847bc8eb777a6971b0d2a7310d74cb92f25c8fe3771d1`;
 the matching-line tuple SHA-256 is
-`93d84baac784b880d19fc7c790a19488d1c62547aadbce1ce5056582dafb7545`;
+`b0628aa946606ca3c1c88c50d10e97bb401128cb14035c26581c1f55bbf57e6b`;
 and the corresponding occurrence-ID-list SHA-256 is
-`577ca40dd5f40101a2c4bdca225fcb6930ed2925353a1419404adc0ca5e30b3d`.
+`9890b99110853fda58aafdb658e4d47d5c9400b84955355972006b33e31d9cac`.
 
 Thirty-one explicit canonical projection groups link the 31 curated claim
 rows to 37 exact occurrences. For each actual surface, a deterministic
-set-difference group owns every other occurrence. Seven surfaces have no
-remainder; the other 142 remainder groups contain 9,142 occurrences. The 37
+set-difference group owns every other occurrence. Ten surfaces have no
+remainder; the other 139 remainder groups contain 9,274 occurrences. Three
+historical surfaces now contain no literal match: both repository copies of
+`asupersync-mega-skill/SKILL.md` and `conformance/http2_h2spec.md`. They remain
+in the exact path and source-pin sets, and the contract checks their explicit
+zero-literal disposition. This does not establish capability absence. The 37
 canonical occurrence-ID list has SHA-256
-`96dcbefec213d04a2a8f29e5255bf8ca1b55b229c993b9997f28c3209365c5ab`;
+`81381d8fcd19e6b37beb4325c1b67eed77a7241d68b0e9a75279b64bb29bd3d5`;
 the owned-unresolved occurrence-ID list has SHA-256
-`db4e006cdb3cde6fee615f3d64753df484c0848474dcd68a412ab055b0ffced0`;
-and the 173 group IDs have SHA-256
-`5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd`.
+`00c3bcfbaaee02f9dd405c3011f697e78162dbac7b6be4d628d080a756797841`;
+and the 170 group IDs have SHA-256
+`57f2dae42643c7bada450205843b9effa21fb71ac4e353d3c82332f6cec816e8`.
 The canonical and remainder groups are pairwise disjoint and their union is
-the full 9,179-occurrence set.
+the full 9,311-occurrence set.
 
 This makes the declared occurrence identity, locator, ownership, and partition
 census exhaustive. It does **not** make semantic classification exhaustive:
-all 9,142 remainder occurrences are `OWNED_UNRESOLVED_CLAIM`, `UNKNOWN`, and
+all 9,274 remainder occurrences are `OWNED_UNRESOLVED_CLAIM`, `UNKNOWN`, and
 migration-blocking. They are not collapsed into a context-only bucket and do
 not become broker, parity, migration, or removal evidence. Likewise, the
 virtual `examples/` row proves only exact local baseline absence; it says
@@ -145,7 +162,7 @@ not authorize removal.
 
 ### Test-declaration census
 
-The declaration census has 35 source-pinned groups and 936 exact declarations.
+The declaration census has 35 source-pinned groups and 959 exact declarations.
 After a trimmed line equal to `#[test]`, the ordinary scanner permits only
 blank lines or zero or more non-test Rust attribute lines, then requires the
 first other nonempty line to match optional `pub` plus `fn NAME(`. The
@@ -163,7 +180,7 @@ The 48 Tokio declarations comprise five in
 `path<TAB>attribute-line<TAB>tokio::test<TAB>function-name` tuple SHA-256 is
 `c21dd6b0021dc189e82e6a3cf95dd37f1cddb100cf9688595fbe7a969b09b80d`.
 The 16 explicit atomic case rows override their group classifications; the
-other 920 declarations inherit their exact group's classification. Neither
+other 943 declarations inherit their exact group's classification. Neither
 identity nor inherited classification is per-test execution or per-test
 migration analysis.
 
@@ -175,7 +192,7 @@ closed. With the feature, private backend fields and operations select
 `rdkafka`. On wasm, the messaging module is absent without Kafka and forcing
 Kafka is a declared compile error.
 
-The K0.1 join covers all 30 public-symbol groups. The K0.2 join covers all 97
+The K0.1 join covers all 33 public-symbol groups. The K0.2 join covers all 102
 semantic rows. The machine joins are exact inverses, not one-way hints: a local
 row's `journey_ids` equal precisely the journey rows whose `local_row_ids`
 contain it, and its `k0_2_semantic_ids` equal precisely the K0.2 disposition
@@ -183,37 +200,39 @@ rows whose `local_row_ids` contain it. Atomic-case backreferences are likewise
 exact in both directions. Symbols and semantics referenced by detailed local
 rows are classified as local use, documentation-only use, or fixture-only use.
 
-The legacy local-row view still has 13 K0.1 and 52 K0.2 usage rows explicitly
-`UNKNOWN`. Separately, after resolved current and stale call-site joins, nine
+The legacy local-row view still has 13 K0.1 and 40 K0.2 usage rows explicitly
+`UNKNOWN`. Separately, after resolved current and stale call-site joins, twelve
 K0.1 IDs have no resolved invocation in the declared grammar:
-`KPR-PUB-007`, `KPR-PUB-009`, and `KPR-PUB-016` through `KPR-PUB-022`.
-Twenty-two K0.2 IDs have no resolved invocation:
+`KPR-PUB-007`, `KPR-PUB-009`, `KPR-PUB-016` through `KPR-PUB-022`, and
+`KCO-PUB-008` through `KCO-PUB-010`. The three diagnostics have local type,
+variant, or field uses, which are outside the call-shaped grammar.
+Twenty-three K0.2 IDs have no resolved invocation:
 `KPR-CFG-009`, `KPR-CFG-010`, `KPR-CFG-014`, `KPR-CFG-016` through
 `KPR-CFG-020`, `KPR-CFG-022`, `KAFKA-ENUM-001`, `KAFKA-ENUM-004`,
-`KAFKA-ENUM-005`, `KPR-HLP-002`, `KPR-HLP-004`, `KPR-HLP-005`, and
+`KAFKA-ENUM-005`, `KAFKA-ENUM-008`, `KPR-HLP-002`, `KPR-HLP-004`, `KPR-HLP-005`, and
 `KPR-OP-015` through `KPR-OP-021`. Absence from this call-shaped grammar is not
 proof of no non-call use. All of these rows remain preserved and require K14
 consumer synthesis; none can become removal evidence.
 
 ### Call-site candidate census
 
-The declared Rust candidate grammar contains 48 path groups and 1,363 stable
-candidate identities. The site-kind partition is 501 associated calls, 654
-instance-method calls, 137 trait-method projections, 23 struct-literal
+The declared Rust candidate grammar contains 48 path groups and 1,521 stable
+candidate identities. The site-kind partition is 536 associated calls, 761
+instance-method calls, 153 trait-method projections, 23 struct-literal
 constructions, 40 free-function calls, and eight context-inferred default
 calls. Stable IDs use exact byte/line-column ranges where available and pinned
 line, callee, and same-line ordinal for macro-token, binding-only,
 context-inferred, and provider-test candidates. The sorted call-site ID-set
 SHA-256 is
-`27ac17b660888d65f1d6a92c924becec669a96b4b1c09795450c89a350aabe2c`;
+`f90a1badb93917fb376db77cab81b12987e5b8777c990f35e6551e3890ddefb7`;
 the sorted 48-path set SHA-256 is
 `612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c`.
 
-Candidate identity is deliberately broader than "Kafka call." Of the 1,363
-nodes, 1,097 are K0 call-shaped candidates: 1,063 resolve to the current K0
+Candidate identity is deliberately broader than "Kafka call." Of the 1,521
+nodes, 1,237 are K0 call-shaped candidates: 1,203 resolve to the current K0
 surface, 26 resolve to stale unwired K0 surfaces, and eight are unresolved
-stale candidates. The other 266 are explicit exclusions and are not Kafka
-calls: 232 name collisions, 31 pattern-only spellings, and three
+stale candidates. The other 284 are explicit exclusions and are not Kafka
+calls: 249 name collisions, 32 pattern-only spellings, and three
 comment/string spellings. Every candidate belongs to exactly one path group
 and one resolution state; a resolved node carries a K0.1 ID, and it carries
 K0.2 IDs exactly when its explicit no-K0.2 reason is null.
@@ -225,16 +244,16 @@ names `fuzz_parse_delivery_result`, `fuzz_parse_kafka_error_response`,
 sorted
 `path<TAB>line<TAB>callee<TAB>same-line-ordinal` tuples with SHA-256
 `a2c49e5cb2519afa11a2d29bee72d97c60532292b2817f725466683b3a93a777`.
-Inside the provider test regions, lines 2725–4335 of
-`src/messaging/kafka.rs` contribute 341 candidates and lines 1673–2757 of
-`src/messaging/kafka_consumer.rs` contribute 294. The 635 sorted
+Inside the provider test regions, lines 2850–4521 of
+`src/messaging/kafka.rs` contribute 347 candidates and lines 2143–3317 of
+`src/messaging/kafka_consumer.rs` contribute 324. The 671 sorted
 `candidate-kind<TAB>path<TAB>line<TAB>candidate-token<TAB>same-line-ordinal`
 tuples have SHA-256
-`1c1f5c263973f83026f7a4235cbe21252de23b4f22ba8833d5fd433659a2e255`.
-The provider kind partition is 254 associated candidates, 249 public-method
-candidates, 106 trait projections, 12 struct constructions, six inferred
+`976ce2339058cc1879c9f3f9fae63867daea246ff6d071443485c76408ae7d2a`.
+The provider kind partition is 260 associated candidates, 266 public-method
+candidates, 119 trait projections, 12 struct constructions, six inferred
 defaults, five free-function calls, and three UFCS trait projections. Those
-provider candidates resolve as 509 current K0 nodes, 92 name collisions, 31
+provider candidates resolve as 529 current K0 nodes, 107 name collisions, 32
 pattern-only spellings, and three comment/string spellings. Provider declaration
 and implementation regions before those line ranges remain excluded from the
 downstream candidate census.
@@ -249,10 +268,12 @@ consumer can compile.
 
 The separate workspace at
 `tests/fixtures/downstream-consumer-proof/Cargo.toml` is the maintained external
-fixture. Its Kafka test covers only the default, no-Kafka, fail-closed producer
-boundary. The mapped proof status is `yellow_frontier` / `rerun-required`.
-There is no maintained feature-enabled Kafka compile or runtime target in that
-fixture.
+fixture. Its mapped Kafka profile covers the default, no-Kafka, fail-closed
+producer boundary, with status `yellow_frontier` / `rerun-required` in this
+historical packet. The shared test source now also has a feature-enabled
+producer-construction and pre-network validation case, reachable through the
+fixture's Kafka feature forwarding. This inventory records its source and
+declaration without supplying a new compile, runtime, or broker receipt.
 
 The separate
 `tests/fixtures/dependency-capability-baseline-consumer/` workspace is also not
@@ -272,19 +293,25 @@ Kafka-family work at that fixture. This planned/mismatched boundary is
 | T6 DP-14 | Wired test source | Real-broker capable, not run | Canonical T6 runner does not enable Kafka |
 | `kafka_real_broker` | Explicit Cargo target | Real-broker capable, not run | Opt-in gate and successful skip paths |
 | Offset property/retry audits | Wired | Deterministic/source-only | Not broker semantics |
-| Producer fail-closed audit | Wired and reused by external fixture | Default-feature boundary | No feature-enabled backend |
-| SASL audit | Wired | Synthetic/error mapping | No authenticated broker |
+| Producer fail-closed audit | Wired and reused by external fixture | Two default-feature checks and one feature-enabled constructor/pre-network case; not run here | No broker deduplication proof |
+| SASL audit | Wired | Synthetic mapping, public Debug redaction, and feature-enabled native config rejection; not run here | No authenticated broker |
 | Compression test | Wired | Configuration-only | No wire, codec, deterministic-broker, or real-broker round trip |
 | Rebalance lifecycle | Wired | Broker intent, not run | Returns successfully when setup fails; no-feature branch is a sentinel |
 | T6 and migration matrices | Wired | Config/error/source checks | No broker |
 | RecordBatch and parser suites | Wired or declared | Wire-codec only | A codec is not a client |
 
 The explicit `kafka_real_broker` target contains real producer, consumer,
-transaction, rebalance, recovery-shaped, payment, and replay scenarios. Seven
+transaction, rebalance, recovery-shaped, payment, and replay scenarios. Eleven
 named broker tests return successfully when `REAL_KAFKA_TESTS` is absent. The
 proof helpers can also record skip outcomes, and successful source paths can
 retain broker version `unknown`. The source is therefore
 `REAL_BROKER_CAPABLE`, not a `REAL_BROKER_RECEIPT`.
+
+Four added tests cover drop without close, cooperative assignment and close,
+cooperative drop, and a never-created topic's transient diagnostic. They keep
+the same opt-in guard and inherit the group's `NOT_RUN` state. Callback
+counters record attempts, and the negotiated-protocol accessor is checked
+separately. The seven original atomic cases below retain their stable IDs.
 
 #### Atomic broker and E2E cases
 
@@ -297,11 +324,11 @@ declaration-group classifications:
 |---|---|---|---|---|
 | `KAFKA-K0-3-CASE-001` | `tests/integration/kafka_real_broker.rs:1095`, producer delivery metadata | produce, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
 | `KAFKA-K0-3-CASE-002` | `:1170`, produce-consume round trip | produce, consume-group, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
-| `KAFKA-K0-3-CASE-003` | `:1306`, exactly-once transaction | transaction, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
-| `KAFKA-K0-3-CASE-004` | `:1401`, group rebalance | consume-group, rebalance, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
-| `KAFKA-K0-3-CASE-005` | `:1489`, recovery-shaped load | broker-recovery, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED`; no broker restart | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
-| `KAFKA-K0-3-CASE-006` | `:1590`, payment delivery | consume-group, payment-delivery, produce, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
-| `KAFKA-K0-3-CASE-007` | `:1755`, close-without-commit replay | consume-group, replay-without-commit, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
+| `KAFKA-K0-3-CASE-003` | `:1314`, exactly-once transaction | transaction, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
+| `KAFKA-K0-3-CASE-004` | `:1409`, group rebalance | consume-group, rebalance, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
+| `KAFKA-K0-3-CASE-005` | `:1543`, recovery-shaped load | broker-recovery, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED`; no broker restart | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
+| `KAFKA-K0-3-CASE-006` | `:1644`, payment delivery | consume-group, payment-delivery, produce, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
+| `KAFKA-K0-3-CASE-007` | `:1814`, close-without-commit replay | consume-group, replay-without-commit, real-broker-proof | `REAL_BROKER_CAPABLE` / `BLOCKED` | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
 | `KAFKA-K0-3-CASE-008` | `tests/e2e_messaging.rs:403`, consumer lifecycle case | consume-group | `REAL_BROKER_CAPABLE` / `PLANNED`; ambient endpoint | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
 | `KAFKA-K0-3-CASE-009` | `tests/e2e_messaging.rs:462`, producer acknowledgement case | produce | `REAL_BROKER_CAPABLE` / `PLANNED`; ambient endpoint | `asupersync-dep-p7-kafka-removal-sarszu.2.13.6` |
 
@@ -386,8 +413,9 @@ historical claims:
   awaits and uses stale aliases and signatures.
 - RecordBatch vectors claim librdkafka provenance without immutable metadata;
   one vector source describes bytes as still to be filled.
-- The SASL audit reimplements a local classifier instead of exercising the
-  private backend mapper.
+- The older SASL classification test reimplements a local classifier. The new
+  constructor regressions reach native configuration rejection and the real
+  error mapper, but do not execute an authenticated broker handshake.
 - Older gap, retry, readiness, interop, limitation, and security documents are
   stale or explicitly historical. Their old versions, error counts,
   source anchors, PASS scores, and performance claims do not override the
@@ -403,7 +431,7 @@ artifact:
 | `KAFKA-K0-3-DOC-CLAIM-014` | `artifacts/dependency_api_adr_registry_v1.json:5069-5085` labels macOS and Windows supported, while current compile/link evidence is `UNKNOWN` | `PLANNED` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5`; refresh `.2.14.1` |
 | `KAFKA-K0-3-DOC-CLAIM-015` | Generic baseline-consumer fixture is mapped by planning but contains no Kafka feature or API use | `PLANNED` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.14.1` |
 | `KAFKA-K0-3-DOC-CLAIM-016` | `tests/golden/PROVENANCE.md:184-190` names an absent retained golden; `src/golden_artifacts_tests.rs:1031-1128` hand-builds two vectors and claims compatibility | `WIRE_CODEC_ONLY` / `OVERCLAIM` | `asupersync-dep-p7-kafka-removal-sarszu.2.12.3` |
-| `KAFKA-K0-3-DOC-CLAIM-017` | `.github/no_mock_policy.json:561-579` keeps two Kafka phase-0-stub waivers active after their 2026-06-30 expiry | `HISTORICAL` / `STALE` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
+| `KAFKA-K0-3-DOC-CLAIM-017` | `.github/no_mock_policy.json:653-671` keeps two Kafka phase-0-stub waivers active after their 2026-06-30 expiry | `HISTORICAL` / `STALE` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
 | `KAFKA-K0-3-DOC-CLAIM-018` | `docs/tokio_db_messaging_integration_contract.md:133-166` defines delivery/error intent only | `STATIC_SOURCE` / `PLANNED` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
 | `KAFKA-K0-3-DOC-CLAIM-019` | `docs/tokio_db_messaging_unit_test_matrix_contract.md:108-117,157-161,242-244` covers config/error tests, not a broker | `DETERMINISTIC_ONLY` / `CURRENT` | `asupersync-dep-p7-kafka-removal-sarszu.2.12.5` |
 | `KAFKA-K0-3-DOC-CLAIM-020` | `docs/tokio_external_validation_benchmark_packs.md:74-76` defines BM-10 without a retained result | `PLANNED` | `asupersync-dep-p7-kafka-removal-sarszu.2.10.5` |
@@ -486,9 +514,9 @@ and `COMPILE_ONLY` cannot satisfy `REAL_BROKER_RECEIPT`.
 |---|---|---|---|
 | K0.3 pinned-row review | `STATIC_SOURCE` | `PASS` | Complete baseline inventory of paths, wiring, claims, owners, blockers, and joins |
 | Baseline occurrence partition | `STATIC_SOURCE` | Receipt recorded | All 245 tracked matches assigned exactly once across five tiers: 30 / 31 / 5 / 17 / 162 |
-| Test declaration classification | `STATIC_SOURCE` | Receipt recorded | All 936 declarations classified through 35 owned groups: 888 `#[test]`, 48 `#[tokio::test]`, 16 atomic overrides, and 920 inherited classifications |
-| Call-site candidate census | `STATIC_SOURCE` | Receipt recorded | 1,363 candidate identities in 48 groups: 1,097 K0 call-shaped nodes and 266 explicit non-call exclusions |
-| Documentation occurrence census | `STATIC_SOURCE` | Receipt recorded | 9,179 exact occurrences have stable identities and owners; 9,142 remain semantically `UNKNOWN` |
+| Test declaration classification | `STATIC_SOURCE` | Current source accounting | All 959 declarations classified through 35 owned groups: 911 `#[test]`, 48 `#[tokio::test]`, 16 atomic overrides, and 943 inherited classifications |
+| Call-site candidate census | `STATIC_SOURCE` | Current source accounting | 1,521 candidate identities in 48 groups: 1,237 K0 call-shaped nodes and 284 explicit non-call exclusions |
+| Documentation occurrence census | `STATIC_SOURCE` | Current source accounting | 9,311 exact occurrences have stable identities and owners; 9,274 remain semantically `UNKNOWN` |
 | Downstream default fixture | `COMPILE_ONLY` | `NOT_RUN` | Mapped no-feature producer behavior only |
 | Generic baseline-consumer fixture | `PLANNED` | `BLOCKED` | Contains no Kafka feature or API use |
 | `kafka_real_broker` target | `REAL_BROKER_CAPABLE` | `NOT_RUN` | Source and wiring exist |
@@ -551,30 +579,31 @@ deletion on its own.
 <!-- KAFKA-K0-3-NO-CLAIMS -->
 
 This packet proves only the source-pinned repository-local static downstream,
-documentation, fixture, profile, cell, and journey census at the named baseline
-revision. Within that boundary it accounts for 225 byte-pinned sources, the
+documentation, fixture, profile, cell, and journey census within the named
+baseline path scope, with current byte pins dated in `current_source_review`.
+Within that boundary it accounts for 225 byte-pinned sources, the
 exact 245-path five-tier Git-tree partition, all local rows and claims, all
-profile/cell/journey joins, 1,363 declared call-site candidates, and 936 named
+profile/cell/journey joins, 1,521 declared call-site candidates, and 959 named
 test declarations in 35 groups. The 16 atomic classifications override their
-groups; the other 920 declarations inherit group classification. Inventory
+groups; the other 943 declarations inherit group classification. Inventory
 completeness does not promote group-level evidence or authorize migration.
 
 The call-site census proves candidate identity and ownership, not that every
-candidate is a Kafka call. Its 1,097 call-shaped nodes include 26 stale unwired
-and eight unresolved-stale nodes; its other 266 nodes are explicit lexical
+candidate is a Kafka call. Its 1,237 call-shaped nodes include 26 stale unwired
+and eight unresolved-stale nodes; its other 284 nodes are explicit lexical
 exclusions. Pattern-only and comment/string spellings are not calls. Unit enum
 paths, imports, type annotations, ordinary field reads, untyped
 context-inferred defaults, and methods outside the declared receiver-binding
 paths remain outside this grammar. `CALL_SITE_REFERENCED` is therefore a path
 accounting tier, not runtime or migration evidence.
 
-Migration remains blocked by nine K0.1 and 22 K0.2 IDs without resolved
+Migration remains blocked by twelve K0.1 and 23 K0.2 IDs without resolved
 invocations in the declared grammar, eight unresolved-stale candidates, 162
-conservatively retained policy/context paths, 920 declarations without
-individual atomic migration analysis, 9,142 documentation occurrences with
+conservatively retained policy/context paths, 943 declarations without
+individual atomic migration analysis, 9,274 documentation occurrences with
 owned but `UNKNOWN` semantics, seven unrun and unknown external domains, and
 15 real-broker-capable cases without immutable receipts. The separate legacy
-local-row view also preserves 13 `UNKNOWN` K0.1 and 52 `UNKNOWN` K0.2 usage
+local-row view also preserves 13 `UNKNOWN` K0.1 and 40 `UNKNOWN` K0.2 usage
 rows. `PRESERVE_AND_RECHECK_AT_K14` means unknown use is neither proof of local
 use nor proof of no local use.
 
@@ -582,7 +611,7 @@ The 149 actual documentation surfaces plus the virtual `examples/` surface
 make the declared documentation identity-and-ownership census exhaustive, not
 its semantic classification. The explicit `EXACT_BASELINE_ABSENCE` token is
 only the virtual row's reproducible digest sentinel. The 31 canonical
-projections classify 37 exact occurrences; the remaining 9,142 occurrences
+projections classify 37 exact occurrences; the remaining 9,274 occurrences
 are not context-only, broker, parity, migration, or removal evidence. The
 virtual absence says nothing about untracked, generated, external,
 consumer-repository, or downstream examples.

@@ -34,7 +34,7 @@ const ADR_ID: &str = "DEP-ADR-009";
 const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const BASELINE_REVISION: &str = "f3a02fe6e6e5d0dca6db91204fcf2da53c22a5c7";
 const INVENTORY_STATE: &str = "K1_2_PROTOCOL_BROKER_AND_SECURITY_POLICY_FROZEN_KEEP_INCUMBENT";
-const POLICY_ROW_SHA256: &str = "a95fe46e59be4859e5fd1d7b106d6e2542a7adba4314050fc2d6616bb91ed60e";
+const POLICY_ROW_SHA256: &str = "159562f5486e1af40a4c79d4d55e43f8a8b86eaafac1f52dc91c41c8f48444c9";
 const NO_CLAIM_SHA256: &str = "0de9d792c3348c6fc5c76e1f54d2dd8fbf9bec3f87e9700de27ca08ce2f2345e";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K1.2 PROTOCOL SECURITY SUPPORT POLICY -->";
@@ -55,6 +55,7 @@ const ROOT_KEYS: &[&str] = &[
     "captured_date_utc",
     "coverage_receipt",
     "credential_cells",
+    "current_source_review",
     "disposition_receipt",
     "flexible_encoding_cells",
     "header_cells",

@@ -18,8 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "f4f2012b475793d57f5ef2f5ed40f08f985dff9a7c709cf1c67416a3eb9f9f09";
-const DOC_SHA256: &str = "a0323113a57e4b42860fcf8be9ba09b54538d673c856daff96e793b1291fc244";
+const ARTIFACT_SHA256: &str = "f57eccb9f506b37721d46a7d0b15fecdb5621e3603690f8a21c7dcda5cbd19e9";
+const DOC_SHA256: &str = "af43062736f0d1dff7b9982f4ccd15308c4f7819e6d4601a2c6687e2d4e0e4c6";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.5";
@@ -37,37 +37,37 @@ const VF5_DOWNSTREAM: &str = "asupersync-validation-frontier-v2-b5cjsv.5";
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K0.5 BASELINE DISPOSITION -->";
 const DOC_END: &str = "<!-- END KAFKA K0.5 BASELINE DISPOSITION -->";
 
-const IMPORTED_SOURCE_PIN_COUNT: usize = 266;
-const UNIQUE_SOURCE_PATH_COUNT: usize = 247;
+const IMPORTED_SOURCE_PIN_COUNT: usize = 267;
+const UNIQUE_SOURCE_PATH_COUNT: usize = 248;
 const SOURCE_PATH_OVERLAP_GROUP_COUNT: usize = 15;
-const ALL_DEFINITION_AND_REFERENCE_COUNT: usize = 1_030;
-const PRIMARY_STABLE_ID_COUNT: usize = 903;
-const CORE_DEFINITION_ID_COUNT: usize = 892;
+const ALL_DEFINITION_AND_REFERENCE_COUNT: usize = 1_047;
+const PRIMARY_STABLE_ID_COUNT: usize = 912;
+const CORE_DEFINITION_ID_COUNT: usize = 901;
 const CONTRADICTION_INPUT_ID_COUNT: usize = 11;
-const AUTHORITY_REFERENCE_COUNT: usize = 127;
-const PUBLIC_SYMBOL_JOIN_COUNT: usize = 30;
-const SEMANTIC_JOIN_COUNT: usize = 97;
+const AUTHORITY_REFERENCE_COUNT: usize = 135;
+const PUBLIC_SYMBOL_JOIN_COUNT: usize = 33;
+const SEMANTIC_JOIN_COUNT: usize = 102;
 const K0_1_PROFILE_COUNT: usize = 13;
 const K0_3_PROFILE_MAPPING_COUNT: usize = 17;
 const K0_4_FIXTURE_COUNT: usize = 67;
 const K0_3_INHERITED_FIXTURE_COUNT: usize = 48;
 const K0_4_DIRECT_FIXTURE_COUNT: usize = 19;
 const LEXICAL_COLLISION_GROUP_COUNT: usize = 34;
-const LEXICAL_COLLISION_SITE_COUNT: usize = 232;
+const LEXICAL_COLLISION_SITE_COUNT: usize = 249;
 const ROUTE_ROW_COUNT: usize = 87;
 const ROUTE_EDGE_COUNT: usize = 126;
 const ROUTE_OWNER_COUNT: usize = 49;
 const EXPLICIT_OWNED_UNKNOWN_COUNT: usize = 17;
-const REDUCED_UNKNOWN_SELECTOR_COUNT: usize = 142;
+const REDUCED_UNKNOWN_SELECTOR_COUNT: usize = 130;
 
-const PRIMARY_ID_SHA256: &str = "38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e";
-const CORE_ID_SHA256: &str = "43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea";
+const PRIMARY_ID_SHA256: &str = "cb03e74dd5a207aaf082664741fb629d4330bcec76a3edd0958969c6a064b729";
+const CORE_ID_SHA256: &str = "cf110029938e34e3830462a68441d3f678708137242c69a40657aa1e107a01d1";
 const CONTRADICTION_ID_SHA256: &str =
     "60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0";
 const K0_1_SYMBOL_ID_SHA256: &str =
-    "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28";
+    "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a";
 const K0_2_SEMANTIC_ID_SHA256: &str =
-    "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
+    "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121";
 const K0_1_PROFILE_ID_SHA256: &str =
     "882b6f73ee7c5abfe73080804fcd082c05dddd9c4002ee61ff9336f0a0d439eb";
 const K0_3_PROFILE_MAPPING_SHA256: &str =
@@ -75,19 +75,19 @@ const K0_3_PROFILE_MAPPING_SHA256: &str =
 const K0_4_FIXTURE_JOIN_SHA256: &str =
     "f0200bd742a0a7a6374cd7dc87d9b1832c8f6d5a79e1f363db6464acfbe2bba2";
 const LEXICAL_COLLISION_SHA256: &str =
-    "48d272658eef24ca2a4f32d33de082846b52f720d3b5f6ce63b6ea33b50eb9c3";
+    "ac5adcbcd832c0dd65b486a7aadf1103bb3d642bb57a006b0d3d8f3fd9a6a555";
 const ROUTE_PROJECTION_SHA256: &str =
     "78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc";
 const ROUTE_OWNER_ID_SHA256: &str =
     "8eb70d75bda5b08007d844cee45bca48383d875ddf795610c9e0f936d1f92e88";
 const REDUCED_UNKNOWN_SELECTOR_SHA256: &str =
-    "5c7fb727bc79d4f8be1c979fadda8bcfd261da0953e972a32a89bef27a28b18c";
+    "4db0a2323e257d602025afc0647109df63c1a401f2bb323a5a1a3f95bc8c8f4a";
 const SOURCE_PIN_FULL_ROW_SHA256: &str =
-    "890b19c9bba9570de2ad374d38deab35a1fb00359c61925a90d25404111f9c5d";
+    "7e72356c31ac6f5ee44ea0bcdc85d69093b77b263debe055757ca1c642135d29";
 const SOURCE_PIN_PATH_SHA256: &str =
-    "d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3";
+    "c9f1f8ae0ce140c27e05919606a947d93c660f9aa978e762f1cbcc232c200ddb";
 const SOURCE_PIN_OVERLAP_SHA256: &str =
-    "d2eb5cb6c4f52668f3f3202215709714ebe89c6d7ae8a847544da65e7b83687c";
+    "d8c4628bbde051a595bc53b744d8e9f8c384b66bd718eb4c938d902cf35573f8";
 const JOURNEY_ID_SHA256: &str = "c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f";
 const VECTOR_ID_SHA256: &str = "73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f";
 const FIXTURE_ID_SHA256: &str = "bb8f922cc63f97efcfb0c76a6e26fdf923775650af8cd613f50da55c95cbb376";
@@ -98,25 +98,25 @@ const FIXTURE_PROFILE_ID_SHA256: &str =
 const ENVIRONMENT_ID_SHA256: &str =
     "372de832a4de112e3ee8bc45b3af978d749b24c3f825416bd8e8b2d4523d831e";
 const AUTHORITY_REFERENCE_ID_SHA256: &str =
-    "a2336ba563186e1bc4a0a935ced3731e2292e8a6d54b0858311662113b267a94";
+    "90457aa8811909a088df43b6f0984b1b8cc262afd5e113f80bc8fcbfdf3bf76e";
 const EXPLICIT_UNKNOWN_ID_SHA256: &str =
     "33c9cdf3dca86570c906c46a902b2ec7ad8ee19aa074b0375afda36d64e63d20";
 const ROUTE_FULL_ROW_SHA256: &str =
-    "e8565a21c4e3cd0e3c520e5d71ab2c04711b8e8954959a96c777cdde5565979f";
+    "6703f44f112d96e80907809e56c0fbfdb6a3f3719a7a29fa7cf9ec2cf27a3ba2";
 const CLAIMS_FULL_ROW_SHA256: &str =
-    "10f7dff0bef49d4ab15cbae2d0641e9618c48b552a820c3ab48de4c4a4fdd48a";
+    "3198dc4e435a56031af6ccef2548eefc359e1f141253be1cc188f6df07820132";
 const AGGREGATE_CLAIMS_SHA256: &str =
     "2a4867239016cef413e38d68bc1d788de89a23bac7ac08890632256013b4d1b6";
 const FIXTURE_PROFILE_MAPPING_SHA256: &str =
     "0c1a77c6b9db4bc3efc478ba4313a65193ab849f7020d5f1f3b2fa4d73c1be9d";
 const AUTHORITY_REFERENCE_MAPPING_SHA256: &str =
-    "0a88e36135222e48bfeab5095be3896ef946cc9fa05f38cbd19d2cb656107cf9";
+    "83a474e63511cb717689f5f5c9d7206bca7752ebd44c642e277eb0d423d057aa";
 const LEXICAL_GROUP_ID_SHA256: &str =
     "e6a23cd6c436c1dd6b775481d2683eb53ca860a928572306f2ea910af3c8231b";
 const LEXICAL_SITE_ID_SHA256: &str =
-    "c99658f840ea27e35cc873cca6940ff50f90a25f8a3a71416e10762a627487f7";
+    "408cc618c56e83440ad07efe3750dc2c3a021ffbb6c4b32b5bd07e4759623e1f";
 const LEXICAL_MAPPING_SHA256: &str =
-    "1c7b0c050e014cf04234ee5b0af6d5a74ff2d293986a3543bbad386548a64e0f";
+    "3ab6e3b2a8ff90e21ed78cb25aa391ec1722dfbc347eb58fc35e938296844889";
 const EXPLICIT_UNKNOWN_OWNER_EDGE_SHA256: &str =
     "7b36d67eb6a635bf112838ea0104aab9b45ad918798af627ec176d01c61e554c";
 const EXPLICIT_UNKNOWN_OWNER_ID_SHA256: &str =
@@ -132,6 +132,7 @@ const ROOT_KEYS: &[&str] = &[
     "capability_id",
     "captured_date_utc",
     "baseline_revision",
+    "current_source_review",
     "inventory_state",
     "authority",
     "policy",
@@ -163,97 +164,97 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.1",
         role: "artifact_file",
         path: "artifacts/kafka_capability_inventory_v1.json",
-        sha256: "ff4cbf408d47ee101af875f00be0218192969aa161dd0ee69931848a042f7912",
-        byte_count: 41_921,
-        record_count: 1_015,
+        sha256: "f33bb0cf011be141ee45952455b173e859591d7dfd9e2dc2460cf19bafaab800",
+        byte_count: 47_232,
+        record_count: 1_087,
     },
     ChildFilePin {
         packet_id: "K0.1",
         role: "document_file",
         path: "docs/kafka_capability_inventory.md",
-        sha256: "8307d3e1fc99fc98f90d8b21c69753c867804ee97cb0ac70361d2f68eda4f305",
-        byte_count: 9_106,
-        record_count: 189,
+        sha256: "ce886a8581eb735b30f38b59d4707ab3739aac9d9774c19bdc0416b710bc69fc",
+        byte_count: 11_083,
+        record_count: 221,
     },
     ChildFilePin {
         packet_id: "K0.1",
         role: "contract_file",
         path: "tests/kafka_capability_inventory_contract.rs",
-        sha256: "204ff7d5911aa8759a9e5e87df7707e1de406dbdf92bd1ba0787a63093354634",
-        byte_count: 28_870,
-        record_count: 853,
+        sha256: "1b9e744169d9d7bddcf49c8378a3578a166655d4d54aaada4a635a8fa1b3230d",
+        byte_count: 29_435,
+        record_count: 867,
     },
     ChildFilePin {
         packet_id: "K0.2",
         role: "artifact_file",
         path: "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-        sha256: "a746fd5f91619dcea064b5e019ce237378970d6bd9ef45f3045670fe59e0f7c2",
-        byte_count: 229_415,
-        record_count: 2_560,
+        sha256: "0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1",
+        byte_count: 244_004,
+        record_count: 2_687,
     },
     ChildFilePin {
         packet_id: "K0.2",
         role: "document_file",
         path: "docs/kafka_incumbent_semantics_matrix.md",
-        sha256: "7cf46fb6eaa7ded66b6d1d04a7c711f4ce687252bb42eaa05d77e3a5e4b79ff5",
-        byte_count: 31_495,
-        record_count: 536,
+        sha256: "614de775f7b4a6c9c81f9cfc7b916fd5e7fdc9dc52985e608029fdc049791553",
+        byte_count: 34_580,
+        record_count: 580,
     },
     ChildFilePin {
         packet_id: "K0.2",
         role: "contract_file",
         path: "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        sha256: "755d645c6724f709b37441c58d85d9f55dd63c010cbc536c21c27a3b539bed51",
-        byte_count: 69_652,
-        record_count: 1_698,
+        sha256: "af2d9e4d48784c2e9b540781317bdec72bca2080459446e1cd0f2ec1d865a642",
+        byte_count: 72_831,
+        record_count: 1_777,
     },
     ChildFilePin {
         packet_id: "K0.3",
         role: "artifact_file",
         path: "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-        sha256: "3de6c4b383349c852da4da62187766282b7e833e80b48ca2c7a9d90a24636708",
-        byte_count: 1_171_976,
-        record_count: 17_987,
+        sha256: "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee",
+        byte_count: 1_295_081,
+        record_count: 19_932,
     },
     ChildFilePin {
         packet_id: "K0.3",
         role: "document_file",
         path: "docs/kafka_downstream_user_journey_inventory.md",
-        sha256: "3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1",
-        byte_count: 40_662,
-        record_count: 612,
+        sha256: "a8fa7f3cb79e042f677552f60793b327a688d740ee6f2fde3aca04137fbd3e0b",
+        byte_count: 42_914,
+        record_count: 641,
     },
     ChildFilePin {
         packet_id: "K0.3",
         role: "contract_file",
         path: "tests/kafka_downstream_user_journey_inventory_contract.rs",
-        sha256: "cba07887e6cddca995e80e24d0c1f5ae72390985f41dc132143096bf8c919a56",
-        byte_count: 216_695,
-        record_count: 5_381,
+        sha256: "08772d40fc32baed0b2eb25b98f50f81f9cc06046517f56d705f8aeba7d3a9f4",
+        byte_count: 219_718,
+        record_count: 5_452,
     },
     ChildFilePin {
         packet_id: "K0.4",
         role: "artifact_file",
         path: "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-        sha256: "fe2c1ddb92a1ab53eb9496a6bcfd3c41ba1f7277ef63c85d6747137e6f92a7c3",
-        byte_count: 119_250,
-        record_count: 2_187,
+        sha256: "3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3",
+        byte_count: 122_592,
+        record_count: 2_214,
     },
     ChildFilePin {
         packet_id: "K0.4",
         role: "document_file",
         path: "docs/kafka_broker_fixture_provenance_matrix.md",
-        sha256: "bac8c12a14bb8e0eb10fdbf6f3d0bf813fee1d95a37cf120c03290ebcf466d93",
-        byte_count: 25_259,
-        record_count: 346,
+        sha256: "949593d6801d89ea8c1bdd018e4b811a89b08d9556e02e11ea1513fd6f56f15c",
+        byte_count: 26_498,
+        record_count: 364,
     },
     ChildFilePin {
         packet_id: "K0.4",
         role: "contract_file",
         path: "tests/kafka_broker_fixture_provenance_matrix_contract.rs",
-        sha256: "fed7b79f20979cc4925d29438caf083f84fc7e6fb6b77198c62ced8add0c94f1",
-        byte_count: 129_665,
-        record_count: 3_462,
+        sha256: "9e8b1e93c924301015a705097f3e6fafa144eace70e8bc655e7ceb9476b36b9d",
+        byte_count: 133_727,
+        record_count: 3_567,
     },
 ];
 
@@ -1571,6 +1572,32 @@ fn validate_reduced_unknown_selectors(children: &ChildArtifacts) -> Result<(), S
 
 fn validate_packet_identity_and_policy(packet: &Value) -> Result<(), String> {
     require_exact_keys(packet, ROOT_KEYS, "aggregate root")?;
+    let review = packet
+        .get("current_source_review")
+        .ok_or_else(|| "aggregate lacks current source review".to_owned())?;
+    require_exact_keys(
+        review,
+        &[
+            "reviewed_date_utc",
+            "owner_bead",
+            "scope",
+            "historical_receipts_preserved",
+            "new_execution_receipts",
+            "interpretation",
+            "reviewed_changes",
+        ],
+        "current source review",
+    )?;
+    if text(review, "reviewed_date_utc") != "2026-09-09"
+        || text(review, "owner_bead") != "asupersync-ghxhvm"
+        || text(review, "scope") != "CURRENT_SOURCE_STATIC_AGGREGATION_ONLY"
+        || !bool_field(review, "historical_receipts_preserved")
+        || unsigned(review, "new_execution_receipts") != 0
+        || array(review, "reviewed_changes").len() != 5
+        || !text(review, "interpretation").contains("remain unchanged")
+    {
+        return Err("current aggregation must preserve historical evidence boundaries".to_owned());
+    }
     if unsigned(packet, "schema_version") != 1
         || text(packet, "artifact_id") != ARTIFACT_ID
         || text(packet, "program_id") != PROGRAM_ID
@@ -1690,7 +1717,7 @@ fn validate_aggregate_coverage_sets(packet: &Value) -> Result<(), String> {
     )?;
     if unsigned(source, "row_count") != IMPORTED_SOURCE_PIN_COUNT as u64
         || source.get("stage_counts")
-            != Some(&serde_json::json!({"K0.1":13,"K0.2":8,"K0.3":225,"K0.4":20}))
+            != Some(&serde_json::json!({"K0.1":14,"K0.2":8,"K0.3":225,"K0.4":20}))
         || text(source, "canonical_json_sha256") != SOURCE_PIN_FULL_ROW_SHA256
         || unsigned(source, "unique_path_count") != UNIQUE_SOURCE_PATH_COUNT as u64
         || text(source, "unique_path_set_sha256") != SOURCE_PIN_PATH_SHA256
@@ -1709,7 +1736,7 @@ fn validate_aggregate_coverage_sets(packet: &Value) -> Result<(), String> {
             .get("primary_stable_ids")
             .ok_or_else(|| "coverage lacks primary_stable_ids".to_owned())?,
         serde_json::json!({
-            "stage_counts": {"K0.1":96,"K0.2":147,"K0.3":469,"K0.4":191},
+            "stage_counts": {"K0.1":100,"K0.2":152,"K0.3":469,"K0.4":191},
             "core_definition_count": CORE_DEFINITION_ID_COUNT,
             "core_definition_typed_tuple_sha256": CORE_ID_SHA256,
             "contradiction_input_count": CONTRADICTION_INPUT_ID_COUNT,
@@ -1734,9 +1761,9 @@ fn validate_aggregate_coverage_sets(packet: &Value) -> Result<(), String> {
             .ok_or_else(|| "coverage lacks semantic_ids".to_owned())?,
         serde_json::json!({
             "count":SEMANTIC_JOIN_COUNT,
-            "configuration_count":43,
-            "enum_count":7,
-            "operation_count":38,
+            "configuration_count":45,
+            "enum_count":8,
+            "operation_count":40,
             "helper_count":9,
             "id_set_sha256":K0_2_SEMANTIC_ID_SHA256,
         }),
@@ -1804,10 +1831,10 @@ fn validate_aggregate_joins_and_collisions(packet: &Value) -> Result<(), String>
                 "join_kind":"AUTHORITY_REFERENCE",
                 "left_locator":"K0.1.public_symbols[].symbol_id",
                 "right_locator":"K0.3.k0_1_symbol_dispositions[].symbol_id",
-                "left_count":30,
-                "right_count":30,
-                "unique_target_count":30,
-                "mapping_count":30,
+                "left_count":33,
+                "right_count":33,
+                "unique_target_count":33,
+                "mapping_count":33,
                 "id_set_sha256":K0_1_SYMBOL_ID_SHA256,
                 "status":"EXACT"
             },
@@ -1816,10 +1843,10 @@ fn validate_aggregate_joins_and_collisions(packet: &Value) -> Result<(), String>
                 "join_kind":"AUTHORITY_REFERENCE",
                 "left_locator":"K0.2 configuration_fields+enum_semantics+operations+callable_helpers semantic_id",
                 "right_locator":"K0.3.k0_2_semantic_dispositions[].semantic_id",
-                "left_count":97,
-                "right_count":97,
-                "unique_target_count":97,
-                "mapping_count":97,
+                "left_count":102,
+                "right_count":102,
+                "unique_target_count":102,
+                "mapping_count":102,
                 "id_set_sha256":K0_2_SEMANTIC_ID_SHA256,
                 "status":"EXACT"
             },
@@ -2006,9 +2033,9 @@ fn validate_aggregate_unknown_disposition(
             {
                 "selector_id":"K0.3-SEMANTIC-USAGE-UNKNOWN",
                 "locator":"k0_2_semantic_dispositions[usage_knowledge_state=UNKNOWN]",
-                "matched_count":52,
+                "matched_count":40,
                 "id_field":"semantic_id",
-                "id_set_sha256":"6327718095f204c777e7b98116005ebae8f943aa65297da5fb508ea635f211c7",
+                "id_set_sha256":"a2250ed7e57cd991d1b50f327af483d3b9f91de11cdd5fd05bcb521ac7e0c1f4",
                 "owner_field":"owner_bead",
                 "required_owner":K14_REFRESH,
                 "blocking":true
@@ -2026,9 +2053,9 @@ fn validate_aggregate_unknown_disposition(
             {
                 "selector_id":"K0.3-DOCUMENTATION-UNKNOWN",
                 "locator":"documentation_claim_occurrence_groups.derived_remainder_groups",
-                "matched_count":8599,
+                "matched_count":9274,
                 "id_field":"derived occurrence ID",
-                "id_set_sha256":"db4e006cdb3cde6fee615f3d64753df484c0848474dcd68a412ab055b0ffced0",
+                "id_set_sha256":"00c3bcfbaaee02f9dd405c3011f697e78162dbac7b6be4d628d080a756797841",
                 "required_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.10.5",
                 "refresh_owner":K14_REFRESH,
                 "blocking":true
@@ -2469,11 +2496,11 @@ fn validate_docs(doc: &str) -> Result<(), String> {
         "STATIC_ONLY_FAIL_CLOSED",
         "KEEP_INCUMBENT",
         "PREEXISTING_NATIVE_EPIC_INVESTIGATION_ONLY",
-        "The primary stable-ID receipt contains 903 unique IDs",
-        "892 are core",
+        "The primary stable-ID receipt contains 912 unique IDs",
+        "901 are core",
         "11 are K0.4 contradiction",
-        "Source-pin canonical JSON | 266",
-        "Unique source-pin paths | 247",
+        "Source-pin canonical JSON | 267",
+        "Unique source-pin paths | 248",
         "Source-pin overlap paths | 15",
         "Source-pin rows on overlap paths | 34",
         SOURCE_PIN_FULL_ROW_SHA256,
@@ -2559,6 +2586,9 @@ fn kafka_k0_baseline_disposition_is_exact_and_fail_closed() {
 
     assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
         mutated["inventory_state"] = Value::String("MIGRATION_ELIGIBLE".to_owned());
+    });
+    assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
+        mutated["current_source_review"]["new_execution_receipts"] = Value::from(1);
     });
     assert_packet_mutation_rejected(&packet, &children, &tracker, doc, |mutated| {
         mutated["child_packets"][0]["files"][0]["sha256"] =

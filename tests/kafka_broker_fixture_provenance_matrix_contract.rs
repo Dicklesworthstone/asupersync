@@ -18,8 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str = "fe2c1ddb92a1ab53eb9496a6bcfd3c41ba1f7277ef63c85d6747137e6f92a7c3";
-const DOC_SHA256: &str = "bac8c12a14bb8e0eb10fdbf6f3d0bf813fee1d95a37cf120c03290ebcf466d93";
+const ARTIFACT_SHA256: &str = "3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3";
+const DOC_SHA256: &str = "949593d6801d89ea8c1bdd018e4b811a89b08d9556e02e11ea1513fd6f56f15c";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.4";
@@ -29,10 +29,10 @@ const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const INVENTORY_STATE: &str = "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN";
 const K0_3_ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const K0_3_BASELINE_REVISION: &str = "ae22e710d87412b38e546b32e9702106619481d5";
-const K0_3_SHA256: &str = "3de6c4b383349c852da4da62187766282b7e833e80b48ca2c7a9d90a24636708";
+const K0_3_SHA256: &str = "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee";
 const K0_3_TEST_GROUP_COUNT: usize = 35;
-const K0_3_TEST_DECLARATION_COUNT: usize = 941;
-const K0_3_EXACT_TEST_DECLARATION_COUNT: usize = 893;
+const K0_3_TEST_DECLARATION_COUNT: usize = 959;
+const K0_3_EXACT_TEST_DECLARATION_COUNT: usize = 911;
 const K0_3_TOKIO_TEST_DECLARATION_COUNT: usize = 48;
 const K0_3_LOCAL_ROW_COUNT: usize = 34;
 const K0_3_ATOMIC_CASE_COUNT: usize = 16;
@@ -177,16 +177,16 @@ const DIRECT_FIXTURE_PINS: &[(&str, &str, u64, u64, &str)] = &[
     ),
     (
         "tests/kafka_capability_inventory_contract.rs",
-        "204ff7d5911aa8759a9e5e87df7707e1de406dbdf92bd1ba0787a63093354634",
-        28_870,
-        853,
+        "1b9e744169d9d7bddcf49c8378a3578a166655d4d54aaada4a635a8fa1b3230d",
+        29_435,
+        867,
         "UTF8_LINES",
     ),
     (
         "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        "755d645c6724f709b37441c58d85d9f55dd63c010cbc536c21c27a3b539bed51",
-        69_652,
-        1_698,
+        "af2d9e4d48784c2e9b540781317bdec72bca2080459446e1cd0f2ec1d865a642",
+        72_831,
+        1_777,
         "UTF8_LINES",
     ),
     (
@@ -1685,6 +1685,7 @@ fn actual_validate_identity(matrix: &Value) -> Result<(), String> {
             "compression_vectors",
             "coverage_receipt",
             "current_real_broker_receipts",
+            "current_source_review",
             "direct_source_pins",
             "environment_identities",
             "evidence_claims",
@@ -2012,8 +2013,8 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
     for (key, expected) in [
         ("source_pins", 225),
         ("baseline_occurrence_paths", 245),
-        ("k0_1_public_symbols", 30),
-        ("k0_2_semantic_rows", 97),
+        ("k0_1_public_symbols", 33),
+        ("k0_2_semantic_rows", 102),
         ("test_declaration_groups", K0_3_TEST_GROUP_COUNT),
         ("test_declarations", K0_3_TEST_DECLARATION_COUNT),
         ("exact_test_declarations", K0_3_EXACT_TEST_DECLARATION_COUNT),
@@ -2021,7 +2022,7 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ("local_inventory_rows", K0_3_LOCAL_ROW_COUNT),
         ("atomic_test_cases", K0_3_ATOMIC_CASE_COUNT),
         ("call_site_groups", 48),
-        ("call_sites", 1_363),
+        ("call_sites", 1_521),
         ("documentation_claims", 31),
         ("user_journeys", 15),
     ] {
@@ -2039,11 +2040,11 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
         (
             "k0_1_public_symbol_id_set_sha256",
-            "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28",
+            "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a",
         ),
         (
             "k0_2_semantic_id_set_sha256",
-            "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
+            "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121",
         ),
         (
             "tokio_test_declaration_tuple_sha256",
@@ -2063,7 +2064,7 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
         (
             "call_site_id_set_sha256",
-            "27ac17b660888d65f1d6a92c924becec669a96b4b1c09795450c89a350aabe2c",
+            "f90a1badb93917fb376db77cab81b12987e5b8777c990f35e6551e3890ddefb7",
         ),
         (
             "call_site_path_set_sha256",
@@ -2075,7 +2076,7 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
         (
             "provider_test_candidate_tuple_sha256",
-            "1c1f5c263973f83026f7a4235cbe21252de23b4f22ba8833d5fd433659a2e255",
+            "976ce2339058cc1879c9f3f9fae63867daea246ff6d071443485c76408ae7d2a",
         ),
         (
             "documentation_candidate_path_sha256",
@@ -2083,27 +2084,27 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
         (
             "documentation_occurrence_tuple_sha256",
-            "1045749285eb5a01933adfee3bd79dc34ed30f2e7cd1b7117caab51c89043dbc",
+            "195b4358e49dcf76300847bc8eb777a6971b0d2a7310d74cb92f25c8fe3771d1",
         ),
         (
             "documentation_matching_line_tuple_sha256",
-            "93d84baac784b880d19fc7c790a19488d1c62547aadbce1ce5056582dafb7545",
+            "b0628aa946606ca3c1c88c50d10e97bb401128cb14035c26581c1f55bbf57e6b",
         ),
         (
             "documentation_occurrence_id_sha256",
-            "577ca40dd5f40101a2c4bdca225fcb6930ed2925353a1419404adc0ca5e30b3d",
+            "9890b99110853fda58aafdb658e4d47d5c9400b84955355972006b33e31d9cac",
         ),
         (
             "documentation_canonical_occurrence_id_sha256",
-            "96dcbefec213d04a2a8f29e5255bf8ca1b55b229c993b9997f28c3209365c5ab",
+            "81381d8fcd19e6b37beb4325c1b67eed77a7241d68b0e9a75279b64bb29bd3d5",
         ),
         (
             "documentation_remainder_occurrence_id_sha256",
-            "db4e006cdb3cde6fee615f3d64753df484c0848474dcd68a412ab055b0ffced0",
+            "00c3bcfbaaee02f9dd405c3011f697e78162dbac7b6be4d628d080a756797841",
         ),
         (
             "documentation_group_id_sha256",
-            "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd",
+            "57f2dae42643c7bada450205843b9effa21fb71ac4e353d3c82332f6cec816e8",
         ),
         (
             "documentation_source_pin_tuple_sha256",
@@ -2119,7 +2120,7 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
         (
             "documentation_remainder_group_sha256",
-            "a52b98d4cb5460c4731c64e085e4852990fd408196c67b9c67d46cc9c5acb7d1",
+            "6b89cdec143aaf0f3d147a98466bff49722aaf27697a7e3c5f5e35f733746902",
         ),
     ] {
         if digests.get(key).and_then(Value::as_str) != Some(expected) {
@@ -3391,8 +3392,106 @@ fn actual_validate_coverage_and_no_claims(matrix: &Value) -> Result<(), String> 
     Ok(())
 }
 
+fn actual_validate_current_source_review(matrix: &Value) -> Result<(), String> {
+    let review = matrix
+        .get("current_source_review")
+        .ok_or_else(|| "current_source_review is required".to_owned())?;
+    actual_require_keys(
+        review,
+        &[
+            "current_fixture_reviews",
+            "dependency_exit_allowed",
+            "historical_fields",
+            "new_broker_receipts",
+            "owner_bead",
+            "reviewed_changes",
+            "reviewed_date_utc",
+            "scope",
+        ],
+        "current_source_review",
+    )?;
+    if text(review, "reviewed_date_utc") != "2026-09-09"
+        || text(review, "owner_bead") != "asupersync-ghxhvm"
+        || text(review, "scope") != "CURRENT_SOURCE_STATIC_REVIEW_ONLY"
+        || review.get("dependency_exit_allowed") != Some(&Value::Bool(false))
+        || review.get("new_broker_receipts").and_then(Value::as_u64) != Some(0)
+        || array(review, "reviewed_changes").len() != 6
+        || !text(review, "historical_fields").contains("remain historical")
+    {
+        return Err(
+            "current source review must preserve the historical evidence boundary".to_owned(),
+        );
+    }
+
+    let fixture_reviews = array(review, "current_fixture_reviews");
+    if fixture_reviews.len() != 1 {
+        return Err("the mixed SASL audit requires one explicit current classification".to_owned());
+    }
+    let current = &fixture_reviews[0];
+    actual_require_keys(
+        current,
+        &[
+            "current_evidence_class",
+            "execution_state",
+            "fixture_id",
+            "historical_classification_profile_id",
+            "limitation",
+            "path",
+            "source_pin_id",
+        ],
+        "current fixture review",
+    )?;
+    let historical = find_row(
+        array(matrix, "fixture_census"),
+        "fixture_id",
+        "KAFKA-K0-4-FIXTURE-056",
+    );
+    for key in ["fixture_id", "path", "source_pin_id"] {
+        if text(current, key) != text(historical, key) {
+            return Err(format!(
+                "current fixture review {key} must join its historical row"
+            ));
+        }
+    }
+    if text(current, "historical_classification_profile_id")
+        != text(historical, "classification_profile_id")
+        || text(current, "current_evidence_class") != "STATIC_SOURCE"
+        || text(current, "execution_state") != "NOT_RECORDED_IN_THIS_ARTIFACT"
+        || !text(current, "limitation").contains("no broker authentication handshake")
+    {
+        return Err(
+            "native configuration tests must not become broker authentication proof".to_owned(),
+        );
+    }
+    let k0_3 = parse_repo_json(K0_3_PATH);
+    let audit = find_row(
+        array(&k0_3, "test_declaration_groups"),
+        "path",
+        text(current, "path"),
+    );
+    let names = row_ids(array(audit, "tests"), "name");
+    if names.len() != 14
+        || !expected_set(&[
+            "producer_config_debug_redacts_all_raw_property_values",
+            "consumer_config_debug_redacts_all_raw_property_values",
+            "transactional_config_debug_redacts_nested_raw_property_values",
+            "producer_config_error_redacts_rejected_raw_values",
+            "consumer_config_error_redacts_rejected_raw_values",
+            "transactional_config_error_redacts_rejected_raw_values",
+            "test_rdkafka_error_mapping_simulation",
+        ])
+        .is_subset(&names)
+    {
+        return Err(
+            "mixed audit classification must follow the exact K0.3 declaration census".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_matrix(matrix: &Value) -> Result<(), String> {
     actual_validate_identity(matrix)?;
+    actual_validate_current_source_review(matrix)?;
     actual_validate_source_scope(matrix)?;
     actual_validate_fixture_census(matrix)?;
     actual_validate_environments(matrix)?;
@@ -3444,6 +3543,12 @@ fn no_static_or_skippable_evidence_can_be_promoted_to_real_broker_evidence() {
 #[test]
 fn unknown_environment_and_source_scope_mutations_fail_closed() {
     let matrix = artifact();
+    validate_matrix(&matrix).expect("the baseline must pass before negative mutations");
+
+    let mut audit_promoted = matrix.clone();
+    audit_promoted["current_source_review"]["current_fixture_reviews"][0]["current_evidence_class"] =
+        Value::String("REAL_BROKER_RECEIPT".to_owned());
+    assert!(actual_validate_current_source_review(&audit_promoted).is_err());
 
     let mut orphan_environment = matrix.clone();
     orphan_environment["broker_api_version_vectors"][0]["environment_ids"] =

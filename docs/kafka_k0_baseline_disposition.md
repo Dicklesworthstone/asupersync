@@ -11,9 +11,17 @@ investigation beside the incumbent; this receipt does not authorize replacing,
 removing, weakening, or bypassing the incumbent path.
 
 No compiler, formatter, test, broker, runtime, service, container, remote job,
-external search, or network lane was run to create this packet. Its evidence is
+external search, or network lane was run for the original capture. Its evidence is
 static repository inspection, exact child-packet hashes, and deterministic
 cross-artifact projections only.
+
+The 2026-09-09 `current_source_review` reconciles the current child inventories
+and preserves the original capture, authority, evidence receipts, and
+`KEEP_INCUMBENT` disposition. It includes the tracked fuzz lockfile, three
+consumer diagnostic type groups, five semantic rows, and reviewed downstream
+references. Current pins and projections do not assert that the files are
+unchanged since their historical baseline revisions. The source repairs and
+new native configuration tests add no broker execution receipt to this packet.
 
 | Aggregate field | Exact value |
 |---|---|
@@ -33,10 +41,10 @@ content hash.
 
 | Child | Machine packet | Baseline / authority revision | Packet SHA-256 | Frozen state |
 |---|---|---|---|---|
-| K0.1 | `kafka-capability-inventory-v1` | `2d811170e956966e960db122a0d634a5b60c56e0` / same | `5dfe71df6daaa056f8f4d22d08fa934b5398baeeff0d5ff27eb0f544405251d6` | `K0_1_SOURCE_REACHABILITY_FROZEN` |
-| K0.2 | `kafka-incumbent-semantics-matrix-v1` | `b4997e8fe4de098a5a30ff468418460b59ca414a` / same | `fec9ac1a1e9ac63ce25393962c843f9169cae804c16c470ada2bf670ab0fc4ec` | `K0_2_INCUMBENT_SEMANTICS_FROZEN` |
-| K0.3 | `kafka-downstream-user-journey-inventory-v1` | `ae22e710d87412b38e546b32e9702106619481d5` / same | `52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09` | `K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN` |
-| K0.4 | `kafka-broker-fixture-provenance-matrix-v1` | `012c13714db267a4fba928db9f900b70d6c1d25a` / top-level `authority_revision` absent | `03406fe1146345ef7c50ec5e4077f0c6131db963e3776215629e9d34a781a643` | `K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN` |
+| K0.1 | `kafka-capability-inventory-v1` | `2d811170e956966e960db122a0d634a5b60c56e0` / same | `f33bb0cf011be141ee45952455b173e859591d7dfd9e2dc2460cf19bafaab800` | `K0_1_SOURCE_REACHABILITY_FROZEN` |
+| K0.2 | `kafka-incumbent-semantics-matrix-v1` | `b4997e8fe4de098a5a30ff468418460b59ca414a` / same | `0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1` | `K0_2_INCUMBENT_SEMANTICS_FROZEN` |
+| K0.3 | `kafka-downstream-user-journey-inventory-v1` | `ae22e710d87412b38e546b32e9702106619481d5` / same | `fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee` | `K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN` |
+| K0.4 | `kafka-broker-fixture-provenance-matrix-v1` | `012c13714db267a4fba928db9f900b70d6c1d25a` / top-level `authority_revision` absent | `3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3` | `K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN` |
 
 The missing K0.4 top-level `authority_revision` is retained as an explicit
 fail-closed schema difference. K0.5 uses the K0.4 `baseline_revision` and packet
@@ -45,21 +53,21 @@ matched the live repository during this static reconciliation.
 
 ## Coverage projection
 
-The primary stable-ID receipt contains 903 unique IDs. Of these, 892 are core
-definitions and 11 are K0.4 contradiction evidence-input IDs. The 127 K0.3
+The primary stable-ID receipt contains 912 unique IDs. Of these, 901 are core
+definitions and 11 are K0.4 contradiction evidence-input IDs. The 135 K0.3
 authority-reference disposition rows are typed joins and are deliberately not
 counted as new definitions.
 
 | Projection | Exact count | Composition |
 |---|---:|---|
-| K0.1 primary IDs | 96 | 13 source pins, 13 profiles, 30 public symbols, 6 backend bindings, 8 cfg branches, 11 no-feature behaviors, 15 routed gaps |
-| K0.2 primary IDs | 147 | 8 source pins, 17 profile groups, 97 semantics, 2 explicit absences, 23 routed findings |
+| K0.1 primary IDs | 100 | 14 source pins, 13 profiles, 33 public symbols, 6 backend bindings, 8 cfg branches, 11 no-feature behaviors, 15 routed gaps |
+| K0.2 primary IDs | 152 | 8 source pins, 17 profile groups, 102 semantics, 2 explicit absences, 23 routed findings |
 | K0.3 primary IDs | 469 | 225 pins, 5 occurrence dispositions, 4 non-consumer dispositions, 7 queries, 15 consumers, 34 local rows, 16 atomic cases, 31 documentation claims, 17 profiles, 8 cells, 15 journeys, 6 evidence claims, 7 external searches, 8 owned unknowns, 23 gaps, 48 call-site groups |
 | K0.4 primary IDs | 191 | 180 core IDs plus 11 contradiction inputs; core includes 20 direct pins, 8 fixture profiles, 67 fixtures, 8 environments, 36 vectors, 6 claims, 9 owned unknowns, and 26 gaps |
-| Core definitions | 892 | K0.1 96 + K0.2 147 + K0.3 469 + K0.4 core 180 |
-| All primary IDs | 903 | 892 core definitions + 11 contradiction inputs; all unique |
-| Public-surface projection | 30 | every K0.1 `symbol_id` has one K0.3 disposition join |
-| Incumbent-semantics projection | 97 | 43 configuration + 7 enum + 38 operation + 9 helper rows; every ID has one K0.3 disposition join |
+| Core definitions | 901 | K0.1 100 + K0.2 152 + K0.3 469 + K0.4 core 180 |
+| All primary IDs | 912 | 901 core definitions + 11 contradiction inputs; all unique |
+| Public-surface projection | 33 | every K0.1 `symbol_id` has one K0.3 disposition join |
+| Incumbent-semantics projection | 102 | 45 configuration + 8 enum + 40 operation + 9 helper rows; every ID has one K0.3 disposition join |
 | Downstream journey projection | 15 | source-pinned K0.3 user journeys |
 | Fixture projection | 67 | 48 K0.3-inherited pins + 19 K0.4-direct pins across 8 fixture profiles |
 | Broker/build projection | 36 | 3 locked-dependency + 5 native-build + 7 broker/API + 5 compression + 6 transport/auth + 4 topology + 6 fault/lifecycle vectors |
@@ -68,26 +76,27 @@ counted as new definitions.
 
 The child identity tuple digest is
 `93041f25c12357a263403a447f289e125b64213c8b77a8710791e9e0054e9298`.
-The ordered four-packet hash-manifest digest is
+The original capture recorded the ordered four-packet hash-manifest digest
 `ec3dc7ca4d040d61261fd8d5c1e7c2a661303c40ad4d6be1f3ab0ab58a9d107a`.
-The ordered child documentation/contract manifest digest is
+and the ordered child documentation/contract manifest digest
 `21ef550bbc8c516ceb9e81595c4b3c30ae70243106bd044c4f9e2e7898c8031d`.
-These are aggregation inputs; the machine packet owns the canonical primary-ID,
+Those two historical manifests are retained as capture records; current child
+file hashes are in the table and machine packet. The machine packet owns the canonical primary-ID,
 join, claims, UNKNOWN/BLOCKED, and route digests.
 
 The canonical machine projections are:
 
 | Projection | Count | SHA-256 |
 |---|---:|---|
-| Source-pin canonical JSON | 266 | `890b19c9bba9570de2ad374d38deab35a1fb00359c61925a90d25404111f9c5d` |
-| Unique source-pin paths | 247 | `d5631183e1560d87aeb50ca953d836b4405110b30f81c98aab099c6a5f1eb4c3` |
+| Source-pin canonical JSON | 267 | `7e72356c31ac6f5ee44ea0bcdc85d69093b77b263debe055757ca1c642135d29` |
+| Unique source-pin paths | 248 | `c9f1f8ae0ce140c27e05919606a947d93c660f9aa978e762f1cbcc232c200ddb` |
 | Source-pin overlap paths | 15 | membership is bound by the 34-row projection below |
-| Source-pin rows on overlap paths | 34 | `d2eb5cb6c4f52668f3f3202215709714ebe89c6d7ae8a847544da65e7b83687c` |
-| Core typed definitions | 892 | `43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea` |
+| Source-pin rows on overlap paths | 34 | `d8c4628bbde051a595bc53b744d8e9f8c384b66bd718eb4c938d902cf35573f8` |
+| Core typed definitions | 901 | `cf110029938e34e3830462a68441d3f678708137242c69a40657aa1e107a01d1` |
 | Contradiction typed inputs | 11 | `60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0` |
-| All primary typed IDs | 903 | `38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e` |
-| Public-symbol ID set | 30 | `307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28` |
-| Semantic ID set | 97 | `a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7` |
+| All primary typed IDs | 912 | `cb03e74dd5a207aaf082664741fb629d4330bcec76a3edd0958969c6a064b729` |
+| Public-symbol ID set | 33 | `2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a` |
+| Semantic ID set | 102 | `c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121` |
 | Downstream-journey ID set | 15 | `c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f` |
 | K0.4 vector ID set | 36 | `73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f` |
 | Fixture ID set | 67 | `bb8f922cc63f97efcfb0c76a6e26fdf923775650af8cd613f50da55c95cbb376` |
@@ -95,7 +104,7 @@ The canonical machine projections are:
 | Fixture-profile ID set | 8 | `b1848945221e425d78007ee47bced23e62b700a5e43fc6a8300124d42c8d8d09` |
 | Environment ID set | 8 | `372de832a4de112e3ee8bc45b3af978d749b24c3f825416bd8e8b2d4523d831e` |
 
-The 266-row source-pin digest wraps each row with `child`, `collection`, `id`,
+The 267-row source-pin digest wraps each row with `child`, `collection`, `id`,
 and `row`, orders those wrappers by child, collection, and ID, recursively sorts
 object keys, emits compact JSON, and appends one LF per record. The 34-row
 overlap digest uses the separately declared
@@ -103,19 +112,19 @@ overlap digest uses the separately declared
 
 ## Sanctioned joins and collision disposition
 
-There is no accidental exact collision among the 903 primary stable IDs. The
+There is no accidental exact collision among the 912 primary stable IDs. The
 following repetitions are required, typed authority joins:
 
 | Join class | Exact cardinality | Disposition |
 |---|---:|---|
-| K0.1 public symbols to K0.3 dispositions | 30 ID groups / 30 rows | `SANCTIONED_AUTHORITY_REFERENCE` |
-| K0.2 semantics to K0.3 dispositions | 97 ID groups / 97 rows | `SANCTIONED_AUTHORITY_REFERENCE` |
-| Combined definition-ID reference groups | 127 groups / 127 rows | exact joins, not duplicate definitions |
-| K0.1 profiles to K0.3 compilation profiles | 13 source IDs / 17 target rows | separate many-to-one typed mapping, not part of the 127 collision groups |
+| K0.1 public symbols to K0.3 dispositions | 33 ID groups / 33 rows | `SANCTIONED_AUTHORITY_REFERENCE` |
+| K0.2 semantics to K0.3 dispositions | 102 ID groups / 102 rows | `SANCTIONED_AUTHORITY_REFERENCE` |
+| Combined definition-ID reference groups | 135 groups / 135 rows | exact joins, not duplicate definitions |
+| K0.1 profiles to K0.3 compilation profiles | 13 source IDs / 17 target rows | separate many-to-one typed mapping, not part of the 135 collision groups |
 | K0.3 source pins to K0.4 fixture census | 48 referenced pins / 48 fixture rows | inherited fixture-pin join, not a definition collision |
 | K0.4 direct pins to fixture census | 19 referenced pins / 19 fixture rows | the twentieth direct pin is the K0.3 authority artifact |
 | Fixture profiles to fixture census | 8 profiles / 67 fixture rows | exact typed reference join |
-| K0.3 lexical exclusions | 34 groups / 232 sites | `NON_KAFKA_LEXICAL_EXCLUSIONS`, not Kafka definition collisions |
+| K0.3 lexical exclusions | 34 groups / 249 sites | `NON_KAFKA_LEXICAL_EXCLUSIONS`, not Kafka definition collisions |
 
 The four K0.1 profiles intentionally used twice by K0.3 are
 `KAFKA-PROFILE-DOWNSTREAM-NO-KAFKA`,
@@ -135,18 +144,18 @@ The former serializes `pin_origin<TAB>source_pin_id<TAB>fixture_id<TAB>path`;
 the latter serializes
 `classification_profile_id<TAB>fixture_id<TAB>path`. Both bytewise-sort unique
 rows and append one LF each.
-The combined 127-row authority-reference mapping digest is
-`0a88e36135222e48bfeab5095be3896ef946cc9fa05f38cbd19d2cb656107cf9`;
+The combined 135-row authority-reference mapping digest is
+`83a474e63511cb717689f5f5c9d7206bca7752ebd44c642e277eb0d423d057aa`;
 its combined ID-set digest is
-`a2336ba563186e1bc4a0a935ced3731e2292e8a6d54b0858311662113b267a94`.
+`90457aa8811909a088df43b6f0984b1b8cc262afd5e113f80bc8fcbfdf3bf76e`.
 The mapping tuple is
 `left_child<TAB>left_collection<TAB>id<TAB>K0.3<TAB>right_collection<TAB>id`,
 bytewise-sorted with one LF per row.
 The lexical-exclusion mapping digest is
-`fb807404dc9d731d11906ca8b96f09d5eae2997e7b4b098ab0f2937b821b415d`.
+`3ab6e3b2a8ff90e21ed78cb25aa391ec1722dfbc347eb58fc35e938296844889`.
 For each `EXCLUDED_NAME_COLLISION` atomic site, it recursively key-sorts and
 compactly serializes an object containing the parent `group_id`, parent `path`,
-and complete site object, bytewise-sorts the 232 records, and appends one LF
+and complete site object, bytewise-sorts the 249 records, and appends one LF
 each.
 K0.5 keys identity by typed section and exact ID; it does not infer type from
 prefix width, prefix spelling, or case.
@@ -161,9 +170,9 @@ blocks the receipt rather than becoming another accepted UNKNOWN.
 | Source group | Rows | Downstream authority |
 |---|---:|---|
 | K0.3 K0.1 usage dispositions | 13 `UNKNOWN` | K14.1 claim-time refresh and synthesis |
-| K0.3 K0.2 usage dispositions | 52 `UNKNOWN` | K14.1 claim-time refresh and synthesis |
+| K0.3 K0.2 usage dispositions | 40 `UNKNOWN` | K14.1 claim-time refresh and synthesis |
 | K0.3 external searches | 7 `UNKNOWN` / `NOT_RUN` | K14.1 |
-| K0.3 unresolved documentation occurrences | 8,599 | K10.5, refreshed by K14.1 |
+| K0.3 unresolved documentation occurrences | 9,274 | K10.5, refreshed by K14.1 |
 | K0.3 non-passing feature/platform cells | 8 | K12.5, refreshed by K14.1 |
 | K0.3 owned unknowns | 8 | 7 to K14.1; immutable real-broker receipt to K13.6 |
 | K0.3 exact blocked inventory/evidence rows | 24 | K10.5, K12.3, K13.6, K14.1, and the declared validation-frontier owner |
@@ -173,10 +182,10 @@ blocks the receipt rather than becoming another accepted UNKNOWN.
 | K0.4 executable vectors | 23 `UNKNOWN`/`BLOCKED` rows | K2.1, K4.2, K12.1, and K13.1/K13.3/K13.4/K13.5/K13.6 |
 | K0.4 owned unknowns | 9 `BLOCKED` | inventory owner K0.4; resolution remains with the routed K2/K4/K12/K13 owners |
 
-The reduced selector ledger contains 142 rows: 96 exact K0.3 state rows, 8
+The reduced selector ledger contains 130 rows: 84 exact K0.3 state rows, 8
 K0.3 `owned_unknowns` rows whose section supplies the unknown state, and 38
 exact K0.4 state rows. Its static reconciliation digest is
-`5c7fb727bc79d4f8be1c979fadda8bcfd261da0953e972a32a89bef27a28b18c`.
+`4db0a2323e257d602025afc0647109df63c1a401f2bb323a5a1a3f95bc8c8f4a`.
 The selector scans every top-level array row in K0.3 and K0.4 for a direct
 string-valued field exactly equal to `UNKNOWN`, `BLOCKED`, or
 `BLOCKED_EXTERNAL`, then adds each K0.3 `owned_unknowns` row with synthetic
@@ -213,7 +222,7 @@ receipt.
 
 The raw child route ledger contains 87 unique route rows, 126 owner edges, and
 49 unique raw owners. The route-row, exact owner-edge, and owner-ID digests are
-`e8565a21c4e3cd0e3c520e5d71ab2c04711b8e8954959a96c777cdde5565979f`,
+`6703f44f112d96e80907809e56c0fbfdb6a3f3719a7a29fa7cf9ec2cf27a3ba2`,
 `78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc`,
 and `8eb70d75bda5b08007d844cee45bca48383d875ddf795610c9e0f936d1f92e88`.
 The route-row digest wraps each child row as a recursively key-sorted compact
@@ -250,7 +259,7 @@ receipt for any later routed owner.
 
 The 93 projected child claim records preserve their source evidence classes.
 Their canonical JSON digest is
-`6594af9887ddda815055e14cbc68a909c6ece34b0239576b798d00dcf287cdf6`.
+`3198dc4e435a56031af6ccef2548eefc359e1f141253be1cc188f6df07820132`.
 Each child record is wrapped with `child`, `collection`, `id`, and `row`; no-claim
 rows use their zero-based array index as the ID, while claim/evidence rows retain
 their declared IDs. Records are ordered by child, collection, and ID before

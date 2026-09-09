@@ -20,8 +20,8 @@ const DOC_PATH: &str = "docs/kafka_downstream_user_journey_inventory.md";
 const K0_1_PATH: &str = "artifacts/kafka_capability_inventory_v1.json";
 const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
-const ARTIFACT_SHA256: &str = "3de6c4b383349c852da4da62187766282b7e833e80b48ca2c7a9d90a24636708";
-const DOC_SHA256: &str = "3c2f0b4fa956bc45fc5b9738f5f2349024dafb577509195e998fa72ec0d9dbb1";
+const ARTIFACT_SHA256: &str = "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee";
+const DOC_SHA256: &str = "a8fa7f3cb79e042f677552f60793b327a688d740ee6f2fde3aca04137fbd3e0b";
 const ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.3";
@@ -32,12 +32,12 @@ const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const OCCURRENCE_PATH_COUNT: usize = 245;
 const OCCURRENCE_PATH_MAP_SHA256: &str =
     "9c815cfcba11f5345e7abced6b0afa21bfb650f9bb280e71bb3da74ebbb55089";
-const K0_1_SYMBOL_COUNT: usize = 30;
+const K0_1_SYMBOL_COUNT: usize = 33;
 const K0_1_SYMBOL_MAP_SHA256: &str =
-    "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28";
-const K0_2_SEMANTIC_COUNT: usize = 97;
+    "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a";
+const K0_2_SEMANTIC_COUNT: usize = 102;
 const K0_2_SEMANTIC_MAP_SHA256: &str =
-    "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
+    "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121";
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K0.3 DOWNSTREAM INVENTORY -->";
 const DOC_END: &str = "<!-- END KAFKA K0.3 DOWNSTREAM INVENTORY -->";
 const SOURCE_PIN_COUNT: usize = 225;
@@ -50,8 +50,8 @@ const EXTERNAL_SEARCH_COUNT: usize = 7;
 const OWNED_UNKNOWN_COUNT: usize = 8;
 const ROUTED_GAP_COUNT: usize = 23;
 const TEST_DECLARATION_GROUP_COUNT: usize = 35;
-const TEST_DECLARATION_COUNT: usize = 941;
-const EXACT_TEST_DECLARATION_COUNT: usize = 893;
+const TEST_DECLARATION_COUNT: usize = 959;
+const EXACT_TEST_DECLARATION_COUNT: usize = 911;
 const TOKIO_TEST_DECLARATION_COUNT: usize = 48;
 const TOKIO_TEST_DECLARATION_TUPLE_SHA256: &str =
     "c21dd6b0021dc189e82e6a3cf95dd37f1cddb100cf9688595fbe7a969b09b80d";
@@ -62,36 +62,36 @@ const TEST_DECLARATION_GROUP_PATH_PIN_SHA256: &str =
 const COMPILATION_PROFILE_SEMANTIC_TUPLE_SHA256: &str =
     "dd718eca06f6c1309e8e073dc65cc4e0c836e4705747bbaa72d7986dc1d31c61";
 const CALL_SITE_GROUP_COUNT: usize = 48;
-const CALL_SITE_COUNT: usize = 1_363;
+const CALL_SITE_COUNT: usize = 1_521;
 const CALL_SITE_ID_SET_SHA256: &str =
-    "c76b5bd3b1d5e97ad1b619052a8a87c95f6841a65d615dcd716e456276facfd4";
+    "f90a1badb93917fb376db77cab81b12987e5b8777c990f35e6551e3890ddefb7";
 const CALL_SITE_PATH_SET_SHA256: &str =
     "612152c18e6daff98c7d0c3c7d907df8aa7100a8bab45e88a701d08588718d9c";
 const DOWNSTREAM_HELPER_TUPLE_SHA256: &str =
     "a2c49e5cb2519afa11a2d29bee72d97c60532292b2817f725466683b3a93a777";
 const PROVIDER_TEST_CANDIDATE_TUPLE_SHA256: &str =
-    "1c1f5c263973f83026f7a4235cbe21252de23b4f22ba8833d5fd433659a2e255";
+    "976ce2339058cc1879c9f3f9fae63867daea246ff6d071443485c76408ae7d2a";
 const DOCUMENTATION_ACTUAL_SURFACE_COUNT: usize = 149;
 const DOCUMENTATION_SURFACE_COUNT: usize = 150;
-const DOCUMENTATION_OCCURRENCE_COUNT: usize = 9_180;
-const DOCUMENTATION_MATCHING_LINE_COUNT: usize = 7_778;
+const DOCUMENTATION_OCCURRENCE_COUNT: usize = 9_311;
+const DOCUMENTATION_MATCHING_LINE_COUNT: usize = 7_872;
 const DOCUMENTATION_CANONICAL_OCCURRENCE_COUNT: usize = 37;
-const DOCUMENTATION_REMAINDER_OCCURRENCE_COUNT: usize = 9_143;
-const DOCUMENTATION_OCCURRENCE_GROUP_COUNT: usize = 173;
+const DOCUMENTATION_REMAINDER_OCCURRENCE_COUNT: usize = 9_274;
+const DOCUMENTATION_OCCURRENCE_GROUP_COUNT: usize = 170;
 const DOCUMENTATION_PATH_SHA256: &str =
     "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67";
 const DOCUMENTATION_OCCURRENCE_TUPLE_SHA256: &str =
-    "25944463b31a9ec38a287acf8e0ac73f1fc75ed62f5ef5751380f42964412c24";
+    "195b4358e49dcf76300847bc8eb777a6971b0d2a7310d74cb92f25c8fe3771d1";
 const DOCUMENTATION_LINE_TUPLE_SHA256: &str =
-    "7fff75e96a9e41c260f703154e205d9596e46a82d3a682021b5e595b7f9f1ed7";
+    "b0628aa946606ca3c1c88c50d10e97bb401128cb14035c26581c1f55bbf57e6b";
 const DOCUMENTATION_OCCURRENCE_ID_SHA256: &str =
-    "fab03234056cffd9ec409fc5eb2bd4b4e7e88de0288aae2afa3e95e53a685f02";
+    "9890b99110853fda58aafdb658e4d47d5c9400b84955355972006b33e31d9cac";
 const DOCUMENTATION_CANONICAL_ID_SHA256: &str =
-    "eb639a6c63291a29da23d7f002dcb0b26a38f34c42ed857f6949db3a92b5328e";
+    "81381d8fcd19e6b37beb4325c1b67eed77a7241d68b0e9a75279b64bb29bd3d5";
 const DOCUMENTATION_REMAINDER_ID_SHA256: &str =
-    "b1b8c3c7451c5f80cc0a39c2a8a1bc06fb216b9be1026bce826a6e955abbbea4";
+    "00c3bcfbaaee02f9dd405c3011f697e78162dbac7b6be4d628d080a756797841";
 const DOCUMENTATION_GROUP_ID_SHA256: &str =
-    "5e36b023be812fd3887b84af75d46e7b220c0138317b2a4face21917bdf180dd";
+    "57f2dae42643c7bada450205843b9effa21fb71ac4e353d3c82332f6cec816e8";
 const DOCUMENTATION_SOURCE_PIN_TUPLE_SHA256: &str =
     "24425b9d52e7f82a2f0ae596ba4a17ea55c4fdb565ca8f5b8998f334e6d6fb74";
 const DOCUMENTATION_SURFACE_TUPLE_SHA256: &str =
@@ -99,7 +99,7 @@ const DOCUMENTATION_SURFACE_TUPLE_SHA256: &str =
 const DOCUMENTATION_ACTUAL_SURFACE_TUPLE_SHA256: &str =
     "94ccd2b31c37be2c9a899d9d33cdcabc794f035107f1ca69615dbc0cc633082e";
 const DOCUMENTATION_REMAINDER_GROUP_SHA256: &str =
-    "a52b98d4cb5460c4731c64e085e4852990fd408196c67b9c67d46cc9c5acb7d1";
+    "6b89cdec143aaf0f3d147a98466bff49722aaf27697a7e3c5f5e35f733746902";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -314,6 +314,7 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
             "compilation_profiles",
             "coverage_joins",
             "coverage_receipt",
+            "current_source_review",
             "documentation_claims",
             "documentation_claim_occurrence_groups",
             "documentation_claim_scope",
@@ -366,6 +367,47 @@ fn validate_identity(inventory: &Value) -> Result<(), String> {
         if inventory.get(key).and_then(Value::as_str) != Some(expected) {
             return Err(format!("{key} must be {expected}"));
         }
+    }
+    let review = &inventory["current_source_review"];
+    require_exact_keys(
+        review,
+        &[
+            "reviewed_date_utc",
+            "owner_bead",
+            "scope",
+            "historical_census",
+            "historical_evidence_preserved",
+            "current_zero_literal_paths",
+            "reviewed_changes",
+            "execution_boundary",
+        ],
+        "current source review",
+    )?;
+    if text(review, "reviewed_date_utc") != "2026-09-09"
+        || text(review, "owner_bead") != "asupersync-ghxhvm"
+        || text(review, "scope") != "CURRENT_PINNED_SOURCE_WITHIN_IMMUTABLE_BASELINE_PATH_SCOPE"
+        || !bool_field(review, "historical_evidence_preserved")
+        || review["historical_census"]
+            != serde_json::json!({
+                "test_declarations": 941,
+                "call_site_candidates": 1363,
+                "documentation_occurrences": 9180,
+                "k0_1_symbols": 30,
+                "k0_2_semantics": 97,
+            })
+        || string_set(review, "current_zero_literal_paths")
+            != expected_set(&[
+                ".claude/skills/asupersync-mega-skill/SKILL.md",
+                "conformance/http2_h2spec.md",
+                "skills/asupersync-mega-skill/SKILL.md",
+            ])
+        || !text(review, "execution_boundary").contains("NOT_RUN broker cases")
+        || !text(review, "execution_boundary").contains("external UNKNOWN population")
+        || !text(review, "execution_boundary").contains("KEEP_INCUMBENT")
+    {
+        return Err(
+            "current-source review must preserve historical authority and proof limits".to_owned(),
+        );
     }
     Ok(())
 }
@@ -426,9 +468,9 @@ fn validate_authority_and_policy(inventory: &Value) -> Result<(), String> {
     }
     let boundary_text = boundaries.join("\n");
     for required in [
-        "1,363-node declared candidate grammar",
-        "266 are explicit lexical exclusions",
-        "893 exact #[test] and 48 exact #[tokio::test]",
+        "1,521-node declared candidate grammar",
+        "284 are explicit lexical exclusions",
+        "911 exact #[test] and 48 exact #[tokio::test]",
         "EXACT_BASELINE_ABSENCE digest token",
         "UNKNOWN usage",
         "no compiler, formatter, test, runtime, broker, external-search, or network execution",
@@ -1984,7 +2026,7 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
                 && text(case, "execution_state") == "NOT_RUN"
         })
         .count();
-    if missing_k0_1 != 9 || missing_k0_2 != 22 || real_broker_without_receipt != 15 {
+    if missing_k0_1 != 12 || missing_k0_2 != 23 || real_broker_without_receipt != 15 {
         return Err(
             "K0 call-coverage gaps or real-broker-capable atomic case count drifted".to_owned(),
         );
@@ -2048,7 +2090,7 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
             "documentation_claim_owned_unresolved_occurrence_count",
             DOCUMENTATION_REMAINDER_OCCURRENCE_COUNT,
         ),
-        ("documentation_claim_derived_remainder_group_count", 142),
+        ("documentation_claim_derived_remainder_group_count", 139),
         (
             "documentation_claim_occurrence_group_count",
             DOCUMENTATION_OCCURRENCE_GROUP_COUNT,
@@ -2199,12 +2241,12 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
     }
 
     let expected_blockers = vec![
-        "9 K0.1 public-symbol IDs have no resolved invocation in the declared call-site grammar; non-call use is outside that grammar and K14 synthesis remains required".to_owned(),
-        "22 K0.2 semantic IDs have no resolved invocation in the declared call-site grammar and require K14 synthesis before migration".to_owned(),
+        "12 K0.1 public-symbol IDs have no resolved invocation in the declared call-site grammar; non-call use is outside that grammar and K14 synthesis remains required".to_owned(),
+        "23 K0.2 semantic IDs have no resolved invocation in the declared call-site grammar and require K14 synthesis before migration".to_owned(),
         "8 stale call-site candidate nodes remain unresolved against the current K0.1 surface".to_owned(),
         "162 baseline occurrence paths are explicitly owned and conservatively POLICY_OR_CONTEXT_RETAINED pending K14 recheck".to_owned(),
-        "925 of 941 literal test declarations use owned group-inherited classifications rather than individual atomic migration analysis".to_owned(),
-        "9,143 literal documentation occurrences have stable identity and ownership but remain semantically UNKNOWN and migration-blocking".to_owned(),
+        "943 of 959 literal test declarations use owned group-inherited classifications rather than individual atomic migration analysis".to_owned(),
+        "9,274 literal documentation occurrences have stable identity and ownership but remain semantically UNKNOWN and migration-blocking".to_owned(),
         "all seven external downstream search domains are NOT_RUN and UNKNOWN".to_owned(),
         "all fifteen real-broker-capable atomic cases are NOT_RUN and retain no immutable broker receipt".to_owned(),
     ];
@@ -2215,7 +2257,7 @@ fn validate_handoff_and_receipt(inventory: &Value) -> Result<(), String> {
             .get("local_static_scope_definition")
             .and_then(Value::as_str)
             != Some(
-                "the exact 245-path five-tier occurrence partition, 941 named declarations across exact test and tokio::test attributes, 16 atomic overrides, 1,363-node candidate call-site grammar, and 9,180-occurrence documentation-claim identity and ownership partition are complete; 266 call-site candidates are explicit exclusions and 9,143 documentation occurrences remain semantically UNKNOWN",
+                "the exact 245-path five-tier occurrence partition, 959 named declarations across exact test and tokio::test attributes, 16 atomic overrides, 1,521-node candidate call-site grammar, and 9,311-occurrence documentation-claim identity and ownership partition are complete; 284 call-site candidates are explicit exclusions and 9,274 documentation occurrences remain semantically UNKNOWN",
             )
         || receipt
             .get("test_declaration_classification_rule")
@@ -2630,6 +2672,7 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
     let mut occurrence_ids = Vec::new();
     let mut occurrence_path = BTreeMap::new();
     let mut occurrence_ids_by_surface = BTreeMap::<usize, Vec<String>>::new();
+    let mut zero_literal_paths = BTreeSet::new();
     let mut extension_counts = BTreeMap::<String, usize>::new();
     for (surface_index, path) in candidate_paths.iter().enumerate() {
         let surface_ordinal = surface_index + 1;
@@ -2663,6 +2706,19 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
                 occurrence_ids.push(occurrence_id);
             }
         }
+        if !occurrence_ids_by_surface.contains_key(&surface_ordinal) {
+            zero_literal_paths.insert(path.clone());
+        }
+    }
+    if zero_literal_paths
+        != string_set(
+            &inventory["current_source_review"],
+            "current_zero_literal_paths",
+        )
+    {
+        return Err(
+            "current zero-literal surfaces must remain explicitly accounted for".to_owned(),
+        );
     }
     let expected_extensions = [
         ("json".to_owned(), 55_usize),
@@ -2765,10 +2821,10 @@ fn validate_documentation_claim_census(inventory: &Value) -> Result<(), String> 
         || text(derivation, "derived_surface_id_path_tuple_sha256")
             != DOCUMENTATION_ACTUAL_SURFACE_TUPLE_SHA256
         || text(derivation, "semantic_state_for_noncanonical_occurrences") != "UNKNOWN"
-        || !bool_field(
+        || bool_field(
             derivation,
             "all_derived_surfaces_have_at_least_one_literal_occurrence",
-        )
+        ) != zero_literal_paths.is_empty()
         || !bool_field(derivation, "migration_blocking")
         || !bool_field(derivation, "no_removal_authority")
         || text(derivation, "surface_id_path_source_pin_tuple_rule")
@@ -4190,7 +4246,7 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         ),
         (
             "candidate_identity_rule",
-            "all 1,363 nodes are candidate identities; 1,097 are resolved-current, resolved-stale, or unresolved-stale K0 call-shaped nodes, while 266 are explicit name-collision, pattern-only, or comment/string exclusions and are not Kafka calls",
+            "all 1,521 nodes are candidate identities; 1,237 are resolved-current, resolved-stale, or unresolved-stale K0 call-shaped nodes, while 284 are explicit name-collision, pattern-only, or comment/string exclusions and are not Kafka calls",
         ),
         (
             "partition_rule",
@@ -4228,14 +4284,14 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         (
             &provider_exclusions[0],
             "src/messaging/kafka.rs",
-            "lines 1-2724",
-            "lines 2725-4335",
+            "lines 1-2849",
+            "lines 2850-4521",
         ),
         (
             &provider_exclusions[1],
             "src/messaging/kafka_consumer.rs",
-            "lines 1-1672",
-            "lines 1673-2757",
+            "lines 1-2142",
+            "lines 2143-3317",
         ),
     ] {
         require_exact_keys(
@@ -4478,21 +4534,21 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         return Err("call-site ID count, uniqueness, or digest drifted".to_owned());
     }
     let expected_kind_counts = [
-        ("ASSOCIATED_CALL", 501_usize),
+        ("ASSOCIATED_CALL", 536_usize),
         ("CONTEXT_INFERRED_DEFAULT_CALL", 8),
         ("FREE_FUNCTION_CALL", 40),
-        ("INSTANCE_METHOD_CALL", 654),
+        ("INSTANCE_METHOD_CALL", 761),
         ("STRUCT_LITERAL_CONSTRUCTION", 23),
-        ("TRAIT_METHOD_PROJECTION", 137),
+        ("TRAIT_METHOD_PROJECTION", 153),
     ]
     .into_iter()
     .map(|(key, count)| (key.to_owned(), count))
     .collect::<BTreeMap<_, _>>();
     let expected_resolution_counts = [
         ("EXCLUDED_COMMENT_OR_STRING", 3_usize),
-        ("EXCLUDED_NAME_COLLISION", 232),
-        ("EXCLUDED_PATTERN_ONLY", 31),
-        ("RESOLVED_CURRENT_K0", 1_063),
+        ("EXCLUDED_NAME_COLLISION", 249),
+        ("EXCLUDED_PATTERN_ONLY", 32),
+        ("RESOLVED_CURRENT_K0", 1_203),
         ("RESOLVED_STALE_UNWIRED_K0", 26),
         ("UNRESOLVED_STALE_SURFACE", 8),
     ]
@@ -4502,10 +4558,10 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
     if kind_counts != expected_kind_counts || resolution_counts != expected_resolution_counts {
         return Err("call-site kind or resolution-state partition drifted".to_owned());
     }
-    if lexical_instance_candidates != 338
-        || binding_resolved_instance_sites != 375
-        || lexical_binding_overlap != 280
-        || unmatched_lexical_instance_candidates != 58
+    if lexical_instance_candidates != 411
+        || binding_resolved_instance_sites != 466
+        || lexical_binding_overlap != 351
+        || unmatched_lexical_instance_candidates != 60
     {
         return Err("downstream instance binding census drifted".to_owned());
     }
@@ -4513,7 +4569,7 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         .checked_add(binding_resolved_instance_sites)
         .and_then(|count| count.checked_sub(lexical_binding_overlap))
         .ok_or_else(|| "call-site instance-union arithmetic underflowed".to_owned())?;
-    if derived_union != 433
+    if derived_union != 526
         || lexical_instance_candidates
             != lexical_binding_overlap + unmatched_lexical_instance_candidates
     {
@@ -4566,6 +4622,8 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         "KafkaError",
         "KafkaFeatureRequirement",
         "KafkaProducer",
+        "KafkaRebalanceProtocol",
+        "KafkaRebalanceStats",
         "KafkaSaslConfig",
         "KafkaSaslMechanism",
         "KafkaSecurityConfig",
@@ -4573,12 +4631,14 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         "ProducerConfig",
         "RealBrokerBackend",
         "RebalanceResult",
+        "RebalanceStats",
         "RecordMetadata",
         "TopicAwareConsumer",
         "TopicPartitionOffset",
         "Transaction",
         "TransactionalConfig",
         "TransactionalProducer",
+        "TransientConsumerError",
     ]);
     let authority = parse_repo_json(K0_1_PATH);
     let expected_public_methods = array(&authority, "public_symbols")
@@ -4587,7 +4647,7 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         .collect::<BTreeSet<_>>();
     if string_set(provider_receipt, "type_tokens") != expected_types
         || string_set(provider_receipt, "public_method_tokens") != expected_public_methods
-        || expected_public_methods.len() != 74
+        || expected_public_methods.len() != 80
         || string_set(provider_receipt, "trait_projection_tokens")
             != expected_set(&["clone", "source", "to_string"])
         || string_set(provider_receipt, "free_function_tokens")
@@ -4631,16 +4691,16 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         (
             &regions[0],
             "src/messaging/kafka.rs",
-            2_725_u64,
-            4_335_u64,
-            341_u64,
+            2_850_u64,
+            4_521_u64,
+            347_u64,
         ),
         (
             &regions[1],
             "src/messaging/kafka_consumer.rs",
-            1_673_u64,
-            2_757_u64,
-            294_u64,
+            2_143_u64,
+            3_317_u64,
+            324_u64,
         ),
     ] {
         require_exact_keys(
@@ -4658,27 +4718,27 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
     }
     let (provider_tuples, provider_kind_counts) = provider_candidate_tuples(provider_receipt)?;
     let expected_provider_kind_counts = [
-        ("ASSOCIATED_CANDIDATE", 254_usize),
+        ("ASSOCIATED_CANDIDATE", 260_usize),
         ("FREE_FUNCTION_CALL", 5),
         ("INFERRED_DEFAULT_CALL", 6),
-        ("INSTANCE_PUBLIC_METHOD_CANDIDATE", 249),
+        ("INSTANCE_PUBLIC_METHOD_CANDIDATE", 266),
         ("STRUCT_LITERAL_CONSTRUCTION", 12),
         ("TRAIT_METHOD_PROJECTION", 3),
-        ("TRAIT_PROJECTION_CANDIDATE", 106),
+        ("TRAIT_PROJECTION_CANDIDATE", 119),
     ]
     .into_iter()
     .map(|(key, count)| (key.to_owned(), count))
     .collect::<BTreeMap<_, _>>();
     let expected_provider_resolution_counts = [
         ("EXCLUDED_COMMENT_OR_STRING", 3_usize),
-        ("EXCLUDED_NAME_COLLISION", 92),
-        ("EXCLUDED_PATTERN_ONLY", 31),
-        ("RESOLVED_CURRENT_K0", 509),
+        ("EXCLUDED_NAME_COLLISION", 107),
+        ("EXCLUDED_PATTERN_ONLY", 32),
+        ("RESOLVED_CURRENT_K0", 529),
     ]
     .into_iter()
     .map(|(key, count)| (key.to_owned(), count))
     .collect::<BTreeMap<_, _>>();
-    if provider_tuples.len() != 635
+    if provider_tuples.len() != 671
         || provider_site_tuples != provider_tuples
         || sorted_newline_sha256(&provider_tuples) != PROVIDER_TEST_CANDIDATE_TUPLE_SHA256
         || provider_kind_counts != expected_provider_kind_counts
@@ -4686,7 +4746,7 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         || provider_receipt
             .get("candidate_count")
             .and_then(Value::as_u64)
-            != Some(635)
+            != Some(671)
         || text(provider_receipt, "tuple_sha256") != PROVIDER_TEST_CANDIDATE_TUPLE_SHA256
     {
         return Err("provider test candidate source census drifted".to_owned());
@@ -4725,16 +4785,16 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         "call_site_scope.raw_counts",
     )?;
     for (key, count) in [
-        ("downstream_associated_candidates", 247_usize),
+        ("downstream_associated_candidates", 276_usize),
         ("downstream_struct_constructions", 11),
         ("downstream_free_function_calls", 35),
         ("downstream_context_inferred_default_calls", 2),
-        ("lexical_instance_candidates", 338),
-        ("binding_resolved_instance_sites", 375),
-        ("lexical_instance_overlap_with_binding_set", 280),
-        ("unmatched_lexical_instance_candidates", 58),
-        ("downstream_instance_union_sites", 433),
-        ("provider_test_candidates", 635),
+        ("lexical_instance_candidates", 411),
+        ("binding_resolved_instance_sites", 466),
+        ("lexical_instance_overlap_with_binding_set", 351),
+        ("unmatched_lexical_instance_candidates", 60),
+        ("downstream_instance_union_sites", 526),
+        ("provider_test_candidates", 671),
     ] {
         if raw_counts_value.get(key).and_then(Value::as_u64) != Some(count_u64(count, key)) {
             return Err(format!("call_site_scope.raw_counts.{key} is not derived"));
@@ -4767,11 +4827,11 @@ fn validate_call_site_scope_and_groups(inventory: &Value) -> Result<(), String> 
         || derived_counts_value
             .get("candidate_call_shaped_count")
             .and_then(Value::as_u64)
-            != Some(1_097)
+            != Some(1_237)
         || derived_counts_value
             .get("explicit_exclusion_candidate_count")
             .and_then(Value::as_u64)
-            != Some(266)
+            != Some(284)
     {
         return Err("call-site derived group or node count drifted".to_owned());
     }
@@ -5084,7 +5144,7 @@ fn k0_1_public_symbols_and_k0_2_semantics_are_exactly_joined() {
         joins
             .get("k0_1_public_symbol_count")
             .and_then(Value::as_u64),
-        Some(30)
+        Some(33)
     );
     assert_eq!(
         joins
@@ -5094,7 +5154,7 @@ fn k0_1_public_symbols_and_k0_2_semantics_are_exactly_joined() {
     );
     assert_eq!(
         joins.get("k0_2_semantic_row_count").and_then(Value::as_u64),
-        Some(97)
+        Some(102)
     );
     assert_eq!(
         joins
@@ -5146,8 +5206,8 @@ fn companion_document_and_packet_bytes_are_pinned() {
         "baseline Git-tree receipt includes `examples/`",
         "rdkafka path-or-content match there",
         "EXACT_BASELINE_ABSENCE",
-        "9,142",
-        "1,363",
+        "9,274",
+        "1,521",
         PROVIDER_TEST_CANDIDATE_TUPLE_SHA256,
         TOKIO_TEST_DECLARATION_TUPLE_SHA256,
         "provides no permission to remove",
@@ -5162,6 +5222,7 @@ fn companion_document_and_packet_bytes_are_pinned() {
 #[test]
 fn fail_closed_mutations_are_rejected() {
     let inventory = artifact();
+    validate_inventory(&inventory).unwrap_or_else(|error| panic!("baseline: {error}"));
 
     let mut removal = inventory.clone();
     removal["authority"]["dependency_exit_allowed"] = Value::Bool(true);
@@ -5213,6 +5274,7 @@ fn fail_closed_mutations_are_rejected() {
 #[test]
 fn baseline_partition_and_test_census_mutations_are_rejected() {
     let inventory = artifact();
+    validate_inventory(&inventory).unwrap_or_else(|error| panic!("baseline: {error}"));
 
     let mut missing_baseline_path = inventory.clone();
     missing_baseline_path["search_scope"]["baseline_occurrence_paths"]
@@ -5279,6 +5341,14 @@ fn baseline_partition_and_test_census_mutations_are_rejected() {
 #[test]
 fn documentation_and_call_site_receipt_mutations_are_rejected() {
     let inventory = artifact();
+    validate_inventory(&inventory).unwrap_or_else(|error| panic!("baseline: {error}"));
+
+    let mut missing_zero_surface = inventory.clone();
+    missing_zero_surface["current_source_review"]["current_zero_literal_paths"]
+        .as_array_mut()
+        .unwrap_or_else(|| panic!("current_zero_literal_paths must be an array"))
+        .pop();
+    assert!(validate_documentation_claim_census(&missing_zero_surface).is_err());
 
     let mut virtual_sentinel_drift = inventory.clone();
     virtual_sentinel_drift["documentation_claim_surfaces"]["virtual_surfaces"][0]["source_pin_digest_token"] =
@@ -5309,6 +5379,7 @@ fn documentation_and_call_site_receipt_mutations_are_rejected() {
 #[test]
 fn disposition_owner_journey_and_state_mutations_are_rejected() {
     let inventory = artifact();
+    validate_inventory(&inventory).unwrap_or_else(|error| panic!("baseline: {error}"));
 
     let mut unpinned_consumer_path = inventory.clone();
     unpinned_consumer_path["local_consumers"][0]["paths"]

@@ -71,13 +71,13 @@ const PROFILE_GROUP_ID_SHA256: &str =
 const PROFILE_MEMBERSHIP_SHA256: &str =
     "8b762d37f55b82fc508c08d079c79bfb743e5eb309f951aeaa3c44e3aaa0a5cd";
 const PUBLIC_JOURNEY_EDGE_SHA256: &str =
-    "2dc041692d554c03a1e123ba9e720967bf88288e402ebdc0ec7ddfe7a821f43a";
+    "487bc48ac1339806de47d427ce5a9f108d170d3a48ff3f27b3df265a7cd62bae";
 const SEMANTIC_JOURNEY_EDGE_SHA256: &str =
-    "d48356bc797bf7af527f4e77915ae45bf6c442fa178f99a14f7350e7b42ffae9";
+    "f9cc452ded8cd8daccb8bc23f0ea0006708a7dc58f3dd4bb4e06e72cb0b20072";
 const FINDING_OWNER_EDGE_SHA256: &str =
     "1e4aea3a7dbe623f8e4c2c51b5bb5edbdec3e6ac0b002f5261d79edbcbc4a860";
 const CONFLICT_ROW_SHA256: &str =
-    "f684298a32b76973e88f91fc243e16ecba70a11b709832873792cbaf396fb390";
+    "1473c981febb31cfaa4bc99fa781c7de67c9a885a1135724d6cea2b4aabcda51";
 const HANDOFF_ROW_SHA256: &str = "e41627d1890e05487e9f76055d95015ff4309701e141f2f443b71bfd830df89b";
 const NO_CLAIM_SHA256: &str = "761b33cf8a1c0e8a3c83ffb8f4597e1c2f526e14a6689e05d8113e09b917d7a6";
 
@@ -1421,26 +1421,26 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
                 == Some("KNOWN_LOCAL_REFERENCES")
         })
         .count();
-    assert_eq_value(public_known, 17, "known public usage")?;
+    assert_eq_value(public_known, 20, "known public usage")?;
     assert_eq_value(
         public_dispositions.len() - public_known,
         13,
         "unknown public usage",
     )?;
-    assert_eq_value(semantic_known, 45, "known semantic usage")?;
+    assert_eq_value(semantic_known, 62, "known semantic usage")?;
     assert_eq_value(
         semantic_dispositions.len() - semantic_known,
-        52,
+        40,
         "unknown semantic usage",
     )?;
     assert_eq_value(
         count(usage, "public_known_local_references")?,
-        17,
+        20,
         "recorded public known",
     )?;
     assert_eq_value(
         count(usage, "public_symbol_rows")?,
-        30,
+        33,
         "recorded public usage rows",
     )?;
     assert_eq_value(
@@ -1450,17 +1450,17 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
     )?;
     assert_eq_value(
         count(usage, "semantic_known_local_references")?,
-        45,
+        62,
         "recorded semantic known",
     )?;
     assert_eq_value(
         count(usage, "semantic_rows")?,
-        97,
+        102,
         "recorded semantic usage rows",
     )?;
     assert_eq_value(
         count(usage, "semantic_unknown")?,
-        52,
+        40,
         "recorded semantic unknown",
     )?;
 
@@ -1490,16 +1490,16 @@ fn validate_absences_conflicts_and_journeys(inputs: &Inputs) -> Result<(), Strin
     }
     unique(&public_edges, "public journey edges")?;
     unique(&semantic_edges, "semantic journey edges")?;
-    assert_eq_value(public_edges.len(), 109, "public journey edge count")?;
-    assert_eq_value(semantic_edges.len(), 216, "semantic journey edge count")?;
+    assert_eq_value(public_edges.len(), 137, "public journey edge count")?;
+    assert_eq_value(semantic_edges.len(), 479, "semantic journey edge count")?;
     assert_eq_value(
         count(usage, "public_journey_edge_count")?,
-        109,
+        137,
         "recorded public edge count",
     )?;
     assert_eq_value(
         count(usage, "semantic_journey_edge_count")?,
-        216,
+        479,
         "recorded semantic edge count",
     )?;
     assert_eq_value(

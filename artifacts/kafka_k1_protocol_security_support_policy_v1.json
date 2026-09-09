@@ -77,9 +77,9 @@
       "input_id": "K1-2-INPUT-K0-2",
       "role": "CONFIGURATION_SECURITY_AND_OPERATION_SEMANTIC_AUTHORITY",
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-      "byte_count": 229415,
-      "record_count": 2560,
-    "sha256": "a746fd5f91619dcea064b5e019ce237378970d6bd9ef45f3045670fe59e0f7c2"
+      "byte_count": 244004,
+      "record_count": 2687,
+      "sha256": "0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1"
     },
     {
       "input_id": "K1-2-INPUT-K1-3",
@@ -101,49 +101,49 @@
       "input_id": "K1-2-INPUT-PRODUCER",
       "role": "CURRENT_PRODUCER_TRANSACTION_AND_SECURITY_SOURCE",
       "path": "src/messaging/kafka.rs",
-      "byte_count": 149141,
-      "record_count": 4335,
-      "sha256": "1329d49653935c9dc9a1c18cff136d9f8bfb21f204f908f562d6c3da62cc7de7"
+      "byte_count": 156720,
+      "record_count": 4521,
+      "sha256": "a737bbe271e70cf830e920426681b6199fc5b9c969243e67aea5ec8b38d27720"
     },
     {
       "input_id": "K1-2-INPUT-CONSUMER",
       "role": "CURRENT_CONSUMER_GROUP_AND_OFFSET_SOURCE",
       "path": "src/messaging/kafka_consumer.rs",
-      "byte_count": 102484,
-      "record_count": 2757,
-      "sha256": "82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d"
+      "byte_count": 126897,
+      "record_count": 3317,
+      "sha256": "157847de9e5611ba8464131dab28a14aa31f841af264fa56a27efd69c6e7504a"
     },
     {
       "input_id": "K1-2-INPUT-MANIFEST",
       "role": "CURRENT_FEATURE_AND_NATIVE_CAPABILITY_DECLARATION",
       "path": "Cargo.toml",
-      "byte_count": 37889,
-      "record_count": 1061,
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b"
+      "byte_count": 41393,
+      "record_count": 1121,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e"
     },
     {
       "input_id": "K1-2-INPUT-LOCKFILE",
       "role": "CURRENT_DEPENDENCY_IDENTITY",
       "path": "Cargo.lock",
-      "byte_count": 114614,
-      "record_count": 4666,
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236"
+      "byte_count": 114587,
+      "record_count": 4664,
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb"
     },
     {
       "input_id": "K1-2-INPUT-REAL-BROKER",
       "role": "CURRENT_OPT_IN_REAL_BROKER_FIXTURE",
       "path": "tests/integration/kafka_real_broker.rs",
-      "byte_count": 65986,
-      "record_count": 1883,
-      "sha256": "f12b3e131f2376617dd6d876dfc09bbffe368f749f1ff25d606d2f0631b204f7"
+      "byte_count": 80598,
+      "record_count": 2236,
+      "sha256": "0bcede7c7c29291ae2fbbf95937a1678da67a6f45badf2e9941bf7bea9e61149"
     },
     {
       "input_id": "K1-2-INPUT-SASL-AUDIT",
       "role": "CURRENT_SYNTHETIC_AUTHENTICATION_ERROR_AUDIT",
       "path": "tests/kafka_sasl_authentication_audit.rs",
-      "byte_count": 9394,
-      "record_count": 265,
-      "sha256": "0a7c9ae8c518af49df2c90dadf14805c81d7ed4abc7591fd2edff8e55cf03363"
+      "byte_count": 16040,
+      "record_count": 438,
+      "sha256": "1e5915302efba99b84a684a8598cf9bd20e9324bf2826cbf8d16d06094f4c006"
     },
     {
       "input_id": "K1-2-INPUT-PROTOCOL-FUZZ",
@@ -207,6 +207,18 @@
     "config_counts_as_authentication": false
   },
   "inventory_state": "K1_2_PROTOCOL_BROKER_AND_SECURITY_POLICY_FROZEN_KEEP_INCUMBENT",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "release_owner": "asupersync-ghxhvm",
+    "historical_scope": "The original capture and baseline identify the historical K1.2 policy. All 90 policy states, owners, terminal gates, and zero accepted numeric version ranges remain unchanged; refreshed authority pins are current source inventory, not new broker evidence.",
+    "reviewed_changes": [
+      "Producer and consumer raw-property APIs apply values before explicitly mapped typed fields. Optional typed fields that are absent do not erase raw values; the broader passthrough must be included in K2.1 reachability and K12.4 security review rather than treated as protocol or authentication support.",
+      "Current configuration Debug hides every raw value, and native ClientConfig rejection omits both values and free-form descriptions, including the parallel KafkaClient consumer constructor. This repairs part of historical GAP-21 without proving native-copy erasure, zeroization of raw Strings, secret-free property names, or sanitation of other upstream error variants.",
+      "Consumer fetch, group, and offset binding IDs now resolve to the actual K0.2 operations: poll is OP-006, caller rebalance OP-005, close OP-009, commit OP-007, and seek OP-008. The previous arrays mixed configuration/accessor IDs into unrelated protocol domains.",
+      "The configured cooperative callback and negotiated protocol diagnostic are distinct. RebalanceStats counts attempted callbacks; retained transient errors and raw-property accessors are local observations, not fabricated Kafka messages."
+    ],
+    "evidence_boundary": "Current-source static review only. Credential diagnostics and private-key-password cells remain blocking, and no transport, authentication, broker-version, native-linkage, or cutover claim is promoted."
+  },
   "broker_support_cells": [
     {
       "cell_id": "KAFKA-K1-2-BROKER-001-OLDEST",
@@ -1230,7 +1242,7 @@
       "cell_id": "KAFKA-K1-2-BIND-004-FETCH",
       "subject": "consumer fetch position isolation and leader recovery",
       "binding_kind": "MESSAGE_SET",
-      "authority_rows": ["KCO-OP-003", "KCO-OP-004", "KCO-OP-005", "KAFKA-ENUM-006", "KAFKA-ENUM-007"],
+      "authority_rows": ["KCO-OP-003", "KCO-OP-004", "KCO-OP-006", "KAFKA-ENUM-006", "KAFKA-ENUM-007"],
       "message_names": ["ApiVersions", "Metadata", "Fetch", "ListOffsets", "OffsetForLeaderEpoch"],
       "required_state": "REQUIRED_EXACT_CURSOR_ISOLATION_AND_RECOVERY_MAPPING",
       "current_evidence_state": "UNKNOWN",
@@ -1240,9 +1252,9 @@
     },
     {
       "cell_id": "KAFKA-K1-2-BIND-005-GROUP",
-      "subject": "consumer group and caller-driven rebalance",
+      "subject": "consumer group, configured callbacks, caller-driven rebalance, and close",
       "binding_kind": "MESSAGE_SET",
-      "authority_rows": ["KCO-OP-001", "KCO-OP-002", "KCO-OP-006", "KCO-OP-007", "KCO-OP-008"],
+      "authority_rows": ["KCO-CFG-019", "KCO-OP-004", "KCO-OP-005", "KCO-OP-009", "KAFKA-ENUM-008"],
       "message_names": ["FindCoordinator", "JoinGroup", "SyncGroup", "Heartbeat", "LeaveGroup"],
       "required_state": "REQUIRED_EXACT_GENERATION_ASSIGN_REVOKE_AND_SHUTDOWN_MAPPING",
       "current_evidence_state": "UNKNOWN",
@@ -1254,7 +1266,7 @@
       "cell_id": "KAFKA-K1-2-BIND-006-OFFSETS",
       "subject": "offset fetch commit seek and restart recovery",
       "binding_kind": "MESSAGE_SET",
-      "authority_rows": ["KCO-OP-009", "KCO-OP-010", "KCO-OP-011", "KCO-OP-012", "KCO-OP-013"],
+      "authority_rows": ["KCO-OP-006", "KCO-OP-007", "KCO-OP-008", "KCO-OP-015", "KCO-OP-016"],
       "message_names": ["FindCoordinator", "OffsetFetch", "OffsetCommit", "ListOffsets"],
       "required_state": "REQUIRED_EXACT_MANUAL_POLICY_AND_DURABILITY_MAPPING",
       "current_evidence_state": "UNKNOWN",
@@ -1300,9 +1312,9 @@
     },
     {
       "cell_id": "KAFKA-K1-2-BIND-010-LOCAL",
-      "subject": "local errors profiles deterministic harness and explicit absences",
+      "subject": "local errors, raw properties, diagnostics, profiles, deterministic harness, and explicit absences",
       "binding_kind": "LOCAL_ONLY",
-      "authority_rows": ["KAFKA-K1-SHARED-011", "KPR-OP-001", "KPR-OP-002", "KAFKA-ENUM-003", "KAFKA-ABS-002"],
+      "authority_rows": ["KAFKA-K1-SHARED-011", "KPR-OP-001", "KPR-OP-002", "KPR-CFG-026", "KCO-CFG-019", "KCO-OP-018", "KCO-OP-019", "KAFKA-ENUM-003", "KAFKA-ABS-002"],
       "message_names": [],
       "required_state": "REQUIRED_NO_FAKE_WIRE_BINDING",
       "current_evidence_state": "STATIC_SOURCE",

@@ -37,41 +37,41 @@ const BASELINE_REVISION: &str = "4b99ef71dbb1b7adbfbef4a3a9a4c2377fcbd6dd";
 const INVENTORY_STATE: &str = "K1_4_RESOURCE_LIFECYCLE_OWNERSHIP_CONTRACT_FROZEN_KEEP_INCUMBENT";
 
 const RESOURCE_COUNT: usize = 42;
-const RESOURCE_SEMANTIC_BINDING_COUNT: usize = 43;
-const RESOURCE_LIMIT_DIMENSION_COUNT: usize = 43;
+const RESOURCE_SEMANTIC_BINDING_COUNT: usize = 45;
+const RESOURCE_LIMIT_DIMENSION_COUNT: usize = 47;
 const COMPOSITE_RESOURCE_COUNT: usize = 16;
 const OPERATION_COUNT: usize = 19;
 const DIMENSION_COUNT: usize = 7;
 const TRANSITION_COUNT: usize = 133;
-const SEMANTIC_COUNT: usize = 97;
-const AUTHORITY_REFERENCE_COUNT: usize = 63;
+const SEMANTIC_COUNT: usize = 102;
+const AUTHORITY_REFERENCE_COUNT: usize = 68;
 const AUTHORITY_INPUT_COUNT: usize = 15;
 
 const RESOURCE_ID_SHA256: &str = "e21f2fbe16b7d974b60cda3958e35e7cd0736eaa62c7003a8b7f6a0dbb194fcd";
 const RESOURCE_CONTRACT_SHA256: &str =
-    "79c551cc99f036bc9b0a2bb9ca31aa794b02fe51db7400136fcc57040abec83b";
+    "a0c124cf63018c60cc7951c3ca4865efe76d05d57042618e7bddb3f27c732ea7";
 const SEMANTIC_RESOURCE_BINDING_SHA256: &str =
-    "bc625fbcca3de75d72d2bc2919cecc7636a94d6b25943bb37743d6c92b63ead9";
+    "cacb6c3934f763dd7f51ae32b5e2ab6cbb2d62acfe96f4f8c289ae2876add408";
 const RESOURCE_LIMIT_DIMENSION_SHA256: &str =
-    "3aaf18e4916c55d659cb5e89bdc0f474d60d54fa1472957e549fd9138c06ee6e";
+    "e85c11abe74b5bab968fc71fe198be6eeb10c04ab8dc0558fc73bc8aabd0f550";
 const OPERATION_ID_SHA256: &str =
     "e608943f31a0b005a825e5a70a3ee926462ed24c1bb5ae155ada73acae2a77ec";
 const OPERATION_CONTRACT_SHA256: &str =
-    "678914aed5298760076fd50b510a1862498805aab87f5295856da54d7d13d974";
+    "64211a73f04a9b5299639af83591afd9cdc33a287e56c887aa7b3d1b1f4ec865";
 const TRANSITION_CONTRACT_SHA256: &str =
-    "2e3005cb5fec2a8f5aeef551619c65e22817e3dac4e2e2413d71e06771c499f3";
+    "7143650cc37656e0fcb209c2b1b5b1e0adb364ce15bd675d2b2eba80fc40b658";
 const AUTHORITY_REFERENCE_SHA256: &str =
-    "634bb51f85fe7d54015ccc24a83b52590d23b77c11c9aa522dc89d9af88357e7";
+    "447712b9a06cd2c2e4b30f3ce18e8b340e90f345fe1bbe6224d0bdcc5bb88ccf";
 const AUTHORITY_CONTRACT_SHA256: &str =
     "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7";
 const AUTHORITY_INPUT_CONTRACT_SHA256: &str =
     "a2c8b4f9b38cc27a24cdc75a747fe5957dcb57684338e5b5a4781acf06d149fc";
 const AUTHORITY_VIEWS_CONTRACT_SHA256: &str =
-    "3ab13136432c2ae21e0db3f592ac08e63a843fb20879a0d97287ad3e3a20a21e";
+    "4cb31018206bd0f69799aea9d28e1a6ede182565cbdd0fb589aaf0606f167b1d";
 const POLICY_CONTRACT_SHA256: &str =
     "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396";
 const SEMANTIC_COVERAGE_CONTRACT_SHA256: &str =
-    "b86d984aa4061fe4770c4aeb7f639750193540deb4226522e48e1dfd6a441b27";
+    "871a8ac39453ef174f11425426c6657ebc1dd58a376d552cc09773491ac71c70";
 const CROSS_CUTTING_INVARIANT_SHA256: &str =
     "88438c4ffdb88a2320e223c994da4974d201d7569326dccf121bc4f6cd819492";
 const OWNERSHIP_AND_GATES_SHA256: &str =
@@ -81,17 +81,17 @@ const DISPOSITION_RECEIPT_SHA256: &str =
 const PROJECTION_RULE_SHA256: &str =
     "582e80ec017c82800001a82312074b53957d79c8c688c50ed3c93a751b284718";
 const NO_CLAIM_SHA256: &str = "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3";
-const SEMANTIC_ID_SHA256: &str = "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
+const SEMANTIC_ID_SHA256: &str = "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121";
 const SEMANTIC_ROW_SHA256: &str =
-    "ada6796514f5502ddd095dc05904f312bff387bc3a7fe70caf1cae0384ce3396";
+    "1ba55c44beb8b1c7e6c8048d197150f3987bb9ecd9b1d69c00d1f2c0fe999624";
 const SEMANTIC_CLASSIFICATION_SHA256: &str =
-    "6bfbbd0e034be578cc508b99b2f7256f9511650632249fa485c5ab5bf1519e35";
+    "f4127207a9f0c4678e970b25e43a9c5833b85b13c03722fa6c2f55211048c087";
 const SHARED_OBLIGATION_SHA256: &str =
     "33d6b682820cff9f656ea6a3b6a88a32393c0f927ebce7a6b5ab2d5ab955752c";
 const ROUTED_FINDING_ID_SHA256: &str =
     "752d9b0be528ea09c4eb06100e6b1ab1992d92f52cd8a8f9400f0d805e5223b0";
 const ROUTED_FINDING_ROW_SHA256: &str =
-    "b8786f5521bfdcfbba786844fea0e41242fcbe65d8ad886069470dfc5540c404";
+    "896c3cb88e234fd40ab9b886a01cfafc41e69d00c08122f0f49b314238991c84";
 const FAULT_VECTOR_ID_SHA256: &str =
     "c3da429cee7ac2fca222b5a288b9f76f78d88e01e5b6e32b4278104baa07c121";
 const FAULT_VECTOR_ROW_SHA256: &str =
@@ -115,6 +115,7 @@ const ROOT_KEYS: &[&str] = &[
     "captured_date_utc",
     "coverage_receipt",
     "cross_cutting_invariants",
+    "current_source_review",
     "disposition_receipt",
     "inventory_state",
     "lifecycle_operations",
@@ -817,7 +818,7 @@ fn validate_authority_views(inputs: &Inputs) -> Result<BTreeSet<String>, String>
     let semantic_view = views
         .get("k0_2_semantic_rows")
         .ok_or_else(|| "k0_2_semantic_rows view is missing".to_owned())?;
-    expect_number(semantic_view, "row_count", 97)?;
+    expect_number(semantic_view, "row_count", 102)?;
     expect_text(semantic_view, "id_set_sha256", SEMANTIC_ID_SHA256)?;
     expect_text(semantic_view, "canonical_row_sha256", SEMANTIC_ROW_SHA256)?;
 
@@ -825,7 +826,7 @@ fn validate_authority_views(inputs: &Inputs) -> Result<BTreeSet<String>, String>
         .artifact
         .get("semantic_coverage")
         .ok_or_else(|| "semantic_coverage is missing".to_owned())?;
-    expect_number(coverage, "classified_row_count", 97)?;
+    expect_number(coverage, "classified_row_count", 102)?;
     expect_number(coverage, "unclassified_row_count", 0)?;
     expect_number(coverage, "duplicate_classification_count", 0)?;
     expect_text(
@@ -849,8 +850,8 @@ fn validate_authority_views(inputs: &Inputs) -> Result<BTreeSet<String>, String>
         text(row, "reason")?;
     }
     let expected_counts = BTreeMap::from([
-        ("CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION", 28usize),
-        ("RESOURCE", 43usize),
+        ("CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION", 31usize),
+        ("RESOURCE", 45usize),
         ("RESOURCE_AND_LIFECYCLE", 26usize),
     ]);
     if classification_counts != expected_counts {
@@ -1648,13 +1649,13 @@ fn validate_coverage_receipt(
     exact_keys(receipt, COVERAGE_KEYS, "coverage_receipt")?;
     for (key, expected) in [
         ("resource_class_count", 42),
-        ("resource_semantic_binding_count", 43),
-        ("resource_limit_dimension_count", 43),
+        ("resource_semantic_binding_count", 45),
+        ("resource_limit_dimension_count", 47),
         ("composite_resource_count", 16),
         ("lifecycle_operation_count", 19),
         ("transition_dimension_count", 7),
         ("transition_cell_count", 133),
-        ("unique_source_authority_reference_count", 63),
+        ("unique_source_authority_reference_count", 68),
     ] {
         expect_number(receipt, key, expected)?;
     }
@@ -1891,8 +1892,8 @@ fn validate_disposition_and_doc(root: &Path, artifact: &Value) -> Result<(), Str
     }
     for required in [
         "42 unique resource rows",
-        "All 43 K0.2 configuration semantics",
-        "43 per-unit limit dimensions",
+        "All 45 K0.2 configuration semantics",
+        "47 per-unit limit dimensions",
         "19 lifecycle rows",
         "133 transition cells",
         "max_poll_records=500",

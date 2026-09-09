@@ -207,26 +207,36 @@ Each sorted path has a stable `KAFKA-K0-4-FIXTURE-NNN` row that resolves to
 exactly one source pin and one of eight classification profiles. The partition
 is 48 live-byte-checked K0.3 inherited pins plus 19 K0.4 direct fixture pins;
 the separate K0.3 authority pin is intentionally outside the fixture set.
-Profiles retain the exact truth/evidence/execution class, environment,
-executable owner, refresh owner, and limitation for every row.
+Profiles retain the historical truth/evidence/execution class, environment,
+executable owner, refresh owner, and limitation for every row. The
+`current_source_review` dated 2026-09-09 distinguishes current source from
+the original capture, including the mixed SASL audit classification below.
 The K0.3 anchor artifact
 `artifacts/kafka_downstream_user_journey_inventory_v1.json` has SHA-256
-`52f8dc9a2695a170b14c85c9b29b6e60f95e05bd013d3d9db0dab8d94a1ced09`
+`fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee`
 and freezes baseline/authority revision
 `ae22e710d87412b38e546b32e9702106619481d5`. The K0.4 static census was
 reconciled at revision `012c13714db267a4fba928db9f900b70d6c1d25a`.
 
-The frozen declaration and case census is:
+The reviewed current declaration and case census is:
 
 | Surface | Exact count and truth |
 |---|---|
 | Kafka-related declaration groups | 35 groups. |
-| Rust test declarations | 888 `#[test]` plus 48 `#[tokio::test]`, 936 total. |
+| Rust test declarations | 911 `#[test]` plus 48 `#[tokio::test]`, 959 total. |
 | Journey-focused atomic cases | 16 cases. |
 | Kafka fuzz targets | Seven registered targets; compilation is not execution. |
 | Tracked Kafka parser seeds | Seven exact seed paths, all lacking independent origin/version provenance. |
 | RecordBatch local tests | 17 self-roundtrip/local-model tests; no independent broker receipt. |
-| Real-broker integration tests | 12 declarations total: seven named real-broker-capable cases plus five static/proof-row declarations; none has an accepted receipt. |
+| Real-broker integration tests | 16 declarations total: eleven named real-broker-capable cases plus five static/proof-row declarations; none has an accepted receipt in this packet. |
+
+The four new real-broker cases cover eager and cooperative consumer drop,
+cooperative assignment, and transient errors for a never-created topic. The
+roundtrip now commits the delivered topic-partition, the group test drives
+both consumers after seeding a topic, and the payment test subscribes after
+its first produce. These are source changes, with no new broker execution
+claim. K0.3 also records 33 public symbol groups, 102 semantic rows, and
+1,521 call-site candidates. The 67-path fixture union is unchanged.
 
 The seven tracked seeds are:
 
@@ -253,15 +263,19 @@ Key current source pins are retained so drift is visible:
 
 | Path | SHA-256 | Lines |
 |---|---|---:|
-| `Cargo.toml` | `b46fde72cc143cdeec3b234a0253619bd9fba1a7b825ee0d43d7b7a7180a3f05` | 1061 |
-| `Cargo.lock` | `ccd16d63e66a3da65e6d87e2650f20d6be63e9d7f8d76c7300e01758193e641f` | 4666 |
-| `src/messaging/kafka.rs` | `5fe763229f2940793bf79739718afc20002ac40b614c35ff0ea475d45fb5aaf1` | 4335 |
-| `src/messaging/kafka_consumer.rs` | `82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d` | 2757 |
-| `tests/integration/kafka_real_broker.rs` | `f12b3e131f2376617dd6d876dfc09bbffe368f749f1ff25d606d2f0631b204f7` | 1883 |
+| `Cargo.toml` | `5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e` | 1121 |
+| `Cargo.lock` | `8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb` | 4664 |
+| `src/messaging/kafka.rs` | `a737bbe271e70cf830e920426681b6199fc5b9c969243e67aea5ec8b38d27720` | 4521 |
+| `src/messaging/kafka_consumer.rs` | `157847de9e5611ba8464131dab28a14aa31f841af264fa56a27efd69c6e7504a` | 3317 |
+| `tests/integration/kafka_real_broker.rs` | `0bcede7c7c29291ae2fbbf95937a1678da67a6f45badf2e9941bf7bea9e61149` | 2236 |
 | `scripts/kafka_broker_parity_proof_runner.sh` | `656a5f812adf8209c5942b7b43243c46c899f9ff0f6e089163814217ce5ec451` | 440 |
 | `scripts/provision_kafka_test_env.rs` | `55da137faa1c826985e9c1dfaf1484df9457b4ab152730ed1de5a094ef40e569` | 376 |
 | `.github/no_mock_policy.json` | `a2b2ca01bab322c0e15a47e091da0f585a647cceaff3abfd5a60035c6a024593` | 611 |
-| `.github/workflows/fuzz.yml` | `f7ff28d27b2872f9c400a25d59bb70ca54da036e67580c5cd7ef27fbca435134` | 365 |
+| `.github/workflows/fuzz.yml` | `6ce49ec2406b4d15190b87ec0e3532d5183a203f6ddf5724aaa5e28075b78277` | 372 |
+
+The artifact's inline line ranges remain locators for its historical baseline;
+the hashes above and inherited K0.3 pins identify the current review. The
+native dependency coordinates and capability expectations remain unchanged.
 
 ## Source contradictions and overclaims
 
@@ -273,8 +287,12 @@ Key current source pins are retained so drift is visible:
 - `tests/messaging_kafka_rebalance_lifecycle.rs` names `KAFKA_BOOTSTRAP` in its
   documentation but does not read it, and its feature-on cases can return after
   construction or subscription failure.
-- `tests/kafka_sasl_authentication_audit.rs` exercises simulated strings and
-  error classification, not a broker authentication handshake.
+- `tests/kafka_sasl_authentication_audit.rs` retains simulated strings and
+  authentication error classification. It now also contains three Debug
+  redaction tests and three native configuration-rejection tests gated on
+  `kafka`. The current review classifies this mixed source as `STATIC_SOURCE`;
+  the historical `LOCAL_MODEL_ONLY` fixture row remains a baseline record.
+  Neither classification establishes a broker authentication handshake.
 - `src/real_http_h2_server_messaging_kafka_e2e_tests.rs`,
   `src/real_kafka_consumer_group_rebalance_e2e_tests.rs`,
   `src/real_messaging_kafka_trace_event_integration_e2e_tests.rs`, and

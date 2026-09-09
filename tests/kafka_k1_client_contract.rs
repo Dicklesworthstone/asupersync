@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 const ARTIFACT_PATH: &str = "artifacts/kafka_k1_obligation_index_v1.json";
 const DOC_PATH: &str = "docs/kafka_k1_client_contract.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "4524caee86d27e4fe1e52ad7bbc9a250bf1e88987a7181d5a9a8d2931b7fdc3a";
-const DOC_SHA256: &str = "3657c47298408fdd5f6906376265ac3c587085ba5b0df67988fac7266fd6e116";
+const ARTIFACT_SHA256: &str = "7b6f941d2701b8f098f29cc656bf584b6151e71b0969ebcd693e88cad42ba969";
+const DOC_SHA256: &str = "f616455c55edaa0568e43c83154d583e33d8337f4688eb6024b842f05fd737d5";
 
 const ARTIFACT_ID: &str = "kafka-k1-obligation-index-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -39,34 +39,34 @@ const K0_5_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const CAPABILITY_REGISTRY_PATH: &str = "artifacts/dependency_capability_registry_v1.json";
 const ADR_REGISTRY_PATH: &str = "artifacts/dependency_api_adr_registry_v1.json";
 
-const ALL_DEFINITION_AND_REFERENCE_COUNT: usize = 1_030;
-const PRIMARY_DEFINITION_COUNT: usize = 903;
-const CORE_DEFINITION_COUNT: usize = 892;
+const ALL_DEFINITION_AND_REFERENCE_COUNT: usize = 1_047;
+const PRIMARY_DEFINITION_COUNT: usize = 912;
+const CORE_DEFINITION_COUNT: usize = 901;
 const CONTRADICTION_INPUT_COUNT: usize = 11;
-const AUTHORITY_REFERENCE_COUNT: usize = 127;
+const AUTHORITY_REFERENCE_COUNT: usize = 135;
 const K0_5_AGGREGATE_ID_COUNT: usize = 32;
-const K1_OBLIGATION_COUNT: usize = 279;
-const LOW_EVIDENCE_STATE_COUNT: usize = 446;
+const K1_OBLIGATION_COUNT: usize = 287;
+const LOW_EVIDENCE_STATE_COUNT: usize = 434;
 
-const PRIMARY_ID_SHA256: &str = "38eb986feff75d2e1e172e444e7d488c765ab42910b6b470056852dea3b0cb6e";
-const CORE_ID_SHA256: &str = "43d9deb2ff6bfa772ec058e8e32e4eb4fb3be099d93c3b152685721be05d4eea";
+const PRIMARY_ID_SHA256: &str = "cb03e74dd5a207aaf082664741fb629d4330bcec76a3edd0958969c6a064b729";
+const CORE_ID_SHA256: &str = "cf110029938e34e3830462a68441d3f678708137242c69a40657aa1e107a01d1";
 const CONTRADICTION_ID_SHA256: &str =
     "60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0";
 const AUTHORITY_REFERENCE_ID_SHA256: &str =
-    "a2336ba563186e1bc4a0a935ced3731e2292e8a6d54b0858311662113b267a94";
+    "90457aa8811909a088df43b6f0984b1b8cc262afd5e113f80bc8fcbfdf3bf76e";
 const AUTHORITY_REFERENCE_MAPPING_SHA256: &str =
-    "0a88e36135222e48bfeab5095be3896ef946cc9fa05f38cbd19d2cb656107cf9";
+    "83a474e63511cb717689f5f5c9d7206bca7752ebd44c642e277eb0d423d057aa";
 const K0_5_AGGREGATE_ID_SHA256: &str =
     "b37d690dd8293c23a0ed2449bcd019864341f97fe0651798583602804da2fd45";
 const NORMALIZED_OBLIGATION_SHA256: &str =
-    "cd4ff24ac2deed867d81d1fb9d81c08f31e57de5c7e77c84e1ea3657e2fa0f37";
+    "59e1ae49f670b9a817c610864ef1b19250657acacf828bef5fc1faceece9084b";
 const SOURCE_PRECISE_OBLIGATION_SHA256: &str =
-    "846a643da80fa9ad9dd78b9e13520981ef8811b91839686608ec7c80a45a4414";
+    "e84e9b969c38366e8e260ea60ca4536f213e51fee02eebb17282f2a201fdbf06";
 const LOW_EVIDENCE_STATE_SHA256: &str =
-    "8d8e318ffbbcd5e26cb5320ba3fc03075624a974b214ea0cf2d10e769838543f";
-const EXPOSURE_SHA256: &str = "cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f";
+    "288cf0c438852ea0c184c2339c8bf00e69a682a71d6d58bcffed9420b01d6c5c";
+const EXPOSURE_SHA256: &str = "e5ab5243ac66474b0df051b5716dcdbe9239bc17742c2c5a154094e157786e23";
 const COARSE_EXPOSURE_SHA256: &str =
-    "d1ebf84a5bd4654ec12cedb880eab9f7f1751fbd758267ce4395549de8affade";
+    "0cfd58553a7278b132a786bf4c64771c266974738d72e140637441c7394daf47";
 const DERIVED_SHARED_SHA256: &str =
     "0c50366802e6fbe8d8c2eccfebcd60a20d7daeed1f0304741ee464fb368a717f";
 const TRACKER_PROJECTION_SHA256: &str =
@@ -86,6 +86,7 @@ const ROOT_KEYS: &[&str] = &[
     "capability_id",
     "captured_date_utc",
     "coverage_receipt",
+    "current_source_review",
     "disposition_receipt",
     "exposure_model",
     "inventory_state",
@@ -468,6 +469,81 @@ fn validate_root_identity_and_policy(packet: &Value) -> Result<(), String> {
     ] {
         if flag(authority, field)? {
             return Err(format!("authority.{field} must stay false"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_current_source_review(packet: &Value, inputs: &AuthorityInputs) -> Result<(), String> {
+    let review = at(packet, "/current_source_review")?;
+    if text(review, "reviewed_date_utc")? != "2026-09-09"
+        || text(review, "release_owner")? != "asupersync-ghxhvm"
+        || at(review, "/historical_counts")?
+            != &json!({"primary_definitions": 903, "authority_references": 127,
+                "obligations": 279, "low_evidence_rows": 446})
+        || text(review, "added_source_pin")? != "KAFKA-PIN-FUZZ-LOCK"
+        || !array(review, "removed_definitions")?.is_empty()
+        || !text(review, "historical_scope")?.contains("remain historical")
+        || !text(review, "reclassification_boundary")?.contains("not runtime or broker receipts")
+        || !text(review, "evidence_boundary")?.contains("No broker authentication")
+    {
+        return Err("current-source review identity or evidence boundary drifted".to_owned());
+    }
+    for (field, expected) in [
+        (
+            "added_public_symbols",
+            vec!["KCO-PUB-008", "KCO-PUB-009", "KCO-PUB-010"],
+        ),
+        (
+            "added_semantic_rows",
+            vec![
+                "KCO-CFG-019",
+                "KPR-CFG-026",
+                "KAFKA-ENUM-008",
+                "KCO-OP-018",
+                "KCO-OP-019",
+            ],
+        ),
+        (
+            "local_reference_reclassifications",
+            vec![
+                "KPR-CFG-003",
+                "KPR-CFG-004",
+                "KPR-CFG-012",
+                "KPR-CFG-013",
+                "KCO-CFG-004",
+                "KCO-CFG-005",
+                "KCO-CFG-009",
+                "KCO-CFG-013",
+                "KCO-CFG-017",
+                "KPR-OP-007",
+                "KPR-OP-008",
+                "KCO-OP-017",
+            ],
+        ),
+    ] {
+        if array(review, field)?.len() != expected.len()
+            || exact_text_set(review, field)? != expected.into_iter().map(str::to_owned).collect()
+        {
+            return Err(format!("current-source review {field} drifted"));
+        }
+    }
+    for id in exact_text_set(review, "local_reference_reclassifications")? {
+        let row = find_unique_in(
+            &inputs.k0_3,
+            "k0_2_semantic_dispositions",
+            "semantic_id",
+            &id,
+        )?;
+        if text(row, "usage_knowledge_state")? != "KNOWN_LOCAL_REFERENCES"
+            || array(row, "local_row_ids")?.is_empty()
+            || !flag(row, "preservation_required")?
+            || !flag(row, "synthesis_required")?
+            || text(row, "owner_bead")? != "asupersync-dep-p7-kafka-removal-sarszu.2.14.1"
+        {
+            return Err(format!(
+                "local-reference reclassification promoted or unowned: {id}"
+            ));
         }
     }
     Ok(())
@@ -1479,7 +1555,7 @@ fn validate_obligation_projection(packet: &Value, inputs: &AuthorityInputs) -> R
     let receipt = at(packet, "/namespace_projection/k1_obligation_projection")?;
     if uint(receipt, "raw_row_count")? != K1_OBLIGATION_COUNT as u64
         || uint(receipt, "unique_row_count")? != K1_OBLIGATION_COUNT as u64
-        || uint(receipt, "stable_k0_definition_row_count")? != 267
+        || uint(receipt, "stable_k0_definition_row_count")? != 275
         || uint(receipt, "derived_unided_k0_2_shared_key_count")? != 12
         || text(receipt, "normalized_projection_sha256")? != NORMALIZED_OBLIGATION_SHA256
         || text(receipt, "source_precise_projection_sha256")? != SOURCE_PRECISE_OBLIGATION_SHA256
@@ -1538,12 +1614,12 @@ fn validate_obligation_projection(packet: &Value, inputs: &AuthorityInputs) -> R
         (
             "K1-VIEW-PUBLIC-SYMBOLS",
             public_ids,
-            "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28",
+            "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a",
         ),
         (
             "K1-VIEW-SEMANTIC-ROWS",
             semantic_ids,
-            "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
+            "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121",
         ),
         (
             "K1-VIEW-SHARED-SEMANTICS",
@@ -1773,11 +1849,11 @@ fn validate_exposure_and_binding(packet: &Value, inputs: &AuthorityInputs) -> Re
         != BTreeMap::from([
             ("CFG_FUZZING", 1),
             ("CFG_TEST_ONLY", 2),
-            ("FACADE", 15),
-            ("MODULE_PUBLIC", 12),
+            ("FACADE", 17),
+            ("MODULE_PUBLIC", 13),
         ])
         || sorted_newline_sha256(detailed_rows) != EXPOSURE_SHA256
-        || coarse_counts != BTreeMap::from([("FACADE_REEXPORTED", 15), ("MODULE_PUBLIC_ONLY", 15)])
+        || coarse_counts != BTreeMap::from([("FACADE_REEXPORTED", 17), ("MODULE_PUBLIC_ONLY", 16)])
         || sorted_newline_sha256(coarse_rows) != COARSE_EXPOSURE_SHA256
     {
         return Err("live public exposure projection drifted".to_owned());
@@ -1785,7 +1861,7 @@ fn validate_exposure_and_binding(packet: &Value, inputs: &AuthorityInputs) -> Re
     let exposure = packet
         .get("exposure_model")
         .ok_or_else(|| "exposure_model missing".to_owned())?;
-    if uint(exposure, "row_count")? != 30
+    if uint(exposure, "row_count")? != 33
         || text(exposure, "projection_sha256")? != EXPOSURE_SHA256
         || at_text(exposure, "/coarse_projection/projection_sha256")? != COARSE_EXPOSURE_SHA256
     {
@@ -1901,14 +1977,14 @@ fn validate_low_evidence_state_projection(
     if rows.len() != LOW_EVIDENCE_STATE_COUNT
         || rows.iter().collect::<BTreeSet<_>>().len() != rows.len()
         || sorted_newline_sha256(rows) != LOW_EVIDENCE_STATE_SHA256
-        || child_counts != BTreeMap::from([("K0.3".to_owned(), 314), ("K0.4".to_owned(), 132)])
+        || child_counts != BTreeMap::from([("K0.3".to_owned(), 302), ("K0.4".to_owned(), 132)])
         || state_counts
             != BTreeMap::from([
                 ("BLOCKED".to_owned(), 77),
                 ("BLOCKED_EXTERNAL".to_owned(), 15),
                 ("LOCAL_MODEL_ONLY".to_owned(), 6),
                 ("NOT_RUN".to_owned(), 225),
-                ("UNKNOWN".to_owned(), 97),
+                ("UNKNOWN".to_owned(), 85),
                 ("UNPINNED".to_owned(), 6),
                 ("WIRE_CODEC_ONLY".to_owned(), 20),
             ])
@@ -1922,11 +1998,11 @@ fn validate_low_evidence_state_projection(
     let expected_child_counts = json!({
         "K0.1": 0,
         "K0.2": 0,
-        "K0.3": 314,
+        "K0.3": 302,
         "K0.4": 132
     });
     let expected_state_counts = json!({
-        "UNKNOWN": 97,
+        "UNKNOWN": 85,
         "BLOCKED": 77,
         "BLOCKED_EXTERNAL": 15,
         "NOT_RUN": 225,
@@ -2251,12 +2327,12 @@ fn validate_disposition_and_coverage(packet: &Value) -> Result<(), String> {
         ("tracker_projection_row_count", 9),
         ("k1_child_count", 5),
         ("k1_child_estimate_minutes", 1_920),
-        ("primary_definition_count", 903),
-        ("definition_and_reference_row_count", 1_030),
-        ("sanctioned_authority_reference_count", 127),
+        ("primary_definition_count", 912),
+        ("definition_and_reference_row_count", 1_047),
+        ("sanctioned_authority_reference_count", 135),
         ("k0_5_aggregate_definition_count", 32),
-        ("k1_obligation_projection_row_count", 279),
-        ("low_evidence_state_projection_row_count", 446),
+        ("k1_obligation_projection_row_count", 287),
+        ("low_evidence_state_projection_row_count", 434),
         ("named_definition_view_count", 11),
         ("authority_reference_view_count", 6),
         ("cross_authority_reference_view_count", 3),
@@ -2331,10 +2407,10 @@ fn validate_docs(doc: &str) -> Result<(), String> {
         ARTIFACT_PATH,
         BEAD_ID,
         "KEEP_INCUMBENT",
-        "1,030",
-        "903",
-        "279",
-        "446",
+        "1,047",
+        "912",
+        "287",
+        "434",
         PRIMARY_ID_SHA256,
         K0_5_AGGREGATE_ID_SHA256,
         NORMALIZED_OBLIGATION_SHA256,
@@ -2359,6 +2435,7 @@ fn validate_packet_value(
     inputs: &AuthorityInputs,
 ) -> Result<(), String> {
     validate_root_identity_and_policy(packet)?;
+    validate_current_source_review(packet, inputs)?;
     validate_authority_input_pins(packet, root)?;
     validate_inherited_child_artifact_pins(packet, root, inputs)?;
     validate_authority_row_pins(packet, inputs)?;
@@ -2415,6 +2492,8 @@ fn kafka_k1_packet_mutations_fail_closed() {
     let packet = parse_json(&root, ARTIFACT_PATH).expect("artifact must parse");
     let doc = read_text(&root, DOC_PATH).expect("document must load");
     let inputs = load_inputs(&root).expect("authority inputs must load");
+    validate_packet_value(&packet, &doc, &root, &inputs)
+        .expect("unmodified packet must validate before negative mutations");
     let mut mutations = Vec::new();
 
     let mut extra_root = packet.clone();
@@ -2422,6 +2501,12 @@ fn kafka_k1_packet_mutations_fail_closed() {
         .expect("packet object")
         .insert("unexpected".to_owned(), json!(true));
     mutations.push(("extra root key", extra_root));
+
+    let mut missing_review = packet.clone();
+    object_mut(&mut missing_review, "packet")
+        .expect("packet object")
+        .remove("current_source_review");
+    mutations.push(("missing current-source review", missing_review));
 
     let mut missing_input = packet.clone();
     array_mut(&mut missing_input, "authority_inputs")
@@ -2432,7 +2517,7 @@ fn kafka_k1_packet_mutations_fail_closed() {
     let mut primary_count = packet.clone();
     *primary_count
         .pointer_mut("/namespace_projection/primary_definitions/primary_stable_id_count")
-        .expect("primary count") = json!(902);
+        .expect("primary count") = json!(PRIMARY_DEFINITION_COUNT - 1);
     mutations.push(("primary definition count", primary_count));
 
     let mut obligation_digest = packet.clone();
@@ -2538,6 +2623,8 @@ fn kafka_k1_authority_input_mutations_fail_closed() {
     let packet = parse_json(&root, ARTIFACT_PATH).expect("artifact must parse");
     let doc = read_text(&root, DOC_PATH).expect("document must load");
     let inputs = load_inputs(&root).expect("authority inputs must load");
+    validate_packet_value(&packet, &doc, &root, &inputs)
+        .expect("unmodified inputs must validate before negative mutations");
 
     let mut missing_public = inputs.clone();
     array_mut(&mut missing_public.k0_1, "public_symbols")
@@ -2575,6 +2662,22 @@ fn kafka_k1_authority_input_mutations_fail_closed() {
         "PASS"
     ));
     assert!(validate_packet_value(&packet, &doc, &root, &promoted_state).is_err());
+
+    let mut promoted_local_reference = inputs.clone();
+    let row = array_mut(
+        &mut promoted_local_reference.k0_3,
+        "k0_2_semantic_dispositions",
+    )
+    .expect("semantic dispositions")
+    .iter_mut()
+    .find(|row| row.get("semantic_id").and_then(Value::as_str) == Some("KPR-CFG-003"))
+    .expect("reviewed local reference");
+    row["usage_knowledge_state"] = json!("PASS");
+    assert!(
+        validate_current_source_review(&packet, &promoted_local_reference)
+            .expect_err("known local references cannot become execution evidence")
+            .contains("local-reference reclassification promoted")
+    );
 
     let mut missing_tracker_gate = inputs;
     missing_tracker_gate.tracker_rows.retain(|row| {
