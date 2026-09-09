@@ -884,7 +884,10 @@ mod tests {
             let (signal, waker, rx) = signal_waker();
             let mut task_cx = Context::from_waker(&waker);
 
-            assert!(matches!(socket.poll_recv_ready(&mut task_cx), Poll::Pending));
+            assert!(matches!(
+                socket.poll_recv_ready(&mut task_cx),
+                Poll::Pending
+            ));
             assert_eq!(
                 signal.hits.load(Ordering::SeqCst),
                 0,

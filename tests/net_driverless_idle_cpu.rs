@@ -124,9 +124,9 @@ fn measure_driverless_wait<T: Send + 'static>(
     };
 
     release();
-    let value = result_rx
-        .recv_timeout(HELPER_BOUND)
-        .unwrap_or_else(|_| panic!("{label}: the wait did not complete after its peer released it"));
+    let value = result_rx.recv_timeout(HELPER_BOUND).unwrap_or_else(|_| {
+        panic!("{label}: the wait did not complete after its peer released it")
+    });
     helper
         .join()
         .unwrap_or_else(|_| panic!("{label}: helper thread panicked"));
@@ -166,7 +166,10 @@ fn read_one_chunk<R: AsyncRead + Unpin>(mut reader: R, signal: &PendingSignal) -
 
 #[test]
 fn driverless_socket_waits_park_instead_of_spinning() {
-    assert!(Cx::current().is_none(), "test must run without an ambient Cx");
+    assert!(
+        Cx::current().is_none(),
+        "test must run without an ambient Cx"
+    );
     let before = fallback_io_driver_probe().unwrap_or_default();
     let mut failures = Vec::new();
 
@@ -195,7 +198,10 @@ fn driverless_socket_waits_park_instead_of_spinning() {
         },
     );
     note_if_spinning(&mut failures, "tcp stream read", tcp_outcome);
-    assert_eq!(tcp_bytes, b"tcp", "tcp stream read returned the released bytes");
+    assert_eq!(
+        tcp_bytes, b"tcp",
+        "tcp stream read returned the released bytes"
+    );
 
     // Unix stream pair.
     let (unix_stream, unix_peer) = UnixStream::pair().expect("unix stream pair");

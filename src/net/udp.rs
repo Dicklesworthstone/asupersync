@@ -1657,7 +1657,7 @@ pub fn fallback_io_driver_probe() -> Option<FallbackIoDriverProbe> {
 ///    else on the fallback driver, and only when neither exists (or the
 ///    reactor refuses the fd) does the caller take the legacy self-wake.
 #[derive(Debug, Default)]
-pub(crate) struct ReactorRegistration {
+pub struct ReactorRegistration {
     registration: Option<IoRegistration>,
     /// Whether `registration` lives on the process-global fallback driver
     /// rather than an ambient `Cx` driver. Such a registration is dropped and
@@ -1669,7 +1669,7 @@ pub(crate) struct ReactorRegistration {
 /// Outcome of [`ReactorRegistration::arm`].
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Armed {
+pub enum Armed {
     /// The fd is registered with a reactor that wakes the waker on readiness;
     /// the caller returns `Pending` without waking anything.
     Parked,
@@ -1814,14 +1814,14 @@ impl ReactorRegistration {
 /// waker that counts wakes and signals a channel, so a test can wait (bounded)
 /// for the wake the fallback reactor pump delivers.
 #[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) mod fallback_io_test_support {
+pub mod fallback_io_test_support {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Mutex};
     use std::task::{Wake, Waker};
 
-    pub(crate) struct SignalWaker {
-        pub(crate) hits: AtomicUsize,
+    pub struct SignalWaker {
+        pub hits: AtomicUsize,
         tx: Mutex<Sender<()>>,
     }
 
@@ -1840,7 +1840,7 @@ pub(crate) mod fallback_io_test_support {
         }
     }
 
-    pub(crate) fn signal_waker() -> (Arc<SignalWaker>, Waker, Receiver<()>) {
+    pub fn signal_waker() -> (Arc<SignalWaker>, Waker, Receiver<()>) {
         let (tx, rx) = channel();
         let signal = Arc::new(SignalWaker {
             hits: AtomicUsize::new(0),
