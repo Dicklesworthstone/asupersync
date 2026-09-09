@@ -102,7 +102,7 @@
     {"path":"tests/conformance/raptorq_differential/Cargo.toml","sha256":"bd40fee112e5012f6799b1b391ba954db1b0e37b4d9008c46957d37d5bdd649e","line_count":32,"role":"standalone differential selector"},
     {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa","line_count":7067,"role":"capability authority"},
     {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"49e85f8defbccb4e9cce3c37d302e965b36de518f8929999928d9464e83ee791","line_count":3296,"role":"baseline authority"},
-    {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"6d398539d44a38fe0a87a5d4b24dff7915898ce5f99005b1fe2cb51f86642e10","line_count":88541,"role":"verification authority"},
+    {"path":"artifacts/dependency_verification_matrix_v1.json","sha256":"d6e0488f1e0b16339e0e20b0c36a55b48e411b904a13d02ceee921a1beab782d","line_count":88887,"role":"verification authority"},
     {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3","line_count":187615,"role":"dependency graph authority"},
     {"path":"COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md","sha256":"10388000250a021e2bdd21ad7e46edcea192dacacac87ad1234abedec92b4ac3","line_count":368,"role":"program authority"},
     {"path":"src/lib.rs","sha256":"baec6f62836d2b3dca6b56ae5bd3d0c2d9717ac60a2d4268b28e509cefe36d36","line_count":513,"role":"crate compilation gate"},

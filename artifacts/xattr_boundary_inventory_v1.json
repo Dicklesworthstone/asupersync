@@ -53,8 +53,8 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
-      "line_count": 7058
+      "sha256": "660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa",
+      "line_count": 7067
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
@@ -63,8 +63,8 @@
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
-      "line_count": 3264
+      "sha256": "49e85f8defbccb4e9cce3c37d302e965b36de518f8929999928d9464e83ee791",
+      "line_count": 3296
     },
     {
       "path": "artifacts/api_surface_map_v1.json",

@@ -71,8 +71,8 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
-      "line_count": 7058
+      "sha256": "660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa",
+      "line_count": 7067
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
