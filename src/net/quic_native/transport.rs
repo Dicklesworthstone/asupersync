@@ -322,9 +322,10 @@ impl LossRecovery {
         // congestion_recovery_start_time) must not contribute to cwnd growth.
         let mut acked_bytes_for_growth: u64 = 0;
 
+        let largest_acked_pn = ack_ranges.iter().map(|range| range.largest).max();
         let mut largest_newly_acked_pn: Option<u64> = None;
-        let mut largest_newly_acked_ack_eliciting_time: Option<u64> = None;
-        let mut largest_newly_acked_ack_eliciting_pn: Option<u64> = None;
+        let mut largest_acked_time: Option<u64> = None;
+        let mut newly_acked_ack_eliciting = false;
 
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
@@ -349,12 +350,10 @@ impl LossRecovery {
                 if largest_newly_acked_pn.is_none_or(|pn| pkt.packet_number > pn) {
                     largest_newly_acked_pn = Some(pkt.packet_number);
                 }
-                if pkt.ack_eliciting
-                    && largest_newly_acked_ack_eliciting_pn.is_none_or(|pn| pkt.packet_number > pn)
-                {
-                    largest_newly_acked_ack_eliciting_pn = Some(pkt.packet_number);
-                    largest_newly_acked_ack_eliciting_time = Some(pkt.time_sent_micros);
+                if Some(pkt.packet_number) == largest_acked_pn {
+                    largest_acked_time = Some(pkt.time_sent_micros);
                 }
+                newly_acked_ack_eliciting |= pkt.ack_eliciting;
             } else {
                 retained.push_back(pkt);
             }
@@ -370,8 +369,13 @@ impl LossRecovery {
             });
         self.largest_acked[space.idx()] = Some(global_largest_acked);
 
-        if let Some(time_sent) = largest_newly_acked_ack_eliciting_time {
-            debug_assert!(largest_newly_acked_ack_eliciting_pn.is_some());
+        // RFC 9002 section 5.1: the frame's largest packet must itself be
+        // newly acknowledged, and at least one newly acknowledged packet
+        // must be ack-eliciting. They need not be the same packet. A frame
+        // repeating its largest packet cannot sample an older new ACK.
+        if newly_acked_ack_eliciting
+            && let Some(time_sent) = largest_acked_time
+        {
             let sample = now_micros.saturating_sub(time_sent);
             let effective_ack_delay = if space == PacketNumberSpace::ApplicationData {
                 ack_delay_micros
@@ -1037,6 +1041,49 @@ mod tests {
         let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[9], 2_000, 70_000);
         assert_eq!(event.acked_packets, 1);
         assert!(t.rtt().smoothed_rtt_micros().is_some());
+    }
+
+    #[test]
+    fn rtt_sample_uses_largest_acked_packet_even_when_it_is_ack_only() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(SentPacketMeta {
+            space: PacketNumberSpace::ApplicationData,
+            packet_number: 2,
+            bytes: 50,
+            ack_eliciting: false,
+            in_flight: false,
+            time_sent_micros: 19_000,
+        });
+
+        // RFC 9002 section 5.1: packet 1 makes this ACK eligible for a
+        // sample, but the frame's largest packet (2) supplies its send time.
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1, 2], 0, 20_000);
+        assert_eq!(event.acked_packets, 2);
+        assert_eq!(event.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(1_000));
+        assert_eq!(t.rtt().smoothed_rtt_micros(), Some(1_000));
+    }
+
+    #[test]
+    fn rtt_sample_ignores_repeated_largest_ack_with_new_older_packet() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 11_000));
+        let first = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 20_000);
+        assert_eq!(first.acked_packets, 1);
+        assert_eq!(first.lost_packets, 0);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(9_000));
+        let original_rtt = t.rtt().clone();
+
+        // The older packet is newly acknowledged and still retires, but
+        // packet 2 was already sampled: its repeated ACK cannot sample 1.
+        let repeated = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1, 2], 0, 20_500);
+        assert_eq!(repeated.acked_packets, 1);
+        assert_eq!(repeated.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.rtt(), &original_rtt);
     }
 
     #[test]
