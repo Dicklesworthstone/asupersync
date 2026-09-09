@@ -8438,7 +8438,11 @@ mod tests {
             .lock()
             .schedule(root_id, Budget::INFINITE.priority);
 
-        lab.step_for_test(); // register timer
+        // Either the joining root or its child can run first. Drain both
+        // runnable tasks before advancing the clock so the child's timer is
+        // registered at virtual time zero rather than after the advance.
+        lab.run_until_idle();
+        assert_eq!(lab.next_timer_deadline(), Some(Time::from_nanos(1_000_000)));
         lab.advance_time(1_000_000);
         lab.run_until_quiescent();
 
