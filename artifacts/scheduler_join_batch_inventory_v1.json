@@ -68,7 +68,7 @@
     "reconciliation_id": "SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-09-09",
     "captured_date_utc": "2026-09-09",
     "reference_commit": "5af6299e1860b2f5f5cc4ea6188999867385a4c3",
-    "documentation_followup_commit": "f9328e57b",
+    "documentation_followup_commit": "e3188231e",
     "reconciliation_state": "CURRENT_TREE_SOURCE_PIN_MAINTENANCE",
     "source_pin_path_count": 15,
     "reconciled_path_count": 10,
@@ -87,7 +87,7 @@
       },
       {
         "path": "src/runtime/builder.rs",
-        "sha256": "8652c283632b417043676e99b6006976846d787643a5ffe49c9d735a6411b57a",
+        "sha256": "270b1831e56b0dbcbf38746c8eb24ea390b6458ae2c4a9114b3b241c5f75ea85",
         "line_count": 11447,
         "classification": "PRODUCTION_JOIN_PRODUCER_LEASES_AND_ADDITIVE_CHECKED_HANDLE_PRESERVE_LEGACY_PANIC_API"
       },
@@ -165,7 +165,7 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "8652c283632b417043676e99b6006976846d787643a5ffe49c9d735a6411b57a",
+      "sha256": "270b1831e56b0dbcbf38746c8eb24ea390b6458ae2c4a9114b3b241c5f75ea85",
       "line_count": 11447,
       "role": "public request-scoped Cx entry plus legacy RuntimeHandle spawn, JoinHandle state, producer leases, completion, admission, and shutdown; additive checked observer"
     },
