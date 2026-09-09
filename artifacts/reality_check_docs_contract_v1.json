@@ -151,8 +151,10 @@
         "default static-only QPACK",
         "opt-in dynamic QPACK field-section",
         "not a claim of h3/quinn drop-in parity or full QUIC deployment parity",
-        "production TCP loopback RemoteRuntime lifecycle proof shipped",
-        "stable production wire format remain adapter-scoped",
+        "`RemoteRuntime` adapter preserves spawn/result, cancellation before ack",
+        "Exact encoder goldens in",
+        "interoperability between archived binary releases, durable",
+        "idempotency across restart, or multi-host/WAN policy and operation",
         "Lean-checked core invariants cover the six non-negotiable runtime invariants",
         "The optional `metrics` feature also has no normal-edge dependency on tokio",
         "The `fuzz` feature is intentionally outside this guarantee",
@@ -181,8 +183,9 @@
         "Bridge-only",
         "Impossible / unsupported",
         "artifacts/http3_qpack_support_matrix_v1.json",
-        "transport-agnostic contract",
-        "adapter-specific responsibilities"
+        "a native TCP+mTLS V3 client/service, and `NativeRemoteRuntime`",
+        "This is pre-delivery static bootstrap failover",
+        "restart-durable idempotency, or automatic route/certificate rollback"
       ],
       "forbidden": [
         "transport-backed remote lifecycle still in progress"
