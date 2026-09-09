@@ -256,6 +256,9 @@ fn source_evidence_rows_bind_b1_b2_b3_artifacts_without_widening_claims() {
 #[test]
 fn package_versions_and_hashes_match_live_committed_package_files() {
     let artifact = signoff();
+    assert_current_package_review(&artifact);
+    let review = &artifact["current_package_review"];
+    let current_hashes = &review["current_hashes"];
     let package_gate = json(PACKAGE_GATE_PATH);
     let gate_versions = array(&package_gate, "package_set")
         .iter()
@@ -271,17 +274,19 @@ fn package_versions_and_hashes_match_live_committed_package_files() {
         let package_name = string(package, "package_name");
         let manifest_path = string(package, "manifest");
         assert_eq!(
-            string(package, "version"),
+            string(review, "package_version"),
             package_manifest_version(manifest_path),
-            "{package_name} signoff version must match live manifest"
+            "{package_name} reviewed candidate version must match live manifest"
         );
         assert_eq!(
-            Some(&string(package, "version").to_owned()),
+            Some(&string(review, "package_version").to_owned()),
             gate_versions.get(package_name),
             "{package_name} signoff version must match B2 package gate"
         );
         assert_eq!(
-            string(package, "manifest_sha256"),
+            current_hashes[manifest_path]
+                .as_str()
+                .unwrap_or_else(|| string(package, "manifest_sha256")),
             sha256_file(manifest_path),
             "{package_name} manifest hash drifted"
         );
@@ -294,11 +299,79 @@ fn package_versions_and_hashes_match_live_committed_package_files() {
         for hash in artifact_hashes {
             let path = string(hash, "path");
             assert_eq!(
-                string(hash, "sha256"),
+                current_hashes[path]
+                    .as_str()
+                    .unwrap_or_else(|| string(hash, "sha256")),
                 sha256_file(path),
                 "{package_name} artifact hash drifted for {path}"
             );
         }
+    }
+}
+
+fn assert_current_package_review(artifact: &Value) {
+    let mut historical = artifact.clone();
+    historical
+        .as_object_mut()
+        .expect("signoff object")
+        .remove("current_package_review");
+    let bytes = serde_json::to_vec(&historical).expect("canonical historical signoff");
+    let digest = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        digest, "179f0dde714d6e62031c6f8306045ebab7c4daa406e9e5c25068c7832b329417",
+        "historical GA authority and package receipt must not be rewritten"
+    );
+    let review = &artifact["current_package_review"];
+    assert_eq!(string(review, "package_version"), env!("CARGO_PKG_VERSION"));
+    assert_eq!(string(review, "status"), "RELEASE_CANDIDATE_NOT_GA_SIGNOFF");
+    assert!(!bool_field(review, "historical_signoff_reissued"));
+    assert!(!bool_field(review, "npm_publish_executed"));
+    let hashes = review["current_hashes"]
+        .as_object()
+        .expect("current hashes");
+    let expected = BTreeSet::from([
+        "packages/browser-core/package.json",
+        "packages/browser-core/index.js",
+        "packages/browser-core/index.d.ts",
+        "packages/browser-core/asupersync.js",
+        "packages/browser-core/asupersync.d.ts",
+        "packages/browser-core/asupersync_bg.wasm",
+        "packages/browser-core/asupersync_bg.wasm.d.ts",
+        "packages/browser-core/abi-metadata.json",
+        "packages/browser-core/debug-metadata.json",
+        "packages/browser/package.json",
+        "packages/browser/src/index.ts",
+        "packages/react/package.json",
+        "packages/next/package.json",
+    ]);
+    assert_eq!(
+        hashes.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        expected
+    );
+    for (path, digest) in hashes {
+        assert_eq!(digest.as_str().expect("digest string"), sha256_file(path));
+    }
+}
+
+#[test]
+fn current_package_review_rejects_stale_bytes_and_historical_promotion() {
+    let baseline = signoff();
+    assert_current_package_review(&baseline);
+    let mut stale = baseline.clone();
+    stale["current_package_review"]["current_hashes"]["packages/browser-core/asupersync_bg.wasm"] =
+        Value::String("0".repeat(64));
+    let mut rewritten = baseline.clone();
+    rewritten["decision"]["candidate_package_version"] = Value::String("0.4.11".to_owned());
+    let mut promoted = baseline;
+    promoted["current_package_review"]["historical_signoff_reissued"] = Value::Bool(true);
+    for rejected in [stale, rewritten, promoted] {
+        assert!(
+            std::panic::catch_unwind(|| assert_current_package_review(&rejected)).is_err(),
+            "invalid current package review must fail closed"
+        );
     }
 }
 

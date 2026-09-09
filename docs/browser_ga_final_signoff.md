@@ -36,10 +36,13 @@ does not promote native-only browser capability parity.
 
 ## Package Versions
 
-All Browser Edition JS/TS packages in this packet are version `0.3.4`. The
-machine artifact records the package manifest hash and every committed package
-artifact hash used by the signoff. A changed hash without a matching refreshed
-B2/B4 packet is a release-blocking mismatch.
+The historical decision and package rows in this packet name version `0.4.9`.
+The September 9 `current_package_review` separately inventories the `0.4.11`
+candidate after fresh RCH prod WASM compilation and packaging. It retains the
+original GA decision, candidate window, and artifact hashes without reissuing
+their authority. The contract checks the current package hashes and rejects
+stale bytes or promotion of the historical signoff. This review does not
+establish a new GA candidate window, npm publication, or full release readiness.
 
 ## Rollback Drill
 

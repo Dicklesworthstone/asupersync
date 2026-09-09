@@ -125,6 +125,30 @@
       "ga_effect": "fail_closed_no_browser_ga_claim"
     }
   ],
+  "current_package_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "package_version": "0.4.11",
+    "status": "RELEASE_CANDIDATE_NOT_GA_SIGNOFF",
+    "historical_signoff_reissued": false,
+    "npm_publish_executed": false,
+    "wasm_source_commit": "7029dce317243366823453928119bddd9e27b126",
+    "scope": "Current candidate package versions and hashes only. The original decision, candidate window, package rows, and GA authority remain historical and do not authorize this candidate's publication or GA promotion.",
+    "current_hashes": {
+      "packages/browser-core/package.json": "e3007336e5420c5e912744dbdc0874ada1977d61761b81d3ca6cf039aa0ea006",
+      "packages/browser-core/index.js": "8e502eb39a97fbf9eecf9a8ad80c7ebb114ee52443e1cb60ffce63f62e93935e",
+      "packages/browser-core/index.d.ts": "7b4c9697f9bee810f467b99c83bc22f1ad508e76349f1353e0f60a4f60142442",
+      "packages/browser-core/asupersync.js": "7e2b71cc51108487491728418b8827a17f4666369cefe791328457730daf696c",
+      "packages/browser-core/asupersync.d.ts": "6fa9bdc6f4221bd7417c434755a322a855e7e5dbfff18abceb73532d6732499a",
+      "packages/browser-core/asupersync_bg.wasm": "62fcd770accbb4dd7328b9bf30b74575409ec912c8a02a2173053fca0df3a7a5",
+      "packages/browser-core/asupersync_bg.wasm.d.ts": "f88c411796cc2c9d5811ac714b5e51a7a11726c5ab5a49cf5df95a888b819e43",
+      "packages/browser-core/abi-metadata.json": "2dd67a5868e0c557b42e1c13295bb33df9776d9ba5d91755a5bdf29be7410dea",
+      "packages/browser-core/debug-metadata.json": "c4a8a145177163d2d97e0feacf18cb7907675cc2aa3e5b3b70e8560526394d1e",
+      "packages/browser/package.json": "ffff63a780e9c4ec87c17d6cb8f95014c5d2e56056899a389c2c9a8324ac4660",
+      "packages/browser/src/index.ts": "b347ae03365060d55482f9ae2e5ceea86c5741e57d64b8c091f0c29500d1e0cf",
+      "packages/react/package.json": "ade0dd97c4dc0124625076f392d52cb0189dda1fd4f0a1b0b968d3a9ad18e61e",
+      "packages/next/package.json": "57c7d4a31bb460c927f30a0baf5b63343ecc3d5323e8c8a9650cfd3e2e754aae"
+    }
+  },
   "package_versions": [
     {
       "package_name": "@asupersync/browser-core",

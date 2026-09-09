@@ -101,10 +101,10 @@ export interface InitOutput {
     readonly websocket_open: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly websocket_recv: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly websocket_send: (a: number, b: number, c: number, d: number, e: number) => void;
-    readonly __wasm_bindgen_func_elem_860: (a: number, b: number, c: number, d: number) => void;
+    readonly __wasm_bindgen_func_elem_859: (a: number, b: number, c: number, d: number) => void;
     readonly __wasm_bindgen_func_elem_112: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_385: (a: number, b: number, c: number) => void;
-    readonly __wasm_bindgen_func_elem_385_3: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_383: (a: number, b: number, c: number) => void;
+    readonly __wasm_bindgen_func_elem_383_3: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number, b: number) => number;
     readonly __wbindgen_export2: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_export3: (a: number) => void;

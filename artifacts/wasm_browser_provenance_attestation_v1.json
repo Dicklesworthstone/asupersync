@@ -9,13 +9,12 @@
     "config_source": {
       "uri": "git+https://github.com/Dicklesworthstone/asupersync",
       "digest": {
-        "sha1": "HEAD"
+        "sha1": "7029dce317243366823453928119bddd9e27b126"
       }
     },
     "command_provenance": [
-      "bash scripts/build_browser_core_artifacts.sh prod",
-      "bash scripts/validate_package_build.sh",
-      "bash scripts/validate_npm_pack_smoke.sh"
+      "RCH_REQUIRE_REMOTE=1 rch exec --base 7029dce317243366823453928119bddd9e27b126 --clean-overlay --no-overlay -- env CARGO_INCREMENTAL=0 RUSTFLAGS='-D warnings' cargo build --locked -j2 -p asupersync-browser-core --target wasm32-unknown-unknown --release --no-default-features --features prod --message-format=json-render-diagnostics",
+      "RCH_REQUIRE_REMOTE=1 rch exec --job --result-dir target/copperoak-release-0411-wasm-package-r1 -- env CARGO_BUILD_JOBS=2 BINARYEN_CORES=2 bash /data/tmp/copperoak-release-0411-wasm-package-inputs-r1/copperoak-release-0411-wasm-package-r1.sh"
     ]
   },
   "subject": [
@@ -24,7 +23,7 @@
       "package": "@asupersync/browser-core",
       "kind": "manifest",
       "digest": {
-          "sha256": "0c6ee067050655dcc6565e2c99aaf0f945bd04c1cec0e0332fc891125dd54fbb"
+          "sha256": "e3007336e5420c5e912744dbdc0874ada1977d61761b81d3ca6cf039aa0ea006"
       }
     },
     {
@@ -32,7 +31,7 @@
       "package": "@asupersync/browser-core",
       "kind": "package-file",
       "digest": {
-          "sha256": "13cac4230f8eeb574d74133379814c8234803e8fa7c8c7b0b7940346a4a591b5"
+          "sha256": "8e502eb39a97fbf9eecf9a8ad80c7ebb114ee52443e1cb60ffce63f62e93935e"
       }
     },
     {
@@ -40,7 +39,7 @@
       "package": "@asupersync/browser-core",
       "kind": "package-file",
       "digest": {
-          "sha256": "45ecd7db8149042ab1b28f51641b93d490d1afc9b76af6d8ceefd8e42a498a19"
+          "sha256": "7b4c9697f9bee810f467b99c83bc22f1ad508e76349f1353e0f60a4f60142442"
       }
     },
     {
@@ -48,7 +47,7 @@
       "package": "@asupersync/browser-core",
       "kind": "package-file",
       "digest": {
-        "sha256": "547f6a607032e08c07e06fbfa172bf800f4821db725fea0956a5f42accee27f0"
+        "sha256": "7e2b71cc51108487491728418b8827a17f4666369cefe791328457730daf696c"
       }
     },
     {
@@ -56,7 +55,7 @@
       "package": "@asupersync/browser-core",
       "kind": "package-file",
       "digest": {
-        "sha256": "d19cd91c0544a0a6e3120f49231fff16ca16e58effd84b24e11282f312b3272b"
+        "sha256": "6fa9bdc6f4221bd7417c434755a322a855e7e5dbfff18abceb73532d6732499a"
       }
     },
     {
@@ -72,7 +71,7 @@
       "package": "@asupersync/browser-core",
       "kind": "wasm",
       "digest": {
-        "sha256": "2206f641a0d2a83d7968aa301e8c30552539b6330050deb87708fd000868951a"
+        "sha256": "62fcd770accbb4dd7328b9bf30b74575409ec912c8a02a2173053fca0df3a7a5"
       }
     },
     {
@@ -80,7 +79,7 @@
       "package": "@asupersync/browser-core",
       "kind": "package-file",
       "digest": {
-        "sha256": "77c67b3be2083c45aec8cc57930e903236ce584bbdf7e263b4e4fdabed422211"
+        "sha256": "f88c411796cc2c9d5811ac714b5e51a7a11726c5ab5a49cf5df95a888b819e43"
       }
     },
     {
@@ -88,7 +87,7 @@
       "package": "@asupersync/browser-core",
       "kind": "metadata",
       "digest": {
-        "sha256": "bcded5f10c7139e0da6ce24990a85efae071b353697b85314cfaad44c1ac790b"
+        "sha256": "2dd67a5868e0c557b42e1c13295bb33df9776d9ba5d91755a5bdf29be7410dea"
       }
     },
     {
@@ -96,7 +95,7 @@
       "package": "@asupersync/browser-core",
       "kind": "metadata",
       "digest": {
-        "sha256": "a01ddbc4fbe173778e55d366f3d4e0bed22f2b0abaefceaa8337aa6aeca5f784"
+        "sha256": "c4a8a145177163d2d97e0feacf18cb7907675cc2aa3e5b3b70e8560526394d1e"
       }
     },
     {
@@ -104,7 +103,7 @@
       "package": "@asupersync/browser",
       "kind": "manifest",
       "digest": {
-          "sha256": "441f13164faa91cb210fc1f272f8f14119d061591b4145a1f4d4529f261eb2fa"
+          "sha256": "ffff63a780e9c4ec87c17d6cb8f95014c5d2e56056899a389c2c9a8324ac4660"
       }
     },
     {
@@ -112,7 +111,7 @@
       "package": "@asupersync/react",
       "kind": "manifest",
       "digest": {
-          "sha256": "f7cf567b7d9ac3ec8eb6b905c3390f52f49d31bf284f1432dd9e2fa0cf0cd7b7"
+          "sha256": "ade0dd97c4dc0124625076f392d52cb0189dda1fd4f0a1b0b968d3a9ad18e61e"
       }
     },
     {
@@ -120,10 +119,27 @@
       "package": "@asupersync/next",
       "kind": "manifest",
       "digest": {
-          "sha256": "3360fece8ff1aac7ec6fab5426c4e431a52d0cc12118c6c330af27641790f84c"
+          "sha256": "57c7d4a31bb460c927f30a0baf5b63343ecc3d5323e8c8a9650cfd3e2e754aae"
       }
     }
   ],
+  "build_receipt": {
+    "profile": "prod",
+    "built_at_utc": "2026-09-09T19:20:57Z",
+    "packaged_at_utc": "2026-09-09T19:31:54Z",
+    "worker": "vmi1264463",
+    "cargo_remote_exit": 0,
+    "cargo_client_exit": 0,
+    "package_remote_exit": 0,
+    "package_client_exit": 0,
+    "raw_wasm_sha256": "346ad0f5265c7a041610d0524d18b87e84ecb435356b0cc40103d7cbc60af060",
+    "optimized_wasm_sha256": "62fcd770accbb4dd7328b9bf30b74575409ec912c8a02a2173053fca0df3a7a5",
+    "wasm_bindgen_version": "0.2.126",
+    "wasm_opt_version": "131",
+    "wasm_opt_flags": ["-Oz", "--enable-bulk-memory", "--strip-dwarf", "--strip-producers", "--vacuum"],
+    "npm_publish_executed": false,
+    "scope": "Fresh prod WASM compilation and packaging only. Manifest versions and package facade files are inventoried current candidate inputs; these commands do not execute TypeScript build, npm pack, or npm publish."
+  },
   "materials": [
     "Cargo.toml",
     "Cargo.lock",
