@@ -22,8 +22,8 @@ const MANIFEST_PATH: &str = "Cargo.toml";
 const ADR_PATH: &str = "docs/adr/dep_plan_adr_009_kafka_client.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str = "a65251dee49ba5d4f39f1be9c3f2eafb33e06089e55bf700bf2474a8139dd9bd";
-const DOC_SHA256: &str = "c9142b9d00a0b07187a50d224534e9268e5226829dfc5e0bbd04de80bf2a4949";
+const ARTIFACT_SHA256: &str = "3363d1fc197b0df6318cbcd50fd088688659308a835f1dd6294564f2fdacb902";
+const DOC_SHA256: &str = "e44af45d6667c1a2fba3aafedb48c9ed2997390d57e14ea3b50a2f7fa8b85810";
 
 const ARTIFACT_ID: &str = "kafka-k1-protocol-security-support-policy-v1";
 const PROGRAM_ID: &str = "dependency-sovereignty-rev5";
@@ -568,9 +568,9 @@ fn check_authority_views(artifact: &Value) -> Result<(), String> {
     let expected = [
         (
             "k1_obligation_projection",
-            279,
+            287,
             "normalized_projection_sha256",
-            "cd4ff24ac2deed867d81d1fb9d81c08f31e57de5c7e77c84e1ea3657e2fa0f37",
+            "59e1ae49f670b9a817c610864ef1b19250657acacf828bef5fc1faceece9084b",
         ),
         (
             "broker_api_version_vectors",

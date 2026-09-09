@@ -3,9 +3,10 @@
 //! Bead: asupersync-dep-p7-kafka-removal-sarszu.2.2.1
 //! Fixture: artifacts/kafka_k2_reachable_schema_broker_matrix_v1.json
 //!
-//! This test reads checked-in bytes only. It does not compile a Kafka feature
-//! profile, contact a broker, run a protocol session, or promote the blocked
-//! packet into schema, interoperability, migration, or cutover evidence.
+//! The default lane reads checked-in bytes only. The Kafka feature adds a
+//! native configuration-rejection check before consumer creation; neither lane
+//! runs a protocol session or promotes the blocked packet into schema,
+//! interoperability, migration, or cutover evidence.
 
 #![allow(dead_code, missing_docs)]
 
@@ -34,6 +35,7 @@ const ROOT_KEYS: &[&str] = &[
     "captured_date_utc",
     "completion_gaps",
     "coverage_receipt",
+    "current_source_review",
     "disposition",
     "error_projection_rows",
     "existing_probe_disposition",
@@ -2105,6 +2107,139 @@ fn validate_authority_inputs(artifact: &Value, root: &Path) -> Result<(), String
         let _ = text(row, "authority_class")?;
     }
     Ok(())
+}
+
+fn validate_current_source_review(artifact: &Value, root: &Path) -> Result<(), String> {
+    let review = &artifact["current_source_review"];
+    expect_exact_keys(
+        review,
+        &[
+            "review_date_utc",
+            "evidence_class",
+            "historical_capture_preserved",
+            "execution_receipt_included",
+            "reviewed_changes",
+            "consumer_group_protocol",
+        ],
+        "current source review",
+    )?;
+    expect_text(review, "review_date_utc", "2026-09-09")?;
+    expect_text(review, "evidence_class", "STATIC_SOURCE_COMPOSITION")?;
+    expect_boolean(review, "historical_capture_preserved", true)?;
+    expect_boolean(review, "execution_receipt_included", false)?;
+    if array(review, "reviewed_changes")?.len() != 4 {
+        return Err("current source review must account for four changes".to_owned());
+    }
+    let protocol = &review["consumer_group_protocol"];
+    expect_exact_keys(
+        protocol,
+        &[
+            "api_key",
+            "historical_reason",
+            "raw_override_exposed",
+            "typed_fields_applied_after_raw_properties",
+            "native_observation_id",
+            "native_package_relative_path",
+            "native_source_sha256",
+            "native_finalization_line_start",
+            "native_finalization_line_end",
+            "native_rejection_state",
+            "current_reachability_state",
+            "native_regression_test",
+            "broker_execution_claimed",
+        ],
+        "consumer protocol source composition",
+    )?;
+    expect_number(protocol, "api_key", 68)?;
+    expect_text(
+        protocol,
+        "historical_reason",
+        "The incumbent defaults group.protocol to classic and Asupersync exposes no override.",
+    )?;
+    expect_boolean(protocol, "raw_override_exposed", true)?;
+    expect_boolean(protocol, "broker_execution_claimed", false)?;
+    expect_text(
+        protocol,
+        "native_rejection_state",
+        "EXPLICIT_TYPED_TIMEOUTS_REJECT_CONSUMER_PROTOCOL_BEFORE_CLIENT_CREATION",
+    )?;
+    expect_text(
+        protocol,
+        "current_reachability_state",
+        "NOT_REACHABLE_FROM_ACCEPTED_CURRENT_CONFIG",
+    )?;
+    expect_text(
+        protocol,
+        "native_regression_test",
+        "consumer_group_protocol_override_is_rejected_before_broker_creation",
+    )?;
+    expect_number(protocol, "native_finalization_line_start", 4224)?;
+    expect_number(protocol, "native_finalization_line_end", 4262)?;
+    let observation = array(artifact, "incumbent_source_observations")?
+        .iter()
+        .find(|row| {
+            row.get("observation_id").and_then(Value::as_str)
+                == Some("KAFKA-K2-1-LIBRDKAFKA-CONFIG")
+        })
+        .ok_or_else(|| "native configuration observation missing".to_owned())?;
+    expect_text(
+        protocol,
+        "native_observation_id",
+        text(observation, "observation_id")?,
+    )?;
+    expect_text(
+        protocol,
+        "native_package_relative_path",
+        text(observation, "package_relative_path")?,
+    )?;
+    expect_text(
+        protocol,
+        "native_source_sha256",
+        text(observation, "sha256")?,
+    )?;
+    let typed = array(protocol, "typed_fields_applied_after_raw_properties")?;
+    if typed
+        != &[
+            Value::from("session.timeout.ms"),
+            Value::from("heartbeat.interval.ms"),
+        ]
+    {
+        return Err("consumer protocol timeout boundary changed".to_owned());
+    }
+
+    let source = fs::read_to_string(root.join("src/messaging/kafka_consumer.rs"))
+        .map_err(|error| format!("read consumer source: {error}"))?;
+    let config = source
+        .split_once("fn build_consumer_config(config: &ConsumerConfig)")
+        .and_then(|(_, rest)| rest.split_once("fn map_consumer_error"))
+        .map(|(body, _)| body)
+        .ok_or_else(|| "consumer native configuration boundary missing".to_owned())?;
+    let raw_end = config
+        .find("client.set(key.as_str(), value.as_str());")
+        .ok_or_else(|| "raw consumer property forwarding missing".to_owned())?;
+    for field in ["session.timeout.ms", "heartbeat.interval.ms"] {
+        let setter = format!("client.set(\n        \"{field}\",");
+        if config.find(&setter).is_none_or(|offset| offset <= raw_end) {
+            return Err(format!(
+                "typed timeout {field} no longer follows raw forwarding"
+            ));
+        }
+    }
+    if config.contains("\"group.protocol\"") {
+        return Err("typed group protocol mapping requires reachability review".to_owned());
+    }
+    let exclusion = array(artifact, "explicit_non_reachable_rows")?
+        .iter()
+        .find(|row| {
+            row.get("row_id").and_then(Value::as_str)
+                == Some("KAFKA-K2-1-NONREACH-CONSUMER-GROUP-PROTOCOL")
+        })
+        .ok_or_else(|| "consumer protocol exclusion missing".to_owned())?;
+    expect_text(
+        exclusion,
+        "reason",
+        "Raw group.protocol=consumer is forwarded, but the facade always explicitly sets session.timeout.ms and heartbeat.interval.ms afterwards; pinned native finalization rejects these fields for the consumer protocol before client creation.",
+    )
 }
 
 fn validate_external_authorities(artifact: &Value) -> Result<(), String> {
@@ -4392,6 +4527,7 @@ fn validate_checked_in_hashes(root: &Path) -> Result<(), String> {
 fn validate_artifact(artifact: &Value, root: &Path) -> Result<(), String> {
     validate_identity_and_policy(artifact)?;
     validate_authority_inputs(artifact, root)?;
+    validate_current_source_review(artifact, root)?;
     validate_external_authorities(artifact)?;
     validate_incumbent_observations(artifact)?;
     validate_reachable_rows(artifact)?;
@@ -4420,10 +4556,61 @@ fn kafka_k2_static_frontier_is_exact_and_fail_closed() -> Result<(), String> {
     validate_document(&root)
 }
 
+#[cfg(feature = "kafka")]
+#[test]
+fn consumer_group_protocol_override_is_rejected_before_broker_creation() {
+    use asupersync::messaging::kafka::KafkaError;
+    use asupersync::messaging::kafka_consumer::{ConsumerConfig, KafkaConsumer};
+
+    // The native property exists and accepts this value. Non-reachability is
+    // caused by composing it with the facade's mandatory typed timeout fields.
+    let mut native = rdkafka::ClientConfig::new();
+    native.set("group.protocol", "consumer");
+    native
+        .create_native_config()
+        .expect("the pinned native client recognizes the consumer protocol");
+
+    for raw_timeout in [None, Some("45000"), Some("")] {
+        let mut config =
+            ConsumerConfig::new(vec!["127.0.0.1:1".to_owned()], "k2-protocol-boundary")
+                .with_property("group.protocol", "consumer");
+        // A raw value (including an empty string) cannot remove the
+        // typed timeout because the facade writes that property afterwards.
+        if let Some(value) = raw_timeout {
+            config = config.with_property("session.timeout.ms", value);
+        }
+        // Native finalization rejects the conflicting properties before a
+        // client thread or connection can be created.
+        match KafkaConsumer::new(config) {
+            Err(KafkaError::Config(message)) => {
+                assert!(message.contains("session.timeout.ms"), "{message}");
+                assert!(message.contains("group.protocol=consumer"), "{message}");
+            }
+            Err(error) => panic!("unexpected error boundary: {error:?}"),
+            Ok(_) => panic!("consumer protocol reached native client creation"),
+        }
+    }
+}
+
 #[test]
 fn kafka_k2_packet_rejects_completion_inflation() -> Result<(), String> {
     let root = repo_root();
     let artifact = parse_artifact()?;
+    validate_artifact(&artifact, &root)?;
+
+    let mut hidden_override = artifact.clone();
+    hidden_override["current_source_review"]["consumer_group_protocol"]["raw_override_exposed"] =
+        Value::Bool(false);
+    expect_invalid(&hidden_override, &root, "hidden consumer protocol override")?;
+
+    let mut invented_execution = artifact.clone();
+    invented_execution["current_source_review"]["consumer_group_protocol"]["broker_execution_claimed"] =
+        Value::Bool(true);
+    expect_invalid(
+        &invented_execution,
+        &root,
+        "configuration rejection promoted to broker proof",
+    )?;
 
     let mut missing_telemetry = artifact.clone();
     let rows = missing_telemetry

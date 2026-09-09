@@ -21,7 +21,7 @@
       "Producer flush yields through the runtime timer while ThreadedProducer performs background polling.",
       "ProducerConfig and ConsumerConfig now implement Debug manually to hide every raw property value while retaining keys and typed settings. Native ClientConfig rejection paths omit the value and free-form description, preserving the Config category and the parallel-client creation prefix; explicit property getters still expose original values and no erasure claim is made.",
       "The excluded fuzz lockfile is now tracked. Its current pin records source availability, not fuzz execution or broker parity.",
-      "Root manifest, lock, library root, dependency registry and ledger changed for release packaging, workspace versions and other capabilities. The optional rdkafka edge, locked Kafka package identities, native messaging gate and KEEP_INCUMBENT authority are unchanged."
+      "Root manifest, lock, library root, dependency registry and ledger changed for release packaging, workspace versions and other capabilities. ADR registry commit cad61b7b1 adds the offline-tuner-logging-parity scenario only; CAP-KAFKA and DEP-ADR-009 rows are unchanged. The optional rdkafka edge, locked Kafka package identities, native messaging gate and KEEP_INCUMBENT authority are unchanged."
     ],
     "historical_public_census": {
       "public_top_level_declarations": 37,
@@ -160,8 +160,8 @@
     {
       "pin_id": "KAFKA-PIN-ADR-REGISTRY",
       "path": "artifacts/dependency_api_adr_registry_v1.json",
-      "record_count": 6831,
-      "sha256": "aba29040cbbcc6daba7166bbe0a3eacca1483b4c4522125bd5d93f6c0091d3d1",
+      "record_count": 6832,
+      "sha256": "54c022426dfb1053607621fbdf7a1e4d9b4a4caad85460201eb44654ae512f0e",
       "role": "ADR-to-capability authority mapping",
       "pin_state": "CURRENT_REVIEWED"
     },

@@ -31,8 +31,15 @@ that a broker accepted the requests or requested telemetry.
 
 The selected frontier excludes the admin API family because the shipped
 Asupersync Kafka facade has no admin surface. It also excludes
-`ConsumerGroupHeartbeat` (68): the incumbent defaults to the classic group
-protocol and the facade exposes no override. `ConsumerGroupDescribe` (69) is
+`ConsumerGroupHeartbeat` (68): the facade now forwards raw
+`group.protocol=consumer`, but always sets the typed `session.timeout.ms` and
+`heartbeat.interval.ms` afterwards. The checksum-pinned native package rejects
+these explicitly set timeouts for the consumer protocol during configuration
+finalization, before creating the client. The original explanation that the
+facade exposes no override is retained in `current_source_review` as historical
+provenance. The current exclusion depends on this composition; changing the
+typed timeout mapping requires another reachability review.
+`ConsumerGroupDescribe` (69) is
 admin-only in the pinned incumbent. Additive admin parity remains owned by
 K10.1.
 
@@ -376,10 +383,23 @@ K2.1 remains open until all of the following are complete:
 
 ## Validation and claim boundary
 
-This pass used repository inspection, exact byte/hash inventory, current and
+The original August pass used repository inspection, exact byte/hash inventory, current and
 historical official-source reviews, and an independent incumbent-source
 cross-check only. It ran no compiler, formatter, test, broker, service,
 container, protocol session, or remote job.
+
+The September source review is recorded separately in `current_source_review`.
+It accounts for raw configuration, redacted diagnostics, consumer observations
+and current K0/K1 inputs. The native `rdkafka_conf.c` bytes were recovered from
+the package with checksum
+`e234cf318915c1059d4921ef7f75616b5219b10b46e9f3a511a15eb4b56a3f77`;
+lines 4224-4262 explain the API 68 configuration rejection. The default contract
+checks the source composition and static packet. With `--features kafka`, the
+focused `consumer_group_protocol_override_is_rejected_before_broker_creation`
+test exercises the public constructor rejection for an omitted raw timeout, an
+explicit raw timeout, and an empty raw value, after confirming the native
+property accepts the protocol value. Its result belongs to the separate test
+receipt; it supplies no broker handshake or accepted protocol range.
 
 Git blob object IDs establish source-object identity, not per-file raw-byte
 SHA-256 security attestations. Historical range rows are source-derived

@@ -51,49 +51,49 @@
       "input_id": "K1-4-INPUT-K1-1",
       "role": "K1_AUTHORITY_AND_NAMESPACE_PACKET",
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
-      "byte_count": 42754,
-      "record_count": 738,
-    "sha256": "4524caee86d27e4fe1e52ad7bbc9a250bf1e88987a7181d5a9a8d2931b7fdc3a"
+      "byte_count": 44410,
+      "record_count": 751,
+      "sha256": "7b6f941d2701b8f098f29cc656bf584b6151e71b0969ebcd693e88cad42ba969"
     },
     {
       "input_id": "K1-4-INPUT-K1-1-DOCUMENT",
       "role": "K1_AUTHORITY_DOCUMENT",
       "path": "docs/kafka_k1_client_contract.md",
-      "byte_count": 12809,
-      "record_count": 291,
-      "sha256": "3657c47298408fdd5f6906376265ac3c587085ba5b0df67988fac7266fd6e116"
+      "byte_count": 14651,
+      "record_count": 323,
+      "sha256": "f616455c55edaa0568e43c83154d583e33d8337f4688eb6024b842f05fd737d5"
     },
     {
       "input_id": "K1-4-INPUT-K1-1-CONTRACT",
       "role": "K1_AUTHORITY_CONTRACT_SOURCE",
       "path": "tests/kafka_k1_client_contract.rs",
-      "byte_count": 95396,
-      "record_count": 2585,
-    "sha256": "056cfa1bbf00304f96e62f3a1fc25189c3046ad91953cb44f32a57b9f2121255"
+      "byte_count": 99472,
+      "record_count": 2688,
+      "sha256": "a9f6ca6b8b39a4f19c1c1e5255addfb2ca10b07d0c0bb3a1c8276c7a08756ff5"
     },
     {
       "input_id": "K1-4-INPUT-K1-2",
       "role": "PROTOCOL_SECURITY_AND_SUPPORT_POLICY",
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
-    "byte_count": 82164,
-      "record_count": 1399,
-    "sha256": "a65251dee49ba5d4f39f1be9c3f2eafb33e06089e55bf700bf2474a8139dd9bd"
+      "byte_count": 84167,
+      "record_count": 1411,
+      "sha256": "3363d1fc197b0df6318cbcd50fd088688659308a835f1dd6294564f2fdacb902"
     },
     {
       "input_id": "K1-4-INPUT-K1-3",
       "role": "PUBLIC_API_CONFIGURATION_AND_ERROR_CONTRACT",
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
-    "byte_count": 37846,
-      "record_count": 753,
-    "sha256": "2dfb53c50b12df0eb0b82da676e699d6db88423d7dd4eaaf30aff6b438d0e6e7"
+      "byte_count": 40490,
+      "record_count": 779,
+      "sha256": "2a78eef4003336f33e9fce011305fde4c4c5cceddd18be5cbeb79dcca34d40f2"
     },
     {
       "input_id": "K1-4-INPUT-K0-5",
       "role": "K0_AGGREGATE_AUTHORITY",
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
-      "byte_count": 29494,
-      "record_count": 284,
-    "sha256": "f4f2012b475793d57f5ef2f5ed40f08f985dff9a7c709cf1c67416a3eb9f9f09"
+      "byte_count": 31779,
+      "record_count": 299,
+      "sha256": "f57eccb9f506b37721d46a7d0b15fecdb5621e3603690f8a21c7dcda5cbd19e9"
     },
     {
       "input_id": "K1-4-INPUT-K0-2",
@@ -107,9 +107,9 @@
       "input_id": "K1-4-INPUT-K0-4",
       "role": "RESTART_TEARDOWN_AND_CANCELLATION_FAULT_VECTOR_AUTHORITY",
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-      "byte_count": 119250,
-      "record_count": 2187,
-    "sha256": "fe2c1ddb92a1ab53eb9496a6bcfd3c41ba1f7277ef63c85d6747137e6f92a7c3"
+      "byte_count": 122592,
+      "record_count": 2214,
+      "sha256": "3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3"
     },
     {
       "input_id": "K1-4-INPUT-ADR",
@@ -1875,7 +1875,7 @@
     "source_authority_reference_sha256": "447712b9a06cd2c2e4b30f3ce18e8b340e90f345fe1bbe6224d0bdcc5bb88ccf",
     "no_claim_boundary_sha256": "bc5703ea9ef717f0796db249350ceafac85544acc31ef47f2da2b6ac33be9ce3",
     "authority_contract_sha256": "6a51fa1221869f3125a3ec478dc5e729eac868efc200a4779fdcaff35599cbf7",
-    "authority_input_contract_sha256": "a2c8b4f9b38cc27a24cdc75a747fe5957dcb57684338e5b5a4781acf06d149fc",
+    "authority_input_contract_sha256": "80b87deb60f35978ba903b742ed91f8181b576da83ea34cccaf3572a367e0cdb",
     "authority_views_contract_sha256": "4cb31018206bd0f69799aea9d28e1a6ede182565cbdd0fb589aaf0606f167b1d",
     "policy_contract_sha256": "ec236faf14c33462c00c5c365e188b1a7089a3215329dd856699633ca4c2b396",
     "semantic_coverage_contract_sha256": "871a8ac39453ef174f11425426c6657ebc1dd58a376d552cc09773491ac71c70",

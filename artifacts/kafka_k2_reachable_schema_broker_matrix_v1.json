@@ -10,6 +10,33 @@
   "adr_id": "DEP-ADR-009",
   "inventory_state": "STATIC_REACHABILITY_FRONTIER_FROZEN_API10_API18_API22_AND_AUTH_BODY_PARTIAL_SCHEMA_AND_BROKER_PROOF_BLOCKED",
   "disposition": "KEEP_INCUMBENT_BLOCK_K2_2",
+  "current_source_review": {
+    "review_date_utc": "2026-09-09",
+    "evidence_class": "STATIC_SOURCE_COMPOSITION",
+    "historical_capture_preserved": true,
+    "execution_receipt_included": false,
+    "reviewed_changes": [
+      "Raw producer and consumer properties now reach native configuration before typed fields; current Debug and native ClientConfig rejection redact raw values. Neither change supplies a broker receipt or changes accepted numeric ranges.",
+      "Consumer diagnostics, cooperative assignment callbacks, bounded leave polling and transient-error observations change local behavior and inventory joins, without adding an administration facade or consumer-offset transaction enrollment.",
+      "The API 68 exclusion remains correct for constructible current consumer configurations, but its historical no-override explanation is superseded by the explicit typed-timeout/native-finalization conflict.",
+      "Current K0/K1 inputs are reconciled separately from the original August schema projections, native package identities, broker-profile blockers and static validation receipt. All 22 selected API rows, 88 partial field rows and ten authentication outcome rows retain their evidence limits."
+    ],
+    "consumer_group_protocol": {
+      "api_key": 68,
+      "historical_reason": "The incumbent defaults group.protocol to classic and Asupersync exposes no override.",
+      "raw_override_exposed": true,
+      "typed_fields_applied_after_raw_properties": ["session.timeout.ms", "heartbeat.interval.ms"],
+      "native_observation_id": "KAFKA-K2-1-LIBRDKAFKA-CONFIG",
+      "native_package_relative_path": "librdkafka/src/rdkafka_conf.c",
+      "native_source_sha256": "14d379fcc6744d2677cea5e6b21aea2585b08f702d83a52f9f8c2a0469493c15",
+      "native_finalization_line_start": 4224,
+      "native_finalization_line_end": 4262,
+      "native_rejection_state": "EXPLICIT_TYPED_TIMEOUTS_REJECT_CONSUMER_PROTOCOL_BEFORE_CLIENT_CREATION",
+      "current_reachability_state": "NOT_REACHABLE_FROM_ACCEPTED_CURRENT_CONFIG",
+      "native_regression_test": "consumer_group_protocol_override_is_rejected_before_broker_creation",
+      "broker_execution_claimed": false
+    }
+  },
   "policy": {
     "accepted_numeric_ranges": false,
     "field_projection_complete": false,
@@ -27,33 +54,33 @@
       "input_id": "KAFKA-K2-1-INPUT-CARGO-TOML",
       "authority_class": "REPOSITORY_MANIFEST",
       "path": "Cargo.toml",
-      "byte_count": 37889,
-      "record_count": 1061,
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b"
+      "byte_count": 41393,
+      "record_count": 1121,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-CARGO-LOCK",
       "authority_class": "LOCKED_DEPENDENCY_IDENTITY",
       "path": "Cargo.lock",
-      "byte_count": 114614,
-      "record_count": 4666,
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236"
+      "byte_count": 114587,
+      "record_count": 4664,
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-PRODUCER-SOURCE",
       "authority_class": "INCUMBENT_REACHABILITY",
       "path": "src/messaging/kafka.rs",
-      "byte_count": 149141,
-      "record_count": 4335,
-      "sha256": "1329d49653935c9dc9a1c18cff136d9f8bfb21f204f908f562d6c3da62cc7de7"
+      "byte_count": 156720,
+      "record_count": 4521,
+      "sha256": "a737bbe271e70cf830e920426681b6199fc5b9c969243e67aea5ec8b38d27720"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-CONSUMER-SOURCE",
       "authority_class": "INCUMBENT_REACHABILITY",
       "path": "src/messaging/kafka_consumer.rs",
-      "byte_count": 102484,
-      "record_count": 2757,
-      "sha256": "82646e24d6e8ebdc07f5ea3a283f681b59855b952e5f86adf575ddc04ee6f61d"
+      "byte_count": 126897,
+      "record_count": 3317,
+      "sha256": "157847de9e5611ba8464131dab28a14aa31f841af264fa56a27efd69c6e7504a"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-2",
@@ -75,9 +102,9 @@
       "input_id": "KAFKA-K2-1-INPUT-K0-4",
       "authority_class": "BROKER_PROVENANCE_BASELINE",
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-      "byte_count": 119250,
-      "record_count": 2187,
-    "sha256": "fe2c1ddb92a1ab53eb9496a6bcfd3c41ba1f7277ef63c85d6747137e6f92a7c3"
+      "byte_count": 122592,
+      "record_count": 2214,
+      "sha256": "3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-3",
@@ -473,7 +500,7 @@
   ],
   "explicit_non_reachable_rows": [
     {"row_id":"KAFKA-K2-1-NONREACH-ADMIN","api_keys":[],"surface_scope":"ADMIN_FACADE","enumeration_state":"DEFERRED_TO_K10_1","reason":"The shipped Asupersync facade has no admin surface; K10.1 owns the exact additive API disposition.","state":"ABSENT_NOT_PARITY"},
-    {"row_id":"KAFKA-K2-1-NONREACH-CONSUMER-GROUP-PROTOCOL","api_keys":[68],"surface_scope":"CURRENT_CONSUMER_CONFIGURATION","enumeration_state":"EXACT","reason":"The incumbent defaults group.protocol to classic and Asupersync exposes no override.","state":"NOT_REACHABLE_FROM_ACCEPTED_CURRENT_CONFIG"},
+    {"row_id":"KAFKA-K2-1-NONREACH-CONSUMER-GROUP-PROTOCOL","api_keys":[68],"surface_scope":"CURRENT_CONSUMER_CONFIGURATION","enumeration_state":"EXACT","reason":"Raw group.protocol=consumer is forwarded, but the facade always explicitly sets session.timeout.ms and heartbeat.interval.ms afterwards; pinned native finalization rejects these fields for the consumer protocol before client creation.","state":"NOT_REACHABLE_FROM_ACCEPTED_CURRENT_CONFIG"},
     {"row_id":"KAFKA-K2-1-NONREACH-CONSUMER-GROUP-DESCRIBE","api_keys":[69],"surface_scope":"ADMIN_FACADE","enumeration_state":"EXACT","reason":"ConsumerGroupDescribe is admin-only in the pinned incumbent and the facade has no admin surface.","state":"ABSENT_NOT_PARITY"}
   ],
   "broker_profile_rows": [

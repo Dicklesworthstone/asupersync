@@ -8,6 +8,26 @@
   "adr_id": "DEP-ADR-009",
   "captured_date_utc": "2026-08-04",
   "baseline_revision": "375d8f626f34378ab75279851ef6db18a47994e4",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "release_owner": "asupersync-ghxhvm",
+    "historical_scope": "The original capture, baseline, child completion receipts, 52 typed historical edges, three historical routing overlays, and original execution boundaries remain preserved. Current child pins and derived joins describe the reviewed source separately.",
+    "historical_obligation_row_count": 279,
+    "current_obligation_row_count": 287,
+    "historical_semantic_row_count": 97,
+    "current_semantic_row_count": 102,
+    "historical_shadow_operation_count": 38,
+    "current_shadow_operation_count": 40,
+    "reviewed_changes": [
+      "Three public consumer diagnostic types and five semantic rows expand the child obligation partition to 33 public and 102 semantic rows; all 12 shared keys and their policy owners remain unchanged.",
+      "Ordered raw producer and consumer properties add two retained configuration bindings and three resource edges. The semantic classes are 45 resource, 26 resource/lifecycle, and 31 context rows, with 64 configuration edges and the same 119 lifecycle edges.",
+      "The original K1.2 52-edge typing and three K1.5 overlays remain historical. Four corrected current child groups have explicit replacement typing; the other six retain their historical typing, yielding 56 current edges without per-message or broker evidence.",
+      "Rebalance diagnostics and retained transient-error accessors join the local comparison class, yielding 21 local/accessor operations among 40 operations. Native protocol queries and lock acquisition remain synchronous; local classification does not authorize concurrent shadow execution."
+    ],
+    "historical_execution_claims_preserved": true,
+    "runtime_evidence_promoted": false,
+    "cutover_allowed": false
+  },
   "inventory_state": "K1_5_AGGREGATE_EVIDENCE_COEXISTENCE_ROLLBACK_GATE_FROZEN_KEEP_INCUMBENT",
   "policy": {
     "mode": "STATIC_ONLY_FAIL_CLOSED",
@@ -15,7 +35,7 @@
     "child_definition_rule": "K1.1 through K1.4 remain the sole definition authorities for their rows. K1.5 stores typed references and joins only; a repeated child ID is never a second obligation definition.",
     "input_pin_rule": "Every child artifact, companion document, and checked-in contract source is pinned by exact repository bytes, logical-record count, and SHA-256.",
     "shared_input_rule": "When child packets pin the same path, every observed SHA-256 must agree. A missing pin or a second hash for one path is a blocking conflict.",
-    "obligation_rule": "The seven K1.1 obligation domains partition exactly 279 typed rows. Missing, extra, duplicate, conflicting, or unowned rows keep the incumbent.",
+    "obligation_rule": "The seven current K1.1 obligation domains partition exactly 287 typed rows. Missing, extra, duplicate, conflicting, or unowned rows keep the incumbent.",
     "evidence_rule": "Unit, executable model, property, fuzz, independent, and real-service vectors are separate required evidence classes. Planned, static, local-model, wire-only, compile-only, NOT_RUN, UNKNOWN, BLOCKED, or silent-skip state is never execution evidence.",
     "protocol_rule": "Only rows explicitly typed MESSAGE_SET or CONFIG_MAPPING by the accepted child or K1.5 adjudication may claim protocol bindings. LOCAL_ONLY, ABSENT_GAP, INVENTORY_ONLY, and REFERENCE_ONLY rows must not acquire invented Kafka messages.",
     "typed_binding_adjudication_rule": "K1.2 binding-group membership is historical input, not semantic proof. K1.5 must type each corrected row as MESSAGE_SET, CONFIG_MAPPING, LOCAL_ONLY, INVENTORY_ONLY, or REFERENCE_ONLY and must retain every displaced coarse reference in the conflict ledger.",
@@ -356,11 +376,11 @@
   "cross_child_join_model": {
     "definition_authority": "artifacts/kafka_k1_obligation_index_v1.json#/namespace_projection/k1_obligation_projection",
     "definition_reference_rule": "The K1.1 typed tuple is the unique obligation definition. K1.2 policy cells, K1.3 dispositions, K1.4 resource/lifecycle rows, and K1.5 evidence routes are references or overlays with independent namespaces.",
-    "obligation_row_count": 279,
+    "obligation_row_count": 287,
     "obligation_partitions": [
       {
         "domain": "public_symbols",
-        "row_count": 30,
+        "row_count": 33,
         "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
         "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
         "evidence_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
@@ -368,7 +388,7 @@
       },
       {
         "domain": "semantic_rows",
-        "row_count": 97,
+        "row_count": 102,
         "definition_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
         "policy_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.3",
         "overlay_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.1.4",
@@ -462,7 +482,7 @@
     "child_namespace_counts": {
       "k1_2_policy_cells": 90,
       "k1_2_protocol_binding_groups": 10,
-      "k1_3_contract_rows": 179,
+      "k1_3_contract_rows": 187,
       "k1_4_resource_rows": 42,
       "k1_4_lifecycle_rows": 19,
       "k1_4_transition_rows": 133,
@@ -479,22 +499,22 @@
     "k1_3_k1_4_semantic_resource_lifecycle_join": {
       "semantic_authority_via_child_stage": "K1.3",
       "semantic_authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
-      "semantic_authority_byte_count": 229415,
-      "semantic_authority_record_count": 2560,
-      "semantic_authority_sha256": "02011e3bcf20b682817ed7f2e1043a4b5d1359d46105039c57c6efbe90129e3c",
-      "semantic_row_count": 97,
+      "semantic_authority_byte_count": 244004,
+      "semantic_authority_record_count": 2687,
+      "semantic_authority_sha256": "0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1",
+      "semantic_row_count": 102,
       "classification_counts": {
-        "RESOURCE": 43,
+        "RESOURCE": 45,
         "RESOURCE_AND_LIFECYCLE": 26,
-        "CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION": 28
+        "CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION": 31
       },
-      "classification_projection_sha256": "6bfbbd0e034be578cc508b99b2f7256f9511650632249fa485c5ab5bf1519e35",
+      "classification_projection_sha256": "f4127207a9f0c4678e970b25e43a9c5833b85b13c03722fa6c2f55211048c087",
       "missing_semantic_count": 0,
       "duplicate_semantic_count": 0,
-      "resource_semantic_binding_count": 43,
-      "resource_semantic_binding_sha256": "bc625fbcca3de75d72d2bc2919cecc7636a94d6b25943bb37743d6c92b63ead9",
-      "config_to_resource_edge_count": 61,
-      "config_to_resource_edge_sha256": "9f790461b8d57091300ca27366a9759f7462e0064a1277df21d4e18a7d8ca6f3",
+      "resource_semantic_binding_count": 45,
+      "resource_semantic_binding_sha256": "cacb6c3934f763dd7f51ae32b5e2ab6cbb2d62acfe96f4f8c289ae2876add408",
+      "config_to_resource_edge_count": 64,
+      "config_to_resource_edge_sha256": "c0ac75df72747ac980dc37aa304792c834a61caea50a82ffee52d4f207043089",
       "config_to_resource_edge_rule": "For every K1.4 semantic_resource_bindings row, emit semantic_id, one TAB, each resource_id, and one LF; bytewise sort complete edge rows before SHA-256.",
       "lifecycle_semantic_target_edge_count": 119,
       "lifecycle_semantic_target_edge_sha256": "16774cada71f64fe1d8b55519f219eddd98d58c6a7f7039d0805e8bc2c486874",
@@ -509,12 +529,60 @@
     "unowned_obligation_count": 0
   },
   "semantic_binding_adjudication": {
-    "authority_rule": "The K1.2 groups remain immutable historical policy inputs. The typed overlays below replace only their K1.5 evidence-routing interpretation; they neither rewrite child bytes nor claim protocol execution.",
+    "authority_rule": "Historical K1.2 typing and K1.5 routing overlays remain immutable provenance. Current child groups resolve through current_row_typing_overrides or the unchanged historical typing, checked against current child membership. Historical overlays retain additional typed routing context; neither layer claims protocol execution or per-message attribution.",
     "historical_binding_group_count": 10,
     "row_typed_binding_group_count": 10,
     "historical_row_typing_edge_count": 52,
     "historical_row_typing_projection_sha256": "ce317ee496fa450c1676161c21eeb0221041e502450d211504fbcfb333ca7a01",
     "historical_row_typing_projection_rule": "For every historical_row_typing edge, emit binding_ref, TAB, authority_row_id, TAB, kind; bytewise sort all 52 rows, append one LF per row, and SHA-256.",
+    "current_row_typing_edge_count": 56,
+    "current_row_typing_projection_sha256": "PENDING_STATIC_DIGEST",
+    "current_row_typing_overrides": [
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-004-FETCH",
+        "typed_edges": [
+          {"authority_row_id": "KCO-OP-003", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KCO-OP-004", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KCO-OP-006", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KAFKA-ENUM-006", "kind": "REFERENCE_ONLY"},
+          {"authority_row_id": "KAFKA-ENUM-007", "kind": "REFERENCE_ONLY"}
+        ]
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-005-GROUP",
+        "typed_edges": [
+          {"authority_row_id": "KCO-CFG-019", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KCO-OP-004", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KCO-OP-005", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-009", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KAFKA-ENUM-008", "kind": "REFERENCE_ONLY"}
+        ]
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-006-OFFSETS",
+        "typed_edges": [
+          {"authority_row_id": "KCO-OP-006", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KCO-OP-007", "kind": "MESSAGE_SET"},
+          {"authority_row_id": "KCO-OP-008", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-015", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-016", "kind": "LOCAL_ONLY"}
+        ]
+      },
+      {
+        "binding_ref": "KAFKA-K1-2-BIND-010-LOCAL",
+        "typed_edges": [
+          {"authority_row_id": "KAFKA-K1-SHARED-011", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-OP-001", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-OP-002", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KPR-CFG-026", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KCO-CFG-019", "kind": "CONFIG_MAPPING"},
+          {"authority_row_id": "KCO-OP-018", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KCO-OP-019", "kind": "LOCAL_ONLY"},
+          {"authority_row_id": "KAFKA-ENUM-003", "kind": "REFERENCE_ONLY"},
+          {"authority_row_id": "KAFKA-ABS-002", "kind": "ABSENT_GAP"}
+        ]
+      }
+    ],
     "membership_adjudicated_binding_group_count": 3,
     "historical_membership_preserved_group_count": 7,
     "observed_misjoined_group_count": 3,

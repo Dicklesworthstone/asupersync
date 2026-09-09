@@ -22,8 +22,8 @@ const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
 
-const ARTIFACT_SHA256: &str = "2dfb53c50b12df0eb0b82da676e699d6db88423d7dd4eaaf30aff6b438d0e6e7";
-const DOC_SHA256: &str = "ee938c6af5aa904c824b46697a996973c6248fdc6de56bf6db1d158ab54ba153";
+const ARTIFACT_SHA256: &str = "2a78eef4003336f33e9fce011305fde4c4c5cceddd18be5cbeb79dcca34d40f2";
+const DOC_SHA256: &str = "adcf36557dc8081d975ed3d73783b54bcc81a1c24917b6e03ef54f0d9b29e601";
 
 const ARTIFACT_ID: &str = "kafka-k1-public-api-contract-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -79,7 +79,7 @@ const FINDING_OWNER_EDGE_SHA256: &str =
 const CONFLICT_ROW_SHA256: &str =
     "1473c981febb31cfaa4bc99fa781c7de67c9a885a1135724d6cea2b4aabcda51";
 const HANDOFF_ROW_SHA256: &str = "e41627d1890e05487e9f76055d95015ff4309701e141f2f443b71bfd830df89b";
-const NO_CLAIM_SHA256: &str = "761b33cf8a1c0e8a3c83ffb8f4597e1c2f526e14a6689e05d8113e09b917d7a6";
+const NO_CLAIM_SHA256: &str = "dba7367af67a8a7e50a1e4b432f48fb7d889843b8e14da8f7bf1726fde68d4bd";
 
 const DOC_BEGIN: &str = "<!-- BEGIN KAFKA K1.3 PUBLIC API CONTRACT -->";
 const DOC_END: &str = "<!-- END KAFKA K1.3 PUBLIC API CONTRACT -->";

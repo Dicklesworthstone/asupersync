@@ -665,8 +665,8 @@ fn validate_conflicts_and_obligations(inputs: &Inputs, artifact: &Value) -> Resu
 
     let join = &artifact["cross_child_join_model"];
     let expected_counts = BTreeMap::from([
-        ("public_symbols", 30usize),
-        ("semantic_rows", 97),
+        ("public_symbols", 33usize),
+        ("semantic_rows", 102),
         ("shared_semantic_keys", 12),
         ("explicit_absences", 2),
         ("downstream_journeys", 15),
@@ -682,8 +682,8 @@ fn validate_conflicts_and_obligations(inputs: &Inputs, artifact: &Value) -> Resu
             return Err("duplicate obligation partition".to_owned());
         }
     }
-    if actual_counts != expected_counts || actual_counts.values().sum::<usize>() != 279 {
-        return Err("279-row obligation partition drift".to_owned());
+    if actual_counts != expected_counts || actual_counts.values().sum::<usize>() != 287 {
+        return Err("287-row obligation partition drift".to_owned());
     }
 
     let shared_authority = array(
@@ -760,13 +760,13 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
     ensure_unique(&all_ids, "classified semantic IDs")?;
     if counts
         != BTreeMap::from([
-            ("RESOURCE", 43usize),
+            ("RESOURCE", 45usize),
             ("RESOURCE_AND_LIFECYCLE", 26),
-            ("CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION", 28),
+            ("CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION", 31),
         ])
-        || all_ids.len() != 97
+        || all_ids.len() != 102
     {
-        return Err("97-to-43/26/28 semantic classification drift".to_owned());
+        return Err("102-to-45/26/31 semantic classification drift".to_owned());
     }
     let receipt = &artifact["cross_child_join_model"]["k1_3_k1_4_semantic_resource_lifecycle_join"];
     let semantic_id_sha256 = sorted_newline_sha256(all_ids.clone());
@@ -792,7 +792,7 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
     let mut config_edges = Vec::new();
     let resource_bindings = array(&inputs.children["K1.4"], "semantic_resource_bindings")?;
     let resource_binding_sha256 = canonical_rows_sha256(resource_bindings)?;
-    if resource_bindings.len() != 43
+    if resource_bindings.len() != 45
         || count(receipt, "resource_semantic_binding_count")? != resource_bindings.len()
         || text(receipt, "resource_semantic_binding_sha256")? != resource_binding_sha256
     {
@@ -809,8 +809,8 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
     }
     ensure_unique(&config_edges, "config-resource edges")?;
     let config_edge_sha256 = sorted_newline_sha256(config_edges.clone());
-    if config_edges.len() != 61
-        || config_edge_sha256 != "9f790461b8d57091300ca27366a9759f7462e0064a1277df21d4e18a7d8ca6f3"
+    if config_edges.len() != 64
+        || config_edge_sha256 != "c0ac75df72747ac980dc37aa304792c834a61caea50a82ffee52d4f207043089"
         || text(receipt, "config_to_resource_edge_sha256")? != config_edge_sha256
     {
         return Err("config-resource expanded edge drift".to_owned());
@@ -873,19 +873,19 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
     {
         return Err("lifecycle semantic target edge drift".to_owned());
     }
-    if count(receipt, "semantic_row_count")? != 97
+    if count(receipt, "semantic_row_count")? != 102
         || object(receipt, "classification_counts")?
             != &Map::from_iter([
-                ("RESOURCE".to_owned(), Value::from(43)),
+                ("RESOURCE".to_owned(), Value::from(45)),
                 ("RESOURCE_AND_LIFECYCLE".to_owned(), Value::from(26)),
                 (
                     "CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION".to_owned(),
-                    Value::from(28),
+                    Value::from(31),
                 ),
             ])
         || count(receipt, "missing_semantic_count")? != 0
         || count(receipt, "duplicate_semantic_count")? != 0
-        || count(receipt, "config_to_resource_edge_count")? != 61
+        || count(receipt, "config_to_resource_edge_count")? != 64
         || count(receipt, "lifecycle_semantic_target_edge_count")? != 119
         || count(
             receipt,
@@ -932,6 +932,15 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
     if child_groups.len() != 10 || typed_groups.len() != 10 {
         return Err("all ten binding groups must be row-typed".to_owned());
     }
+    // Authenticate the complete historical rows before considering current children.
+    // Their membership must not be rewritten to agree with a later corrected child.
+    if canonical_rows_sha256(typed_groups)?
+        != "3437449bd7d917c4dabe422ceb5d5cf6c109beec046a43942918b489c8c1087b"
+    {
+        return Err("immutable historical row typing drift".to_owned());
+    }
+    ensure_unique(&ids(child_groups, "cell_id")?, "current binding group IDs")?;
+    ensure_unique(&ids(typed_groups, "binding_ref")?, "historical binding group IDs")?;
     let mut typed_edge_count = 0usize;
     let mut typed_projection_rows = Vec::new();
     for group in child_groups {
@@ -940,14 +949,10 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
             .iter()
             .find(|row| row.get("binding_ref").and_then(Value::as_str) == Some(binding))
             .ok_or_else(|| format!("missing row typing for {binding}"))?;
-        let historical = string_set(array(group, "authority_rows")?, "historical binding rows")?;
         let edges = array(typed, "typed_edges")?;
         typed_edge_count += edges.len();
         let edge_ids = ids(edges, "authority_row_id")?;
         ensure_unique(&edge_ids, "typed binding edge IDs")?;
-        if edge_ids.into_iter().collect::<BTreeSet<_>>() != historical {
-            return Err(format!("typed edge membership drift for {binding}"));
-        }
         for edge in edges {
             if !allowed.contains(text(edge, "kind")?) {
                 return Err(format!("unknown binding kind in {binding}"));
@@ -974,8 +979,11 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
     }
 
     let overlays = array(adjudication, "overlays")?;
-    if overlays.len() != 3 {
-        return Err("exactly three membership overlays are required".to_owned());
+    if overlays.len() != 3
+        || canonical_rows_sha256(overlays)?
+            != "1181a9250c4b99d12e1f9d4244da49e3b028930bc58fee691b1b2a544d172e18"
+    {
+        return Err("three immutable historical membership overlays are required".to_owned());
     }
     let overlay_refs = ids(overlays, "binding_ref")?;
     ensure_unique(&overlay_refs, "membership overlay refs")?;
@@ -994,10 +1002,16 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
             .iter()
             .find(|row| row.get("cell_id").and_then(Value::as_str) == Some(binding))
             .ok_or_else(|| format!("overlay has unknown binding {binding}"))?;
+        let historical = typed_groups
+            .iter()
+            .find(|row| row.get("binding_ref").and_then(Value::as_str) == Some(binding))
+            .ok_or_else(|| format!("overlay has no historical group {binding}"))?;
         if string_set(
             array(overlay, "superseded_authority_rows")?,
             "superseded rows",
-        )? != string_set(array(child, "authority_rows")?, "child authority rows")?
+        )? != ids(array(historical, "typed_edges")?, "authority_row_id")?
+            .into_iter()
+            .collect::<BTreeSet<_>>()
             || array(overlay, "message_names")? != array(child, "message_names")?
         {
             return Err(format!(
@@ -1099,6 +1113,7 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
             _ => return Err(format!("unexpected membership overlay {binding}")),
         }
     }
+    validate_current_binding_typing(inputs, adjudication)?;
     let shared_support = array(adjudication, "shared_support_edges")?;
     if shared_support.len() != 1
         || text(&shared_support[0], "authority_row_id")? != "KCO-OP-003"
@@ -1575,7 +1590,7 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
     let shadow_mapping_sha256 = sorted_newline_sha256(shadow_mapping.clone());
     if subtype_ids.into_iter().collect::<BTreeSet<_>>()
         != authority_ids.iter().cloned().collect::<BTreeSet<_>>()
-        || shadow_mapping.len() != 38
+        || shadow_mapping.len() != 40
         || operation_id_sha256 != SHADOW_OPERATION_ID_SHA256
         || text(shadow, "semantic_operation_id_set_sha256")? != SHADOW_OPERATION_ID_SHA256
         || subtype_sha256 != SHADOW_OPERATIONAL_SUBTYPE_SHA256
@@ -1585,7 +1600,7 @@ fn validate_profiles_and_shadow(inputs: &Inputs, artifact: &Value) -> Result<(),
         || flag(shadow, "per_operation_owner_routing_complete")?
         || flag(shadow, "current_execution_authorized")?
     {
-        return Err("exact 38-operation shadow partition drift".to_owned());
+        return Err("exact 40-operation shadow partition drift".to_owned());
     }
     let declared_classes = ids(array(artifact, "shadow_classes")?, "class_id")?
         .into_iter()

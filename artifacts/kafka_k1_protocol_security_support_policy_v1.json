@@ -37,41 +37,41 @@
       "input_id": "K1-2-INPUT-K1-1-ARTIFACT",
       "role": "K1_AUTHORITY_AND_NAMESPACE_PACKET",
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
-      "byte_count": 42754,
-      "record_count": 738,
-    "sha256": "4524caee86d27e4fe1e52ad7bbc9a250bf1e88987a7181d5a9a8d2931b7fdc3a"
+      "byte_count": 44410,
+      "record_count": 751,
+      "sha256": "7b6f941d2701b8f098f29cc656bf584b6151e71b0969ebcd693e88cad42ba969"
     },
     {
       "input_id": "K1-2-INPUT-K1-1-DOCUMENT",
       "role": "K1_AUTHORITY_DOCUMENT",
       "path": "docs/kafka_k1_client_contract.md",
-      "byte_count": 12809,
-      "record_count": 291,
-      "sha256": "3657c47298408fdd5f6906376265ac3c587085ba5b0df67988fac7266fd6e116"
+      "byte_count": 14651,
+      "record_count": 323,
+      "sha256": "f616455c55edaa0568e43c83154d583e33d8337f4688eb6024b842f05fd737d5"
     },
     {
       "input_id": "K1-2-INPUT-K1-1-CONTRACT",
       "role": "K1_AUTHORITY_CONTRACT_SOURCE",
       "path": "tests/kafka_k1_client_contract.rs",
-      "byte_count": 95396,
-      "record_count": 2585,
-    "sha256": "056cfa1bbf00304f96e62f3a1fc25189c3046ad91953cb44f32a57b9f2121255"
+      "byte_count": 99472,
+      "record_count": 2688,
+      "sha256": "a9f6ca6b8b39a4f19c1c1e5255addfb2ca10b07d0c0bb3a1c8276c7a08756ff5"
     },
     {
       "input_id": "K1-2-INPUT-K0-5",
       "role": "K0_AGGREGATE_AUTHORITY",
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
-      "byte_count": 29494,
-      "record_count": 284,
-    "sha256": "f4f2012b475793d57f5ef2f5ed40f08f985dff9a7c709cf1c67416a3eb9f9f09"
+      "byte_count": 31779,
+      "record_count": 299,
+      "sha256": "f57eccb9f506b37721d46a7d0b15fecdb5621e3603690f8a21c7dcda5cbd19e9"
     },
     {
       "input_id": "K1-2-INPUT-K0-4",
       "role": "BROKER_VERSION_FIXTURE_AND_SECURITY_AUTHORITY",
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-      "byte_count": 119250,
-      "record_count": 2187,
-    "sha256": "fe2c1ddb92a1ab53eb9496a6bcfd3c41ba1f7277ef63c85d6747137e6f92a7c3"
+      "byte_count": 122592,
+      "record_count": 2214,
+      "sha256": "3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3"
     },
     {
       "input_id": "K1-2-INPUT-K0-2",
@@ -85,9 +85,9 @@
       "input_id": "K1-2-INPUT-K1-3",
       "role": "SIBLING_PUBLIC_API_AND_CONFIGURATION_CONTRACT",
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
-    "byte_count": 37846,
-      "record_count": 753,
-    "sha256": "2dfb53c50b12df0eb0b82da676e699d6db88423d7dd4eaaf30aff6b438d0e6e7"
+      "byte_count": 40490,
+      "record_count": 779,
+      "sha256": "2a78eef4003336f33e9fce011305fde4c4c5cceddd18be5cbeb79dcca34d40f2"
     },
     {
       "input_id": "K1-2-INPUT-ADR",
@@ -156,8 +156,8 @@
   ],
   "authority_views": {
     "k1_obligation_projection": {
-      "row_count": 279,
-      "normalized_projection_sha256": "cd4ff24ac2deed867d81d1fb9d81c08f31e57de5c7e77c84e1ea3657e2fa0f37"
+      "row_count": 287,
+      "normalized_projection_sha256": "59e1ae49f670b9a817c610864ef1b19250657acacf828bef5fc1faceece9084b"
     },
     "broker_api_version_vectors": {
       "row_count": 7,
