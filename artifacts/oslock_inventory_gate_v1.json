@@ -6,6 +6,31 @@
   "capability_id": "CAP-SYNC-LOCKS",
   "baseline_revision": "d6bfec75aba10957b6a3e29654a29e650b45d510",
   "captured_date_utc": "2026-07-25",
+  "source_review": {
+    "date_utc": "2026-09-09",
+    "commit": "a936ad83b243b0991c14be1117d81985cc41f749",
+    "previous_census_revision": "9eb0600e6",
+    "previous_census": {"matching_file_count":247,"matching_line_count":561,"sha256":"738384a996ed1d1a5064b134890aea1aaf9d1d278ebd6aa263f91ebc60120b20","direct_use_statement_count":183},
+    "scope": "Current lexical census and source pins. The authority decision basis, baseline matrix, original failure and isolated reproduction receipts remain historical evidence. Terminal DEFER and all replacement restrictions are unchanged.",
+    "current_additions": [
+      "Remote computation registries, sessions and clients use Mutex/RwLock; this census includes imports, not a lock-site or runtime-correctness count.",
+      "Region close receipts, root outcome receipts, child-region state and ShutdownBudget add shared Mutex/RwLock ownership; ShutdownBudget is a crate-visible Arc<RwLock<Option<Budget>>> alias.",
+      "HTTP body/response/WebSocket handoff slots and H3 producer lifecycle use shared Mutex state.",
+      "ATP transfer progress, UDP state, and the private regex VM use incumbent locks.",
+      "Additional cancellation, map-reduce, runtime and protocol test observations and extracted sibling test modules explain the remaining census changes. No new Condvar import form or incumbent guard primitive appeared."
+    ],
+    "transitions": [
+      {"path":"Cargo.toml","previous_sha256":"914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b","review":"Release and unrelated feature/package changes; the parking_lot edge remains unchanged."},
+      {"path":"Cargo.lock","previous_sha256":"dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236","review":"Workspace and unrelated package updates; incumbent lock dependency versions remain unchanged."},
+      {"path":"COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md","previous_sha256":"401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0","review":"The plan now explicitly preserves shipped public parking_lot types; only additive/private experiments can be reconsidered, with separate evidence."},
+      {"path":"README.md","previous_sha256":"af06f2a680aece0a71683bf9751b90ce8a6e26c2aeedcf8c6ed90c7b727b5f70","review":"Release and runtime documentation grew; this review claims no new performance, stable-lane or replacement proof."},
+      {"path":"artifacts/dependency_capability_registry_v1.json","previous_sha256":"9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd","review":"CAP-SYNC-LOCKS is unchanged."},
+      {"path":"artifacts/dependency_marginal_ledger_v1.json","previous_sha256":"4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047","review":"All 52 lock cells retain their marginal counts and package names; source hashes and some absolute baseline/counterfactual counts changed together."},
+      {"path":"src/runtime/io_driver.rs","previous_sha256":"4d661727d302e20cf106acaf6f7df36d6b3ef1b534ea76bca06ff7dcf007acbe","review":"Added weak reactor access for timer publication; public lock and try_lock guard signatures are unchanged."},
+      {"path":"src/runtime/state.rs","previous_sha256":"97029bd90cae9a35396bc2c157a955ba30ba456fcbedaf947facdf783449f14e","review":"Root task completion and region lifecycle accounting changed; the two inventoried guard accessors remain present and new root outcome locks appear in the census."},
+      {"path":"src/sync/mutex.rs","previous_sha256":"8e29e82429c7c71a1fb9829f26f80b31a653ccc843d779e45acc1884328f103b","review":"Checked obligation admission was added and inline tests moved to mutex_tests.rs; incumbent locking and mapped guard ownership remain required."}
+    ]
+  },
   "authority": {
     "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
     "registry": "artifacts/dependency_capability_registry_v1.json",
@@ -40,33 +65,33 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664
     },
     {
       "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
-      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
-      "line_count": 332
+      "sha256": "10388000250a021e2bdd21ad7e46edcea192dacacac87ad1234abedec92b4ac3",
+      "line_count": 368
     },
     {
       "path": "README.md",
-      "sha256": "af06f2a680aece0a71683bf9751b90ce8a6e26c2aeedcf8c6ed90c7b727b5f70",
-      "line_count": 2136
+      "sha256": "241f490d473bb15ea70248f3a4682451f66a579fb0f51ff0a4434e14f4b22c2f",
+      "line_count": 2539
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-      "line_count": 6929
+      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
+      "line_count": 7058
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
-      "line_count": 188447
+      "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+      "line_count": 187615
     },
     {
       "path": "src/runtime/blocking_pool.rs",
@@ -80,13 +105,13 @@
     },
     {
       "path": "src/runtime/io_driver.rs",
-      "sha256": "4d661727d302e20cf106acaf6f7df36d6b3ef1b534ea76bca06ff7dcf007acbe",
-      "line_count": 2982
+      "sha256": "3a834d44261b7a9a104dcd635dc375fd21f447500a828addac765168a8eea6ad",
+      "line_count": 2988
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "97029bd90cae9a35396bc2c157a955ba30ba456fcbedaf947facdf783449f14e",
-      "line_count": 10190
+      "sha256": "7d6311d55dfe7471a5e2ccc91da5f0699e3d9926b9c244e6fb82ba2c479ec10d",
+      "line_count": 11286
     },
     {
       "path": "src/service/steer.rs",
@@ -95,8 +120,8 @@
     },
     {
       "path": "src/sync/mutex.rs",
-      "sha256": "8e29e82429c7c71a1fb9829f26f80b31a653ccc843d779e45acc1884328f103b",
-      "line_count": 5293
+      "sha256": "e3da31f2776e2c4ff2c82e4919012537f4540ff8a14e371ac300e80984f21d88",
+      "line_count": 1057
     },
     {
       "path": "src/sync/rwlock.rs",
@@ -116,9 +141,9 @@
     "excluded_paths": [
       "tests/oslock_inventory_gate_contract.rs"
     ],
-    "matching_file_count": 247,
-    "matching_line_count": 561,
-    "sha256": "738384a996ed1d1a5064b134890aea1aaf9d1d278ebd6aa263f91ebc60120b20",
+    "matching_file_count": 272,
+    "matching_line_count": 651,
+    "sha256": "e546b7e6c879c7dbed58ebb2a8c548de43423c087d9a7d1a7240588b19d07dff",
     "scope_counts": [
       {
         "scope": "benches",
@@ -137,13 +162,13 @@
       },
       {
         "scope": "src",
-        "file_count": 180,
-        "occurrence_count": 430
+        "file_count": 204,
+        "occurrence_count": 513
       },
       {
         "scope": "tests",
-        "file_count": 52,
-        "occurrence_count": 95
+        "file_count": 53,
+        "occurrence_count": 102
       }
     ],
     "workload_counts": [
@@ -154,12 +179,12 @@
       },
       {
         "workload": "channels",
-        "file_count": 8,
+        "file_count": 10,
         "occurrence_count": 27
       },
       {
         "workload": "database",
-        "file_count": 4,
+        "file_count": 5,
         "occurrence_count": 15
       },
       {
@@ -179,33 +204,33 @@
       },
       {
         "workload": "integration_tests",
-        "file_count": 52,
-        "occurrence_count": 95
+        "file_count": 53,
+        "occurrence_count": 102
       },
       {
         "workload": "messaging",
-        "file_count": 8,
+        "file_count": 9,
         "occurrence_count": 54
       },
       {
         "workload": "networking",
-        "file_count": 11,
-        "occurrence_count": 13
+        "file_count": 13,
+        "occurrence_count": 22
       },
       {
         "workload": "observability",
-        "file_count": 12,
+        "file_count": 13,
         "occurrence_count": 22
       },
       {
         "workload": "other_runtime_surfaces",
-        "file_count": 40,
-        "occurrence_count": 67
+        "file_count": 43,
+        "occurrence_count": 74
       },
       {
         "workload": "protocol_and_server",
-        "file_count": 9,
-        "occurrence_count": 31
+        "file_count": 16,
+        "occurrence_count": 50
       },
       {
         "workload": "raptorq",
@@ -214,8 +239,8 @@
       },
       {
         "workload": "runtime_scheduler_reactors",
-        "file_count": 34,
-        "occurrence_count": 63
+        "file_count": 35,
+        "occurrence_count": 74
       },
       {
         "workload": "services",
@@ -225,16 +250,16 @@
       {
         "workload": "structured_app",
         "file_count": 4,
-        "occurrence_count": 25
+        "occurrence_count": 27
       },
       {
         "workload": "structured_concurrency_core",
-        "file_count": 17,
-        "occurrence_count": 48
+        "file_count": 21,
+        "occurrence_count": 83
       },
       {
         "workload": "sync_primitives",
-        "file_count": 9,
+        "file_count": 11,
         "occurrence_count": 22
       },
       {
@@ -245,15 +270,15 @@
     ]
   },
   "import_inventory": {
-    "direct_use_statement_count": 183,
+    "direct_use_statement_count": 191,
     "forms": [
       {
         "form": "Mutex",
-        "count": 132
+        "count": 139
       },
       {
         "form": "RwLock",
-        "count": 30
+        "count": 31
       },
       {
         "form": "{Mutex, RwLock}",

@@ -13,8 +13,11 @@ source, manifest, or lockfile change.
 
 ## Why the gate is DEFER
 
-The clean-revision census contains 552 exact dependency-token occurrences in
-240 Rust files. The surface is not just a collection of private mutex fields:
+The original July census contained 552 exact dependency-token occurrences in
+240 Rust files. The August refresh recorded 561 lines in 247 files; the
+2026-09-09 review records 651 lines in 272 files. These lexical counts include
+comments and tests. They are not counts of production lock sites.
+The surface is not just a collection of private mutex fields:
 it includes production `Condvar` behavior, blocking-pool shutdown, DNS
 discovery coalescing, visible guard-returning APIs, crate-visible locked state,
 and Asupersync's own cancel-aware Mutex and RwLock implementations.
@@ -45,7 +48,7 @@ authorize a rewrite.
 
 The machine artifact defines the reproducible census:
 
-1. start from the clean baseline revision;
+1. start from the current reviewed source revision (`source_review.commit`);
 2. recursively inspect Rust files under `benches`, `examples`, `fuzz`, `src`,
    and `tests`;
 3. exclude only the focused contract itself;
@@ -61,19 +64,19 @@ The result is:
 | `benches` | 1 | 1 |
 | `examples` | 1 | 4 |
 | `fuzz` | 13 | 31 |
-| `src` | 180 | 430 |
-| `tests` | 52 | 95 |
-| **Total** | **247** | **561** |
+| `src` | 204 | 513 |
+| `tests` | 53 | 102 |
+| **Total** | **272** | **651** |
 
 The SHA-256 receipt is
-`738384a996ed1d1a5064b134890aea1aaf9d1d278ebd6aa263f91ebc60120b20`.
+`e546b7e6c879c7dbed58ebb2a8c548de43423c087d9a7d1a7240588b19d07dff`.
 The focused contract recomputes the receipt and the nineteen workload buckets
 from the clean overlay, so a new, removed, or changed occurrence fails closed.
 
 ## Primitive and API surface
 
-There are 183 direct import statements. The dominant forms are 132 standalone
-`Mutex` imports, 30 standalone `RwLock` imports, seven combined
+There are 191 direct import statements. The dominant forms are 139 standalone
+`Mutex` imports, 31 standalone `RwLock` imports, seven combined
 `{Mutex, RwLock}` imports, three `{Mutex, MutexGuard}` imports, three
 `{Condvar, Mutex}` imports, and aliases named `ParkingMutex` and `PoolMutex`.
 
@@ -89,7 +92,7 @@ The inventory covers:
 - `MutexGuard` and `RwLockReadGuard`: borrowed guard lifetimes and visible
   signatures;
 - mapped and owned guards: Asupersync-owned projection APIs in
-  `src/sync/mutex.rs` and `src/sync/rwlock.rs`; no direct incumbent
+`src/sync/mutex.rs` and `src/sync/rwlock.rs`; no direct incumbent
   mapped-guard spelling is present;
 - aliases: import aliases and the two example aliases must not hide a mixed
   backend during any future migration.
@@ -105,6 +108,16 @@ The direct visible boundary includes:
 
 Private signatures such as notify's baton-passing guard are also retained in
 the machine inventory because they constrain an atomic migration.
+
+The September review includes remote-runtime registries and sessions,
+region/root completion receipts, HTTP streaming and upgrade handoff slots,
+ATP progress and UDP state, and the private regex VM. The new crate-visible
+`ShutdownBudget` alias contains an incumbent `RwLock`. Additional test
+observations and extracted sibling test modules account for the other census
+changes. The nine original signature rows and baseline receipts remain
+historical evidence; this update adds no replacement or performance proof.
+The current dependency plan also requires preserving shipped public
+`parking_lot` types even if an additive private wrapper is reconsidered.
 
 ## Semantic obligations
 
