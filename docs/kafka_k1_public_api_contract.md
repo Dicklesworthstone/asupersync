@@ -36,20 +36,26 @@ requires `KEEP_UNTIL_PARITY`. Dependency exit, feature removal, API removal,
 capability removal, file deletion, production wiring, oracle retirement, and
 cutover are all forbidden by this packet.
 
+The 2026-09-09 current-source review preserves that historical baseline and
+disposition receipt. It expands the current projections for three public
+groups and five semantic rows added since capture. The original census was
+129 core rows, 30 public groups, 97 semantic rows, 15 facade exports, and two
+renamed aliases. This source review adds no broker or migration acceptance.
+
 ## Exact coverage
 
-The core contract contains exactly 129 rows:
+The core contract contains exactly 137 rows:
 
 | Core domain | Rows | Disposition |
 |---|---:|---|
-| Public symbols | 30 | `PRESERVE` |
-| Configuration, enum, operation, and helper semantics | 97 | `PRESERVE` |
+| Public symbols | 33 | `PRESERVE` |
+| Configuration, enum, operation, and helper semantics | 102 | `PRESERVE` |
 | Explicit absences | 2 | `ADDITIVE_GAP` |
 
 The core projection emits
 `domain<TAB>stable_id<TAB>disposition`, bytewise sorts unique rows, and appends
 one LF per row. Its SHA-256 is
-`f1ebad598d91e38b86206686c8d35ec6f013bbf93cd422f4b68308fbf89efb7a`.
+`0ad0d3929140ddd04ea6a5ff61a26ba896114bed956ecc2ecc787089e5e799e8`.
 
 The supporting contract contains exactly 50 rows:
 
@@ -61,8 +67,8 @@ The supporting contract contains exactly 50 rows:
 
 The supporting projection uses the same tuple and newline rules. Its SHA-256
 is `1deac57a9c2330e41f67afccffb2353998e5719f3663ba39bde926090f262265`.
-The exact 179-row union has SHA-256
-`36c6470809d8f8ed98291f0265db34d6003462889c730d1c029cf84690126cc3`.
+The exact 187-row union has SHA-256
+`1bf9615acd129eba9419a363c848eb4aeb4d6dff47f54c08d00875448aecfe1c`.
 
 These counts are contract coverage, not runtime coverage. Missing, extra,
 duplicate, changed, or unowned rows fail closed and leave the incumbent in
@@ -93,35 +99,36 @@ proof-only, opt-in, or silent-skip evidence is promoted by this document.
 
 ## Public API, exposure, and aliases
 
-All 30 K0.1 public symbol groups remain accepted inputs. Their complete
+All 33 K0.1 public symbol groups remain accepted inputs. Their complete
 canonical-row digest is
-`18ba7fa4a9db025263b9df4ae5ce5f36641ca5e9334d4eeaf8fd64b2bb66e4f2`.
+`ebe68af6e8dfb70024cc857a4ce3e5797b6c7161ba7172569626ea08e362b50f`.
 K1.3 preserves public declarations, fields, variants, methods, module-public
 names, facade exports, and facade aliases rather than reducing the contract to
 the facade alone.
 
 | Exposure class | Rows |
 |---|---:|
-| `FACADE` | 15 |
-| `MODULE_PUBLIC` | 12 |
+| `FACADE` | 17 |
+| `MODULE_PUBLIC` | 13 |
 | `CFG_TEST_ONLY` | 2 |
 | `CFG_FUZZING` | 1 |
 | `PRIVATE` | 0 |
 
 The `symbol_id<TAB>exposure_class` projection digest is
-`cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f`.
-The fifteen facade-export rows have digest
-`8a63a3ae3410057e3aedcd063187e491529cd0bb978804c7cc41a8bffb9a7e5e`.
+`e5ab5243ac66474b0df051b5716dcdbe9239bc17742c2c5a154094e157786e23`.
+The seventeen facade-export rows have digest
+`db3e4f48fada190ddac9e03b29acfc71cdbfe037de94640c0981982fec5b84ec`.
 
-Two facade exports intentionally rename their module-public types:
+Three facade exports intentionally rename their module-public types:
 
 | Stable row | Module-public name | Facade name |
 |---|---|---|
 | `KCO-PUB-003` | `ConsumerConfig` | `KafkaConsumerConfig` |
 | `KCO-PUB-006` | `ConsumerRecord` | `KafkaConsumerRecord` |
+| `KCO-PUB-008` | `RebalanceStats` | `KafkaRebalanceStats` |
 
 Their exact projection digest is
-`eee9f608a39846d1df1ec81a830c0f7b079667a09f923a3a398c2cdd64ca1fb1`.
+`8e06be84e0364c9588bd6f217f2c3447a691a6b5d59dbc3d9f520248321aa7de`.
 An alias is an additional accepted path; it cannot erase, replace, or silently
 rename its module-public authority row.
 
@@ -134,7 +141,7 @@ test-scoped. `KPR-PUB-023` remains exposed only through test, fuzz, or
 ## Cfg and compilation profiles
 
 The profile contract freezes thirteen K0.1 compilation profiles, seventeen
-K0.2 semantic profile groups, and exactly 97 semantic-to-profile memberships.
+K0.2 semantic profile groups, and exactly 102 semantic-to-profile memberships.
 Their respective digests are:
 
 - compilation-profile ID set:
@@ -144,9 +151,9 @@ Their respective digests are:
 - semantic profile-group ID set:
   `7bb8ea31cc9a88c8f068f6a18a8656a1eea52056229aa11302ffb7f9473b938c`;
 - canonical semantic profile-group rows:
-  `75bedc39680e2df6ea1be48212fa6a0f9c397767cab43dcae769d29e99526c29`;
+  `72c68408f21abf58cf8d6849dd23e463f2510ef736066fb012fa42aeb4d38cb1`;
 - semantic membership projection:
-  `60e296aa42497ee03292a481dd867919b873eb309cecbfbc7877e9338fe47925`.
+  `8b762d37f55b82fc508c08d079c79bfb743e5eb309f951aeaa3c44e3aaa0a5cd`.
 
 The native no-feature facade remains present. Broker-directed operations fail
 closed through typed outcomes unless an exact test or test-internals rule
@@ -164,12 +171,28 @@ contract.
 
 ## Configuration, defaults, and shared semantics
 
-The 97 semantic rows consist of 43 configuration fields, seven enum rows,
-38 operations, and nine callable helpers. Every row retains its accepted and
+The 102 semantic rows consist of 45 configuration fields, eight enum rows,
+40 operations, and nine callable helpers. Every row retains its accepted and
 rejected values, broker mapping, success and error outcomes, retry and timeout
 rules, cancellation and shutdown rules, resource bounds, credential/payload
 rules, source anchor, and owner routes. Their combined canonical-row digest is
-`d19103e0fb6dd8b291405b1925c15d14cfacdf970901c766c10e06fcdbd7beab`.
+`1ba55c44beb8b1c7e6c8048d197150f3987bb9ecd9b1d69c00d1f2c0fe999624`.
+
+`KPR-CFG-026` and `KCO-CFG-019` preserve the new raw-property builder,
+setter, and borrowed accessor. Repeated keys replace in their original
+position; explicitly written typed mappings override raw properties, while
+an absent optional typed mapping leaves a raw value intact. Unknown keys or
+values are not validated by these accessors; native construction can reject
+them. The explicit accessor and `Clone` retain the original values.
+
+`KAFKA-ENUM-008` and `KCO-OP-018` distinguish the configured cooperative
+callback path from the negotiated protocol. Relaxed counters record attempts
+before native assign/unassign returns, and are not a simultaneous snapshot
+or success receipt. The caller-driven assignment API remains separate.
+`KCO-OP-019` preserves the retained transient diagnostic: primary poll records
+`UnknownTopicOrPartition`, continues to its original deadline, saturates the
+repeated count, and replaces the entry for a distinct code. Successful poll
+and close do not clear it; `None` is not a broker-health claim.
 
 Four headline invariants are explicit:
 
@@ -207,8 +230,12 @@ terminal evidence verifies them.
 
 This is `PRESERVE_CURRENT_AND_REQUIRE_REVIEWED_EVOLUTION`, not an endorsement
 of every incumbent error. Coarse string-bearing errors, classifier mismatches,
-rejected-value exposure, ambiguous completion states, and absent `ASUP-E`
-registry integration remain blocking inputs. K10.3 owns typed outcomes, K10.4
+historical rejected-value exposure, ambiguous completion states, and absent
+`ASUP-E` registry integration remain blocking inputs. Current `ClientConfig`
+rejection paths, including the parallel `KafkaClient` consumer constructor,
+retain the property name and typed result while omitting raw values and
+free-form native descriptions. Other upstream error variants remain outside
+that repair. K10.3 owns typed outcomes, K10.4
 owns telemetry privacy and redaction, and K12.5 owns independent verification.
 
 ## Explicit additive gaps
@@ -233,7 +260,7 @@ Five conflicts are retained without silently normalizing source truth:
 |---|---|---|
 | Consumer auto-commit policy | defaults false, but the public config permits true; the real path honors opt-in while deterministic poll ignores it | K9, K10.2, K11.2; blocking reviewed evolution |
 | Insecure transport bypass cfg | setters compile under `cfg(any(test, debug_assertions))`, including ordinary downstream debug builds | K10.2, K12.4; blocking reviewed evolution |
-| Credential redaction and zeroization | SASL wrapper passwords redact and zeroize on wrapper drop; TLS key passwords are cloneable strings and rejected native values can reach public errors | K3.2, K3.3, K10.4, K12.4; blocking reviewed evolution |
+| Credential redaction and zeroization | current raw-property Debug and native `ClientConfig` errors omit values; SASL wrapper passwords redact and zeroize on wrapper drop; TLS key passwords and raw properties remain cloneable strings, keys remain visible, and other upstream errors lack complete sanitation proof | K3.2, K3.3, K10.4, K12.4; blocking reviewed evolution |
 | Downstream inventory status | the local static/call-site inventory is complete, but external search remains `NOT_RUN` and `UNKNOWN` | K10.5 and K14.1; blocking claim-time refresh |
 | Consumer commit method documentation | singular `commit_offset` does not exist; the API is `KafkaConsumer::commit_offsets` | K10.5; blocking documentation repair |
 
@@ -302,12 +329,17 @@ remain independent.
 
 ## Static-only validation boundary
 
-This packet was authored and checked through static JSON parsing, exact hashes,
+The original packet was authored and checked through static JSON parsing, exact hashes,
 counts, joins, source inspection, tracker inspection, and documentation
 markers only. No compiler, formatter, linter, test, fuzz target, broker,
 service, container, runtime program, network operation, RCH lane, or remote job
-was run for K1.3. The artifact and this document retain no dynamic execution
-receipt and make no dynamic claim.
+was run for that original K1.3 capture. The 2026-09-09 review checks current
+source changes and their inventory joins. Separate release contract-test
+receipts do not become native Kafka or broker evidence in this packet.
+Producer flush now yields through the Cx timer but still subtracts requested
+slices; bounded consumer leave-group draining still cannot establish cleanup
+after an abandoned close. The artifact and this document retain no dynamic
+Kafka execution receipt and make no dynamic Kafka claim.
 
 ## No-claim boundary
 

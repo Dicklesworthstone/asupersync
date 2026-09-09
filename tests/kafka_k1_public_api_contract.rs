@@ -36,40 +36,40 @@ const BASELINE_REVISION: &str = "816cb7f89a881656f639c734d0aa4795300738c7";
 const INVENTORY_STATE: &str =
     "K1_3_PUBLIC_API_CONFIG_ERROR_AND_MIGRATION_CONTRACT_FROZEN_KEEP_INCUMBENT";
 
-const CORE_COUNT: usize = 129;
+const CORE_COUNT: usize = 137;
 const SUPPORTING_COUNT: usize = 50;
-const COMBINED_COUNT: usize = 179;
-const CORE_SHA256: &str = "f1ebad598d91e38b86206686c8d35ec6f013bbf93cd422f4b68308fbf89efb7a";
+const COMBINED_COUNT: usize = 187;
+const CORE_SHA256: &str = "0ad0d3929140ddd04ea6a5ff61a26ba896114bed956ecc2ecc787089e5e799e8";
 const SUPPORTING_SHA256: &str = "1deac57a9c2330e41f67afccffb2353998e5719f3663ba39bde926090f262265";
-const COMBINED_SHA256: &str = "36c6470809d8f8ed98291f0265db34d6003462889c730d1c029cf84690126cc3";
+const COMBINED_SHA256: &str = "1bf9615acd129eba9419a363c848eb4aeb4d6dff47f54c08d00875448aecfe1c";
 
-const PUBLIC_ID_SHA256: &str = "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28";
-const PUBLIC_ROW_SHA256: &str = "18ba7fa4a9db025263b9df4ae5ce5f36641ca5e9334d4eeaf8fd64b2bb66e4f2";
-const EXPOSURE_SHA256: &str = "cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f";
+const PUBLIC_ID_SHA256: &str = "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a";
+const PUBLIC_ROW_SHA256: &str = "ebe68af6e8dfb70024cc857a4ce3e5797b6c7161ba7172569626ea08e362b50f";
+const EXPOSURE_SHA256: &str = "e5ab5243ac66474b0df051b5716dcdbe9239bc17742c2c5a154094e157786e23";
 const FACADE_EXPORT_SHA256: &str =
-    "8a63a3ae3410057e3aedcd063187e491529cd0bb978804c7cc41a8bffb9a7e5e";
+    "db3e4f48fada190ddac9e03b29acfc71cdbfe037de94640c0981982fec5b84ec";
 const RENAMED_ALIAS_SHA256: &str =
-    "eee9f608a39846d1df1ec81a830c0f7b079667a09f923a3a398c2cdd64ca1fb1";
+    "8e06be84e0364c9588bd6f217f2c3447a691a6b5d59dbc3d9f520248321aa7de";
 
-const SEMANTIC_ID_SHA256: &str = "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7";
+const SEMANTIC_ID_SHA256: &str = "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121";
 const SEMANTIC_ROW_SHA256: &str =
-    "ada6796514f5502ddd095dc05904f312bff387bc3a7fe70caf1cae0384ce3396";
+    "1ba55c44beb8b1c7e6c8048d197150f3987bb9ecd9b1d69c00d1f2c0fe999624";
 const SHARED_ID_SHA256: &str = "92ab055d5d14e4971daf298e54c9f5036ecf71c490d579270f4789b889fc86a5";
 const SHARED_OBJECT_SHA256: &str =
-    "558e38b863ad5a8e423a7d2f3731ada112a7d0bea16cf60484fd5c383efdfcb0";
+    "ca4020a9b0886134cea9acd432b043e2a0e23aca32265a67df104a1de1ad0570";
 const ABSENCE_ROW_SHA256: &str = "9892212d2641f933ded02b730993ff3c81f21ea65f7565b74b4a038b5a69afc5";
 const JOURNEY_ROW_SHA256: &str = "3124cf3daff343142b56bbadceba66f8d0fb21862f771957e667f4d6c393260f";
 const JOURNEY_ID_SHA256: &str = "c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f";
-const FINDING_ROW_SHA256: &str = "b8786f5521bfdcfbba786844fea0e41242fcbe65d8ad886069470dfc5540c404";
+const FINDING_ROW_SHA256: &str = "896c3cb88e234fd40ab9b886a01cfafc41e69d00c08122f0f49b314238991c84";
 
 const PROFILE_ROW_SHA256: &str = "8a2b2437daa7b2b4c8189875502bf5d4b049d6c9ce408d390279deaf8d8b5815";
 const PROFILE_ID_SHA256: &str = "882b6f73ee7c5abfe73080804fcd082c05dddd9c4002ee61ff9336f0a0d439eb";
 const PROFILE_GROUP_ROW_SHA256: &str =
-    "75bedc39680e2df6ea1be48212fa6a0f9c397767cab43dcae769d29e99526c29";
+    "72c68408f21abf58cf8d6849dd23e463f2510ef736066fb012fa42aeb4d38cb1";
 const PROFILE_GROUP_ID_SHA256: &str =
     "7bb8ea31cc9a88c8f068f6a18a8656a1eea52056229aa11302ffb7f9473b938c";
 const PROFILE_MEMBERSHIP_SHA256: &str =
-    "60e296aa42497ee03292a481dd867919b873eb309cecbfbc7877e9338fe47925";
+    "8b762d37f55b82fc508c08d079c79bfb743e5eb309f951aeaa3c44e3aaa0a5cd";
 const PUBLIC_JOURNEY_EDGE_SHA256: &str =
     "2dc041692d554c03a1e123ba9e720967bf88288e402ebdc0ec7ddfe7a821f43a";
 const SEMANTIC_JOURNEY_EDGE_SHA256: &str =
@@ -95,6 +95,7 @@ const ROOT_KEYS: &[&str] = &[
     "capability_id",
     "captured_date_utc",
     "coverage_model",
+    "current_source_review",
     "disposition_receipt",
     "error_and_outcome_contract",
     "explicit_absence_contract",
@@ -703,7 +704,7 @@ fn validate_coverage(inputs: &Inputs) -> Result<(), String> {
 
 fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
     let rows = array(&inputs.k0_1, "public_symbols")?;
-    assert_eq_value(rows.len(), 30, "public symbol count")?;
+    assert_eq_value(rows.len(), 33, "public symbol count")?;
     let symbol_ids = ids(rows, "symbol_id")?;
     unique(&symbol_ids, "public symbol IDs")?;
     assert_eq_value(
@@ -778,12 +779,12 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
     )?;
     assert_eq_value(
         exposure_counts.get("FACADE").copied(),
-        Some(15),
+        Some(17),
         "facade count",
     )?;
     assert_eq_value(
         exposure_counts.get("MODULE_PUBLIC").copied(),
-        Some(12),
+        Some(13),
         "module-public count",
     )?;
     assert_eq_value(
@@ -803,7 +804,7 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
         .ok_or("public_api_contract missing")?;
     assert_eq_value(
         count(public_contract, "public_symbol_count")?,
-        30,
+        33,
         "recorded public count",
     )?;
     assert_eq_value(
@@ -814,7 +815,7 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
     let exposure = public_contract
         .get("exposure_projection")
         .ok_or("exposure_projection missing")?;
-    assert_eq_value(count(exposure, "row_count")?, 30, "recorded exposure count")?;
+    assert_eq_value(count(exposure, "row_count")?, 33, "recorded exposure count")?;
     assert_eq_value(
         text(exposure, "projection_sha256")?,
         EXPOSURE_SHA256,
@@ -822,8 +823,8 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
     )?;
     let recorded_counts = object(exposure, "class_counts")?;
     for (class, expected) in [
-        ("FACADE", 15),
-        ("MODULE_PUBLIC", 12),
+        ("FACADE", 17),
+        ("MODULE_PUBLIC", 13),
         ("CFG_TEST_ONLY", 2),
         ("CFG_FUZZING", 1),
         ("PRIVATE", 0),
@@ -838,7 +839,7 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
     let facade = public_contract
         .get("facade_export_projection")
         .ok_or("facade_export_projection missing")?;
-    assert_eq_value(count(facade, "row_count")?, 15, "recorded facade count")?;
+    assert_eq_value(count(facade, "row_count")?, 17, "recorded facade count")?;
     assert_eq_value(
         text(facade, "projection_sha256")?,
         FACADE_EXPORT_SHA256,
@@ -849,7 +850,7 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
         .ok_or("renamed_facade_aliases missing")?;
     assert_eq_value(
         count(alias_contract, "row_count")?,
-        2,
+        3,
         "recorded alias count",
     )?;
     assert_eq_value(
@@ -858,7 +859,7 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
         "recorded alias hash",
     )?;
     let expected_aliases = array(alias_contract, "rows")?;
-    assert_eq_value(aliases.len(), 2, "derived alias count")?;
+    assert_eq_value(aliases.len(), 3, "derived alias count")?;
     assert_eq_value(
         canonical_rows_sha256(&aliases)?,
         canonical_rows_sha256(expected_aliases)?,
@@ -895,7 +896,7 @@ fn validate_public_surface(inputs: &Inputs) -> Result<(), String> {
 
 fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
     let rows = semantic_rows(&inputs.k0_2)?;
-    assert_eq_value(rows.len(), 97, "semantic row count")?;
+    assert_eq_value(rows.len(), 102, "semantic row count")?;
     let semantic_ids = ids(&rows, "semantic_id")?;
     unique(&semantic_ids, "semantic IDs")?;
     assert_eq_value(
@@ -926,7 +927,7 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
         .ok_or("semantic_contract missing")?;
     assert_eq_value(
         count(semantic_contract, "semantic_row_count")?,
-        97,
+        102,
         "recorded semantic count",
     )?;
     assert_eq_value(
@@ -946,9 +947,9 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
     )?;
     let collection_counts = object(semantic_contract, "collection_counts")?;
     for (collection, expected) in [
-        ("configuration_fields", 43),
-        ("enum_semantics", 7),
-        ("operations", 38),
+        ("configuration_fields", 45),
+        ("enum_semantics", 8),
+        ("operations", 40),
         ("callable_helpers", 9),
     ] {
         let recorded = collection_counts
@@ -971,11 +972,11 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
     }
     let recorded_owner_counts = object(semantic_contract, "configuration_owner_counts")?;
     for (owner, expected) in [
-        ("ProducerConfig", 14),
+        ("ProducerConfig", 15),
         ("KafkaTlsConfig", 4),
         ("KafkaSaslConfig", 4),
         ("TransactionalConfig", 3),
-        ("ConsumerConfig", 18),
+        ("ConsumerConfig", 19),
     ] {
         assert_eq_value(owner_counts.get(owner).copied(), Some(expected), owner)?;
         let recorded = recorded_owner_counts
@@ -1139,7 +1140,7 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
             seen_semantics.push(semantic_id.to_owned());
         }
     }
-    assert_eq_value(memberships.len(), 97, "profile membership count")?;
+    assert_eq_value(memberships.len(), 102, "profile membership count")?;
     unique(&seen_semantics, "profile semantic memberships")?;
     assert_eq_value(
         seen_semantics.into_iter().collect::<BTreeSet<_>>(),
@@ -1187,7 +1188,7 @@ fn validate_semantics_and_profiles(inputs: &Inputs) -> Result<(), String> {
     )?;
     assert_eq_value(
         count(profile_contract, "semantic_profile_membership_count")?,
-        97,
+        102,
         "recorded profile membership count",
     )?;
     assert_eq_value(
@@ -1860,7 +1861,7 @@ fn validate_gates_and_docs(root: &Path, artifact: &Value) -> Result<(), String> 
     assert_eq_value(doc.matches(DOC_BEGIN).count(), 1, "document begin marker")?;
     assert_eq_value(doc.matches(DOC_END).count(), 1, "document end marker")?;
     for phrase in [
-        "The core contract contains exactly 129 rows",
+        "The core contract contains exactly 137 rows",
         "The supporting contract contains exactly 50 rows",
         "Two independent axes: disposition and gate state",
         "No compiler, formatter, linter, test, fuzz target, broker",

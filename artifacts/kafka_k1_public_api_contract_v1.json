@@ -9,6 +9,27 @@
   "captured_date_utc": "2026-08-03",
   "baseline_revision": "816cb7f89a881656f639c734d0aa4795300738c7",
   "inventory_state": "K1_3_PUBLIC_API_CONFIG_ERROR_AND_MIGRATION_CONTRACT_FROZEN_KEEP_INCUMBENT",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "release_owner": "asupersync-ghxhvm",
+    "historical_scope": "The original capture date, baseline revision, and disposition receipt remain the historical K1.3 packet. Current projections include the reviewed incumbent additions without upgrading any journey, broker, or cutover evidence.",
+    "historical_census": {
+      "core_rows": 129,
+      "public_symbols": 30,
+      "semantic_rows": 97,
+      "facade_exports": 15,
+      "renamed_aliases": 2
+    },
+    "reviewed_changes": [
+      "ProducerConfig and ConsumerConfig expose ordered raw properties through with_property, set_property, and extra_properties. Repeated keys replace in place; explicitly written typed mappings win, while absent optional typed fields do not erase raw values.",
+      "RebalanceStats, KafkaRebalanceProtocol, and TransientConsumerError add three public groups. KafkaRebalanceStats is a third renamed facade alias; TransientConsumerError remains module-public.",
+      "Configured cooperative callback intent and relaxed attempted-operation counters are distinct from the negotiated protocol accessor. Caller-driven rebalance remains a separate explicit assign/unassign path.",
+      "Primary poll retains UnknownTopicOrPartition diagnostics and continues to its original deadline. The accessor clones a retained entry, saturates repeated counts, and does not report broker health or clear on successful poll or close.",
+      "Raw configuration values are redacted in Debug and native ClientConfig rejection paths, including the parallel KafkaClient consumer constructor. Explicit property access and Clone retain values; property names and other upstream error variants are outside that sanitation claim.",
+      "Producer flush now awaits the Cx timer/yield path but still accounts requested slices. Consumer close and Drop use bounded leave-group draining; neither is evidence of completed cleanup after an abandoned close."
+    ],
+    "evidence_boundary": "Current-source static review only. No new native feature, broker, migration, or release acceptance is established by this packet."
+  },
   "authority": {
     "k1_1_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.1.1",
     "k1_1_artifact": "artifacts/kafka_k1_obligation_index_v1.json",
@@ -154,14 +175,14 @@
   ],
   "coverage_model": {
     "core_contract": {
-      "row_count": 129,
+      "row_count": 137,
       "composition": {
-        "public_symbols": 30,
-        "semantic_rows": 97,
+        "public_symbols": 33,
+        "semantic_rows": 102,
         "explicit_absences": 2
       },
       "projection_rule": "Emit domain<TAB>stable_id<TAB>disposition for every K0.1 public symbol, every K0.2 configuration, enum, operation, and helper row, and every K0.2 explicit absence; bytewise sort unique rows and append one LF per row.",
-      "projection_sha256": "f1ebad598d91e38b86206686c8d35ec6f013bbf93cd422f4b68308fbf89efb7a"
+      "projection_sha256": "0ad0d3929140ddd04ea6a5ff61a26ba896114bed956ecc2ecc787089e5e799e8"
     },
     "supporting_contract": {
       "row_count": 50,
@@ -174,48 +195,48 @@
       "projection_sha256": "1deac57a9c2330e41f67afccffb2353998e5719f3663ba39bde926090f262265"
     },
     "combined_contract": {
-      "row_count": 179,
+      "row_count": 187,
       "projection_rule": "Union the core and supporting rows, bytewise sort unique rows, and append one LF per row. Present public, semantic, shared, and journey rows use PRESERVE; explicit absences use ADDITIVE_GAP; routed findings use REVIEWED_EVOLUTION_INPUT.",
-      "projection_sha256": "36c6470809d8f8ed98291f0265db34d6003462889c730d1c029cf84690126cc3"
+      "projection_sha256": "1bf9615acd129eba9419a363c848eb4aeb4d6dff47f54c08d00875448aecfe1c"
     },
     "domain_views": [
       {
         "domain": "public_symbols",
         "source_collection": "K0.1 public_symbols",
-        "row_count": 30,
+        "row_count": 33,
         "id_key": "symbol_id",
-        "id_set_sha256": "307956cfcb2a4e1de2b1a45d9db3767aa88e5be090815bc9ae1a77c8ad3add28",
-        "canonical_row_sha256": "18ba7fa4a9db025263b9df4ae5ce5f36641ca5e9334d4eeaf8fd64b2bb66e4f2",
+        "id_set_sha256": "2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a",
+        "canonical_row_sha256": "ebe68af6e8dfb70024cc857a4ce3e5797b6c7161ba7172569626ea08e362b50f",
         "disposition": "PRESERVE",
         "gate_state": "BLOCKING_PENDING_K1_5_AND_TERMINAL_EVIDENCE"
       },
       {
         "domain": "configuration_fields",
         "source_collection": "K0.2 configuration_fields",
-        "row_count": 43,
+        "row_count": 45,
         "id_key": "semantic_id",
-        "id_set_sha256": "8d92fb41fd731462e9851f23c6d4f0ca2298254f852663cd8d073554a37227cf",
-        "canonical_row_sha256": "fcd3b8aaf80ba67320dc047ba24eac117f06b4e65cd1b2012804da2397b86f69",
+        "id_set_sha256": "19c17095cf830f3cdac1e05d6d2626b0f2d9b90e93666e05629a80d1a4c9ba75",
+        "canonical_row_sha256": "0f47669f1bf5b36be0a7792b930ccff2831fb85cd922a10f00c436db7a8c33e5",
         "disposition": "PRESERVE",
         "gate_state": "BLOCKING_PENDING_IMPLEMENTATION_AND_VERIFICATION"
       },
       {
         "domain": "enum_semantics",
         "source_collection": "K0.2 enum_semantics",
-        "row_count": 7,
+        "row_count": 8,
         "id_key": "semantic_id",
-        "id_set_sha256": "034481cb30a74a776fae88462c4b544413a67310da6718585d5f77cedb462c4b",
-        "canonical_row_sha256": "12921229b5abb29fe6a5dd5e78d0752586b7e37af6ba2107bf14542c3125bdc8",
+        "id_set_sha256": "aa1a41c9a989a8c21d00e7609ea42b5ae2dddb02102205e5a9b190f99fe417c1",
+        "canonical_row_sha256": "2172382c45fe2d83ea7dee72783b9029a6e1ef44f92f9a464388ac4870febace",
         "disposition": "PRESERVE",
         "gate_state": "BLOCKING_PENDING_IMPLEMENTATION_AND_VERIFICATION"
       },
       {
         "domain": "operations",
         "source_collection": "K0.2 operations",
-        "row_count": 38,
+        "row_count": 40,
         "id_key": "semantic_id",
-        "id_set_sha256": "01a40fb40520c2ee2016e0b6c51ca9083fd6cb019bbb369d28e86fca73f88eed",
-        "canonical_row_sha256": "fd1d1de4362e35c5259ed2503d9abd9ffad148346ba4bebf289d2706b2f947e2",
+        "id_set_sha256": "67852f4d78939a533c5846b7e129c0a41cf225bba4bc884b14af7b930b39b7a7",
+        "canonical_row_sha256": "cac7d188c65a305b65851268095827b807139a1f70715f0e21e4a77e7e3fe382",
         "disposition": "PRESERVE",
         "gate_state": "BLOCKING_PENDING_IMPLEMENTATION_AND_VERIFICATION"
       },
@@ -225,7 +246,7 @@
         "row_count": 9,
         "id_key": "semantic_id",
         "id_set_sha256": "bab14d0ee1561fdf84e073bf25fcb9c162ad3e0b5fd1c67852ef396b2fa9c06c",
-        "canonical_row_sha256": "81f1eb6880f03924237500da89c8a34f273bfdfa428bbff82c84dda42024250d",
+        "canonical_row_sha256": "5450d12250f5d1e933cd66660486479e96fdc43cab37a110645866879d1dad71",
         "disposition": "PRESERVE",
         "gate_state": "BLOCKING_PENDING_CFG_ISOLATION_VERIFICATION"
       },
@@ -235,7 +256,7 @@
         "row_count": 12,
         "id_key": "object_key",
         "id_set_sha256": "92ab055d5d14e4971daf298e54c9f5036ecf71c490d579270f4789b889fc86a5",
-        "canonical_object_sha256": "558e38b863ad5a8e423a7d2f3731ada112a7d0bea16cf60484fd5c383efdfcb0",
+        "canonical_object_sha256": "ca4020a9b0886134cea9acd432b043e2a0e23aca32265a67df104a1de1ad0570",
         "disposition": "PRESERVE",
         "gate_state": "BLOCKING_PENDING_IMPLEMENTATION_AND_VERIFICATION"
       },
@@ -265,36 +286,36 @@
         "row_count": 23,
         "id_key": "finding_id",
         "id_set_sha256": "752d9b0be528ea09c4eb06100e6b1ab1992d92f52cd8a8f9400f0d805e5223b0",
-        "canonical_row_sha256": "b8786f5521bfdcfbba786844fea0e41242fcbe65d8ad886069470dfc5540c404",
+        "canonical_row_sha256": "896c3cb88e234fd40ab9b886a01cfafc41e69d00c08122f0f49b314238991c84",
         "disposition": "REVIEWED_EVOLUTION_INPUT",
         "gate_state": "BLOCKING_UNTIL_OWNER_RESOLUTION_AND_TERMINAL_EVIDENCE"
       }
     ]
   },
   "public_api_contract": {
-    "public_symbol_count": 30,
+    "public_symbol_count": 33,
     "canonical_public_row_rule": "Recursively key-sort and compactly serialize each complete K0.1 public_symbols row; bytewise sort records and append one LF per record.",
-    "canonical_public_row_sha256": "18ba7fa4a9db025263b9df4ae5ce5f36641ca5e9334d4eeaf8fd64b2bb66e4f2",
+    "canonical_public_row_sha256": "ebe68af6e8dfb70024cc857a4ce3e5797b6c7161ba7172569626ea08e362b50f",
     "exposure_projection": {
-      "row_count": 30,
+      "row_count": 33,
       "class_counts": {
-        "FACADE": 15,
-        "MODULE_PUBLIC": 12,
+        "FACADE": 17,
+        "MODULE_PUBLIC": 13,
         "CFG_TEST_ONLY": 2,
         "CFG_FUZZING": 1,
         "PRIVATE": 0
       },
       "classification_rule": "A nonempty facade_exports array is FACADE; KPR-PUB-002 and KPR-PUB-021 are CFG_TEST_ONLY; KPR-PUB-023 is CFG_FUZZING; every remaining row is MODULE_PUBLIC.",
       "projection_rule": "Emit symbol_id<TAB>exposure_class, bytewise sort unique rows, and append one LF per row.",
-      "projection_sha256": "cec04b907f94b381e8c1e4e9c38a5cdee6d0d89508f52aab5f2c92eab15fb70f"
+      "projection_sha256": "e5ab5243ac66474b0df051b5716dcdbe9239bc17742c2c5a154094e157786e23"
     },
     "facade_export_projection": {
-      "row_count": 15,
+      "row_count": 17,
       "projection_rule": "For every row with facade exports, emit symbol_id<TAB>comma_joined_facade_exports in K0.1 order; bytewise sort and append one LF per row.",
-      "projection_sha256": "8a63a3ae3410057e3aedcd063187e491529cd0bb978804c7cc41a8bffb9a7e5e"
+      "projection_sha256": "db3e4f48fada190ddac9e03b29acfc71cdbfe037de94640c0981982fec5b84ec"
     },
     "renamed_facade_aliases": {
-      "row_count": 2,
+      "row_count": 3,
       "rows": [
         {
           "symbol_id": "KCO-PUB-003",
@@ -305,10 +326,15 @@
           "symbol_id": "KCO-PUB-006",
           "module_name": "ConsumerRecord",
           "facade_name": "KafkaConsumerRecord"
+        },
+        {
+          "symbol_id": "KCO-PUB-008",
+          "module_name": "RebalanceStats",
+          "facade_name": "KafkaRebalanceStats"
         }
       ],
       "projection_rule": "Emit symbol_id<TAB>module_name<TAB>facade_name, bytewise sort, and append one LF per row.",
-      "projection_sha256": "eee9f608a39846d1df1ec81a830c0f7b079667a09f923a3a398c2cdd64ca1fb1"
+      "projection_sha256": "8e06be84e0364c9588bd6f217f2c3447a691a6b5d59dbc3d9f520248321aa7de"
     },
     "required_preservation": [
       "All public declarations, public fields, public variants, public methods, module-public names, facade exports, and renamed facade aliases remain contract inputs.",
@@ -321,16 +347,16 @@
     "gate_state": "BLOCKING_PENDING_K1_5_K12_5_K13_6_K14_1"
   },
   "semantic_contract": {
-    "semantic_row_count": 97,
+    "semantic_row_count": 102,
     "collection_counts": {
-      "configuration_fields": 43,
-      "enum_semantics": 7,
-      "operations": 38,
+      "configuration_fields": 45,
+      "enum_semantics": 8,
+      "operations": 40,
       "callable_helpers": 9
     },
-    "semantic_id_set_sha256": "a9967c47346ee6386e9e8836d73e819a784f829baa6d255eb24e55aae1950cf7",
+    "semantic_id_set_sha256": "c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121",
     "canonical_semantic_row_rule": "Recursively key-sort and compactly serialize every row from configuration_fields, enum_semantics, operations, and callable_helpers; bytewise sort records and append one LF per record.",
-    "canonical_semantic_row_sha256": "ada6796514f5502ddd095dc05904f312bff387bc3a7fe70caf1cae0384ce3396",
+    "canonical_semantic_row_sha256": "1ba55c44beb8b1c7e6c8048d197150f3987bb9ecd9b1d69c00d1f2c0fe999624",
     "required_row_fields": [
       "accepted_values",
       "broker_mapping",
@@ -353,11 +379,11 @@
       "timeout_rule"
     ],
     "configuration_owner_counts": {
-      "ProducerConfig": 14,
+      "ProducerConfig": 15,
       "KafkaTlsConfig": 4,
       "KafkaSaslConfig": 4,
       "TransactionalConfig": 3,
-      "ConsumerConfig": 18
+      "ConsumerConfig": 19
     },
     "headline_invariants": [
       {
@@ -419,7 +445,7 @@
         "shutdown_model"
       ],
       "id_set_sha256": "92ab055d5d14e4971daf298e54c9f5036ecf71c490d579270f4789b889fc86a5",
-      "canonical_object_sha256": "558e38b863ad5a8e423a7d2f3731ada112a7d0bea16cf60484fd5c383efdfcb0",
+      "canonical_object_sha256": "ca4020a9b0886134cea9acd432b043e2a0e23aca32265a67df104a1de1ad0570",
       "disposition": "PRESERVE"
     },
     "disposition": "PRESERVE",
@@ -431,12 +457,12 @@
     "canonical_compilation_profile_sha256": "8a2b2437daa7b2b4c8189875502bf5d4b049d6c9ce408d390279deaf8d8b5815",
     "semantic_profile_group_count": 17,
     "semantic_profile_group_id_set_sha256": "7bb8ea31cc9a88c8f068f6a18a8656a1eea52056229aa11302ffb7f9473b938c",
-    "canonical_semantic_profile_group_sha256": "75bedc39680e2df6ea1be48212fa6a0f9c397767cab43dcae769d29e99526c29",
-    "semantic_profile_membership_count": 97,
+    "canonical_semantic_profile_group_sha256": "72c68408f21abf58cf8d6849dd23e463f2510ef736066fb012fa42aeb4d38cb1",
+    "semantic_profile_membership_count": 102,
     "semantic_profile_membership_rule": "Emit semantic_id<TAB>profile_group_id for every profile_disposition_groups membership, bytewise sort, and append one LF per row.",
-    "semantic_profile_membership_sha256": "60e296aa42497ee03292a481dd867919b873eb309cecbfbc7877e9338fe47925",
+    "semantic_profile_membership_sha256": "8b762d37f55b82fc508c08d079c79bfb743e5eb309f951aeaa3c44e3aaa0a5cd",
     "required_profile_rules": [
-      "All 97 semantic rows belong to exactly one of the 17 K0.2 profile disposition groups.",
+      "All 102 semantic rows belong to exactly one of the 17 K0.2 profile disposition groups.",
       "The native no-feature facade remains present and broker-directed behavior remains fail-closed unless the exact test or test-internals admission rule says otherwise.",
       "Debug-only insecure transport setters remain visible under test OR debug_assertions as current source truth; their ADR mismatch remains an explicit conflict, not a silent narrowing.",
       "Deterministic broker helpers retain their exact test and test-internals distinctions, including the release test-internals guard behavior recorded in K0.2.",
@@ -470,8 +496,8 @@
       "is_timeout",
       "is_retryable"
     ],
-    "semantic_outcome_rule": "Every one of the 97 semantic rows retains accepted_values, rejected_values, success_outcome, error_outcome, retry_rule, timeout_rule, cancellation_rule, shutdown_rule, resource_bound, and credential_payload_rule exactly through the canonical semantic-row digest.",
-    "coarse_error_boundary": "The current coarse string-bearing errors, classifier mismatches, rejected-value exposure, ambiguous completion states, and absent ASUP-E registry integration remain reviewed-evolution inputs. K1.3 does not claim they are sufficient or safe.",
+    "semantic_outcome_rule": "Every one of the 102 semantic rows retains accepted_values, rejected_values, success_outcome, error_outcome, retry_rule, timeout_rule, cancellation_rule, shutdown_rule, resource_bound, and credential_payload_rule exactly through the canonical semantic-row digest.",
+    "coarse_error_boundary": "Coarse string-bearing errors, classifier mismatches, historical rejected-value exposure, ambiguous completion states, and absent ASUP-E registry integration remain reviewed-evolution inputs. Current ClientConfig rejection omits raw values and descriptions, while other upstream error variants remain outside that repair. K1.3 does not claim complete error sanitation.",
     "typed_feature_disabled_rule": "FeatureDisabled remains a public KafkaError variant and the native no-feature behavior remains typed and fail-closed at the exact K0.2 operation boundaries.",
     "delivery_rebalance_offset_rule": "Delivery, transaction, rebalance, poll, commit, seek, close, and accessor outcomes remain exactly those of the K0.2 operation rows until K10.3 records reviewed interfaces and terminal evidence verifies them.",
     "implementation_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.10.3",
@@ -558,7 +584,7 @@
           "KAFKA-K0-2-GAP-11",
           "KAFKA-K0-2-GAP-21"
         ],
-        "current_state": "SASL wrapper passwords are redacted and zeroized on wrapper drop; TLS key passwords are cloneable String values without repository-owned zeroization, and rejected native configuration values can be exposed through public errors.",
+        "current_state": "SASL wrapper passwords are redacted and zeroized on wrapper drop. Current raw-property Debug and native ClientConfig errors omit raw values, superseding that part of historical GAP-21. TLS key passwords and raw property values remain cloneable String storage without repository-owned zeroization; explicit accessors retain values, keys remain visible, and other upstream error variants have no comprehensive sanitation proof.",
         "owners": [
           "asupersync-dep-p7-kafka-removal-sarszu.2.3.2",
           "asupersync-dep-p7-kafka-removal-sarszu.2.3.3",
