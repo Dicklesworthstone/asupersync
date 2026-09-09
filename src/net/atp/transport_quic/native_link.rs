@@ -605,6 +605,14 @@ const NEEDMORE_PTO: Duration = Duration::from_millis(1500);
 /// Fast retry cadence for source STREAM recovery while bytes are still being
 /// flushed or while the sender awaits the receiver's reliable Proof.
 const SOURCE_STREAM_PTO: Duration = Duration::from_millis(200);
+
+/// Absolute bound on a proof/feedback wait, as a multiple of the idle
+/// timeout. The wait's silence budget restarts on every 1-RTT packet so a
+/// receiver that is alive but slow (a long local commit under keep-alives)
+/// is not declared dead; this cap keeps a peer that is alive at the QUIC
+/// layer yet never delivers the frame from holding the session, its file
+/// handles and its retained in-flight frames forever.
+const PROOF_WAIT_LIVENESS_MULTIPLIER: u32 = 8;
 const QUIC_LOSS_TARGET_PROGRESS_STALL_RATIO: f64 = 0.50;
 const QUIC_LOSS_TARGET_PROGRESS_LOSS_MARGIN: f64 = 0.01;
 const QUIC_LOSS_TARGET_DELIVERY_BACKOFF_HEADROOM: f64 = 1.25;
@@ -5094,24 +5102,43 @@ impl QuicLink {
             }
             let probe_before = rqtrace_fallback_io_probe();
             let wait_started = Instant::now();
-            let received = match crate::time::timeout(
-                cx.now(),
-                next_timeout,
-                self.endpoint.receive_batch(cx, receive_limit),
-            )
-            .await
-            {
-                Ok(Ok(packets)) => packets,
-                Ok(Err(err)) => return Err(map_udp_error(err)),
-                Err(_elapsed) => {
-                    self.trace_pump_idle(
-                        next_timeout,
-                        wait_started.elapsed(),
-                        total_processed,
-                        parked_before,
-                        probe_before,
-                    );
-                    return Ok(total_processed);
+            let received = if next_timeout.is_zero() {
+                // A zero wait must still poll the socket exactly once.
+                // `timeout` reports its deadline as already elapsed before
+                // polling the inner future whenever an ambient timer clock is
+                // present (every task `Cx` under the runtime carries the wall
+                // clock), so routing a zero wait through it never touched the
+                // socket and the receiver's keep-alive drain acknowledged
+                // nothing under the CLI runtime (GH#67 follow-up review).
+                match futures_lite::future::poll_once(
+                    self.endpoint.receive_batch(cx, receive_limit),
+                )
+                .await
+                {
+                    Some(Ok(packets)) => packets,
+                    Some(Err(err)) => return Err(map_udp_error(err)),
+                    None => return Ok(total_processed),
+                }
+            } else {
+                match crate::time::timeout(
+                    cx.now(),
+                    next_timeout,
+                    self.endpoint.receive_batch(cx, receive_limit),
+                )
+                .await
+                {
+                    Ok(Ok(packets)) => packets,
+                    Ok(Err(err)) => return Err(map_udp_error(err)),
+                    Err(_elapsed) => {
+                        self.trace_pump_idle(
+                            next_timeout,
+                            wait_started.elapsed(),
+                            total_processed,
+                            parked_before,
+                            probe_before,
+                        );
+                        return Ok(total_processed);
+                    }
                 }
             };
             let received_len = received.len();
@@ -5693,6 +5720,10 @@ impl QuicLink {
         let pto = NEEDMORE_PTO;
         let mut attempts = 0u32;
         let mut last_retransmit = Instant::now();
+        let started = Instant::now();
+        let liveness_cap = self
+            .idle_timeout
+            .saturating_mul(PROOF_WAIT_LIVENESS_MULTIPLIER);
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             if let Some(frame) = self.pending_control_frames.pop_front() {
@@ -5704,6 +5735,21 @@ impl QuicLink {
             self.flush(cx).await?;
             let pumped = self.pump_inbound_for(cx, pto).await?;
             attempts = stream_pto_attempts_after_pump(attempts, pumped);
+            // A peer that stays alive at the QUIC layer (keep-alives, ACKs)
+            // but never delivers the frame must not hold this session open
+            // forever: the consecutive-silence budget above resets on every
+            // packet, so an absolute cap bounds the wait regardless.
+            if started.elapsed() >= liveness_cap {
+                super::quic_progress(format_args!(
+                    "control: stream_pto_liveness_cap operation={operation} attempts={attempts} cap_ms={} {}",
+                    liveness_cap.as_millis(),
+                    self.wait_diagnostics()
+                ));
+                return Err(QuicTransportError::Timeout {
+                    operation,
+                    timeout: liveness_cap,
+                });
+            }
             if pumped > 0 && last_retransmit.elapsed() < pto {
                 continue;
             }
