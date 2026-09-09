@@ -1632,9 +1632,10 @@ mod tests {
         let cwnd_before = t.congestion_window_bytes();
 
         t.on_packet_sent(ack_only(space, 1, 30_000));
-        t.on_packet_sent(sent(space, 2, 30_100));
-        // now - loss_delay = 48_750 > 30_000, pn 1 <= largest acked (2), but
-        // pn 1 + 3 > 2 so only the time threshold applies.
+        t.on_packet_sent(sent(space, 2, 50_000));
+        // This ACK also measures 10 ms, keeping loss_delay at 11.25 ms.
+        // now - loss_delay = 48_750 > 30_000, pn 1 <= largest acked (2),
+        // but pn 1 + 3 > 2 so only the time threshold applies.
         let event = t.on_ack_received(space, &[2], 0, 60_000);
         assert_eq!(event.acked_packets, 1);
         assert_eq!(event.lost_packets, 0);
@@ -2107,7 +2108,9 @@ mod tests {
     #[test]
     fn managed_pto_latest_send_restarts_deadline_and_survives_its_ack() {
         let mut t = QuicTransportMachine::new();
-        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+        // Packet 1 must remain younger than the loss delay computed from
+        // the ACK's fresh 1000us RTT: its age will be 1100us < 1125us.
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 2_900));
         t.on_packet_sent(sent(PacketNumberSpace::Initial, 2, 3_000));
         assert_eq!(t.pto_deadline_micros(3_000), Some(1_002_000));
 
