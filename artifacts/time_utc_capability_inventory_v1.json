@@ -8,6 +8,57 @@
   "captured_date_utc": "2026-08-05",
   "baseline_revision": "1afde84d564bd8ea876459624116f90028b80835",
   "evidence_mode": "STATIC_SOURCE_INVENTORY",
+  "current_source_review": {
+    "review_id": "TIME-A1-CURRENT-SOURCE-2026-09-09",
+    "reviewed_date_utc": "2026-09-09",
+    "state": "STATIC_SOURCE_RECONCILIATION_ONLY",
+    "historical_signoff_preserved": true,
+    "historical_source_pin_projection_sha256": "4c3381718f369d2b6ab8cf4b6593de7557e72d29c9d625d730364a1633643b21",
+    "dependency_exit_allowed": false,
+    "source_snapshot_pin_count": 78,
+    "literal_chrono_line_count": 166,
+    "direct_alias_line_count": 39,
+    "literal_or_alias_unique_line_count": 204,
+    "alias_derived_anchor_count": 11,
+    "additional_derived_anchor_count": 51,
+    "cross_file_consumer_anchor_count": 34,
+    "declared_consumer_unique_direct_source_anchor_count": 82,
+    "classified_anchor_count": 300,
+    "refreshed_source_pins": [
+      {"path": "Cargo.toml", "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e", "line_count": 1121},
+      {"path": "Cargo.lock", "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb", "line_count": 4664},
+      {"path": "conformance/Cargo.toml", "sha256": "df343652b07260dcada2c35c56d4b704f0a6ef33160b8de09a435edd7b31a2cc", "line_count": 214},
+      {"path": "fuzz/Cargo.toml", "sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385", "line_count": 6234},
+      {"path": "fuzz/conformance/Cargo.toml", "sha256": "0b2f13450fd2c8b7f5376912160cf1fd1f2b5b5d92bae0703cd683805b1c274f", "line_count": 50},
+      {"path": "artifacts/dependency_capability_registry_v1.json", "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75", "line_count": 7058},
+      {"path": "artifacts/dependency_capability_baseline_v1.json", "sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858", "line_count": 3264},
+      {"path": "artifacts/dependency_api_adr_registry_v1.json", "sha256": "54c022426dfb1053607621fbdf7a1e4d9b4a4caad85460201eb44654ae512f0e", "line_count": 6832},
+      {"path": "src/lib.rs", "sha256": "baec6f62836d2b3dca6b56ae5bd3d0c2d9717ac60a2d4268b28e509cefe36d36", "line_count": 513},
+      {"path": "src/time/mod.rs", "sha256": "3f1cebd6c954bc745efce2babf0d4e2626126b04f188c612f2bfc80235c1983f", "line_count": 81},
+      {"path": "src/bin/asupersync.rs", "sha256": "db9679da2c0ba6050f209264fb353da75892b0046429dffe0ba7edce5d74517a", "line_count": 17878},
+      {"path": "src/cli/atp_workflows.rs", "sha256": "552e87ffb23988adb422609577741f9503c7451a74040f97b83d24d81e5ffba0", "line_count": 1973},
+      {"path": "src/atp/benchmark/suite.rs", "sha256": "e5516a91702a38bfb7f21c35b29f302849b4a1514e7618ecc046148268f7fc57", "line_count": 349},
+      {"path": "src/database/postgres.rs", "sha256": "bf2f7e452eba0e56897c6f95a272e9ffae705e4a3fc8fd51ff8c313f85388b87", "line_count": 9212},
+      {"path": "src/messaging/redis.rs", "sha256": "1632fe48e99d37e29ba1c56ca2d57dcf0f4548940390d3be5334487aec309360", "line_count": 6633},
+      {"path": "src/bin/offline_tuner.rs", "sha256": "61c73ca18846a95ec6939aaa158dc2b063bb97b76a2d34fffa0141dc12e9039c", "line_count": 668},
+      {"path": "src/trace/replay.rs", "sha256": "b47a4c045653fa4a12540a177dcb1824111a8899d8380695e0751fae7fdef954", "line_count": 1825}
+    ],
+    "added_source_pins": [
+      {"path": "src/database/postgres_tests.rs", "sha256": "d375eba0dae52926ded4562d8aafef37c2d5c4ffa991fa097192967784ac61c9", "line_count": 10681},
+      {"path": "src/messaging/redis_tests.rs", "sha256": "51a845c5ab3ed61742564be27cf6b345f8a4732c78ed74fb68a36d23a068f75e", "line_count": 6398},
+      {"path": "tests/dependency_oracle_policy_contract.rs", "sha256": "7944dbdf05b6c177bfdc701869ac3e3b5c64bc49618391aac32b10e95bf7f4bf", "line_count": 3970},
+      {"path": "tests/dependency_supply_chain_policy_contract.rs", "sha256": "2861693f278a93b0e524e76acf5cd3ee15ed8ad5ac2ba0364ff80badb4d9e39a", "line_count": 495}
+    ],
+    "review_notes": [
+      "PostgreSQL and Redis unit bodies moved into sibling include files under their existing feature and cfg(test) owners. The four Chrono literals in each remain test-only; PostgreSQL DATE/TIMESTAMP epoch arithmetic and Redis RFC3339 diagnostics are unchanged.",
+      "The two dependency policy integration contracts add seven namespace lines. The oracle contract also adds one NaiveDate/Utc binding with seven direct alias lines and three first date comparisons: current >= expiry, reviewed >= previous expiry, and next expiry > reviewed.",
+      "The supply-chain policy parses a calendar expiry and RFC3339 approval, compares expiry strictly after as_of, and compares the approval's encoded-offset calendar date at or before as_of. date_naive does not normalize that approval to UTC. Its two fixture date arguments are first test-helper boundaries, not public carriers or persistence evidence.",
+      "BenchmarkSuite now creates its scratch directory with an explicit prefix and Unix0700 permissions; the same first timestamp-bearing report constructor moved from line99 to107. ATP workflow changes strengthen the existing bare SHA256 content-hash test without changing UTC acquisition or persisted timestamp shapes.",
+      "Root manifests retain the same Chrono/time direct edges and locked versions. Packaging, workspace versions, unrelated dependency updates and removal of offline-tuner env_logger do not establish a TIME cutover. Registry TIME capability and baseline rows are unchanged; ADR011 only removes the already-exited env_logger from its cli feature projection.",
+      "Root exports add remote-service and test recovery surfaces, time adds a private process_epoch reexport, replay adds a separate production schedule projection, and CLI adds opt-in Unix remote service commands. None changes the inventoried UTC formatter or public Chrono fields. Offline tuner still emits SystemTime debug metadata."
+    ],
+    "no_claim_boundary": "The August extensions, source revisions, execution receipts, owner authority, A1 historical signoff and seven behavioral gaps remain historical. Current source classification is not renewed runtime, byte-level, readback, broker, conformance, performance, cross-platform or release evidence; no dependency exit is authorized."
+  },
   "authority": {
     "adr_id": "DEP-ADR-011",
     "adr_bead_id": "asupersync-dep-p3-api-adrs-h3jspm.11",
@@ -671,10 +722,10 @@
       "conformance",
       "fuzz/conformance"
     ],
-    "path_count": 71,
-    "matching_line_count": 159,
-    "path_and_line_count_projection_sha256": "f8fd5086d737eb83440e89530d8929d8bcd25dc68449e16ea57f12fcd116c7de",
-    "paths_projection_sha256": "f16dea3b2143a0502579cdde842a5b00694031ec504eb674750554f6030f9700",
+    "path_count": 73,
+    "matching_line_count": 166,
+    "path_and_line_count_projection_sha256": "afb1263fcee26ea00178b3c7bf7374b30dd6f1a39b5ff5ffc9f7f2dda60b9b5a",
+    "paths_projection_sha256": "7362a7a24a311776549d2d2aa0d4746676f53dc60abf762a32d0787054cd975f",
     "classification_groups": [
       {
         "group_id": "TIME-CHRONO-PRODUCTION-CLI",
@@ -751,11 +802,11 @@
         "matching_line_count": 8,
         "paths": [
           {
-            "path": "src/database/postgres.rs",
+          "path": "src/database/postgres_tests.rs",
             "matching_line_count": 4
           },
           {
-            "path": "src/messaging/redis.rs",
+          "path": "src/messaging/redis_tests.rs",
             "matching_line_count": 4
           }
         ]
@@ -880,8 +931,8 @@
         ],
       "wiring_state": "PER_PATH_STATIC_CLASSIFICATION_RECORDED",
         "activation_note": "No integration target was built or run by A1.",
-        "path_count": 8,
-        "matching_line_count": 23,
+      "path_count": 10,
+      "matching_line_count": 30,
         "paths": [
         {
           "path": "tests/conformance/codec_framing/mod.rs",
@@ -924,6 +975,28 @@
           "cfg_or_wiring": "WIRED_BY_TESTS_CONFORMANCE_RS",
           "operation": "conformance report timestamp",
           "exposure": "TEST_SOURCE_ONLY",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/dependency_oracle_policy_contract.rs",
+          "matching_line_count": 1,
+          "target_kind": "automatic integration target",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+          "operation": "policy current UTC date, expiry parsing and renewal comparisons",
+          "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+          "implementation_owner": "asupersync-5z2scg.6.7",
+          "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
+        },
+        {
+          "path": "tests/dependency_supply_chain_policy_contract.rs",
+          "matching_line_count": 6,
+          "target_kind": "automatic integration target",
+          "manifest_profile": "TIME-PROFILE-ROOT-DEV",
+          "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+          "operation": "policy expiry and encoded-offset approval date validation",
+          "exposure": "PRIVATE_POLICY_TEST_HELPERS",
           "implementation_owner": "asupersync-5z2scg.6.7",
           "aggregate_evidence_owner": "asupersync-5z2scg.6.7"
         },
@@ -1183,24 +1256,24 @@
   "per_use_classification": {
     "state": "LITERAL_DIRECT_ALIAS_AND_FIRST_BOUNDARY_CARRIERS_COMPLETE",
     "inheritance_rule": "Each literal Chrono line receives its semantic operation from the first ordered literal_operation_rule whose needle occurs on that line. Every literal, import-backed, and in-file derived anchor receives profile, migration group, and owner metadata from its unique path_classification_set; literal overrides and alias binding or operation rows may narrow wiring, exposure, and association without changing that ownership route. Declared cross-file rows carry explicit profile, wiring, exposure, association, and direct-source lineage because their consumer paths need not contain a Chrono reference.",
-    "path_count": 71,
-    "literal_line_count": 159,
-    "direct_alias_line_count": 32,
+    "path_count": 73,
+    "literal_line_count": 166,
+    "direct_alias_line_count": 39,
     "literal_alias_overlap_line_count": 1,
-    "literal_or_alias_unique_line_count": 190,
-    "derived_operation_anchor_count": 55,
-    "classified_anchor_count": 279,
-    "literal_use_override_count": 36,
-    "additional_derived_operation_anchor_count": 47,
+    "literal_or_alias_unique_line_count": 204,
+    "derived_operation_anchor_count": 62,
+    "classified_anchor_count": 300,
+    "literal_use_override_count": 38,
+    "additional_derived_operation_anchor_count": 51,
     "cross_file_consumer_anchor_count": 34,
     "cross_file_direct_source_anchor_count": 41,
-    "declared_consumer_unique_direct_source_anchor_count": 76,
-    "literal_operation_projection_sha256": "0a37d054eaa2677355b75f7788b46d51dc6b6dc1072b8fd26b49c44d3d387cb9",
-    "literal_source_projection_sha256": "3a25d366e0388bb559881b71823c2d42be3e45ff7e05fee0324f24dcd2c7fcec",
-    "path_classification_projection_sha256": "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63",
-    "literal_override_projection_sha256": "194275e94001e0b048499cce9765365db2fffc9cf256d8a2e93489f1a97ee2e6",
-    "additional_derived_projection_sha256": "a32e839f13b56abfe4c80070dc20df15fdc26a6c9a63c36487492f7771e77e3b",
-    "cross_file_consumer_projection_sha256": "ca8cec49608f6762b7984ba4bc3b6e3b816ecee73cb008510ea11c1677fa728c",
+    "declared_consumer_unique_direct_source_anchor_count": 82,
+    "literal_operation_projection_sha256": "47da830b8b1551d493df63002db52916304bd34dd13ef085a87bebfdb6850044",
+    "literal_source_projection_sha256": "3dcb2243698b97b5a1ea59f10bf40520f840cd41d070319bd01857dd6a8e5a8c",
+    "path_classification_projection_sha256": "883dab893db867d03bcde4c186cd784daa98f0e344430ee8a1a6a56d991906bf",
+    "literal_override_projection_sha256": "ea5df80caad282824d6065071cf90bb5ab48fad670fde51da7f3ce4de7ef7494",
+    "additional_derived_projection_sha256": "ee9d15e4b2e7593a2d1d78046029f00e631e6c546281816b72a7cd0225caf1c5",
+    "cross_file_consumer_projection_sha256": "6d420b6a7a5ac8278dbb724193e3a6cead52912e95ea2d7e69f7dd90de50f8ef",
     "semantic_consumer_boundary": "Include nonliteral consumers through the first semantic compare, arithmetic, format, serialize, persist, retain, return, extract, or embed boundary in a Chrono-bearing source path; exclude cross-file propagation, external consumers, and later container or arbitrary-byte taint.",
     "cross_file_consumer_boundary": "Include the first explicit embedding, constructor, return, or statically generic JSON value serialization boundary in a different source file when a timestamp-bearing public carrier flows from a direct Chrono producer to a declared in-repository consumer; exclude later encoding or rendering calls, later container propagation, distinct file or standard-output sink anchors, dynamic dispatch, external consumers, and ambiguous provenance.",
     "derived_consumer_category_ids": [
@@ -1210,6 +1283,7 @@
       "TIME-CONSUMER-JETSTREAM-WIRE-INSERTION",
       "TIME-CONSUMER-REAL-E2E-BOUNDARY",
       "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+      "TIME-CONSUMER-TEST-POLICY-EXPIRY",
       "TIME-CONSUMER-TEST-PROFILE-CARRIER"
     ],
     "cross_file_consumer_category_ids": [
@@ -1229,7 +1303,7 @@
         "operation_id": "DIRECT_IMPORT_BINDING",
         "needle": "use chrono::",
         "operation": "direct Chrono symbol binding",
-        "matching_line_count": 4
+        "matching_line_count": 5
       },
       {
         "precedence": 2,
@@ -1263,8 +1337,8 @@
         "precedence": 6,
         "operation_id": "CALENDAR_DATE_CONSTRUCTION",
         "needle": "chrono::NaiveDate::from_ymd_opt",
-        "operation": "PostgreSQL calendar epoch construction",
-        "matching_line_count": 2
+        "operation": "calendar date construction for PostgreSQL epochs or policy fixtures",
+        "matching_line_count": 3
       },
       {
         "precedence": 7,
@@ -1313,7 +1387,28 @@
         "operation_id": "AMBIENT_UTC_TYPED",
         "needle": "chrono::Utc::now()",
         "operation": "ambient UTC acquired as a typed datetime",
-        "matching_line_count": 23
+        "matching_line_count": 24
+      },
+      {
+        "precedence": 14,
+        "operation_id": "CALENDAR_DATE_PARSE",
+        "needle": "chrono::NaiveDate::parse_from_str",
+        "operation": "parse a policy calendar date with an explicit format",
+        "matching_line_count": 2
+      },
+      {
+        "precedence": 15,
+        "operation_id": "OFFSET_DATETIME_PARSE",
+        "needle": "chrono::DateTime::parse_from_rfc3339",
+        "operation": "parse an RFC3339 timestamp retaining its encoded offset",
+        "matching_line_count": 1
+      },
+      {
+        "precedence": 16,
+        "operation_id": "CALENDAR_DATE_PARAMETER",
+        "needle": "chrono::NaiveDate",
+        "operation": "private policy helper calendar-date parameter",
+        "matching_line_count": 1
       }
     ],
     "path_classification_sets": [
@@ -1361,7 +1456,7 @@
         "profile_id": "TIME-PROFILE-ROOT-DEV",
         "migration_group_id": "TIME-MIG-DATABASE-MESSAGING-ORACLES",
         "paths": [
-          "src/database/postgres.rs"
+          "src/database/postgres_tests.rs"
         ],
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
         "exposure": "PRIVATE_UNIT_DIFFERENTIAL_ORACLE",
@@ -1373,7 +1468,7 @@
         "profile_id": "TIME-PROFILE-ROOT-DEV",
         "migration_group_id": "TIME-MIG-DATABASE-MESSAGING-ORACLES",
         "paths": [
-          "src/messaging/redis.rs"
+          "src/messaging/redis_tests.rs"
         ],
         "cfg_or_wiring": "CFG_TEST_IN_REDIS_MODULE",
         "exposure": "PRIVATE_TEST_DIAGNOSTIC_OUTPUT",
@@ -1487,6 +1582,8 @@
         "profile_id": "TIME-PROFILE-ROOT-DEV",
         "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
         "paths": [
+          "tests/dependency_oracle_policy_contract.rs",
+          "tests/dependency_supply_chain_policy_contract.rs",
           "tests/grpc_http2_e2e.rs",
           "tests/rfc6330_conformance.rs"
         ],
@@ -1633,6 +1730,26 @@
     ],
     "literal_use_overrides": [
       {
+        "use_id": "TIME-LITERAL-OVERRIDE-SUPPLY-CURRENT-DATE-0208",
+        "path": "tests/dependency_supply_chain_policy_contract.rs",
+        "line": 208,
+        "source_anchor": "pem_retention_is_valid_at(exception, chrono::Utc::now().date_naive()),",
+        "operation": "acquire current UTC calendar date and pass it to the private expiry predicate",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "live policy exception expiry check; no public carrier or serialization"
+      },
+      {
+        "use_id": "TIME-LITERAL-OVERRIDE-SUPPLY-FIXTURE-DATE-0217",
+        "path": "tests/dependency_supply_chain_policy_contract.rs",
+        "line": 217,
+        "source_anchor": "let review_date = chrono::NaiveDate::from_ymd_opt(2026, 9, 8).unwrap();",
+        "operation": "construct a fixed policy review calendar date for a regression fixture",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "historical approval and exact expiry-day test inputs"
+      },
+      {
         "use_id": "TIME-LITERAL-OVERRIDE-CLI-COMMAND-1041",
         "path": "src/cli/atp_command_tree.rs",
         "line": 1041,
@@ -1724,8 +1841,8 @@
       },
       {
         "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18142",
-        "path": "src/database/postgres.rs",
-        "line": 18146,
+        "path": "src/database/postgres_tests.rs",
+        "line": 9051,
         "source_anchor": "(epoch + chrono::TimeDelta::days(days)).to_string()",
         "operation": "add a PostgreSQL day offset to the calendar epoch and render expected DATE text",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -1734,8 +1851,8 @@
       },
       {
         "use_id": "TIME-LITERAL-OVERRIDE-POSTGRES-18153",
-        "path": "src/database/postgres.rs",
-        "line": 18157,
+        "path": "src/database/postgres_tests.rs",
+        "line": 9062,
         "source_anchor": "(epoch + chrono::TimeDelta::microseconds(micros)).to_string()",
         "operation": "add a PostgreSQL microsecond offset to the midnight epoch and render expected TIMESTAMP text",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -1995,6 +2112,62 @@
     ],
     "additional_derived_operation_rows": [
       {
+        "use_id": "TIME-DERIVED-SUPPLY-EXPIRY-COMPARE-0066",
+        "derivation_sources": [
+          "tests/dependency_supply_chain_policy_contract.rs:52",
+          "tests/dependency_supply_chain_policy_contract.rs:56",
+          "tests/dependency_supply_chain_policy_contract.rs:208"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-TEST-POLICY-EXPIRY",
+        "path": "tests/dependency_supply_chain_policy_contract.rs",
+        "line": 66,
+        "source_anchor": "expiry > as_of",
+        "operation": "require policy expiry to be strictly later than the supplied calendar date",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "private predicate rejects an exception on its expiry date"
+      },
+      {
+        "use_id": "TIME-DERIVED-SUPPLY-APPROVAL-COMPARE-0067",
+        "derivation_sources": [
+          "tests/dependency_supply_chain_policy_contract.rs:52",
+          "tests/dependency_supply_chain_policy_contract.rs:62",
+          "tests/dependency_supply_chain_policy_contract.rs:208"
+        ],
+        "consumer_category_id": "TIME-CONSUMER-TEST-POLICY-EXPIRY",
+        "path": "tests/dependency_supply_chain_policy_contract.rs",
+        "line": 67,
+        "source_anchor": "&& approval.date_naive() <= as_of",
+        "operation": "compare the approval's encoded-offset calendar date with the supplied date without UTC normalization",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "private policy approval predicate; not instant ordering"
+      },
+      {
+        "use_id": "TIME-DERIVED-SUPPLY-FIXTURE-REVIEW-0218",
+        "derivation_sources": ["tests/dependency_supply_chain_policy_contract.rs:217"],
+        "consumer_category_id": "TIME-CONSUMER-TEST-POLICY-EXPIRY",
+        "path": "tests/dependency_supply_chain_policy_contract.rs",
+        "line": 218,
+        "source_anchor": "assert!(pem_retention_is_valid_at(&exception, review_date));",
+        "operation": "pass the fixed review date to the private predicate and assert acceptance",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "first fixture argument boundary; no persistence or public carrier"
+      },
+      {
+        "use_id": "TIME-DERIVED-SUPPLY-FIXTURE-EXPIRY-0222",
+        "derivation_sources": ["tests/dependency_supply_chain_policy_contract.rs:220"],
+        "consumer_category_id": "TIME-CONSUMER-TEST-POLICY-EXPIRY",
+        "path": "tests/dependency_supply_chain_policy_contract.rs",
+        "line": 222,
+        "source_anchor": "assert!(!pem_retention_is_valid_at(&exception, expiry));",
+        "operation": "pass the parsed expiry date to the private predicate and assert rejection",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "first fixture argument boundary for expiry-day refusal"
+      },
+      {
         "use_id": "TIME-DERIVED-CLI-CI-EXPIRY-MOVE-0251",
         "derivation_sources": [
           "src/cli/atp_workflows.rs:236"
@@ -2056,11 +2229,11 @@
       {
         "use_id": "TIME-DERIVED-POSTGRES-MIDNIGHT-CONSTRUCTION-18151",
         "derivation_sources": [
-          "src/database/postgres.rs:18153"
+          "src/database/postgres_tests.rs:9058"
         ],
         "consumer_category_id": "TIME-CONSUMER-DATABASE-MESSAGING-ARITHMETIC",
-        "path": "src/database/postgres.rs",
-        "line": 18155,
+        "path": "src/database/postgres_tests.rs",
+        "line": 9060,
         "source_anchor": ".and_hms_opt(0, 0, 0)",
         "operation": "extend the PostgreSQL calendar epoch date to a midnight timestamp",
         "cfg_or_wiring": "FEATURE_POSTGRES_AND_CFG_TEST_IN_MODULE",
@@ -2790,7 +2963,7 @@
         "consumer_category_id": "TIME-CROSS-FILE-BENCHMARK-PUBLIC-CONSTRUCTOR",
         "profile_id": "TIME-PROFILE-BENCHMARK-ADAPTERS",
         "path": "src/atp/benchmark/suite.rs",
-        "line": 99,
+        "line": 107,
         "source_anchor": "let report = BenchmarkReport::new(",
         "operation": "construct the timestamp-bearing BenchmarkReport at the benchmark-suite aggregation boundary",
         "cfg_or_wiring": "FEATURE_BENCHMARK_ADAPTERS",
@@ -3218,15 +3391,15 @@
   "alias_aware_chrono_uses": {
     "scope": "Bounded lexical inventory of every direct Chrono import binding, every line that directly references an imported Chrono symbol in the five census roots, and every adjacent derived temporal arithmetic, comparison, association, or ordering anchor discovered for those bindings.",
     "state": "IMPORT_BINDINGS_DIRECT_REFERENCES_AND_DECLARED_DERIVED_ANCHORS_COMPLETE",
-    "binding_path_count": 4,
-    "binding_count": 4,
-    "direct_reference_line_count": 32,
-    "imported_symbol_occurrence_count": 45,
+    "binding_path_count": 5,
+    "binding_count": 5,
+    "direct_reference_line_count": 39,
+    "imported_symbol_occurrence_count": 52,
     "literal_namespace_overlap_line_count": 1,
-    "new_line_count_beyond_literal_census": 31,
-    "literal_or_alias_unique_line_count": 190,
-    "derived_operation_anchor_line_count": 8,
-    "classification_projection_sha256": "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118",
+    "new_line_count_beyond_literal_census": 38,
+    "literal_or_alias_unique_line_count": 204,
+    "derived_operation_anchor_line_count": 11,
+    "classification_projection_sha256": "87e211072705c7893fbec3445c60460a3cb82ca52f8c6172f107e7fe42ac8d40",
     "absent_forms": [
       "Chrono crate rename import",
       "extern crate Chrono declaration",
@@ -3234,6 +3407,23 @@
       "Chrono-backed type alias"
     ],
     "bindings": [
+      {
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "import_line": 9,
+        "import_source": "use chrono::{NaiveDate, Utc};",
+        "imported_symbols": ["NaiveDate", "Utc"],
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7",
+        "direct_reference_lines": [338, 1080, 1081, 1220, 1221, 1256, 1257],
+        "imported_symbol_occurrence_count": 7,
+        "literal_namespace_overlap_lines": [],
+        "derived_operation_lines": [1083, 1223, 1259],
+        "excluded_nonchrono_shadow_lines": []
+      },
       {
         "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
         "path": "src/cli/atp_workflows.rs",
@@ -3365,6 +3555,111 @@
       }
     ],
     "operation_rows": [
+      {
+        "use_id": "TIME-ALIAS-USE-ORACLE-0338",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 338,
+        "imported_symbols_used": ["Utc"],
+        "literal_namespace_overlap": false,
+        "operation": "acquire current UTC calendar date and return YYYY-MM-DD text",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "live exception date input; first format and return boundary",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-ORACLE-1080",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1080,
+        "imported_symbols_used": ["NaiveDate"],
+        "literal_namespace_overlap": false,
+        "operation": "parse the current YYYY-MM-DD policy date",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "date comparison operand for live exception expiry",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-ORACLE-1081",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1081,
+        "imported_symbols_used": ["NaiveDate"],
+        "literal_namespace_overlap": false,
+        "operation": "parse the YYYY-MM-DD exception expiry date",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "date comparison operand for live exception expiry",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-ORACLE-1220",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1220,
+        "imported_symbols_used": ["NaiveDate"],
+        "literal_namespace_overlap": false,
+        "operation": "parse the YYYY-MM-DD review date for prior expiry validation",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "renewal review date operand",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-ORACLE-1221",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1221,
+        "imported_symbols_used": ["NaiveDate"],
+        "literal_namespace_overlap": false,
+        "operation": "parse the YYYY-MM-DD previous expiry date",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "renewal prior expiry operand",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-ORACLE-1256",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1256,
+        "imported_symbols_used": ["NaiveDate"],
+        "literal_namespace_overlap": false,
+        "operation": "parse the YYYY-MM-DD review date for new expiry validation",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "renewal review date operand",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-USE-ORACLE-1257",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1257,
+        "imported_symbols_used": ["NaiveDate"],
+        "literal_namespace_overlap": false,
+        "operation": "parse the YYYY-MM-DD renewed expiry date",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "renewal future expiry operand",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
       {
         "use_id": "TIME-ALIAS-USE-CLI-0236",
         "binding_id": "TIME-ALIAS-CLI-WORKFLOWS",
@@ -3924,6 +4219,48 @@
       }
     ],
     "derived_operation_rows": [
+      {
+        "use_id": "TIME-ALIAS-DERIVED-ORACLE-1083",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1083,
+        "source_anchor": "(Ok(current), Ok(expiry)) if current >= expiry => errors.push(format!(",
+        "operation": "reject an exception on or after its expiry calendar date",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "first comparison after current and expiry date parsing",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-DERIVED-ORACLE-1223",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1223,
+        "source_anchor": "(Ok(reviewed), Ok(previous)) => reviewed >= previous,",
+        "operation": "require renewal review on or after the previous expiry date",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "first comparison after review and previous expiry parsing",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
+      {
+        "use_id": "TIME-ALIAS-DERIVED-ORACLE-1259",
+        "binding_id": "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+        "path": "tests/dependency_oracle_policy_contract.rs",
+        "line": 1259,
+        "source_anchor": "(Ok(reviewed), Ok(next)) if next > reviewed => {}",
+        "operation": "require renewed expiry strictly after the review date",
+        "exposure": "PRIVATE_POLICY_TEST_HELPERS",
+        "persistence_or_public_association": "first comparison after review and new expiry parsing",
+        "profile_id": "TIME-PROFILE-ROOT-DEV",
+        "cfg_or_wiring": "CARGO_AUTOMATIC_TEST_TARGET",
+        "migration_group_id": "TIME-MIG-DOWNSTREAM-CORPUS",
+        "owner_bead": "asupersync-5z2scg.6.7"
+      },
       {
         "use_id": "TIME-ALIAS-DERIVED-MAINT-0277",
         "binding_id": "TIME-ALIAS-STANDALONE-MAINTENANCE",

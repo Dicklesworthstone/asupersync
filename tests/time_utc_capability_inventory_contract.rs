@@ -23,31 +23,33 @@ const BEAD_ID: &str = "asupersync-5z2scg.6.1";
 const CAPABILITY_ID: &str = "CAP-TIME-UTC-RFC3339";
 const ADR_ID: &str = "DEP-ADR-011";
 const BASELINE_REVISION: &str = "1afde84d564bd8ea876459624116f90028b80835";
-const ARTIFACT_SHA256: &str = "d24cfc31cd2bc4be11d5c58a3297eae264d464f7aa7249ba20b061e73e144dad";
+const HISTORICAL_SOURCE_PIN_SHA256: &str =
+    "4c3381718f369d2b6ab8cf4b6593de7557e72d29c9d625d730364a1633643b21";
+const ARTIFACT_SHA256: &str = "f538e5d3a764ad667ee430ea20ce8de678c66e483cbf6d45be7333ba7f29543c";
 const DOC_BEGIN: &str = "<!-- BEGIN TIME UTC CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END TIME UTC CAPABILITY INVENTORY -->";
 const CHRONO_TOKEN: &str = concat!("chrono", "::");
 const EXTERNAL_TIME_TOKEN: &str = concat!("time", "::");
 const CENSUS_PROJECTION_SHA256: &str =
-    "f8fd5086d737eb83440e89530d8929d8bcd25dc68449e16ea57f12fcd116c7de";
+    "afb1263fcee26ea00178b3c7bf7374b30dd6f1a39b5ff5ffc9f7f2dda60b9b5a";
 const CENSUS_PATHS_SHA256: &str =
-    "f16dea3b2143a0502579cdde842a5b00694031ec504eb674750554f6030f9700";
+    "7362a7a24a311776549d2d2aa0d4746676f53dc60abf762a32d0787054cd975f";
 const LITERAL_OPERATION_PROJECTION_SHA256: &str =
-    "0a37d054eaa2677355b75f7788b46d51dc6b6dc1072b8fd26b49c44d3d387cb9";
+    "47da830b8b1551d493df63002db52916304bd34dd13ef085a87bebfdb6850044";
 const LITERAL_SOURCE_PROJECTION_SHA256: &str =
-    "3a25d366e0388bb559881b71823c2d42be3e45ff7e05fee0324f24dcd2c7fcec";
+    "3dcb2243698b97b5a1ea59f10bf40520f840cd41d070319bd01857dd6a8e5a8c";
 const PATH_CLASSIFICATION_PROJECTION_SHA256: &str =
-    "5f60bb8b7deb36b1aac2123747fd1be426f1888fc759f46afe3baae103dc3b63";
+    "883dab893db867d03bcde4c186cd784daa98f0e344430ee8a1a6a56d991906bf";
 const LITERAL_OVERRIDE_PROJECTION_SHA256: &str =
-    "194275e94001e0b048499cce9765365db2fffc9cf256d8a2e93489f1a97ee2e6";
+    "ea5df80caad282824d6065071cf90bb5ab48fad670fde51da7f3ce4de7ef7494";
 const ALIAS_CLASSIFICATION_PROJECTION_SHA256: &str =
-    "867c7f39911b829635b5a28413179e8cc2d4156f0cfe2a1218fbb3f4819c5118";
+    "87e211072705c7893fbec3445c60460a3cb82ca52f8c6172f107e7fe42ac8d40";
 const ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
-    "a32e839f13b56abfe4c80070dc20df15fdc26a6c9a63c36487492f7771e77e3b";
+    "ee9d15e4b2e7593a2d1d78046029f00e631e6c546281816b72a7cd0225caf1c5";
 const RAPTORQ_LINEAGE_ADDITIONAL_DERIVED_PROJECTION_SHA256: &str =
     "6b1a4e86af89748dd08fef01e10c2417b9641ba1bf0f262a59ce57f0dd21ad44";
 const CROSS_FILE_CONSUMER_PROJECTION_SHA256: &str =
-    "ca8cec49608f6762b7984ba4bc3b6e3b816ecee73cb008510ea11c1677fa728c";
+    "6d420b6a7a5ac8278dbb724193e3a6cead52912e95ea2d7e69f7dd90de50f8ef";
 const PUBLIC_CARRIER_LINEAGE_PROJECTION_SHA256: &str =
     "c14a1beb11f2c57890a9907a2c29092183974a56f2c2b521f0b37ae40c077eb7";
 const TEST_PROFILE_CARRIER_LINEAGE_PROJECTION_SHA256: &str =
@@ -806,8 +808,8 @@ fn validate_public_and_persisted_counts(inventory: &Value) -> Result<(), String>
 
 fn expected_census(inventory: &Value) -> Result<BTreeMap<String, u64>, String> {
     let census = &inventory["chrono_census"];
-    if number(census, "path_count") != 71
-        || number(census, "matching_line_count") != 159
+    if number(census, "path_count") != 73
+        || number(census, "matching_line_count") != 166
         || text(census, "path_and_line_count_projection_sha256") != CENSUS_PROJECTION_SHA256
         || text(census, "paths_projection_sha256") != CENSUS_PATHS_SHA256
     {
@@ -848,7 +850,7 @@ fn expected_census(inventory: &Value) -> Result<BTreeMap<String, u64>, String> {
         summed_paths += declared_paths;
         summed_lines += declared_lines;
     }
-    if summed_paths != 71 || summed_lines != 159 || rows.len() != 71 {
+    if summed_paths != 73 || summed_lines != 166 || rows.len() != 73 {
         return Err("classified census aggregate drifted".to_owned());
     }
     Ok(rows)
@@ -1194,12 +1196,12 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     let per_use = &inventory["per_use_classification"];
     let alias = &inventory["alias_aware_chrono_uses"];
     if text(per_use, "state") != "LITERAL_DIRECT_ALIAS_AND_FIRST_BOUNDARY_CARRIERS_COMPLETE"
-        || number(per_use, "path_count") != 71
-        || number(per_use, "literal_line_count") != 159
-        || number(per_use, "direct_alias_line_count") != 32
+        || number(per_use, "path_count") != 73
+        || number(per_use, "literal_line_count") != 166
+        || number(per_use, "direct_alias_line_count") != 39
         || number(per_use, "literal_alias_overlap_line_count") != 1
-        || number(per_use, "literal_or_alias_unique_line_count") != 190
-        || number(per_use, "literal_use_override_count") != 36
+        || number(per_use, "literal_or_alias_unique_line_count") != 204
+        || number(per_use, "literal_use_override_count") != 38
         || text(per_use, "literal_operation_projection_sha256")
             != LITERAL_OPERATION_PROJECTION_SHA256
         || text(per_use, "literal_source_projection_sha256") != LITERAL_SOURCE_PROJECTION_SHA256
@@ -1227,6 +1229,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             "TIME-CONSUMER-JETSTREAM-WIRE-INSERTION",
             "TIME-CONSUMER-REAL-E2E-BOUNDARY",
             "TIME-CONSUMER-STANDALONE-PERSISTENCE",
+            "TIME-CONSUMER-TEST-POLICY-EXPIRY",
             "TIME-CONSUMER-TEST-PROFILE-CARRIER",
         ],
     )?;
@@ -1346,7 +1349,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     }
     let expected_paths: BTreeSet<_> = group_by_path.keys().cloned().collect();
     let actual_paths: BTreeSet<_> = classified_paths.keys().cloned().collect();
-    if actual_paths != expected_paths || actual_paths.len() != 71 {
+    if actual_paths != expected_paths || actual_paths.len() != 73 {
         return Err("per-use path coverage drifted".to_owned());
     }
 
@@ -1356,7 +1359,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             "DIRECT_IMPORT_BINDING",
             concat!("use ", "chrono", "::"),
             "direct Chrono symbol binding",
-            4_u64,
+            5_u64,
         ),
         (
             "UTC_DATETIME_TYPE",
@@ -1385,8 +1388,8 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
         (
             "CALENDAR_DATE_CONSTRUCTION",
             concat!("chrono", "::NaiveDate::from_ymd_opt"),
-            "PostgreSQL calendar epoch construction",
-            2,
+            "calendar date construction for PostgreSQL epochs or policy fixtures",
+            3,
         ),
         (
             "CALENDAR_ARITHMETIC",
@@ -1428,7 +1431,25 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
             "AMBIENT_UTC_TYPED",
             concat!("chrono", "::Utc::now()"),
             "ambient UTC acquired as a typed datetime",
-            23,
+            24,
+        ),
+        (
+            "CALENDAR_DATE_PARSE",
+            concat!("chrono", "::NaiveDate::parse_from_str"),
+            "parse a policy calendar date with an explicit format",
+            2,
+        ),
+        (
+            "OFFSET_DATETIME_PARSE",
+            concat!("chrono", "::DateTime::parse_from_rfc3339"),
+            "parse an RFC3339 timestamp retaining its encoded offset",
+            1,
+        ),
+        (
+            "CALENDAR_DATE_PARAMETER",
+            concat!("chrono", "::NaiveDate"),
+            "private policy helper calendar-date parameter",
+            1,
         ),
     ];
     if rules.len() != expected_rules.len() {
@@ -1454,7 +1475,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
         .iter()
         .map(|(path, line, _)| (path.clone(), *line))
         .collect();
-    if literal_rows.len() != 159 || literal_pairs.len() != 159 {
+    if literal_rows.len() != 166 || literal_pairs.len() != 166 {
         return Err("literal per-use source set drifted".to_owned());
     }
     if sha256_hex(&literal_source_projection(&literal_rows)) != LITERAL_SOURCE_PROJECTION_SHA256 {
@@ -1494,8 +1515,8 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
 
     let mut override_pairs = BTreeSet::new();
     let literal_overrides = array(per_use, "literal_use_overrides");
-    if number(per_use, "literal_use_override_count") != 36
-        || literal_overrides.len() != 36
+    if number(per_use, "literal_use_override_count") != 38
+        || literal_overrides.len() != 38
         || row_ids(literal_overrides, "use_id").len() != literal_overrides.len()
         || sha256_hex(literal_override_projection(literal_overrides).as_bytes())
             != LITERAL_OVERRIDE_PROJECTION_SHA256
@@ -1531,7 +1552,7 @@ fn validate_per_use_classification(inventory: &Value) -> Result<(), String> {
     }
     let mut direct_union = literal_pairs.clone();
     direct_union.extend(direct_pairs);
-    if direct_union.len() != 190
+    if direct_union.len() != 204
         || number(per_use, "literal_or_alias_unique_line_count") != direct_union.len() as u64
     {
         return Err("literal-or-alias union drifted".to_owned());
@@ -1794,14 +1815,14 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     let alias = &inventory["alias_aware_chrono_uses"];
     if text(alias, "state")
         != "IMPORT_BINDINGS_DIRECT_REFERENCES_AND_DECLARED_DERIVED_ANCHORS_COMPLETE"
-        || number(alias, "binding_path_count") != 4
-        || number(alias, "binding_count") != 4
-        || number(alias, "direct_reference_line_count") != 32
-        || number(alias, "imported_symbol_occurrence_count") != 45
+        || number(alias, "binding_path_count") != 5
+        || number(alias, "binding_count") != 5
+        || number(alias, "direct_reference_line_count") != 39
+        || number(alias, "imported_symbol_occurrence_count") != 52
         || number(alias, "literal_namespace_overlap_line_count") != 1
-        || number(alias, "new_line_count_beyond_literal_census") != 31
-        || number(alias, "literal_or_alias_unique_line_count") != 190
-        || number(alias, "derived_operation_anchor_line_count") != 8
+        || number(alias, "new_line_count_beyond_literal_census") != 38
+        || number(alias, "literal_or_alias_unique_line_count") != 204
+        || number(alias, "derived_operation_anchor_line_count") != 11
         || text(alias, "classification_projection_sha256") != ALIAS_CLASSIFICATION_PROJECTION_SHA256
     {
         return Err("alias-aware inventory totals drifted".to_owned());
@@ -1828,6 +1849,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
         "binding_id",
         &[
             "TIME-ALIAS-CLI-WORKFLOWS",
+            "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
             "TIME-ALIAS-ROOT-HPACK-DIFFERENTIAL-TEST",
             "TIME-ALIAS-STANDALONE-MAINTENANCE",
             "TIME-ALIAS-STANDALONE-REGRESSION",
@@ -1839,6 +1861,13 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
         .map(|row| (text(row, "binding_id"), row))
         .collect();
     let expected_binding_facts = [
+        (
+            "TIME-ALIAS-DEPENDENCY-ORACLE-POLICY",
+            "tests/dependency_oracle_policy_contract.rs",
+            9_u64,
+            format!("use {}{{NaiveDate, Utc}};", CHRONO_TOKEN),
+            vec!["NaiveDate", "Utc"],
+        ),
         (
             "TIME-ALIAS-CLI-WORKFLOWS",
             "src/cli/atp_workflows.rs",
@@ -1956,11 +1985,11 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
         }
         declared_occurrences += number(binding, "imported_symbol_occurrence_count");
     }
-    if binding_paths.len() != 4
-        || direct_pairs.len() != 32
+    if binding_paths.len() != 5
+        || direct_pairs.len() != 39
         || overlap_pairs.len() != 1
-        || derived_pairs.len() != 8
-        || declared_occurrences != 45
+        || derived_pairs.len() != 11
+        || declared_occurrences != 52
     {
         return Err("alias binding aggregates drifted".to_owned());
     }
@@ -1983,6 +2012,12 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             "tests/conformance/raptorq_rfc6330/reporting/src/regression_detection.rs".to_owned(),
             314,
         )))
+        .chain([1083_u64, 1223, 1259].into_iter().map(|line| {
+            (
+                "tests/dependency_oracle_policy_contract.rs".to_owned(),
+                line,
+            )
+        }))
         .collect();
     if derived_pairs != expected_derived_pairs {
         return Err("derived temporal operation anchors drifted".to_owned());
@@ -2011,7 +2046,7 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
     }
 
     let operation_rows = array(alias, "operation_rows");
-    if operation_rows.len() != 32 || row_ids(operation_rows, "use_id").len() != operation_rows.len()
+    if operation_rows.len() != 39 || row_ids(operation_rows, "use_id").len() != operation_rows.len()
     {
         return Err("direct alias operation row identity drifted".to_owned());
     }
@@ -2063,12 +2098,12 @@ fn validate_alias_inventory(inventory: &Value) -> Result<(), String> {
             ));
         }
     }
-    if operation_pairs != direct_pairs || operation_occurrences != 45 {
+    if operation_pairs != direct_pairs || operation_occurrences != 52 {
         return Err("direct alias references lack one-to-one operation and symbol rows".to_owned());
     }
 
     let derived_rows = array(alias, "derived_operation_rows");
-    if derived_rows.len() != 8 || row_ids(derived_rows, "use_id").len() != derived_rows.len() {
+    if derived_rows.len() != 11 || row_ids(derived_rows, "use_id").len() != derived_rows.len() {
         return Err("derived alias operation row identity drifted".to_owned());
     }
     let mut classified_derived_pairs = BTreeSet::new();
@@ -2572,16 +2607,63 @@ fn validate_alias_sources(inventory: &Value) -> Result<(), String> {
 }
 
 fn validate_source_pins(inventory: &Value) -> Result<(), String> {
-    let pins = array(&inventory["source_snapshot"], "files");
-    if pins.len() != 74 {
-        return Err("source pin count drifted".to_owned());
+    let historical = array(&inventory["source_snapshot"], "files");
+    let review = &inventory["current_source_review"];
+    let refreshed = array(review, "refreshed_source_pins");
+    let added = array(review, "added_source_pins");
+    let mut historical_rows: Vec<_> = historical
+        .iter()
+        .map(|pin| {
+            format!(
+                "{}\t{}\t{}\n",
+                text(pin, "path"),
+                text(pin, "sha256"),
+                number(pin, "line_count"),
+            )
+        })
+        .collect();
+    historical_rows.sort();
+    if text(review, "historical_source_pin_projection_sha256") != HISTORICAL_SOURCE_PIN_SHA256
+        || sha256_hex(historical_rows.concat().as_bytes()) != HISTORICAL_SOURCE_PIN_SHA256
+    {
+        return Err("historical source pin projection drifted".to_owned());
     }
-    let mut paths = BTreeSet::new();
-    for pin in pins {
+    let mut pins: BTreeMap<_, _> = historical
+        .iter()
+        .map(|pin| (text(pin, "path"), pin))
+        .collect();
+    if historical.len() != 74 || pins.len() != 74 || refreshed.len() != 17 {
+        return Err("historical or refreshed source pin count drifted".to_owned());
+    }
+    let mut refreshed_paths = BTreeSet::new();
+    for pin in refreshed {
         let path = text(pin, "path");
-        if !paths.insert(path.to_owned()) {
-            return Err(format!("duplicate source pin {path}"));
+        if !refreshed_paths.insert(path) || !pins.contains_key(path) || pins[path] == pin {
+            return Err(format!("invalid reviewed source pin {path}"));
         }
+        pins.insert(path, pin);
+    }
+    require_exact_ids(
+        added,
+        "path",
+        &[
+            "src/database/postgres_tests.rs",
+            "src/messaging/redis_tests.rs",
+            "tests/dependency_oracle_policy_contract.rs",
+            "tests/dependency_supply_chain_policy_contract.rs",
+        ],
+        "current source additions",
+    )?;
+    for pin in added {
+        let path = text(pin, "path");
+        if pins.insert(path, pin).is_some() {
+            return Err(format!("added source pin already existed: {path}"));
+        }
+    }
+    if pins.len() as u64 != number(review, "source_snapshot_pin_count") {
+        return Err("current source pin aggregate drifted".to_owned());
+    }
+    for (path, pin) in pins {
         let bytes = read_repo_bytes(path);
         if sha256_hex(&bytes) != text(pin, "sha256") {
             return Err(format!("source pin hash drifted for {path}"));
@@ -3084,7 +3166,7 @@ fn validate_post_a1_benchmark_lineage_extension(inventory: &Value) -> Result<(),
         (
             "TIME-CROSS-FILE-BENCHMARK-REPORT-CONSTRUCTOR-0099",
             "src/atp/benchmark/suite.rs",
-            99,
+            107,
             "let report = BenchmarkReport::new(",
         ),
     ] {
@@ -3342,17 +3424,17 @@ fn validate_post_a1_conformance_raptorq_lineage_extension(inventory: &Value) -> 
         (
             "literal_operation",
             "a533497be94a3a8c649a061117053acff88821c102e9cedbe16cb4da0b66990b",
-            LITERAL_OPERATION_PROJECTION_SHA256,
+            "0a37d054eaa2677355b75f7788b46d51dc6b6dc1072b8fd26b49c44d3d387cb9",
         ),
         (
             "literal_source",
             "5c4020cfe41d10dbfcab19c64f3677ee78941c65441c12da93dc7e3cd6946f2d",
-            LITERAL_SOURCE_PROJECTION_SHA256,
+            "3a25d366e0388bb559881b71823c2d42be3e45ff7e05fee0324f24dcd2c7fcec",
         ),
         (
             "literal_override",
             "81f3549c7644361eabee937044ba098315b3aeffbd079d9c644eb1d60ccc3f84",
-            LITERAL_OVERRIDE_PROJECTION_SHA256,
+            "194275e94001e0b048499cce9765365db2fffc9cf256d8a2e93489f1a97ee2e6",
         ),
         (
             "additional_derived",
@@ -4130,6 +4212,34 @@ fn validate_post_a1_static_inventory_signoff(inventory: &Value) -> Result<(), St
         }
     }
 
+    // August signoff counts remain a historical receipt. Bind September's
+    // expanded inventory to its own dated review instead of rewriting history.
+    let current = &inventory["current_source_review"];
+    if text(current, "review_id") != "TIME-A1-CURRENT-SOURCE-2026-09-09"
+        || text(current, "reviewed_date_utc") != "2026-09-09"
+        || text(current, "state") != "STATIC_SOURCE_RECONCILIATION_ONLY"
+        || current["historical_signoff_preserved"] != true
+        || current["dependency_exit_allowed"] != false
+        || array(current, "review_notes").len() != 6
+        || !text(current, "no_claim_boundary").contains("remain historical")
+    {
+        return Err("current source review authority drifted".to_owned());
+    }
+    for (key, expected) in [
+        ("source_snapshot_pin_count", 78),
+        ("literal_chrono_line_count", 166),
+        ("direct_alias_line_count", 39),
+        ("literal_or_alias_unique_line_count", 204),
+        ("alias_derived_anchor_count", 11),
+        ("additional_derived_anchor_count", 51),
+        ("cross_file_consumer_anchor_count", 34),
+        ("declared_consumer_unique_direct_source_anchor_count", 82),
+        ("classified_anchor_count", 300),
+    ] {
+        if number(current, key) != expected {
+            return Err(format!("current source review {key} drifted"));
+        }
+    }
     let per_use = &inventory["per_use_classification"];
     let alias = &inventory["alias_aware_chrono_uses"];
     let public_carrier_count = array(inventory, "public_datetime_fields").len()
@@ -4138,26 +4248,26 @@ fn validate_post_a1_static_inventory_signoff(inventory: &Value) -> Result<(), St
         != array(&inventory["source_snapshot"], "files").len() as u64
         || number(signoff, "dependency_profile_count")
             != array(inventory, "dependency_profiles").len() as u64
-        || number(signoff, "literal_chrono_line_count")
+        || number(current, "literal_chrono_line_count")
             != number(&inventory["chrono_census"], "matching_line_count")
-        || number(signoff, "direct_alias_line_count")
+        || number(current, "direct_alias_line_count")
             != number(alias, "direct_reference_line_count")
-        || number(signoff, "literal_or_alias_unique_line_count")
+        || number(current, "literal_or_alias_unique_line_count")
             != number(per_use, "literal_or_alias_unique_line_count")
-        || number(signoff, "alias_derived_anchor_count")
+        || number(current, "alias_derived_anchor_count")
             != number(alias, "derived_operation_anchor_line_count")
-        || number(signoff, "additional_derived_anchor_count")
+        || number(current, "additional_derived_anchor_count")
             != array(per_use, "additional_derived_operation_rows").len() as u64
         || number(signoff, "cross_file_consumer_anchor_count")
             != array(per_use, "cross_file_consumer_rows").len() as u64
         || number(
-            signoff,
+            current,
             "declared_consumer_unique_direct_source_anchor_count",
         ) != number(
             per_use,
             "declared_consumer_unique_direct_source_anchor_count",
         )
-        || number(signoff, "classified_anchor_count") != number(per_use, "classified_anchor_count")
+        || number(current, "classified_anchor_count") != number(per_use, "classified_anchor_count")
         || number(signoff, "public_carrier_field_count") != public_carrier_count as u64
         || number(signoff, "test_profile_carrier_field_count")
             != array(inventory, "test_profile_datetime_fields").len() as u64
@@ -4710,30 +4820,29 @@ fn validate_source_markers(inventory: &Value) -> Result<(), String> {
         return Err("RaptorQ benchmark event timestamp drifted".to_owned());
     }
 
-    for path in ["src/database/postgres.rs", "src/messaging/redis.rs"] {
+    for (owner, path, include) in [
+        (
+            "src/database/postgres.rs",
+            "src/database/postgres_tests.rs",
+            "postgres_tests.rs",
+        ),
+        (
+            "src/messaging/redis.rs",
+            "src/messaging/redis_tests.rs",
+            "redis_tests.rs",
+        ),
+    ] {
+        let production = read_repo_file(owner);
         let source = read_repo_file(path);
-        let test_module = source
-            .find("\nmod tests {\n")
-            .ok_or_else(|| format!("{path} lost its test boundary"))?;
-        let prefix = &source[..test_module];
-        let Some(cfg_guard) = prefix.rfind("#[cfg(test)]") else {
-            return Err(format!("{path} test module lost its cfg guard"));
-        };
-        if prefix[cfg_guard..].lines().count() > 8 {
-            return Err(format!(
-                "{path} test module cfg guard moved away from the module"
-            ));
-        }
-        if prefix.contains(CHRONO_TOKEN) {
-            return Err(format!("{path} gained a production chrono reference"));
-        }
-        if count_matching_lines(&source[test_module..], CHRONO_TOKEN) != 4
+        if !production.contains(&format!("#[cfg(test)]\ninclude!(\"{include}\");"))
+            || production.contains(CHRONO_TOKEN)
+            || !source.contains("mod tests {\n")
             || count_matching_lines(&source, CHRONO_TOKEN) != 4
         {
-            return Err(format!("{path} test chrono census drifted"));
+            return Err(format!("{path} test-only include or chrono census drifted"));
         }
     }
-    let postgres = read_repo_file("src/database/postgres.rs");
+    let postgres = read_repo_file("src/database/postgres_tests.rs");
     let chrono_date = format!("{}NaiveDate::from_ymd_opt", CHRONO_TOKEN);
     let chrono_delta = format!("{}TimeDelta::microseconds", CHRONO_TOKEN);
     if !postgres.contains(&chrono_date)
@@ -4902,6 +5011,13 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
     for marker in [
         DOC_BEGIN,
         DOC_END,
+        "TIME-A1-CURRENT-SOURCE-2026-09-09",
+        "73 paths and 166 literal namespace lines",
+        "204 unique direct lines",
+        "300 classified anchors",
+        "src/atp/benchmark/suite.rs:107",
+        "TIME-CONSUMER-TEST-POLICY-EXPIRY",
+        "encoded offset; it is not normalized to UTC",
         "12 concrete Chrono UTC fields",
         "four timestamp-bearing JSON families",
         "32 alias-bearing code lines",
@@ -4961,6 +5077,29 @@ fn time_utc_inventory_is_exact_and_source_pinned() {
 #[test]
 fn time_utc_inventory_rejects_cutover_and_completeness_drift() {
     let inventory = artifact();
+    validate_inventory(&inventory).expect("negative fixtures require a valid current inventory");
+    validate_source_pins(&inventory).expect("negative pin fixtures require a valid pin baseline");
+
+    let mut historical_pin = inventory.clone();
+    assert_eq!(
+        historical_pin["source_snapshot"]["files"][1]["path"],
+        "Cargo.lock"
+    );
+    historical_pin["source_snapshot"]["files"][1]["sha256"] = Value::String("0".repeat(64));
+    assert!(validate_source_pins(&historical_pin).is_err());
+
+    let mut review_cutover = inventory.clone();
+    review_cutover["current_source_review"]["dependency_exit_allowed"] = Value::Bool(true);
+    assert!(validate_inventory(&review_cutover).is_err());
+
+    let mut review_count = inventory.clone();
+    review_count["current_source_review"]["classified_anchor_count"] = Value::from(279_u64);
+    assert!(validate_inventory(&review_count).is_err());
+
+    let mut review_pin = inventory.clone();
+    review_pin["current_source_review"]["refreshed_source_pins"][0]["path"] =
+        Value::String("tests/dependency_oracle_policy_contract.rs".to_owned());
+    assert!(validate_source_pins(&review_pin).is_err());
 
     let mut cutover = inventory.clone();
     cutover["authority"]["dependency_exit_allowed"] = Value::Bool(true);

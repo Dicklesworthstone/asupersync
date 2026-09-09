@@ -20,9 +20,60 @@ behavioral evidence gaps remain routed to A2-A8. `bead_close_allowed=true`
 authorizes closing A1 only; it does not authorize dependency exit, cutover, or
 closure of any downstream bead.
 
+## Current source reconciliation — 2026-09-09
+
+`TIME-A1-CURRENT-SOURCE-2026-09-09` updates the live source projections while
+retaining the August extensions, source snapshot, execution receipts, owner
+authority and signoff below as historical records. Seventeen reviewed pin
+replacements and four added pins produce 78 current source pins. The current
+verifier separately authenticates the original 74-pin projection, so a current
+replacement cannot hide a rewritten historical hash. The current
+census is 73 paths and 166 literal namespace lines. Five import bindings cover
+39 direct alias lines and 52 symbol occurrences, with one same-line overlap:
+204 unique direct lines. Eleven alias-derived anchors, 51 additional in-file
+anchors and 34 cross-file anchors produce 300 classified anchors. The current
+declared consumer rows reference 82 unique direct source anchors. Sixteen
+ordered literal rules and 38 exact overrides classify the current literals.
+
+PostgreSQL and Redis unit bodies moved to `src/database/postgres_tests.rs` and
+`src/messaging/redis_tests.rs`. Their original owners include those files only
+under `cfg(test)`, retaining four Chrono literals each. PostgreSQL's epoch
+construction and DATE/TIMESTAMP arithmetic remain unchanged; its midnight
+boundary now occurs at line 9060. The benchmark report constructor moved to
+`src/atp/benchmark/suite.rs:107` after private scratch-directory permissions
+were tightened. Timestamp-bearing public fields and all 34 cross-file consumer
+identities remain unchanged.
+
+The two added automatic integration targets use `TIME-PROFILE-ROOT-DEV` and
+`TIME-MIG-DOWNSTREAM-CORPUS`, owned by `asupersync-5z2scg.6.7`.
+`dependency_oracle_policy_contract.rs` imports `NaiveDate` and `Utc`, renders
+the current UTC date, parses six calendar-date operands and rejects expired
+exceptions with `current >= expiry`. Its renewal predicates require
+`reviewed >= previous` and `next > reviewed`. The private helper boundaries
+carry no public timestamp model or serialization contract.
+
+`dependency_supply_chain_policy_contract.rs` parses calendar expiry dates and
+RFC3339 approvals. Its expiry predicate requires `expiry > as_of`; its approval
+predicate uses `approval.date_naive() <= as_of`. That date retains the timestamp's
+encoded offset; it is not normalized to UTC before comparison. Four first
+predicate or fixture-argument boundaries use the new
+`TIME-CONSUMER-TEST-POLICY-EXPIRY` category. This inventory records the behavior
+without treating source inspection as proof that the policy is correct.
+
+The manifest and lock review retains the Chrono and `time` edges and versions.
+The current registry's TIME capability and baseline rows remain unchanged;
+ADR011 only removes the already-exited `env_logger` from its CLI projection.
+Remote-service exports, the private `process_epoch` reexport, the separate
+production replay projection, CLI remote commands and the stronger ATP hash
+test do not change the inventoried UTC formatter or public Chrono fields.
+No current behavioral, byte-level, readback, broker, conformance, performance,
+cross-platform or release proof is claimed. All seven behavioral gaps remain
+routed, and `dependency_exit_allowed=false` remains in force.
+
 ## Pinned static result
 
-Seven facts at the pinned revision supersede stale counts in the ADR and global
+The following sections retain the August static history and counts. Seven facts
+at that pinned revision superseded stale counts in the ADR and global
 registry without mutating those shared authorities:
 
 1. A bounded lexical scan of production source finds zero external
