@@ -27,9 +27,8 @@
 //! For abstract namespace sockets (Linux only), no cleanup is needed as the
 //! kernel handles it automatically.
 
-use crate::cx::Cx;
+use crate::net::udp::{Armed, ReactorRegistration};
 use crate::net::unix::stream::UnixStream;
-use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use crate::stream::Stream;
 use parking_lot::Mutex;
@@ -297,8 +296,9 @@ where
 /// namespace socket).
 #[derive(Debug)]
 pub struct UnixListener {
-    /// Reactor registration for I/O events (lazily initialized).
-    registration: Mutex<Option<IoRegistration>>,
+    /// Reactor registration for I/O events (lazily initialized), aware of
+    /// the process-global fallback I/O driver (GH#67, tx9j0f).
+    registration: Mutex<ReactorRegistration>,
     /// Fanout waiter list for concurrent accept futures.
     accept_waiters: Arc<AcceptWaiters>,
     /// The underlying standard library listener.
@@ -371,7 +371,7 @@ impl UnixListener {
             accept_waiters: Arc::new(AcceptWaiters::default()),
             path: None, // No filesystem path for abstract sockets
             cleanup_identity: None,
-            registration: Mutex::new(None), // Lazy registration on first poll
+            registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first poll
         })
     }
 
@@ -441,60 +441,21 @@ impl UnixListener {
     }
 
     /// Registers interest with the I/O driver for READABLE events.
+    ///
+    /// With no ambient I/O driver the fd parks on the process-global fallback
+    /// driver instead of re-waking the accept waiters into a hot loop (GH#67,
+    /// asupersync-tx9j0f); see [`ReactorRegistration::arm`]. The lock is
+    /// released before any self-wake so a re-poll cannot contend on it.
     fn register_interest(&self) -> io::Result<()> {
-        let mut registration = self.registration.lock();
         let accept_waker = Waker::from(Arc::clone(&self.accept_waiters));
-
-        if let Some(existing) = registration.as_mut() {
-            // Re-arm reactor interest and conditionally update the waker in a
-            // single lock acquisition (will_wake guard skips the clone).
-            match existing.rearm(Interest::READABLE, &accept_waker) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {
-                    *registration = None;
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                    *registration = None;
-                    drop(registration);
-                    fallback_rewake_waiters(&self.accept_waiters);
-                    return Ok(());
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        let Some(current) = Cx::current() else {
-            drop(registration);
+        let armed = self
+            .registration
+            .lock()
+            .arm(&self.inner, Interest::READABLE, &accept_waker)?;
+        if armed == Armed::SelfWake {
             fallback_rewake_waiters(&self.accept_waiters);
-            return Ok(());
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            drop(registration);
-            fallback_rewake_waiters(&self.accept_waiters);
-            return Ok(());
-        };
-
-        match driver.register(&self.inner, Interest::READABLE, accept_waker) {
-            Ok(new_reg) => {
-                *registration = Some(new_reg);
-                drop(registration);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                drop(registration);
-                fallback_rewake_waiters(&self.accept_waiters);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                drop(registration);
-                fallback_rewake_waiters(&self.accept_waiters);
-                Ok(())
-            }
-            Err(err) => {
-                drop(registration);
-                Err(err)
-            }
         }
+        Ok(())
     }
 
     /// Returns the local socket address.
@@ -535,7 +496,7 @@ impl UnixListener {
             inner: listener,
             path: None, // Don't clean up sockets we didn't create
             cleanup_identity: None,
-            registration: Mutex::new(None), // Lazy registration on first poll
+            registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first poll
         })
     }
 
@@ -589,7 +550,7 @@ impl UnixListener {
             inner,
             path: Some(path.to_path_buf()),
             cleanup_identity,
-            registration: Mutex::new(None), // Lazy registration on first poll
+            registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first poll
         })
     }
 }
@@ -666,6 +627,53 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    /// GH#67 follow-up (asupersync-tx9j0f): a `UnixListener` polled for a
+    /// connection with no I/O driver on the current `Cx` parks on the
+    /// process-global fallback driver instead of re-waking its accept
+    /// waiters into a hot loop.
+    mod gh67_fallback_io_driver {
+        use super::*;
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use std::time::Duration;
+
+        #[test]
+        fn poll_accept_without_io_driver_parks_until_a_peer_connects() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let dir = tempdir().expect("create temp dir");
+            let path = dir.path().join("driverless_accept.sock");
+            let listener = UnixListener::bind(&path).expect("bind listener");
+            let (signal, waker, rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+
+            assert!(matches!(listener.poll_accept(&mut task_cx), Poll::Pending));
+            assert_eq!(
+                signal.hits.load(Ordering::SeqCst),
+                0,
+                "driverless accept poll must park, not self-wake (GH#67)"
+            );
+            assert!(
+                listener.registration.lock().on_fallback(),
+                "driverless accept registers with the process-global fallback I/O driver"
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "no wake may arrive while nobody connects"
+            );
+
+            let _peer = net::UnixStream::connect(&path).expect("peer connect");
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("fallback reactor pump delivers the readiness wake");
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
+            match listener.poll_accept(&mut task_cx) {
+                Poll::Ready(Ok((_stream, _addr))) => {}
+                other => panic!("expected the connection after the wake, got {other:?}"),
+            }
+        }
     }
 
     fn noop_waker() -> Waker {

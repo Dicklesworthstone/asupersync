@@ -16,8 +16,8 @@
 //! }
 //! ```
 
-use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
+use crate::net::udp::{Armed, ReactorRegistration};
 use crate::net::unix::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
@@ -190,8 +190,9 @@ pub struct UCred {
 /// guaranteed delivery, use higher-level protocols.
 #[derive(Debug)]
 pub struct UnixStream {
-    /// Reactor registration for I/O events (lazily initialized).
-    registration: Mutex<Option<IoRegistration>>,
+    /// Reactor registration for I/O events (lazily initialized), aware of
+    /// the process-global fallback I/O driver (GH#67, tx9j0f).
+    registration: Mutex<ReactorRegistration>,
     /// The underlying standard library stream.
     pub(crate) inner: Arc<net::UnixStream>,
 }
@@ -205,7 +206,7 @@ impl UnixStream {
     ) -> Self {
         Self {
             inner,
-            registration: Mutex::new(registration), // Lazy registration on first I/O
+            registration: Mutex::new(ReactorRegistration::from_registration(registration)), // Lazy registration on first I/O
         }
     }
 
@@ -242,7 +243,7 @@ impl UnixStream {
         let inner: net::UnixStream = socket.into();
         Ok(Self {
             inner: Arc::new(inner),
-            registration: Mutex::new(registration),
+            registration: Mutex::new(ReactorRegistration::from_registration(registration)),
         })
     }
 
@@ -291,7 +292,7 @@ impl UnixStream {
         let inner: net::UnixStream = socket.into();
         Ok(Self {
             inner: Arc::new(inner),
-            registration: Mutex::new(registration),
+            registration: Mutex::new(ReactorRegistration::from_registration(registration)),
         })
     }
 
@@ -317,11 +318,11 @@ impl UnixStream {
         Ok((
             Self {
                 inner: Arc::new(s1),
-                registration: Mutex::new(None), // Lazy registration on first I/O
+                registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first I/O
             },
             Self {
                 inner: Arc::new(s2),
-                registration: Mutex::new(None), // Lazy registration on first I/O
+                registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first I/O
             },
         ))
     }
@@ -343,7 +344,7 @@ impl UnixStream {
         stream.set_nonblocking(true)?;
         Ok(Self {
             inner: Arc::new(stream),
-            registration: Mutex::new(None), // Lazy registration on first I/O
+            registration: Mutex::new(ReactorRegistration::new()), // Lazy registration on first I/O
         })
     }
 
@@ -376,59 +377,20 @@ impl UnixStream {
     }
 
     /// Registers interest with the I/O driver.
+    ///
+    /// With no ambient I/O driver the fd parks on the process-global fallback
+    /// driver instead of self-waking into a hot loop (GH#67,
+    /// asupersync-tx9j0f); see [`ReactorRegistration::arm`]. The lock is
+    /// released before any self-wake so a re-poll cannot contend on it.
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let mut registration = self.registration.lock();
-        let target_interest = interest;
-
-        if let Some(existing) = registration.as_mut() {
-            // Re-arm reactor interest and conditionally update the waker in a
-            // single lock acquisition (will_wake guard skips the clone).
-            match existing.rearm(target_interest, cx.waker()) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {
-                    *registration = None;
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                    *registration = None;
-                    crate::net::tcp::stream::fallback_rewake(cx);
-                    return Ok(());
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        let Some(current) = Cx::current() else {
-            drop(registration);
+        let armed = self
+            .registration
+            .lock()
+            .arm(&*self.inner, interest, cx.waker())?;
+        if armed == Armed::SelfWake {
             crate::net::tcp::stream::fallback_rewake(cx);
-            return Ok(());
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            drop(registration);
-            crate::net::tcp::stream::fallback_rewake(cx);
-            return Ok(());
-        };
-
-        match driver.register(&*self.inner, target_interest, cx.waker().clone()) {
-            Ok(new_reg) => {
-                *registration = Some(new_reg);
-                drop(registration);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                drop(registration);
-                crate::net::tcp::stream::fallback_rewake(cx);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                drop(registration);
-                crate::net::tcp::stream::fallback_rewake(cx);
-                Ok(())
-            }
-            Err(err) => {
-                drop(registration);
-                Err(err)
-            }
         }
+        Ok(())
     }
 
     /// Returns the credentials of the peer process.
@@ -929,10 +891,126 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::cx::Cx;
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::io::{self, IoSlice, IoSliceMut, Read};
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
+
+    /// GH#67 follow-up (asupersync-tx9j0f): a `UnixStream` polled with no
+    /// I/O driver on the current `Cx` parks on the process-global fallback
+    /// driver instead of re-waking itself into a hot loop.
+    mod gh67_fallback_io_driver {
+        use super::*;
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use crate::runtime::{IoDriverHandle, LabReactor};
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::io::Write as _;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        fn poll_read_once(
+            stream: &mut UnixStream,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut read_buf = ReadBuf::new(buf);
+            match Pin::new(stream).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+
+        /// The defect: with no I/O driver on the current `Cx`, a `WouldBlock`
+        /// read re-woke its own waker synchronously, so an executor re-polled
+        /// in a hot loop. The fixed path must (1) return `Pending` without
+        /// any wake, (2) stay silent while the peer is idle, and (3) wake
+        /// exactly once when bytes arrive, from the fallback reactor pump.
+        #[test]
+        fn poll_read_without_io_driver_parks_until_data_arrives() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (mut stream, peer) = UnixStream::pair().expect("socket pair");
+            let (signal, waker, rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 16];
+
+            assert!(matches!(
+                poll_read_once(&mut stream, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert_eq!(
+                signal.hits.load(Ordering::SeqCst),
+                0,
+                "driverless poll must park, not self-wake (GH#67)"
+            );
+            assert!(
+                stream.registration.lock().on_fallback(),
+                "driverless poll registers with the process-global fallback I/O driver"
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "no wake may arrive while the peer is silent"
+            );
+
+            let mut writer = &*peer.inner;
+            writer.write_all(b"wake").expect("peer write");
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("fallback reactor pump delivers the readiness wake");
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
+            match poll_read_once(&mut stream, &mut task_cx, &mut buf) {
+                Poll::Ready(Ok(len)) => assert_eq!(&buf[..len], b"wake"),
+                other => panic!("expected the bytes after the wake, got {other:?}"),
+            }
+        }
+
+        /// A stream parked on the fallback driver is handed to the ambient
+        /// driver as soon as it is polled under a `Cx` that carries one.
+        #[test]
+        fn fallback_registration_migrates_to_ambient_io_driver() {
+            assert!(Cx::current().is_none());
+            let (mut stream, _peer) = UnixStream::pair().expect("socket pair");
+            let (_signal, waker, _rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 8];
+
+            assert!(matches!(
+                poll_read_once(&mut stream, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(stream.registration.lock().on_fallback());
+
+            let driver = IoDriverHandle::new(Arc::new(LabReactor::new()));
+            assert_eq!(driver.waker_count(), 0);
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(ambient));
+
+            assert!(matches!(
+                poll_read_once(&mut stream, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(
+                !stream.registration.lock().on_fallback(),
+                "ambient driver must take over the registration"
+            );
+            assert!(stream.registration.lock().is_some());
+            assert_eq!(
+                driver.waker_count(),
+                1,
+                "the ambient driver now owns the stream's readiness waker"
+            );
+        }
+    }
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

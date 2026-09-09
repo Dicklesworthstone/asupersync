@@ -29,9 +29,8 @@
 //! - **Connected sockets** have a default destination and can use [`send`](UnixDatagram::send)
 //!   instead of [`send_to`](UnixDatagram::send_to).
 
-use crate::cx::Cx;
+use crate::net::udp::{Armed, ReactorRegistration};
 use crate::net::unix::stream::UCred;
-use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 use nix::errno::Errno;
 use nix::sys::socket::{self, MsgFlags, SockaddrLike};
@@ -84,8 +83,9 @@ fn errno_poll_error<T>(errno: Errno) -> Poll<io::Result<T>> {
 /// the single reactor registration/waker slot.
 #[derive(Debug)]
 pub struct UnixDatagram {
-    /// Reactor registration for async I/O wakeup.
-    registration: Option<IoRegistration>,
+    /// Reactor registration for async I/O wakeup, aware of the process-global
+    /// fallback I/O driver (GH#67, tx9j0f).
+    registration: ReactorRegistration,
     /// The underlying standard library datagram socket.
     inner: net::UnixDatagram,
     /// Path to the socket file (for cleanup on drop).
@@ -107,7 +107,7 @@ impl UnixDatagram {
             inner,
             path: Some(path.to_path_buf()),
             cleanup_identity,
-            registration: None,
+            registration: ReactorRegistration::new(),
         })
     }
 
@@ -170,7 +170,7 @@ impl UnixDatagram {
             inner,
             path: None, // No filesystem path for abstract sockets
             cleanup_identity: None,
-            registration: None,
+            registration: ReactorRegistration::new(),
         })
     }
 
@@ -198,7 +198,7 @@ impl UnixDatagram {
             inner,
             path: None,
             cleanup_identity: None,
-            registration: None,
+            registration: ReactorRegistration::new(),
         })
     }
 
@@ -231,13 +231,13 @@ impl UnixDatagram {
                 inner: s1,
                 path: None,
                 cleanup_identity: None,
-                registration: None,
+                registration: ReactorRegistration::new(),
             },
             Self {
                 inner: s2,
                 path: None,
                 cleanup_identity: None,
-                registration: None,
+                registration: ReactorRegistration::new(),
             },
         ))
     }
@@ -286,49 +286,15 @@ impl UnixDatagram {
     }
 
     /// Register interest with the reactor for async wakeup.
+    ///
+    /// With no ambient I/O driver the fd parks on the process-global fallback
+    /// driver instead of self-waking into a hot loop (GH#67,
+    /// asupersync-tx9j0f); see [`ReactorRegistration::arm`].
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        let target_interest = interest;
-        if let Some(registration) = &mut self.registration {
-            // Re-arm reactor interest and conditionally update the waker in a
-            // single lock acquisition (will_wake guard skips the clone).
-            match registration.rearm(target_interest, cx.waker()) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {
-                    self.registration = None;
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                    self.registration = None;
-                    crate::net::tcp::stream::fallback_rewake(cx);
-                    return Ok(());
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        let Some(current) = Cx::current() else {
+        if self.registration.arm(&self.inner, interest, cx.waker())? == Armed::SelfWake {
             crate::net::tcp::stream::fallback_rewake(cx);
-            return Ok(());
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            crate::net::tcp::stream::fallback_rewake(cx);
-            return Ok(());
-        };
-
-        match driver.register(&self.inner, interest, cx.waker().clone()) {
-            Ok(registration) => {
-                self.registration = Some(registration);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                crate::net::tcp::stream::fallback_rewake(cx);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                crate::net::tcp::stream::fallback_rewake(cx);
-                Ok(())
-            }
-            Err(err) => Err(err),
         }
+        Ok(())
     }
 
     fn pending_on_interest<T>(
@@ -603,7 +569,7 @@ impl UnixDatagram {
             inner: socket,
             path: None, // Don't clean up sockets we didn't create
             cleanup_identity: None,
-            registration: None,
+            registration: ReactorRegistration::new(),
         })
     }
 
@@ -895,6 +861,56 @@ mod tests {
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
+    }
+
+    /// GH#67 follow-up (asupersync-tx9j0f): a `UnixDatagram` polled with no
+    /// I/O driver on the current `Cx` parks on the process-global fallback
+    /// driver instead of re-waking itself into a hot loop.
+    mod gh67_fallback_io_driver {
+        use super::*;
+        use crate::cx::Cx;
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        #[test]
+        fn poll_recv_ready_without_io_driver_parks_until_datagram_arrives() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (mut socket, peer) = UnixDatagram::pair().expect("socket pair");
+            let (signal, waker, rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+
+            assert!(matches!(socket.poll_recv_ready(&mut task_cx), Poll::Pending));
+            assert_eq!(
+                signal.hits.load(Ordering::SeqCst),
+                0,
+                "driverless poll must park, not self-wake (GH#67)"
+            );
+            assert!(
+                socket.registration.on_fallback(),
+                "driverless poll registers with the process-global fallback I/O driver"
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "no wake may arrive while the peer is silent"
+            );
+
+            peer.inner.send(b"wake").expect("peer send");
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("fallback reactor pump delivers the readiness wake");
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                socket.poll_recv_ready(&mut task_cx),
+                Poll::Ready(Ok(()))
+            ));
+            let mut buf = [0u8; 8];
+            let len = socket.inner.recv(&mut buf).expect("recv the datagram");
+            assert_eq!(&buf[..len], b"wake");
+        }
     }
 
     #[test]

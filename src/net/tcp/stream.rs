@@ -11,6 +11,9 @@ use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use crate::net::lookup_all;
 use crate::net::tcp::split::{OwnedReadHalf, OwnedWriteHalf, ReadHalf, WriteHalf};
 use crate::net::tcp::traits::TcpStreamApi;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::net::udp::Armed;
+use crate::net::udp::ReactorRegistration;
 use crate::runtime::io_driver::IoRegistration;
 use crate::runtime::reactor::Interest;
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,8 +52,9 @@ fn browser_tcp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
 /// A TCP stream.
 #[derive(Debug)]
 pub struct TcpStream {
+    /// Reactor registration, fallback-driver aware (GH#67, tx9j0f).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    registration: Option<IoRegistration>,
+    registration: ReactorRegistration,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     inner: Arc<net::TcpStream>,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -292,7 +296,7 @@ impl TcpStream {
             stream.set_nonblocking(true)?;
             Ok(Self {
                 inner: Arc::new(stream),
-                registration: None,
+                registration: ReactorRegistration::new(),
                 shutdown_on_drop: true,
                 #[cfg(target_os = "windows")]
                 connect_settle_retries: 0,
@@ -310,7 +314,7 @@ impl TcpStream {
     ) -> Self {
         Self {
             inner,
-            registration,
+            registration: ReactorRegistration::from_registration(registration),
             shutdown_on_drop: true,
             #[cfg(target_os = "windows")]
             connect_settle_retries: 0,
@@ -639,56 +643,21 @@ impl TcpStream {
         browser_tcp_unsupported_result("TcpStream::register_interest")
     }
 
+    /// Registers readiness interest for the caller's current poll.
+    ///
+    /// A plain `TcpStream` has a single waiter, so only the caller's current
+    /// interest is armed (no sticky union of historical bits, which kept stale
+    /// WRITABLE polls alive during later read waits). With no ambient I/O
+    /// driver the fd parks on the process-global fallback driver instead of
+    /// self-waking into a hot loop (GH#67, asupersync-tx9j0f); see
+    /// [`ReactorRegistration::arm`].
     #[cfg(not(target_arch = "wasm32"))]
     #[inline]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
-        // A plain `TcpStream` has a single waiter. Re-arm only the caller's
-        // current interest instead of sticky-unioning historical bits, which
-        // otherwise keeps stale WRITABLE polls alive during later read waits.
-        let target_interest = interest;
-        if let Some(registration) = &mut self.registration {
-            // Re-arm reactor interest and conditionally update the waker in a
-            // single lock acquisition.  The waker clone is skipped when the
-            // task's waker hasn't changed (will_wake guard).
-            match registration.rearm(target_interest, cx.waker()) {
-                Ok(true) => return Ok(()),
-                Ok(false) => {
-                    // Slab slot gone — fall through to fresh registration.
-                    self.registration = None;
-                }
-                Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                    self.registration = None;
-                    fallback_rewake(cx);
-                    return Ok(());
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        let Some(current) = Cx::current() else {
+        if self.registration.arm(&*self.inner, interest, cx.waker())? == Armed::SelfWake {
             fallback_rewake(cx);
-            return Ok(());
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            fallback_rewake(cx);
-            return Ok(());
-        };
-
-        match driver.register(&*self.inner, target_interest, cx.waker().clone()) {
-            Ok(registration) => {
-                self.registration = Some(registration);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                fallback_rewake(cx);
-                Ok(())
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                fallback_rewake(cx);
-                Ok(())
-            }
-            Err(err) => Err(err),
         }
+        Ok(())
     }
 }
 
@@ -2225,6 +2194,129 @@ mod tests {
             1,
             "fallback re-wake should immediately schedule another poll without a timer driver"
         );
+    }
+
+    /// GH#67 follow-up (asupersync-tx9j0f): a `TcpStream` polled with no I/O
+    /// driver on the current `Cx` parks on the process-global fallback driver
+    /// instead of re-waking itself into a hot loop (the raw `fallback_rewake`
+    /// helper above stays immediate; it is now reached only when no reactor
+    /// at all can take the fd).
+    mod gh67_fallback_io_driver {
+        use super::*;
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use std::io::Write as _;
+
+        /// A connected, non-blocking pair: the async stream under test and
+        /// the std peer that can make it readable at will.
+        fn connected_pair() -> (TcpStream, net::TcpStream) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let peer = net::TcpStream::connect(addr).expect("connect peer");
+            let (accepted, _) = listener.accept().expect("accept");
+            accepted.set_nonblocking(true).expect("nonblocking");
+            (TcpStream::from_parts(Arc::new(accepted), None), peer)
+        }
+
+        fn poll_read_once(
+            stream: &mut TcpStream,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut read_buf = ReadBuf::new(buf);
+            match Pin::new(stream).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+
+        /// The defect: with no I/O driver on the current `Cx`, a `WouldBlock`
+        /// read re-woke its own waker synchronously, so an executor re-polled
+        /// in a hot loop. The fixed path must (1) return `Pending` without
+        /// any wake, (2) stay silent while the peer is idle, and (3) wake
+        /// exactly once when bytes arrive, from the fallback reactor pump.
+        #[test]
+        fn poll_read_without_io_driver_parks_until_data_arrives() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (mut stream, mut peer) = connected_pair();
+            let (signal, waker, rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 16];
+
+            assert!(matches!(
+                poll_read_once(&mut stream, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert_eq!(
+                signal.hits.load(Ordering::SeqCst),
+                0,
+                "driverless poll must park, not self-wake (GH#67)"
+            );
+            assert!(
+                stream.registration.on_fallback(),
+                "driverless poll registers with the process-global fallback I/O driver"
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "no wake may arrive while the peer is silent"
+            );
+
+            peer.write_all(b"wake").expect("peer write");
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("fallback reactor pump delivers the readiness wake");
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
+            match poll_read_once(&mut stream, &mut task_cx, &mut buf) {
+                Poll::Ready(Ok(len)) => assert_eq!(&buf[..len], b"wake"),
+                other => panic!("expected the bytes after the wake, got {other:?}"),
+            }
+        }
+
+        /// A stream parked on the fallback driver is handed to the ambient
+        /// driver as soon as it is polled under a `Cx` that carries one.
+        #[test]
+        fn fallback_registration_migrates_to_ambient_io_driver() {
+            assert!(Cx::current().is_none());
+            let (mut stream, _peer) = connected_pair();
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 8];
+
+            assert!(matches!(
+                poll_read_once(&mut stream, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(stream.registration.on_fallback());
+
+            let driver = IoDriverHandle::new(Arc::new(LabReactor::new()));
+            assert_eq!(driver.waker_count(), 0);
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(ambient));
+
+            assert!(matches!(
+                poll_read_once(&mut stream, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(
+                !stream.registration.on_fallback(),
+                "ambient driver must take over the registration"
+            );
+            assert!(stream.registration.is_some());
+            assert_eq!(
+                driver.waker_count(),
+                1,
+                "the ambient driver now owns the stream's readiness waker"
+            );
+        }
     }
 
     // =========================================================================
