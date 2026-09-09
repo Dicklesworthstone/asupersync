@@ -71,9 +71,11 @@
 //! (scheduler, fast queue, local-ready queue, worker id, lane owner,
 //! local-store key, ambient `Cx`) restored when the inner drive ends, each
 //! runtime's `!Send` futures live in their own per-runtime store, and
-//! local-spawn requests parked on the thread's lane by an outer root are set
-//! aside for the duration of the inner drive. A `block_on` from inside a
-//! task poll (the worker is busy executing), from the background thread, or
+//! local-spawn requests parked by an outer root of a different runtime are
+//! set aside for the duration of the inner drive. Same-runtime re-entry
+//! keeps those requests available so the nested root can join them.
+//! A `block_on` from inside a task poll (the worker is busy executing), from
+//! the background thread, or
 //! concurrently from another thread cannot borrow the worker; it polls its
 //! future directly, as before.
 //!
@@ -81,7 +83,8 @@
 //! owns the driver, and every future that captures a `RuntimeHandle` must
 //! prove `RuntimeInner: Send + Sync`; keeping `ThreeLaneWorker` out of that
 //! type keeps those auto-trait proofs shallow (the `Send` bound on the
-//! worker is proven once, at the erasure).
+//! worker is proven once, at the erasure). Its allocation is retained across
+//! handovers and root polls.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -98,7 +101,9 @@ use std::time::{Duration, Instant};
 use crate::cx::Cx;
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::local::ScopedLocalStoreKey;
-use crate::runtime::scheduler::three_lane::{ScopedWorkerId, ThreeLaneScheduler, ThreeLaneWorker};
+use crate::runtime::scheduler::three_lane::{
+    ScopedWorkerId, ThreeLaneScheduler, ThreeLaneWorker, current_worker_id,
+};
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::spawn_mailbox::{
     self, LocalSpawnRequest, ScopedLocalSpawnLaneOwner, SpawnGateway, SpawnMailbox,
@@ -132,12 +137,12 @@ const DRAIN_DEADLINE_CHECK_TURNS: u32 = 16;
 /// see the module docs for why it is type-erased.
 type ErasedWorker = Box<dyn Any + Send>;
 
-fn erase_worker(worker: ThreeLaneWorker) -> ErasedWorker {
-    Box::new(worker)
+fn erase_worker(worker: Box<ThreeLaneWorker>) -> ErasedWorker {
+    worker
 }
 
-fn recover_worker(erased: ErasedWorker) -> ThreeLaneWorker {
-    *erased
+fn recover_worker(erased: ErasedWorker) -> Box<ThreeLaneWorker> {
+    erased
         .downcast::<ThreeLaneWorker>()
         .expect("worker slots only ever hold a ThreeLaneWorker")
 }
@@ -239,7 +244,7 @@ impl CurrentThreadDriver {
             .unwrap_or_else(PoisonError::into_inner) = Some(std::thread::current().id());
         let shutdown = Arc::clone(&worker.shutdown);
         let _store_key = ScopedLocalStoreKey::new(worker.local_store_key());
-        let mut worker = worker;
+        let mut worker = Box::new(worker);
         loop {
             worker.run_loop_until(
                 &mut || self.handover_requested.load(Ordering::Acquire),
@@ -309,7 +314,7 @@ impl CurrentThreadDriver {
     /// thread, or returns `None` when it cannot be borrowed (the background
     /// thread itself, a concurrent borrower, a refused handover, or
     /// shutdown).
-    fn acquire(&self, scheduler: &ThreeLaneScheduler) -> Option<ThreeLaneWorker> {
+    fn acquire(&self, scheduler: &ThreeLaneScheduler) -> Option<Box<ThreeLaneWorker>> {
         // A thread that is already inside a worker loop (this runtime's
         // driving thread re-entering `block_on`, or any worker thread) keeps
         // that worker's thread-local task store; a second worker on the same
@@ -343,12 +348,6 @@ impl CurrentThreadDriver {
                     *slot = WorkerSlot::Background;
                     return None;
                 }
-                // The background thread refused the handover (it owns live
-                // local tasks) and cleared the flag itself.
-                WorkerSlot::Background => {
-                    *slot = WorkerSlot::Background;
-                    return None;
-                }
                 WorkerSlot::Closed => {
                     *slot = WorkerSlot::Closed;
                     self.handover_requested.store(false, Ordering::Release);
@@ -364,7 +363,7 @@ impl CurrentThreadDriver {
     }
 
     /// Hands the worker back to the background thread.
-    fn release(&self, worker: ThreeLaneWorker) {
+    fn release(&self, worker: Box<ThreeLaneWorker>) {
         let mut slot = self.lock_slot();
         if matches!(*slot, WorkerSlot::Closed) {
             drop(worker);
@@ -376,7 +375,7 @@ impl CurrentThreadDriver {
 
     /// Parks the worker for a nested `block_on` from the root being polled
     /// on this thread.
-    fn park_reentrant(&self, worker: ThreeLaneWorker) {
+    fn park_reentrant(&self, worker: Box<ThreeLaneWorker>) {
         let mut parked = self
             .reentrant
             .lock()
@@ -386,7 +385,7 @@ impl CurrentThreadDriver {
     }
 
     /// Takes the worker parked for re-entry by a drive on this thread, if any.
-    fn take_reentrant(&self) -> Option<ThreeLaneWorker> {
+    fn take_reentrant(&self) -> Option<Box<ThreeLaneWorker>> {
         let mut parked = self
             .reentrant
             .lock()
@@ -511,7 +510,7 @@ enum LoanReturn {
 /// Returns the borrowed worker on every exit path, including unwinds.
 struct WorkerLoan<'a> {
     driver: &'a CurrentThreadDriver,
-    worker: Option<ThreeLaneWorker>,
+    worker: Option<Box<ThreeLaneWorker>>,
     return_to: LoanReturn,
 }
 
@@ -519,12 +518,13 @@ impl WorkerLoan<'_> {
     /// Runs `f` with this thread set up as the worker's thread: worker id
     /// and lane owner (so `Cx::spawn_local` from the root parks on this
     /// thread's lane), the runtime's local-store key, and the thread's lane
-    /// contents of an outer drive set aside and restored afterwards. `f`
+    /// contents of a different runtime's outer drive set aside and restored
+    /// afterwards. Same-runtime re-entry keeps the lane available. `f`
     /// receives the loan's worker slot; it may take the worker out
     /// temporarily (re-entrancy) but must put it back.
     fn with_thread_context<R>(
         &mut self,
-        f: impl FnOnce(&CurrentThreadDriver, &mut Option<ThreeLaneWorker>) -> R,
+        f: impl FnOnce(&CurrentThreadDriver, &mut Option<Box<ThreeLaneWorker>>) -> R,
     ) -> R {
         let (worker_id, mailbox, store_key): (usize, Option<Arc<SpawnMailbox>>, usize) = {
             let worker = self
@@ -540,21 +540,29 @@ impl WorkerLoan<'_> {
         let _store_key = ScopedLocalStoreKey::new(store_key);
         let _worker_id = ScopedWorkerId::new(worker_id);
         let _lane_owner = mailbox.map(ScopedLocalSpawnLaneOwner::new);
-        // Nested drive: local spawns parked on this thread's lane by an
-        // outer root are admitted by that drive, not this one.
+        // A nested root of this runtime can join a local request queued by
+        // its outer root, so it must be able to admit that request. Only
+        // isolate the lane when borrowing a different runtime's worker.
+        let isolate_lane = !matches!(self.return_to, LoanReturn::Reentrant);
         let mut outer_requests = Vec::new();
-        spawn_mailbox::drain_local_spawn_lane(usize::MAX, &mut outer_requests);
+        if isolate_lane {
+            spawn_mailbox::drain_local_spawn_lane(usize::MAX, &mut outer_requests);
+        }
 
         let result = f(self.driver, &mut self.worker);
 
-        // The loop leaves the lane empty unless shutdown cut it short; a
-        // request left behind then can never be admitted by this runtime.
-        let mut orphaned = Vec::new();
-        spawn_mailbox::drain_local_spawn_lane(usize::MAX, &mut orphaned);
-        for request in orphaned {
-            request.resolve_failed(SpawnError::RuntimeUnavailable);
+        if isolate_lane {
+            // The loop leaves the lane empty unless shutdown cut it short;
+            // a request left behind then can never be admitted by this
+            // runtime. A same-runtime outer drive can still admit requests
+            // left by its nested drive and must retain them.
+            let mut orphaned = Vec::new();
+            spawn_mailbox::drain_local_spawn_lane(usize::MAX, &mut orphaned);
+            for request in orphaned {
+                request.resolve_failed(SpawnError::RuntimeUnavailable);
+            }
+            restore_local_spawn_lane(outer_requests);
         }
-        restore_local_spawn_lane(outer_requests);
         result
     }
 }
@@ -583,7 +591,7 @@ fn restore_local_spawn_lane(requests: Vec<LocalSpawnRequest>) {
 /// re-entrancy slot so a nested `block_on` from the root can drive it.
 fn drive_root_on<F: Future>(
     driver: &CurrentThreadDriver,
-    slot: &mut Option<ThreeLaneWorker>,
+    slot: &mut Option<Box<ThreeLaneWorker>>,
     request_cx: &Cx,
     future: F,
 ) -> std::thread::Result<F::Output> {
@@ -665,8 +673,8 @@ fn drive_root_on<F: Future>(
 }
 
 /// The loaned worker; it is only ever absent while the root is being polled.
-fn loaned(slot: &mut Option<ThreeLaneWorker>) -> &mut ThreeLaneWorker {
-    slot.as_mut()
+fn loaned(slot: &mut Option<Box<ThreeLaneWorker>>) -> &mut ThreeLaneWorker {
+    slot.as_deref_mut()
         .expect("worker stays on loan for the whole drive")
 }
 

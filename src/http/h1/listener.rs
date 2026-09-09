@@ -1442,9 +1442,9 @@ mod tests {
         init_test_logging();
         let runtime = RuntimeBuilder::current_thread()
             .root_region_limits(RegionLimits {
-                // The blocker consumes the only root task slot, so a per-connection
-                // spawn attempt must fail without leaking its connection guard.
-                max_tasks: Some(1),
+                // The block_on root and blocker consume both task slots,
+                // so a connection spawn must fail without leaking its guard.
+                max_tasks: Some(2),
                 ..RegionLimits::unlimited()
             })
             .build()
@@ -1492,7 +1492,14 @@ mod tests {
                 Err(err) => err,
             };
 
-            assert!(matches!(err, SpawnError::RegionAtCapacity { .. }));
+            assert!(matches!(
+                err,
+                SpawnError::RegionAtCapacity {
+                    limit: 2,
+                    live: 2,
+                    ..
+                }
+            ));
             assert!(
                 should_retry_after_spawn_failure(&err),
                 "capacity failures should be scoped to the rejected connection"

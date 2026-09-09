@@ -8314,13 +8314,25 @@ mod tests {
         let mut lab = LabRuntime::new(LabConfig::new(7).trace_capacity(1024));
         let lab_region = lab.state.create_root_region(Budget::INFINITE);
         for _ in 0..2 {
-            let (task_id, _handle) = lab
+            let (task_id, mut handle) = lab
                 .state
                 .create_task(lab_region, Budget::INFINITE, async { 1_u8 })
                 .expect("lab task spawn");
             lab.scheduler
                 .lock()
                 .schedule(task_id, Budget::INFINITE.priority);
+            // Model the real block_on root that joins this child in the
+            // production runtime, including its spawn and retirement.
+            let (root_id, _root_handle) = lab
+                .state
+                .create_task(lab_region, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("lab root context");
+                    assert_eq!(handle.join(&cx).await.expect("lab child completes"), 1);
+                })
+                .expect("lab root spawn");
+            lab.scheduler
+                .lock()
+                .schedule(root_id, Budget::INFINITE.priority);
             lab.run_until_quiescent();
         }
 
@@ -8408,13 +8420,23 @@ mod tests {
 
         let mut lab = LabRuntime::new(LabConfig::new(7).trace_capacity(1024));
         let lab_region = lab.state.create_root_region(Budget::INFINITE);
-        let (task_id, _handle) = lab
+        let (task_id, mut handle) = lab
             .state
             .create_task(lab_region, Budget::INFINITE, sleep_once())
             .expect("lab sleep task spawn");
         lab.scheduler
             .lock()
             .schedule(task_id, Budget::INFINITE.priority);
+        let (root_id, _root_handle) = lab
+            .state
+            .create_task(lab_region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("lab root context");
+                handle.join(&cx).await.expect("lab timer child completes");
+            })
+            .expect("lab root spawn");
+        lab.scheduler
+            .lock()
+            .schedule(root_id, Budget::INFINITE.priority);
 
         lab.step_for_test(); // register timer
         lab.advance_time(1_000_000);

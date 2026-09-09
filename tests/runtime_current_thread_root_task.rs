@@ -732,6 +732,136 @@ fn current_thread_three_deep_nested_block_on_spawns_at_every_level() {
     );
 }
 
+/// A same-runtime nested drive must admit local requests queued by its
+/// outer root: the inner root may be waiting for exactly that child.
+#[test]
+fn current_thread_nested_block_on_joins_outer_pending_local_spawn() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+    let caller = thread::current().id();
+    let ran = Rc::new(Cell::new(false));
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("outer root Cx is installed");
+        let task_ran = Rc::clone(&ran);
+        let handle = cx
+            .spawn_local(move |_| async move {
+                assert_eq!(thread::current().id(), caller);
+                task_ran.set(true);
+                42_u32
+            })
+            .expect("outer root accepts a local task");
+        assert!(!ran.get(), "the child must still be awaiting admission");
+
+        // Self-waking bounded joins make the old hidden-request deadlock
+        // fail with a count of zero instead of hanging the test process.
+        let completed = join_all_within(&runtime, vec![handle], Duration::from_secs(2));
+        assert_eq!(completed, 1, "nested drive hid the outer local request");
+        assert_eq!(
+            Cx::current().expect("outer Cx restored").task_id(),
+            cx.task_id()
+        );
+        assert!(!runtime.is_quiescent(), "the outer root must remain live");
+    });
+
+    assert!(ran.get());
+    assert!(runtime.is_quiescent(), "both root records must retire");
+}
+
+/// A caught nested panic returns the worker and restores the outer root's
+/// context, including its authority to admit subsequent local work.
+#[test]
+fn current_thread_caught_nested_panic_restores_local_spawn_and_reentry() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("outer root Cx is installed");
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            runtime.block_on(async {
+                yield_now().await;
+                panic!("nested root boom");
+            })
+        }));
+        let payload = outcome.expect_err("nested root panic must propagate");
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("nested root boom")
+        );
+        assert_eq!(
+            Cx::current().expect("outer Cx restored").task_id(),
+            cx.task_id()
+        );
+
+        let local = Rc::new(42_u32);
+        let handle = cx
+            .spawn_local(move |_| async move { *local })
+            .expect("outer root retains local spawn authority after nested panic");
+        assert_eq!(
+            join_all_within(&runtime, vec![handle], Duration::from_secs(2)),
+            1
+        );
+        assert_eq!(runtime.block_on(async { 7_u8 }), 7);
+        assert!(
+            !runtime.is_quiescent(),
+            "outer root remains live after recovery"
+        );
+    });
+
+    assert_eq!(runtime.block_on(async { 9_u8 }), 9);
+    assert!(runtime.is_quiescent(), "panicked nested root must retire");
+}
+
+/// Distinct runtimes share the thread's local-spawn lane, but must never
+/// admit each other's pending local requests into the wrong task store.
+#[test]
+fn current_thread_nested_distinct_runtimes_preserve_pending_outer_local_spawn() {
+    let outer = RuntimeBuilder::current_thread()
+        .build()
+        .expect("outer runtime");
+    let inner = RuntimeBuilder::current_thread()
+        .build()
+        .expect("inner runtime");
+    let ran = Rc::new(Cell::new(false));
+
+    outer.block_on(async {
+        let cx = Cx::current().expect("outer root Cx is installed");
+        let task_ran = Rc::clone(&ran);
+        let handle = cx
+            .spawn_local(move |_| async move {
+                task_ran.set(true);
+                42_u32
+            })
+            .expect("outer root accepts a local task");
+        inner.block_on(async {
+            let inner_cx = Cx::current().expect("inner root Cx is installed");
+            let local = Rc::new(42_u32);
+            let mut task = inner_cx
+                .spawn_local(move |_| async move { *local })
+                .expect("inner root accepts its own local task");
+            assert_eq!(
+                task.join(&inner_cx).await.expect("inner child completes"),
+                42
+            );
+            assert!(!ran.get(), "inner runtime must not admit the outer request");
+        });
+        assert!(
+            !ran.get(),
+            "outer request stays pending until the outer drive resumes"
+        );
+        assert_eq!(
+            join_all_within(&outer, vec![handle], Duration::from_secs(2)),
+            1
+        );
+    });
+
+    assert!(ran.get());
+    assert!(outer.is_quiescent());
+    assert!(inner.is_quiescent());
+}
+
 /// Teardown: a `!Send` task admitted by this thread and still parked when
 /// the runtime is dropped is dropped with it (abort-by-drop at teardown),
 /// and the runtime's per-thread local store is retired, not leaked.

@@ -667,16 +667,18 @@ mod tests {
                             Some((holder_cx.task_id(), successor_id))
                         });
                     let holders = runtime.block_on(runtime.handle().spawn(parent));
-                    runtime.block_on(async {
-                        let started = Instant::now();
-                        while !runtime.is_quiescent() {
-                            assert!(
-                                started.elapsed() < Duration::from_secs(5),
-                                "native pool obligations and task retirement must drain"
-                            );
-                            yield_now().await;
-                        }
-                    });
+                    // Observe from outside block_on: its real root task is
+                    // live until it returns and cannot observe quiescence
+                    // while counting itself. The worker keeps draining the
+                    // completed Send tasks on the background thread.
+                    let started = Instant::now();
+                    while !runtime.is_quiescent() {
+                        assert!(
+                            started.elapsed() < Duration::from_secs(5),
+                            "native pool obligations and task retirement must drain"
+                        );
+                        std::thread::yield_now();
+                    }
                     assert!(
                         runtime
                             .task_inspector(Default::default())

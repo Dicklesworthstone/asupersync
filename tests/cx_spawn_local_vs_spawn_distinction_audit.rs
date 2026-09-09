@@ -588,12 +588,11 @@ fn spawn_local_rejects_a_context_owned_by_another_runtime() {
     );
 }
 
-/// Installing another runtime through nested `block_on` must not retarget the
-/// worker's thread-local spawn lane. The lane still belongs to the outer
-/// runtime even though `Runtime::current_handle()` and `Cx::current()`
-/// temporarily describe the inner runtime.
+/// A nested current-thread runtime borrows its own worker and temporarily
+/// owns the local lane. Its own Cx may spawn locally; the outer runtime's
+/// Cx must be rejected until the outer worker resumes.
 #[test]
-fn spawn_local_rejects_nested_foreign_runtime_block_on_from_worker_lane() {
+fn spawn_local_nested_foreign_runtime_block_on_preserves_lane_ownership() {
     let runtime_a = RuntimeBuilder::current_thread()
         .build()
         .expect("build outer worker runtime");
@@ -604,35 +603,57 @@ fn spawn_local_rejects_nested_foreign_runtime_block_on_from_worker_lane() {
     let foreign_future_polled = Arc::new(AtomicBool::new(false));
     let polled = Arc::clone(&foreign_future_polled);
 
-    let rejected = runtime_a.block_on(runtime_a.handle().spawn(async move {
-        nested_runtime.block_on(async move {
+    let value = runtime_a.block_on(runtime_a.handle().spawn(async move {
+        let outer_cx = Cx::current().expect("outer worker Cx");
+        let outer_id = outer_cx.task_id();
+        let caller = std::thread::current().id();
+        let value = nested_runtime.block_on(async move {
             let nested_cx: Cx = Cx::current().expect("nested block_on installs runtime-B Cx");
-            match nested_cx.spawn_local(move |_| async move {
+            match outer_cx.spawn_local(move |_| async move {
                 polled.store(true, Ordering::Release);
                 73_u8
             }) {
-                Err(SpawnError::LocalSchedulerUnavailable) => true,
+                Err(SpawnError::LocalSchedulerUnavailable) => {}
                 Err(other) => panic!(
-                    "nested foreign-runtime spawn_local must fail at the lane-owner boundary; got {other:?}"
+                    "outer-runtime spawn_local must fail at the inner lane boundary; got {other:?}"
                 ),
-                Ok(handle) => {
-                    drop(handle);
-                    false
-                }
+                Ok(_) => panic!("outer-runtime Cx published into the nested runtime's lane"),
             }
-        })
+            let local = std::rc::Rc::new(73_u8);
+            let mut task = nested_cx
+                .spawn_local(move |_| async move {
+                    assert_eq!(std::thread::current().id(), caller);
+                    *local
+                })
+                .expect("nested runtime owns the local lane during its worker loan");
+            let started = std::time::Instant::now();
+            loop {
+                if let Some(value) = task.try_join().expect("nested local task succeeds") {
+                    break value;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "nested worker must drive its local task"
+                );
+                asupersync::runtime::yield_now().await;
+            }
+        });
+        let restored = Cx::current().expect("outer worker Cx restored");
+        assert_eq!(restored.task_id(), outer_id);
+        let mut local = restored
+            .spawn_local(|_| async { 17_u8 })
+            .expect("outer worker regains local spawn authority");
+        assert_eq!(local.join(&restored).await, Ok(17));
+        value
     }));
 
     let runtime_a_clean = runtime_a.shutdown_timeout(Duration::from_secs(5));
     let runtime_b_clean = runtime_b.shutdown_timeout(Duration::from_secs(5));
 
-    assert!(
-        rejected,
-        "nested runtime-B block_on must not publish into runtime A's worker-local lane"
-    );
+    assert_eq!(value, 73, "nested runtime must drive its own local future");
     assert!(
         !foreign_future_polled.load(Ordering::Acquire),
-        "a rejected nested foreign-runtime local future must never be polled"
+        "a rejected outer-runtime local future must never be polled by the inner runtime"
     );
     assert!(runtime_a_clean, "outer runtime must shut down cleanly");
     assert!(runtime_b_clean, "nested runtime must shut down cleanly");
