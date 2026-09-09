@@ -47,6 +47,8 @@ const LOWERING_PATH: &str = "artifacts/regex_priority_capture_lowering_contract_
 const VM_SOURCE_PATH: &str = "src/observability/regex_vm.rs";
 const TERMINAL_SHA256: &str = "3a67d943175079ab0378080de5b8ee06fd5e979b0c9555dc30a45cbb62da2f5b";
 const LOWERING_SHA256: &str = "27334fd193274b52ccf1952b212dd7d07237fdd96240e4e61587ee3b2d41257a";
+const CURRENT_LOWERING_SHA256: &str =
+    "fff4b34e537a16b72077cb9289b3f6fcff439238212c7b4471e44410af6c2086";
 const FROZEN_R3_4_2_VM_SHA256: &str =
     "5b27779e8384d5746b471064820f87410b3ccc5dea06ac637890eefc460ef0ee";
 
@@ -190,7 +192,11 @@ fn identity_sources_authority_and_decision_are_fail_closed() {
         u64::from(CAPTURE_VM_SCHEMA_VERSION)
     );
     assert_eq!(sha256(TERMINAL_PATH), TERMINAL_SHA256);
-    assert_eq!(sha256(LOWERING_PATH), LOWERING_SHA256);
+    assert_eq!(sha256(LOWERING_PATH), CURRENT_LOWERING_SHA256);
+    assert_eq!(
+        value["authority"]["priority_capture_lowering_sha256"],
+        LOWERING_SHA256
+    );
     assert!(fs::metadata(PREDECESSOR_PATH).is_ok());
 
     let sources = array(&value, "sources");

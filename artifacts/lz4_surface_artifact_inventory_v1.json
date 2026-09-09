@@ -96,7 +96,7 @@
     },
     {
       "path": "src/trace/file.rs",
-      "sha256": "57c7c5602420154601095e7a00f639732bcdb209cf09cb7d72cb446067068827",
+      "sha256": "67d22662b847644524e088edf08d05eeeb59aa670c99be725d016ed825d456d9",
       "role": "CAP-TRACE-LZ4 production format, writer, readers, migration, errors, and limits"
     },
     {
@@ -121,7 +121,7 @@
     },
     {
       "path": "fuzz/Cargo.toml",
-      "sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
+      "sha256": "1a90bcc6869fcca866b6572f6c571b42dcdbcea43960211901ed21bdad83f21f",
       "role": "excluded fuzz dependency declaration"
     },
     {

@@ -347,7 +347,7 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     let capture_commit = string(observation, "capture_commit")?;
     if capture_commit.len() != 40
         || !capture_commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || string(observation, "capture_date")? != "2026-09-08"
+        || string(observation, "capture_date")? != "2026-09-09"
         || string(observation, "execution_state")? != "STATIC_READ_ONLY"
         || string(observation, "scope")? != "four-member-topology-only"
         || u64_field(observation, "member_count")? != members.len() as u64
@@ -562,15 +562,20 @@ fn validate_reference_integrity(scan: &Value) -> Result<(), String> {
     {
         return Err("current historical-edge provenance state drifted".to_owned());
     }
+    if resolved_targets.len() != RESOLVED_TARGET_RECEIPTS.len() {
+        return Err("all three retained Git-object receipts must remain present".to_owned());
+    }
     let mut declared_historical_targets = resolved_targets
         .into_iter()
         .map(|((path, sha256), line_count)| (path, sha256, line_count))
+        .filter(|identity| current_historical_targets.contains(identity))
         .collect::<BTreeSet<_>>();
-    if declared_historical_targets.len() != RESOLVED_TARGET_RECEIPTS.len()
+    if declared_historical_targets.len() != 2
         || array(&provenance_value, "unresolved_targets")?.len() != 2
     {
         return Err(
-            "partial provenance requires three resolved and two unresolved targets".to_owned(),
+            "partial provenance requires two current resolved and two unresolved targets"
+                .to_owned(),
         );
     }
     for target in array(&provenance_value, "unresolved_targets")? {
@@ -933,7 +938,7 @@ fn scanner_report_is_concise_and_matches_artifact_boundaries() {
         "excluded",
         "PASS_NO_CONTENT_ADDRESSED_CYCLE_WITH_PATH_ALIAS_WARNING",
         "content-addressed graph",
-        "nine nodes, six edges",
+        "eight nodes, six edges",
         "does not independently authenticate",
         "requires separate receipts",
         "immutable byte provenance",

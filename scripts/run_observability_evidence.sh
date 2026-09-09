@@ -83,7 +83,10 @@ has_scenario() {
 
 git_state() {
     local sha
-    sha="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)"
+    if ! sha="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null)"; then
+        printf 'source-archive-without-git-metadata'
+        return
+    fi
     if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain)" ]]; then
         printf 'main@%s-dirty' "$sha"
     else
