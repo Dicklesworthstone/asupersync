@@ -64,7 +64,86 @@ impl LocalTaskStore {
     }
 }
 
+/// Next per-runtime local-store key. Keys are process-unique and never
+/// reused, so a store left on a thread by a runtime that has since been
+/// dropped can never be mistaken for a later runtime's store (a heap address
+/// used to serve as the key, and allocator reuse made that aliasing likely;
+/// asupersync-1fyc8f).
+static NEXT_LOCAL_STORE_KEY: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(1);
+
+/// Keys of retired runtimes, published so that every thread drops the stores
+/// it still holds for them on its next local-store operation. Bounded: once
+/// it holds more than [`RETIRED_LOCAL_STORE_KEYS_CAP`] keys the oldest half
+/// is forgotten (a store keyed by a forgotten key can only leak, never alias,
+/// because keys are unique).
+static RETIRED_LOCAL_STORE_KEYS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+/// Bumped on every retirement; threads compare it against their last-seen
+/// value so the purge check on the store hot path is one atomic load.
+static RETIRED_LOCAL_STORE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+const RETIRED_LOCAL_STORE_KEYS_CAP: usize = 4_096;
+
+/// Allocates a fresh, process-unique local-store key for a runtime.
+#[must_use]
+pub(crate) fn allocate_local_store_key() -> usize {
+    NEXT_LOCAL_STORE_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Marks `key` retired process-wide: every thread drops the store it holds
+/// for that key (with the tasks still parked in it) on its next local-store
+/// operation. The default store (`key == 0`) is never retired.
+pub(crate) fn publish_retired_local_store_key(key: usize) {
+    if key == 0 {
+        return;
+    }
+    let mut retired = RETIRED_LOCAL_STORE_KEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if retired.contains(&key) {
+        return;
+    }
+    if retired.len() >= RETIRED_LOCAL_STORE_KEYS_CAP {
+        let keep_from = retired.len() / 2;
+        retired.drain(..keep_from);
+    }
+    retired.push(key);
+    drop(retired);
+    RETIRED_LOCAL_STORE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+/// Drops this thread's stores whose keys were retired since the last check.
+/// Task destructors run after the store borrow is released.
+fn purge_retired_local_stores() {
+    let generation = RETIRED_LOCAL_STORE_GENERATION.load(std::sync::atomic::Ordering::Acquire);
+    let seen = SEEN_RETIRED_LOCAL_STORE_GENERATION.with(Cell::get);
+    if seen == generation {
+        return;
+    }
+    SEEN_RETIRED_LOCAL_STORE_GENERATION.with(|last| last.set(generation));
+    let retired = RETIRED_LOCAL_STORE_KEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let dropped = KEYED_LOCAL_TASKS.with(|stores| {
+        let mut stores = stores.borrow_mut();
+        let mut dropped = Vec::new();
+        let mut index = 0;
+        while index < stores.len() {
+            if retired.contains(&stores[index].0) {
+                dropped.push(stores.swap_remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        dropped
+    });
+    drop(dropped);
+}
+
 thread_local! {
+    /// Retirement generation this thread has already purged.
+    static SEEN_RETIRED_LOCAL_STORE_GENERATION: Cell<u64> = const { Cell::new(0) };
     /// Local tasks stored on the current thread (the default store, selected
     /// while no [`ScopedLocalStoreKey`] is installed).
     static LOCAL_TASKS: RefCell<LocalTaskStore> = const { RefCell::new(LocalTaskStore::new()) };
@@ -106,6 +185,8 @@ pub(crate) fn retire_local_store(key: usize) {
     if key == 0 {
         return;
     }
+    // Other threads that drove this runtime purge their copy lazily.
+    publish_retired_local_store_key(key);
     let retired = KEYED_LOCAL_TASKS
         .try_with(|stores| {
             let mut stores = stores.borrow_mut();
@@ -135,6 +216,11 @@ impl Drop for ScopedLocalStoreKey {
 }
 
 fn with_current_store<R>(f: impl FnOnce(&mut LocalTaskStore) -> R) -> R {
+    // Runs before the default-store shortcut on purpose: a thread that left
+    // a runtime's keyed store behind (its `block_on` returned with `!Send`
+    // tasks parked) usually has no key installed when the runtime is dropped
+    // elsewhere, and this is where it learns of the retirement.
+    purge_retired_local_stores();
     let key = CURRENT_LOCAL_STORE_KEY.with(Cell::get);
     if key == 0 {
         return LOCAL_TASKS.with(|tasks| f(&mut tasks.borrow_mut()));
@@ -199,6 +285,79 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    /// asupersync-1fyc8f: keys are process-unique and never reused.
+    #[test]
+    fn allocated_local_store_keys_are_unique_and_never_zero() {
+        init_test("allocated_local_store_keys_are_unique_and_never_zero");
+        let first = allocate_local_store_key();
+        let second = allocate_local_store_key();
+        assert_ne!(first, 0, "zero is the default store");
+        assert!(
+            second > first,
+            "keys grow monotonically: {first} then {second}"
+        );
+        let from_other_thread = std::thread::spawn(allocate_local_store_key)
+            .join()
+            .expect("allocator thread");
+        assert!(from_other_thread > second, "one process-wide sequence");
+    }
+
+    /// asupersync-1fyc8f: a retirement published by any thread drops the
+    /// store (and the tasks parked in it) on every thread's next local-store
+    /// operation, including threads that currently use the default store.
+    #[test]
+    fn retired_store_is_purged_on_next_touch_from_any_thread() {
+        init_test("retired_store_is_purged_on_next_touch_from_any_thread");
+        let key = allocate_local_store_key();
+        let task_id = TaskId::new_for_test(42_777, 0);
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel::<&'static str>();
+        struct DropSignal(std::sync::mpsc::Sender<&'static str>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send("parked task dropped");
+            }
+        }
+
+        let (stored_tx, stored_rx) = std::sync::mpsc::channel::<usize>();
+        let (retired_tx, retired_rx) = std::sync::mpsc::channel::<()>();
+        let (after_tx, after_rx) = std::sync::mpsc::channel::<usize>();
+        let holder = std::thread::spawn(move || {
+            {
+                let _key = ScopedLocalStoreKey::new(key);
+                let signal = DropSignal(dropped_tx);
+                store_local_task(
+                    task_id,
+                    LocalStoredTask::new(async move {
+                        let _signal = signal;
+                        std::future::pending::<()>().await;
+                        Outcome::Ok(())
+                    }),
+                );
+                stored_tx
+                    .send(keyed_local_store_count())
+                    .expect("report store count");
+            }
+            retired_rx.recv().expect("wait for the retirement");
+            // Default store selected (no key installed): the touch still
+            // observes the retirement.
+            let _ = local_task_count();
+            after_tx
+                .send(keyed_local_store_count())
+                .expect("report store count after purge");
+        });
+
+        assert_eq!(stored_rx.recv().expect("stored"), 1);
+        publish_retired_local_store_key(key);
+        retired_tx.send(()).expect("release the holder");
+        assert_eq!(after_rx.recv().expect("after"), 0, "retired store purged");
+        assert_eq!(
+            dropped_rx.recv().expect("drop signal"),
+            "parked task dropped",
+            "the parked task is dropped with its store"
+        );
+        holder.join().expect("holder thread");
     }
 
     #[test]

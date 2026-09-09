@@ -213,11 +213,141 @@ fn current_thread_block_on_propagates_root_panic_and_stays_usable() {
         "block_on must re-raise the root's own panic payload"
     );
 
-    let value = runtime.block_on(async { 7_u8 });
+    let value = runtime.block_on(async {
+        let cx = Cx::current().expect("recovered root Cx");
+        let local = Rc::new(7_u8);
+        let mut task = cx
+            .spawn_local(move |_| async move { *local })
+            .expect("recovered root retains local spawn authority");
+        task.join(&cx).await.expect("recovered worker dispatches")
+    });
     assert_eq!(value, 7, "runtime must stay usable after a root panic");
     assert!(
         runtime.is_quiescent(),
         "panicked root left the runtime non-quiescent"
+    );
+}
+
+/// A startup hook can unwind before the worker enters its dispatch loop.
+/// A subsequent caller must fall back to polling its root, rather than wait
+/// forever for a handover from that dead worker. Shutdown releases the old
+/// implementation's waiter before the assertion, so even RED leaves no hang.
+#[test]
+fn current_thread_start_hook_panic_does_not_strand_block_on() {
+    let (unwinding, unwound) = mpsc::channel();
+    let runtime = RuntimeBuilder::current_thread()
+        .on_thread_start(move || {
+            struct OnUnwind(mpsc::Sender<()>);
+            impl Drop for OnUnwind {
+                fn drop(&mut self) {
+                    let _ = self.0.send(());
+                }
+            }
+            let _notify = OnUnwind(unwinding.clone());
+            panic!("startup hook boom");
+        })
+        .build()
+        .expect("build runtime with panicking startup hook");
+    unwound
+        .recv_timeout(Duration::from_secs(5))
+        .expect("startup hook must actually unwind");
+
+    let caller_runtime = runtime.clone();
+    let (sent, received) = mpsc::channel();
+    let caller = thread::spawn(move || {
+        let value = caller_runtime.block_on(async { 42_u32 });
+        let _ = sent.send(value);
+    });
+    let result = received.recv_timeout(Duration::from_secs(2));
+    runtime.shutdown_background();
+    caller.join().expect("caller exits after shutdown cleanup");
+    assert_eq!(
+        result.expect("block_on waited for a worker whose startup hook panicked"),
+        42
+    );
+}
+
+/// The actual pinned root, including its destructor, belongs to the root
+/// task. Drop may spawn local work, which must be drained before return.
+#[test]
+fn current_thread_root_destructor_runs_before_retirement_and_drain() {
+    use std::future::Future;
+    use std::marker::PhantomPinned;
+    use std::pin::Pin;
+    use std::task::Context;
+
+    struct Root<'a> {
+        runtime: &'a Runtime,
+        root_id: Cell<Option<asupersync::types::TaskId>>,
+        address: Cell<usize>,
+        drop_live: &'a Cell<bool>,
+        drop_context: &'a Cell<bool>,
+        child_ran: Rc<Cell<bool>>,
+        _pin: PhantomPinned,
+    }
+    impl Future for Root<'_> {
+        type Output = u32;
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u32> {
+            self.root_id
+                .set(Some(Cx::current().expect("root Cx").task_id()));
+            self.address
+                .set(std::ptr::from_ref(self.as_ref().get_ref()) as usize);
+            Poll::Ready(42)
+        }
+    }
+    impl Drop for Root<'_> {
+        fn drop(&mut self) {
+            assert_eq!(self.address.get(), std::ptr::from_ref(self) as usize);
+            let cx = Cx::current().expect("root destructor Cx");
+            self.drop_context
+                .set(Some(cx.task_id()) == self.root_id.get());
+            self.drop_live.set(
+                !self.runtime.is_quiescent()
+                    && self
+                        .runtime
+                        .task_inspector(TaskInspectorConfig::default())
+                        .list_tasks()
+                        .iter()
+                        .any(|task| Some(task.id) == self.root_id.get()),
+            );
+            let ran = Rc::clone(&self.child_ran);
+            let _child = cx
+                .spawn_local(move |_| async move {
+                    ran.set(true);
+                })
+                .expect("root destructor retains local spawn authority");
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let live = Cell::new(false);
+    let context = Cell::new(false);
+    let ran = Rc::new(Cell::new(false));
+    assert_eq!(
+        runtime.block_on(Root {
+            runtime: &runtime,
+            root_id: Cell::new(None),
+            address: Cell::new(0),
+            drop_live: &live,
+            drop_context: &context,
+            child_ran: Rc::clone(&ran),
+            _pin: PhantomPinned,
+        }),
+        42
+    );
+    assert!(
+        context.get(),
+        "root destructor lost its admission-minted Cx"
+    );
+    assert!(
+        live.get(),
+        "root record retired before its future was dropped"
+    );
+    assert!(ran.get(), "root destructor's local child was not drained");
+    assert!(
+        runtime.is_quiescent(),
+        "root and destructor child must retire"
     );
 }
 

@@ -162,6 +162,11 @@ use std::time::Duration;
 pub type WorkerId = usize;
 
 const DEFAULT_CANCEL_STREAK_LIMIT: usize = 16;
+
+/// Stranded-local-task set size past which entries whose record has retired
+/// are pruned on insert (asupersync-xpae8x). The multi-thread flavor prunes
+/// only here: its workers enter `run_loop_until` once.
+const STRANDED_LOCAL_TASK_PRUNE_THRESHOLD: usize = 1_024;
 const DEFAULT_BROWSER_READY_HANDOFF_LIMIT: usize = 0;
 const DEFAULT_STEAL_BATCH_SIZE: usize = 4;
 const GLOBAL_READY_BATCH_DRAIN_MIN_DEPTH: usize = 8;
@@ -1483,6 +1488,10 @@ pub struct ThreeLaneScheduler {
     timer_driver: Option<TimerDriverHandle>,
     /// Shared runtime state for accessing task records and wake_state.
     state: Arc<ContendedMutex<RuntimeState>>,
+    /// Process-unique key of this runtime's per-thread local-task stores
+    /// (GH#58, asupersync-1fyc8f): shared by every worker of the runtime and
+    /// by the current-thread driver, never reused by a later runtime.
+    local_store_key: usize,
     /// Optional sharded task table for hot-path task operations.
     ///
     /// When present, inject/spawn methods use this instead of the full
@@ -1634,6 +1643,14 @@ impl SchedulerConstructionHandles {
 }
 
 impl ThreeLaneScheduler {
+    /// Process-unique key of this runtime's per-thread local-task stores
+    /// (GH#58, asupersync-1fyc8f); every worker and the current-thread driver
+    /// use this same key.
+    #[must_use]
+    pub(crate) fn local_store_key(&self) -> usize {
+        self.local_store_key
+    }
+
     #[inline]
     fn current_worker_owns_tasks(&self) -> bool {
         LocalQueue::current_is_backed_by(&self.state, self.task_table.as_ref())
@@ -1936,6 +1953,10 @@ impl ThreeLaneScheduler {
             })
             .collect();
 
+        // One process-unique local-store key per runtime, shared by all its
+        // workers (GH#58, asupersync-1fyc8f).
+        let local_store_key = crate::runtime::local::allocate_local_store_key();
+
         // Create workers with references to all other workers' schedulers
         for id in 0..worker_count {
             let parker = parkers[id].clone();
@@ -1968,6 +1989,7 @@ impl ThreeLaneScheduler {
 
             workers.push(ThreeLaneWorker {
                 id,
+                local_store_key,
                 local: Arc::clone(&local_schedulers[id]),
                 stealers,
                 preferred_heap_stealer_count: worker_count.saturating_sub(1),
@@ -2070,6 +2092,7 @@ impl ThreeLaneScheduler {
             spawn_mailbox: None,
             timer_driver,
             state: Arc::clone(state),
+            local_store_key,
             task_table,
             browser_ready_handoff_limit,
             steal_batch_size,
@@ -3042,6 +3065,9 @@ impl StealerLocality {
 pub struct ThreeLaneWorker {
     /// Unique worker ID.
     pub id: WorkerId,
+    /// Process-unique key of this runtime's per-thread local-task stores
+    /// (GH#58, asupersync-1fyc8f); see [`ThreeLaneScheduler::local_store_key`].
+    local_store_key: usize,
     /// Local 3-lane scheduler for this worker.
     pub local: Arc<Mutex<PriorityScheduler>>,
     /// References to other workers' local schedulers for stealing.
@@ -4929,7 +4955,14 @@ impl ThreeLaneWorker {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            if should_stop() && crate::runtime::spawn_mailbox::local_spawn_lane_is_empty() {
+            // The stop predicate is authoritative even while the local spawn
+            // lane holds requests: waiting for the lane to drain let a local
+            // task that re-spawns its successor on every poll keep the loop
+            // (and a `block_on` in its bounded post-root drain) running
+            // forever (asupersync-e74m5x). Requests still on the lane are
+            // admitted by the next dispatch loop on this thread; the loan
+            // protocol refuses a handover while the lane is non-empty.
+            if should_stop() {
                 break;
             }
             if let Some(task) = self.next_task() {
@@ -6880,17 +6913,39 @@ impl ThreeLaneWorker {
             .now
     }
 
-    /// Key of this runtime's per-thread local-task store (GH#58): the
-    /// address of the runtime state every worker of one runtime shares.
+    /// Key of this runtime's per-thread local-task store (GH#58): allocated
+    /// once per runtime by the scheduler, process-unique and never reused
+    /// (asupersync-1fyc8f), so a store a thread still holds for a dropped
+    /// runtime can never alias a later runtime's store.
     pub(crate) fn local_store_key(&self) -> usize {
-        Arc::as_ptr(&self.state).addr()
+        self.local_store_key
     }
 
     /// Records a woken local task whose future is not stored on this thread
-    /// (GH#58). Every wake is kept (one entry per task, no cap); the owning
-    /// thread re-schedules it in [`Self::rescue_stranded_local_tasks`].
+    /// (GH#58). Every wake of a live local task is kept (one entry per task);
+    /// the owning thread re-schedules it in
+    /// [`Self::rescue_stranded_local_tasks`]. Once the set grows past
+    /// [`STRANDED_LOCAL_TASK_PRUNE_THRESHOLD`] entries, ids whose record has
+    /// retired are dropped here rather than only at the next
+    /// `run_loop_until` entry, which on the multi-thread flavor happens once
+    /// per worker lifetime (asupersync-xpae8x).
     fn note_stranded_local_task(&mut self, task: TaskId) {
         self.stranded_local_tasks.insert(task);
+        if self.stranded_local_tasks.len() > STRANDED_LOCAL_TASK_PRUNE_THRESHOLD {
+            self.prune_retired_stranded_local_tasks();
+        }
+    }
+
+    /// Drops stranded entries whose task record no longer exists.
+    fn prune_retired_stranded_local_tasks(&mut self) {
+        let stranded = std::mem::take(&mut self.stranded_local_tasks);
+        let live = self.with_task_table_ref(|tt| {
+            stranded
+                .into_iter()
+                .filter(|task| tt.task(*task).is_some())
+                .collect::<std::collections::BTreeSet<TaskId>>()
+        });
+        self.stranded_local_tasks = live;
     }
 
     /// Re-schedules stranded local tasks whose future lives on this thread;
@@ -7529,10 +7584,20 @@ impl ThreeLaneWorker {
                 // Slow path: local task (stored in TLS, not in global TaskTable).
                 let local = crate::runtime::local::remove_local_task(task_id);
                 let Some(local) = local else {
-                    // GH#58: the future lives on another thread (a
-                    // current-thread worker driven from a different thread
-                    // admitted it). Remember the wake for that thread.
-                    self.note_stranded_local_task(task_id);
+                    // GH#58: a local task whose future lives on another
+                    // thread (a current-thread worker driven from a different
+                    // thread admitted it) keeps its wake for that thread. A
+                    // `Send` task whose future is merely out of the table for
+                    // the moment (being polled on another worker while the
+                    // cancel lane injected a duplicate wake) and a retired
+                    // record are not stranded local tasks and are not
+                    // remembered (asupersync-xpae8x).
+                    let stranded_local = self.with_task_table_ref(|tt| {
+                        tt.task(task_id).is_some_and(|record| record.is_local())
+                    });
+                    if stranded_local {
+                        self.note_stranded_local_task(task_id);
+                    }
                     return;
                 };
                 let record_info = self.with_task_table(|tt| {

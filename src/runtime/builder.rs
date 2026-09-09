@@ -3564,7 +3564,7 @@ impl Runtime {
                 let _ = inner.current_thread_driver.set(Arc::new(
                     crate::runtime::current_thread::CurrentThreadDriver::new(
                         gateway,
-                        Arc::as_ptr(&inner.state).addr(),
+                        inner.scheduler.local_store_key(),
                     ),
                 ));
             }
@@ -4710,6 +4710,10 @@ impl RuntimeInner {
         if let Some(driver) = self.current_thread_driver.get() {
             driver.shutdown();
         }
+        // Threads that drove this runtime's worker from `block_on` and still
+        // hold `!Send` tasks parked in its keyed local store drop that store
+        // on their next local-store operation (asupersync-1fyc8f).
+        crate::runtime::local::publish_retired_local_store_key(self.scheduler.local_store_key());
         if let Some(pool) = self.blocking_pool.as_ref() {
             // The bounded caller must not wait on the pool's coordination
             // mutex. Atomically close admission here; the reaper performs the
@@ -5292,6 +5296,7 @@ impl Drop for RuntimeInner {
         if let Some(driver) = self.current_thread_driver.get() {
             driver.shutdown();
         }
+        crate::runtime::local::publish_retired_local_store_key(self.scheduler.local_store_key());
         let handles = std::mem::take(self.worker_threads.get_mut());
         let current_thread = std::thread::current().id();
         let on_worker = handles
@@ -11298,5 +11303,104 @@ worker_threads = 16
     #[test]
     fn native_sharded_managed_replacement_waits_for_registered_finalizers() {
         native_managed_finalizer_replacement_matrix(true);
+    }
+
+    /// asupersync-e74m5x: a local task that re-spawns its successor with
+    /// `spawn_local` on every poll keeps the local spawn lane non-empty at
+    /// every drain check. The post-root drain is bounded, so `block_on` must
+    /// still return once its root has completed.
+    #[test]
+    fn current_thread_block_on_returns_despite_spawn_local_trampoline() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn respawn_forever(cx: &Cx, hops: std::sync::Arc<AtomicUsize>) {
+            let next = std::sync::Arc::clone(&hops);
+            let _ = cx.spawn_local(move |child| async move {
+                next.fetch_add(1, Ordering::Relaxed);
+                respawn_forever(&child, next);
+            });
+        }
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<(u8, usize)>();
+        let _driver = std::thread::spawn(move || {
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("build current_thread runtime");
+            let hops = std::sync::Arc::new(AtomicUsize::new(0));
+            let counter = std::sync::Arc::clone(&hops);
+            let value = runtime.block_on(async move {
+                let cx = Cx::current().expect("root cx");
+                respawn_forever(&cx, counter);
+                42_u8
+            });
+            let _ = done_tx.send((value, hops.load(Ordering::Relaxed)));
+            drop(runtime);
+        });
+        let (value, hops) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("block_on must return after its root despite a spawn_local trampoline");
+        assert_eq!(value, 42);
+        assert!(
+            hops >= 1,
+            "the trampoline must have run at least once before the bounded drain cut it off"
+        );
+    }
+
+    /// asupersync-1fyc8f: a thread that ran `block_on` keeps that runtime's
+    /// keyed local-task store (here holding a parked `!Send` task). Dropping
+    /// the runtime on another thread must retire that store the next time the
+    /// first thread touches its local stores; before, the store lived on
+    /// under a heap-address key that a later runtime could reuse.
+    #[test]
+    fn keyed_local_store_is_purged_after_the_runtime_is_dropped_elsewhere() {
+        use crate::runtime::local::{keyed_local_store_count, local_task_count};
+
+        let (runtime_tx, runtime_rx) = std::sync::mpsc::channel::<Runtime>();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel::<()>();
+        let (counts_tx, counts_rx) = std::sync::mpsc::channel::<(usize, usize)>();
+        let helper = std::thread::spawn(move || {
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("build current_thread runtime");
+            runtime.block_on(async {
+                let cx = Cx::current().expect("root cx");
+                let _parked = cx
+                    .spawn_local(|_| std::future::pending::<()>())
+                    .expect("spawn_local from the root");
+                // One dispatch turn admits the parked task into this thread's
+                // keyed store.
+                crate::runtime::yield_now().await;
+            });
+            let before = keyed_local_store_count();
+            runtime_tx
+                .send(runtime)
+                .expect("hand the runtime to the dropping thread");
+            dropped_rx.recv().expect("wait for the drop");
+            // Any local-store operation on this thread must observe the
+            // retirement.
+            let _ = local_task_count();
+            let after = keyed_local_store_count();
+            counts_tx
+                .send((before, after))
+                .expect("report store counts");
+        });
+
+        let runtime = runtime_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("helper hands over its runtime");
+        drop(runtime);
+        dropped_tx.send(()).expect("release the helper");
+        let (before, after) = counts_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("helper reports its keyed store counts");
+        helper.join().expect("helper thread");
+        assert_eq!(
+            before, 1,
+            "the parked !Send task keeps this runtime's keyed store on the block_on thread"
+        );
+        assert_eq!(
+            after, 0,
+            "dropping the runtime on another thread must retire that thread's keyed store on its next touch"
+        );
     }
 }

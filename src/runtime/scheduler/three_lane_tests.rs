@@ -12258,3 +12258,59 @@ fn external_only_finalizer_budget_activation_wakes_and_retires_actual_cleanup() 
         );
     }
 }
+
+/// asupersync-xpae8x: a dequeued task whose future is momentarily absent
+/// from the table (a `Send` task being polled on another worker while the
+/// cancel lane injected a duplicate wake) is not a stranded local task and
+/// must not be remembered as one.
+#[test]
+fn execute_does_not_strand_a_send_task_whose_future_is_absent() {
+    let state = state_with_virtual_clock();
+    let region = state
+        .lock()
+        .expect("lock")
+        .create_root_region(Budget::INFINITE);
+    let task_id = {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (task_id, _handle) = guard
+            .create_task(region, Budget::INFINITE, async {})
+            .expect("create task");
+        // The future is "out on loan": another worker holds it for the poll.
+        let stored = guard.tasks.remove_stored_future(task_id);
+        assert!(stored.is_some(), "a fresh task has a stored future");
+        task_id
+    };
+
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    let mut worker = scheduler.take_workers().into_iter().next().unwrap();
+    assert!(worker.stranded_local_tasks.is_empty());
+
+    worker.execute(task_id);
+
+    assert!(
+        worker.stranded_local_tasks.is_empty(),
+        "a Send task whose future is absent is not a stranded local task: {:?}",
+        worker.stranded_local_tasks
+    );
+}
+
+/// asupersync-xpae8x: the stranded set is pruned of ids whose record has
+/// retired instead of growing for the life of the worker (on the
+/// multi-thread flavor it was only pruned at `run_loop_until` entry, once).
+#[test]
+fn stranded_local_task_set_is_pruned_of_retired_records() {
+    let state = state_with_virtual_clock();
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    let mut worker = scheduler.take_workers().into_iter().next().unwrap();
+    // None of these ids has a task record: every entry is prunable.
+    for index in 0..4_096u32 {
+        worker.note_stranded_local_task(TaskId::new_for_test(index, 0));
+    }
+    assert!(
+        worker.stranded_local_tasks.len() <= 1_024,
+        "the stranded set must be pruned of retired records, held {} entries",
+        worker.stranded_local_tasks.len()
+    );
+}

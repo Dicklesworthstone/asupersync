@@ -796,6 +796,49 @@ impl RootStub {
 mod tests {
     use super::*;
 
+    /// Reproduce the state visible to R1 when its handover was refused and
+    /// R2 has already borrowed the worker before R1 reacquires the mutex.
+    /// The refused caller must not wait for a foreign loan to finish.
+    #[test]
+    fn refused_request_does_not_wait_for_a_foreign_loan() {
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use std::sync::mpsc;
+
+        let state = Arc::new(ContendedMutex::new("request_race", RuntimeState::new()));
+        let scheduler = Arc::new(ThreeLaneScheduler::new(1, &state));
+        let driver = Arc::new(CurrentThreadDriver::new(None, 0x5eec));
+        let caller_driver = Arc::clone(&driver);
+        let (sent, received) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            let refused = caller_driver.acquire(&scheduler).is_none();
+            let _ = sent.send(refused);
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut request_seen = false;
+        while Instant::now() < deadline {
+            let mut slot = driver.lock_slot();
+            if driver.handover_requested.load(Ordering::Acquire) {
+                request_seen = true;
+                // The background refusal and R2 acquisition happen while
+                // R1 is asleep; only their final state is observable to R1.
+                *slot = WorkerSlot::Loaned;
+                driver.changed.notify_all();
+                break;
+            }
+            drop(slot);
+            std::thread::yield_now();
+        }
+        let result = received.recv_timeout(Duration::from_secs(2));
+        driver.shutdown();
+        caller.join().expect("requester exits after cleanup");
+        assert!(
+            request_seen,
+            "requester must actually enter the handover wait"
+        );
+        assert!(result.expect("refused requester waited on a foreign loan"));
+    }
+
     /// `ScopedLocalStoreKey` restores the key of the thread that created it,
     /// so it must not be movable to another thread. The call below is
     /// ambiguous, and fails to compile, if the type ever becomes `Send`.
