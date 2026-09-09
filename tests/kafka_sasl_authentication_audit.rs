@@ -1,9 +1,182 @@
-//! Audit test for Kafka SASL/PLAIN handshake authentication response handling.
+//! Kafka authentication error classification and configuration redaction audits.
 //!
 //! Tests that malformed authentication responses are properly distinguished
 //! from transport errors and do not trigger infinite retry loops.
+//! Public configuration tests exercise raw-property Debug redaction and, with
+//! `kafka` enabled, native librdkafka rejection through the client constructors.
 
-use asupersync::messaging::kafka::KafkaError;
+use asupersync::messaging::kafka::{KafkaError, ProducerConfig, TransactionalConfig};
+use asupersync::messaging::kafka_consumer::ConsumerConfig;
+
+// Harmless synthetic values only: never print the rendered config on failure.
+const RAW_PROPERTIES: [(&str, &str); 6] = [
+    ("sasl.password", "synthetic-sasl-marker"),
+    ("ssl.key.password", "synthetic-key-password-marker"),
+    ("ssl.key.pem", "synthetic-private-key-marker"),
+    ("sasl.oauthbearer.config", "synthetic-oauth-marker"),
+    ("future.extension", "synthetic-unknown-property-marker"),
+    ("partition.assignment.strategy", "cooperative-sticky"),
+];
+
+fn assert_raw_properties_redacted(config: &impl std::fmt::Debug) {
+    for rendered in [format!("{config:?}"), format!("{config:#?}")] {
+        for (key, value) in RAW_PROPERTIES {
+            assert!(
+                !rendered.contains(value),
+                "a raw Kafka property value escaped Debug redaction"
+            );
+            assert!(
+                rendered.contains(key),
+                "Debug must retain the raw property names for diagnostics"
+            );
+        }
+        assert!(rendered.contains("<redacted>"));
+        assert!(rendered.contains("extra_properties"));
+        assert!(rendered.contains("bootstrap_servers"));
+        assert!(rendered.contains("broker.example:9093"));
+        assert!(rendered.contains("client_id"));
+        assert!(rendered.contains("diagnostic-client"));
+        assert!(rendered.contains("security"));
+    }
+}
+
+#[test]
+fn producer_config_debug_redacts_all_raw_property_values() {
+    let mut config = ProducerConfig::new(vec!["broker.example:9093".into()])
+        .client_id("diagnostic-client")
+        .batch_size(32_768);
+    for (key, value) in RAW_PROPERTIES {
+        config = config.with_property(key, value);
+    }
+    config.set_property("sasl.password", "synthetic-replaced-marker");
+    config.set_property("sasl.password", RAW_PROPERTIES[0].1);
+    let cloned = config.clone();
+    for subject in [&config, &cloned] {
+        assert_raw_properties_redacted(subject);
+        assert!(format!("{subject:?}").contains("batch_size: 32768"));
+        assert!(
+            subject
+                .extra_properties()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .eq(RAW_PROPERTIES)
+        );
+    }
+}
+
+#[test]
+fn consumer_config_debug_redacts_all_raw_property_values() {
+    let mut config = ConsumerConfig::new(vec!["broker.example:9093".into()], "diagnostic-group")
+        .client_id("diagnostic-client")
+        .max_poll_records(123);
+    for (key, value) in RAW_PROPERTIES {
+        config = config.with_property(key, value);
+    }
+    config.set_property("ssl.key.password", "synthetic-replaced-marker");
+    config.set_property("ssl.key.password", RAW_PROPERTIES[1].1);
+    let cloned = config.clone();
+    for subject in [&config, &cloned] {
+        assert_raw_properties_redacted(subject);
+        let rendered = format!("{subject:?}");
+        assert!(rendered.contains("diagnostic-group"));
+        assert!(rendered.contains("max_poll_records: 123"));
+        assert!(rendered.contains("enable_auto_commit: false"));
+        assert!(
+            subject
+                .extra_properties()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .eq(RAW_PROPERTIES)
+        );
+    }
+}
+
+#[test]
+fn transactional_config_debug_redacts_nested_raw_property_values() {
+    let mut producer =
+        ProducerConfig::new(vec!["broker.example:9093".into()]).client_id("diagnostic-client");
+    for (key, value) in RAW_PROPERTIES {
+        producer.set_property(key, value);
+    }
+    let config = TransactionalConfig::new(producer, "diagnostic-transaction".into());
+    assert_raw_properties_redacted(&config);
+    assert_raw_properties_redacted(&config.clone());
+    assert!(format!("{config:?}").contains("diagnostic-transaction"));
+}
+
+#[cfg(feature = "kafka")]
+fn assert_native_config_errors_redacted(create: impl Fn(&str, &str) -> Result<(), KafkaError>) {
+    for (key, result_code) in [
+        ("future.extension", "RD_KAFKA_CONF_UNKNOWN"),
+        ("statistics.interval.ms", "RD_KAFKA_CONF_INVALID"),
+    ] {
+        let marker = "synthetic-rejected-property-marker";
+        // Reach real librdkafka validation before invoking our public client
+        // constructor. This is native config rejection, without broker I/O.
+        let mut native = rdkafka::ClientConfig::new();
+        native.set(key, marker);
+        let upstream = native
+            .create_native_config()
+            .err()
+            .expect("librdkafka must reject the invalid raw property");
+        assert!(matches!(
+            upstream,
+            rdkafka::error::KafkaError::ClientConfig(_, _, ref name, ref value)
+                if name == key && value == marker
+        ));
+
+        let error = create(key, marker).expect_err("public constructor must reject the config");
+        assert!(matches!(error, KafkaError::Config(_)));
+        assert!(!error.is_retryable());
+        for rendered in [
+            format!("{error}"),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(
+                !rendered.contains(marker),
+                "rejected raw property value escaped into a config error"
+            );
+            assert!(rendered.contains(key));
+            assert!(rendered.contains(result_code));
+            assert!(rendered.contains("<redacted>"));
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn producer_config_error_redacts_rejected_raw_values() {
+    assert_native_config_errors_redacted(|key, value| {
+        asupersync::messaging::kafka::KafkaProducer::new(
+            ProducerConfig::default().with_property(key, value),
+        )
+        .map(drop)
+    });
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn consumer_config_error_redacts_rejected_raw_values() {
+    assert_native_config_errors_redacted(|key, value| {
+        asupersync::messaging::kafka_consumer::KafkaConsumer::new(
+            ConsumerConfig::default().with_property(key, value),
+        )
+        .map(drop)
+    });
+}
+
+#[cfg(feature = "kafka")]
+#[test]
+fn transactional_config_error_redacts_rejected_raw_values() {
+    assert_native_config_errors_redacted(|key, value| {
+        asupersync::messaging::kafka::TransactionalProducer::new(TransactionalConfig::new(
+            ProducerConfig::default().with_property(key, value),
+            "diagnostic-transaction".into(),
+        ))
+        .map(drop)
+    });
+}
 
 #[test]
 fn test_authentication_error_classification() {

@@ -350,7 +350,9 @@ fn record_metadata_from_message(message: &BorrowedMessage<'_>) -> RecordMetadata
 #[cfg(feature = "kafka")]
 fn map_rdkafka_error(err: &RdKafkaError, message: Option<&BorrowedMessage<'_>>) -> KafkaError {
     match err {
-        RdKafkaError::ClientConfig(_, _, _, msg) => KafkaError::Config(msg.clone()),
+        RdKafkaError::ClientConfig(result, _, key, _) => {
+            KafkaError::Config(redacted_config_message(*result, key))
+        }
         RdKafkaError::MessageProduction(code) => {
             map_error_code(*code, message.map(rdkafka::Message::topic))
         }
@@ -372,6 +374,13 @@ fn map_rdkafka_error(err: &RdKafkaError, message: Option<&BorrowedMessage<'_>>) 
             }
         }
     }
+}
+
+#[cfg(feature = "kafka")]
+pub(super) fn redacted_config_message(result: rdkafka::types::RDKafkaConfRes, key: &str) -> String {
+    // Both the raw value and librdkafka's free-form description can contain
+    // credentials. Keep only the typed result and the diagnostic property name.
+    format!("librdkafka rejected property {key:?} ({result:?}; value: <redacted>)")
 }
 
 #[cfg(feature = "kafka")]
@@ -1196,8 +1205,25 @@ pub(crate) fn apply_security_config(client: &mut ClientConfig, security: &KafkaS
     }
 }
 
+/// Formats caller-provided property names while hiding every raw value.
+///
+/// Raw extensions can carry credentials under names unknown to this version,
+/// so a secret-key denylist cannot safely determine which values to print.
+pub(super) struct RedactedProperties<'a>(pub(super) &'a [(String, String)]);
+
+impl fmt::Debug for RedactedProperties<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|(key, _)| (key, "<redacted>")))
+            .finish()
+    }
+}
+
 /// Configuration for Kafka producer.
-#[derive(Debug, Clone)]
+///
+/// `Debug` retains typed settings and raw property names, but redacts every
+/// raw property value. Keep credentials in values, never in property names.
+#[derive(Clone)]
 pub struct ProducerConfig {
     /// Bootstrap server addresses (host:port).
     pub bootstrap_servers: Vec<String>,
@@ -1237,6 +1263,40 @@ pub struct ProducerConfig {
     /// Raw librdkafka properties applied before the typed fields
     /// ([`ProducerConfig::with_property`]), in insertion order.
     extra_properties: Vec<(String, String)>,
+}
+
+impl fmt::Debug for ProducerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("ProducerConfig");
+        debug
+            .field("bootstrap_servers", &self.bootstrap_servers)
+            .field("client_id", &self.client_id)
+            .field("batch_size", &self.batch_size)
+            .field("linger_ms", &self.linger_ms)
+            .field("compression", &self.compression)
+            .field("enable_idempotence", &self.enable_idempotence)
+            .field("acks", &self.acks)
+            .field("retries", &self.retries)
+            .field("request_timeout", &self.request_timeout)
+            .field("max_message_size", &self.max_message_size)
+            .field("security", &self.security)
+            .field("feature_requirement", &self.feature_requirement)
+            .field(
+                "allow_insecure_transport_for_testing",
+                &self.allow_insecure_transport_for_testing,
+            );
+        #[cfg(any(test, feature = "test-internals"))]
+        debug.field(
+            "allow_deterministic_broker_for_testing",
+            &self.allow_deterministic_broker_for_testing,
+        );
+        debug
+            .field(
+                "extra_properties",
+                &RedactedProperties(&self.extra_properties),
+            )
+            .finish()
+    }
 }
 
 impl Default for ProducerConfig {
@@ -1285,6 +1345,11 @@ impl ProducerConfig {
     /// always wins over a raw property with the same key; a later call for
     /// the same key overrides an earlier one. Unknown keys are rejected by
     /// librdkafka when the producer is created.
+    ///
+    /// `Debug` redacts all raw values, including non-secret values. Property
+    /// names remain visible and must not contain credentials.
+    /// Native configuration rejection reports the property name and result
+    /// code, without the value or free-form native error description.
     #[must_use]
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.set_property(key, value);
@@ -1308,6 +1373,9 @@ impl ProducerConfig {
 
     /// The raw properties set through [`Self::with_property`], in the order
     /// they are applied.
+    ///
+    /// Unlike this configuration's `Debug` output, this explicit accessor
+    /// returns the original values, which may contain credentials.
     #[must_use]
     pub fn extra_properties(&self) -> &[(String, String)] {
         &self.extra_properties
@@ -2377,6 +2445,19 @@ pub struct KafkaClient {
 }
 
 #[cfg(feature = "kafka")]
+fn create_kafka_client_consumer(
+    config: &ClientConfig,
+) -> Result<BaseConsumer<KafkaContext>, KafkaError> {
+    config.create_with_context(KafkaContext).map_err(|error| {
+        let message = match error {
+            RdKafkaError::ClientConfig(result, _, key, _) => redacted_config_message(result, &key),
+            _ => error.to_string(),
+        };
+        KafkaError::Config(format!("Failed to create consumer: {message}"))
+    })
+}
+
+#[cfg(feature = "kafka")]
 impl KafkaClient {
     /// Create a new unified Kafka client with real broker backend.
     pub async fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
@@ -2434,9 +2515,7 @@ impl KafkaClient {
         consumer_config.set("enable.auto.commit", "false");
 
         // Create BaseConsumer
-        let rdkafka_consumer: BaseConsumer<KafkaContext> = consumer_config
-            .create_with_context(KafkaContext)
-            .map_err(|e| KafkaError::Config(format!("Failed to create consumer: {}", e)))?;
+        let rdkafka_consumer = create_kafka_client_consumer(&consumer_config)?;
 
         // Subscribe to the topic
         rdkafka_consumer.subscribe(&[topic]).map_err(|e| {
@@ -3279,6 +3358,40 @@ mod tests {
             group_id,
             "asupersync-consumer-payments-worker-billing-events"
         );
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn kafka_client_consumer_creation_redacts_rejected_raw_values() {
+        for (key, result_code) in [
+            ("future.extension", "RD_KAFKA_CONF_UNKNOWN"),
+            ("statistics.interval.ms", "RD_KAFKA_CONF_INVALID"),
+        ] {
+            let marker = "synthetic-parallel-consumer-marker";
+            let mut config = ClientConfig::new();
+            config.set(key, marker);
+            // Exercise the exact native creation boundary used by
+            // KafkaClient::consumer, before any broker connection is possible.
+            let error = create_kafka_client_consumer(&config)
+                .err()
+                .expect("native consumer creation must reject the raw property");
+            assert!(matches!(&error, KafkaError::Config(message)
+                if message.starts_with("Failed to create consumer: ")));
+            assert!(!error.is_retryable());
+            for rendered in [
+                format!("{error}"),
+                format!("{error:?}"),
+                format!("{error:#?}"),
+            ] {
+                assert!(
+                    !rendered.contains(marker),
+                    "rejected raw value escaped the parallel consumer creation boundary"
+                );
+                assert!(rendered.contains(key));
+                assert!(rendered.contains(result_code));
+                assert!(rendered.contains("<redacted>"));
+            }
+        }
     }
 
     #[test]

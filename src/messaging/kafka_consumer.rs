@@ -17,11 +17,12 @@
 #![allow(clippy::unused_async)]
 
 use crate::cx::Cx;
-#[cfg(feature = "kafka")]
-use crate::messaging::kafka::apply_security_config;
 use crate::messaging::kafka::{
-    KafkaError, KafkaSaslConfig, KafkaSecurityConfig, KafkaTlsConfig, is_loopback_bootstrap_server,
+    KafkaError, KafkaSaslConfig, KafkaSecurityConfig, KafkaTlsConfig, RedactedProperties,
+    is_loopback_bootstrap_server,
 };
+#[cfg(feature = "kafka")]
+use crate::messaging::kafka::{apply_security_config, redacted_config_message};
 #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
 use crate::messaging::kafka::{
     deterministic_broker_end_offset, deterministic_broker_fetch, deterministic_broker_notify,
@@ -91,6 +92,8 @@ pub enum IsolationLevel {
 ///
 /// Typed fields cover the common librdkafka settings; anything else goes
 /// through [`ConsumerConfig::with_property`] (typed fields win on conflict).
+/// `Debug` retains typed settings and raw property names, but redacts every
+/// raw property value. Keep credentials in values, never in property names.
 ///
 /// **Assignor rule.** The rebalance protocol is fixed at construction from
 /// `partition.assignment.strategy`: a value containing `cooperative-sticky`
@@ -104,7 +107,7 @@ pub enum IsolationLevel {
 /// resulting revoke in normal polling mode, bounded to about five seconds,
 /// before the librdkafka handle is closed; the close path itself never waits
 /// on the group.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConsumerConfig {
     /// Bootstrap server addresses (host:port).
     pub bootstrap_servers: Vec<String>,
@@ -174,6 +177,44 @@ pub struct ConsumerConfig {
     extra_properties: Vec<(String, String)>,
 }
 
+impl fmt::Debug for ConsumerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = f.debug_struct("ConsumerConfig");
+        debug
+            .field("bootstrap_servers", &self.bootstrap_servers)
+            .field("group_id", &self.group_id)
+            .field("client_id", &self.client_id)
+            .field("session_timeout", &self.session_timeout)
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("auto_offset_reset", &self.auto_offset_reset)
+            .field("enable_auto_commit", &self.enable_auto_commit)
+            .field("auto_commit_interval", &self.auto_commit_interval)
+            .field("max_poll_records", &self.max_poll_records)
+            .field("fetch_min_bytes", &self.fetch_min_bytes)
+            .field("fetch_max_bytes", &self.fetch_max_bytes)
+            .field("fetch_max_wait", &self.fetch_max_wait)
+            .field("isolation_level", &self.isolation_level)
+            .field("security", &self.security)
+            .field("force_real_kafka", &self.force_real_kafka)
+            .field("retries", &self.retries)
+            .field(
+                "allow_insecure_transport_for_testing",
+                &self.allow_insecure_transport_for_testing,
+            );
+        #[cfg(any(test, feature = "test-internals"))]
+        debug.field(
+            "allow_deterministic_broker_for_testing",
+            &self.allow_deterministic_broker_for_testing,
+        );
+        debug
+            .field(
+                "extra_properties",
+                &RedactedProperties(&self.extra_properties),
+            )
+            .finish()
+    }
+}
+
 impl Default for ConsumerConfig {
     fn default() -> Self {
         Self {
@@ -233,6 +274,11 @@ impl ConsumerConfig {
     /// later `with_property` for the same key overrides an earlier one.
     /// Unknown keys are rejected by librdkafka when the consumer is created
     /// ([`KafkaError::Config`]).
+    ///
+    /// `Debug` redacts all raw values, including non-secret values. Property
+    /// names remain visible and must not contain credentials.
+    /// Native configuration rejection reports the property name and result
+    /// code, without the value or free-form native error description.
     #[must_use]
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.set_property(key, value);
@@ -256,6 +302,9 @@ impl ConsumerConfig {
 
     /// The raw properties set through [`Self::with_property`], in the order
     /// they are applied.
+    ///
+    /// Unlike this configuration's `Debug` output, this explicit accessor
+    /// returns the original values, which may contain credentials.
     #[must_use]
     pub fn extra_properties(&self) -> &[(String, String)] {
         &self.extra_properties
@@ -893,8 +942,8 @@ fn build_consumer_config(config: &ConsumerConfig) -> rdkafka::ClientConfig {
 fn map_consumer_error(err: RdKafkaError) -> KafkaError {
     match err {
         RdKafkaError::Canceled => KafkaError::Cancelled,
-        RdKafkaError::ClientConfig(_, desc, key, value) => {
-            KafkaError::Config(format!("{desc} (key: {key}, value: {value})"))
+        RdKafkaError::ClientConfig(result, _, key, _) => {
+            KafkaError::Config(redacted_config_message(result, &key))
         }
         RdKafkaError::ClientCreation(msg) | RdKafkaError::Subscription(msg) => {
             KafkaError::Config(msg)
