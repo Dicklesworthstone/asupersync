@@ -9,6 +9,12 @@
   "source_review": {
     "reviewed_date_utc": "2026-09-09",
     "reviewed_commit": "a936ad83b243b0991c14be1117d81985cc41f749",
+    "followup_review": {
+      "commit": "605257400",
+      "path": "src/messaging/kafka.rs",
+      "previous_sha256": "57b974f519e6bbc103017572a8c867bef889bbac17d423363d2dc63c77ce0761",
+      "review": "ProducerConfig Debug now redacts raw property values, and client-configuration errors retain only property names and typed failure categories. Added tests exercise those confidentiality boundaries. CompressionType, compression.type assignment, typed-over-raw precedence and librdkafka codec ownership are unchanged; historical A1 execution receipts remain bound to their original source."
+    },
     "scope": "Current source pins and gRPC encode-limit description only. The original decision, profile matrix, validation receipts and unresolved gaps remain historical A1 evidence, not executions on the reviewed commit.",
     "transitions": [
       {"path":"Cargo.toml","previous_sha256":"541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7","review":"Version, package exclusions, unrelated features and lint policy changed; both flate2 requirements and compression feature edges are unchanged."},
@@ -743,8 +749,8 @@
     },
     {
       "path": "src/messaging/kafka.rs",
-      "sha256": "57b974f519e6bbc103017572a8c867bef889bbac17d423363d2dc63c77ce0761",
-      "line_count": 4408
+      "sha256": "a737bbe271e70cf830e920426681b6199fc5b9c969243e67aea5ec8b38d27720",
+      "line_count": 4521
     },
     {
       "path": "tests/grpc_codec_gzip_prost_conformance.rs",

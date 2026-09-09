@@ -32,7 +32,12 @@ bringing the current inventory to seven surfaces.
 
 The `release_review` section preserves the older receipts and records current
 source transitions separately. The new schemas require `remote-service` on
-Unix and have no JSON loader or writer:
+Unix and have no JSON loader or writer.
+
+The builder pin includes the runtime lifecycle repairs and documentation through
+`e3188231e`. Review of startup-hook supervision, local-store retirement and the
+new bounded-drain tests found no changes to the TOML entry points or parser.
+The earlier runtime execution receipts retain their original source bindings.
 
 | Stable ID | Entry point | Typed fields | Schema version | Unknown fields |
 | --- | --- | --- | ---: | --- |

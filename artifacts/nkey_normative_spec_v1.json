@@ -12,6 +12,12 @@
     "prior_inventory_revision": "b76d2db92a4cfb8f4892d0d4d294be36bc44d9c1",
     "prior_nats_source_revision": "ac996c8e37fe053fb73c34f219f3a84191caa5c1",
     "release_bead": "asupersync-ghxhvm",
+    "followup_review": {
+      "commit": "cad61b7b1",
+      "path": "artifacts/dependency_api_adr_registry_v1.json",
+      "previous_sha256": "aba29040cbbcc6daba7166bbe0a3eacca1483b4c4522125bd5d93f6c0091d3d1",
+      "review": "ADR005 adds the already-owned offline-tuner-logging-parity scenario to its aggregate coverage union. ADR007 and all NKey authority, API, signer and format rows are unchanged. No historical NKey execution receipt is rebound."
+    },
     "scope": "Six source pins changed. Sixteen prior pins match the prior inventory revision; its older NATS pin matches ac996c8. NatsConfig and the intervening credential, nonce and JWT authentication definitions remain byte-identical. The protocol engine moved into NatsConnection with a region-owned supervisor, direct compatibility mode, fail-closed parser teardown, committed-reply cleanup and bare-503 wording. Connection authentication completes before supervisor publication. The CAP-NKEY-AUTH registry row and resolved nkeys version/features are unchanged.",
     "no_claim_boundary": "This source review does not rebind historical evidence, close signer-chain or secret-disposition gaps, prove live NATS interoperability, or authorize production key replacement."
   },
@@ -69,8 +75,8 @@
     },
     {
       "path": "artifacts/dependency_api_adr_registry_v1.json",
-      "sha256": "aba29040cbbcc6daba7166bbe0a3eacca1483b4c4522125bd5d93f6c0091d3d1",
-      "line_count": 6831
+      "sha256": "54c022426dfb1053607621fbdf7a1e4d9b4a4caad85460201eb44654ae512f0e",
+      "line_count": 6832
     },
     {
       "path": "artifacts/api_surface_map_v1.json",

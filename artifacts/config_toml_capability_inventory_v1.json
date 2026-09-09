@@ -140,9 +140,9 @@
       {
         "path": "src/runtime/builder.rs",
         "previous_sha256": "43e4f8b0d8a68c4978c447d2b0f52bc11ca198482f7a61c59d4495c9842b62b4",
-        "sha256": "0e1c94cab515b252bc6e659666166c47fd76b450bed99e65d962082184f916ba",
-        "line_count": 11302,
-        "review": "Caller-thread root execution, runtime lifecycle, and test changes; from_toml/from_toml_str and typed TOML parsing remain unchanged. This is not a runtime-equivalence claim."
+        "sha256": "270b1831e56b0dbcbf38746c8eb24ea390b6458ae2c4a9114b3b241c5f75ea85",
+        "line_count": 11447,
+        "review": "Caller-thread root execution, runtime lifecycle, and test changes; from_toml/from_toml_str and typed TOML parsing remain unchanged. Follow-up through e3188231e reviews startup-hook supervision, monotonic local-store identity and retirement, bounded-drain tests, and caller-thread documentation. This is not a runtime-equivalence claim."
       },
       {
         "path": "src/cli/atp_config.rs",

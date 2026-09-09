@@ -12,6 +12,11 @@ the resulting frame size. The compression implementations, flate2 edges
 and backend versions remain unchanged; this review supplies no new platform
 or interoperability result.
 
+The follow-up Kafka pin at `605257400` includes raw-property Debug redaction
+and sanitized client-configuration errors. The compression enum, property
+assignment, precedence and librdkafka codec ownership are unchanged. This
+source review leaves the earlier execution receipts bound to their original code.
+
 ## Decision
 
 The verdict is `KEEP_INCUMBENT`. This bead makes no production source change,

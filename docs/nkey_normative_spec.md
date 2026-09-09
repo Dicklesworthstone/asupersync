@@ -15,6 +15,10 @@ available, with a direct compatibility mode otherwise. Authentication completes
 before that supervisor is published. This review adds no signer-chain,
 secret-disposition or live-service proof and preserves the fourteen routed gaps.
 
+The ADR registry follow-up at `cad61b7b1` adds an existing offline-tuner scenario
+to ADR005's coverage union. ADR007 and all NKey rows are unchanged; the refreshed
+registry pin adds no NKey execution evidence.
+
 The specification has zero unknown or ambiguous rows. N2-N6 may implement the
 frozen rows, but production integration, cutover and dependency removal remain
 forbidden. A newly discovered unknown or ambiguity blocks its affected child
