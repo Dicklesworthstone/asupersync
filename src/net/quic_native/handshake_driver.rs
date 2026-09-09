@@ -2462,7 +2462,7 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         match error {
             QuicTlsError::CryptoProviderFailure { provider, code } => {
                 assert_eq!(*provider, "rustls-quic-handshake");
-                *code
+                code
             }
             other => panic!("expected a handshake failure code, got {other:?}"),
         }
@@ -2705,15 +2705,14 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         assert!(client.staged_segments.is_empty());
 
         // The staged flight is a real Finished: the server completes on it.
-        let mut client_pn = 1u64;
-        for segment in client_flight
-            .iter()
-            .filter(|segment| segment.level != HandshakeLevel::OneRtt)
-        {
+        for (client_pn, segment) in (1u64..).zip(
+            client_flight
+                .iter()
+                .filter(|segment| segment.level != HandshakeLevel::OneRtt),
+        ) {
             let packet = client
                 .assemble_handshake_packet(segment, server_scid, client_scid, client_pn)
                 .expect("client packet");
-            client_pn += 1;
             server
                 .recv_handshake_packet(&packet)
                 .expect("server accepts client Finished");
