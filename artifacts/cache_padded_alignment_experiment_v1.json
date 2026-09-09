@@ -15,6 +15,13 @@
       {"path":"src/runtime/spawn_mailbox.rs","previous_sha256":"d7e36a0b2ceef7becbc1f8c298c3f61ffc77990bf5156d8b24e27aee1a9bfbad","review":"Checked spawn admission and obligation handling changed outside SpawnIdAllocator. Its eight CachePadded shard counters and allocator implementation are unchanged."}
     ]
   },
+  "current_thread_follow_up_review": {
+    "date_utc": "2026-09-09",
+    "commit": "7425bcb60",
+    "path": "src/runtime/scheduler/three_lane.rs",
+    "previous_sha256": "8fca45d5c80d22aa5f57f91e3e5194278e3b95fac4138324cee468f24bd331de",
+    "review": "The scheduler now allocates a unique local-store key, obeys the bounded drain stop predicate, and only retains live local stranded-task IDs. WorkerCoordinator and its entire implementation remain byte-identical to a936ad83b. This updates the source pin only; it does not rerun or change the historical alignment experiment or DEFER decision."
+  },
   "production_policy": {
     "global_alignment_bytes": 64,
     "global_change_made": false,
@@ -632,8 +639,8 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "8fca45d5c80d22aa5f57f91e3e5194278e3b95fac4138324cee468f24bd331de",
-      "line_count": 8554
+      "sha256": "a97ab57f9287da6a282baa87fc3fee57e99b6d3db9eb35f7893251ad0b1e8574",
+      "line_count": 8619
     },
     {
       "path": "src/runtime/spawn_mailbox.rs",
