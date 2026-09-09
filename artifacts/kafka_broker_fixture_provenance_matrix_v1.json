@@ -161,7 +161,7 @@
     "authority_anchor": {
       "artifact_id": "kafka-downstream-user-journey-inventory-v1",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "sha256": "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee",
+      "sha256": "cf85355ab65ad06690480c145eebc8c4f87d09221c538dc337348be39456fdcb",
       "authority_revision": "ae22e710d87412b38e546b32e9702106619481d5",
       "captured_date_utc": "2026-08-03",
       "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN"
@@ -195,11 +195,11 @@
       "downstream_helper_tuple_sha256": "a2c49e5cb2519afa11a2d29bee72d97c60532292b2817f725466683b3a93a777",
       "provider_test_candidate_tuple_sha256": "976ce2339058cc1879c9f3f9fae63867daea246ff6d071443485c76408ae7d2a",
       "documentation_candidate_path_sha256": "092daf94a5e428430bc2e6fab7a13a30649aca53e30680c300f9eb76cbbfec67",
-      "documentation_occurrence_tuple_sha256": "195b4358e49dcf76300847bc8eb777a6971b0d2a7310d74cb92f25c8fe3771d1",
-      "documentation_matching_line_tuple_sha256": "b0628aa946606ca3c1c88c50d10e97bb401128cb14035c26581c1f55bbf57e6b",
-      "documentation_occurrence_id_sha256": "9890b99110853fda58aafdb658e4d47d5c9400b84955355972006b33e31d9cac",
+      "documentation_occurrence_tuple_sha256": "f0f0c1bde370cfb8076866fc91187db73dea4c73445804f0eb395360a3bf2779",
+      "documentation_matching_line_tuple_sha256": "1e6a35be1a772c630c9e82bac167670b08e0cad1064766cd8ed5fbcd6edf914c",
+      "documentation_occurrence_id_sha256": "d5b3ed77cfd83f233a70e76814b28c2897209b86bcc3f3bf33178d306664880d",
       "documentation_canonical_occurrence_id_sha256": "81381d8fcd19e6b37beb4325c1b67eed77a7241d68b0e9a75279b64bb29bd3d5",
-      "documentation_remainder_occurrence_id_sha256": "00c3bcfbaaee02f9dd405c3011f697e78162dbac7b6be4d628d080a756797841",
+      "documentation_remainder_occurrence_id_sha256": "7832fa790e0e79ec6a0b404f6f28b480b869edf4d0543bc23e05dbd0c229c4d1",
       "documentation_group_id_sha256": "57f2dae42643c7bada450205843b9effa21fb71ac4e353d3c82332f6cec816e8",
       "documentation_source_pin_tuple_sha256": "24425b9d52e7f82a2f0ae596ba4a17ea55c4fdb565ca8f5b8998f334e6d6fb74",
       "documentation_surface_tuple_sha256": "71d1cc5d04e71d3005d4449a11758af96d4d787f28bb63ec86102f902ce32970",
@@ -293,8 +293,8 @@
     {
       "pin_id": "KAFKA-K0-4-PIN-001-K0-3-AUTHORITY",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "sha256": "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee",
-      "byte_count": 1295081,
+      "sha256": "cf85355ab65ad06690480c145eebc8c4f87d09221c538dc337348be39456fdcb",
+      "byte_count": 1295370,
       "record_count": 19932
     },
     {
@@ -419,7 +419,7 @@
     {
       "pin_id": "KAFKA-K0-4-PIN-019-K0-2-CONTRACT",
       "path": "tests/kafka_incumbent_semantics_matrix_contract.rs",
-      "sha256": "af2d9e4d48784c2e9b540781317bdec72bca2080459446e1cd0f2ec1d865a642",
+      "sha256": "9cca3ee15c6a4da7d7a73277b846e7ade79c2548701bd08520f02edc145e4d44",
       "byte_count": 72831,
       "record_count": 1777
     },

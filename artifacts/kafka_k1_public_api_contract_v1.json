@@ -82,7 +82,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 44410,
       "record_count": 751,
-      "sha256": "7b6f941d2701b8f098f29cc656bf584b6151e71b0969ebcd693e88cad42ba969"
+      "sha256": "b7ea18f49cb652a4eb749f001edbd146108abffa218dcb59d2c6b254875b3086"
     },
     {
       "input_id": "K1-3-INPUT-K1-1-DOCUMENT",
@@ -98,23 +98,23 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 99472,
       "record_count": 2688,
-      "sha256": "a9f6ca6b8b39a4f19c1c1e5255addfb2ca10b07d0c0bb3a1c8276c7a08756ff5"
+      "sha256": "a947d25a558b0b353065c2a9f904ba77ef7bf1cd1ba3caf5956f8bfe0f493fa5"
     },
     {
       "input_id": "K1-3-INPUT-K0-5",
       "role": "K0_AGGREGATE_AUTHORITY",
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
-      "byte_count": 31779,
+      "byte_count": 31852,
       "record_count": 299,
-      "sha256": "f57eccb9f506b37721d46a7d0b15fecdb5621e3603690f8a21c7dcda5cbd19e9"
+      "sha256": "8f5e8239663a35b0dc860a86dfdd923dc85f8d88556f39fbfa10b75684f1819e"
     },
     {
       "input_id": "K1-3-INPUT-K0-1",
       "role": "PUBLIC_API_AUTHORITY",
       "path": "artifacts/kafka_capability_inventory_v1.json",
-      "byte_count": 47232,
+      "byte_count": 47361,
       "record_count": 1087,
-      "sha256": "f33bb0cf011be141ee45952455b173e859591d7dfd9e2dc2460cf19bafaab800"
+      "sha256": "ba59e8a84342a65041fb97bfb50f15b6a4ce9f1e3370c0afba23e6c1eb116b82"
     },
     {
       "input_id": "K1-3-INPUT-K0-2",
@@ -122,15 +122,15 @@
       "path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "byte_count": 244004,
       "record_count": 2687,
-      "sha256": "0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1"
+      "sha256": "1f6ecabe42d72251a7ea0ae9747afbcf3d2e104005424d851d6f2ce610283aa0"
     },
     {
       "input_id": "K1-3-INPUT-K0-3",
       "role": "DOWNSTREAM_AND_MIGRATION_AUTHORITY",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "byte_count": 1295081,
+      "byte_count": 1295370,
       "record_count": 19932,
-      "sha256": "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee"
+      "sha256": "cf85355ab65ad06690480c145eebc8c4f87d09221c538dc337348be39456fdcb"
     },
     {
       "input_id": "K1-3-INPUT-ADR",

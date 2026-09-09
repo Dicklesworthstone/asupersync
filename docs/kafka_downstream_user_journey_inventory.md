@@ -124,20 +124,20 @@ Rows are surface-ID ordered and LF-terminated. The explicit
 `source_pin_digest_token` value `EXACT_BASELINE_ABSENCE` is a serialization
 sentinel only; it is not a source pin or evidence of external absence.
 
-The case-insensitive, non-overlapping content scan finds 9,311 literal Kafka
-occurrences on 7,872 distinct matching lines. An occurrence ID has the form
+The case-insensitive, non-overlapping content scan finds 9,316 literal Kafka
+occurrences on 7,876 distinct matching lines. An occurrence ID has the form
 `KAFKA-K0-3-DOC-OCC-{surface}-L{line}-M{within-line ordinal}`. The exact
 path/line/match-ordinal tuple SHA-256 is
-`195b4358e49dcf76300847bc8eb777a6971b0d2a7310d74cb92f25c8fe3771d1`;
+`f0f0c1bde370cfb8076866fc91187db73dea4c73445804f0eb395360a3bf2779`;
 the matching-line tuple SHA-256 is
-`b0628aa946606ca3c1c88c50d10e97bb401128cb14035c26581c1f55bbf57e6b`;
+`1e6a35be1a772c630c9e82bac167670b08e0cad1064766cd8ed5fbcd6edf914c`;
 and the corresponding occurrence-ID-list SHA-256 is
-`9890b99110853fda58aafdb658e4d47d5c9400b84955355972006b33e31d9cac`.
+`d5b3ed77cfd83f233a70e76814b28c2897209b86bcc3f3bf33178d306664880d`.
 
 Thirty-one explicit canonical projection groups link the 31 curated claim
 rows to 37 exact occurrences. For each actual surface, a deterministic
 set-difference group owns every other occurrence. Ten surfaces have no
-remainder; the other 139 remainder groups contain 9,274 occurrences. Three
+remainder; the other 139 remainder groups contain 9,279 occurrences. Three
 historical surfaces now contain no literal match: both repository copies of
 `asupersync-mega-skill/SKILL.md` and `conformance/http2_h2spec.md`. They remain
 in the exact path and source-pin sets, and the contract checks their explicit
@@ -145,15 +145,15 @@ zero-literal disposition. This does not establish capability absence. The 37
 canonical occurrence-ID list has SHA-256
 `81381d8fcd19e6b37beb4325c1b67eed77a7241d68b0e9a75279b64bb29bd3d5`;
 the owned-unresolved occurrence-ID list has SHA-256
-`00c3bcfbaaee02f9dd405c3011f697e78162dbac7b6be4d628d080a756797841`;
+`7832fa790e0e79ec6a0b404f6f28b480b869edf4d0543bc23e05dbd0c229c4d1`;
 and the 170 group IDs have SHA-256
 `57f2dae42643c7bada450205843b9effa21fb71ac4e353d3c82332f6cec816e8`.
 The canonical and remainder groups are pairwise disjoint and their union is
-the full 9,311-occurrence set.
+the full 9,316-occurrence set.
 
 This makes the declared occurrence identity, locator, ownership, and partition
 census exhaustive. It does **not** make semantic classification exhaustive:
-all 9,274 remainder occurrences are `OWNED_UNRESOLVED_CLAIM`, `UNKNOWN`, and
+all 9,279 remainder occurrences are `OWNED_UNRESOLVED_CLAIM`, `UNKNOWN`, and
 migration-blocking. They are not collapsed into a context-only bucket and do
 not become broker, parity, migration, or removal evidence. Likewise, the
 virtual `examples/` row proves only exact local baseline absence; it says
@@ -516,7 +516,7 @@ and `COMPILE_ONLY` cannot satisfy `REAL_BROKER_RECEIPT`.
 | Baseline occurrence partition | `STATIC_SOURCE` | Receipt recorded | All 245 tracked matches assigned exactly once across five tiers: 30 / 31 / 5 / 17 / 162 |
 | Test declaration classification | `STATIC_SOURCE` | Current source accounting | All 959 declarations classified through 35 owned groups: 911 `#[test]`, 48 `#[tokio::test]`, 16 atomic overrides, and 943 inherited classifications |
 | Call-site candidate census | `STATIC_SOURCE` | Current source accounting | 1,521 candidate identities in 48 groups: 1,237 K0 call-shaped nodes and 284 explicit non-call exclusions |
-| Documentation occurrence census | `STATIC_SOURCE` | Current source accounting | 9,311 exact occurrences have stable identities and owners; 9,274 remain semantically `UNKNOWN` |
+| Documentation occurrence census | `STATIC_SOURCE` | Current source accounting | 9,316 exact occurrences have stable identities and owners; 9,279 remain semantically `UNKNOWN` |
 | Downstream default fixture | `COMPILE_ONLY` | `NOT_RUN` | Mapped no-feature producer behavior only |
 | Generic baseline-consumer fixture | `PLANNED` | `BLOCKED` | Contains no Kafka feature or API use |
 | `kafka_real_broker` target | `REAL_BROKER_CAPABLE` | `NOT_RUN` | Source and wiring exist |
@@ -600,7 +600,7 @@ accounting tier, not runtime or migration evidence.
 Migration remains blocked by twelve K0.1 and 23 K0.2 IDs without resolved
 invocations in the declared grammar, eight unresolved-stale candidates, 162
 conservatively retained policy/context paths, 943 declarations without
-individual atomic migration analysis, 9,274 documentation occurrences with
+individual atomic migration analysis, 9,279 documentation occurrences with
 owned but `UNKNOWN` semantics, seven unrun and unknown external domains, and
 15 real-broker-capable cases without immutable receipts. The separate legacy
 local-row view also preserves 13 `UNKNOWN` K0.1 and 40 `UNKNOWN` K0.2 usage
@@ -611,7 +611,7 @@ The 149 actual documentation surfaces plus the virtual `examples/` surface
 make the declared documentation identity-and-ownership census exhaustive, not
 its semantic classification. The explicit `EXACT_BASELINE_ABSENCE` token is
 only the virtual row's reproducible digest sentinel. The 31 canonical
-projections classify 37 exact occurrences; the remaining 9,274 occurrences
+projections classify 37 exact occurrences; the remaining 9,279 occurrences
 are not context-only, broker, parity, migration, or removal evidence. The
 virtual absence says nothing about untracked, generated, external,
 consumer-repository, or downstream examples.

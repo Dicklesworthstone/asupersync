@@ -672,8 +672,25 @@ fn check_tracker_routes(root: &Path, artifact: &Value) -> Result<(), String> {
         tracker_ids.insert(id.to_owned());
     }
 
+    let review_owner = artifact
+        .get("current_source_review")
+        .and_then(|review| review.get("release_owner"))
+        .and_then(Value::as_str);
+    if review_owner != Some("asupersync-ghxhvm") || !tracker_ids.contains("asupersync-ghxhvm") {
+        return Err("current source review release owner is absent or changed".to_owned());
+    }
+
+    // The release reviewer does not become a Kafka implementation or terminal-gate owner.
+    // Preserve the original program-scoped 36-owner projection independently.
     let mut references = BTreeSet::new();
-    collect_tracker_references(artifact, &mut references);
+    for (key, value) in artifact
+        .as_object()
+        .ok_or("policy packet must be an object")?
+    {
+        if key != "current_source_review" {
+            collect_tracker_references(value, &mut references);
+        }
+    }
     if references.len() != 36 {
         return Err(format!(
             "owner and terminal reference count mismatch: expected 36, got {}",

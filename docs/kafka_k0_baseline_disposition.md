@@ -41,10 +41,10 @@ content hash.
 
 | Child | Machine packet | Baseline / authority revision | Packet SHA-256 | Frozen state |
 |---|---|---|---|---|
-| K0.1 | `kafka-capability-inventory-v1` | `2d811170e956966e960db122a0d634a5b60c56e0` / same | `f33bb0cf011be141ee45952455b173e859591d7dfd9e2dc2460cf19bafaab800` | `K0_1_SOURCE_REACHABILITY_FROZEN` |
-| K0.2 | `kafka-incumbent-semantics-matrix-v1` | `b4997e8fe4de098a5a30ff468418460b59ca414a` / same | `0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1` | `K0_2_INCUMBENT_SEMANTICS_FROZEN` |
-| K0.3 | `kafka-downstream-user-journey-inventory-v1` | `ae22e710d87412b38e546b32e9702106619481d5` / same | `fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee` | `K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN` |
-| K0.4 | `kafka-broker-fixture-provenance-matrix-v1` | `012c13714db267a4fba928db9f900b70d6c1d25a` / top-level `authority_revision` absent | `3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3` | `K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN` |
+| K0.1 | `kafka-capability-inventory-v1` | `2d811170e956966e960db122a0d634a5b60c56e0` / same | `ba59e8a84342a65041fb97bfb50f15b6a4ce9f1e3370c0afba23e6c1eb116b82` | `K0_1_SOURCE_REACHABILITY_FROZEN` |
+| K0.2 | `kafka-incumbent-semantics-matrix-v1` | `b4997e8fe4de098a5a30ff468418460b59ca414a` / same | `1f6ecabe42d72251a7ea0ae9747afbcf3d2e104005424d851d6f2ce610283aa0` | `K0_2_INCUMBENT_SEMANTICS_FROZEN` |
+| K0.3 | `kafka-downstream-user-journey-inventory-v1` | `ae22e710d87412b38e546b32e9702106619481d5` / same | `cf85355ab65ad06690480c145eebc8c4f87d09221c538dc337348be39456fdcb` | `K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN` |
+| K0.4 | `kafka-broker-fixture-provenance-matrix-v1` | `012c13714db267a4fba928db9f900b70d6c1d25a` / top-level `authority_revision` absent | `faaee61a3340bfa52d36415b718c4bd97831c275ca6be03910266b4433659ba0` | `K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN` |
 
 The missing K0.4 top-level `authority_revision` is retained as an explicit
 fail-closed schema difference. K0.5 uses the K0.4 `baseline_revision` and packet
@@ -88,10 +88,10 @@ The canonical machine projections are:
 
 | Projection | Count | SHA-256 |
 |---|---:|---|
-| Source-pin canonical JSON | 267 | `7e72356c31ac6f5ee44ea0bcdc85d69093b77b263debe055757ca1c642135d29` |
+| Source-pin canonical JSON | 267 | `1a5e081dec2b116455b813a324c47897a8c2adb179fef638e067b9d9b3b074ad` |
 | Unique source-pin paths | 248 | `c9f1f8ae0ce140c27e05919606a947d93c660f9aa978e762f1cbcc232c200ddb` |
 | Source-pin overlap paths | 15 | membership is bound by the 34-row projection below |
-| Source-pin rows on overlap paths | 34 | `d8c4628bbde051a595bc53b744d8e9f8c384b66bd718eb4c938d902cf35573f8` |
+| Source-pin rows on overlap paths | 34 | `a83160709d49613c658a8d70d80beebc6fb563f646e2dd0ca7c8802fe1d95b5e` |
 | Core typed definitions | 901 | `cf110029938e34e3830462a68441d3f678708137242c69a40657aa1e107a01d1` |
 | Contradiction typed inputs | 11 | `60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0` |
 | All primary typed IDs | 912 | `cb03e74dd5a207aaf082664741fb629d4330bcec76a3edd0958969c6a064b729` |
@@ -172,7 +172,7 @@ blocks the receipt rather than becoming another accepted UNKNOWN.
 | K0.3 K0.1 usage dispositions | 13 `UNKNOWN` | K14.1 claim-time refresh and synthesis |
 | K0.3 K0.2 usage dispositions | 40 `UNKNOWN` | K14.1 claim-time refresh and synthesis |
 | K0.3 external searches | 7 `UNKNOWN` / `NOT_RUN` | K14.1 |
-| K0.3 unresolved documentation occurrences | 9,274 | K10.5, refreshed by K14.1 |
+| K0.3 unresolved documentation occurrences | 9,279 | K10.5, refreshed by K14.1 |
 | K0.3 non-passing feature/platform cells | 8 | K12.5, refreshed by K14.1 |
 | K0.3 owned unknowns | 8 | 7 to K14.1; immutable real-broker receipt to K13.6 |
 | K0.3 exact blocked inventory/evidence rows | 24 | K10.5, K12.3, K13.6, K14.1, and the declared validation-frontier owner |
@@ -259,7 +259,7 @@ receipt for any later routed owner.
 
 The 93 projected child claim records preserve their source evidence classes.
 Their canonical JSON digest is
-`3198dc4e435a56031af6ccef2548eefc359e1f141253be1cc188f6df07820132`.
+`74f3359505a1a6816502cc7293e46c2abaa32e9de0ed514e72cf8fd76f139e6b`.
 Each child record is wrapped with `child`, `collection`, `id`, and `row`; no-claim
 rows use their zero-based array index as the ID, while claim/evidence rows retain
 their declared IDs. Records are ordered by child, collection, and ID before

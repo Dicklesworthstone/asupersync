@@ -213,7 +213,7 @@ executable owner, refresh owner, and limitation for every row. The
 the original capture, including the mixed SASL audit classification below.
 The K0.3 anchor artifact
 `artifacts/kafka_downstream_user_journey_inventory_v1.json` has SHA-256
-`fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee`
+`cf85355ab65ad06690480c145eebc8c4f87d09221c538dc337348be39456fdcb`
 and freezes baseline/authority revision
 `ae22e710d87412b38e546b32e9702106619481d5`. The K0.4 static census was
 reconciled at revision `012c13714db267a4fba928db9f900b70d6c1d25a`.

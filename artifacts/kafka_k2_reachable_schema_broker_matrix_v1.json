@@ -104,7 +104,7 @@
       "path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
       "byte_count": 122592,
       "record_count": 2214,
-      "sha256": "3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3"
+      "sha256": "faaee61a3340bfa52d36415b718c4bd97831c275ca6be03910266b4433659ba0"
     },
     {
       "input_id": "KAFKA-K2-1-INPUT-K1-3",

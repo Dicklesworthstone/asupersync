@@ -133,6 +133,8 @@ const K0_2_PATH: &str = "artifacts/kafka_incumbent_semantics_matrix_v1.json";
 const K0_4_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const HISTORICAL_ROW_TYPING_SHA256: &str =
     "ce317ee496fa450c1676161c21eeb0221041e502450d211504fbcfb333ca7a01";
+const CURRENT_ROW_TYPING_SHA256: &str =
+    "148084a508cf9f4116cfcbd12b92b1fc3f026ae1e82430ed08d688b1d8e75dd5";
 const NO_CLAIM_BOUNDARY_SHA256: &str =
     "5c626eb148630a40e1c003fa94e2296fbdb89a05fc0014b745a565e99b2ae1bb";
 const VECTOR_CATEGORY_MAPPING_SHA256: &str =
@@ -140,11 +142,11 @@ const VECTOR_CATEGORY_MAPPING_SHA256: &str =
 const SOURCE_PROFILE_MAPPING_SHA256: &str =
     "4bc88aad41381aa47eb2962f8f270399e0dfd3b2f3af2835459835c859a5d90e";
 const SHADOW_OPERATION_ID_SHA256: &str =
-    "01a40fb40520c2ee2016e0b6c51ca9083fd6cb019bbb369d28e86fca73f88eed";
+    "67852f4d78939a533c5846b7e129c0a41cf225bba4bc884b14af7b930b39b7a7";
 const SHADOW_OPERATIONAL_SUBTYPE_SHA256: &str =
-    "a3bc7018bb1f69beac51f09685644976a422d4e7cc94a859faf725e308bb06b1";
+    "251f52693477239c7fc916e3e433ff7ec4953902aac5d8ec92213d500024de74";
 const SHADOW_CLASS_MAPPING_SHA256: &str =
-    "8c2562a4b3b09ca575b7e5a4163725dfc6a99bf12553bf84317020fec673c4ac";
+    "2c33710e0a84ca558366c8c9f5a62cf3f8ecabf0d0ffb92de7d851dd5251dfdb";
 
 const PROJECTION_SCOPES: [(&str, &str, &str); 17] = [
     (
@@ -940,7 +942,10 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
         return Err("immutable historical row typing drift".to_owned());
     }
     ensure_unique(&ids(child_groups, "cell_id")?, "current binding group IDs")?;
-    ensure_unique(&ids(typed_groups, "binding_ref")?, "historical binding group IDs")?;
+    ensure_unique(
+        &ids(typed_groups, "binding_ref")?,
+        "historical binding group IDs",
+    )?;
     let mut typed_edge_count = 0usize;
     let mut typed_projection_rows = Vec::new();
     for group in child_groups {
@@ -1225,6 +1230,114 @@ fn validate_bindings(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
         || count(coverage, "unresolved_zero_message_set_edge_group_count")? != gaps.len()
     {
         return Err("binding adjudication coverage receipt drift".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_current_binding_typing(inputs: &Inputs, adjudication: &Value) -> Result<(), String> {
+    let historical = array(adjudication, "historical_row_typing")?;
+    let overrides = array(adjudication, "current_row_typing_overrides")?;
+    let override_ids = ids(overrides, "binding_ref")?;
+    ensure_unique(&override_ids, "current binding override IDs")?;
+    if override_ids.into_iter().collect::<BTreeSet<_>>()
+        != BTreeSet::from([
+            "KAFKA-K1-2-BIND-004-FETCH".to_owned(),
+            "KAFKA-K1-2-BIND-005-GROUP".to_owned(),
+            "KAFKA-K1-2-BIND-006-OFFSETS".to_owned(),
+            "KAFKA-K1-2-BIND-010-LOCAL".to_owned(),
+        ])
+    {
+        return Err("current binding override group set drift".to_owned());
+    }
+    let mut projection = Vec::new();
+    for child in array(&inputs.children["K1.2"], "protocol_binding_groups")? {
+        let binding = text(child, "cell_id")?;
+        let typed = overrides
+            .iter()
+            .chain(historical)
+            .find(|row| row.get("binding_ref").and_then(Value::as_str) == Some(binding))
+            .ok_or_else(|| format!("missing current typing for {binding}"))?;
+        let edges = array(typed, "typed_edges")?;
+        let edge_ids = ids(edges, "authority_row_id")?;
+        ensure_unique(&edge_ids, "current typed edge IDs")?;
+        if edge_ids.into_iter().collect::<BTreeSet<_>>()
+            != string_set(
+                array(child, "authority_rows")?,
+                "current child authority rows",
+            )?
+        {
+            return Err(format!("current typed edge membership drift for {binding}"));
+        }
+        for edge in edges {
+            projection.push(format!(
+                "{binding}\t{}\t{}",
+                text(edge, "authority_row_id")?,
+                text(edge, "kind")?
+            ));
+        }
+    }
+    if projection.len() != 56
+        || count(adjudication, "current_row_typing_edge_count")? != 56
+        || sorted_newline_sha256(projection) != CURRENT_ROW_TYPING_SHA256
+        || text(adjudication, "current_row_typing_projection_sha256")? != CURRENT_ROW_TYPING_SHA256
+    {
+        return Err("56 current row-typing edges drift".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_current_source_review(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
+    let review = &artifact["current_source_review"];
+    if text(review, "reviewed_date_utc")? != "2026-09-09"
+        || text(review, "release_owner")? != "asupersync-ghxhvm"
+        || !flag(review, "historical_execution_claims_preserved")?
+        || flag(review, "runtime_evidence_promoted")?
+        || flag(review, "cutover_allowed")?
+    {
+        return Err("current source review scope drift".to_owned());
+    }
+    for (field, expected) in [
+        ("historical_obligation_row_count", 279),
+        ("current_obligation_row_count", 287),
+        ("historical_semantic_row_count", 97),
+        ("current_semantic_row_count", 102),
+        ("historical_shadow_operation_count", 38),
+        ("current_shadow_operation_count", 40),
+    ] {
+        if count(review, field)? != expected {
+            return Err(format!("historical/current review count drift: {field}"));
+        }
+    }
+    // These receipts describe the original child acceptances, including their counts.
+    if canonical_rows_sha256(array(artifact, "child_packet_receipts")?)?
+        != "64626f739641a6821591cfc0efd08b7556e759d4c3f70f7d8496b682ca880938"
+    {
+        return Err("historical child completion receipts drift".to_owned());
+    }
+    let coverage = &artifact["coverage_receipt"];
+    let join = &artifact["cross_child_join_model"];
+    if count(coverage, "obligation_row_count")? != 287
+        || count(join, "obligation_row_count")? != 287
+        || count(&join["child_namespace_counts"], "k1_3_contract_rows")? != 187
+        || count(coverage, "current_binding_row_typing_edge_count")? != 56
+        || count(coverage, "shadow_semantic_operation_count")? != 40
+    {
+        return Err("current aggregate count receipt drift".to_owned());
+    }
+    let bytes = fs::read(inputs.root.join(K0_2_PATH))
+        .map_err(|error| format!("failed to read current semantic authority: {error}"))?;
+    let content = std::str::from_utf8(&bytes)
+        .map_err(|error| format!("current semantic authority is not UTF-8: {error}"))?;
+    let semantic = &join["k1_3_k1_4_semantic_resource_lifecycle_join"];
+    let shadow = &artifact["shadow_semantic_operation_partition"];
+    if count(semantic, "semantic_authority_byte_count")? != bytes.len()
+        || count(semantic, "semantic_authority_record_count")? != content.lines().count()
+        || text(semantic, "semantic_authority_sha256")? != sha256(&bytes)
+        || text(shadow, "authority_file_sha256")? != sha256(&bytes)
+        || count(shadow, "authority_semantic_row_count")? != 40
+        || count(shadow, "partitioned_semantic_operation_count")? != 40
+    {
+        return Err("current semantic/shadow authority drift".to_owned());
     }
     Ok(())
 }
@@ -1874,6 +1987,7 @@ fn validate_document_and_no_claims(inputs: &Inputs, artifact: &Value) -> Result<
 
 fn validate(inputs: &Inputs, artifact: &Value) -> Result<(), String> {
     validate_identity_and_inputs(inputs, artifact)?;
+    validate_current_source_review(inputs, artifact)?;
     validate_conflicts_and_obligations(inputs, artifact)?;
     validate_semantic_resource_join(inputs, artifact)?;
     validate_bindings(inputs, artifact)?;
@@ -1892,8 +2006,100 @@ fn kafka_k1_aggregate_gate_is_exact_and_fail_closed() {
 }
 
 #[test]
+fn kafka_k1_aggregate_gate_separates_historical_and_current_bindings() {
+    let mut inputs = Inputs::load().expect("load K1.5 contract inputs");
+    validate_bindings(&inputs, &inputs.artifact).expect("valid binding baseline");
+
+    let mut rewritten_history = inputs.artifact.clone();
+    rewritten_history["semantic_binding_adjudication"]["historical_row_typing"][3]["typed_edges"]
+        [2]["authority_row_id"] = Value::String("KCO-OP-006".to_owned());
+    assert!(
+        validate_bindings(&inputs, &rewritten_history)
+            .expect_err("rewriting historical membership must fail")
+            .contains("immutable historical row typing")
+    );
+
+    let mut rewritten_overlay = inputs.artifact.clone();
+    rewritten_overlay["semantic_binding_adjudication"]["overlays"][0]["superseded_authority_rows"]
+        [2] = Value::String("KCO-OP-006".to_owned());
+    assert!(
+        validate_bindings(&inputs, &rewritten_overlay)
+            .expect_err("rewriting superseded membership must fail")
+            .contains("immutable historical membership overlays")
+    );
+
+    let mut promoted_accessor = inputs.artifact.clone();
+    promoted_accessor["semantic_binding_adjudication"]["current_row_typing_overrides"][3]["typed_edges"]
+        [5]["kind"] = Value::String("MESSAGE_SET".to_owned());
+    assert!(
+        validate_current_binding_typing(
+            &inputs,
+            &promoted_accessor["semantic_binding_adjudication"]
+        )
+        .expect_err("diagnostic accessor cannot acquire message evidence")
+        .contains("current row-typing edges drift")
+    );
+
+    // A stale child with the historical FETCH ID must fail the current join,
+    // even though the unchanged historical provenance still authenticates.
+    inputs.children.get_mut("K1.2").expect("protocol child")["protocol_binding_groups"][3]["authority_rows"]
+        [2] = Value::String("KCO-OP-005".to_owned());
+    assert!(
+        validate_current_binding_typing(&inputs, &inputs.artifact["semantic_binding_adjudication"])
+            .expect_err("stale child membership must fail")
+            .contains("current typed edge membership drift")
+    );
+}
+
+#[test]
+fn kafka_k1_aggregate_gate_preserves_capture_and_diagnostic_scope() {
+    let inputs = Inputs::load().expect("load K1.5 contract inputs");
+    validate_current_source_review(&inputs, &inputs.artifact).expect("valid review baseline");
+
+    let mut rewritten = inputs.artifact.clone();
+    rewritten["child_packet_receipts"][0]["obligation_row_count"] = Value::from(287);
+    assert!(
+        validate_current_source_review(&inputs, &rewritten)
+            .expect_err("original child receipt cannot be retroactively updated")
+            .contains("historical child completion receipts")
+    );
+
+    let mut promoted = inputs.artifact.clone();
+    promoted["current_source_review"]["runtime_evidence_promoted"] = Value::Bool(true);
+    assert!(
+        validate_current_source_review(&inputs, &promoted)
+            .expect_err("static review cannot promote runtime evidence")
+            .contains("current source review scope")
+    );
+
+    validate_profiles_and_shadow(&inputs, &inputs.artifact).expect("valid shadow baseline");
+    let mut changed_class = inputs.artifact.clone();
+    let classes = changed_class["shadow_semantic_operation_partition"]["classes"]
+        .as_array_mut()
+        .expect("shadow classes");
+    let diagnostic = classes[0]["semantic_ids"]
+        .as_array_mut()
+        .expect("local diagnostic IDs")
+        .pop()
+        .expect("diagnostic accessor");
+    assert_eq!(diagnostic, "KCO-OP-019");
+    classes[0]["row_count"] = Value::from(20);
+    classes[1]["semantic_ids"]
+        .as_array_mut()
+        .expect("constructor IDs")
+        .push(diagnostic);
+    classes[1]["row_count"] = Value::from(5);
+    assert!(
+        validate_profiles_and_shadow(&inputs, &changed_class)
+            .expect_err("diagnostic accessor cannot become a resource constructor")
+            .contains("40-operation shadow partition drift")
+    );
+}
+
+#[test]
 fn kafka_k1_aggregate_gate_rejects_representative_mutations() {
     let inputs = Inputs::load().expect("load K1.5 contract inputs");
+    validate(&inputs, &inputs.artifact).expect("valid baseline before negative mutations");
     let mut mutations = Vec::new();
 
     let mut pin = inputs.artifact.clone();

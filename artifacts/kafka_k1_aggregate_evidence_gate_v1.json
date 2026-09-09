@@ -38,7 +38,7 @@
     "obligation_rule": "The seven current K1.1 obligation domains partition exactly 287 typed rows. Missing, extra, duplicate, conflicting, or unowned rows keep the incumbent.",
     "evidence_rule": "Unit, executable model, property, fuzz, independent, and real-service vectors are separate required evidence classes. Planned, static, local-model, wire-only, compile-only, NOT_RUN, UNKNOWN, BLOCKED, or silent-skip state is never execution evidence.",
     "protocol_rule": "Only rows explicitly typed MESSAGE_SET or CONFIG_MAPPING by the accepted child or K1.5 adjudication may claim protocol bindings. LOCAL_ONLY, ABSENT_GAP, INVENTORY_ONLY, and REFERENCE_ONLY rows must not acquire invented Kafka messages.",
-    "typed_binding_adjudication_rule": "K1.2 binding-group membership is historical input, not semantic proof. K1.5 must type each corrected row as MESSAGE_SET, CONFIG_MAPPING, LOCAL_ONLY, INVENTORY_ONLY, or REFERENCE_ONLY and must retain every displaced coarse reference in the conflict ledger.",
+    "typed_binding_adjudication_rule": "Historical K1.2 membership remains immutable provenance. Current K1.2 membership is checked against a separate typed projection; membership alone is not semantic proof. K1.5 must preserve explicit row types and every displaced coarse reference.",
     "state_owner_rule": "Every accepted route names a typed state-owner role separately from implementation and evidence roles; no effect, resource, residue, generation, offset, transaction, or delivery state may be ownerless. If state_owner reuses any route-local unit, model, property, or fuzz owner ID, an explicit overlap reason is required. Sharing among non-state evidence roles is permitted and never collapses independent or real-service ownership.",
     "coexistence_rule": "The incumbent remains the only production path. Future native observation requires an explicit isolated mode owned by K14 and may not narrow the public no-feature or feature=kafka surfaces.",
     "shadow_rule": "Offline-pure, broker-read, resource-construction-observe-only, isolated-side-effecting, duplicate-forbidden, and non-comparable operations are distinct. No side-effecting request or resource construction may be duplicated against the same production identity or namespace.",
@@ -501,7 +501,7 @@
       "semantic_authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "semantic_authority_byte_count": 244004,
       "semantic_authority_record_count": 2687,
-      "semantic_authority_sha256": "0eb1383f4c9ab18e5e47808f97f23e99ddf1f75b6276b5c5eb831880ff1a59c1",
+      "semantic_authority_sha256": "1f6ecabe42d72251a7ea0ae9747afbcf3d2e104005424d851d6f2ce610283aa0",
       "semantic_row_count": 102,
       "classification_counts": {
         "RESOURCE": 45,
@@ -536,7 +536,7 @@
     "historical_row_typing_projection_sha256": "ce317ee496fa450c1676161c21eeb0221041e502450d211504fbcfb333ca7a01",
     "historical_row_typing_projection_rule": "For every historical_row_typing edge, emit binding_ref, TAB, authority_row_id, TAB, kind; bytewise sort all 52 rows, append one LF per row, and SHA-256.",
     "current_row_typing_edge_count": 56,
-    "current_row_typing_projection_sha256": "PENDING_STATIC_DIGEST",
+    "current_row_typing_projection_sha256": "148084a508cf9f4116cfcbd12b92b1fc3f026ae1e82430ed08d688b1d8e75dd5",
     "current_row_typing_overrides": [
       {
         "binding_ref": "KAFKA-K1-2-BIND-004-FETCH",
@@ -818,7 +818,7 @@
         "state": "TYPED_STATIC_ROUTING_ONLY_BLOCKING_EXECUTION_EVIDENCE"
       }
     ],
-    "routing_rule": "K1.5 route refs for FETCH, GROUP, and OFFSETS resolve through these typed overlays. Deliberate cross-group typed-reference overlap is permitted because overlays are references, never duplicate definitions. The seven unaffected K1.2 group refs retain their child policy meaning but remain non-executed evidence.",
+    "routing_rule": "K1.5 routes use current row typing for current child membership and retain the three historical typed overlays as supplementary routing context. Deliberate cross-group typed-reference overlap is permitted because overlays are references, never duplicate definitions. The six unchanged current groups retain historical typing; all routes remain non-executed evidence with two unresolved zero-message-set groups.",
     "adjudication_state": "COMPLETE_MEMBERSHIP_AND_ROW_TYPING_WITH_TWO_ZERO_MESSAGE_SET_GROUPS_AND_NO_PER_MESSAGE_ATTRIBUTION_CLAIM"
   },
   "capability_evidence_contract": {
@@ -874,9 +874,9 @@
       "authority_via_child_stage": "K1.1",
       "authority_via_k0_aggregate": "artifacts/kafka_k0_baseline_disposition_v1.json#/child_packets[K0.4]",
       "authority_path": "artifacts/kafka_broker_fixture_provenance_matrix_v1.json",
-      "authority_byte_count": 119250,
-      "authority_record_count": 2187,
-      "authority_sha256": "fe2c1ddb92a1ab53eb9496a6bcfd3c41ba1f7277ef63c85d6747137e6f92a7c3",
+      "authority_byte_count": 122592,
+      "authority_record_count": 2214,
+      "authority_sha256": "faaee61a3340bfa52d36415b718c4bd97831c275ca6be03910266b4433659ba0",
       "executable_vector_count": 36,
       "executable_vector_id_set_sha256": "73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f",
       "vector_category_mapping_sha256": "180bb499a516f563cea8367a3e4b28e0fc74d19373b01e61dc0c3a399e3555e2",
@@ -1001,7 +1001,7 @@
       },
       "routed_gap_receipt": {
         "route_row_count": 87,
-        "route_row_sha256": "e8565a21c4e3cd0e3c520e5d71ab2c04711b8e8954959a96c777cdde5565979f",
+        "route_row_sha256": "6703f44f112d96e80907809e56c0fbfdb6a3f3719a7a29fa7cf9ec2cf27a3ba2",
         "route_owner_edge_count": 126,
         "route_owner_edge_sha256": "78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc",
         "owner_id_count": 49,
@@ -1607,17 +1607,17 @@
   "shadow_semantic_operation_partition": {
     "authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json#/operations",
     "authority_via_child_stage": "K1.3",
-    "authority_file_sha256": "02011e3bcf20b682817ed7f2e1043a4b5d1359d46105039c57c6efbe90129e3c",
-    "authority_semantic_row_count": 38,
-    "semantic_operation_id_set_sha256": "01a40fb40520c2ee2016e0b6c51ca9083fd6cb019bbb369d28e86fca73f88eed",
-    "semantic_operation_id_set_rule": "Bytewise sort 38 unique UTF-8 semantic IDs, append one LF per ID, and SHA-256.",
-    "operational_subtype_mapping_sha256": "a3bc7018bb1f69beac51f09685644976a422d4e7cc94a859faf725e308bb06b1",
-    "operational_subtype_mapping_rule": "Emit semantic_id, TAB, partition_class_id, and LF for all 38 rows; bytewise sort unique rows and SHA-256.",
-    "shadow_class_mapping_sha256": "8c2562a4b3b09ca575b7e5a4163725dfc6a99bf12553bf84317020fec673c4ac",
+    "authority_file_sha256": "1f6ecabe42d72251a7ea0ae9747afbcf3d2e104005424d851d6f2ce610283aa0",
+    "authority_semantic_row_count": 40,
+    "semantic_operation_id_set_sha256": "67852f4d78939a533c5846b7e129c0a41cf225bba4bc884b14af7b930b39b7a7",
+    "semantic_operation_id_set_rule": "Bytewise sort 40 unique UTF-8 semantic IDs, append one LF per ID, and SHA-256.",
+    "operational_subtype_mapping_sha256": "251f52693477239c7fc916e3e433ff7ec4953902aac5d8ec92213d500024de74",
+    "operational_subtype_mapping_rule": "Emit semantic_id, TAB, partition_class_id, and LF for all 40 rows; bytewise sort unique rows and SHA-256.",
+    "shadow_class_mapping_sha256": "2c33710e0a84ca558366c8c9f5a62cf3f8ecabf0d0ffb92de7d851dd5251dfdb",
     "shadow_class_mapping_rule": "Emit semantic_id, TAB, K1S shadow_class_id, and LF for the exact nested shadow-class subpartitions; bytewise sort unique rows and SHA-256.",
     "classification_basis": "MAXIMUM_EFFECT_ACROSS_ACCEPTED_PROFILES",
     "partition_class_count": 5,
-    "partitioned_semantic_operation_count": 38,
+    "partitioned_semantic_operation_count": 40,
     "missing_semantic_operation_count": 0,
     "extra_semantic_operation_count": 0,
     "duplicate_semantic_operation_count": 0,
@@ -1631,15 +1631,15 @@
     "classes": [
       {
         "partition_class_id": "LOCAL_PURE_OR_ACCESSOR",
-        "row_count": 19,
+        "row_count": 21,
         "shadow_class_ids": ["K1S-LOCAL-PURE"],
         "same_target_dual_allowed": false,
         "frozen_snapshot_or_identical_replay_comparison_allowed": true,
         "comparator": "Exact or reviewed canonical local value, typed error, configuration projection, or accessor projection; no runtime parity is inferred from a static match.",
-        "isolation": "Frozen inputs and local state only; no broker contact, filesystem mutation, ambient clock oracle, or external identity.",
+        "isolation": "Frozen inputs and local state only; no broker contact, filesystem mutation, ambient clock oracle, or external identity. Diagnostic accessors may synchronously query native protocol state or acquire a lock; this class does not authorize concurrent execution or assert successful assignment.",
         "semantic_ids": [
           "KPR-OP-001", "KPR-OP-002", "KPR-OP-007", "KPR-OP-008", "KPR-OP-011", "KPR-OP-015", "KPR-OP-016", "KPR-OP-018", "KPR-OP-019",
-          "KCO-OP-001", "KCO-OP-002", "KCO-OP-010", "KCO-OP-011", "KCO-OP-012", "KCO-OP-013", "KCO-OP-014", "KCO-OP-015", "KCO-OP-016", "KCO-OP-017"
+          "KCO-OP-001", "KCO-OP-002", "KCO-OP-010", "KCO-OP-011", "KCO-OP-012", "KCO-OP-013", "KCO-OP-014", "KCO-OP-015", "KCO-OP-016", "KCO-OP-017", "KCO-OP-018", "KCO-OP-019"
         ],
         "terminal_gates": [
           "asupersync-dep-p7-kafka-removal-sarszu.2.14.3",
@@ -2040,11 +2040,12 @@
     "authority_input_count": 12,
     "child_packet_count": 4,
     "obligation_partition_count": 7,
-    "obligation_row_count": 279,
+    "obligation_row_count": 287,
     "shared_semantic_split_count": 12,
     "protocol_binding_reference_count": 10,
     "row_typed_binding_group_count": 10,
     "historical_binding_row_typing_edge_count": 52,
+    "current_binding_row_typing_edge_count": 56,
     "membership_adjudicated_binding_group_count": 3,
     "zero_message_set_edge_group_count": 2,
     "absence_route_count": 2,
@@ -2067,7 +2068,7 @@
     "shadow_class_count": 6,
     "shadow_policy_summary_count": 13,
     "shadow_semantic_partition_class_count": 5,
-    "shadow_semantic_operation_count": 38,
+    "shadow_semantic_operation_count": 40,
     "stop_condition_count": 12,
     "rollback_case_count": 7,
     "approval_gate_count": 7,

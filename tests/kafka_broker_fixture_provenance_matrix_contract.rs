@@ -18,8 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str = "3da8b6a3b427c662b2fcff3f5cda330540be7808704f52723bdf4511235e3af3";
-const DOC_SHA256: &str = "949593d6801d89ea8c1bdd018e4b811a89b08d9556e02e11ea1513fd6f56f15c";
+const ARTIFACT_SHA256: &str = "faaee61a3340bfa52d36415b718c4bd97831c275ca6be03910266b4433659ba0";
+const DOC_SHA256: &str = "23b278530c81ef134c9a15c7e71ce3d1a8900f3abaaff2287daaa7138fab9196";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.4";
@@ -29,7 +29,7 @@ const CAPTURED_DATE_UTC: &str = "2026-08-03";
 const INVENTORY_STATE: &str = "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN";
 const K0_3_ARTIFACT_ID: &str = "kafka-downstream-user-journey-inventory-v1";
 const K0_3_BASELINE_REVISION: &str = "ae22e710d87412b38e546b32e9702106619481d5";
-const K0_3_SHA256: &str = "fd7059ae13bdef84dc42adc52f87b749ad752beeac3ff06c3fa3571d3d3487ee";
+const K0_3_SHA256: &str = "cf85355ab65ad06690480c145eebc8c4f87d09221c538dc337348be39456fdcb";
 const K0_3_TEST_GROUP_COUNT: usize = 35;
 const K0_3_TEST_DECLARATION_COUNT: usize = 959;
 const K0_3_EXACT_TEST_DECLARATION_COUNT: usize = 911;
@@ -184,7 +184,7 @@ const DIRECT_FIXTURE_PINS: &[(&str, &str, u64, u64, &str)] = &[
     ),
     (
         "tests/kafka_incumbent_semantics_matrix_contract.rs",
-        "af2d9e4d48784c2e9b540781317bdec72bca2080459446e1cd0f2ec1d865a642",
+        "9cca3ee15c6a4da7d7a73277b846e7ade79c2548701bd08520f02edc145e4d44",
         72_831,
         1_777,
         "UTF8_LINES",
@@ -2084,15 +2084,15 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
         (
             "documentation_occurrence_tuple_sha256",
-            "195b4358e49dcf76300847bc8eb777a6971b0d2a7310d74cb92f25c8fe3771d1",
+            "f0f0c1bde370cfb8076866fc91187db73dea4c73445804f0eb395360a3bf2779",
         ),
         (
             "documentation_matching_line_tuple_sha256",
-            "b0628aa946606ca3c1c88c50d10e97bb401128cb14035c26581c1f55bbf57e6b",
+            "1e6a35be1a772c630c9e82bac167670b08e0cad1064766cd8ed5fbcd6edf914c",
         ),
         (
             "documentation_occurrence_id_sha256",
-            "9890b99110853fda58aafdb658e4d47d5c9400b84955355972006b33e31d9cac",
+            "d5b3ed77cfd83f233a70e76814b28c2897209b86bcc3f3bf33178d306664880d",
         ),
         (
             "documentation_canonical_occurrence_id_sha256",
@@ -2100,7 +2100,7 @@ fn actual_validate_source_scope(matrix: &Value) -> Result<(), String> {
         ),
         (
             "documentation_remainder_occurrence_id_sha256",
-            "00c3bcfbaaee02f9dd405c3011f697e78162dbac7b6be4d628d080a756797841",
+            "7832fa790e0e79ec6a0b404f6f28b480b869edf4d0543bc23e05dbd0c229c4d1",
         ),
         (
             "documentation_group_id_sha256",

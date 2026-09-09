@@ -12,6 +12,14 @@ for downstream contract work to begin. It is not permission to wire a native
 client, run a shadow lane, remove `rdkafka` or `librdkafka`, retire an oracle,
 delete a file, or cut over production behavior.
 
+The 2026-09-09 source review under `asupersync-ghxhvm` updates current child
+pins and joins. The original 2026-08-04 capture, child commit and completion
+receipts, 52 historical typed edges, and three historical routing overlays
+remain unchanged. Original child counts and no-execution statements describe
+that capture; the current counts below describe the reviewed source. A focused
+remote contract result verifies only these joins and negative mutations; it
+does not establish broker behavior or authorize cutover.
+
 ## Scope and authority
 
 K1.5 consumes the exact artifact, document, and checked-in contract-source
@@ -43,7 +51,7 @@ silently normalizing them:
    treated as a redundant, undeclared byte dependency with zero semantic and
    zero completion authority. Its bytes must still agree with the direct K1.3
    child receipt.
-3. The K1.2 FETCH, GROUP, and OFFSETS groups have coarse, cross-domain
+3. The historical K1.2 FETCH, GROUP, and OFFSETS groups had coarse, cross-domain
    authority-row membership. K1.5 preserves their historical bytes and applies
    an explicit row-typed routing overlay.
 4. Child-local completion snapshots were captured at different times, and K1.3
@@ -66,14 +74,14 @@ The seven K1.1 obligation partitions remain exact and disjoint:
 
 | Domain | Rows |
 |---|---:|
-| public symbols | 30 |
-| semantic rows | 97 |
+| public symbols | 33 |
+| semantic rows | 102 |
 | shared semantic keys | 12 |
 | explicit absences | 2 |
 | downstream journeys | 15 |
 | executable vectors | 36 |
 | routed gaps and findings | 87 |
-| **Total** | **279** |
+| **Total** | **287** |
 
 The 12 shared semantic keys retain the exact policy split: two owned by K1.2,
 seven by K1.3, and three by K1.4. K1.5 is only the aggregate join owner; it does
@@ -81,10 +89,10 @@ not introduce a second policy owner.
 
 The K1.3/K1.4 semantic join is also exact:
 
-- 43 `RESOURCE` rows;
+- 45 `RESOURCE` rows;
 - 26 `RESOURCE_AND_LIFECYCLE` rows;
-- 28 `CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION` rows;
-- 61 expanded configuration-to-resource edges;
+- 31 `CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION` rows;
+- 64 expanded configuration-to-resource edges;
 - 119 expanded lifecycle-semantic target edges; and
 - zero context-only direct resource or lifecycle references.
 
@@ -118,9 +126,19 @@ Three membership overlays correct K1.5 routing:
 - OFFSETS binds poll and commit as message-bearing; offset values, seek, and
   accessors remain local; manual-commit controls remain configuration.
 
-The original group rows remain pinned as `superseded_authority_rows`. The
-overlay changes K1.5 evidence routing only; it does not rewrite the K1.2 child
-or prove protocol execution.
+The original group rows remain pinned as `superseded_authority_rows`, joined
+to the immutable historical typing rather than current child membership.
+Complete historical row and overlay digests reject provenance rewrites.
+
+Current K1.2 membership is checked separately through four explicit typing
+overrides for FETCH, GROUP, OFFSETS, and LOCAL, plus the six unchanged groups.
+All 56 current edges must match their current child group. The corrected poll,
+close, commit, seek, and position IDs keep their explicit types. Raw property
+rows remain configuration, the rebalance-protocol enum remains reference
+context, and the two new diagnostic accessors remain local. The historical
+overlays retain additional routing context without claiming these current
+child memberships existed at the original capture. Neither layer proves
+protocol execution or per-message attribution.
 
 Two zero-message-set group gaps remain explicit. METADATA and SASL name future
 messages but carry no direct message-authority semantic row. They remain
@@ -186,8 +204,8 @@ work.
 
 ## Shadow classification
 
-The 38 K0.2 operation semantics have an exact, duplicate-free operational
-partition: 19 local/accessor rows, four resource constructors, one stateful
+The 40 current K0.2 operation semantics have an exact, duplicate-free operational
+partition: 21 local/accessor rows, four resource constructors, one stateful
 poll, ten mutators, and four lifecycle/ambiguity rows.
 
 They also map exactly once to the declared shadow policy classes. Resource
@@ -201,6 +219,9 @@ The classification uses the maximum effect across accepted profiles. Local
 accessors may compare only against a frozen snapshot or identical replay; live
 same-target dual execution is not authorized. Per-operation K14.3 owner
 routing remains pending, so the exact partition is policy, not admission.
+The added rebalance and transient-error accessors compare diagnostic snapshots.
+A synchronous native protocol query or state lock does not establish successful
+assignment, broker health, cleanup completion, or a coherent concurrent snapshot.
 
 ## Stop and rollback rules
 
@@ -225,7 +246,7 @@ digests, and 17 independently recomputable projection scopes. Duplicate IDs and
 count drift are rejected before hashing so canonicalization cannot hide an
 inserted duplicate.
 
-This work session used static JSON, text, file, tracker, and Git inspection
+The original 2026-08-04 capture used static JSON, text, file, tracker, and Git inspection
 only. No compiler, formatter, linter, test process, fuzz harness, benchmark,
 runtime, broker, service, container, network workload, remote compilation job,
 or dynamic validation was executed. The checked-in Rust contract is source for
