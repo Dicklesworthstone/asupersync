@@ -421,3 +421,119 @@ fn browser_boundary_docs_keep_single_owner_language_aligned() {
         );
     }
 }
+
+#[test]
+fn packaged_facade_preserves_host_stream_and_rejection_boundaries() {
+    // Execute the committed WASM and facade. The transport adapter supplies
+    // native WHATWG streams, not a live HTTP/3 connection or browser proof.
+    let script = r#"
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const core = await import(pathToFileURL(process.cwd() + '/packages/browser-core/index.js'));
+await core.default({ module_or_path: readFileSync('packages/browser-core/asupersync_bg.wasm') });
+const ok = result => { assert.equal(result.outcome, 'ok', JSON.stringify(result)); return result.value; };
+const rejected = (result, operation, message) => {
+  assert.deepEqual(result, {
+    outcome: 'err',
+    failure: { code: 'invalid_handle', recoverability: 'permanent',
+      message: `webtransport_${operation} rejected: ${message}` },
+  });
+};
+const unknown = new core.TaskHandle({ kind: 'task', slot: 12345, generation: 1 });
+for (const operation of ['send', 'recv', 'close']) {
+  const invoke = core[`webtransport_${operation}`];
+  rejected(invoke({ session: unknown }), operation, 'unknown WebTransport session handle');
+  let reads = 0;
+  rejected(invoke({ get session() { reads++; throw new Error('session getter refused'); } }),
+    operation, 'session getter refused');
+  assert.equal(reads, 1);
+  rejected(invoke({ session: {} }), operation,
+    `${operation === 'close' ? 'sessionHandle' : 'request.session'} must be a browser-core handle`);
+}
+for (const operation of ['recv', 'close', 'cancel']) {
+  let reads = 0;
+  const result = core[`websocket_${operation}`]({
+    get socket() { reads++; throw new Error('socket getter refused'); },
+    get reason() { assert.fail('socket validation must precede reason access'); },
+    get kind() { assert.fail('socket access must precede kind access'); },
+  });
+  assert.equal(reads, 1);
+  assert.deepEqual(result, { outcome: 'err', failure: {
+    code: 'internal_failure', recoverability: 'unknown',
+    message: `websocket_${operation} failed: socket getter refused`,
+  }});
+}
+const adapters = [];
+class HostDatagrams {
+  constructor(url, options) {
+    assert.equal(url, 'https://example.test/transport');
+    this.events = [];
+    this.ready = Promise.resolve();
+    this.closed = new Promise(resolve => { this.finish = resolve; });
+    this.datagrams = {
+      readable: new ReadableStream({
+        start: controller => { this.input = controller; },
+        cancel: reason => { this.events.push(['cancel', reason]); },
+      }),
+      writable: new WritableStream({
+        write: value => {
+          if (options?.rejectWrite) throw new Error('datagram refused');
+          this.events.push(['write', [...value]]);
+        },
+        close: () => { this.events.push(['writer-close']); },
+      }),
+    };
+    adapters.push(this);
+  }
+  close(info) { this.events.push(['transport-close', info?.reason]); }
+}
+globalThis.WebTransport = HostDatagrams;
+const turn = () => new Promise(resolve => setImmediate(resolve));
+const runtime = ok(core.runtime_create());
+const scope = ok(core.scope_enter({ parent: runtime, label: 'facade-boundaries' }));
+const session = ok(core.webtransport_open({ scope, url: 'https://example.test/transport' }));
+await turn();
+const host = adapters.at(-1);
+ok(core.webtransport_send({ session, value: new Uint8Array([9, 2, 3, 8]).subarray(1, 3) }));
+await turn();
+assert.deepEqual(host.events, [['write', [2, 3]]]);
+host.input.enqueue(new Uint8Array([4, 5]));
+await turn();
+assert.deepEqual(ok(core.webtransport_recv({ session })), new Uint8Array([4, 5]));
+assert.equal(ok(core.webtransport_recv({ session })), undefined);
+const badDatagram = core.webtransport_send({ session, value: {} });
+assert.equal(badDatagram.failure.code, 'compatibility_rejected');
+assert.match(badDatagram.failure.message, /^webtransport_send rejected: request.value must be/);
+const closed = core.webtransport_close({ session, reason: 'finished' });
+assert.equal(closed.outcome, 'cancelled');
+await turn();
+assert.equal(host.datagrams.readable.locked, false);
+assert.equal(host.datagrams.writable.locked, false);
+assert.equal(host.events.filter(event => event[0] === 'transport-close').length, 1);
+rejected(core.webtransport_close({ session }), 'close', 'unknown WebTransport session handle');
+rejected(core.webtransport_recv({ session }), 'recv', 'unknown WebTransport session handle');
+const failing = ok(core.webtransport_open({ scope, url: 'https://example.test/transport',
+  options: { rejectWrite: true } }));
+await turn();
+const failingHost = adapters.at(-1);
+ok(core.webtransport_send({ session: failing, value: 'probe' }));
+await turn();
+rejected(core.webtransport_recv({ session: failing }), 'recv', 'unknown WebTransport session handle');
+assert(failingHost.events.some(event => event[0] === 'transport-close' && event[1] === 'write_failure'));
+ok(core.scope_close(scope));
+ok(core.runtime_close(runtime));
+console.log('packaged facade rejection, byte-subview, stream, and cleanup boundaries passed');
+"#;
+    let output = std::process::Command::new("node")
+        .args(["--input-type=module", "--eval", script])
+        .current_dir(repo_root())
+        .output()
+        .expect("Node is required for the packaged facade boundary contract");
+    assert!(
+        output.status.success(),
+        "packaged facade failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
