@@ -62,6 +62,10 @@ The subsequent UTC negative fixture and driverless-socket test add one JSON
 token and one Rust test file to the census; neither changes codec or persisted
 format evidence.
 
+The final release contract repairs add nine further JSON tokens in test
+sources, for 6,766 tokens across the same 4,385 Rust files. The historical
+provenance guards and CLI role check leave production codec evidence unchanged.
+
 ## Registry reconciliation
 
 The terminal packet requires the live registry to retain:
