@@ -2204,7 +2204,6 @@ mod tests {
     mod gh67_fallback_io_driver {
         use super::*;
         use crate::net::udp::fallback_io_test_support::signal_waker;
-        use std::io::Write as _;
 
         /// A connected, non-blocking pair: the async stream under test and
         /// the std peer that can make it readable at will.

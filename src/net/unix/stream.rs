@@ -906,7 +906,6 @@ mod tests {
         use crate::net::udp::fallback_io_test_support::signal_waker;
         use crate::runtime::{IoDriverHandle, LabReactor};
         use crate::types::{Budget, RegionId, TaskId};
-        use std::io::Write as _;
         use std::sync::atomic::Ordering;
         use std::time::Duration;
 

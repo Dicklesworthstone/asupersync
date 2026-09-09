@@ -647,7 +647,11 @@ mod tests {
             );
             let dir = tempdir().expect("create temp dir");
             let path = dir.path().join("driverless_accept.sock");
-            let listener = UnixListener::bind(&path).expect("bind listener");
+            let std_listener = net::UnixListener::bind(&path).expect("bind listener");
+            std_listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let listener = UnixListener::from_std(std_listener).expect("wrap listener");
             let (signal, waker, rx) = signal_waker();
             let mut task_cx = Context::from_waker(&waker);
 

@@ -1702,6 +1702,12 @@ impl ReactorRegistration {
         self.registration.is_some()
     }
 
+    /// The live registration, for tests that inspect its interest.
+    #[cfg(test)]
+    pub(crate) const fn as_ref(&self) -> Option<&IoRegistration> {
+        self.registration.as_ref()
+    }
+
     #[cfg(test)]
     pub(crate) const fn is_none(&self) -> bool {
         self.registration.is_none()
@@ -2419,6 +2425,8 @@ impl UdpSocket {
     /// Unlike the all-packets async helper, this may return a successful prefix
     /// without an error. Its caller owns and retries the unsent suffix. No
     /// datagram has been sent when this returns Pending.
+    // Native-only callers (the QUIC endpoint); the wasm32 body is a stub.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn poll_send_batch_to_with_strategy(
         &mut self,
         cx: &Context<'_>,
@@ -3296,6 +3304,8 @@ impl UdpSocket {
     }
 
     /// Release readiness ownership without requiring a live cancellation context.
+    // Native-only callers (the QUIC endpoint).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn clear_registration(&mut self) {
         self.registration.clear();
     }

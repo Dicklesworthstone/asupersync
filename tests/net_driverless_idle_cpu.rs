@@ -13,6 +13,10 @@
 //! then releases the wait and checks the socket saw exactly the readiness it
 //! was promised.
 //!
+//! The idle window opens only after the waiting side has acknowledged its
+//! first `Pending` poll (an explicit handshake, not a settle sleep), and every
+//! wait on the helper is bounded so a regression fails instead of hanging.
+//!
 //! Gating: `test-internals` (for the fallback driver probe) and Linux (the CPU
 //! accounting reads `/proc/self/stat`). This file intentionally holds a single
 //! test so the process-wide CPU accounting is not polluted by sibling tests on
@@ -26,8 +30,8 @@ use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::os::unix::net::{UnixDatagram as StdUnixDatagram, UnixStream as StdUnixStream};
 use std::pin::Pin;
-use std::sync::mpsc;
-use std::task::Poll;
+use std::sync::mpsc::{self, Sender};
+use std::task::{Context, Poll};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,9 +43,9 @@ use futures_lite::future::block_on;
 
 /// The idle window measured per socket type.
 const IDLE_WINDOW: Duration = Duration::from_millis(800);
-/// Time given to the helper thread to reach its first `Pending` poll before
-/// the window opens, so connection setup is not charged to the window.
-const SETTLE: Duration = Duration::from_millis(150);
+/// Bound on every wait for the helper thread: its first `Pending` poll, and
+/// its completion after the peer releases it.
+const HELPER_BOUND: Duration = Duration::from_secs(10);
 /// Generous bound: a parked wait costs ~0 %, the defect costs ~100 %. The
 /// slack absorbs shared-worker noise.
 const MAX_IDLE_CPU_PERCENT: u64 = 15;
@@ -68,26 +72,44 @@ struct IdleOutcome {
     cpu_fraction_percent: u64,
 }
 
+/// Handed to the waiting side; it reports every `Pending` poll so the
+/// measuring side knows the wait has actually parked (or started spinning)
+/// before the idle window opens.
+#[derive(Clone)]
+struct PendingSignal(Sender<()>);
+
+impl PendingSignal {
+    fn note<T>(&self, poll: Poll<T>) -> Poll<T> {
+        if poll.is_pending() {
+            let _ = self.0.send(());
+        }
+        poll
+    }
+}
+
 /// Runs `wait` on a helper thread under `futures_lite::block_on` (no runtime,
-/// no ambient `Cx`), accounts process CPU across an idle window while the
-/// peer stays silent, then runs `release` (which makes the fd ready) and
-/// joins the helper. Returns the window's outcome and what the wait produced.
+/// no ambient `Cx`), opens the idle window once the helper has reported its
+/// first `Pending` poll, accounts process CPU across the window while the peer
+/// stays silent, then runs `release` (which makes the fd ready) and waits,
+/// bounded, for the helper's result.
 fn measure_driverless_wait<T: Send + 'static>(
     label: &str,
-    wait: impl FnOnce() -> T + Send + 'static,
+    wait: impl FnOnce(PendingSignal) -> T + Send + 'static,
     release: impl FnOnce(),
 ) -> (IdleOutcome, T) {
-    let (started_tx, started_rx) = mpsc::channel();
+    let (pending_tx, pending_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
     let helper = thread::spawn(move || {
         assert!(
             Cx::current().is_none(),
             "the helper must poll with no ambient Cx"
         );
-        started_tx.send(()).expect("report helper start");
-        wait()
+        let value = wait(PendingSignal(pending_tx));
+        let _ = result_tx.send(value);
     });
-    started_rx.recv().expect("helper thread started");
-    thread::sleep(SETTLE);
+    pending_rx
+        .recv_timeout(HELPER_BOUND)
+        .unwrap_or_else(|_| panic!("{label}: the wait never reported a Pending poll"));
 
     let ticks_before = process_cpu_ticks();
     let started = Instant::now();
@@ -102,7 +124,10 @@ fn measure_driverless_wait<T: Send + 'static>(
     };
 
     release();
-    let value = helper
+    let value = result_rx
+        .recv_timeout(HELPER_BOUND)
+        .unwrap_or_else(|_| panic!("{label}: the wait did not complete after its peer released it"));
+    helper
         .join()
         .unwrap_or_else(|_| panic!("{label}: helper thread panicked"));
     (outcome, value)
@@ -124,16 +149,18 @@ fn note_if_spinning(failures: &mut Vec<String>, label: &str, outcome: IdleOutcom
     }
 }
 
-/// Reads one chunk from an `AsyncRead` under `block_on`, returning the bytes.
-fn read_one_chunk<R: AsyncRead + Unpin>(mut reader: R) -> Vec<u8> {
-    block_on(poll_fn(|cx| {
+/// Reads one chunk from an `AsyncRead` under `block_on`, reporting every
+/// `Pending` poll on `signal`, and returns the bytes.
+fn read_one_chunk<R: AsyncRead + Unpin>(mut reader: R, signal: &PendingSignal) -> Vec<u8> {
+    block_on(poll_fn(|cx: &mut Context<'_>| {
         let mut buf = [0u8; 64];
         let mut read_buf = ReadBuf::new(&mut buf);
-        match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
+        let poll = match Pin::new(&mut reader).poll_read(cx, &mut read_buf) {
             Poll::Ready(Ok(())) => Poll::Ready(read_buf.filled().to_vec()),
             Poll::Ready(Err(err)) => panic!("driverless read failed: {err}"),
             Poll::Pending => Poll::Pending,
-        }
+        };
+        signal.note(poll)
     }))
 }
 
@@ -155,30 +182,32 @@ fn driverless_socket_waits_park_instead_of_spinning() {
     });
     let (tcp_outcome, tcp_bytes) = measure_driverless_wait(
         "tcp stream read",
-        move || {
+        move |signal| {
             let stream = block_on(TcpStream::connect(addr)).expect("driverless connect");
-            read_one_chunk(stream)
+            read_one_chunk(stream, &signal)
         },
         || {
-            accept_rx.recv().expect("async side accepted");
+            accept_rx
+                .recv_timeout(HELPER_BOUND)
+                .expect("async side accepted");
             let mut peer = acceptor.join().expect("acceptor thread");
             peer.write_all(b"tcp").expect("peer write");
         },
     );
-    note_if_spinning(&mut failures,"tcp stream read", tcp_outcome);
+    note_if_spinning(&mut failures, "tcp stream read", tcp_outcome);
     assert_eq!(tcp_bytes, b"tcp", "tcp stream read returned the released bytes");
 
     // Unix stream pair.
     let (unix_stream, unix_peer) = UnixStream::pair().expect("unix stream pair");
     let (unix_outcome, unix_bytes) = measure_driverless_wait(
         "unix stream read",
-        move || read_one_chunk(unix_stream),
+        move |signal| read_one_chunk(unix_stream, &signal),
         || {
             let mut writer = unix_peer.as_std();
             writer.write_all(b"unix").expect("peer write");
         },
     );
-    note_if_spinning(&mut failures,"unix stream read", unix_outcome);
+    note_if_spinning(&mut failures, "unix stream read", unix_outcome);
     assert_eq!(
         unix_bytes, b"unix",
         "unix stream read returned the released bytes"
@@ -189,8 +218,8 @@ fn driverless_socket_waits_park_instead_of_spinning() {
     let mut dgram = UnixDatagram::from_std(dgram_std).expect("wrap datagram");
     let (dgram_outcome, dgram_bytes) = measure_driverless_wait(
         "unix datagram recv",
-        move || {
-            block_on(poll_fn(|cx| dgram.poll_recv_ready(cx))).expect("recv readiness");
+        move |signal| {
+            block_on(poll_fn(|cx| signal.note(dgram.poll_recv_ready(cx)))).expect("recv readiness");
             let mut buf = [0u8; 16];
             let len = dgram.as_std().recv(&mut buf).expect("recv the datagram");
             buf[..len].to_vec()
@@ -199,7 +228,7 @@ fn driverless_socket_waits_park_instead_of_spinning() {
             dgram_peer.send(b"dgram").expect("peer send");
         },
     );
-    note_if_spinning(&mut failures,"unix datagram recv", dgram_outcome);
+    note_if_spinning(&mut failures, "unix datagram recv", dgram_outcome);
     assert_eq!(
         dgram_bytes, b"dgram",
         "unix datagram recv returned the released datagram"
@@ -212,14 +241,16 @@ fn driverless_socket_waits_park_instead_of_spinning() {
     let connect_path = path.clone();
     let (accept_outcome, accepted) = measure_driverless_wait(
         "unix listener accept",
-        move || block_on(unix_listener.accept()).map(|_| ()),
+        move |signal| {
+            block_on(poll_fn(|cx| signal.note(unix_listener.poll_accept(cx)))).map(|_| ())
+        },
         || {
             let _peer = StdUnixStream::connect(&connect_path).expect("peer connect");
             // Keep the peer alive until the accept has returned.
             thread::sleep(Duration::from_millis(200));
         },
     );
-    note_if_spinning(&mut failures,"unix listener accept", accept_outcome);
+    note_if_spinning(&mut failures, "unix listener accept", accept_outcome);
     accepted.expect("unix listener accepted the released connection");
 
     assert!(
