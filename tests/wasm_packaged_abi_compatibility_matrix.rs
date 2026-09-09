@@ -426,7 +426,7 @@ fn browser_boundary_docs_keep_single_owner_language_aligned() {
 fn packaged_facade_preserves_host_stream_and_rejection_boundaries() {
     // Execute the committed WASM and facade. The transport adapter supplies
     // native WHATWG streams, not a live HTTP/3 connection or browser proof.
-    let script = r#"
+    let script = r"
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -524,7 +524,7 @@ assert(failingHost.events.some(event => event[0] === 'transport-close' && event[
 ok(core.scope_close(scope));
 ok(core.runtime_close(runtime));
 console.log('packaged facade rejection, byte-subview, stream, and cleanup boundaries passed');
-"#;
+";
     let output = std::process::Command::new("node")
         .args(["--input-type=module", "--eval", script])
         .current_dir(repo_root())
