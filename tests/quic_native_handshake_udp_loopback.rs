@@ -1532,7 +1532,7 @@ mod managed_quiet {
                 }
                 count >= first_pto + 6
                     && number(row, "deadline") > number(&first, "deadline")
-                    && number(row, "deadline") - number(row, "now") > 800_000_000
+                    && number(row, "deadline") - number(row, "now") > 1_500_000_000
             },
         );
         assert!(rearms.len() >= 2);
@@ -1566,6 +1566,25 @@ mod managed_quiet {
         let removed_by_ack = stabilize(&mut server);
         assert_eq!(removed_by_ack["pending_timers"], 0);
         assert_eq!(removed_by_ack["state"]["pto_count"], 0);
+
+        // The withheld peer legitimately contributes a long RTT sample on
+        // resume. ACK reset clears PTO backoff, not the RTT estimator. Obtain
+        // fresh samples from real protected stream/ACK exchanges before asking
+        // for a shorter deadline; otherwise the stall itself can make the
+        // new zero-backoff PTO longer than the retained backed-off one.
+        let mut rtt_recovery = Vec::new();
+        let mut acked = number(&removed_by_ack["state"], "packets_acked");
+        for sequence in 9002..9014 {
+            server.send(json!({"command":"send", "sequence":sequence}));
+            client.until("fresh RTT sample record delivered", |row| {
+                contains_record(row, sequence)
+            });
+            let sampled = server.until("fresh protected stream packet acknowledged", |row| {
+                settled(row) && number(&row["state"], "packets_acked") > acked
+            });
+            acked = number(&sampled["state"], "packets_acked");
+            rtt_recovery.push(sampled);
+        }
 
         // This is an earlier *rearm after ACK*, and includes the observed
         // intervening timer removal. It does not claim an atomic active-handle
@@ -1615,13 +1634,19 @@ mod managed_quiet {
         let server_terminal = server.finish();
         let client_terminal = client.finish();
         let sent = json!([0, 1, 2, 3, 4, 5]);
-        let echoed = json!([0, 1, 2, 9000, 3, 9001, 4, 5]);
+        let echoed = json!([
+            0, 1, 2, 9000, 3, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012,
+            9013, 9001, 4, 5
+        ]);
         assert_eq!(client_terminal["state"]["sent"], sent);
         assert_eq!(server_terminal["state"]["received"], sent);
         assert_eq!(server_terminal["state"]["sent"], echoed);
         assert_eq!(client_terminal["state"]["received"], echoed);
         assert_eq!(server_terminal["state"]["received_bytes"], 6 * RECORD_BYTES);
-        assert_eq!(client_terminal["state"]["received_bytes"], 8 * RECORD_BYTES);
+        assert_eq!(
+            client_terminal["state"]["received_bytes"],
+            20 * RECORD_BYTES
+        );
         for terminal in [&server_terminal, &client_terminal] {
             assert_eq!(terminal["source"], source());
             assert_eq!(terminal["executable"], executable);
@@ -1642,6 +1667,7 @@ mod managed_quiet {
                 "initial":first, "rearms":rearms, "later":later,
                 "packet_before_deadline":ingress, "packet_received_at":received_at,
                 "retained_deadline":retained_deadline, "removed_by_ack":removed_by_ack,
+                "fresh_stream_ack_samples":rtt_recovery,
                 "earlier_rearm_after_ack":earlier},
             "periodic_wake_negative":mutation, "server":server_terminal, "client":client_terminal,
             "elapsed_nanos":started.elapsed().as_nanos(),
