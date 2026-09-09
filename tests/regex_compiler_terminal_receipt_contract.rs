@@ -148,25 +148,35 @@ fn terminal_validate(value: &Value) -> Result<(), String> {
         (
             "artifacts/regex_semantic_terminal_receipt_v1.json",
             "42d00d7c92b2b4a9974c252481432142eae2927b9442ffe08265769e00f7c8a2",
+            "42d00d7c92b2b4a9974c252481432142eae2927b9442ffe08265769e00f7c8a2",
         ),
         (
             "artifacts/regex_ir_schema_contract_v1.json",
             "8f03a973c2b356ddf47e9db8140c50a36f1a6a1ae0f740d187f7e6f2f1184f21",
+            "6bd97aaf8dc4e472849d583560fbce04cc89b8a523f8affdbb0675a4801e281d",
         ),
         (
             "artifacts/regex_ir_lowering_contract_v1.json",
             "6293e939cf7a8c21176325503f8709e50a69b3f9643b5e28383953bdddee6dc6",
+            "ca4b6827d3775261ba100546de7ff8f183365b8ec47f5fe085d2887c8398b38c",
         ),
         (
             "artifacts/regex_priority_capture_lowering_contract_v1.json",
             "27334fd193274b52ccf1952b212dd7d07237fdd96240e4e61587ee3b2d41257a",
+            "fff4b34e537a16b72077cb9289b3f6fcff439238212c7b4471e44410af6c2086",
         ),
     ];
     if predecessors.len() != expected_predecessors.len() {
         return Err("predecessor count drifted".to_owned());
     }
-    for (row, (path, digest)) in predecessors.iter().zip(expected_predecessors) {
-        if text(row, "path")? != path || text(row, "sha256")? != digest || sha256(path) != digest {
+    // Preserve the captured receipt while authenticating the reviewed metadata successors.
+    for (row, (path, captured_digest, current_digest)) in
+        predecessors.iter().zip(expected_predecessors)
+    {
+        if text(row, "path")? != path
+            || text(row, "sha256")? != captured_digest
+            || sha256(path) != current_digest
+        {
             return Err(format!("predecessor drifted: {path}"));
         }
     }

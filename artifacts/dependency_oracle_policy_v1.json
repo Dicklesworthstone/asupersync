@@ -109,7 +109,7 @@
       },
       {
         "path": "asupersync-wasm/Cargo.toml",
-        "sha256": "6ce38190b3bc3815aeff60ca1793fb8f737c6b97422d7c8ff1091e1349a9d9e2",
+        "sha256": "2bceddad6004d9def7815dc2e4daa621e652eb0abb9028bcdf1291a5bcb90a9d",
         "line_count": 60,
         "scope": "explicitly-excluded-wasm-project"
       },

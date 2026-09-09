@@ -8,12 +8,12 @@
   "captured_date_utc": "2026-08-05",
   "current_source_review": {
     "reviewed_date_utc": "2026-09-09",
-    "reference_commit": "2e242edb9ad7f6dacc9debf59a352779d88faa91",
+    "reference_commit": "532a412fc6427d985293cf9fc2397bb3f892ac3d",
     "ledger_source_commit": "376c313540a58d2c8e6618cf40b4ac87ed36ec53",
     "scope": "Current source pins, unchanged direct dependency identities and path census, and all 78 relevant rows of the checked marginal ledger. The original marginal_graph receipt and KEEP authority remain historical and unchanged.",
     "reviewed_changes": [
       "Manifest and lock release metadata, additive features, capability/baseline routing and verification metadata changed without altering the two native dependency declarations or locked identities.",
-      "IoDriver adds a weak reactor handle for timer publication. TCP changes only portable socket-option test assertions and an unused test binding.",
+      "IoDriver adds a weak reactor handle for timer publication. TCP and Unix sockets now register driverless readiness with the shared fallback reactor; their socket-option and SockRef boundaries remain unchanged.",
       "UDP adds a shared driverless reactor fallback, ambient-driver migration, BSD reconnection and connected-send handling, target-aware sendmmsg/GSO reporting, and bounded batch polling that preserves committed prefixes. Its two SockRef buffer accessors remain unchanged.",
       "ATP transfer and NATS lifecycle changes leave their existing SockRef control-buffer helper and test-only socket use unchanged.",
       "The checked ledger still has 39 active rows per dependency, identical marginal package sets and counts, no marginal native code, and empty marginal build-script and proc-macro sets. It was not regenerated for this review."
@@ -95,13 +95,13 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
-      "line_count": 7058
+      "sha256": "660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa",
+      "line_count": 7067
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
-      "line_count": 3264
+      "sha256": "49e85f8defbccb4e9cce3c37d302e965b36de518f8929999928d9464e83ee791",
+      "line_count": 3296
     },
     {
       "path": "artifacts/dependency_cutover_policy_v1.json",
@@ -120,8 +120,8 @@
     },
     {
       "path": "artifacts/dependency_verification_matrix_v1.json",
-      "sha256": "6d398539d44a38fe0a87a5d4b24dff7915898ce5f99005b1fe2cb51f86642e10",
-      "line_count": 88541
+      "sha256": "d6e0488f1e0b16339e0e20b0c36a55b48e411b904a13d02ceee921a1beab782d",
+      "line_count": 88887
     },
     {
       "path": "src/runtime/reactor/mod.rs",
@@ -175,8 +175,8 @@
     },
     {
       "path": "src/net/tcp/stream.rs",
-      "sha256": "6eb2b1bb7f109e424bc42eedd2467a53435c14a0155e76ba3c9e0820869edad0",
-      "line_count": 2915
+      "sha256": "af537d7d902572337edae668493393822364be4837a021ae78e2fba2f87fff54",
+      "line_count": 3006
     },
     {
       "path": "src/net/tcp/traits.rs",
@@ -185,18 +185,18 @@
     },
     {
       "path": "src/net/udp.rs",
-      "sha256": "63803ea49646611dc3ffed0cab6e7bc7190886fd134285c30c8bde45fb5bca93",
-      "line_count": 5209
+      "sha256": "8d62b3d735d62decfcb6cf954e66599bbb7e35e57021fe2692b7936cb4ef730b",
+      "line_count": 5288
     },
     {
       "path": "src/net/unix/listener.rs",
-      "sha256": "012546852c0aca57f9e194b3503c13dac8515fe930713b65a10d63cda364a9d5",
-      "line_count": 1118
+      "sha256": "fee9351d7be31aa066989d90942369f5bb9454f7553fb3331813368c70e822e3",
+      "line_count": 1131
     },
     {
       "path": "src/net/unix/stream.rs",
-      "sha256": "4b8ab25359a23c81493564a3d88eb85da086f4540deb1cc08c8d32cbbbf56076",
-      "line_count": 1539
+      "sha256": "ad5c7c8e1d58cf96763d1d07b47ba371f999d5690392f7297be8f588500f1635",
+      "line_count": 1617
     },
     {
       "path": "src/net/atp/transport_rq/mod.rs",

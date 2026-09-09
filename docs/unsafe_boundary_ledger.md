@@ -54,6 +54,14 @@ correctly. Site IDs, categories, invariants, evidence requirements, and the
 must still pass; these location updates establish no new platform or runtime
 safety result.
 
+The September 9 release review at `754bbed5ee379e9efe278e343b79acbc29984134`
+moves 20 existing locators after the driverless socket and runtime test changes.
+All matched unsafe statements are unchanged: 13 TCP test calls, two Unix
+ancillary locators, four runtime environment locators, and one pool test allow.
+The 100 rows and 892 operations retain their categories, safety invariants,
+evidence requirements, and platform coverage limits. This is source alignment,
+not new unsafe code or additional platform execution evidence.
+
 ## Row Schema
 
 Each `sites[]` row must include:

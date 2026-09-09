@@ -94,7 +94,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 44410,
       "record_count": 751,
-      "sha256": "e46a37481e729758d6c812519631f3fd0a04024cee0ae802ae4e24706005f80d"
+      "sha256": "212a1823de1142c907afb6fc8879fdc9200b05d98a7206cede5821907b07582c"
     },
     {
       "input_id": "K1-5-INPUT-K1-1-DOCUMENT",
@@ -112,7 +112,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 99472,
       "record_count": 2688,
-      "sha256": "7c075165c3046d6e4aa2c70eaac68e3b207abf20a2e209895792c2f3b68a16b1"
+      "sha256": "5c08ff63325f0b239c4c26dbf6b544426d2d32e272b645fc63e7aefb3e0ad939"
     },
     {
       "input_id": "K1-5-INPUT-K1-2-ARTIFACT",
@@ -121,7 +121,7 @@
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
       "byte_count": 84167,
       "record_count": 1411,
-      "sha256": "7680fee4efa391b697df0e556b4aa8add60d153369554035ea97df3abdb315fc"
+      "sha256": "9c25edb48691df6e714c3cf35c3fe201e941a84f7d130f59f050f4a33e86b215"
     },
     {
       "input_id": "K1-5-INPUT-K1-2-DOCUMENT",
@@ -139,7 +139,7 @@
       "path": "tests/kafka_k1_protocol_security_support_policy_contract.rs",
       "byte_count": 52491,
       "record_count": 1495,
-      "sha256": "e8bb8925487aa2c06a09e772afdbd2c0a1bc4a5b8d91d06064365fff7b945329"
+      "sha256": "4a73d39ceb870ff04ca31fe90595a9586761e2b538bec8f338f9a76cca5e72e3"
     },
     {
       "input_id": "K1-5-INPUT-K1-3-ARTIFACT",
@@ -148,7 +148,7 @@
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
       "byte_count": 40490,
       "record_count": 779,
-      "sha256": "0ffc3911840b8bbd8562d91c619ebf0bbe688c48852f09d63f88bbdf20ebb25c"
+      "sha256": "a50817e12b736506928514d38da3c9a4f7cf97f77309f28b7432ae981d970cf7"
     },
     {
       "input_id": "K1-5-INPUT-K1-3-DOCUMENT",
@@ -166,7 +166,7 @@
       "path": "tests/kafka_k1_public_api_contract.rs",
       "byte_count": 66587,
       "record_count": 2001,
-      "sha256": "53fab9c06315144d5e7539f041726df07d0428760ce7fcfaafddaa2a149cbcb0"
+      "sha256": "7cdc78fdf4a9ad42f4618103909824ef0a91cbd34565daa2eb149939cfea3eee"
     },
     {
       "input_id": "K1-5-INPUT-K1-4-ARTIFACT",
@@ -175,7 +175,7 @@
       "path": "artifacts/kafka_k1_resource_lifecycle_contract_v1.json",
       "byte_count": 201892,
       "record_count": 1922,
-      "sha256": "d7220011d7c0e71327cda7b8a92d8b215f99fa5206c659e634c2aeb5138c321a"
+      "sha256": "195dd36bc87d236c30d7b83626cab255d73ace42c474be1d71e8d8f2ba761ff3"
     },
     {
       "input_id": "K1-5-INPUT-K1-4-DOCUMENT",
@@ -193,7 +193,7 @@
       "path": "tests/kafka_k1_resource_lifecycle_contract.rs",
       "byte_count": 75501,
       "record_count": 2083,
-      "sha256": "81815a527073e220c7224d4abae835c2087f09ad1cc477170a9d2ef6e0e9f3db"
+      "sha256": "2b957d35450dca0c2041a5456a22c7e859152c6f9f2432d563a61c6085a5692f"
     }
   ],
   "child_packet_receipts": [
@@ -501,7 +501,7 @@
       "semantic_authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json",
       "semantic_authority_byte_count": 244004,
       "semantic_authority_record_count": 2687,
-      "semantic_authority_sha256": "1f6ecabe42d72251a7ea0ae9747afbcf3d2e104005424d851d6f2ce610283aa0",
+      "semantic_authority_sha256": "a5045d8d466677ac052e3faa8279eb6e990b7e9b89f18e164da2de0b3a4bf780",
       "semantic_row_count": 102,
       "classification_counts": {
         "RESOURCE": 45,
@@ -1612,7 +1612,7 @@
   "shadow_semantic_operation_partition": {
     "authority_path": "artifacts/kafka_incumbent_semantics_matrix_v1.json#/operations",
     "authority_via_child_stage": "K1.3",
-    "authority_file_sha256": "1f6ecabe42d72251a7ea0ae9747afbcf3d2e104005424d851d6f2ce610283aa0",
+    "authority_file_sha256": "a5045d8d466677ac052e3faa8279eb6e990b7e9b89f18e164da2de0b3a4bf780",
     "authority_semantic_row_count": 40,
     "semantic_operation_id_set_sha256": "67852f4d78939a533c5846b7e129c0a41cf225bba4bc884b14af7b930b39b7a7",
     "semantic_operation_id_set_rule": "Bytewise sort 40 unique UTF-8 semantic IDs, append one LF per ID, and SHA-256.",
@@ -2122,7 +2122,7 @@
       "approval_projection_sha256": {"pointer": "/approval_gates", "rule": "ROW_SET_V1"},
       "no_claim_boundary_sha256": {"pointer": "/no_claim_boundaries", "rule": "STRING_SET_V1"}
     },
-    "authority_input_projection_sha256": "a39f6e1f23d511d79ac3d1e88cdf1b334054824e41f14d7557a801caeecd8ed7",
+    "authority_input_projection_sha256": "da30947fbf4adf3fe65925f665dfda4356cb58ac5a69fb3463783ddab7ddc317",
     "child_receipt_projection_sha256": "64626f739641a6821591cfc0efd08b7556e759d4c3f70f7d8496b682ca880938",
     "lineage_conflict_projection_sha256": "9548fc723b4803575fd901618b66f45931e657c116ef00a287cfd5b75d733acc",
     "obligation_partition_projection_sha256": "3887d22d50b080008eab405f3558e684e627497e563f03f5926d12067125abb6",
