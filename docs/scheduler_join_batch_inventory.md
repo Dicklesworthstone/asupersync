@@ -69,6 +69,11 @@ releasing pending credit. Current-thread lifecycle and timer repairs preserve
 global batch-one and owner-local batch-sixteen admission bounds. The scheduler
 stop-predicate documentation was corrected separately without changing code.
 
+The follow-up at `f9328e57b` only clarifies `builder.rs` documentation for
+current-thread nesting, fallback, synchronous blocking, and the bounded drain.
+Its source hash, line count, and 21 existing builder anchors are refreshed;
+the completion, admission, and batching code is unchanged.
+
 This reconciliation updates completion descriptions as well as pins and
 anchors. It changes no benchmark source or baseline row, records no
 measurement, and does not satisfy the p50, p95, allocation, repetition, or

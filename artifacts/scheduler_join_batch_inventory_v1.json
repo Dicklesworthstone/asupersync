@@ -68,6 +68,7 @@
     "reconciliation_id": "SCHED-JOIN-BATCH-SOURCE-RECONCILIATION-2026-09-09",
     "captured_date_utc": "2026-09-09",
     "reference_commit": "5af6299e1860b2f5f5cc4ea6188999867385a4c3",
+    "documentation_followup_commit": "f9328e57b",
     "reconciliation_state": "CURRENT_TREE_SOURCE_PIN_MAINTENANCE",
     "source_pin_path_count": 15,
     "reconciled_path_count": 10,
@@ -86,8 +87,8 @@
       },
       {
         "path": "src/runtime/builder.rs",
-        "sha256": "952c6bcf45b1b4d347d0437a06e44fcb9071492a8305d05079cdfa2756b61c7a",
-        "line_count": 11410,
+        "sha256": "8652c283632b417043676e99b6006976846d787643a5ffe49c9d735a6411b57a",
+        "line_count": 11447,
         "classification": "PRODUCTION_JOIN_PRODUCER_LEASES_AND_ADDITIVE_CHECKED_HANDLE_PRESERVE_LEGACY_PANIC_API"
       },
       {
@@ -164,8 +165,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "952c6bcf45b1b4d347d0437a06e44fcb9071492a8305d05079cdfa2756b61c7a",
-      "line_count": 11410,
+      "sha256": "8652c283632b417043676e99b6006976846d787643a5ffe49c9d735a6411b57a",
+      "line_count": 11447,
       "role": "public request-scoped Cx entry plus legacy RuntimeHandle spawn, JoinHandle state, producer leases, completion, admission, and shutdown; additive checked observer"
     },
     {
@@ -260,12 +261,12 @@
       "repoll_shape": "assertion panic after terminal consumption",
       "selected_for_safe_experiment": true,
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4379, "fragment": "pub fn spawn<F>(&self, future: F)"},
-        {"path": "src/runtime/builder.rs", "line": 4390, "fragment": "pub fn try_spawn<F>(&self, future: F)"},
-        {"path": "src/runtime/builder.rs", "line": 4497, "fragment": "pub struct JoinHandle<T>"},
-        {"path": "src/runtime/builder.rs", "line": 4521, "fragment": "impl<T> Future for JoinHandle<T>"},
-        {"path": "src/runtime/builder.rs", "line": 5355, "fragment": "struct JoinState<T>"},
-        {"path": "src/runtime/builder.rs", "line": 5560, "fragment": "fn complete(mut self, output: std::thread::Result<T>)"}
+        {"path": "src/runtime/builder.rs", "line": 4416, "fragment": "pub fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 4427, "fragment": "pub fn try_spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 4534, "fragment": "pub struct JoinHandle<T>"},
+        {"path": "src/runtime/builder.rs", "line": 4558, "fragment": "impl<T> Future for JoinHandle<T>"},
+        {"path": "src/runtime/builder.rs", "line": 5392, "fragment": "struct JoinState<T>"},
+        {"path": "src/runtime/builder.rs", "line": 5597, "fragment": "fn complete(mut self, output: std::thread::Result<T>)"}
       ]
     },
     {
@@ -298,8 +299,8 @@
       "incumbent_contract": "try_spawn returns SpawnError; spawn panics through expect",
       "must_preserve": "fallible and panicking entry points remain distinct",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4379, "fragment": "pub fn spawn<F>(&self, future: F)"},
-        {"path": "src/runtime/builder.rs", "line": 4390, "fragment": "pub fn try_spawn<F>(&self, future: F)"}
+        {"path": "src/runtime/builder.rs", "line": 4416, "fragment": "pub fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 4427, "fragment": "pub fn try_spawn<F>(&self, future: F)"}
       ]
     },
     {
@@ -309,8 +310,8 @@
       "incumbent_contract": "JoinProducer::complete stores one result unless terminal state already exists and releases its producer lease; poll takes the result once and returns T",
       "must_preserve": "exactly one terminal value is observable",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4531, "fragment": "match guard.result.take()"},
-        {"path": "src/runtime/builder.rs", "line": 5560, "fragment": "fn complete(mut self, output: std::thread::Result<T>)"}
+        {"path": "src/runtime/builder.rs", "line": 4568, "fragment": "match guard.result.take()"},
+        {"path": "src/runtime/builder.rs", "line": 5597, "fragment": "fn complete(mut self, output: std::thread::Result<T>)"}
       ]
     },
     {
@@ -320,8 +321,8 @@
       "incumbent_contract": "one equivalent Waker slot is retained or replaced under the mutex and taken before wake outside the mutex",
       "must_preserve": "no lost wake and no callback under the completion mutex",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4546, "fragment": "guard.waker = Some(cx.waker().clone())"},
-        {"path": "src/runtime/builder.rs", "line": 5560, "fragment": "fn complete(mut self, output: std::thread::Result<T>)"}
+        {"path": "src/runtime/builder.rs", "line": 4583, "fragment": "guard.waker = Some(cx.waker().clone())"},
+        {"path": "src/runtime/builder.rs", "line": 5597, "fragment": "fn complete(mut self, output: std::thread::Result<T>)"}
       ]
     },
     {
@@ -331,8 +332,8 @@
       "incumbent_contract": "CatchUnwind stores the panic payload and the awaiter resumes that payload",
       "must_preserve": "this family remains panic-based rather than silently converting to typed JoinError",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 5049, "fragment": "fn spawn<F>(&self, future: F)"},
-        {"path": "src/runtime/builder.rs", "line": 4521, "fragment": "impl<T> Future for JoinHandle<T>"}
+        {"path": "src/runtime/builder.rs", "line": 5086, "fragment": "fn spawn<F>(&self, future: F)"},
+        {"path": "src/runtime/builder.rs", "line": 4558, "fragment": "impl<T> Future for JoinHandle<T>"}
       ]
     },
     {
@@ -342,7 +343,7 @@
       "incumbent_contract": "the unadmitted callback owns a separate JoinProducer lease and stores the specific reason plus an error payload that becomes an awaiter panic",
       "must_preserve": "the observer resolves exactly once; no typed-cancellation claim is added to this family",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 5072, "fragment": "if let Some(mailbox) = &self.spawn_mailbox"},
+        {"path": "src/runtime/builder.rs", "line": 5109, "fragment": "if let Some(mailbox) = &self.spawn_mailbox"},
         {"path": "src/runtime/spawn_mailbox.rs", "line": 1155, "fragment": "pub fn resolve_failed(self, error: SpawnError)"}
       ]
     },
@@ -353,8 +354,8 @@
       "incumbent_contract": "runtime drain resolves pending requests; dropping the final producer without a result publishes shutdown cancellation and wakes the observer; a handle with cancellation or no executor-side Arc panics when polled",
       "must_preserve": "is_finished becomes true and a subsequent await does not park forever",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 5338, "fragment": "while let Some(request) = mailbox.dequeue()"},
-        {"path": "src/runtime/builder.rs", "line": 5605, "fragment": "impl<T> Drop for JoinProducer<T>"}
+        {"path": "src/runtime/builder.rs", "line": 5375, "fragment": "while let Some(request) = mailbox.dequeue()"},
+        {"path": "src/runtime/builder.rs", "line": 5642, "fragment": "impl<T> Drop for JoinProducer<T>"}
       ]
     },
     {
@@ -364,7 +365,7 @@
       "incumbent_contract": "there is no JoinHandle Drop implementation and task execution is not cancelled by observer drop",
       "must_preserve": "a completion transport replacement must not introduce abort-on-handle-drop",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4497, "fragment": "pub struct JoinHandle<T>"}
+        {"path": "src/runtime/builder.rs", "line": 4534, "fragment": "pub struct JoinHandle<T>"}
       ]
     },
     {
@@ -374,8 +375,8 @@
       "incumbent_contract": "is_finished checks local completion, stored result or cancellation, or executor-side disappearance; repoll asserts",
       "must_preserve": "the query remains non-consuming and repoll remains an explicit failure",
       "anchors": [
-        {"path": "src/runtime/builder.rs", "line": 4512, "fragment": "pub fn is_finished(&self) -> bool"},
-        {"path": "src/runtime/builder.rs", "line": 4521, "fragment": "impl<T> Future for JoinHandle<T>"}
+        {"path": "src/runtime/builder.rs", "line": 4549, "fragment": "pub fn is_finished(&self) -> bool"},
+        {"path": "src/runtime/builder.rs", "line": 4558, "fragment": "impl<T> Future for JoinHandle<T>"}
       ]
     },
     {
@@ -716,7 +717,7 @@
         "profile_ids": ["submit_only", "submit_then_join_all"],
         "baseline_required": true,
         "setup_anchors": [
-          {"path": "src/runtime/builder.rs", "line": 3670, "fragment": "pub fn request_cx_with_budget"}
+          {"path": "src/runtime/builder.rs", "line": 3707, "fragment": "pub fn request_cx_with_budget"}
         ]
       },
       {
