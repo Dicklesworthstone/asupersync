@@ -20,7 +20,7 @@
     "current_shadow_operation_count": 40,
     "reviewed_changes": [
       "Three public consumer diagnostic types and five semantic rows expand the child obligation partition to 33 public and 102 semantic rows; all 12 shared keys and their policy owners remain unchanged.",
-      "Ordered raw producer and consumer properties add two retained configuration bindings and three resource edges. The semantic classes are 45 resource, 26 resource/lifecycle, and 31 context rows, with 64 configuration edges and the same 119 lifecycle edges.",
+      "Ordered raw producer and consumer properties add two retained configuration bindings and three resource edges. The semantic classes are 45 resource, 26 resource/lifecycle, and 31 context rows, with 64 configuration edges and the same 119 lifecycle edges. Three context references describe diagnostic storage: rebalance protocol and counters in K1R-016, and the retained transient error in K1R-025; none acquires a distinct operation owner.",
       "The original K1.2 52-edge typing and three K1.5 overlays remain historical. Four corrected current child groups have explicit replacement typing; the other six retain their historical typing, yielding 56 current edges without per-message or broker evidence.",
       "Rebalance diagnostics and retained transient-error accessors join the local comparison class, yielding 21 local/accessor operations among 40 operations. Native protocol queries and lock acquisition remain synchronous; local classification does not authorize concurrent shadow execution."
     ],
@@ -92,108 +92,108 @@
       "stage": "K1.1",
       "role": "AUTHORITY_NAMESPACE_AND_OBLIGATION_PACKET",
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
-      "byte_count": 42754,
-      "record_count": 738,
-    "sha256": "4524caee86d27e4fe1e52ad7bbc9a250bf1e88987a7181d5a9a8d2931b7fdc3a"
+      "byte_count": 44410,
+      "record_count": 751,
+      "sha256": "b7ea18f49cb652a4eb749f001edbd146108abffa218dcb59d2c6b254875b3086"
     },
     {
       "input_id": "K1-5-INPUT-K1-1-DOCUMENT",
       "stage": "K1.1",
       "role": "AUTHORITY_NAMESPACE_OPERATOR_DOCUMENT",
       "path": "docs/kafka_k1_client_contract.md",
-      "byte_count": 12809,
-      "record_count": 291,
-      "sha256": "3657c47298408fdd5f6906376265ac3c587085ba5b0df67988fac7266fd6e116"
+      "byte_count": 14651,
+      "record_count": 323,
+      "sha256": "f616455c55edaa0568e43c83154d583e33d8337f4688eb6024b842f05fd737d5"
     },
     {
       "input_id": "K1-5-INPUT-K1-1-CONTRACT",
       "stage": "K1.1",
       "role": "AUTHORITY_NAMESPACE_STATIC_CONTRACT_SOURCE",
       "path": "tests/kafka_k1_client_contract.rs",
-      "byte_count": 95396,
-      "record_count": 2585,
-    "sha256": "056cfa1bbf00304f96e62f3a1fc25189c3046ad91953cb44f32a57b9f2121255"
+      "byte_count": 99472,
+      "record_count": 2688,
+      "sha256": "a947d25a558b0b353065c2a9f904ba77ef7bf1cd1ba3caf5956f8bfe0f493fa5"
     },
     {
       "input_id": "K1-5-INPUT-K1-2-ARTIFACT",
       "stage": "K1.2",
       "role": "PROTOCOL_SECURITY_AND_SUPPORT_PACKET",
       "path": "artifacts/kafka_k1_protocol_security_support_policy_v1.json",
-    "byte_count": 82164,
-      "record_count": 1399,
-    "sha256": "a65251dee49ba5d4f39f1be9c3f2eafb33e06089e55bf700bf2474a8139dd9bd"
+      "byte_count": 84167,
+      "record_count": 1411,
+      "sha256": "c0cc2ccfca63e7a66a8ba785977e015a16aec6c076270126f1359afcfa231765"
     },
     {
       "input_id": "K1-5-INPUT-K1-2-DOCUMENT",
       "stage": "K1.2",
       "role": "PROTOCOL_SECURITY_OPERATOR_DOCUMENT",
       "path": "docs/kafka_k1_protocol_security_support_policy.md",
-      "byte_count": 13539,
-      "record_count": 280,
-      "sha256": "c9142b9d00a0b07187a50d224534e9268e5226829dfc5e0bbd04de80bf2a4949"
+      "byte_count": 15251,
+      "record_count": 308,
+      "sha256": "e44af45d6667c1a2fba3aafedb48c9ed2997390d57e14ea3b50a2f7fa8b85810"
     },
     {
       "input_id": "K1-5-INPUT-K1-2-CONTRACT",
       "stage": "K1.2",
       "role": "PROTOCOL_SECURITY_STATIC_CONTRACT_SOURCE",
       "path": "tests/kafka_k1_protocol_security_support_policy_contract.rs",
-      "byte_count": 51761,
-      "record_count": 1477,
-    "sha256": "51e5b48d7a121c2a8c33ee946df565af7173481baeafb5bb3f36cfc970e38db0"
+      "byte_count": 52491,
+      "record_count": 1495,
+      "sha256": "3edd40a7a10e5ce4bad5a9dd2661ad3f1ed2cac5a49123ef3a40073896cbfedc"
     },
     {
       "input_id": "K1-5-INPUT-K1-3-ARTIFACT",
       "stage": "K1.3",
       "role": "PUBLIC_API_CONFIGURATION_ERROR_AND_MIGRATION_PACKET",
       "path": "artifacts/kafka_k1_public_api_contract_v1.json",
-    "byte_count": 37846,
-      "record_count": 753,
-    "sha256": "2dfb53c50b12df0eb0b82da676e699d6db88423d7dd4eaaf30aff6b438d0e6e7"
+      "byte_count": 40490,
+      "record_count": 779,
+      "sha256": "f4a4295292c0911693bc3330c4dfeeb27969c26275bf59746200be9cf94ba70d"
     },
     {
       "input_id": "K1-5-INPUT-K1-3-DOCUMENT",
       "stage": "K1.3",
       "role": "PUBLIC_API_OPERATOR_DOCUMENT",
       "path": "docs/kafka_k1_public_api_contract.md",
-      "byte_count": 16803,
-      "record_count": 338,
-      "sha256": "ee938c6af5aa904c824b46697a996973c6248fdc6de56bf6db1d158ab54ba153"
+      "byte_count": 19525,
+      "record_count": 377,
+      "sha256": "adcf36557dc8081d975ed3d73783b54bcc81a1c24917b6e03ef54f0d9b29e601"
     },
     {
       "input_id": "K1-5-INPUT-K1-3-CONTRACT",
       "stage": "K1.3",
       "role": "PUBLIC_API_STATIC_CONTRACT_SOURCE",
       "path": "tests/kafka_k1_public_api_contract.rs",
-      "byte_count": 66553,
-      "record_count": 2000,
-    "sha256": "9b72b2f3b5b9d5d001d075499dcd42a1faa83651f4e05c0d12cd1a84c1eed18d"
+      "byte_count": 66587,
+      "record_count": 2001,
+      "sha256": "5c3958a4fd7bd05ee9bffaefb1c02d54c4a228c185ad215a9e39b5df2e29e657"
     },
     {
       "input_id": "K1-5-INPUT-K1-4-ARTIFACT",
       "stage": "K1.4",
       "role": "RESOURCE_AND_LIFECYCLE_PACKET",
       "path": "artifacts/kafka_k1_resource_lifecycle_contract_v1.json",
-    "byte_count": 196164,
-      "record_count": 1901,
-    "sha256": "2a8b464914aa130657f51fd332a184494e6c23916b54c1b5af1920bbe326403c"
+      "byte_count": 201892,
+      "record_count": 1922,
+      "sha256": "657be79c5330272e3bda8f7630bc8331244ba756c9512b69e813d5ab71494e9e"
     },
     {
       "input_id": "K1-5-INPUT-K1-4-DOCUMENT",
       "stage": "K1.4",
       "role": "RESOURCE_AND_LIFECYCLE_OPERATOR_DOCUMENT",
       "path": "docs/kafka_k1_resource_lifecycle_contract.md",
-      "byte_count": 21013,
-      "record_count": 373,
-      "sha256": "01f51a8331ed57529fcc6d744aa29e0fceb38d83b30a97c58382851a0e18e805"
+      "byte_count": 23200,
+      "record_count": 408,
+      "sha256": "03c831b48c12bb92997694a18a8451a0c40da494edc32ab1069416d6619f917a"
     },
     {
       "input_id": "K1-5-INPUT-K1-4-CONTRACT",
       "stage": "K1.4",
       "role": "RESOURCE_AND_LIFECYCLE_STATIC_CONTRACT_SOURCE",
       "path": "tests/kafka_k1_resource_lifecycle_contract.rs",
-      "byte_count": 75469,
-      "record_count": 2082,
-    "sha256": "caad1107512250b07d05197b5f83e95b61909d953c4bdde7d19c7d961cef867a"
+      "byte_count": 75501,
+      "record_count": 2083,
+      "sha256": "87dd0163e86ce6c03d9c64e62830cdf5a321e6e084f2a65f4f81176bac762830"
     }
   ],
   "child_packet_receipts": [
@@ -519,7 +519,12 @@
       "lifecycle_semantic_target_edge_count": 119,
       "lifecycle_semantic_target_edge_sha256": "16774cada71f64fe1d8b55519f219eddd98d58c6a7f7039d0805e8bc2c486874",
       "lifecycle_semantic_target_edge_rule": "For each of the 26 RESOURCE_AND_LIFECYCLE IDs, emit semantic_id, TAB, resource, TAB, resource_id for every resource_classes source-authority match and semantic_id, TAB, lifecycle, TAB, operation_id for every lifecycle_operations match; bytewise sort unique rows, append one LF per row, and SHA-256.",
-      "context_direct_resource_or_lifecycle_reference_count": 0,
+      "context_direct_resource_or_lifecycle_reference_count": 3,
+      "context_storage_authority_edges": [
+        "KAFKA-ENUM-008\tresource\tK1R-016",
+        "KCO-OP-018\tresource\tK1R-016",
+        "KCO-OP-019\tresource\tK1R-025"
+      ],
       "join_state": "EXACT_DISJOINT_EXHAUSTIVE_STATIC_JOIN"
     },
     "missing_obligation_count": 0,
@@ -2117,19 +2122,19 @@
       "approval_projection_sha256": {"pointer": "/approval_gates", "rule": "ROW_SET_V1"},
       "no_claim_boundary_sha256": {"pointer": "/no_claim_boundaries", "rule": "STRING_SET_V1"}
     },
-    "authority_input_projection_sha256": "a9dc77f39c8a04dc226deb9482ce71e7f52ed5b6aba3817f12d2a807bd07dbd4",
+    "authority_input_projection_sha256": "f9aba3abc6893c639b3b8cfc244dde5f970306b07e1b884a825939d109c3abcb",
     "child_receipt_projection_sha256": "64626f739641a6821591cfc0efd08b7556e759d4c3f70f7d8496b682ca880938",
     "lineage_conflict_projection_sha256": "9548fc723b4803575fd901618b66f45931e657c116ef00a287cfd5b75d733acc",
-    "obligation_partition_projection_sha256": "960794c3f3e4a66dc614147e083772c38bdec23bc0fa5b8b75f1864659c5ccbe",
-    "semantic_resource_lifecycle_join_projection_sha256": "af8fd96c2e67aace0f5407a43d1c206a1bf3a8e4c8fa37543bccd89f38ee553f",
-    "semantic_binding_adjudication_projection_sha256": "d272517d070a5da6b107cd5739d521a8ed2a1c39abd287acaf36f1f50d741f1b",
-    "capability_evidence_contract_projection_sha256": "bdf3525bd7c22cccaa4de82db302f893499043ea288a0c7612cc40dff9a256e1",
+    "obligation_partition_projection_sha256": "3887d22d50b080008eab405f3558e684e627497e563f03f5926d12067125abb6",
+    "semantic_resource_lifecycle_join_projection_sha256": "6eaa5e2b6874fefc7b0d0fb65184c0219857571dab2e5fbf754ae70234db37fb",
+    "semantic_binding_adjudication_projection_sha256": "fd0ff35d78464e6f2eebf528bed8930d7623bc8c3aef8673f7dffef8b8901608",
+    "capability_evidence_contract_projection_sha256": "2293d6bade79ae01cc998e880843fa2fe697b4a20127117fe8e4fdae59840409",
     "capability_route_projection_sha256": "68ec5cf270f773130e1de1c294f4d314d1b65b81cd0d470fc2a9a4ece8c7f9f3",
     "feature_coexistence_mode_projection_sha256": "d7907da645683a56469b9dc387bd8d4f29738d88f368ab3421be8979f4632dac",
     "feature_profile_projection_sha256": "0fc0221918113296ff7645368113990a0694240623473b01b408ca914af5934d",
     "shadow_class_projection_sha256": "554238c682c0ed42fce9f5bfd0c297676eb56aac8743c24f29841d2478939910",
     "shadow_policy_summary_projection_sha256": "fb58778caa811fbfe2888c147adb0dd9a6187099c6183cba4707402fd2127b63",
-    "shadow_semantic_partition_projection_sha256": "babe4dbe0c17f30c4ff90edc8a32fd40eced5e05691aa7758956ffd7024bba2f",
+    "shadow_semantic_partition_projection_sha256": "0e01c556de095cd782855767a040e367cfecd4d7cfff4836efe4d434fd7c40c4",
     "stop_condition_projection_sha256": "b7526e84e8bbbe7a171803fb0b1f4e69fbeef5f5d15d7fce1b5530d2e9efd88c",
     "rollback_contract_projection_sha256": "2450727dc3b250431f0c6849a097269cac6a377d4e3ad24aaf4618aed61771e8",
     "approval_projection_sha256": "7a68a3d0697e605104acc1f38e9fe0e041e29edb3be0f4e78d844e1c02e809fb",

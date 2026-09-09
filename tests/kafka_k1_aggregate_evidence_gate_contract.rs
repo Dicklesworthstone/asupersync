@@ -835,7 +835,7 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
         .and_then(|row| string_set(array(row, "semantic_ids")?, "context semantic IDs"))?;
     let mut lifecycle_edges = Vec::new();
     let mut seen_lifecycle = BTreeSet::new();
-    let mut context_refs = 0usize;
+    let mut context_edges = Vec::new();
     for (kind, rows, id_key) in [
         (
             "resource",
@@ -859,16 +859,29 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
                     lifecycle_edges.push(format!("{source}\t{kind}\t{target}"));
                 }
                 if context_ids.contains(source) {
-                    context_refs += 1;
+                    context_edges.push(format!("{source}\t{kind}\t{target}"));
                 }
             }
         }
+    }
+    ensure_unique(&context_edges, "context storage authority edges")?;
+    let expected_context = BTreeSet::from([
+        "KAFKA-ENUM-008\tresource\tK1R-016".to_owned(),
+        "KCO-OP-018\tresource\tK1R-016".to_owned(),
+        "KCO-OP-019\tresource\tK1R-025".to_owned(),
+    ]);
+    if context_edges.into_iter().collect::<BTreeSet<_>>() != expected_context
+        || string_set(
+            array(receipt, "context_storage_authority_edges")?,
+            "context storage authority edges",
+        )? != expected_context
+    {
+        return Err("context storage authority edge drift".to_owned());
     }
     ensure_unique(&lifecycle_edges, "lifecycle semantic target edges")?;
     let lifecycle_edge_sha256 = sorted_newline_sha256(lifecycle_edges.clone());
     if seen_lifecycle != lifecycle_ids
         || lifecycle_edges.len() != 119
-        || context_refs != 0
         || lifecycle_edge_sha256
             != "16774cada71f64fe1d8b55519f219eddd98d58c6a7f7039d0805e8bc2c486874"
         || text(receipt, "lifecycle_semantic_target_edge_sha256")? != lifecycle_edge_sha256
@@ -892,7 +905,7 @@ fn validate_semantic_resource_join(inputs: &Inputs, artifact: &Value) -> Result<
         || count(
             receipt,
             "context_direct_resource_or_lifecycle_reference_count",
-        )? != 0
+        )? != expected_context.len()
         || text(receipt, "join_state")? != "EXACT_DISJOINT_EXHAUSTIVE_STATIC_JOIN"
     {
         return Err("semantic-resource-lifecycle receipt drift".to_owned());
@@ -2115,6 +2128,16 @@ fn kafka_k1_aggregate_gate_rejects_representative_mutations() {
     binding["semantic_binding_adjudication"]["historical_row_typing"][9]["typed_edges"][4]["kind"] =
         Value::String("MESSAGE_SET".to_owned());
     mutations.push(("fake absence message binding", binding));
+
+    let mut diagnostic_storage = inputs.artifact.clone();
+    diagnostic_storage["cross_child_join_model"]["k1_3_k1_4_semantic_resource_lifecycle_join"]["context_storage_authority_edges"]
+        [0] = Value::String("KAFKA-ENUM-008\tresource\tK1R-025".to_owned());
+    assert!(
+        validate_semantic_resource_join(&inputs, &diagnostic_storage)
+            .expect_err("diagnostic references must bind their actual storage owner")
+            .contains("context storage authority edge drift")
+    );
+    mutations.push(("misbound diagnostic storage", diagnostic_storage));
 
     let mut vector = inputs.artifact.clone();
     vector["capability_evidence_contract"]["accepted_evidence_namespace"]["category_routes"][0]

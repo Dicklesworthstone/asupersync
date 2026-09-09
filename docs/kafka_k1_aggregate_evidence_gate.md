@@ -94,7 +94,9 @@ The K1.3/K1.4 semantic join is also exact:
 - 31 `CONTEXT_ONLY_NOT_A_DISTINCT_LONG_LIVED_OPERATION` rows;
 - 64 expanded configuration-to-resource edges;
 - 119 expanded lifecycle-semantic target edges; and
-- zero context-only direct resource or lifecycle references.
+- three context references describing diagnostic storage, with no distinct
+  operation owner: `KAFKA-ENUM-008` and `KCO-OP-018` in `K1R-016`, plus
+  `KCO-OP-019` in `K1R-025`.
 
 The packet freezes both expanded edge digests and their tab-separated canonical
 projection rules. A missing, duplicate, extra, or unresolved edge keeps the
