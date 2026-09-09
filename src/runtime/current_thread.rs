@@ -23,17 +23,17 @@
 //!   reactor turns and parking exactly as a worker thread would — until the
 //!   root waker fires again. The root waker unparks the worker's parker and
 //!   wakes the reactor so a wake from any thread ends the park promptly.
-//! - The root is a real task for the life of the call: a `!Send` root stub
+//! - The root is a real task for the life of the call: a `!Send` accounting
 //!   task is admitted through the worker's local lane into the root region.
 //!   Its admission-minted [`Cx`] is installed as the ambient
 //!   `Cx::current()` of the root future, so the root carries a registered
 //!   task id, spawn and `spawn_local` authority, and observes root-region
-//!   cancellation through its checkpoints. The stub stays live until the
+//!   cancellation through its checkpoints. The task stays live until the
 //!   root future completes, so
 //!   [`Runtime::is_quiescent`](crate::runtime::Runtime::is_quiescent) is
 //!   false while the root runs.
 //! - After the root completes, `block_on` drops the root future in place
-//!   with its task context still installed, then retires the stub (one direct poll
+//!   with its task context still installed, then retires the task (one direct poll
 //!   of its record, independent of queue order) and then drains runnable
 //!   work with a bounded policy: dispatch turns continue until nothing is
 //!   runnable (no dispatchable task, ready finalizer, queued command, or
@@ -42,7 +42,7 @@
 //!   self-waking task therefore cannot keep `block_on` from returning. Remaining
 //!   `Send` work continues on the background thread once it resumes the worker;
 //!   local tasks wait until their owning thread drives the runtime again.
-//! - A root panic is caught around the poll and destructor; the stub is retired, the
+//! - A root panic is caught around the poll and destructor; the task is retired, the
 //!   worker is returned, and the original payload is re-raised on the caller
 //!   (`block_on` propagates root panics exactly as before).
 //!
@@ -66,7 +66,7 @@
 //! A root may call `block_on` again on its own runtime: while the driver
 //! polls the root in place it parks the worker in a per-thread re-entrancy
 //! slot, so the nested call drives the same worker on the same thread (its
-//! own stub, its own bounded drain) and hands it back before the outer poll
+//! own accounting task, its own bounded drain) and hands it back before the outer poll
 //! resumes; this nests to any depth. Distinct runtimes nest the same way on
 //! one thread. Every piece of thread-local worker state is a scoped guard
 //! (scheduler, fast queue, local-ready queue, worker id, lane owner,
@@ -186,6 +186,7 @@ pub struct CurrentThreadDriver {
 }
 
 impl CurrentThreadDriver {
+    #[cfg(any(test, not(target_arch = "wasm32")))]
     pub fn new(gateway: Option<Arc<SpawnGateway>>, store_key: usize) -> Self {
         Self {
             slot: Mutex::new(WorkerSlot::Background),
@@ -432,8 +433,8 @@ impl CurrentThreadDriver {
     /// caller can fall back to polling it directly.
     ///
     /// `request_cx` is the runtime-wired ambient context `block_on` built;
-    /// it is the parent of the root stub task and the fallback ambient `Cx`
-    /// when the stub cannot be admitted.
+    /// it is the parent of the root accounting task and the fallback ambient `Cx`
+    /// when that task cannot be admitted.
     ///
     /// # Panics
     ///
@@ -601,8 +602,8 @@ fn restore_local_spawn_lane(requests: Vec<LocalSpawnRequest>) {
 }
 
 /// Polls the root in place, interleaved with the worker loop, until it
-/// completes; the root stub task brackets the root's lifetime in accounting.
-/// Then retires the stub and drains runnable work under the bounded policy.
+/// completes; the registered task brackets the root's lifetime in accounting.
+/// Then retires that task and drains runnable work under the bounded policy.
 /// While the root is being polled the worker sits in the driver's
 /// re-entrancy slot so a nested `block_on` from the root can drive it.
 fn drive_root_on<F: Future>(
@@ -624,20 +625,20 @@ fn drive_root_on<F: Future>(
     let waker = Waker::from(Arc::clone(&root_waker));
     let mut ctx = Context::from_waker(&waker);
     // Pin an Option so the actual !Unpin future can be dropped in place
-    // before retiring its stub, without moving it or allocating a box.
+    // before retiring its accounting task, without moving it or allocating a box.
     let mut future = pin!(Some(future));
 
-    // Phase 1: admit the root stub and take its admission-minted Cx. The
-    // first dispatch turn drains the lane, admits the stub on this worker
-    // and polls it once; the stub publishes its Cx on that poll.
-    let stub = RootStub::spawn(request_cx);
-    if let Ok(stub) = stub.as_ref() {
-        loaned(slot).run_loop_until(&mut || stub.cx_available() || stub.is_finished(), false);
+    // Phase 1: admit the accounting task and take its admission-minted Cx. The
+    // first dispatch turn drains the lane, admits the task on this worker
+    // and polls it once; the task publishes its Cx on that poll.
+    let registration = RootRegistration::spawn(request_cx);
+    if let Ok(task) = registration.as_ref() {
+        loaned(slot).run_loop_until(&mut || task.cx_available() || task.is_finished(), false);
     }
-    let root_cx = stub
+    let root_cx = registration
         .as_ref()
         .ok()
-        .and_then(RootStub::take_cx)
+        .and_then(RootRegistration::take_cx)
         .unwrap_or_else(|| request_cx.clone());
     let root_cx_guard = Cx::set_current(Some(root_cx));
 
@@ -695,12 +696,12 @@ fn drive_root_on<F: Future>(
     let result = result.and_then(|output| dropped.map(|()| output));
     drop(root_cx_guard);
 
-    // Phase 3: retire the stub with one direct poll of its record (so the
+    // Phase 3: retire the task with one direct poll of its record (so the
     // root leaves task accounting regardless of queue order), then drain
     // runnable work: until idle or the predicate-check budget is spent, never waiting
     // on timers or I/O. A shutdown cuts this short like any other task.
-    if let Ok(stub) = stub.as_ref() {
-        stub.finish_now(loaned(slot));
+    if let Ok(task) = registration.as_ref() {
+        task.finish_now(loaned(slot));
     }
     let mut turns = 0_u32;
     loaned(slot).run_loop_until(
@@ -777,26 +778,26 @@ impl Wake for RootWaker {
     }
 }
 
-/// State shared between the driver and the root stub task on the driving
-/// thread (the stub is a `!Send` local task, so `Rc` is sufficient).
-struct RootStubShared {
-    /// The stub's admission-minted Cx, published on its first poll.
+/// State shared between the driver and the accounting task on the driving
+/// thread (the task is a `!Send` local task, so `Rc` is sufficient).
+struct RootRegistrationShared {
+    /// The task's admission-minted Cx, published on its first poll.
     cx: RefCell<Option<Cx>>,
-    /// Set by the driver once the root future completed; the stub's next
+    /// Set by the driver once the root future completed; the task's next
     /// poll then completes it.
     done: Cell<bool>,
 }
 
 /// The root's task record: a local task in the root region that stays
 /// pending until the driver marks the root complete.
-struct RootStub {
-    shared: Rc<RootStubShared>,
+struct RootRegistration {
+    shared: Rc<RootRegistrationShared>,
     handle: TaskHandle<()>,
 }
 
-impl RootStub {
+impl RootRegistration {
     fn spawn(parent: &Cx) -> Result<Self, SpawnError> {
-        let shared = Rc::new(RootStubShared {
+        let shared = Rc::new(RootRegistrationShared {
             cx: RefCell::new(None),
             done: Cell::new(false),
         });
@@ -829,7 +830,7 @@ impl RootStub {
         self.handle.is_finished()
     }
 
-    /// Completes the stub's record now: marks it done and dispatches it
+    /// Completes the task's record now: marks it done and dispatches it
     /// through the worker's ordinary execute path on this thread.
     fn finish_now(&self, worker: &mut ThreeLaneWorker) {
         self.shared.done.set(true);
