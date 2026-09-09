@@ -1952,9 +1952,15 @@ fn checked_native_runtime(sharded: bool, limit: usize) -> asupersync::runtime::R
 }
 
 fn assert_checked_native_cleanup(runtime: &asupersync::runtime::Runtime) {
-    // GH#58: on a current-thread runtime the root of `block_on` is itself a
-    // live task, so runtime-wide quiescence is observed from outside any
-    // root; the worker keeps draining between `block_on` calls.
+    // GH#58: this wait used to run inside `block_on` with `yield_now`. On a
+    // current-thread runtime the root of `block_on` is now itself a live
+    // task, so `is_quiescent()` is false by design for as long as the root
+    // runs and the wait can never succeed from inside it. It therefore runs
+    // on this thread, outside any root. That is sufficient because
+    // `block_on` drains every runnable task before it returns, and the
+    // runtime's background worker thread resumes the worker afterwards, so
+    // the checked-admission cleanup keeps progressing while this thread
+    // sleeps. Same oracle, same 5 s bound, same diagnostics.
     let started = Instant::now();
     while !runtime.is_quiescent() {
         assert!(

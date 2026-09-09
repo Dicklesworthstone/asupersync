@@ -9,15 +9,18 @@
 //! `block_on` returns; root panics still propagate; `!Send` roots are
 //! accepted; work spawned outside `block_on` still progresses).
 
+use std::cell::Cell;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::observability::TaskInspectorConfig;
 use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
+use asupersync::sync::{LockError, Mutex, OwnedMutexGuard};
 
 /// Repro A: a task spawned from the root of a current-thread runtime runs
 /// on the calling thread (Tokio `new_current_thread` semantics).
@@ -259,5 +262,147 @@ fn current_thread_handle_spawn_outside_block_on_still_progresses() {
         worker,
         thread::current().id(),
         "outside block_on the worker runs on the background thread"
+    );
+}
+
+/// Drain contract: tasks spawned from the root and never awaited are
+/// polled to completion before `block_on` returns (runnable work is
+/// drained; only work parked on external events stays parked).
+#[test]
+fn current_thread_block_on_drains_unawaited_spawns_before_returning() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("root Cx is installed");
+        for _ in 0..4 {
+            let completed = Arc::clone(&completed);
+            // Dropping the handle detaches the task; nothing awaits it.
+            let _detached = cx
+                .spawn(move |_| async move {
+                    for _ in 0..3 {
+                        yield_now().await;
+                    }
+                    completed.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("root Cx has spawn authority");
+        }
+        let _detached = Runtime::current_handle()
+            .expect("runtime handle is installed")
+            .spawn({
+                let completed = Arc::clone(&completed);
+                async move {
+                    yield_now().await;
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+    });
+
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        5,
+        "unawaited root spawns must be polled to completion before block_on returns"
+    );
+    assert!(
+        runtime.is_quiescent(),
+        "drained runtime must be quiescent once block_on returned"
+    );
+}
+
+/// Drain contract for `!Send` work: an unawaited `spawn_local` from the
+/// root also completes before `block_on` returns, on the calling thread.
+#[test]
+fn current_thread_block_on_drains_unawaited_spawn_local_before_returning() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+    let completed = Rc::new(Cell::new(0_u32));
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("root Cx is installed");
+        let completed = Rc::clone(&completed);
+        let _detached = cx
+            .spawn_local(move |_| async move {
+                for _ in 0..3 {
+                    yield_now().await;
+                }
+                completed.set(completed.get() + 1);
+            })
+            .expect("current_thread root must accept a local task");
+    });
+
+    assert_eq!(
+        completed.get(),
+        1,
+        "unawaited local root spawn must be polled to completion before block_on returns"
+    );
+    assert!(
+        runtime.is_quiescent(),
+        "drained runtime must be quiescent once block_on returned"
+    );
+}
+
+/// Regression for the first caller-driven implementation (swept to main as
+/// b07a58fd7, 2026-09-08): a `!Send` task spawned from the root, parked on
+/// a cancel-aware mutex, aborted and joined — all inside one `block_on` —
+/// must complete within a bound. In that implementation a local future
+/// could end up in the thread-local store of a thread other than the one
+/// executing the worker; the abort's cancel dispatch then found no future
+/// and was dropped, so the join never resolved.
+#[test]
+fn current_thread_abort_of_parked_local_task_from_root_completes_within_bound() {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build asupersync runtime");
+        let typed_cancellation = runtime.block_on(async {
+            let cx = Cx::current().expect("root Cx is installed");
+            let mutex = Arc::new(Mutex::new(()));
+            let holder = mutex
+                .try_lock_owned()
+                .expect("seed mutex must be available");
+            let waiter_mutex = Arc::clone(&mutex);
+            let mut waiter = cx
+                .spawn_local(move |waiter_cx| async move {
+                    OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                        .await
+                        .map(drop)
+                })
+                .expect("current_thread root must accept a local task");
+
+            for _ in 0..256 {
+                if mutex.waiters() == 1 {
+                    break;
+                }
+                yield_now().await;
+            }
+            assert_eq!(
+                mutex.waiters(),
+                1,
+                "local waiter must be genuinely parked before abort"
+            );
+
+            waiter.abort();
+            let result = waiter.join(&cx).await;
+            assert_eq!(
+                mutex.waiters(),
+                0,
+                "abort must unlink the parked local waiter before the holder unlocks"
+            );
+            drop(holder);
+            matches!(result, Ok(Err(LockError::Cancelled)))
+        });
+        let _ = tx.send(typed_cancellation);
+    });
+
+    let typed_cancellation = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("abort + join of a parked local task from the root must complete within 10 s");
+    assert!(
+        typed_cancellation,
+        "abort of a parked local task must join as the mutex's typed cancellation"
     );
 }
