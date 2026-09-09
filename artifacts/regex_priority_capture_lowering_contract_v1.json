@@ -202,6 +202,40 @@
     "matcher or VM execution correctness",
     "production wiring or dependency removal"
   ],
+  "current_source_review": {
+    "reviewed_at_utc": "2026-09-09",
+    "release_bead": "asupersync-ghxhvm",
+    "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "execution_receipts_rebound": false,
+    "review": "Against the exact 4455cb7756 source pin, b12cc7ad adds PrivateCompileOutput, compile_private_with_captures and bounded capture-name extraction through shared analyze_and_lower. The existing lower and compile_private results remain Program and retain validation. da992970 adds deny_unknown_fields Serde support to the six limit structures. Save/Split emission, capture numbering, repetition and resource accounting are unchanged. Original execution receipts are retained for their original source only; this review grants no replacement-template, configured-pattern, matcher or production acceptance.",
+    "sources": [
+      {
+        "path": "src/observability/regex_lowering.rs",
+        "sha256": "c6eb65265b080aa234359b83ff50a7ddaf05b733c411dc7f55abbbe9f652a25f",
+        "bytes": 72080
+      },
+      {
+        "path": "src/observability/regex_ir.rs",
+        "sha256": "aa287fd02abd3a2a4196e01b9c27d86937cb220f796e652263c94726b28f48b4",
+        "bytes": 45117
+      },
+      {
+        "path": "src/observability/regex_syntax.rs",
+        "sha256": "17dd552c2e5d9ec5e7e06bc4c14d29aac7f0c175609f389d720ad94b6a3514ac",
+        "bytes": 119221
+      },
+      {
+        "path": "src/observability/regex_semantics.rs",
+        "sha256": "ab0821e49cb0233c31ec23172c18fde56610e42136ec42dd14da0b02cb1cc64c",
+        "bytes": 44083
+      },
+      {
+        "path": "src/observability/regex_boundaries.rs",
+        "sha256": "3f87bdd55ad86cd40d4eb7300595abea4133ec76dac1d144132714abc7835658",
+        "bytes": 49608
+      }
+    ]
+  },
   "no_claims": [
     "matcher or VM execution correctness",
     "production wiring or dependency removal",

@@ -328,6 +328,40 @@
     "frozen_semantic_and_ir_authorities_remain_live_checked": true,
     "r3_3_2_claim_rewritten": false
   },
+  "current_source_review": {
+    "reviewed_at_utc": "2026-09-09",
+    "release_bead": "asupersync-ghxhvm",
+    "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "execution_receipts_rebound": false,
+    "review": "R3.3.3 retains ownership of the successor lowerer. Subsequent b12cc7ad adds a separate capture-name output through shared analyze_and_lower; the original lower function still returns only Program. da992970 adds deny_unknown_fields Serde support to the six limit structures. Instruction layout, validation, defaults, semantic analysis and existing lowering behavior are unchanged. Original R3.3.2 decisions, deferred rows, source pins and execution receipts remain historical and do not prove these later APIs.",
+    "sources": [
+      {
+        "path": "src/observability/regex_lowering.rs",
+        "sha256": "c6eb65265b080aa234359b83ff50a7ddaf05b733c411dc7f55abbbe9f652a25f",
+        "bytes": 72080
+      },
+      {
+        "path": "src/observability/regex_ir.rs",
+        "sha256": "aa287fd02abd3a2a4196e01b9c27d86937cb220f796e652263c94726b28f48b4",
+        "bytes": 45117
+      },
+      {
+        "path": "src/observability/regex_syntax.rs",
+        "sha256": "17dd552c2e5d9ec5e7e06bc4c14d29aac7f0c175609f389d720ad94b6a3514ac",
+        "bytes": 119221
+      },
+      {
+        "path": "src/observability/regex_semantics.rs",
+        "sha256": "ab0821e49cb0233c31ec23172c18fde56610e42136ec42dd14da0b02cb1cc64c",
+        "bytes": 44083
+      },
+      {
+        "path": "src/observability/regex_boundaries.rs",
+        "sha256": "3f87bdd55ad86cd40d4eb7300595abea4133ec76dac1d144132714abc7835658",
+        "bytes": 49608
+      }
+    ]
+  },
   "no_claims": [
     "no capture or repetition lowering",
     "no matcher or VM execution",

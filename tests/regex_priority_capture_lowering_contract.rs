@@ -90,6 +90,50 @@ fn sha256(path: &str) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn validate_source_review(value: &Value) -> Result<(), &'static str> {
+    let mut historical = value.clone();
+    historical
+        .as_object_mut()
+        .ok_or("artifact must be an object")?
+        .remove("current_source_review");
+    let bytes = serde_json::to_vec(&historical).map_err(|_| "historical serialization")?;
+    if hex::encode(Sha256::digest(bytes))
+        != "698d8a2661635275a5bf38bac934bc15155e036fc0b05d55682d320f1f9a721a"
+    {
+        return Err("historical artifact changed");
+    }
+    let review = &value["current_source_review"];
+    if review["claim_scope"] != "CURRENT_SOURCE_STATIC_REVIEW_ONLY"
+        || review["execution_receipts_rebound"] != false
+    {
+        return Err("current review must not rebind historical execution");
+    }
+    let sources = review["sources"]
+        .as_array()
+        .ok_or("missing current sources")?;
+    let expected = array(value, "sources")
+        .iter()
+        .map(|row| text(row, "path"))
+        .collect::<BTreeSet<_>>();
+    let mut actual = BTreeSet::new();
+    for source in sources {
+        let path = source["path"].as_str().ok_or("missing source path")?;
+        if !actual.insert(path) {
+            return Err("duplicate current source");
+        }
+        let bytes = fs::read(path).map_err(|_| "current source unreadable")?;
+        if source["sha256"] != hex::encode(Sha256::digest(&bytes))
+            || source["bytes"].as_u64() != Some(bytes.len() as u64)
+        {
+            return Err("current source changed");
+        }
+    }
+    if actual != expected {
+        return Err("current source coverage changed");
+    }
+    Ok(())
+}
+
 fn lower_default(pattern: &str) -> Result<Program, regex_lowering::LowerError> {
     lower(
         pattern,
@@ -209,9 +253,8 @@ fn identity_authority_and_source_pins_are_fail_closed() {
     assert_eq!(text(&value, "capability_id"), "CAP-REGEX-PRIVACY");
     assert_eq!(text(&value, "lowering_id"), LOWERING_ID);
     assert_eq!(LOWERING_SCHEMA_VERSION, 2);
-    assert_eq!(sha256(SOURCE_PATH), FROZEN_SOURCE_SHA256);
-    assert_eq!(sha256(IR_SOURCE_PATH), FROZEN_IR_SOURCE_SHA256);
     assert_eq!(sha256(SEMANTIC_TERMINAL_PATH), FROZEN_TERMINAL_SHA256);
+    validate_source_review(&value).expect("reviewed current source and immutable history");
 
     let decision = Value::Object(object(&value, "decision").clone());
     assert_eq!(
@@ -227,9 +270,30 @@ fn identity_authority_and_source_pins_are_fail_closed() {
     assert!(!boolean(&decision, "dependency_removal_authorized"));
 
     for source in array(&value, "sources") {
-        assert_eq!(sha256(text(source, "path")), text(source, "sha256"));
+        match text(source, "path") {
+            SOURCE_PATH => assert_eq!(text(source, "sha256"), FROZEN_SOURCE_SHA256),
+            IR_SOURCE_PATH => assert_eq!(text(source, "sha256"), FROZEN_IR_SOURCE_SHA256),
+            _ => {}
+        }
         assert!(number(source, "bytes") > 0);
     }
+
+    let mut changed_history = value.clone();
+    changed_history["sources"][0]["sha256"] =
+        value["current_source_review"]["sources"][0]["sha256"].clone();
+    assert_eq!(
+        validate_source_review(&changed_history),
+        Err("historical artifact changed")
+    );
+    let mut stale_current = value.clone();
+    stale_current["current_source_review"]["sources"][0]["bytes"] = 0.into();
+    assert_eq!(
+        validate_source_review(&stale_current),
+        Err("current source changed")
+    );
+    let mut promoted = value.clone();
+    promoted["current_source_review"]["execution_receipts_rebound"] = true.into();
+    assert!(validate_source_review(&promoted).is_err());
 }
 
 #[test]

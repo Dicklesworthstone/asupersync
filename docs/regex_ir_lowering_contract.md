@@ -114,8 +114,13 @@ historical completion evidence. R3.3.3 intentionally extends the same private
 lowerer source under
 `artifacts/regex_priority_capture_lowering_contract_v1.json`; that successor
 owns the live source pin after the extension. The frozen R3.2 semantic terminal
-and R3.3.1 IR source remain live-checked here. This handoff does not rewrite or
-broaden the original R3.3.2 claim.
+remains live-checked. The September 9 review separately pins the current five
+compiler inputs: subsequent changes add capture-name output and Serde support
+for limit configuration. They retain the IR instruction layout, validation,
+semantic analysis and existing lowering behavior. The original artifact,
+including its source pins and execution receipts, is authenticated unchanged.
+The current review is static evidence; later APIs require their own tests.
+This handoff does not rewrite or broaden the original R3.3.2 claim.
 
 ## No-claim boundary
 

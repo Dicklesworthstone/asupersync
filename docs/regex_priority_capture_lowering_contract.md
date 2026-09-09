@@ -139,9 +139,14 @@ No local Cargo fallback is approved.
 The R3.3.2 receipt retains its original source hash and its original structural
 scope as historical evidence. Its successor-handoff row names this contract
 and explains that the live lowerer source is intentionally mutable across
-compiler stages. Frozen R3.2 semantic inputs and the R3.3.1 IR source continue
-to be checked live. The R3.3.3 receipt is the live source authority after this
-extension.
+compiler stages. The frozen R3.2 terminal remains checked live. A separate
+September 9 review pins all five current compiler inputs after `b12cc7ad`
+added capture-name output and `da992970` added Serde support for the six limit
+structures. Existing `lower` and `compile_private` results, Save/Split
+emission, capture numbering, repetition and resource accounting are unchanged.
+The original artifact, including all five source pins and execution receipts,
+is authenticated unchanged. This static review does not extend those receipts
+to the later replacement or configured-pattern APIs.
 
 The admitted remote receipts are source check job `29947326818681042`,
 170/170 predecessor-plus-successor contract job `29947326818681058`, focused
