@@ -55,8 +55,8 @@ migrated to the owned helper by A5; their retained rows describe the baseline.
 | `FUT-PROD-RELOAD-BLOCK` | `src/signal/shutdown.rs` | The SIGHUP receive loop blocks on its dedicated `asupersync-reload-sighup` standard thread. |
 | `FUT-PROD-SHUTDOWN-BLOCK` | `src/signal/shutdown.rs` | Each watched shutdown signal blocks on its own named standard thread. |
 
-The current production census contains eight incumbent tokens: the four
-unmigrated A1 tokens plus these four new `future::race` calls. Their source
+The current production census contains ten incumbent tokens: the four
+unmigrated A1 tokens, four new `future::race` calls and two native ATP helpers. Their source
 review records ownership; it supplies no new behavioral execution receipt.
 
 | Current site | Source function | Cancellation ownership |
@@ -64,12 +64,20 @@ review records ownership; it supplies no new behavioral execution receipt.
 | `FUT-PROD-REMOTE-SESSION-RACE` | `src/remote.rs`: `remote_session_race_io` (`tls`) | Races session I/O against a Cx-aware oneshot wait. Caller cancellation drops the session's owned framed connection. |
 | `FUT-PROD-REMOTE-CLIENT-RACE` | `src/remote.rs`: `remote_client_race_cancellation` (`tls`, native) | Wakes an active connection attempt or bounded retry delay on cancellation. Retries remain limited to failures proven to precede delivery. |
 | `FUT-PROD-REMOTE-DRIVER-RACE` | `src/remote.rs`: `drive_native_remote_session` (`tls`, native) | A control win releases the borrowed event read before cancel or renewal on the same framed transport. The driver guard owns terminal publication. |
-| `FUT-PROD-MULTIPART-READ-RACE` | `src/web/multipart.rs`: `read_more` | Races a deadline-bounded borrowed body poll against caller cancellation, returning a typed multipart error on cancellation. |
+| `FUT-PROD-MULTIPART-READ-RACE` | `src/web/multipart.rs`: `read_more` (native) | Races a deadline-bounded borrowed body poll against caller cancellation, returning a typed multipart error on cancellation. |
 
 All four use the incumbent's drop-loser behavior. None spawns a separate loser
 task, proves structured loser drain, or rolls back effects already performed
 by a polled future. The remote driver's separate protocol cleanup remains its
 owner's responsibility.
+
+The native ATP inventory now includes an earlier omitted `future::or` in
+`keep_peer_alive_while` and the `future::poll_once` added in `efa5798d1`.
+The keep-alive race borrows pinned work while racing it against the cadence
+sleep; it then completes each keep-alive emission outside that race. The zero-wait
+receive polls once instead of allowing an expired timeout to skip the socket
+poll. These ownership descriptions establish neither safe external cancellation
+of the whole operation nor rollback of effects from a polled receive.
 
 Two additional references are compiled public doctests on `Notify`. They are
 not production runtime calls, but removing the test executor without migrating
@@ -193,22 +201,23 @@ convert focused unit behavior into runtime E2E evidence.
 ### Post-baseline current snapshot
 
 The historical A1 census remains frozen at 310 files and 1,362 textual tokens.
-A separate post-baseline current snapshot, refreshed on 2026-09-09, records 330
-files and 1,527 tokens after the A5 production poll-adapter migration, A3
-incumbent-comparison receipt, remote and multipart races, and additional tests.
+A separate post-baseline current snapshot, refreshed on 2026-09-09, records 331
+files and 1,531 tokens after the A5 production poll-adapter migration, A3
+incumbent-comparison receipt, remote and multipart races, native ATP poll-once,
+and additional tests. The driverless socket fixture contributes three test-only tokens.
 It does not rewrite the historical baseline:
 
 | Scope | Current files | Current tokens |
 |---|---:|---:|
-| `src` | 160 | 956 |
-| `tests` | 160 | 559 |
+| `src` | 160 | 957 |
+| `tests` | 161 | 562 |
 | `benches` | 4 | 4 |
 | `examples` | 1 | 1 |
 | `asupersync-tokio-compat` | 3 | 5 |
 | `fuzz` | 2 | 2 |
 
 The current ownership projection is 45 files / 278 tokens for `FUT-A6-CORE`,
-35 / 183 for `FUT-A7-IO`, 34 / 218 for `FUT-A8-SERVICES`, and 216 / 848 for
+35 / 183 for `FUT-A7-IO`, 34 / 218 for `FUT-A8-SERVICES`, and 217 / 852 for
 `FUT-A9-ATP-DEV`. Owners must use these current projections for reservation
 drift checks while retaining the A1 rows as historical evidence.
 
@@ -216,6 +225,8 @@ Eight previously stale source pins are reconciled to current bytes:
 `Cargo.toml`, `Cargo.lock`, `src/sync/notify.rs`, the capability registry, the
 marginal ledger, the API surface map, the compatibility manifest, and the router.
 The new remote, multipart, and extracted Notify test files are also pinned.
+The follow-up pins the native ATP source and retains the multipart parser bytes
+with the browser-only unused-context binding; that binding changes no native parse path.
 Each reconciliation records the old
 and current whole-file hash plus its capability-specific classification. The
 manifest requirement, resolved package block, combined Notify token lines,

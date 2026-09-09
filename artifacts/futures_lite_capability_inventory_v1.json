@@ -630,21 +630,21 @@
     "current_occurrence": {
       "unit": "non-overlapping textual token occurrences in current tracked Rust source, excluding this contract",
       "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
-      "file_count": 330,
-      "token_count": 1527,
-      "digest_sha256": "727060c116017ed85c44440e288e6a862a89bacbaaf8e6d105386a79561efeb9",
+      "file_count": 331,
+      "token_count": 1531,
+      "digest_sha256": "8578df034838ec7cdb13cca5190e7795f8092a4f5e1ea8c5171695aa8cd16cfa",
       "scope_rows": [
         {
           "scope": "src",
           "file_count": 160,
-          "token_count": 956,
-          "digest_sha256": "5b6765ba327f336c65a48fd64c2b9b86f23f1717f7a37b98a64d57c29cd2e628"
+          "token_count": 957,
+          "digest_sha256": "26a789ca19a6875200d038afa45c94fb9f5f0cb242c3b781d073474dd2a5a402"
         },
         {
           "scope": "tests",
-          "file_count": 160,
-          "token_count": 559,
-          "digest_sha256": "1abfed2bc0481853a7644eb49ea54de30b19aff2ddd77e53aac5dc2621d769a5"
+          "file_count": 161,
+          "token_count": 562,
+          "digest_sha256": "98d03fa0ea0e23108ed5a72e5305c384e65293cb997352cb5f61fd9fea3fa9c2"
         },
         {
           "scope": "benches",
@@ -693,9 +693,9 @@
       },
       {
         "group_id": "FUT-A9-ATP-DEV",
-        "file_count": 216,
-        "token_count": 848,
-        "digest_sha256": "b3a72336edb109cd74eddb52dbbc6c4fe84da3ca3672b85e54af321224b01c06"
+        "file_count": 217,
+        "token_count": 852,
+        "digest_sha256": "42e527ba3255b4b2c51b9d0c4d5a3c958052f6602344addb6b2f686bb62ee51a"
       }
     ],
     "source_pin_reconciliations": [
@@ -768,8 +768,30 @@
         "projection": "Router::handle still blocks on handle_with_cx; three additional textual tokens are test-only"
       }
     ],
-    "current_production_token_count": 8,
-    "production_token_accounting": "Six historical A1 tokens minus two A5 poll-adapter migrations plus four new incumbent races. Historical production_surfaces and A1 occurrence rows remain unchanged.",
+    "current_production_token_count": 10,
+    "production_token_accounting": "Six historical A1 tokens minus two A5 poll-adapter migrations plus four new incumbent races and two native ATP helpers. The prior current snapshot omitted the existing ATP or call; efa5798d1 added poll_once and c4760a1b5 narrowed the or race to work versus cadence. Historical production_surfaces and A1 occurrence rows remain unchanged.",
+    "native_atp_helpers": [
+      {
+        "site_id": "FUT-PROD-ATP-KEEPALIVE-OR",
+        "path": "src/net/atp/transport_quic/native_link.rs",
+        "function": "keep_peer_alive_while",
+        "api": "future::or",
+        "cfg": "not wasm32",
+        "token_occurrences": 1,
+        "structured_loser_drain_proven": false,
+        "owner_behavior": "The left-biased race borrows the pinned work future and races only its poll against the cadence sleep. A timer win ends that borrow without dropping the owned work; keep-alive emission runs outside the race and work is driven to completion before reporting a keep-alive failure. External cancellation of this whole owner is not proven safe by this inventory."
+      },
+      {
+        "site_id": "FUT-PROD-ATP-RECEIVE-POLL-ONCE",
+        "path": "src/net/atp/transport_quic/native_link.rs",
+        "function": "pump_inbound_for",
+        "api": "future::poll_once",
+        "cfg": "not wasm32",
+        "token_occurrences": 1,
+        "structured_loser_drain_proven": false,
+        "owner_behavior": "A zero wait polls receive_batch exactly once, retaining ready packets or propagating its error; Pending returns the already-processed count and drops the borrowed receive future. This avoids an already-expired timeout skipping the inner poll. It does not establish rollback of receive-side effects."
+      }
+    ],
     "new_production_races": [
       {
         "site_id": "FUT-PROD-REMOTE-SESSION-RACE",
@@ -805,7 +827,7 @@
         "site_id": "FUT-PROD-MULTIPART-READ-RACE",
         "path": "src/web/multipart.rs",
         "function": "read_more",
-        "cfg": "all supported root targets",
+        "cfg": "not wasm32",
         "token_occurrences": 1,
         "loser_policy": "DROP_FUTURE_ONLY",
         "structured_loser_drain_proven": false,
@@ -1713,8 +1735,13 @@
     },
     {
       "path": "src/web/multipart.rs",
-      "sha256": "6424eb5ca8ea7191f08f1bd8f3739e40552fc1dcd691ee74ec03cdd96131e816",
-      "line_count": 4219
+      "sha256": "5d64575cd8bdac7756487eadc67cc35c7868e724bbf1a2809bbe8db4d8e1c155",
+      "line_count": 4221
+    },
+    {
+      "path": "src/net/atp/transport_quic/native_link.rs",
+      "sha256": "f10b9fe6645f5aa87d35587d688311c55de807d9507f063ae152d60e23d92a95",
+      "line_count": 11568
     },
     {
       "path": "docs/adr/dep_plan_adr_008_futures_streams.md",

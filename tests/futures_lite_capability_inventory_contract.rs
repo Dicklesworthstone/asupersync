@@ -759,10 +759,10 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
     let current = snapshot
         .get("current_occurrence")
         .expect("current occurrence snapshot");
-    if current.get("file_count").and_then(Value::as_u64) != Some(330)
-        || current.get("token_count").and_then(Value::as_u64) != Some(1527)
+    if current.get("file_count").and_then(Value::as_u64) != Some(331)
+        || current.get("token_count").and_then(Value::as_u64) != Some(1531)
         || text(current, "digest_sha256")
-            != "727060c116017ed85c44440e288e6a862a89bacbaaf8e6d105386a79561efeb9"
+            != "8578df034838ec7cdb13cca5190e7795f8092a4f5e1ea8c5171695aa8cd16cfa"
         || array(current, "scope_rows").len() != 6
         || array(snapshot, "current_migration_reservation_groups").len() != 4
     {
@@ -882,12 +882,12 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
             "FUT-PROD-MULTIPART-READ-RACE",
             "src/web/multipart.rs",
             "read_more",
-            "all supported root targets",
+            "not wasm32",
         ),
     ];
     if races.len() != expected_races.len()
         || row_ids(races, "site_id") != expected_races.iter().map(|row| row.0.to_owned()).collect()
-        || snapshot["current_production_token_count"].as_u64() != Some(8)
+        || snapshot["current_production_token_count"].as_u64() != Some(10)
     {
         return Err("current production inventory must retain four additional races".to_owned());
     }
@@ -904,6 +904,44 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
             return Err(format!(
                 "current race ownership or no-drain boundary drift: {id}"
             ));
+        }
+    }
+
+    let helpers = array(snapshot, "native_atp_helpers");
+    if helpers.len() != 2 {
+        return Err("current production inventory must retain both native ATP helpers".to_owned());
+    }
+    for (id, function, api) in [
+        (
+            "FUT-PROD-ATP-KEEPALIVE-OR",
+            "keep_peer_alive_while",
+            "future::or",
+        ),
+        (
+            "FUT-PROD-ATP-RECEIVE-POLL-ONCE",
+            "pump_inbound_for",
+            "future::poll_once",
+        ),
+    ] {
+        let row = find_row(helpers, "site_id", id);
+        let path = "src/net/atp/transport_quic/native_link.rs";
+        if text(row, "path") != path
+            || text(row, "function") != function
+            || text(row, "api") != api
+            || text(row, "cfg") != "not wasm32"
+            || row["token_occurrences"].as_u64() != Some(1)
+            || row["structured_loser_drain_proven"].as_bool() != Some(false)
+            || !source_pins.iter().any(|pin| pin["path"] == path)
+        {
+            return Err(format!(
+                "native ATP ownership or no-drain boundary drift: {id}"
+            ));
+        }
+        let source = read_repo_file(path);
+        if !source.contains(&format!("async fn {function}"))
+            || source.matches(&format!("{TOKEN}::{api}(")).count() != 1
+        {
+            return Err(format!("native ATP helper source drift: {id}"));
         }
     }
 
