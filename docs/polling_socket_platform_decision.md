@@ -10,9 +10,10 @@ The terminal decision is **KEEP**. The `polling` and `socket2` incumbents stay
 in place, the cutover state remains `KEEP_INCUMBENT`, and this decision grants
 no implementation or dependency-exit authority.
 
-This packet is deliberately static. It inventories current source and checked
-artifacts, but it did not compile or execute the focused contract, run a
-platform probe, or produce fresh runtime or benchmark evidence.
+This packet inventories source and checked artifacts. The original capture
+did not compile or execute the focused contract. A later focused contract run
+validates the inventory and its negative fixtures; it cannot establish platform behavior or supply runtime
+or benchmark evidence.
 
 ## Why KEEP is the terminal result
 
@@ -72,12 +73,22 @@ There is no `rustix`-eviction result.
 
 ### Ledger freshness
 
-The ledger source revision is `ddea6250aee80357756fa1f39456823df88f7af1`;
-this receipt is pinned at
-`e263782a6d5a793b78e53065f70ce7f76605e863`. Current static inspection confirms
-that the two declarations and their locked versions did not change, but the
-ledger was not regenerated. Its counts are canonical historical graph
-evidence corroborated by current source, not a fresh build or runtime result.
+The original `marginal_graph` receipt records ledger revision
+`00a42d75c072044cbc8a7093885ec19420f21bdc` and claim revision
+`e263782a6d5a793b78e53065f70ce7f76605e863`. The September 9, 2026 review
+separately reads the checked ledger at
+`376c313540a58d2c8e6618cf40b4ac87ed36ec53`. All 78 relevant rows retain the
+package sets and counts above, including native-code classifications and
+empty marginal build-script and proc-macro sets. The two declarations and
+locked dependency identities also remain unchanged. The review did not
+regenerate the ledger or measure the release candidate's graph or behavior.
+
+The current source review refreshes twelve of the 27 file pins. Reactor
+backends are unchanged. `IoDriverHandle` adds a weak reactor reference for
+timer publication; TCP changes only socket-option tests. ATP and NATS retain
+their existing direct `SockRef` call sites despite broader transfer and
+messaging changes. The UDP lifecycle changes are described below. KEEP,
+historical evidence, and the routed platform gaps remain unchanged.
 
 ## Exact direct-use inventory
 
@@ -215,6 +226,16 @@ wait for readiness, inspect the socket error or peer state, and stop
 multi-address fallback when cancellation is observed. Successful conversion
 preserves OS ownership and registration coupling. UDP cloning creates a
 distinct OS handle and registration.
+
+Current UDP code also handles BSD `EISCONN` by dissolving the old association
+before one reconnect attempt, and uses connected sends for the current peer.
+Its driverless path registers with a shared process-lifetime reactor pump and
+migrates back to an ambient driver when one becomes available. Pump creation
+failure retains the self-wake fallback; hard turn failures back off, and turn
+panics are caught. These source paths do not resolve the fork-safety gap.
+Bounded batch polling returns already-committed send prefixes and leaves the
+unsent suffix with the caller. These are source observations, not new platform
+or performance measurements.
 
 These are not thin wrappers. They are lifecycle and error-contract boundaries
 whose behavior varies by target.

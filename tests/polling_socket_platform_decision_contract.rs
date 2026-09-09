@@ -553,7 +553,20 @@ fn canonical_marginal_rows_match_terminal_graph_summary() {
     let ledger = parse_repo_json(LEDGER_PATH);
     assert_eq!(
         ledger.get("source_commit").and_then(Value::as_str),
-        Some("00a42d75c072044cbc8a7093885ec19420f21bdc")
+        Some("376c313540a58d2c8e6618cf40b4ac87ed36ec53")
+    );
+    let inventory = artifact();
+    assert_eq!(
+        map_text(
+            object(&inventory, "current_source_review"),
+            "ledger_source_commit"
+        ),
+        text(&ledger, "source_commit")
+    );
+    assert_eq!(
+        map_text(object(&inventory, "marginal_graph"), "ledger_source_commit"),
+        "00a42d75c072044cbc8a7093885ec19420f21bdc",
+        "retain the original graph receipt separately from the current review"
     );
 
     let polling = marginal_rows(&ledger, "polling");

@@ -6,6 +6,20 @@
   "capability_id": "CAP-POLLING-SOCKET",
   "baseline_revision": "e263782a6d5a793b78e53065f70ce7f76605e863",
   "captured_date_utc": "2026-08-05",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "reference_commit": "2e242edb9ad7f6dacc9debf59a352779d88faa91",
+    "ledger_source_commit": "376c313540a58d2c8e6618cf40b4ac87ed36ec53",
+    "scope": "Current source pins, unchanged direct dependency identities and path census, and all 78 relevant rows of the checked marginal ledger. The original marginal_graph receipt and KEEP authority remain historical and unchanged.",
+    "reviewed_changes": [
+      "Manifest and lock release metadata, additive features, capability/baseline routing and verification metadata changed without altering the two native dependency declarations or locked identities.",
+      "IoDriver adds a weak reactor handle for timer publication. TCP changes only portable socket-option test assertions and an unused test binding.",
+      "UDP adds a shared driverless reactor fallback, ambient-driver migration, BSD reconnection and connected-send handling, target-aware sendmmsg/GSO reporting, and bounded batch polling that preserves committed prefixes. Its two SockRef buffer accessors remain unchanged.",
+      "ATP transfer and NATS lifecycle changes leave their existing SockRef control-buffer helper and test-only socket use unchanged.",
+      "The checked ledger still has 39 active rows per dependency, identical marginal package sets and counts, no marginal native code, and empty marginal build-script and proc-macro sets. It was not regenerated for this review."
+    ],
+    "no_claim_boundary": "Static source and checked-ledger reconciliation only; no new platform execution, runtime behavior, performance, release readiness, fork safety, or dependency replacement authority."
+  },
   "purpose": "Record the terminal KEEP decision for polling and socket2 after a source-pinned cross-platform surface inventory and canonical marginal-ledger review. This packet performs no replacement implementation and authorizes no source, manifest, lockfile, or dependency change.",
   "authority": {
     "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
@@ -66,28 +80,28 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-        "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664
     },
     {
       "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
-      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
-      "line_count": 332
+      "sha256": "10388000250a021e2bdd21ad7e46edcea192dacacac87ad1234abedec92b4ac3",
+      "line_count": 368
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-      "line_count": 6929
+      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
+      "line_count": 7058
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-      "line_count": 3210
+      "sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+      "line_count": 3264
     },
     {
       "path": "artifacts/dependency_cutover_policy_v1.json",
@@ -96,8 +110,8 @@
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "4e36ca29d7187e3237cfd9f422b2661009a608e93bb5761c7d511d412d66a047",
-      "line_count": 188447
+      "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+      "line_count": 187615
     },
     {
       "path": "artifacts/dependency_safety_taxonomy_v1.json",
@@ -106,7 +120,7 @@
     },
     {
       "path": "artifacts/dependency_verification_matrix_v1.json",
-      "sha256": "4c8779793cab58c5c7ec604f5dc678fed96ac470d6874a5c454e2d763b4737f8",
+      "sha256": "6d398539d44a38fe0a87a5d4b24dff7915898ce5f99005b1fe2cb51f86642e10",
       "line_count": 88541
     },
     {
@@ -151,8 +165,8 @@
     },
     {
       "path": "src/runtime/io_driver.rs",
-      "sha256": "4d661727d302e20cf106acaf6f7df36d6b3ef1b534ea76bca06ff7dcf007acbe",
-      "line_count": 2982
+      "sha256": "3a834d44261b7a9a104dcd635dc375fd21f447500a828addac765168a8eea6ad",
+      "line_count": 2988
     },
     {
       "path": "src/net/tcp/socket.rs",
@@ -161,8 +175,8 @@
     },
     {
       "path": "src/net/tcp/stream.rs",
-      "sha256": "6c4fb29d9224963d3aedd13cd6e3d25c4daea2814eff349b368bc5ce7b9b21d4",
-      "line_count": 2909
+      "sha256": "6eb2b1bb7f109e424bc42eedd2467a53435c14a0155e76ba3c9e0820869edad0",
+      "line_count": 2915
     },
     {
       "path": "src/net/tcp/traits.rs",
@@ -171,8 +185,8 @@
     },
     {
       "path": "src/net/udp.rs",
-      "sha256": "27b16785f2365a2023673d27cd000cdb1af8b82da751ed0471c237bc6bbd5ffc",
-      "line_count": 4347
+      "sha256": "63803ea49646611dc3ffed0cab6e7bc7190886fd134285c30c8bde45fb5bca93",
+      "line_count": 5209
     },
     {
       "path": "src/net/unix/listener.rs",
@@ -186,13 +200,13 @@
     },
     {
       "path": "src/net/atp/transport_rq/mod.rs",
-      "sha256": "fb2b22bf47db0c6a7dc81d3aa4d8aaee067c26dba5fcbefe725d7b6cef95ff8a",
-      "line_count": 15242
+      "sha256": "b4e94f5c675ac12a3a9e99f2d22ff08c008a824d3259a6ae375532724b764eaa",
+      "line_count": 16628
     },
     {
       "path": "src/messaging/nats.rs",
-      "sha256": "3cd0a5ca3c96c64c626066bd6813c089f7bfe663f81a80cf0339bddf534552dc",
-      "line_count": 5539
+      "sha256": "00c34d14c5d7db72875828a681e31f594683c0bceaaa6109e7cd0f52799b2f27",
+      "line_count": 6458
     },
     {
       "path": "tests/conformance/udp_socket.rs",
@@ -436,7 +450,7 @@
     {
       "semantic_id": "POLLING-WAKE",
       "state": "DELEGATED_WITH_GAP",
-      "current_semantics": "All native adapters delegate wake to Poller::notify; IoDriver serializes a single active poll leader. Some pre-registration and rearm wake errors are intentionally ignored.",
+      "current_semantics": "All native adapters delegate wake to Poller::notify; IoDriver serializes a single active poll leader and exposes a weak reactor reference for timer publication. Some pre-registration and rearm wake errors are intentionally ignored.",
       "anchors": [
         "src/runtime/reactor/epoll.rs",
         "src/runtime/reactor/kqueue.rs",
@@ -561,16 +575,17 @@
     {
       "semantic_id": "SOCKET-CONNECT-ERRORS",
       "state": "PRESENT",
-      "current_semantics": "Nonblocking TCP and Unix connect classify in-progress and Interrupted states, wait for readiness, inspect socket error or peer state, and stop fallback when cancellation is observed.",
+      "current_semantics": "Nonblocking TCP and Unix connect classify in-progress and Interrupted states, wait for readiness, inspect socket error or peer state, and stop fallback when cancellation is observed. UDP handles BSD EISCONN by dissolving the old association before one reconnect attempt and uses connected sends for the current peer.",
       "anchors": [
         "src/net/tcp/stream.rs",
-        "src/net/unix/stream.rs"
+        "src/net/unix/stream.rs",
+        "src/net/udp.rs"
       ]
     },
     {
       "semantic_id": "SOCKET-LIFECYCLE",
       "state": "PRESENT",
-      "current_semantics": "Owned socket2 values close on early return; successful paths transfer ownership to std sockets. Registration ownership and cancellation checkpoints remain coupled to connect and I/O paths.",
+      "current_semantics": "Owned socket2 values close on early return; successful paths transfer ownership to std sockets. Registration ownership and cancellation checkpoints remain coupled to connect and I/O paths. Driverless UDP uses a shared reactor pump with ambient-driver migration; initialization failure preserves self-wake fallback. Bounded batch polling returns committed send prefixes without consuming the unsent suffix.",
       "anchors": [
         "src/net/tcp/stream.rs",
         "src/net/unix/stream.rs",
