@@ -280,17 +280,24 @@ Journey linkage is usage evidence, not completeness proof:
 
 | Usage view | Total rows | Known local | Unknown | Journey edges |
 |---|---:|---:|---:|---:|
-| Public symbols | 30 | 17 | 13 | 109 |
-| Semantic rows | 97 | 45 | 52 | 216 |
+| Public symbols | 33 | 20 | 13 | 137 |
+| Semantic rows | 102 | 62 | 40 | 479 |
 
 The public and semantic journey-edge digests are, respectively,
-`2dc041692d554c03a1e123ba9e720967bf88288e402ebdc0ec7ddfe7a821f43a`
+`487bc48ac1339806de47d427ce5a9f108d170d3a48ff3f27b3df265a7cd62bae`
 and
-`d48356bc797bf7af527f4e77915ae45bf6c442fa178f99a14f7350e7b42ffae9`.
-K1.3 therefore freezes all 30 public and all 97 semantic rows independently;
-it does not mistake the 17 and 45 journey-linked subsets for complete API
+`f9cc452ded8cd8daccb8bc23f0ea0006708a7dc58f3dd4bb4e06e72cb0b20072`.
+K1.3 therefore freezes all 33 public and all 102 semantic rows independently;
+it does not mistake the 20 and 62 journey-linked subsets for complete API
 coverage. Unknown usage and every unexecuted or blocked journey remain
 migration-blocking until their named owners supply admitted evidence.
+
+The current K0.3 scan adds local source references without changing any of the
+fifteen journey rows or their execution states. Its corrected reverse binding
+routes `isolation_level` to `KCO-CFG-013`; `KCO-CFG-010` (`fetch_min_bytes`)
+remains unknown. The August projection had 30 public rows (17 known), 97
+semantic rows (45 known), and 109/216 journey edges. Those historical counts
+are not current API coverage or a broker-execution receipt.
 
 ## Exact migration and ownership order
 
