@@ -186,6 +186,63 @@
   ],
   "allowlist_entries": [
     {
+      "pattern": "src/distributed/consensus/pbft.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "PbftConsensus::submit still returns a fixed response rather than a replicated result. The 0.4.11 deprecation and experimental warning expose this existing gap while retaining the 0.4.x API. These exact warning lines are classified as unfinished production behavior, not evidence that consensus works.",
+      "revisit_condition": "Replace this entry only after the linked PBFT follow-up proves that submit returns the executed replicated result or the documented compatibility policy changes.",
+      "replacement_issue": "asupersync-gap-snapshot-transport-swim-pbft-e6drlx",
+      "justified_text": [
+        "^\\s*/// # Experimental stub$",
+        "^\\s*/// \\*\\*placeholder\\*\\* response \\(`view 0`, `sequence 0`, the fixed bytes$",
+        "^\\s*note = \"experimental PBFT scaffold: returns a fixed placeholder response, not a replicated "
+      ]
+    },
+    {
+      "pattern": "src/net/quic_native/handshake_driver.rs",
+      "category": "production_stub",
+      "owner": "quic-native",
+      "reason": "The Initial-packet encoder first sizes the header with a same-width length value, then emits the padded authenticated packet. Placeholder describes that sizing value in the GH#68 repair, not missing packet encoding or fabricated transport.",
+      "revisit_condition": "Review any additional marker independently; this entry covers only the sizing comment.",
+      "replacement_issue": "asupersync-ghxhvm",
+      "justified_text": [
+        "^\\s*// is sized with a placeholder length of the same varint width the$"
+      ]
+    },
+    {
+      "pattern": "src/runtime/current_thread.rs",
+      "category": "production_stub",
+      "owner": "runtime-core",
+      "reason": "RootStub is the real registered local task that brackets the caller-polled root future, publishes its Cx, participates in cancellation and trace accounting, and retires on completion. The listed uses name that accounting record and its lifecycle; they do not substitute a fake result for the caller's future.",
+      "revisit_condition": "Review any new marker outside these root-accounting lines; retain the native root, nested-runtime, and cancellation tests when this mechanism changes.",
+      "replacement_issue": "asupersync-94jh37",
+      "justified_text": [
+        "^//! - The root is a real task for the life of the call: a `!Send` root stub$",
+        "^//!   cancellation through its checkpoints\\. The stub stays live until the$",
+        "^//! - After the root completes, `block_on` retires the stub \\(one direct poll$",
+        "^//! - A root panic is caught around the poll; the stub is retired, the$",
+        "^//! own stub, its own bounded drain\\) and hands it back before the outer poll$",
+        "^\\s*/// it is the parent of the root stub task and the fallback ambient `Cx`$",
+        "^\\s*/// when the stub cannot be admitted\\.$",
+        "^/// completes; the root stub task brackets the root's lifetime in accounting\\.$",
+        "^/// Then retires the stub and drains runnable work under the bounded policy\\.$",
+        "^\\s*// Phase 1: admit the root stub and take its admission-minted Cx\\. The$",
+        "^\\s*// first dispatch turn drains the lane, admits the stub on this worker$",
+        "^\\s*// and polls it once; the stub publishes its Cx on that poll\\.$",
+        "^\\s*let stub = RootStub::spawn\\(request_cx\\);$",
+        "^\\s*if let Ok\\(stub\\) = stub\\.as_ref\\(\\) \\{$",
+        "^\\s*loaned\\(slot\\)\\.run_loop_until\\(&mut \\|\\| stub\\.cx_available\\(\\) \\|\\| stub\\.is_finished\\(\\), false\\);$",
+        "^\\s*let root_cx = stub$",
+        "^\\s*// Phase 3: retire the stub with one direct poll of its record \\(so the$",
+        "^\\s*stub\\.finish_now\\(loaned\\(slot\\)\\);$",
+        "^/// State shared between the driver and the root stub task on the driving$",
+        "^/// thread \\(the stub is a `!Send` local task, so `Rc` is sufficient\\)\\.$",
+        "^\\s*/// The stub's admission-minted Cx, published on its first poll\\.$",
+        "^\\s*/// Set by the driver once the root future completed; the stub's next$",
+        "^\\s*/// Completes the stub's record now: marks it done and dispatches it$"
+      ]
+    },
+    {
       "pattern": "src/grpc/client.rs",
       "category": "production_stub",
       "owner": "grpc-core",

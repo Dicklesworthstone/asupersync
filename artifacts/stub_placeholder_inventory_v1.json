@@ -100,6 +100,21 @@
       "notes": "ATP CLI preview/follow-up commands validate inputs where possible, then fail closed with ASUP-E701 instead of fabricating sync, mirror, watch, daemon, or peer behavior."
     },
     {
+      "id": "src-pbft-submit-experimental-fixed-response",
+      "paths": [
+        "src/distributed/consensus/pbft.rs"
+      ],
+      "terms": [
+        "# Experimental stub",
+        "**placeholder** response",
+        "experimental PBFT scaffold: returns a fixed placeholder response"
+      ],
+      "disposition": "product-bug-follow-up",
+      "support_class": "blocked_follow_up",
+      "blocker_bead_id": "asupersync-gap-snapshot-transport-swim-pbft-e6drlx",
+      "notes": "The deprecated submit API still returns a fixed response rather than a replicated execution result. The experimental warning exposes that existing gap while retaining the 0.4.x API; no PBFT completion or successful consensus claim follows from this classification."
+    },
+    {
       "id": "src-pbft-view-change-fail-closed",
       "paths": [
         "src/distributed/consensus/pbft.rs"
@@ -153,6 +168,33 @@
       "support_class": "test_harness",
       "blocker_bead_id": "",
       "notes": "ATP SDK source-local tests use loopback listeners and stub wording to assert reachable daemon-delegated operations fail closed with ASUP-E701."
+    },
+    {
+      "id": "src-atp-quic-keepalive-test-flight",
+      "paths": [
+        "src/net/atp/transport_quic/native_link.rs"
+      ],
+      "terms": [
+        "let placeholder = [SentControlStreamFrame",
+        "&placeholder,"
+      ],
+      "disposition": "legitimate-test-harness",
+      "support_class": "test_harness",
+      "blocker_bead_id": "asupersync-t64ggs",
+      "notes": "The GH#67 source-local test passes one synthetic outstanding control-frame descriptor while real loopback peers exchange keep-alives and a proof. These two exact lines are fixture setup, not a production transfer implementation."
+    },
+    {
+      "id": "src-quic-initial-packet-sizing-value",
+      "paths": [
+        "src/net/quic_native/handshake_driver.rs"
+      ],
+      "terms": [
+        "is sized with a placeholder length of the same varint width"
+      ],
+      "disposition": "documented-deferred-surface",
+      "support_class": "internal_bookkeeping",
+      "blocker_bead_id": "",
+      "notes": "The Initial encoder uses a same-width length value to size the header before emitting the actual padded authenticated packet. The marker describes the sizing algorithm, not missing transport behavior."
     },
     {
       "id": "src-atp-metadata-empty-entry-placeholder-terminology",
@@ -651,12 +693,13 @@
         "src/net/atp/transport_rq/mod.rs"
       ],
       "terms": [
-        "sha256_hex_placeholder"
+        "sha256_hex_placeholder",
+        "sha256_hex != empty_sha256_hex.as_str() && sha256_hex != placeholder.as_str()"
       ],
       "disposition": "documented-deferred-surface",
       "support_class": "documented_runtime_semantics",
       "blocker_bead_id": "",
-      "notes": "sha256_hex_placeholder() returns a deliberate fixed-width 64-zero hex sentinel meaning 'digest not yet known', used only in SourceStream mode where the digest is not yet computable. It is enforced fail-closed rather than trusted: ManifestDigestMode::Manifest errors outright on a missing digest, and with require_source_stream_trailer the receiver errors if any entry lacks a real trailer digest. Anchored to the identifier, so an unrelated placeholder in this file still surfaces."
+      "notes": "sha256_hex_placeholder() returns a deliberate fixed-width 64-zero hex sentinel meaning 'digest not yet known' for SourceStream metadata. Topology-only symlink, special-file, and hardlink entries must be direct, unpacked, unfragmented entries with zero size and either the empty digest or that sentinel. Content entries still require their real trailer digest when require_source_stream_trailer is set. Matching is anchored to the identifier and the exact topology digest comparison; unrelated markers remain unclassified."
     },
     {
       "id": "src-atp-bonded-sdk-contrasting-doc-terminology",
