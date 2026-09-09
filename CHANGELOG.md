@@ -96,7 +96,7 @@ collects the changes since the published `v0.4.10` source.
   The current runtime keeps its existing worker, blocking-pool and drain
   defaults; a cross-version consumer checks the older-runtime pairing.
 
-### QUIC reassembly and ATP framing
+### QUIC transport and ATP framing
 
 - Adjacent received stream ranges coalesce into contiguous runs, keeping the
   reassembly budget tied to out-of-order holes instead of packet count.
@@ -105,6 +105,17 @@ collects the changes since the published `v0.4.10` source.
   capacity. The fixed guard remains bounded.
 - ATP binary frame decoding preserves incomplete prefixes, rejects truncated
   frames at stream FIN, and binds client completion to its original handshake.
+- ATP-over-QUIC receivers send keep-alives while decoded-block writes and
+  packed-tree commits are in progress. Sender proof and feedback waits count
+  consecutive silent intervals, so a slow receiver that keeps responding can
+  finish its local work without exhausting a cumulative idle budget.
+- QUIC loss detection excludes packets that never counted as in flight, and
+  ACK ranges retain received non-ack-eliciting packet numbers. ACK-only traffic
+  no longer causes false losses and congestion-window collapse on clean
+  delayed paths.
+- Peer stream-data limits apply separately to each stream direction and type.
+  Omitting an unused unidirectional limit no longer removes bidirectional
+  stream credit.
 - Self-signed certificate coverage distinguishes a valid server leaf from a
   CA certificate used as a leaf. Exact pins preserve WebPKI's role checks.
 
