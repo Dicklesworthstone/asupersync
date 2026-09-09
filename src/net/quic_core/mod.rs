@@ -839,11 +839,10 @@ fn decode_long_header_prefix(input: &[u8]) -> Result<ProtectedHeaderPrefix, Quic
         3 => LongPacketType::Retry,
         _ => unreachable!("2-bit pattern"),
     };
-    if matches!(packet_type, LongPacketType::Retry) && first & 0x0f != 0 {
-        return Err(QuicCoreError::InvalidHeader(
-            "retry header reserved bits set",
-        ));
-    }
+    // RFC 9000 §17.2.5.1: the low four bits of a Retry packet are "Unused",
+    // set to an arbitrary value by the server, and clients MUST ignore them.
+    // They are not reserved bits and are not covered by header protection,
+    // so no value there may reject the packet.
 
     let mut pos = 1usize;
     let version = u32::from_be_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]]);
@@ -1472,8 +1471,12 @@ mod tests {
         assert_eq!(consumed, buf.len());
     }
 
+    /// RFC 9000 §17.2.5.1: a Retry packet's low four bits are "Unused" and
+    /// set to an arbitrary value by the server; clients MUST ignore them.
+    /// A compliant server that fills them with 0b0001 used to be rejected as
+    /// "reserved bits set".
     #[test]
-    fn retry_header_rejects_reserved_bits() {
+    fn retry_header_ignores_unused_bits() {
         let raw = [
             0b1111_0001,
             0,
@@ -1501,11 +1504,34 @@ mod tests {
             0x32,
             0x10,
         ];
-        let err = PacketHeader::decode(&raw, 0).expect_err("should fail");
-        assert_eq!(
-            err,
-            QuicCoreError::InvalidHeader("retry header reserved bits set")
-        );
+        let (header, consumed) =
+            PacketHeader::decode(&raw, 0).expect("unused bits never reject a Retry");
+        assert_eq!(consumed, raw.len());
+        let PacketHeader::Retry(retry) = header else {
+            panic!("expected a Retry header, got {header:?}");
+        };
+        assert_eq!(retry.version, 1);
+        assert_eq!(retry.dst_cid.as_bytes(), &[0xaa]);
+        assert_eq!(retry.src_cid.as_bytes(), &[0xbb]);
+        assert!(retry.token.is_empty());
+        assert_eq!(&retry.integrity_tag[..], &raw[raw.len() - 16..]);
+        // The protected-prefix decoder used by the routing and handshake
+        // paths agrees.
+        let prefix =
+            ProtectedHeaderPrefix::decode(&raw, 0).expect("prefix decoder ignores unused bits");
+        assert!(matches!(prefix, ProtectedHeaderPrefix::Retry(ref p) if p.version == 1));
+        // Every other unused-bit value is accepted too.
+        for bits in 1..=0x0fu8 {
+            let mut variant = raw;
+            variant[0] = 0b1111_0000 | bits;
+            assert!(
+                matches!(
+                    PacketHeader::decode(&variant, 0),
+                    Ok((PacketHeader::Retry(_), _))
+                ),
+                "Retry with unused bits {bits:#06b} must decode"
+            );
+        }
     }
 
     #[test]
