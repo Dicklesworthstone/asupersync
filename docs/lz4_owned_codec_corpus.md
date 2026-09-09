@@ -45,6 +45,12 @@ receipt uses a 60-second run and a 2 GiB RSS limit. The admitted RCH run
 completed 11,010,692 executions in 61 seconds with exit code 0 and 227 MiB
 reported RSS.
 
+The v0.4.11 provenance review updates `a3_manifest_sha256` after the fuzz
+manifest gained its `MIT OR Apache-2.0` license declaration. The dependency
+pin, target bytes, bounds, and codec are unchanged. The A1 manifest hash and
+the July 26 execution receipt remain historical; the refreshed metadata hash
+does not represent a new fuzz run.
+
 Focused contract:
 
 ```bash

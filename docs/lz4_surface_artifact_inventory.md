@@ -211,6 +211,22 @@ production constructor selection, public modes, diagnostics, and all accepted
 artifacts unchanged. The terminal packet is a durable KEEP receipt, not a
 partial switch or a deferred hidden cutover.
 
+## Reviewed source provenance
+
+The v0.4.11 release review refreshes the live root manifest, lockfile, CLI,
+capability registry, baseline registry, and marginal ledger pins. The LZ4
+dependency requirements, resolved LZ4 and twox-hash packages, capability row,
+six baseline evidence rows, and CLI trace journeys are unchanged. The ledger
+refresh changes the surrounding graph counts and manifest/lock fingerprints;
+its LZ4 edges, marginal packages, target/profile coverage, and unsafe/native
+classifications are unchanged. This review adds no new measurement.
+
+The A1 fuzz and trace-file pins remain historical transition inputs. A3 records
+the current fuzz manifest, and A4 records the integrated trace-file successor.
+The original inventory timestamp and captured fuzz version-drift observation
+remain historical evidence; the A3/A4 successors and A5 KEEP verdict govern
+their interpretation.
+
 ## Gate and rollback
 
 `REPLACE_EXPERIMENT_AUTHORIZED` means only that A2 may construct an isolated

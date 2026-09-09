@@ -54,6 +54,13 @@ canonical scenarios:
 The terminal aggregate reruns the A1, A3, A4, and A5 contracts after a sparse
 `--no-default-features --features trace-compression` check.
 
+The v0.4.11 review refreshes the root manifest/lockfile pins and the reviewed
+A1/A3 artifact and documentation joins. The LZ4 dependency edges, codec,
+trace integration, and A4 measurement receipt are unchanged. A3's current
+manifest pin includes a license-only metadata change; its recorded fuzz run
+remains historical. This provenance refresh preserves the KEEP verdict and
+does not supply a fresh fuzz run or performance measurement.
+
 ## Performance gate
 
 The authoritative A4 receipt records 64 iterations over 95,887 canonical

@@ -104,12 +104,12 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
       "role": "retained root normal feature edge and development oracle edge"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
       "role": "locked lz4_flex 0.14.0 package and checksum"
     },
     {
@@ -134,12 +134,12 @@
     },
     {
       "path": "artifacts/lz4_surface_artifact_inventory_v1.json",
-      "sha256": "965d4e8a2ead1a247e74986ff94ae065cbddc7dcbd82a42ff029e0b8d07594ff",
+      "sha256": "9f201406abea2937b092202fbeef2eb34f025e8f25623d8e52d7ed17bce13524",
       "role": "A1 machine inventory and routed gap authority"
     },
     {
       "path": "artifacts/lz4_owned_codec_corpus_v1.json",
-      "sha256": "e43d62bcfad745ce839e40fa04d9bdf2f5eaa88b920804efd817c4af1b341c9b",
+      "sha256": "9389c229112679e3e85cf164a66f386e4f92da07b2b669b08b1c204eb27f3546",
       "role": "A3 independent corpus and bounded execution receipt"
     },
     {
@@ -169,12 +169,12 @@
     },
     {
       "path": "docs/lz4_surface_artifact_inventory.md",
-      "sha256": "1cd9a3bb16dbf6e7cd58507f6e6a1947c73412fe8587483e5de6b9239fe86101",
+      "sha256": "7fc7512f1cf987221b27036d6894965f2702559b8580fbd9936e1eea681a0a33",
       "role": "A1 operator inventory reconciled with the A5 terminal decision"
     },
     {
       "path": "docs/lz4_owned_codec_corpus.md",
-      "sha256": "a618ebde74249746e66064415bb1f982ca7a984693a7635a4ce2e3a8243f1301",
+      "sha256": "506bc0e823e83449273a72cf3b8845c70d7bf565e22e62ce4ac89c233cd5bea6",
       "role": "A3 independent corpus operator guide"
     },
     {
@@ -194,7 +194,7 @@
     },
     {
       "path": "docs/lz4_final_signoff.md",
-      "sha256": "25bdc2fb650ef90257a7fedc9639550307b641ec9c87c8116ea47d99beeaea0f",
+      "sha256": "a6612e978cc154e195e0f0705d071d2ec178652d1d17ded318c528d59769d6d2",
       "role": "terminal decision and operator rollback guide"
     }
   ],
