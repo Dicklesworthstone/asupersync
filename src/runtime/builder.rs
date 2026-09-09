@@ -3962,25 +3962,40 @@ impl Runtime {
         wakes.dispatch();
 
         let started = Instant::now();
-        loop {
-            if self.work_is_drained() {
-                let mut guard = self
-                    .inner
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                guard.advance_region_state(self.inner.root_region);
-                return RootDrainOutcome::Quiescent;
+        // GH#58: on a current-thread runtime this thread drives the worker
+        // while it waits, so cancelled tasks — including `!Send` tasks whose
+        // future lives on this thread — make progress here; the observation
+        // loop below is the fallback when the worker cannot be borrowed.
+        let driven = self.inner.current_thread_driver.get().and_then(|driver| {
+            driver.drain_until(&self.inner.scheduler, started, bound, &mut || {
+                self.work_is_drained()
+            })
+        });
+        let drained_in_time = driven.unwrap_or_else(|| {
+            loop {
+                if self.work_is_drained() {
+                    break true;
+                }
+                if started.elapsed() >= bound {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
             }
-            if started.elapsed() >= bound {
-                crate::tracing_compat::warn!(
-                    bound_ms = bound.as_millis() as u64,
-                    "root region drain timed out; remaining work is dropped at teardown"
-                );
-                return RootDrainOutcome::TimedOut;
-            }
-            std::thread::sleep(Duration::from_millis(1));
+        });
+        if drained_in_time {
+            let mut guard = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.advance_region_state(self.inner.root_region);
+            return RootDrainOutcome::Quiescent;
         }
+        crate::tracing_compat::warn!(
+            bound_ms = bound.as_millis() as u64,
+            "root region drain timed out; remaining work is dropped at teardown"
+        );
+        RootDrainOutcome::TimedOut
     }
 
     /// True when no live task (embedded or dispatch-table resident), no

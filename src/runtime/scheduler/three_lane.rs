@@ -1992,6 +1992,7 @@ impl ThreeLaneScheduler {
                 io_driver: io_driver.clone(),
                 timer_driver: timer_driver.clone(),
                 steal_buffer: Vec::new(),
+                stranded_local_tasks: Vec::new(),
                 steal_batch_size,
                 enable_parking,
                 empty_backoff: 0,
@@ -3202,6 +3203,11 @@ pub struct ThreeLaneWorker {
     steal_locality_counters: StealLocalityCounters,
     /// Optional shared collector for runtime scheduler evidence snapshots.
     scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
+    /// Local (`!Send`) tasks woken while this worker ran on a thread other
+    /// than the one holding their future (GH#58: a current-thread worker is
+    /// driven by `block_on` callers). Re-scheduled by the thread that owns
+    /// them the next time it runs this worker.
+    stranded_local_tasks: Vec<TaskId>,
 }
 
 /// Worker-local counters for preferred-vs-remote steal outcomes.
@@ -4769,7 +4775,9 @@ impl ThreeLaneWorker {
         }
     }
 
-    fn drive_io_phase(&self) -> IoPhaseOutcome {
+    /// `quick_poll` (GH#58, idle-return mode) turns the reactor without
+    /// blocking so already-arrived readiness becomes runnable work.
+    fn drive_io_phase(&self, quick_poll: bool) -> IoPhaseOutcome {
         let Some(io) = &self.io_driver else {
             return IoPhaseOutcome::NoProgress;
         };
@@ -4801,15 +4809,19 @@ impl ThreeLaneWorker {
         // request produces no runnable task; without this mailbox check, the
         // next request could wait for the full idle I/O timeout before the
         // scheduler loop revisits admission.
-        let io_timeout = select_io_poll_timeout(
-            timeout,
-            self.fast_queue.is_empty(),
-            self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
-                || self
-                    .spawn_mailbox
-                    .as_ref()
-                    .is_some_and(|mailbox| !mailbox.is_empty()),
-        );
+        let io_timeout = if quick_poll {
+            Some(Duration::ZERO)
+        } else {
+            select_io_poll_timeout(
+                timeout,
+                self.fast_queue.is_empty(),
+                self.pending_cancel_dispatch_ready.load(Ordering::Acquire)
+                    || self
+                        .spawn_mailbox
+                        .as_ref()
+                        .is_some_and(|mailbox| !mailbox.is_empty()),
+            )
+        };
 
         if self.shutdown.load(Ordering::Acquire) {
             return IoPhaseOutcome::NoProgress;
@@ -4864,10 +4876,11 @@ impl ThreeLaneWorker {
     /// 5. Steal from other workers
     /// 6. Park (with timeout based on next timer deadline)
     pub fn run_loop(&mut self) {
-        self.run_loop_until(&mut || false);
+        self.run_loop_until(&mut || false, false);
     }
 
-    /// [`Self::run_loop`] with an additional stop condition.
+    /// [`Self::run_loop`] with additional stop conditions (GH#58: the
+    /// current-thread driver borrows the worker for `Runtime::block_on`).
     ///
     /// Returns when shutdown is signalled, or when `should_stop` returns
     /// true and this thread's local-spawn lane is empty. The predicate is
@@ -4875,9 +4888,19 @@ impl ThreeLaneWorker {
     /// raises a flag and wakes this worker (parker + reactor) regains the
     /// thread at the next dispatch boundary. The lane condition makes sure
     /// `!Send` spawns parked by the last dispatched task are admitted to this
-    /// worker before the thread is handed back (GH#58: the current-thread
-    /// driver borrows the worker for `Runtime::block_on`).
-    pub(crate) fn run_loop_until(&mut self, should_stop: &mut dyn FnMut() -> bool) {
+    /// worker before the thread is handed back.
+    ///
+    /// With `return_when_idle` the loop also returns instead of parking once
+    /// nothing is runnable: no dispatchable task, no ready finalizer, no
+    /// queued cancel/ready work, no pending spawn or cancel command, and a
+    /// zero-timeout reactor poll found nothing. Timers due at that moment
+    /// have already fired; tasks parked on later timers or external events
+    /// stay parked.
+    pub(crate) fn run_loop_until(
+        &mut self,
+        should_stop: &mut dyn FnMut() -> bool,
+        return_when_idle: bool,
+    ) {
         // Set thread-local scheduler for this worker thread.
         let _guard = ScopedLocalScheduler::new(Arc::clone(&self.local));
         // Set thread-local fast queue for O(1) ready-lane operations.
@@ -4893,9 +4916,17 @@ impl ThreeLaneWorker {
             crate::runtime::spawn_mailbox::ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox))
         });
 
-        while !self.shutdown.load(Ordering::Relaxed)
-            && !(should_stop() && crate::runtime::spawn_mailbox::local_spawn_lane_is_empty())
-        {
+        // GH#58: local tasks whose future lives on this thread but that were
+        // woken while the worker ran elsewhere are runnable again here.
+        self.rescue_stranded_local_tasks();
+
+        'dispatch: loop {
+            if self.shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            if should_stop() && crate::runtime::spawn_mailbox::local_spawn_lane_is_empty() {
+                break;
+            }
             if let Some(task) = self.next_task() {
                 self.reset_empty_backoff();
                 self.execute(task);
@@ -4910,7 +4941,7 @@ impl ThreeLaneWorker {
             }
 
             // PHASE 5: Drive I/O (Leader/Follower pattern).
-            let io_phase = self.drive_io_phase();
+            let io_phase = self.drive_io_phase(return_when_idle);
             if matches!(io_phase, IoPhaseOutcome::Progress) {
                 // We polled I/O, so we might have woken tasks. Continue loop.
                 continue;
@@ -4976,7 +5007,7 @@ impl ThreeLaneWorker {
                         crate::runtime::metrics::record_sched_yield();
                         std::thread::yield_now();
                     }
-                    EmptyBackoffAction::Park if self.enable_parking => {
+                    EmptyBackoffAction::Park if self.enable_parking || return_when_idle => {
                         // About to park: now check mutex-backed local queues.
                         // Deferred from the spin/yield phases to avoid 160 mutex
                         // round-trips per backoff cycle.
@@ -4998,6 +5029,12 @@ impl ThreeLaneWorker {
                             || local_spawn_lane_has_work
                         {
                             break;
+                        }
+                        if return_when_idle {
+                            // Nothing is runnable: hand the thread back to
+                            // the caller instead of parking (GH#58).
+                            self.reset_empty_backoff();
+                            break 'dispatch;
                         }
                         // Park with timeout based on next timer deadline.
                         // If we are the IO leader, we shouldn't even be here (we'd block in epoll).
@@ -6838,6 +6875,44 @@ impl ThreeLaneWorker {
             .now
     }
 
+    /// Records a woken local task whose future is not stored on this thread
+    /// (GH#58). Bounded and de-duplicated; the owning thread re-schedules it
+    /// in [`Self::rescue_stranded_local_tasks`].
+    fn note_stranded_local_task(&mut self, task: TaskId) {
+        const STRANDED_LOCAL_TASK_CAP: usize = 256;
+        if self.stranded_local_tasks.len() < STRANDED_LOCAL_TASK_CAP
+            && !self.stranded_local_tasks.contains(&task)
+        {
+            self.stranded_local_tasks.push(task);
+        }
+    }
+
+    /// Re-schedules stranded local tasks whose future lives on this thread;
+    /// keeps the ones owned by another thread, drops the ones whose record
+    /// has already retired. Requires this worker's thread-locals to be
+    /// installed (called at the top of [`Self::run_loop_until`]).
+    fn rescue_stranded_local_tasks(&mut self) {
+        if self.stranded_local_tasks.is_empty() {
+            return;
+        }
+        let stranded = std::mem::take(&mut self.stranded_local_tasks);
+        for task in stranded {
+            match crate::runtime::local::remove_local_task(task) {
+                Some(stored) => {
+                    crate::runtime::local::store_local_task(task, stored);
+                    if !schedule_local_task(task) {
+                        self.local_ready.lock().push_back(task);
+                    }
+                }
+                None => {
+                    if self.with_task_table_ref(|tt| tt.task(task).is_some()) {
+                        self.stranded_local_tasks.push(task);
+                    }
+                }
+            }
+        }
+    }
+
     /// Runs a single scheduling step.
     ///
     /// Returns `true` if a task was executed.
@@ -7448,6 +7523,10 @@ impl ThreeLaneWorker {
                 // Slow path: local task (stored in TLS, not in global TaskTable).
                 let local = crate::runtime::local::remove_local_task(task_id);
                 let Some(local) = local else {
+                    // GH#58: the future lives on another thread (a
+                    // current-thread worker driven from a different thread
+                    // admitted it). Remember the wake for that thread.
+                    self.note_stranded_local_task(task_id);
                     return;
                 };
                 let record_info = self.with_task_table(|tt| {
