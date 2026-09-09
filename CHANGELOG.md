@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-09-08, reconstructed from git history,
+Scope window: current work through 2026-09-09, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts. The `v0.4.11` candidate
 collects the changes since the published `v0.4.10` source.
 
@@ -73,6 +73,13 @@ collects the changes since the published `v0.4.10` source.
 
 ### Runtime lifetime
 
+- `Runtime::block_on` accounts for its root future as a live task, so
+  `is_quiescent()` stays false while that future runs. A current-thread runtime
+  drives spawned tasks on the caller's thread and accepts `spawn_local` from
+  the root. Nested calls preserve the outer local-task queue, including after
+  an inner panic, while a distinct nested runtime keeps its own task ownership.
+  The root also counts toward `max_tasks`: a limit of one leaves no capacity
+  for child tasks while `block_on` is running.
 - Dropping the final runtime owner from one of its async workers transfers
   worker joins to a teardown thread, allowing the current poll to return
   without trying to join itself. The teardown job retains runtime state
@@ -98,6 +105,16 @@ collects the changes since the published `v0.4.10` source.
 
 ### QUIC transport and ATP framing
 
+- DATAGRAM admission checks both the peer's frame limit and the protected
+  packet budget. Oversized payloads return `DatagramTooLarge` before entering
+  the send queue, preserving the connection for subsequent traffic.
+- Client Initial packets carry authenticated padding to the required minimum
+  datagram size. Received Initial and Handshake packets use the peer's header
+  protection key; protected bits are interpreted after unmasking.
+- Coalesced handshake packets are bounded by their individual Length fields.
+  Processing one packet installs newly available keys before the next packet
+  is processed, and authentication failures in an active packet space remain
+  errors.
 - Adjacent received stream ranges coalesce into contiguous runs, keeping the
   reassembly budget tied to out-of-order holes instead of packet count.
   Packets that exceed receive capacity are dropped before frame side effects
@@ -113,6 +130,10 @@ collects the changes since the published `v0.4.10` source.
   ACK ranges retain received non-ack-eliciting packet numbers. ACK-only traffic
   no longer causes false losses and congestion-window collapse on clean
   delayed paths.
+- RTT sampling uses the ACK frame's largest packet only when it is newly
+  acknowledged and the frame also newly acknowledges ack-eliciting traffic.
+  Repeated ACK-largest values cannot resample an older packet. The fresh RTT
+  estimate is applied before classifying time-threshold losses from that ACK.
 - Peer stream-data limits apply separately to each stream direction and type.
   Omitting an unused unidirectional limit no longer removes bidirectional
   stream credit.
