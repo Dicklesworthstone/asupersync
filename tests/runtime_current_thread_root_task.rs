@@ -675,6 +675,63 @@ fn current_thread_block_on_returns_despite_cancellation_blind_self_waker() {
     );
 }
 
+/// Re-entrancy: a root may call `block_on` on its own runtime again, to any
+/// depth, and every level's spawns run on the calling thread and can be
+/// awaited (the outer drive parks the worker for the nested call while it
+/// polls its root). Also the compile-time regression for the `Send`-proof
+/// depth of futures that capture a `RuntimeHandle`: this file compiles
+/// under `-D warnings`, where `recursion_depth_exceeding_limit` is an error.
+#[test]
+fn current_thread_three_deep_nested_block_on_spawns_at_every_level() {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let caller = thread::current().id();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build asupersync runtime");
+        let value = runtime.block_on(async {
+            let level1 = Runtime::current_handle()
+                .expect("runtime handle is installed")
+                .spawn(async { thread::current().id() })
+                .await;
+            assert_eq!(level1, caller, "level 1 spawn left the calling thread");
+            let inner = runtime.block_on(async {
+                let level2 = Runtime::current_handle()
+                    .expect("runtime handle is installed")
+                    .spawn(async { thread::current().id() })
+                    .await;
+                assert_eq!(level2, caller, "level 2 spawn left the calling thread");
+                let innermost = runtime.block_on(async {
+                    let cx = Cx::current().expect("level 3 root Cx is installed");
+                    let mut level3 = cx
+                        .spawn(|_| async { thread::current().id() })
+                        .expect("level 3 root Cx has spawn authority");
+                    let level3 = level3.join(&cx).await.expect("level 3 task completes");
+                    assert_eq!(level3, caller, "level 3 spawn left the calling thread");
+                    40_u32
+                });
+                innermost + 1
+            });
+            assert!(
+                !runtime.is_quiescent(),
+                "the outer root must still be live after the nested calls returned"
+            );
+            inner + 1
+        });
+        let quiescent = runtime.is_quiescent();
+        let _ = tx.send((value, quiescent));
+    });
+
+    let (value, quiescent) = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("three-deep nested block_on must complete within 10 s");
+    assert_eq!(value, 42);
+    assert!(
+        quiescent,
+        "every nested root record must retire once the outermost block_on returned"
+    );
+}
+
 /// Teardown: a `!Send` task admitted by this thread and still parked when
 /// the runtime is dropped is dropped with it (abort-by-drop at teardown),
 /// and the runtime's per-thread local store is retired, not leaked.
