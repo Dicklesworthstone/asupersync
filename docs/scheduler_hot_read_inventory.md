@@ -24,6 +24,12 @@ six existing `sched/task_state/` baseline rows remain byte-for-byte historical
 evidence for their original synthetic workload; they are not a baseline for a
 new operation ID.
 
+The v0.4.11 source review on 2026-09-09 refreshes fourteen of the 26 source
+pins and records 145 anchors, including ten additional anchors for public
+cancellation queries, live observability views and worker teardown ownership.
+The original capture and static validation receipt remain historical. No new
+benchmark measurement or conversion decision is implied by this refresh.
+
 ## Ownership and lifetime model
 
 | Surface | Authority | Lifetime and generation boundary | Synchronization and payload |
@@ -42,21 +48,43 @@ The production builder can provide an external
 comparator must exercise the selected final backing rather than construct an
 unrelated `RuntimeState` solely to create lock contention.
 
+Worker ownership now also includes the current-thread loan path. Each entry
+into `ThreeLaneWorker::run_loop_until` installs the runtime's local queues,
+spawn-lane owner and local-store key on the driving thread. A local future
+stays on its owning thread; a wake encountered elsewhere is retained for a
+later drive on that thread. The execution guard owns the polled future, and
+terminal destruction runs with the task `Cx` installed, outside owner locks,
+before completion audits. Completion revokes obligation admission and drains
+accepted posts while the holder record remains live, then detaches the record.
+Sharded completion still drops the detached record without returning it to
+the task-table pool. A comparator must include these ownership boundaries
+where its operation crosses them.
+
+Live `TaskInspector` and `Diagnostics` queries now use a shared state view that
+locks runtime state, external tasks and external obligations in B -> A -> C
+order, copies data, then releases the locks in reverse order. Their detached
+`Owned` constructors keep the earlier behavior. `RuntimeState::snapshot`
+itself still reads embedded tables. The earlier inventory finding that all
+three observer surfaces were embedded-only is superseded for the live views.
+
 ## Live read inventory
 
-The machine artifact records every direct production read anchor. The reader
+The machine artifact records exact source anchors for the listed production
+reader and ownership surfaces. The reader
 classes are summarized here.
 
 | Reader class | Exact live anchors | Expected frequency | Meaning |
 |---|---|---|---|
-| Phase accessor and bookkeeping | `TaskRecord::phase` at `src/record/task.rs:576`; `TaskTable::{count_in_phase,insert,remove,insert_task_with,insert_pooled_task_with,update_task,live_task_count}` at `src/runtime/task_table.rs:301,329,343,456,485,517,615` | lifecycle bookkeeping or whole-table telemetry; `update_task` brackets each mutation | Scalar phase only. Every in-tree caller already holds a valid record/table reference. |
-| Rich task state | `Worker::execute_task` at `src/runtime/scheduler/worker.rs:391,607,770`; `ThreeLaneWorker::{execute_task,complete_polled_record}` at `src/runtime/scheduler/three_lane.rs:7553,7886`; `TaskSnapshot::from_record` at `src/runtime/state.rs:8884` | poll completion/unwind or cold snapshot | Non-scalar lifecycle and outcome semantics under the record owner lock. |
-| Public cancellation query | `Cx::is_cancel_requested` at `src/cx/cx.rs:2141` | caller-selected | Reads the restored 0.4.3 `cancel_requested` flag under the `CxInner` read lock with its original semantics; it does not clone the rich cancellation reason. Standard runtime publication still updates the stable scheduler clone. |
-| Checkpoint publication query | `Cx::checkpoint` at `src/cx/cx.rs:2186` | cooperative progress checkpoint | Under the `CxInner` read guard, checks the lock-backed bit or current public `fast_cancel` handle. Cancellation and budget handling then use the locked slow path. |
-| Ordinary global wake | `ThreeLaneWaker::schedule` at `src/runtime/scheduler/three_lane.rs:7951` | every ordinary global wake that wins dedup | `TaskWakeState::notify`, then Acquire-query the stable cancellation envelope; a true result triggers a locked reason/priority read. |
-| Ordinary local wake | `ThreeLaneLocalWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8014` | every ordinary local wake that wins dedup | Same stable-envelope query, followed by locked reason/priority lookup before local cancel-lane promotion. |
-| Reason-bearing global cancel wake | `CancelLaneWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8075` | cancellation wake | Reads `cancel_requested` and reason-derived cleanup priority together under the `CxInner` read lock, then promotes unconditionally. |
-| Reason-bearing local cancel wake | `ThreeLaneLocalCancelWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8134` | local cancellation wake | Same coherent locked payload read, then local cancel-lane promotion. |
+| Phase accessor and bookkeeping | `TaskRecord::phase` load at `src/record/task.rs:616`; `TaskTable` loads at `src/runtime/task_table.rs:306,330,352,474,512,525,531,621` | lifecycle bookkeeping or whole-table telemetry; `update_task` brackets each mutation | Scalar phase only. Every in-tree caller already holds a valid record/table reference. |
+| Rich task state | `Worker::execute_task` at `src/runtime/scheduler/worker.rs:415,664,838`; `ThreeLaneWorker::{execute_task,complete_polled_record}` at `src/runtime/scheduler/three_lane.rs:7966,8313`; `TaskSnapshot::from_record` at `src/runtime/state.rs:9903` | poll completion/unwind or cold snapshot | Non-scalar lifecycle and outcome semantics under the record owner lock. |
+| Public locked cancellation query | `Cx::is_cancel_requested` read at `src/cx/cx.rs:2363` | caller-selected | Reads the restored 0.4.3 `cancel_requested` flag under the `CxInner` read lock with its original semantics; it does not clone the rich cancellation reason. Standard runtime publication still updates the stable scheduler clone. |
+| Public published-bit queries | `Cx::{published_cancel_requested,is_cancelled}` at `src/cx/cx.rs:2401,2425` | caller-selected hot-loop queries | Acquire reads the stable cancellation envelope. A legacy direct locked-field mutation can diverge from this bit; checkpoint delivery does not necessarily republish it. |
+| Spawn completion observer | `SpawnCompletionObserver::poll` at `src/runtime/task_handle.rs:187` | cancellation-sensitive Pending poll or every terminal poll | The stable bit gates locked acknowledgement reads on Pending; terminal polls capture cancellation facts under the context read lock before destroying the completed future. |
+| Checkpoint publication query | `Cx::checkpoint` read at `src/cx/cx.rs:2491` | cooperative progress checkpoint | Under the `CxInner` read guard, checks the lock-backed bit or current public `fast_cancel` handle. Cancellation and budget handling then use the locked slow path. |
+| Ordinary global wake | `ThreeLaneWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8378` | every ordinary global wake that wins dedup | `TaskWakeState::notify`, then Acquire-query the stable cancellation envelope; a true result triggers a locked reason/priority read. |
+| Ordinary local wake | `ThreeLaneLocalWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8441` | every ordinary local wake that wins dedup | Same stable-envelope query, followed by locked reason/priority lookup before local cancel-lane promotion. |
+| Reason-bearing global cancel wake | `CancelLaneWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8502` | cancellation wake | Reads `cancel_requested` and reason-derived cleanup priority together under the `CxInner` read lock, then promotes unconditionally. |
+| Reason-bearing local cancel wake | `ThreeLaneLocalCancelWaker::schedule` at `src/runtime/scheduler/three_lane.rs:8561` | local cancellation wake | Same coherent locked payload read, then local cancel-lane promotion. |
 
 `TaskPhaseCell` has nine direct in-tree production load positions: the accessor,
 the whole-table count, insert bookkeeping, remove bookkeeping, closure-based
@@ -250,9 +278,12 @@ The dispositions are:
 
 ## Validation and no-claim boundary
 
-This lane used static source anchors, Git history, source hashes, baseline JSON
-inspection, and the authored contract. The contract is intentionally recorded
-as not executed in this lane. No compiler, test, benchmark, profiler, or remote worker was invoked.
+The original 2026-08-06 HOTREAD-1 capture used static source anchors, Git history,
+source hashes, baseline JSON inspection, and the authored contract. Its receipt
+intentionally records the contract as not executed: No compiler, test, benchmark, profiler, or remote worker was invoked.
+The v0.4.11 source reconciliation preserves that historical `validation_state`.
+Any later focused contract result is a separate execution receipt, not a new
+benchmark or a retroactive change to the original capture.
 
 This inventory does not prove compilation, runtime correctness, wake
 correctness, cancellation correctness, deterministic replay, performance,

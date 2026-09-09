@@ -5,6 +5,21 @@
   "captured_date_utc": "2026-08-06",
   "base_commit": "5d8f4959fa6cf027ddfcc2afd3d8b3ff601587b8",
   "disposition": "STATIC_INVENTORY_COMPLETE_PRODUCTION_UNCHANGED",
+  "release_source_review": {
+    "reviewed_at_utc": "2026-09-09",
+    "source_commit": "5af6299e1860b2f5f5cc4ea6188999867385a4c3",
+    "previous_inventory_commit": "3cb2dc6d0",
+    "scope": "Reconcile fourteen changed source pins and exact anchors after semantic review. The original captured date, static validation receipt, six historical benchmark rows, comparator identities and no-conversion decisions are retained.",
+    "changes": [
+      "Cx adds published_cancel_requested and is_cancelled as Acquire readers of the stable cancellation bit. The locked is_cancel_requested query and checkpoint compatibility semantics remain distinct; direct legacy field mutation need not publish the stable bit.",
+      "TaskInspector and Diagnostics now use RuntimeStateSource: detached Owned views retain their old behavior, while Shared views lock RuntimeState, external tasks and external obligations in B -> A -> C order. RuntimeState::snapshot itself still reads the embedded tables. The earlier embedded-only observer finding is superseded for live inspector/diagnostics views.",
+      "Native workers now retain stored futures in the execution guard and destroy terminal futures outside owner locks, while the task Cx remains installed, before auditing completion. Completion revokes obligation admission and drains accepted posts while the holder remains live before detaching its record. Detached sharded records are still dropped rather than recycled.",
+      "ThreeLane current-thread dispatch can lend its worker across caller threads; each dispatch-loop entry scopes the local queues, spawn-lane owner and per-runtime local-store key. Missing thread-affine futures retain a stranded wake until their owning thread drives the worker. These paths are not represented by the old synthetic task-state benchmark.",
+      "The actor graceful-drain repair retains the cancellation writer sites. Lab additions provide region-command admission and optional production-schedule replay without replacing the quota writer. Oneshot adds obligation-aware permits and checked admission, and extracts its tests; its cancellation registration and post-lock wake contract remain separate from scheduler timing.",
+      "Cargo changes cover release versions/packaging, opt-in features, CLI logging, lint policy and resolved dependency updates. Existing TaskPhaseCell, TaskWakeState and CxCancellationState ownership primitives remain the incumbents; no synchronization replacement is authorized."
+    ],
+    "no_claim_boundary": "This review updates the source inventory only. It does not establish scheduler equivalence, new performance observations, runtime correctness, broad workspace health or release readiness. Later focused contract execution is separate from the original static-only validation_state."
+  },
   "validation_state": {
     "source_hashes_checked": true,
     "source_anchors_checked": true,
@@ -19,7 +34,7 @@
   },
   "authority": {
     "inventory_scope": "in-tree production task-state, cancellation, wake-read, record-lifetime, and incumbent benchmark surfaces",
-    "read_site_definition": "a direct synchronized or atomic read of TaskState, TaskPhaseCell, TaskWakeState, the stable cancellation publication state, cancel_requested, or cancel_reason, plus its in-tree authority-switching consumer",
+    "read_site_definition": "enumerated direct synchronized or atomic reads of TaskState, TaskPhaseCell, TaskWakeState, the stable cancellation publication state, cancel_requested, or cancel_reason, plus their in-tree authority-switching consumers",
     "source_revision_authority": "historical base_commit plus source_pins and exact line anchors maintained against the current tree",
     "production_behavior_changed": false,
     "production_conversion_authorized": false,
@@ -32,26 +47,26 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121,
       "role": "direct dependency and benchmark registration surface"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666,
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664,
       "role": "resolved synchronization ecosystem inventory"
     },
     {
       "path": "src/record/task.rs",
-      "sha256": "1e1b3ecbb182d0ee8c063eae24235ff62442a1473c5d8e9655b438b7dcdf1ed4",
-      "line_count": 3204,
+      "sha256": "7afdb9522ea2a962da1edb5659eb7770d9671925b3af6b56769ab92516ced548",
+      "line_count": 3210,
       "role": "TaskState authority, TaskPhaseCell, TaskWakeState, transition writers, and recycle reset"
     },
     {
       "path": "src/runtime/task_table.rs",
-      "sha256": "313dfbc470cf18ec0c4987800656f3faa5f898beaf8ab70a31436fbfb7df4de3",
-      "line_count": 1684,
+      "sha256": "efa2bc9b745d3b93dd803e408af7824d1b981a39fa3cece980078793150f8ba0",
+      "line_count": 1687,
       "role": "generation-checked record owner, stored-future owner, phase bookkeeping, and record pool"
     },
     {
@@ -74,32 +89,32 @@
     },
     {
       "path": "src/cx/cx.rs",
-      "sha256": "2e9b20ad5c3aefba1619e93831640ab2d6eead53922e31a87c305dc0f431f95b",
-      "line_count": 7816,
+      "sha256": "55a0f73ff93231459635f00a0b1b2e5be99b1c88844c50975583933577852162",
+      "line_count": 8178,
       "role": "checkpoint, cancellation queries, writers, and cancel-waker registrations"
     },
     {
       "path": "src/runtime/task_handle.rs",
-      "sha256": "4bef44973e925eb925ad59c99c0adbe9a2b0875cb6fc28a86393ed148c83da84",
-      "line_count": 2096,
+      "sha256": "35429c0ee91df3b3238cf1b8c0ac35cc0d5b064f2116a1cc87de6baa4c9bc509",
+      "line_count": 2135,
       "role": "task-handle cancellation publication"
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "95133c33fbfac1ce32625234aca1a4fb262b6594d562ba5beb95aec8965f9156",
-      "line_count": 8210,
+      "sha256": "da113aaa0311fafd3271f2c93d0e0f1c12dfbd5f2f4c90a1da894f4ad871ab21",
+      "line_count": 8619,
       "role": "production scheduler table selection, poll cycle, publication, ordinary wakers, and reason-bearing cancel wakers"
     },
     {
       "path": "src/runtime/scheduler/worker.rs",
-      "sha256": "84306384a4b214e54c0fa11cdf998a316b82344a9675868a6f1b4ef9106d71c8",
-      "line_count": 2998,
+      "sha256": "b76fb667f9bd6f41724e4484cfa730d2449f815f20fa564448a22b9a1d24d5be",
+      "line_count": 3500,
       "role": "exported legacy worker wake and rich-state paths"
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "97029bd90cae9a35396bc2c157a955ba30ba456fcbedaf947facdf783449f14e",
-      "line_count": 10190,
+      "sha256": "7d6311d55dfe7471a5e2ccc91da5f0699e3d9926b9c244e6fb82ba2c479ec10d",
+      "line_count": 11286,
       "role": "embedded task owner, cancellation propagation, completion, finalizer publication, and snapshots"
     },
     {
@@ -116,8 +131,8 @@
     },
     {
       "path": "src/actor.rs",
-      "sha256": "971d48e8f9bef744ce04595eef544a0ebf6f5309f6932e24a6cb632621977fa3",
-      "line_count": 3699,
+      "sha256": "25e450b39bbae3d432b6e8faf6e08d7cd6786c462153d712e5b1cda47619eb28",
+      "line_count": 3858,
       "role": "actor and actor-join abort writers"
     },
     {
@@ -128,26 +143,26 @@
     },
     {
       "path": "src/lab/runtime.rs",
-      "sha256": "ff01e00c11f5afedb04376c77b8724f686d00cf3988690c51229fa36628c85a8",
-      "line_count": 11253,
+      "sha256": "da3c022629e8f9a269030e3778e764988020558f4c872932ff70359cff03f75a",
+      "line_count": 12205,
       "role": "deterministic scheduler cancellation writer and alternate reader model"
     },
     {
       "path": "src/observability/task_inspector.rs",
-      "sha256": "72d03d53ed2c633821cbb946e709c622ac3f17da13dc742c4088efa9d1c88710",
-      "line_count": 1624,
-      "role": "query-time rich state, phase, and wake snapshot"
+      "sha256": "492290679cc5fff6cb897677aec38ad54f68be657c302a323eb7f75e80ea1fc2",
+      "line_count": 1793,
+      "role": "detached or live B-A-C state view and query-time rich state, phase, and wake snapshot"
     },
     {
       "path": "src/observability/diagnostics.rs",
-      "sha256": "e26a88ce0fd375bc3157d9220e2304d3fa9f0e64080ce406ed072ffd470f4693",
-      "line_count": 8111,
+      "sha256": "f4e45563ab80313107903fafe029f45a8adae883ec83b4924d8e839436194856",
+      "line_count": 8174,
       "role": "query-time blocked-task rich state and wake inspection"
     },
     {
       "path": "src/channel/oneshot.rs",
-      "sha256": "ca554d1eaa31d17e57f0d532a4c210cf9ad0d0b190b670df219701d27dfe979f",
-      "line_count": 7848,
+      "sha256": "10d0393489a194a7345790dc0e89817c4788092731a11ad175a9800f7d492237",
+      "line_count": 1432,
       "role": "token-owned cancel-waker consumer example"
     },
     {
@@ -190,10 +205,10 @@
   "ownership_model": [
     {
       "ownership_id": "HOTREAD-OWN-RICH-TASK",
-      "owner": "TaskRecord while retained by TaskTable or embedded RuntimeState",
+      "owner": "TaskRecord while retained by TaskTable, embedded RuntimeState, or detached by value for ordered completion",
       "payload": "TaskState including outcome, CancelReason, and cleanup Budget",
       "synchronization": "exclusive access through the selected task-table or RuntimeState lock",
-      "lifetime": "record reference is valid only while its owning table access remains live",
+      "lifetime": "a borrowed record remains valid only within owning table access; ordered completion can detach and retain the record by value until post-lock retirement",
       "generation": "TaskId carries ArenaIndex slot and generation; Arena::get and get_mut require both to match",
       "publication": "TaskPhaseCell is a scalar mirror and never grants record ownership"
     },
@@ -253,13 +268,13 @@
         {"path": "src/record/task.rs", "line": 616, "fragment": "self.phase.load()"},
         {"path": "src/runtime/task_table.rs", "line": 306, "fragment": "record.phase.load()"},
         {"path": "src/runtime/task_table.rs", "line": 330, "fragment": "record.phase.load()"},
-        {"path": "src/runtime/task_table.rs", "line": 349, "fragment": "record.phase.load()"},
-        {"path": "src/runtime/task_table.rs", "line": 471, "fragment": "record.phase.load()"},
-        {"path": "src/runtime/task_table.rs", "line": 509, "fragment": "record.phase.load()"},
-        {"path": "src/runtime/task_table.rs", "line": 522, "fragment": "record.phase.load()"},
-        {"path": "src/runtime/task_table.rs", "line": 528, "fragment": "record.phase.load()"},
-        {"path": "src/runtime/task_table.rs", "line": 618, "fragment": "record.phase.load()"},
-        {"path": "src/observability/task_inspector.rs", "line": 534, "fragment": "phase: task.phase()"}
+        {"path": "src/runtime/task_table.rs", "line": 352, "fragment": "record.phase.load()"},
+        {"path": "src/runtime/task_table.rs", "line": 474, "fragment": "record.phase.load()"},
+        {"path": "src/runtime/task_table.rs", "line": 512, "fragment": "record.phase.load()"},
+        {"path": "src/runtime/task_table.rs", "line": 525, "fragment": "record.phase.load()"},
+        {"path": "src/runtime/task_table.rs", "line": 531, "fragment": "record.phase.load()"},
+        {"path": "src/runtime/task_table.rs", "line": 621, "fragment": "record.phase.load()"},
+        {"path": "src/observability/task_inspector.rs", "line": 699, "fragment": "phase: task.phase()"}
       ]
     },
     {
@@ -279,9 +294,9 @@
         {"path": "src/obligation/lyapunov.rs", "line": 293, "fragment": "TaskPhase::CancelRequested"},
         {"path": "src/obligation/lyapunov.rs", "line": 294, "fragment": "TaskPhase::Cancelling"},
         {"path": "src/obligation/lyapunov.rs", "line": 295, "fragment": "TaskPhase::Finalizing"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4589, "fragment": "fn capture_adaptive_snapshot"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4629, "fragment": "capture_adaptive_snapshot()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6343, "fragment": "StateSnapshot::from_runtime_state_with_tasks"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4726, "fragment": "fn capture_adaptive_snapshot"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4766, "fragment": "capture_adaptive_snapshot()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6646, "fragment": "StateSnapshot::from_runtime_state_with_tasks"},
         {"path": "src/runtime/config.rs", "line": 2233, "fragment": "enable_governor: false"},
         {"path": "src/runtime/config.rs", "line": 2234, "fragment": "governor_interval: 32"},
         {"path": "src/runtime/config.rs", "line": 2236, "fragment": "enable_adaptive_cancel_streak: true"},
@@ -305,17 +320,17 @@
         {"path": "src/record/task.rs", "line": 651, "fragment": "fn request_cancel_with_budget_and_publication"},
         {"path": "src/record/task.rs", "line": 1001, "fragment": "pub fn cancel_witness"},
         {"path": "src/record/task.rs", "line": 1196, "fragment": "pub fn complete"},
-        {"path": "src/record/task.rs", "line": 1401, "fragment": "pub fn cancel_reason"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7571, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7904, "fragment": "fn complete_polled_record"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 391, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 607, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 770, "fragment": "record.state.is_terminal()"},
-        {"path": "src/runtime/state.rs", "line": 6445, "fragment": "match &task.state"},
-        {"path": "src/runtime/state.rs", "line": 6519, "fragment": "match &task.state"},
-        {"path": "src/runtime/state.rs", "line": 8912, "fragment": "from_state(&record.state)"},
-        {"path": "src/observability/task_inspector.rs", "line": 533, "fragment": "from(&task.state)"},
-        {"path": "src/observability/diagnostics.rs", "line": 454, "fragment": "match &task.state"}
+        {"path": "src/record/task.rs", "line": 1407, "fragment": "pub fn cancel_reason"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7966, "fragment": "record.state.is_terminal()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8313, "fragment": "fn complete_polled_record"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 415, "fragment": "record.state.is_terminal()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 664, "fragment": "record.state.is_terminal()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 838, "fragment": "record.state.is_terminal()"},
+        {"path": "src/runtime/state.rs", "line": 7300, "fragment": "match &task.state"},
+        {"path": "src/runtime/state.rs", "line": 7374, "fragment": "match &task.state"},
+        {"path": "src/runtime/state.rs", "line": 9903, "fragment": "from_state(&record.state)"},
+        {"path": "src/observability/task_inspector.rs", "line": 698, "fragment": "from(&task.state)"},
+        {"path": "src/observability/diagnostics.rs", "line": 467, "fragment": "match &task.state"}
       ]
     },
     {
@@ -330,29 +345,32 @@
       "semantic_payload": "lock-backed 0.4.3 requested bit or cloned reason/cause chain",
       "disposition": "KEEP_PUBLISHED_FLAG_AND_LOCKED_RICH_READS",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2196, "fragment": "self.inner.read().cancel_requested"},
-        {"path": "src/cx/cx.rs", "line": 3490, "fragment": "inner.cancel_reason.clone()"},
-        {"path": "src/cx/cx.rs", "line": 3520, "fragment": "pub fn cancel_chain"},
-        {"path": "src/cx/cx.rs", "line": 3554, "fragment": "pub fn root_cancel_cause"},
-        {"path": "src/cx/cx.rs", "line": 3580, "fragment": "pub fn cancelled_by"},
-        {"path": "src/cx/cx.rs", "line": 3611, "fragment": "pub fn any_cause_is"}
+        {"path": "src/cx/cx.rs", "line": 2363, "fragment": "self.inner.read().cancel_requested"},
+        {"path": "src/cx/cx.rs", "line": 3720, "fragment": "inner.cancel_reason.clone()"},
+        {"path": "src/cx/cx.rs", "line": 3750, "fragment": "pub fn cancel_chain"},
+        {"path": "src/cx/cx.rs", "line": 3784, "fragment": "pub fn root_cancel_cause"},
+        {"path": "src/cx/cx.rs", "line": 3810, "fragment": "pub fn cancelled_by"},
+        {"path": "src/cx/cx.rs", "line": 3841, "fragment": "pub fn any_cause_is"}
       ]
     },
     {
       "surface_id": "HOTREAD-READ-CANCELLATION-PUBLICATION",
       "category": "ordinary_waker_and_checkpoint_publication",
       "owner": "the public Arc<AtomicBool> fast_cancel handle for checkpoint compatibility plus the original stable clone named CxCancellationState inside the scheduler",
-      "reader_set": ["Cx::checkpoint", "ThreeLaneWaker::schedule", "ThreeLaneLocalWaker::schedule"],
+      "reader_set": ["Cx::checkpoint", "Cx::published_cancel_requested", "Cx::is_cancelled", "SpawnCompletionObserver::poll", "ThreeLaneWaker::schedule", "ThreeLaneLocalWaker::schedule"],
       "writer_set": ["cancellation_publication_writer_sites"],
-      "synchronization": "checkpoint reads the lock-backed flag or current public handle; ordinary wakers read the stable clone; both atomic reads use Acquire paired with Release publication through CxInner::set_cancel_requested; rich reason reads still require CxInner read",
-      "lifetime_and_generation": "wakers own the stable clone and weak context; checkpoint owns a Cx and observes the current public compatibility handle",
-      "expected_frequency": "every ordinary wake that wins wake dedup and every explicit checkpoint",
+      "synchronization": "checkpoint reads the lock-backed flag or current public handle; ordinary wakers, public published-bit queries and the spawn observer read the stable clone with Acquire paired with Release publication through CxInner::set_cancel_requested; rich reason and acknowledgement reads still require CxInner read",
+      "lifetime_and_generation": "wakers own the stable clone and weak context; public queries and the spawn observer retain a Cx; checkpoint observes its current public compatibility handle",
+      "expected_frequency": "every ordinary wake that wins wake dedup, explicit checkpoint, cancellation-sensitive spawn observer poll, or caller-selected published-bit query",
       "semantic_payload": "one-bit cancellation publication only",
       "disposition": "KEEP_INCUMBENT_ALREADY_ATOMIC",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2261, "fragment": "let cancelled = guard.is_cancel_requested()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7977, "fragment": "self.cancellation.load(Ordering::Acquire)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8036, "fragment": "self.cancellation.load(Ordering::Acquire)"}
+        {"path": "src/cx/cx.rs", "line": 2491, "fragment": "let cancelled = guard.is_cancel_requested()"},
+        {"path": "src/cx/cx.rs", "line": 2401, "fragment": "pub fn published_cancel_requested"},
+        {"path": "src/cx/cx.rs", "line": 2425, "fragment": "pub fn is_cancelled"},
+        {"path": "src/runtime/task_handle.rs", "line": 187, "fragment": "this.completion_cx.has_published_cancellation()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8386, "fragment": "self.cancellation.load(Ordering::Acquire)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8445, "fragment": "self.cancellation.load(Ordering::Acquire)"}
       ]
     },
     {
@@ -367,32 +385,34 @@
       "semantic_payload": "coherent cancellation flag, strongest cleanup priority, and local/global route",
       "disposition": "KEEP_REASON_BEARING_LOCKED_PATH",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8093, "fragment": "fn schedule(&self)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8098, "fragment": "let guard = inner.read()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8105, "fragment": "guard.cancel_requested"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8152, "fragment": "fn schedule(&self)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8157, "fragment": "let guard = inner.read()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8164, "fragment": "guard.cancel_requested"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8502, "fragment": "fn schedule(&self)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8507, "fragment": "let guard = inner.read()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8514, "fragment": "guard.cancel_requested"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8561, "fragment": "fn schedule(&self)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8566, "fragment": "let guard = inner.read()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8573, "fragment": "guard.cancel_requested"}
       ]
     },
     {
       "surface_id": "HOTREAD-READ-OBSERVABILITY",
-      "category": "query_time_embedded_table_snapshot",
-      "owner": "embedded RuntimeState task table",
+      "category": "query_time_selected_table_snapshot",
+      "owner": "RuntimeState::snapshot uses embedded tables; live TaskInspector and Diagnostics use RuntimeStateSource::Shared plus optional external task and obligation tables",
       "reader_set": ["RuntimeState::snapshot", "TaskInspector", "Diagnostics"],
       "writer_set": ["runtime lifecycle owner"],
-      "synchronization": "shared RuntimeState view supplied to the observer",
-      "lifetime_and_generation": "queries retain the state reference and use generation-checked task lookup",
+      "synchronization": "Owned retains a detached RuntimeState; Shared locks RuntimeState B, task table A and obligation table C in that order, copies plain data and releases in reverse order",
+      "lifetime_and_generation": "queries retain the resolved state view, use generation-checked task lookup and never carry record references beyond the owner lock scope",
       "expected_frequency": "explicit diagnostic or snapshot request",
       "semantic_payload": "rich TaskState, phase, wake pending, timing, and waiter metadata",
-      "disposition": "INVENTORY_ONLY_SHARDED_VISIBILITY_REQUIRES_SEPARATE_OWNER",
+      "disposition": "INVENTORY_ONLY_LIVE_VIEW_AND_EMBEDDED_SNAPSHOT_DISTINCT",
       "anchors": [
-        {"path": "src/runtime/state.rs", "line": 3267, "fragment": "pub fn snapshot(&self)"},
-        {"path": "src/runtime/state.rs", "line": 3288, "fragment": ".tasks_iter()"},
-        {"path": "src/observability/task_inspector.rs", "line": 499, "fragment": "pub fn inspect_task"},
-        {"path": "src/observability/task_inspector.rs", "line": 540, "fragment": "wake_pending: task.wake_state.is_notified()"},
-        {"path": "src/observability/diagnostics.rs", "line": 439, "fragment": "pub fn explain_task_blocked"},
-        {"path": "src/observability/diagnostics.rs", "line": 461, "fragment": "task.wake_state.is_notified()"}
+        {"path": "src/runtime/state.rs", "line": 3395, "fragment": "pub fn snapshot(&self)"},
+        {"path": "src/runtime/state.rs", "line": 3416, "fragment": ".tasks_iter()"},
+        {"path": "src/observability/task_inspector.rs", "line": 57, "fragment": "pub(crate) enum RuntimeStateSource"},
+        {"path": "src/observability/task_inspector.rs", "line": 170, "fragment": "pub(crate) fn with_view"},
+        {"path": "src/observability/task_inspector.rs", "line": 663, "fragment": "pub fn inspect_task"},
+        {"path": "src/observability/task_inspector.rs", "line": 705, "fragment": "wake_pending: task.wake_state.is_notified()"},
+        {"path": "src/observability/diagnostics.rs", "line": 443, "fragment": "pub fn explain_task_blocked"},
+        {"path": "src/observability/diagnostics.rs", "line": 474, "fragment": "task.wake_state.is_notified()"}
       ]
     },
     {
@@ -407,12 +427,12 @@
       "semantic_payload": "legacy rich lifecycle and ordinary wake publication without stable cancellation-envelope routing",
       "disposition": "TREE_DORMANT_PUBLIC_SURFACE_NOT_A_CURRENT_BUILDER_COMPARATOR",
       "anchors": [
-        {"path": "src/runtime/scheduler/worker.rs", "line": 413, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 478, "fragment": "record.wake_state.begin_poll()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 663, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 738, "fragment": "wake_state.finish_poll()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 786, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/worker.rs", "line": 916, "fragment": "self.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/worker.rs", "line": 437, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 509, "fragment": "record.wake_state.begin_poll()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 720, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 801, "fragment": "wake_state.finish_poll()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 854, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 984, "fragment": "self.wake_state.notify()"}
       ]
     }
   ],
@@ -426,17 +446,17 @@
     {
       "writer_id": "HOTREAD-CANCEL-WRITER-TASK-HANDLE",
       "owner": "strengthen_cancel_reason_locked",
-      "anchor": {"path": "src/runtime/task_handle.rs", "line": 386, "fragment": "lock.set_cancel_requested(true)"},
+      "anchor": {"path": "src/runtime/task_handle.rs", "line": 425, "fragment": "lock.set_cancel_requested(true)"},
       "ordering": "CxInner write guard; set_cancel_requested publishes the matching Release value before callback-free command publication follows"
     },
     {
       "writer_id": "HOTREAD-CANCEL-WRITER-CHECKPOINT",
       "owner": "Cx::checkpoint and Cx::checkpoint_with compatibility-handle materialization and budget exhaustion",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 2313, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2322, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2443, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 2452, "fragment": "inner.set_cancel_requested(true)"}
+        {"path": "src/cx/cx.rs", "line": 2543, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2552, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2673, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 2682, "fragment": "inner.set_cancel_requested(true)"}
       ],
       "ordering": "CxInner write guard; budget-derived reason and pending waker state remain under the guard"
     },
@@ -444,11 +464,11 @@
       "writer_id": "HOTREAD-CANCEL-WRITER-CX-APIS",
       "owner": "Cx internal, explicit, low-allocation, and reason-setting cancellation APIs",
       "anchors": [
-        {"path": "src/cx/cx.rs", "line": 3158, "fragment": "inner.set_cancel_requested(value)"},
-        {"path": "src/cx/cx.rs", "line": 3192, "fragment": "inner.set_cancel_requested(value)"},
-        {"path": "src/cx/cx.rs", "line": 3387, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 3444, "fragment": "inner.set_cancel_requested(true)"},
-        {"path": "src/cx/cx.rs", "line": 3644, "fragment": "inner.set_cancel_requested(true)"}
+        {"path": "src/cx/cx.rs", "line": 3388, "fragment": "inner.set_cancel_requested(value)"},
+        {"path": "src/cx/cx.rs", "line": 3422, "fragment": "inner.set_cancel_requested(value)"},
+        {"path": "src/cx/cx.rs", "line": 3617, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 3674, "fragment": "inner.set_cancel_requested(true)"},
+        {"path": "src/cx/cx.rs", "line": 3874, "fragment": "inner.set_cancel_requested(true)"}
       ],
       "ordering": "CxInner write guard; rich reason and waker snapshots are coherent at unlock"
     },
@@ -473,7 +493,7 @@
     {
       "writer_id": "HOTREAD-CANCEL-WRITER-LAB",
       "owner": "LabRuntime poll-quota exhaustion",
-      "anchor": {"path": "src/lab/runtime.rs", "line": 3854, "fragment": "guard.set_cancel_requested(true)"},
+      "anchor": {"path": "src/lab/runtime.rs", "line": 4373, "fragment": "guard.set_cancel_requested(true)"},
       "ordering": "CxInner write guard within generation-checked Lab task update"
     }
   ],
@@ -504,12 +524,12 @@
       "expected_frequency": "spawn, ordinary wake, timer wake, and cancellation injection",
       "semantic_payload": "dedup result plus local/global route metadata",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2593, "fragment": "record.wake_state.clear()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2607, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2675, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2696, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2754, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2857, "fragment": "record.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2645, "fragment": "record.wake_state.clear()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2659, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2727, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2748, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2806, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 2909, "fragment": "record.wake_state.notify()"}
       ]
     },
     {
@@ -522,7 +542,7 @@
       "semantic_payload": "strongest reason priority, wake snapshots, and first-lane publication",
       "anchors": [
         {"path": "src/record/task.rs", "line": 896, "fragment": "self.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5166, "fragment": "record.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5366, "fragment": "record.wake_state.notify()"}
       ]
     },
     {
@@ -534,9 +554,9 @@
       "expected_frequency": "task or async-finalizer admission",
       "semantic_payload": "initial Notified state before ready queue publication",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5777, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5782, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/state.rs", "line": 7247, "fragment": "record.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5994, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 5999, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/state.rs", "line": 8211, "fragment": "record.wake_state.notify()"}
       ]
     },
     {
@@ -548,12 +568,12 @@
       "expected_frequency": "worker-local scheduling and dependent completion wakes",
       "semantic_payload": "dedup, priority, pinning, and route",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6934, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 6975, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7016, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7063, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7072, "fragment": "record.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7102, "fragment": "metadata.wake_state.clear()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7301, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7342, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7383, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7430, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7439, "fragment": "record.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7469, "fragment": "metadata.wake_state.clear()"}
       ]
     },
     {
@@ -561,15 +581,19 @@
       "owner": "ThreeLaneWorker selected task table and cloned wake-state Arc",
       "reader_writer_set": ["global poll start", "local poll start", "ready completion", "pending completion", "panic completion"],
       "synchronization": "begin under table lock; user poll occurs unlocked; finish detects concurrent Release notify with Acquire failure ordering",
-      "lifetime_and_generation": "Arc remains valid across unlocked Future::poll; task table still validates TaskId on reinsertion/completion",
+      "lifetime_and_generation": "Arc remains valid across unlocked Future::poll; task table still validates TaskId on reinsertion/completion. The execution guard retains stored futures through terminal destruction while Cx remains installed, outside owner locks and before the completion audit. Each dispatch-loop entry scopes runtime-local storage and queue authority.",
       "expected_frequency": "every production ThreeLane poll",
       "semantic_payload": "Polling to Idle or Notified handoff",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7187, "fragment": "record.wake_state.begin_poll()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7229, "fragment": "record.wake_state.begin_poll()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7405, "fragment": "wake_state.clear()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7470, "fragment": "wake_state.finish_poll()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7544, "fragment": "wake_state.clear()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7550, "fragment": "record.wake_state.begin_poll()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7606, "fragment": "record.wake_state.begin_poll()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7795, "fragment": "wake_state.clear()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7860, "fragment": "wake_state.finish_poll()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7939, "fragment": "wake_state.clear()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 4949, "fragment": "ScopedLocalStoreKey::new"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7753, "fragment": "Cx::set_current(task_cx)"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 579, "fragment": "Cx::set_current(task_cx)"},
+        {"path": "src/runtime/scheduler/worker.rs", "line": 29, "fragment": "pub(super) fn retire_terminal_task"}
       ]
     },
     {
@@ -581,10 +605,10 @@
       "expected_frequency": "every external wake and cancellation wake",
       "semantic_payload": "dedup, cancel route, strongest cleanup priority, and queue destination",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7970, "fragment": "self.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8033, "fragment": "self.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8113, "fragment": "self.wake_state.notify()"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8172, "fragment": "self.wake_state.notify()"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8379, "fragment": "self.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8442, "fragment": "self.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8522, "fragment": "self.wake_state.notify()"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8581, "fragment": "self.wake_state.notify()"}
       ]
     },
     {
@@ -598,8 +622,8 @@
       "anchors": [
         {"path": "src/types/task_context.rs", "line": 981, "fragment": "pub(crate) fn cancel_waker_snapshot"},
         {"path": "src/types/task_context.rs", "line": 1006, "fragment": "pub(crate) fn take_cancel_wakers"},
-        {"path": "src/cx/cx.rs", "line": 3213, "fragment": "fn refresh_cancel_waker"},
-        {"path": "src/channel/oneshot.rs", "line": 865, "fragment": "fn refresh_cancel_waker"},
+        {"path": "src/cx/cx.rs", "line": 3443, "fragment": "fn refresh_cancel_waker"},
+        {"path": "src/channel/oneshot.rs", "line": 979, "fragment": "fn refresh_cancel_waker"},
         {"path": "src/sync/barrier.rs", "line": 489, "fragment": "Clear the Cx registration first"},
         {"path": "src/sync/once_cell.rs", "line": 884, "fragment": "refresh_cancel_waker"}
       ]
@@ -630,21 +654,22 @@
       "owner": "TaskRecord Recyclable implementation",
       "rule": "reset replaces phase and clears rich state; wake state is reset in place only with unique Arc ownership, otherwise replaced",
       "anchors": [
-        {"path": "src/record/task.rs", "line": 1522, "fragment": "fn reset(&mut self)"},
-        {"path": "src/record/task.rs", "line": 1527, "fragment": "TaskPhaseCell::new"},
-        {"path": "src/record/task.rs", "line": 1571, "fragment": "Arc::get_mut"},
-        {"path": "src/record/task.rs", "line": 1574, "fragment": "Arc::new(TaskWakeState::new())"}
+        {"path": "src/record/task.rs", "line": 1528, "fragment": "fn reset(&mut self)"},
+        {"path": "src/record/task.rs", "line": 1533, "fragment": "TaskPhaseCell::new"},
+        {"path": "src/record/task.rs", "line": 1577, "fragment": "Arc::get_mut"},
+        {"path": "src/record/task.rs", "line": 1580, "fragment": "Arc::new(TaskWakeState::new())"}
       ]
     },
     {
       "boundary_id": "HOTREAD-LIFE-SHARDED-COMPLETION",
       "owner": "ThreeLaneWorker ordered completion",
-      "rule": "external task table removes and detaches the record before RuntimeState completion; post-lock retirement drops it rather than returning it to the table pool",
+      "rule": "terminal future destruction precedes the completion audit; revoke obligation admission and drain accepted posts while the holder remains live, then detach under the external task table and perform RuntimeState completion; post-lock retirement drops the record rather than returning it to the table pool",
       "anchors": [
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7646, "fragment": "tt.remove_task(task_id)"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7664, "fragment": "task_completed_from_external_record"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7805, "fragment": "fn retire_detached_task_record"},
-        {"path": "src/runtime/scheduler/three_lane.rs", "line": 7810, "fragment": "drop(record)"}
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8031, "fragment": "self.drain_completion_obligation_posts(task_id)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8045, "fragment": "tt.remove_task(task_id)"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8063, "fragment": "task_completed_from_external_record"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8214, "fragment": "fn retire_detached_task_record"},
+        {"path": "src/runtime/scheduler/three_lane.rs", "line": 8219, "fragment": "drop(record)"}
       ]
     }
   ],
@@ -680,8 +705,8 @@
     {
       "finding_id": "HOTREAD-ACCURACY-OBSERVABILITY-BACKING",
       "recorded_claim": "RuntimeState snapshots describe runtime tasks",
-      "pinned_reality": "snapshot, TaskInspector, and Diagnostics read the embedded table; the inspected code has no external-task-table-aware variant for these surfaces",
-      "disposition": "OUTSIDE_HOTREAD_CONVERSION_SEPARATE_OWNER_REQUIRED",
+      "pinned_reality": "RuntimeState::snapshot still reads embedded tables. TaskInspector and Diagnostics now accept live Shared views that include external task/obligation tables under B -> A -> C locks; their detached Owned mode retains the original behavior. The earlier embedded-only claim no longer describes those live query surfaces.",
+      "disposition": "SUPERSEDED_FOR_LIVE_VIEWS_SNAPSHOT_SCOPE_RETAINED",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.4.2"
     }
   ],
