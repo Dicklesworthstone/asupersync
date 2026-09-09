@@ -38,7 +38,7 @@ const PATH_TOKEN: &str = concat!("hex", "::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "80353758136d41417f488d73c3d4877981600331f04dff3061590d31e08ff23f";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "25856928806f4fcd401b9dff58d24b8cc7d5c9a8a45736d78560f5b2136b8380";
+    "be8ecce740929dfc3ed395d76c03899fa3a4e4cf7658552aca2da157ebc0816c";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1118,7 +1118,7 @@ fn complete_direct_path_census_matches_source() {
             ("FromHexError".to_owned(), 4),
             ("decode".to_owned(), 36),
             ("decode_to_slice".to_owned(), 11),
-            ("encode".to_owned(), 210),
+            ("encode".to_owned(), 220),
             ("tests".to_owned(), 1),
         ])
     );
