@@ -10,7 +10,7 @@
     "reviewed_at_utc": "2026-09-09",
     "source_commit": "0e22fec3adabc68f9ad9d8fca4fda83306b51218",
     "registry_review": "artifacts/typed_format_registry_v1.json#/release_source_review",
-    "subsequent_registry_join_review": "The registry's cad61b7b1 ADR005 source-pin follow-up adds the existing offline-tuner-logging-parity evidence scenario without changing DEP-ADR-001 or typed-format authority. This signoff retains the earlier scoped decision and evidence limits.",
+    "subsequent_registry_join_review": "The registry's cad61b7b1 ADR005 source-pin follow-up adds the existing offline-tuner-logging-parity evidence scenario without changing DEP-ADR-001 or typed-format authority. The subsequent UTC historical-pin negative fixture and driverless-socket test add one JSON token and one test file to the census, with no production codec or persisted-format change. This signoff retains the earlier scoped decision and evidence limits.",
     "scope": "Refresh the registry join and the snapshot/replay source pins after semantic review. Snapshot changes are documentation-only; the ReplayTrace schema and codec are unchanged beneath the additive ProductionSchedule API. The registry separately records the current handoff-message extension and exact lexical census.",
     "no_claim_boundary": "This reconciliation preserves the earlier scoped KEEP decision and does not create fresh historical-writer, projection, handoff, executable-restoration, eventual-quiescence, performance, or release evidence."
   },
@@ -92,7 +92,7 @@
   "source_contracts": [
     {
       "path": "artifacts/typed_format_registry_v1.json",
-      "sha256": "84dcc7d9a82d43c957817ad53128fbb2461f8c1314d9c9647b24ac8d7e36c11f",
+      "sha256": "83333c4e4e6215dffe33f1e8e2cef64a860cf564b4121beeed956e8f4fbb8cc9",
       "role": "canonical row-level inventory, pins, corpora, consumers, and A6 decisions"
     },
     {

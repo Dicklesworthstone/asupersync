@@ -16,6 +16,11 @@
       "change": "ADR005 adds the existing offline-tuner-logging-parity scenario to its evidence roster. The typed-format DEP-ADR-001 authority, capability decisions, schema definitions, codecs and corpus evidence are unchanged.",
       "evidence_boundary": "This shared registry pin update does not rerun the recorded offline-tuner campaign or grant new typed-format authority."
     },
+    "subsequent_lexical_review": {
+      "source_commits": ["85ee4ef11", "7710807db"],
+      "change": "The UTC inventory's historical-pin negative fixture adds one serde_json::json! token in tests. The driverless-socket CPU regression adds one Linux test-internals Rust test file and no codec call. Tests now contain 1942 Rust files and 3657 JSON tokens; all binary codec and production JSON path counts are unchanged.",
+      "evidence_boundary": "These test-source census additions do not establish temporal, socket-performance, persisted-format, historical-writer or release behavior."
+    },
     "scope": "Reviewed seven changed source pins and the lexical census against the v0.4.9 inventory. Policy authority, generic codec decisions, payload goldens, historical corpus bytes, evidence-state partitions, and the 48-path pin scope are retained.",
     "changes": [
       "Cargo.toml adds release packaging exclusions, the opt-in remote-service feature, updated workspace versions and lint policy. Cargo.lock changes workspace versions and chacha20 0.10.1 to 0.10.2. The three registered serialization dependencies retain their versions, checksums and configuration.",
@@ -115,8 +120,8 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4384,
-      "serde_json::": 6756,
+      "rust_files": 4385,
+      "serde_json::": 6757,
       "rmp_serde::": 70,
       "bincode::": 32,
       "SerializationFormat::": 160,
@@ -138,8 +143,8 @@
       {
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
-        "rust_files": 1941,
-        "serde_json::": 3656,
+        "rust_files": 1942,
+        "serde_json::": 3657,
         "rmp_serde::": 9,
         "bincode::": 11,
         "SerializationFormat::": 23,

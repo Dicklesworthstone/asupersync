@@ -69,7 +69,12 @@ the existing `offline-tuner-logging-parity` scenario. DEP-ADR-001 and the
 typed-format decisions, schemas, codecs and corpus evidence are unchanged;
 this inventory update does not rerun the offline-tuner campaign.
 
-The 2026-09-09 review records 4,384 Rust files, 6,756 literal JSON tokens and
+The subsequent UTC historical-pin negative fixture adds one JSON macro token;
+the Linux driverless-socket CPU regression adds one test file with no codec
+calls. These are test-source census additions, with no temporal, socket,
+historical-writer or release-behavior claim.
+
+The 2026-09-09 review records 4,385 Rust files, 6,757 literal JSON tokens and
 259 source paths containing direct JSON tokens. Seven inline-test extractions
 replace their original paths; extracted QUIC tests add a second path. Other
 additions cover test receipts, ATP diagnostics, dependency-table tooling,

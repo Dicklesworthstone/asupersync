@@ -58,6 +58,9 @@ snapshot restoration, or eventual quiescence.
 
 The later registry join includes the reviewed `cad61b7b1` ADR005 scenario
 addition. It preserves DEP-ADR-001 and all typed-format decision authority.
+The subsequent UTC negative fixture and driverless-socket test add one JSON
+token and one Rust test file to the census; neither changes codec or persisted
+format evidence.
 
 ## Registry reconciliation
 
