@@ -14,6 +14,12 @@ request ingress remains bounded and buffered rather than incrementally
 consumed. Statements below that use “current” describe the frozen foundation
 baseline unless a later status note explicitly supersedes them.
 
+The 2026-09-09 source review at candidate `0e22fec3a` refreshed nineteen of
+the thirty source fingerprints. Every original source anchor remains present.
+The artifact purpose now makes the historical scope explicit as well; these
+current fingerprints do not extend the 2026-08-11 execution receipt to later
+implementation work.
+
 ## Purpose and authority
 
 This packet freezes the current request-body pipeline and defines the ownership,
@@ -34,7 +40,11 @@ The authority boundary is intentionally narrow:
 - leave emitted ASUP error-code allocation to a later implementation change; and
 - close BODY-2 only after focused Rust contract and live H1 streaming validation.
 
-## Foundation architecture baseline
+## Current architecture
+
+This section records the foundation architecture baseline. The release source
+review above describes subsequent changes; the historical matrix below remains
+scoped to that baseline.
 
 The reusable abstractions and the live server path are currently separate.
 
@@ -412,6 +422,39 @@ The focused contract also exposed one matrix-notation defect: the pinned
 content-length audit path lacked the required `::symbol` suffix. Its anchor now
 names `json_extractor_rejects_content_length_mismatch`; the pinned file,
 coverage meaning, and runtime behavior are unchanged.
+
+The 0.4.11 source review checked the following later changes against those
+preservation requirements:
+
+- `Body for Bytes` adds a single-frame buffered adapter. `Limited` now retains
+  the attempted over-limit length for diagnostics while preserving whole-frame
+  refusal and terminal behavior. MPSC adds checked obligation admission and
+  moves inline tests into a separate module; the incoming channel still uses
+  the original bounded permit path.
+- The incoming H1 carrier adds queue high-water counters, a monotonic shared
+  body-policy limit, and typed client-abort classification. It retains the
+  original frame/byte queue limits, checked admission, single consumer, and
+  legacy adapters. H1 server additions cover owned producers, upgrade handoff,
+  cancellation and bounded response cleanup; these are separate from the
+  historical BODY-2 execution evidence.
+- H2 connection, stream and listener changes support bounded response
+  production and owned handler cleanup. Request DATA still enters the
+  per-stream `Vec<u8>` with the same prospective cap and
+  `ENHANCE_YOUR_CALM` reset before `END_STREAM` dispatch. This refresh supplies
+  no incremental H2 ingress or aggregate incoming-memory claim.
+- Web extraction, handlers, routing, multipart and responses now have additive
+  streaming paths. The original request and response `Bytes` fields and
+  extractor defaults remain. `ServerRequestRegion` can retain a
+  scheduler-admitted body context and use a cancellation-independent drain
+  timer; the legacy borrowed path remains. The error registry adds the body
+  diagnostic families described above, and its contract now checks their
+  wire dispositions. `ASUP-E501` gained only a related-code link.
+
+These are source-review findings. The foundation contract, content-length
+extractor tests and diagnostic-registry tests check their respective bounded
+surfaces; they do not substitute for current native protocol and cancellation
+tests or the final release suite. The original receipt, budgets, terminal
+mapping, ownership rules and follow-on evidence boundaries are preserved.
 
 Therefore this packet does not claim:
 
