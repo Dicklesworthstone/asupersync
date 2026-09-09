@@ -36,9 +36,9 @@ const DOC_BEGIN: &str = "<!-- BEGIN HEX CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END HEX CAPABILITY INVENTORY -->";
 const PATH_TOKEN: &str = concat!("hex", "::");
 const SOURCE_PIN_PATHS_SHA256: &str =
-    "8ff7aa63a3c44e801fc536f894aff787d209a9032de2ac69d163bcca1f6cb156";
+    "80353758136d41417f488d73c3d4877981600331f04dff3061590d31e08ff23f";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "9e18013ac2ac9b4cd9cb0807467e3657c30dbe54c853a3e7479c9117c3114199";
+    "25856928806f4fcd401b9dff58d24b8cc7d5c9a8a45736d78560f5b2136b8380";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -367,9 +367,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
 
     let pin_scope = object(inventory, "source_pin_scope");
     if pin_scope.get("state").and_then(Value::as_str) != Some("BASELINED")
-        || pin_scope.get("path_count").and_then(Value::as_u64) != Some(81)
+        || pin_scope.get("path_count").and_then(Value::as_u64) != Some(87)
     {
-        return Err("source pin scope must retain 81 baselined paths".to_owned());
+        return Err("source pin scope must retain 87 baselined paths".to_owned());
     }
 
     let resolution = object(inventory, "dependency_resolution");
@@ -478,6 +478,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "cli-module",
             "atp-cli-binary",
             "postgres",
+            "postgres-lib-tests",
             "legacy-internal-lib-tests",
             "serialization-golden-lib-tests",
             "default-lib-tests",
@@ -485,6 +486,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "root-auto-ungated",
             "root-auto-atp-cli-windows",
             "root-auto-test-internals",
+            "root-auto-tls-module",
+            "root-auto-http3-tls",
+            "root-auto-tls-test-internals",
+            "root-auto-metrics",
             "root-explicit-kafka",
             "root-nested-object-journal",
             "root-nested-multi-peer",
@@ -530,14 +535,14 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
 
     let census = object(inventory, "occurrence_census");
     for (key, expected) in [
-        ("files", 103),
-        ("lexical_tokens", 262),
-        ("code_or_type_references", 259),
+        ("files", 109),
+        ("lexical_tokens", 272),
+        ("code_or_type_references", 269),
         ("comment_tokens", 3),
         ("cfg_any_disabled_reference_count", 4),
-        ("cfg_test_references_embedded_in_production_files", 25),
+        ("cfg_test_references_embedded_in_production_files", 16),
         ("test_or_test_internals_module_references", 2),
-        ("test_or_conformance_group_references", 132),
+        ("test_or_conformance_group_references", 151),
         ("active_production_references", 96),
         ("unknown_occurrences", 0),
     ] {
@@ -553,7 +558,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             ("FromHexError".to_owned(), 4),
             ("decode".to_owned(), 36),
             ("decode_to_slice".to_owned(), 11),
-            ("encode".to_owned(), 210),
+            ("encode".to_owned(), 220),
             ("tests".to_owned(), 1),
         ])
         || symbol_map(census_value, "code_or_type_symbols")
@@ -561,7 +566,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
                 ("FromHexError".to_owned(), 4),
                 ("decode".to_owned(), 34),
                 ("decode_to_slice".to_owned(), 11),
-                ("encode".to_owned(), 210),
+                ("encode".to_owned(), 220),
             ])
     {
         return Err("occurrence symbol summaries drifted".to_owned());
@@ -574,8 +579,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         "occurrence roots",
     )?;
     let expected_root_counts = BTreeMap::from([
-        ("src", (51, 183)),
-        ("tests", (51, 77)),
+        ("src", (52, 183)),
+        ("tests", (56, 87)),
         ("conformance", (1, 2)),
         ("examples", (0, 0)),
         ("benches", (0, 0)),
@@ -592,8 +597,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         }
     }
     let call_sites = array(inventory, "call_sites");
-    if call_sites.len() != 103 || row_ids(call_sites, "path").len() != 103 {
-        return Err("call_sites must contain 103 unique paths".to_owned());
+    if call_sites.len() != 109 || row_ids(call_sites, "path").len() != 109 {
+        return Err("call_sites must contain 109 unique paths".to_owned());
     }
     if call_sites.iter().any(|row| {
         text(row, "profile").is_empty()
@@ -983,6 +988,7 @@ fn expected_group(path: &str) -> &'static str {
     const TEST_MODULES: &[&str] = &[
         "src/atp/cache_seeding_integration_tests.rs",
         "src/codec/hex.rs",
+        "src/database/postgres_tests.rs",
         "src/deterministic_state_golden_tests.rs",
         "src/golden_artifacts_tests.rs",
         "src/observability/span_id_collision_audit_test.rs",
@@ -1058,9 +1064,9 @@ fn inventory_is_fail_closed_and_fully_owned() {
 fn source_pins_match_exact_bytes_and_line_counts() {
     let inventory = artifact();
     let pins = array(&inventory, "source_pins");
-    assert_eq!(pins.len(), 81);
+    assert_eq!(pins.len(), 87);
     let paths = row_ids(pins, "path");
-    assert_eq!(paths.len(), 81, "source pin paths must be unique");
+    assert_eq!(paths.len(), 87, "source pin paths must be unique");
     let mut projection = String::new();
     for path in &paths {
         projection.push_str(path);
@@ -1104,8 +1110,8 @@ fn complete_direct_path_census_matches_source() {
             *lexical_symbols.entry(name.clone()).or_default() += count;
         }
     }
-    assert_eq!(actual.len(), 103);
-    assert_eq!(lexical_symbols.values().sum::<u64>(), 262);
+    assert_eq!(actual.len(), 109);
+    assert_eq!(lexical_symbols.values().sum::<u64>(), 272);
     assert_eq!(
         lexical_symbols,
         BTreeMap::from([
@@ -1127,7 +1133,7 @@ fn complete_direct_path_census_matches_source() {
                 totals
             },
         );
-    assert_eq!(code_symbols.values().sum::<u64>(), 259);
+    assert_eq!(code_symbols.values().sum::<u64>(), 269);
     assert_eq!(code_symbols.get("decode"), Some(&34));
 }
 
@@ -1178,8 +1184,8 @@ fn reservation_groups_are_disjoint_complete_and_digest_pinned() {
             text(group, "projection_sha256")
         );
     }
-    assert_eq!(counts.values().map(|row| row.0).sum::<u64>(), 103);
-    assert_eq!(counts.values().map(|row| row.1).sum::<u64>(), 262);
+    assert_eq!(counts.values().map(|row| row.0).sum::<u64>(), 109);
+    assert_eq!(counts.values().map(|row| row.1).sum::<u64>(), 272);
 }
 
 #[test]
@@ -1206,7 +1212,18 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
     );
     assert_eq!(comment_rows.len(), 3);
     assert_eq!(disabled_rows.len(), 4);
-    assert_eq!(cfg_test_rows.len(), 5);
+    assert_eq!(cfg_test_rows.len(), 4);
+
+    for row in comment_rows.iter().chain(disabled_rows) {
+        let path = text(row, "path");
+        let source = read_repo_file(path);
+        let line = row.get("line").and_then(Value::as_u64).expect("line") as usize;
+        let contents = source.lines().nth(line - 1).expect("recorded source line");
+        assert!(
+            contents.contains(&format!("{PATH_TOKEN}{}", text(row, "symbol"))),
+            "recorded occurrence moved: {path}:{line}"
+        );
+    }
 
     let comment_keys: BTreeSet<_> = comment_rows
         .iter()
@@ -1223,8 +1240,8 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         BTreeSet::from([
             ("src/codec/hex.rs".to_owned(), 296, "tests".to_owned()),
             (
-                "src/database/postgres.rs".to_owned(),
-                12_714,
+                "src/database/postgres_tests.rs".to_owned(),
+                3_686,
                 "decode".to_owned()
             ),
             (
@@ -1247,9 +1264,9 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
     assert_eq!(
         disabled_keys,
         BTreeSet::from([
-            ("src/bin/atp.rs".to_owned(), 7_810, "encode".to_owned()),
-            ("src/bin/atp.rs".to_owned(), 7_992, "encode".to_owned()),
-            ("src/bin/atp.rs".to_owned(), 8_009, "decode".to_owned()),
+            ("src/bin/atp.rs".to_owned(), 8_585, "encode".to_owned()),
+            ("src/bin/atp.rs".to_owned(), 8_767, "encode".to_owned()),
+            ("src/bin/atp.rs".to_owned(), 8_784, "decode".to_owned()),
             (
                 "src/net/atp/transport_tcp/mod.rs".to_owned(),
                 569,
@@ -1266,8 +1283,8 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         .iter()
         .map(|row| symbol_total(&symbol_map(row, "symbols")))
         .sum();
-    assert_eq!(call_site_cfg_test_total, 25);
-    assert_eq!(census_cfg_test_total, 25);
+    assert_eq!(call_site_cfg_test_total, 16);
+    assert_eq!(census_cfg_test_total, 16);
 
     let call_site_disabled_total: u64 = array(&inventory, "call_sites")
         .iter()
@@ -1279,7 +1296,7 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         .map(|row| symbol_total(&symbol_map(row, "symbols")))
         .sum();
     assert_eq!(call_site_disabled_total, 4);
-    assert_eq!(test_conformance_total, 132);
+    assert_eq!(test_conformance_total, 151);
 
     let logging = find_row(
         array(&inventory, "call_sites"),
@@ -1292,7 +1309,7 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         "cfg(any(test, feature = test-internals))"
     );
     assert_eq!(symbol_total(&symbol_map(logging, "symbols")), 2);
-    assert_eq!(259 - test_conformance_total - 25 - 2 - 4, 96);
+    assert_eq!(269 - test_conformance_total - 16 - 2 - 4, 96);
 }
 
 #[test]

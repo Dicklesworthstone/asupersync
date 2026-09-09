@@ -5,7 +5,9 @@
 This is the operator-readable companion to
 `artifacts/hex_capability_inventory_v1.json`. It freezes
 `CAP-HEX-CODEC` for `asupersync-d24mms.9.1` at revision
-`8793ef7097f23622b2bdea1cd9a60afbb11517f1`.
+`8793ef7097f23622b2bdea1cd9a60afbb11517f1`. The source census and pins were
+reviewed again on 2026-09-09 against `f22fcc160` for the 0.4.11 release.
+The registry authority and codec preservation requirements remain unchanged.
 
 The disposition remains **KEEP_INCUMBENT** and cutover remains
 `BLOCKED_PENDING_EVIDENCE`. This inventory authorizes no implementation,
@@ -37,12 +39,17 @@ Graph reachability is broader than direct source compilation:
 | CLI workflows | `cli` and native target |
 | ATP binary | `atp-cli` and native target |
 | PostgreSQL | `postgres` and native target |
+| extracted PostgreSQL tests | `cfg(test)`, `postgres` and native target |
 | root golden modules | `legacy-internal-test-harnesses` and/or `serialization-golden-harnesses` |
 | observability audit modules | `cfg(test)` |
 | test logging | `cfg(any(test, feature = "test-internals"))` |
 | ordinary integration tests | auto-discovered target, empty manifest `required-features`, no crate/direct-occurrence cfg |
 | ATP CLI loopback occurrence | auto target; crate requires `atp-cli` and `tls`; the direct occurrence is Windows-only |
 | owned LZ4 contract occurrence | auto target; crate requires `test-internals` |
+| ATP session extension occurrences | auto target; enclosing module requires `tls` |
+| HTTP/3 UDP occurrences | auto target; crate requires `http3` and `tls` |
+| QUIC handshake UDP occurrences | auto target; crate requires `tls` and `test-internals` |
+| regex terminal receipt occurrence | auto target; crate requires `metrics` |
 | Kafka broker occurrence | explicit target with empty manifest `required-features`; crate `cfg(test)`; source imports Kafka APIs |
 | nested ATP object/journal modules | owned by `atp_object_journal_e2e_proof_suite` |
 | nested ATP multi-peer module | owned by `atp_e2e_proof_suite` and `atp_multi_peer_integration` |
@@ -60,8 +67,8 @@ Only four upstream names are consumed:
 
 | Name | Code/type references |
 | --- | ---: |
-| `encode` | 180 |
-| `decode` | 33 |
+| `encode` | 220 |
+| `decode` | 34 |
 | `decode_to_slice` | 11 |
 | `FromHexError` | 4 |
 
@@ -125,36 +132,37 @@ non-ASCII bytes, destination mismatch, partial-prefix mutation, and success.
 
 ## Complete call-site census
 
-The source snapshot contains 102 Rust files and 250 literal path tokens. Of
-those, 247 are code or type references, three are comments, and four code
-references are disabled by `cfg(any())`. Another 25 references sit in
-`cfg(test)` sections embedded in five otherwise production-owned files. Both
+The source snapshot contains 109 Rust files and 272 literal path tokens. Of
+those, 269 are code or type references, three are comments, and four code
+references are disabled by `cfg(any())`. Another 16 references sit in
+`cfg(test)` sections embedded in four otherwise production-owned files. Both
 references in `src/test_logging.rs` are separately gated to tests or
-`test-internals`. The test/conformance reservation group owns 121 code or type
+`test-internals`. The test/conformance reservation group owns 151 code or type
 references,
-leaving 95 active production references after comment, disabled, and
+leaving 96 active production references after comment, disabled, and
 non-production separation.
 
 | Root | Files | Literal tokens |
 | --- | ---: | ---: |
-| `src` | 51 | 182 |
-| `tests` | 50 | 66 |
+| `src` | 52 | 183 |
+| `tests` | 56 | 87 |
 | `conformance` | 1 | 2 |
 | `examples` | 0 | 0 |
 | `benches` | 0 | 0 |
 | separate robustness workspace | 0 | 0 |
 
 The three comment-only tokens are in `src/codec/hex.rs:296`,
-`src/database/postgres.rs:12714`, and
+`src/database/postgres_tests.rs:3686`, and
 `src/observability/w3c_trace_context.rs:576`. The four disabled references
-are in `src/bin/atp.rs:7810,7992,8009` and
+are in `src/bin/atp.rs:8585,8767,8784` and
 `src/net/atp/transport_tcp/mod.rs:569`.
 
-The five mixed production/test files are `src/atp/cache/mod.rs` (one encode),
+The four mixed production/test files are `src/atp/cache/mod.rs` (one encode),
 `src/atp/sync/mod.rs` (two encodes), `src/bin/atp.rs` (nine encodes),
-`src/database/postgres.rs` (nine decodes), and
 `src/net/atp/sdk/transfer.rs` (four encodes). Their test-only counts remain
 part of each file reservation but not the active production behavior claim.
+The nine PostgreSQL test decodes and their comment moved into
+`src/database/postgres_tests.rs`; that file belongs to the test group.
 
 Every path and per-symbol count is recorded under `call_sites` in the
 machine artifact. Its contract rescans the source and fails on a missing,
@@ -162,16 +170,16 @@ added, or recategorized path.
 
 ## Collision-free migration groups
 
-The 102-path census is partitioned into four deterministic, non-overlapping
+The 109-path census is partitioned into four deterministic, non-overlapping
 reservation groups. Digest input is byte-sorted
 `path<TAB>literal_token_count\n`.
 
 | Group | Files/tokens | Projection SHA-256 | Owner |
 | --- | ---: | --- | --- |
-| `HEX-A3-ATP-PROTOCOL-CLI` | 33/94 | `a1432140334c3763e9823e9ea06286a0308c618f03a13b08095d3a3bd5fc5a80` | A3 |
+| `HEX-A3-ATP-PROTOCOL-CLI` | 33/95 | `065bba8c646f36c81ebf6fb74b664598feeadd48a845c882db5fb06b27380312` | A3 |
 | `HEX-A3-SECURITY-OBSERVABILITY` | 9/21 | `3238b9a702154b696580eb534ac15bb3e5e10abb42e6769fa43ea54e3d2ce71a` | A3 |
-| `HEX-A3-DATABASE` | 1/13 | `8b1b81a6b635c208085693fb6ed788bca8c50f08aecb8dac07aab0734acc5b0d` | A3 |
-| `HEX-A3-TEST-CONFORMANCE` | 59/122 | `fb8a1f9190aa2d12ab8134a6dcf24741c5dfa3f066d7c74e2471d25236a8e583` | A3 |
+| `HEX-A3-DATABASE` | 1/3 | `dbab775870d3d18ebc06a8678efb6eacb7d1ae310a0eedc972c68b835692f620` | A3 |
+| `HEX-A3-TEST-CONFORMANCE` | 66/153 | `188a149d6ca6559299c1af16b6111248e8740af948057e0e3656f573de9772e1` | A3 |
 
 A2 owns the scalar kernel and owned error. A3 migrates one reserved group at a
 time without touching the manifest. A4 owns independent evidence and real
@@ -262,8 +270,9 @@ The inventory names nineteen format families:
     64 lowercase digits; minimization keys are `atp-lab-<scenario>-` followed
     by the first 12 fingerprint digits.
 17. CLI workflow artifacts: generated content hashes and checksums are raw 64
-    lowercase digits. The current unit assertion's `sha256:` expectation is a
-    routed contradiction, not the implemented grammar.
+    lowercase digits. The unit assertion now checks that existing grammar
+    and the fixed SHA-256 of `test content`; the historical prefix mismatch
+    is retained in the gap history.
 18. Keys and evidence: fingerprint full/redacted widths are 64/16;
     `AgentCredentials.signature` is `nkey_ed25519.` followed by a
     mixed-case-decodable signature whose bytes are verified; bearer tokens are
@@ -345,7 +354,7 @@ protocol journeys, and A5 alone owns any dependency cutover.
 | `HEX-A1-GAP-12` | A1 intentionally produced no live journey result | A4 |
 | `HEX-A1-GAP-13` | nested simple golden source is lexical-only and unwired | A3 |
 | `HEX-A1-GAP-14` | explicit Kafka test target omits required feature declaration | A5 |
-| `HEX-A1-GAP-15` | CLI implementation emits raw 64-digit hashes while its unit assertion expects a `sha256:` prefix | A3 |
+| `HEX-A1-GAP-15` | historical CLI assertion mismatch resolved in source by checking the existing raw digest; migration parity remains separately owned | A3 |
 
 There are zero `UNKNOWN` rows. Missing runtime evidence is
 `NOT_RUN_BY_A1`; the conformance manifest state is `BLOCKED`; the unwired
@@ -369,13 +378,13 @@ execution receipts.
 ## Validation boundary
 
 `tests/hex_capability_inventory_contract.rs` is the focused static contract.
-It checks identity, authority, zero-unknown policy, 81 unique source pins, all
-20 compilation profiles, the complete path/symbol census, deterministic
+It checks identity, authority, zero-unknown policy, 87 unique source pins, all
+25 compilation profiles, the complete path/symbol census, deterministic
 reservation-group digests, eleven public/API rows, eight manual collision rows,
 nineteen persisted-format rows, fifteen routed gaps, exact owner maps, the
 canonical claims projection, documentation markers, and negative mutations.
 
-This A1 pass ran no Cargo build, remote compilation, scenario, or robustness
+The original A1 pass ran no Cargo build, remote compilation, scenario, or robustness
 lane. Static source pins do not prove compilation, runtime correctness,
 performance, constant-time behavior, secret zeroization, broad workspace
 health, release readiness, or permission to remove the incumbent.
