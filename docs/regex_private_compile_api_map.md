@@ -278,6 +278,13 @@ health claim, release-readiness claim, or local Cargo fallback.
 
 <!-- BEGIN R3.7.1 FULL-SURFACE CORPUS JOIN -->
 
+The September 9 source review refreshes four producer packets and two verifier
+pins after their current-source checks were separated from frozen historical
+evidence. Each refreshed row retains its previous digest and line count. The
+original corpus values, grammar, Unicode authority and execution receipts are
+unchanged; the added verifier cases reject stale current inputs and historical
+rewrites. These are current replay inputs, not fresh execution results.
+
 `ASUP-REGEX-R3-7-1-FULL-SURFACE-CORPUS-V1` is the executable join over the
 already-shipped syntax, Unicode/byte, compiler/IR, VM, replacement,
 configuration, privacy, cache, concurrency, and cancellation corpora. Its

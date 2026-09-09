@@ -24,6 +24,13 @@ evidence.
 
 ## Frozen authority
 
+The September 9 release review records four current source digests separately
+from the complete historical packet. Release metadata and the R1 source review
+changed; the regex resolution and Unicode table authority did not. The verifier
+checks current bytes while retaining the historical regeneration blocker and
+measurements exactly. This review supplies no new regeneration or benchmark
+result.
+
 The authoritative source is the Unicode Character Database 16.0.0 archive:
 
 | Item | Value |

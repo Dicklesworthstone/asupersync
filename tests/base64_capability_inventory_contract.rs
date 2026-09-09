@@ -33,11 +33,11 @@ const DOC_BEGIN: &str = "<!-- BEGIN BASE64 CAPABILITY INVENTORY -->";
 const DOC_END: &str = "<!-- END BASE64 CAPABILITY INVENTORY -->";
 const PATH_TOKEN: &str = concat!("base", "64::");
 const SOURCE_PIN_PATHS_SHA256: &str =
-    "996efa7ae8c2105ab6d8a059f8cafef646c323e1791e40895becc43f68157fe4";
+    "6e53e63eb62497a441f4f2b542e0a733a410714071ed7d6e3e58182d085aaff0";
 const RECORDED_OPERATION_SEMANTICS_SHA256: &str =
-    "1423e225f925ed0781c570a4558906922d684b9ced3db8f914d49cef07760ecc";
+    "aa01cdd298f2830b5bd88ccfa181d28fd23a71d3bef1d382ffec9ba0eb6a10aa";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "a6e007ca8fc7ad43feabf5e8aaaa24a4e0ea816c96214e0aee29f71b824c5cf1";
+    "be17eee3ef47a546846a8e85cf8105634363d2850963fd3a2d164b8e0c9f4c90";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -190,6 +190,7 @@ fn claims_projection(inventory: &Value) -> Value {
         "authority": inventory["authority"].clone(),
         "policy": inventory["policy"].clone(),
         "static_refresh_receipt": inventory["static_refresh_receipt"].clone(),
+        "current_source_review": inventory["current_source_review"].clone(),
         "source_pin_scope": inventory["source_pin_scope"].clone(),
         "source_pins": inventory["source_pins"].clone(),
         "dependency_resolution": inventory["dependency_resolution"].clone(),
@@ -327,16 +328,16 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
 
     let source_scope = object(inventory, "source_pin_scope");
-    if source_scope.get("path_count").and_then(Value::as_u64) != Some(75)
+    if source_scope.get("path_count").and_then(Value::as_u64) != Some(80)
         || source_scope.get("paths_sha256").and_then(Value::as_str) != Some(SOURCE_PIN_PATHS_SHA256)
-        || array(inventory, "source_pins").len() != 75
+        || array(inventory, "source_pins").len() != 80
     {
         return Err("source-pin scope drifted".to_owned());
     }
     require_exact_strings(
         &inventory["source_pin_scope"],
         "excluded_generated_paths",
-        &["asupersync-wasm/Cargo.lock", "fuzz/Cargo.lock"],
+        &["asupersync-wasm/Cargo.lock"],
     )?;
 
     let resolution = object(inventory, "dependency_resolution");
@@ -347,7 +348,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || resolution["root_transitive_retained"]["direct_0_23_edge_removal_effect"].as_str()
             != Some("DOES_NOT_REMOVE_ALL_BASE64_PACKAGES_FROM_ROOT_LOCKED_GRAPH")
         || resolution["excluded_fuzz_workspace"]["repository_lock_state"].as_str()
-            != Some("ABSENT_IGNORED")
+            != Some("TRACKED_PINNED")
+        || resolution["excluded_fuzz_workspace"]["resolved_version"].as_str() != Some("0.22.1")
+        || resolution["excluded_fuzz_workspace"]["checksum"].as_str()
+            != Some("72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6")
         || resolution["excluded_fuzz_workspace"]["local_snapshot"]["state"].as_str()
             != Some("OBSERVED_NOT_REPOSITORY_PINNED")
         || resolution["excluded_fuzz_workspace"]["local_snapshot"]["resolved_version"].as_str()
@@ -513,6 +517,10 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-ROLE-GRPC-CONFORMANCE-FIXTURE",
             "B64-ROLE-PERF-COMMAND-FIXTURE",
             "B64-ROLE-EXCLUDED-LOCAL-HELPER",
+            "B64-ROLE-GRPC-CLIENT-OUTBOUND-BINARY-METADATA",
+            "B64-ROLE-GRPC-CLIENT-INBOUND-BINARY-METADATA",
+            "B64-ROLE-GRPC-CLIENT-STATUS-DETAILS",
+            "B64-ROLE-H2-ORACLE-ARTIFACT-EXPORT",
         ],
         "recorded operation security roles",
     )?;
@@ -554,6 +562,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-ERROR-H3-WEBSOCKET-FIXTURE",
             "B64-ERROR-H2C-CONFORMANCE-STRING",
             "B64-ERROR-RAPTORQ-FIXTURE",
+            "B64-ERROR-GRPC-CLIENT-FALLBACK-SUPPRESSED",
+            "B64-ERROR-GRPC-CLIENT-INTERNAL",
+            "B64-ERROR-H1-UPGRADE-INVALID-DATA",
         ],
         "recorded operation owned error mappings",
     )?;
@@ -619,7 +630,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     }
 
     let call_sites = array(inventory, "call_sites");
-    let expected_call_ids: Vec<String> = (1..=36)
+    let expected_call_ids: Vec<String> = (1..=40)
         .map(|index| format!("B64-CALL-{index:03}"))
         .collect();
     let expected_call_refs: Vec<&str> = expected_call_ids.iter().map(String::as_str).collect();
@@ -660,16 +671,16 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             }
         }
     }
-    if call_sites.len() != 36
+    if call_sites.len() != 40
         || call_sites
             .iter()
             .map(|row| number(row, "literal_tokens"))
             .sum::<u64>()
-            != 166
-        || sum_nested(call_sites, "production", "encode") != 23
-        || sum_nested(call_sites, "production", "decode") != 20
-        || sum_nested(call_sites, "nonproduction", "encode") != 52
-        || sum_nested(call_sites, "nonproduction", "decode") != 28
+            != 176
+        || sum_nested(call_sites, "production", "encode") != 24
+        || sum_nested(call_sites, "production", "decode") != 25
+        || sum_nested(call_sites, "nonproduction", "encode") != 54
+        || sum_nested(call_sites, "nonproduction", "decode") != 29
     {
         return Err("call-site census totals drifted".to_owned());
     }
@@ -703,8 +714,8 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         "literal census roots",
     )?;
     let expected_root_totals = BTreeMap::from([
-        ("src", (20, 89)),
-        ("tests", (9, 19)),
+        ("src", (23, 97)),
+        ("tests", (10, 21)),
         ("fuzz", (7, 58)),
         ("examples", (0, 0)),
         ("benches", (0, 0)),
@@ -723,11 +734,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if actual_root_totals != expected_root_totals {
         return Err("literal census root totals drifted".to_owned());
     }
-    if occurrence.get("path_count").and_then(Value::as_u64) != Some(36)
+    if occurrence.get("path_count").and_then(Value::as_u64) != Some(40)
         || occurrence
             .get("literal_token_count")
             .and_then(Value::as_u64)
-            != Some(166)
+            != Some(176)
         || occurrence.get("local_mock_paths").and_then(Value::as_u64) != Some(2)
         || occurrence.get("comment_only_paths").and_then(Value::as_u64) != Some(1)
     {
@@ -737,14 +748,14 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         .get("external_call_totals")
         .and_then(Value::as_object)
         .ok_or_else(|| "external_call_totals must be an object".to_owned())?;
-    if external_totals.get("all_encode").and_then(Value::as_u64) != Some(75)
-        || external_totals.get("all_decode").and_then(Value::as_u64) != Some(48)
+    if external_totals.get("all_encode").and_then(Value::as_u64) != Some(78)
+        || external_totals.get("all_decode").and_then(Value::as_u64) != Some(54)
     {
         return Err("external call totals drifted".to_owned());
     }
     let expected_engine_totals = BTreeMap::from([
-        ("B64-ENGINE-STANDARD-PAD", (57, 35)),
-        ("B64-ENGINE-STANDARD-NO-PAD", (4, 5)),
+        ("B64-ENGINE-STANDARD-PAD", (59, 39)),
+        ("B64-ENGINE-STANDARD-NO-PAD", (5, 7)),
         ("B64-ENGINE-URL-SAFE-PAD", (0, 2)),
         ("B64-ENGINE-URL-SAFE-NO-PAD", (14, 6)),
     ]);
@@ -824,7 +835,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             return Err(format!("reservation path digest drifted for {group_id}"));
         }
     }
-    if all_reserved_paths.len() != 44 {
+    if all_reserved_paths.len() != 48 {
         return Err("reservation path union count drifted".to_owned());
     }
 
@@ -834,6 +845,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         &[
             "B64-PUBLIC-GRPC-WEB",
             "B64-PROTOCOL-GRPC-SERVER-METADATA",
+            "B64-PROTOCOL-GRPC-CLIENT-METADATA",
             "B64-PUBLIC-TLS-PIN",
             "B64-PUBLIC-HTTP-BASIC",
             "B64-PUBLIC-WEBSOCKET",
@@ -858,6 +870,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         &[
             "B64-CONSUMER-GRPC-WEB",
             "B64-CONSUMER-GRPC-SERVER-METADATA",
+            "B64-CONSUMER-GRPC-CLIENT-METADATA",
             "B64-CONSUMER-TLS-PIN",
             "B64-CONSUMER-HTTP-BASIC",
             "B64-CONSUMER-WEBSOCKET",
@@ -941,6 +954,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-CONSUMER-GRPC-WEB-AUDIT",
             "B64-CONSUMER-PERF-COMMAND-FIXTURE",
             "B64-CONSUMER-EXCLUDED-LOCAL-HELPERS",
+            "B64-CONSUMER-H2-ORACLE-ARTIFACT-EXPORT",
         ],
         "nonpublic consumer relations",
     )?;
@@ -1065,11 +1079,11 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         || operation_progress
             .get("external_operation_total")
             .and_then(Value::as_u64)
-            != Some(123)
+            != Some(132)
         || operation_progress
             .get("recorded_operation_total")
             .and_then(Value::as_u64)
-            != Some(123)
+            != Some(132)
         || operation_progress
             .get("remaining_operation_total")
             .and_then(Value::as_u64)
@@ -1090,7 +1104,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     )?;
 
     let operations = array(inventory, "operation_contracts");
-    if operations.len() != 123 || row_ids(operations, "operation_id").len() != 123 {
+    if operations.len() != 132 || row_ids(operations, "operation_id").len() != 132 {
         return Err("operation contract count or ID uniqueness drifted".to_owned());
     }
     let prior_operations: Vec<Value> = operations
@@ -1157,6 +1171,12 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             "B64-A4-OP-WS-GOLDEN-WRONG-GUID-ENCODE",
             "B64-A4-OP-DEBUG-WS-ACCEPT-DIGEST-ENCODE",
             "B64-A4-OP-WEB-WS-CLIENT-KEY-DECODE",
+            "B64-A4-OP-GRPC-CLIENT-METADATA-ENCODE",
+            "B64-A4-OP-GRPC-CLIENT-DETAILS-DECODE-PAD",
+            "B64-A4-OP-GRPC-CLIENT-DETAILS-DECODE-NOPAD",
+            "B64-A4-OP-GRPC-CLIENT-METADATA-DECODE-PAD",
+            "B64-A4-OP-GRPC-CLIENT-METADATA-DECODE-NOPAD",
+            "B64-A4-OP-H1-UPGRADE-CLIENT-KEY-DECODE",
         ],
         "recorded operation contracts",
     )?;
@@ -1421,7 +1441,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         operation_totals.values().map(|counts| counts[2]).sum(),
         operation_totals.values().map(|counts| counts[3]).sum(),
     ];
-    if aggregate_totals != [23, 20, 52, 28]
+    if aggregate_totals != [24, 25, 54, 29]
         || recorded_totals
             .get("production_encode")
             .and_then(Value::as_u64)
@@ -1438,7 +1458,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             .get("nonproduction_decode")
             .and_then(Value::as_u64)
             != Some(aggregate_totals[3])
-        || aggregate_totals.iter().sum::<u64>() != 123
+        || aggregate_totals.iter().sum::<u64>() != 132
     {
         return Err("recorded operation aggregate drifted".to_owned());
     }
@@ -1608,7 +1628,7 @@ fn identity_policy_engines_profiles_and_routed_gaps_are_exact() {
 fn source_pins_cover_every_claimed_path_and_match_bytes() {
     let inventory = artifact();
     let pins = array(&inventory, "source_pins");
-    assert_eq!(pins.len(), 75);
+    assert_eq!(pins.len(), 80);
 
     let mut pinned_paths = BTreeSet::new();
     for pin in pins {
@@ -1925,6 +1945,16 @@ fn dependency_governance_sources_remain_blocking_and_version_skew_is_explicit() 
     }
     assert_eq!(root_lock.matches(" \"base64 0.22.1\",").count(), 3);
     assert!(read_repo_file(FUZZ_MANIFEST_PATH).contains("base64 = \"0.22\""));
+    assert!(read_repo_file("fuzz/Cargo.lock").contains(concat!(
+        "name = \"base64\"\nversion = \"0.22.1\"\n",
+        "source = \"registry+https://github.com/rust-lang/crates.io-index\"\n",
+        "checksum = \"72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6\"",
+    )));
+    assert!(
+        read_repo_file(IGNORE_PATH)
+            .lines()
+            .any(|line| line == "!fuzz/Cargo.lock")
+    );
     assert!(read_repo_file(RAPTORQ_MANIFEST_PATH).contains("base64 = \"0.22\""));
     let excluded_wasm_manifest = read_repo_file("asupersync-wasm/Cargo.toml");
     assert!(excluded_wasm_manifest.contains(concat!(
@@ -1945,16 +1975,16 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
     assert_eq!(docs.matches(DOC_END).count(), 1);
     for needle in [
         "NOT_RUN_BY_A1",
-        "36 Rust paths and 166 literal",
-        "75 tracked source hashes",
+        "40 Rust paths and 176 literal",
+        "80 tracked source hashes",
         "request trailers",
         "RFC 4648 section 10",
         "asupersync-wasm",
         "Structured downstream obligations",
         "CAP-AUTH-CREDENTIALS",
-        "44 unique reservation paths",
-        "23 | 20 | 43",
-        "52 | 28 | 80",
+        "48 unique reservation paths",
+        "24 | 25 | 49",
+        "54 | 29 | 83",
         "B64-A3-AUTH",
         "B64-A4-WEB-GRPC",
         "B64-A5-REMAINING",
@@ -1966,11 +1996,11 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
         "29 stable security-role IDs",
         "14 stable owned-error IDs",
         "B64-CONSUMER-GRPC-STATUS-SNAPSHOT",
-        "all 123 external operations",
-        "43 stable roles and 20 owned error mappings",
+        "all 132 external operations",
+        "47 stable roles and 23 owned error mappings",
         "14 profile-gate contracts",
         "14-row profile-baseline relation",
-        "10 public and 17 explicit nonpublic consumer",
+        "11 public and 18 explicit nonpublic consumer",
         "CALL-019`, `CALL-021`, and `CALL-032",
         "no constant-time claim",
         "does not prove compilation",
@@ -1996,6 +2026,22 @@ fn docs_ignore_and_no_claim_markers_remain_discoverable() {
 #[test]
 fn safe_negative_mutations_fail_closed() {
     let original = artifact();
+    validate_claims_projection(&original).expect("valid baseline before negative mutations");
+
+    let mut rewritten_history = original.clone();
+    rewritten_history["current_source_review"]["historical_census"]["external_operations"] =
+        Value::from(132);
+    assert!(validate_claims_projection(&rewritten_history).is_err());
+
+    let mut client_error_swap = original.clone();
+    let client_error = client_error_swap["operation_contracts"]
+        .as_array_mut()
+        .expect("operations")
+        .iter_mut()
+        .find(|row| row["operation_id"] == "B64-A4-OP-GRPC-CLIENT-METADATA-DECODE-NOPAD")
+        .expect("native client metadata decode");
+    client_error["error_id"] = Value::String("B64-ERROR-GRPC-SERVER-INVALID-METADATA".to_owned());
+    assert!(validate_inventory(&client_error_swap).is_err());
 
     let mut with_unknown = original.clone();
     with_unknown["authority"]["current_action"] = Value::String("UNKNOWN".to_owned());
@@ -2053,8 +2099,19 @@ fn safe_negative_mutations_fail_closed() {
     assert!(validate_inventory(&incomplete_profile_baseline).is_err());
 
     let mut missing_collision_backlink = original.clone();
-    missing_collision_backlink["downstream_and_e2e"]["consumer_obligations"][2]["collision_ids"] =
-        Value::Array(Vec::new());
+    let tls_consumer = missing_collision_backlink["downstream_and_e2e"]["consumer_obligations"]
+        .as_array_mut()
+        .expect("consumer obligations")
+        .iter_mut()
+        .find(|row| row["consumer_id"] == "B64-CONSUMER-TLS-PIN")
+        .expect("TLS pin consumer");
+    assert!(
+        !tls_consumer["collision_ids"]
+            .as_array()
+            .expect("collision IDs")
+            .is_empty()
+    );
+    tls_consumer["collision_ids"] = Value::Array(Vec::new());
     assert!(validate_inventory(&missing_collision_backlink).is_err());
 
     let mut exposed_error = original;

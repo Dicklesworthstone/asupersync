@@ -7,6 +7,14 @@ and it does not claim that any proposed replacement is equivalent.
 
 ## No feature loss
 
+The September 9 release review records seventeen current source replacements
+while preserving the complete historical baseline, terminal KEEP decisions,
+claim-time checkpoints and blocked matrices. Current hash and call-site checks
+cover those reviewed files; original execution receipts retain their original
+sources. The current tempfile lexical census is 82 source paths / 275 tokens,
+100 test paths, two benchmark paths and one example path. The previous
+81 / 274 / 98 census remains recorded as historical evidence.
+
 Dependency sovereignty is an implementation objective, not permission to make
 asupersync smaller as a product. Public APIs, generic extension points,
 features, binaries, formats, wire protocols, platform behavior, diagnostics,

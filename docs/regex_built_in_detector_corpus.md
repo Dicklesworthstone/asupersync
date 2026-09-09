@@ -16,6 +16,13 @@ implements no scanner and authorizes no dispatch or cutover.
 
 ## Live pipeline
 
+The September 9 review records eight current source pins separately from the
+historical corpus. The verifier retains every original vector, provenance row
+and named-host handoff, checks current file bytes, and rejects attempts to
+rewrite history or promote the review to execution evidence. The changes cover
+release metadata, additive registries, R1 source-review metadata and equivalent
+predicate/lint maintenance in `otel.rs`.
+
 With the `metrics` feature enabled, `PrivacyConfig::redact_pii` follows this
 order:
 

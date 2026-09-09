@@ -28,6 +28,19 @@
       "sha256": "410afeaeb0250a36b8d91c1a78b612c942d729fd495e7752c3f5965bbe8d5fbe"
     }
   ],
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner": "asupersync-ghxhvm",
+    "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "execution_receipts_rebound": false,
+    "reviewed_changes": "Release 0.4.11 metadata, an unrelated chacha20 patch and the separately reviewed R1 source inventory changed. The regex 1.13.1 / regex-syntax 0.8.11 resolution, Unicode 16.0.0 table authority, blocked regeneration receipt and KEEP_INCUMBENT_DEFER decision are unchanged.",
+    "source_pins": [
+      {"path":"Cargo.toml","sha256":"5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e"},
+      {"path":"Cargo.lock","sha256":"8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb"},
+      {"path":"artifacts/regex_privacy_capability_inventory_v1.json","sha256":"a19f39988dccde57c7368823918cfe567180ec2af52517d23021f3630e1adf55"},
+      {"path":"artifacts/regex_syntax_terminal_receipt_v1.json","sha256":"410afeaeb0250a36b8d91c1a78b612c942d729fd495e7752c3f5965bbe8d5fbe"}
+    ]
+  },
   "decision": {
     "disposition": "KEEP_INCUMBENT_DEFER",
     "incumbent_state": "RETAIN_REGEX_SYNTAX_TABLES",

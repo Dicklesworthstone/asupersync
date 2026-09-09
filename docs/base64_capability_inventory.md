@@ -5,8 +5,9 @@
 This is the operator-readable companion to
 `artifacts/base64_capability_inventory_v1.json`. It freezes the direct and
 colliding Base64 surfaces for `CAP-BASE64-CODEC` and
-`asupersync-d24mms.10.1` at source revision
-`470dab2839742dc36cbb1241ff219e1c8d2f451b`.
+`asupersync-d24mms.10.1`. The historical authority revision remains
+`470dab2839742dc36cbb1241ff219e1c8d2f451b`; the September release review
+records current source pins and relations separately.
 
 The disposition remains **KEEP_INCUMBENT** and dependency cutover remains
 `BLOCKED_PENDING_EVIDENCE`. A1 is a static inventory: its execution state is
@@ -24,6 +25,14 @@ same decoder for initial headers and request trailers under one post-decode
 dispatch/retention budget. That budget does not bound HPACK or header-list
 allocation. None of these static checks is an execution receipt.
 
+The 2026-09-09 release review records 40 paths, 176 literal tokens, and 132
+external expressions. PostgreSQL's six test expressions moved to
+`src/database/postgres_tests.rs`. New expressions comprise five native gRPC
+client metadata operations, one HTTP/1 WebSocket handoff decode, one retained
+H2 oracle artifact encode, and two ATP command-redaction test operations through
+the existing imported engine. The historical authority, August refresh receipt,
+KEEP disposition, and execution limits remain unchanged.
+
 ## Dependency and graph boundary
 
 The root manifest selects `base64 = 0.23` with default features disabled and
@@ -40,13 +49,13 @@ Four additional dependency/version boundaries are present:
 
 - The root lock also retains transitive `base64 0.22.1` through
   `opentelemetry-proto 0.32.0`, `sqlx-core 0.9.0`, and `tonic 0.14.6`.
-- The excluded fuzz workspace selects `0.22`. Its `Cargo.lock` is ignored and
-  absent from repository authority; a local snapshot currently observes
-  `0.22.1`, but that observation is not reproducible clean-checkout evidence.
+- The excluded fuzz workspace selects `0.22`. Its now-tracked `Cargo.lock`
+  pins `0.22.1` under the explicit `.gitignore` exception. This is current
+  dependency provenance; it does not establish fuzz execution or parity.
 - The standalone RaptorQ differential workspace selects `0.22` but has no
   repository lockfile, so its exact patch is not pinned.
 - The excluded, non-canonical `asupersync-wasm` scaffold requests
-  `asupersync ^0.3.5`; the current local path package is `0.3.10`. Its lock is
+  `asupersync ^0.4.11`; the current local path package is `0.4.11`. Its lock is
   likewise ignored and absent from repository authority; a stale local snapshot records
   `asupersync 0.3.2` and `base64 0.22.1`, but it is not evidence about a clean
   checkout or the root production graph.
@@ -54,10 +63,10 @@ Four additional dependency/version boundaries are present:
 `base64ct 1.8.3` is a distinct dependency and is not this replacement edge.
 Removing the direct root `base64 0.23` edge therefore would not remove every
 Base64 package from the locked root graph.
-The dependency marginal ledger covers 13 canonical profiles across four
+The retained dependency marginal ledger covers 13 canonical profiles across four
 targets, for 52 cells: 12 synthesized-consumer profiles plus one full-workspace
 dev/build audit profile. Each root-edge removal cell loses exactly
-`base64@0.23.0`.
+`base64@0.23.0`. Those historical ledger cells are not a fresh graph execution.
 
 ## Four exact engines
 
@@ -114,8 +123,11 @@ into owned boundaries:
   bytes;
 - gRPC-Web uses `GrpcError::protocol`; native gRPC server initial and trailing
   binary metadata uses `Status::invalid_argument` with the metadata key;
+- the native unary gRPC client maps final metadata/status-details decode failure
+  to `Status::internal`, after trying padded then unpadded standard engines;
 - WebSocket handshake and extraction collapse syntax and decoded-length failure
-  into `HandshakeError::InvalidKey` or a bad-request `ExtractionError`;
+  into `HandshakeError::InvalidKey` or a bad-request `ExtractionError`; the
+  native HTTP/1 handoff uses `HttpError::Io` with `InvalidData`;
 - browser storage key decode becomes `Option`, while value decode becomes an
   owned `String` error;
 - ATP CLI surfaces command-context errors.
@@ -125,15 +137,15 @@ current wording or proof that every embedding is secure.
 
 ## Complete literal census
 
-The pinned snapshot contains 36 Rust paths and 166 literal `base64::` tokens.
+The current pinned snapshot contains 40 Rust paths and 176 literal `base64::` tokens.
 The contract rescans `src`, `tests`, `fuzz`, `examples`, `benches`, and
 `conformance`, plus the dependency-only `asupersync-wasm/src` scaffold, and
 fails on any path or per-path token-count drift.
 
 | Root | Paths | Literal tokens |
 | --- | ---: | ---: |
-| `src` | 20 | 89 |
-| `tests` | 9 | 19 |
+| `src` | 23 | 97 |
+| `tests` | 10 | 21 |
 | `fuzz` | 7 | 58 |
 | `examples` | 0 | 0 |
 | `benches` | 0 | 0 |
@@ -146,22 +158,22 @@ classified external call-expression census is:
 
 | Class | Encode | Decode | Total |
 | --- | ---: | ---: | ---: |
-| active production | 23 | 20 | 43 |
-| tests, fixtures, fuzz, and reference workspaces | 52 | 28 | 80 |
-| all external call expressions | 75 | 48 | 123 |
+| active production | 24 | 25 | 49 |
+| tests, fixtures, fuzz, and reference workspaces | 54 | 29 | 83 |
+| all external call expressions | 78 | 54 | 132 |
 
 The exact engine split is:
 
 | Engine | Encode | Decode |
 | --- | ---: | ---: |
-| `STANDARD` | 57 | 35 |
-| `STANDARD_NO_PAD` | 4 | 5 |
+| `STANDARD` | 59 | 39 |
+| `STANDARD_NO_PAD` | 5 | 7 |
 | `URL_SAFE` | 0 | 2 |
 | `URL_SAFE_NO_PAD` | 14 | 6 |
 
 ### A3 per-operation checkpoint
 
-The first bounded matrix tranche records 22 of 123 external call expressions as
+The first historical matrix tranche recorded 22 of 123 external call expressions as
 exact one-operation rows for `B64-A3-AUTH`. Each row
 pins its call/path relation, source anchor and line, engine, direction,
 production classification, compilation profile, migration group, stable
@@ -170,7 +182,7 @@ rule. Every recorded row has `count = 1`.
 
 | A3 call | Production encode/decode | Nonproduction encode/decode | Recorded operations |
 | --- | ---: | ---: | ---: |
-| PostgreSQL SCRAM (`CALL-009`) | 3 / 2 | 5 / 1 | 11 |
+| PostgreSQL SCRAM (`CALL-009`, fixtures now `CALL-037`) | 3 / 2 | 5 / 1 | 11 |
 | NATS authentication (`CALL-017`) | 1 / 2 | 3 / 0 | 6 |
 | signed runtime profile (`CALL-024`) | 1 / 1 | 0 / 0 | 2 |
 | TLS pins (`CALL-025`) | 1 / 2 | 0 / 0 | 3 |
@@ -205,7 +217,7 @@ with 68 A5 expressions remaining.
 | web extractor WebSocket (`CALL-027`) | 0 / 1 | 0 / 0 | 1 |
 | **A4 total** | **14 / 12** | **4 / 3** | **33** |
 
-Across A3 and A4, the registry now contains 29 stable security-role IDs and
+At that historical checkpoint, the registry contained 29 stable security-role IDs and
 14 stable owned-error IDs. Every one is referenced by the 55 recorded
 operations without an orphan. The private gRPC status snapshot is linked to
 the explicit `B64-CONSUMER-GRPC-STATUS-SNAPSHOT` nonpublic fixture relation;
@@ -222,32 +234,48 @@ does not retroactively turn A3 or A4 into executed evidence.
 
 ### A5 per-operation and relation completion
 
-The final tranche records all 68 `B64-A5-REMAINING` expressions. Together the
-three reservation groups now account for all 123 external operations at unique
-source locations: production 23 encode / 20 decode and nonproduction 52 encode
-/ 28 decode.
+The historical final tranche recorded 68 `B64-A5-REMAINING` expressions.
+The current review adds three A5 and six A4 expressions. Together the three
+reservation groups account for all 132 external operations at unique source
+locations: production 24 encode / 25 decode and nonproduction 54 encode /
+29 decode. A3 still has 22 expressions; A4 now has 39 and A5 has 71.
 
 | A5 surface family | Production encode/decode | Nonproduction encode/decode | Recorded operations |
 | --- | ---: | ---: | ---: |
 | excluded fuzz targets (`CALL-001` through `CALL-007`) | 0 / 0 | 24 / 17 | 41 |
-| ATP CLI (`CALL-008`) | 3 / 1 | 1 / 1 | 6 |
+| ATP CLI (`CALL-008`) | 3 / 1 | 2 / 2 | 8 |
 | legacy database fixtures (`CALL-010/011`) | 0 / 0 | 2 / 0 | 2 |
 | H3 and unwired WebSocket sources (`CALL-020/022/023`) | 0 / 0 | 4 / 2 | 6 |
 | unwired H2C settings (`CALL-028`) | 0 / 0 | 0 / 1 | 1 |
 | standalone RaptorQ fixtures (`CALL-029`) | 0 / 0 | 2 / 2 | 4 |
 | root conformance/golden/perf fixtures (`CALL-030/031/033/034/035/036`) | 0 / 0 | 7 / 1 | 8 |
-| **A5 total** | **3 / 1** | **40 / 24** | **68** |
+| H2 oracle artifact export (`CALL-040`) | 0 / 0 | 1 / 0 | 1 |
+| **A5 total** | **3 / 1** | **42 / 25** | **71** |
+
+The five new native gRPC client operations encode request binary metadata
+without padding and decode response metadata/status details using padded then
+unpadded engines. Generic metadata checks a case-sensitive `-bin` suffix;
+status details use a case-insensitive name and reject duplicates before decode.
+The client does not inherit the server's post-decode metadata budget. The new
+HTTP/1 handoff decode requires exactly 16 bytes before negotiated upgrade
+validation; it does not repair the separate debug WebSocket path.
+
+H2 artifact export belongs to the Linux x86_64 `external_h2spec` test module
+under `test-internals`. The ignored opt-in oracle test's retained-file encoder
+checks a 32 MiB per-file limit before reading; encoder presence proves no
+oracle execution. ATP's added test operations inspect a generated UTF-16LE
+script and encoded protected-stdin marker without executing PowerShell.
 
 `CALL-019`, `CALL-021`, and `CALL-032` remain explicit zero-operation rows:
 two hand-written local helpers and one comment-only source. They are linked to
 `B64-CONSUMER-EXCLUDED-LOCAL-HELPERS`; no synthetic codec call was invented.
 
-The completed registry contains 43 stable roles and 20 owned error mappings.
+The current registry contains 47 stable roles and 23 owned error mappings.
 Every operation references one registered role and error, and every manual or
-cross-runtime collision plus all 10 public and 17 explicit nonpublic consumer
+cross-runtime collision plus all 11 public and 18 explicit nonpublic consumer
 records carry stable role/error references. The 14 profile-gate contracts pin
 manifest/workspace boundary, target, Cargo feature, Rust cfg semantics,
-consumers, groups, and no-claim text. Their call IDs partition all 36 call rows
+consumers, groups, and no-claim text. Their call IDs partition all 40 call rows
 exactly once; the excluded wasm scaffold is the sole dependency-only zero-call
 profile. A parallel 14-row profile-baseline relation joins each profile to its
 exact capability and partial evidence-ID set without promoting that baseline
@@ -277,6 +305,8 @@ calls and cannot serve as parity oracles.
 | debug WebSocket | `STANDARD` | padded accept digest, but the local path does not decode and length-check the supplied key |
 | gRPC-Web | `STANDARD`, `STANDARD_NO_PAD` | padded one-shot; stream retains quartets and accepts a 2- or 3-character no-pad final tail; `GrpcError::protocol` |
 | gRPC server | `STANDARD`, `STANDARD_NO_PAD` | case-insensitive `-bin` initial headers and request trailers decode padded then no-pad under one post-decode dispatch/retention budget; that budget does not bound HPACK or header-list allocation; binary response metadata/status details encode no-pad |
+| native gRPC client | `STANDARD`, `STANDARD_NO_PAD` | request binary metadata encodes no-pad; response metadata/status details decode padded then no-pad, ending in `Status::internal`; no server-budget inheritance |
+| HTTP/1 upgrade handoff | `STANDARD` | requires exactly 16 decoded key bytes before handoff; syntax or length failure becomes `HttpError::Io InvalidData` |
 | browser storage | `URL_SAFE_NO_PAD` | LocalStorage persists namespace, key, and value as URL-safe no-pad text; IndexedDB uses it only for namespace/key and stores values as raw binary; decoded keys must also be UTF-8 |
 | ATP CLI | `STANDARD` | delta target manifest and command transport |
 
@@ -295,13 +325,14 @@ below is partial rather than terminal journey proof.
 | --- | --- | --- | --- |
 | gRPC-Web | `CALL-014` | `EVD-CONSUMER-DEFAULT`, `EVD-BASE64-PROTOCOL` | A4 / A6 |
 | native gRPC metadata | `CALL-012` | none | A4 / A6 |
+| native gRPC client metadata | `CALL-038` | none | A4 / A6 |
 | TLS pins | `CALL-025`, `COLLISION-TLS-PIN-TEST` | none | A3 / A6 |
 | HTTP Basic | `CALL-015`, `COLLISION-HTTP-REQUEST` | none | A4 / A6 |
-| WebSocket | `CALL-018/026/027` | none | A4 / A6 |
+| WebSocket | `CALL-018/026/027/039` | none | A4 / A6 |
 | browser persistence | `CALL-016`, `COLLISION-BROWSER-TS/SERVICE-WORKER-NODE` | none | A4 / A6 |
 | signed runtime profile | `CALL-024` | `EVD-NKEY-SIGNED-PROFILE` | A3 / A6 |
 | NATS authentication | `CALL-017`, `COLLISION-JETSTREAM-TEST` | `EVD-NKEY-SIGNED-PROFILE` | A3 / A6 |
-| PostgreSQL SCRAM | `CALL-009` | `EVD-AUTH-POLICY` | A3 / A6 |
+| PostgreSQL SCRAM | `CALL-009/037` | `EVD-AUTH-POLICY` | A3 / A6 |
 | ATP CLI transport | `CALL-008`, `COLLISION-ATP-POWERSHELL` | none | A5 / A6 |
 
 The bead authority maps both `CAP-BASE64-CODEC` and
@@ -330,7 +361,7 @@ freezes a machine-readable gate contract for each:
   no direct call path, an absent ignored lock, and a stale local snapshot;
 - local mock or comment-only text.
 
-The 36 call IDs appear exactly once across the profile contracts. Each contract
+The 40 call IDs appear exactly once across the profile contracts. Each contract
 names its manifest or workspace boundary, target and feature admission, Rust
 cfg relationship, consumers, reservation groups, static state, and no-claim
 boundary. The excluded wasm scaffold has an empty call set by design.
@@ -349,7 +380,7 @@ it.
 The literal-census digest input is byte-sorted
 `path<TAB>literal_token_count\n`. The reservation digest input is the
 byte-sorted union of direct call paths and separately routed collision paths as
-`path\n`. Every one of the 44 unique reservation paths belongs to exactly one
+`path\n`. Every one of the 48 unique reservation paths belongs to exactly one
 group.
 
 | Group | Owner | Literal paths/tokens | Literal projection SHA-256 | Reserved paths | Reservation SHA-256 |
@@ -390,13 +421,13 @@ The literal Rust census is not the entire compatibility surface:
   contract.
 
 The artifact pins all 11 manual/cross-runtime collision rows. These rows are
-separate from the unchanged 36-path direct Rust dependency census.
+separate from the current 40-path direct Rust dependency census.
 
 ## Routed gaps
 
 The machine artifact routes every observed gap; none is left unowned:
 
-- A1: the current 36 call rows aggregate 123 external expressions. All three
+- A1: the current 40 call rows aggregate 132 external expressions. All three
   tranches now have exact operation rows, the three zero-operation rows remain
   explicit, all collision/consumer role-error references resolve, and the 14
   manifest/feature/target/cfg profile contracts partition the calls. The A1
@@ -422,8 +453,8 @@ those rows.
 ## Static contract and no-claim boundary
 
 `tests/base64_capability_inventory_contract.rs` is a fail-closed static
-contract for artifact structure, zero `UNKNOWN` values, 75 tracked source hashes
-and line counts, the literal census, all 123 operation semantics, exact
+contract for artifact structure, zero `UNKNOWN` values, 80 tracked source hashes
+and line counts, the literal census, all 132 operation semantics, exact
 call totals, engine/profile/group ownership, role/error/consumer/collision
 closure, the 14 profile-gate relations, governance-source state,
 documentation markers, and the `.gitignore` exception. It deliberately

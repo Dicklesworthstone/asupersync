@@ -214,9 +214,35 @@ fn validate_receipt(receipt: &Value, corpus: &Value) -> Result<(), String> {
         return Err("terminal authorization set or rollback revision drifted".to_owned());
     }
 
-    let pins = array(receipt, "source_pins");
-    if pins.len() != 4 {
-        return Err("terminal receipt must retain exactly four source pins".to_owned());
+    let mut historical = receipt.clone();
+    historical
+        .as_object_mut()
+        .ok_or("receipt must be an object")?
+        .remove("current_source_review");
+    if canonical_sha256(&historical)
+        != "1cee862fe9a47de758e12b41e75bd0759b55c87678fcf97eea87f4d1188141d4"
+    {
+        return Err("historical terminal receipt changed".to_owned());
+    }
+    let review = &receipt["current_source_review"];
+    if review["claim_scope"] != "CURRENT_SOURCE_STATIC_REVIEW_ONLY"
+        || review["execution_receipts_rebound"] != false
+    {
+        return Err("source review must not rebind historical measurements".to_owned());
+    }
+    let pins = review["source_pins"]
+        .as_array()
+        .ok_or("missing current source pins")?;
+    let paths = pins
+        .iter()
+        .map(|pin| text(pin, "path"))
+        .collect::<BTreeSet<_>>();
+    let historical_paths = array(receipt, "source_pins")
+        .iter()
+        .map(|pin| text(pin, "path"))
+        .collect::<BTreeSet<_>>();
+    if pins.len() != 4 || paths.len() != 4 || paths != historical_paths {
+        return Err("terminal receipt must retain exactly four current source paths".to_owned());
     }
     for pin in pins {
         let path = text(pin, "path");
@@ -425,6 +451,15 @@ fn every_frozen_public_pipeline_outcome_replays() {
 fn terminal_receipt_mutations_fail_closed() {
     let corpus = parse(CORPUS_PATH);
     let original = artifact();
+    validate_receipt(&original, &corpus).expect("valid receipt before mutations");
+
+    let mut stale_current = original.clone();
+    stale_current["current_source_review"]["source_pins"][0]["line_count"] = Value::from(0);
+    assert!(validate_receipt(&stale_current, &corpus).is_err());
+
+    let mut promoted_execution = original.clone();
+    promoted_execution["current_source_review"]["execution_receipts_rebound"] = Value::Bool(true);
+    assert!(validate_receipt(&promoted_execution, &corpus).is_err());
 
     let mut custom_cutover = original.clone();
     custom_cutover["authority"]["custom_pattern_fast_path_allowed"] = Value::Bool(true);

@@ -223,4 +223,12 @@ RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
 
 No local Cargo fallback is approved when this remote-required lane is blocked.
 
+The September 9 release review keeps the historical inventory byte-for-byte in
+its canonical JSON projection and records ten current source pins separately.
+The reviewed changes are release metadata, additive API/CLI registry entries,
+an equivalent optional-value predicate and an existing Unicode-test lint
+exemption. Regex versions, the metrics gate and privacy policy are unchanged.
+Historical execution receipts are not rebound to these current sources; the
+contract separately checks current hashes and rejects historical rewrites.
+
 <!-- END REGEX PRIVACY CAPABILITY INVENTORY -->

@@ -23,6 +23,13 @@ Custom patterns have always remained on the incumbent.
 
 ## Equivalence and rollback replay
 
+The September 9 release review binds four current files separately from the
+historical terminal packet. It preserves all measured latency and allocation
+values, original source revisions and disabled fast paths. Current source
+hashes cover the reviewed predicate/lint maintenance, release lockfile and
+corpus provenance update; they do not turn the earlier measurements into fresh
+performance evidence.
+
 | Surface | Source revision | Forced-remote evidence | Terminal disposition |
 | --- | --- | --- | --- |
 | Email and SSN | `a3bf8f2cd` | `j-29988810699833424` (3/3) | `KEEP` |

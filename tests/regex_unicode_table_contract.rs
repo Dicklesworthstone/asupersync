@@ -291,6 +291,23 @@ fn expected_generated_rows() -> BTreeMap<&'static str, (&'static str, u64, &'sta
 }
 
 fn validate_contract(contract: &Value, inventory: &Value, terminal: &Value) -> Result<(), String> {
+    let mut historical = contract.clone();
+    historical
+        .as_object_mut()
+        .ok_or("contract must be an object")?
+        .remove("current_source_review");
+    let historical_bytes = serde_json::to_vec(&historical).map_err(|error| error.to_string())?;
+    if hex::encode(Sha256::digest(historical_bytes))
+        != "ca72ddabb4e1d4bf1e4d06a4febbb16c4419b14fd50702af5fd03a8dc41c4cb5"
+    {
+        return Err("historical Unicode receipt changed".to_owned());
+    }
+    let review = &contract["current_source_review"];
+    if review["claim_scope"] != "CURRENT_SOURCE_STATIC_REVIEW_ONLY"
+        || review["execution_receipts_rebound"] != false
+    {
+        return Err("source review must not rebind historical execution".to_owned());
+    }
     if number(contract, "schema_version")? != 1
         || text(contract, "artifact_id")? != "regex-unicode-table-contract-v1"
         || text(contract, "program_id")? != "dependency-sovereignty"
@@ -333,8 +350,20 @@ fn validate_contract(contract: &Value, inventory: &Value, terminal: &Value) -> R
         let expected = expected_source_digests
             .get(path)
             .ok_or_else(|| format!("unexpected source digest row {path}"))?;
-        if text(row, "sha256")? != *expected || sha256(path) != *expected {
+        if text(row, "sha256")? != *expected {
             return Err(format!("source digest drifted for {path}"));
+        }
+    }
+    let current_pins = array(review, "source_pins")?;
+    if current_pins.len() != digest_rows.len()
+        || row_ids(current_pins, "path")? != row_ids(digest_rows, "path")?
+    {
+        return Err("current source coverage changed".to_owned());
+    }
+    for pin in current_pins {
+        let path = text(pin, "path")?;
+        if sha256(path) != text(pin, "sha256")? {
+            return Err(format!("current source changed: {path}"));
         }
     }
 
@@ -802,6 +831,16 @@ fn contract_rejects_version_table_feature_and_cutover_drift() {
     let contract = parse_repo_json(CONTRACT_PATH);
     let inventory = parse_repo_json(INVENTORY_PATH);
     let terminal = parse_repo_json(TERMINAL_RECEIPT_PATH);
+    validate_contract(&contract, &inventory, &terminal).expect("valid baseline before mutations");
+
+    let mut stale_current = contract.clone();
+    stale_current["current_source_review"]["source_pins"][0]["sha256"] =
+        Value::String("0".repeat(64));
+    assert!(validate_contract(&stale_current, &inventory, &terminal).is_err());
+
+    let mut promoted_execution = contract.clone();
+    promoted_execution["current_source_review"]["execution_receipts_rebound"] = Value::Bool(true);
+    assert!(validate_contract(&promoted_execution, &inventory, &terminal).is_err());
 
     let mut version_drift = contract.clone();
     version_drift["unicode_source"]["version"] = Value::String("15.1.0".to_owned());

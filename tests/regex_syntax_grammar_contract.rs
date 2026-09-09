@@ -90,6 +90,43 @@ fn exact_set(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
 }
 
+fn validate_current_source_review(contract: &Value) -> Result<(), String> {
+    let mut historical = contract.clone();
+    historical
+        .as_object_mut()
+        .ok_or("contract must be an object")?
+        .remove("current_source_review");
+    let bytes = serde_json::to_vec(&historical).map_err(|error| error.to_string())?;
+    if hex::encode(Sha256::digest(bytes))
+        != "fc679b9dc16ed3e6f9f9b8906b5bb9df504f1049cf7d731bbba25d7f572d72de"
+    {
+        return Err("historical grammar contract changed".to_owned());
+    }
+    let review = &contract["current_source_review"];
+    if review["claim_scope"] != "CURRENT_SOURCE_STATIC_REVIEW_ONLY"
+        || review["execution_receipts_rebound"] != false
+    {
+        return Err("source review must not rebind historical execution".to_owned());
+    }
+    let pins = review["source_pins"]
+        .as_array()
+        .ok_or("missing current source pins")?;
+    if pins.len() != array(contract, "source_pins").len()
+        || row_ids(pins, "path") != row_ids(array(contract, "source_pins"), "path")
+    {
+        return Err("current source coverage changed".to_owned());
+    }
+    for pin in pins {
+        let path = text(pin, "path");
+        if pin["sha256"] != hex::encode(Sha256::digest(read_repo_bytes(path)))
+            || pin["line_count"].as_u64() != Some(read_repo_file(path).lines().count() as u64)
+        {
+            return Err(format!("current source changed: {path}"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_contract(contract: &Value) -> Result<(), String> {
     if number(contract, "schema_version") != 1
         || text(contract, "artifact_id") != "regex-syntax-grammar-contract-v1"
@@ -425,7 +462,8 @@ fn grammar_contract_is_complete_versioned_and_zero_unknown() {
 #[test]
 fn source_pins_and_resolved_upstream_versions_are_exact() {
     let contract = artifact();
-    for pin in array(&contract, "source_pins") {
+    validate_current_source_review(&contract).expect("current source review and frozen grammar");
+    for pin in array(&contract["current_source_review"], "source_pins") {
         let path = text(pin, "path");
         let bytes = read_repo_bytes(path);
         assert_eq!(
@@ -513,6 +551,19 @@ fn golden_corpus_matches_incumbent_compile_and_match_behavior() {
 #[test]
 fn limits_version_and_inventory_coverage_fail_closed_under_mutation() {
     let contract = artifact();
+    validate_current_source_review(&contract).expect("valid source review before mutations");
+
+    let mut rewritten_history = contract.clone();
+    rewritten_history["source_pins"][0]["sha256"] = Value::String("0".repeat(64));
+    assert!(validate_current_source_review(&rewritten_history).is_err());
+
+    let mut stale_current = contract.clone();
+    stale_current["current_source_review"]["source_pins"][0]["line_count"] = Value::from(0);
+    assert!(validate_current_source_review(&stale_current).is_err());
+
+    let mut promoted_execution = contract.clone();
+    promoted_execution["current_source_review"]["execution_receipts_rebound"] = Value::Bool(true);
+    assert!(validate_current_source_review(&promoted_execution).is_err());
 
     let mut changed_version = contract.clone();
     changed_version["language_version"] = Value::from(2);

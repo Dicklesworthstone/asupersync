@@ -167,6 +167,43 @@ fn checked_json_sha256(value: &Value) -> Result<String, String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
+fn validate_current_source_review(inventory: &Value) -> Result<(), String> {
+    let mut historical = inventory.clone();
+    historical
+        .as_object_mut()
+        .ok_or("inventory must be an object")?
+        .remove("current_source_review");
+    if checked_json_sha256(&historical)?
+        != "b1a2656c4b8e51319361ed21144eafe24cd8a070d9e183e57512f539b1f51d34"
+    {
+        return Err("historical inventory changed".to_owned());
+    }
+    let review = &inventory["current_source_review"];
+    if review["claim_scope"] != "CURRENT_SOURCE_STATIC_REVIEW_ONLY"
+        || review["execution_receipts_rebound"] != false
+    {
+        return Err("source review must not rebind historical execution".to_owned());
+    }
+    let expected = row_ids(array(inventory, "source_pins"), "path");
+    let mut actual = BTreeSet::new();
+    for pin in checked_array(review, "source_pins")? {
+        let path = checked_text(pin, "path")?;
+        if !actual.insert(path.to_owned()) {
+            return Err("duplicate current source".to_owned());
+        }
+        let bytes = read_repo_bytes(path);
+        if pin["sha256"] != hex::encode(Sha256::digest(&bytes))
+            || pin["line_count"].as_u64() != Some(read_repo_file(path).lines().count() as u64)
+        {
+            return Err(format!("current source drifted: {path}"));
+        }
+    }
+    if actual != expected {
+        return Err("current source coverage changed".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if inventory.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("schema_version must be 1".to_owned());
@@ -360,17 +397,8 @@ fn inventory_is_complete_source_pinned_and_zero_unknown() {
     let inventory = artifact();
     validate_inventory(&inventory).unwrap_or_else(|error| panic!("{error}"));
 
-    for pin in array(&inventory, "source_pins") {
-        let path = text(pin, "path");
-        let bytes = read_repo_bytes(path);
-        let digest = hex::encode(Sha256::digest(&bytes));
-        assert_eq!(digest, text(pin, "sha256"), "{path} source pin drifted");
-        assert_eq!(
-            pin.get("line_count").and_then(Value::as_u64),
-            Some(read_repo_file(path).lines().count() as u64),
-            "{path} line count drifted"
-        );
-    }
+    validate_current_source_review(&inventory)
+        .expect("reviewed current sources and frozen history");
 }
 
 #[test]
@@ -2279,6 +2307,20 @@ fn r3_7_1_full_surface_join_rejects_missing_stale_or_overclaimed_evidence() {
 #[test]
 fn fail_closed_mutations_are_rejected() {
     let inventory = artifact();
+    validate_current_source_review(&inventory).expect("valid source review before mutations");
+
+    let mut rewritten_history = inventory.clone();
+    rewritten_history["source_pins"][0]["sha256"] =
+        inventory["current_source_review"]["source_pins"][0]["sha256"].clone();
+    assert!(validate_current_source_review(&rewritten_history).is_err());
+
+    let mut stale_current_source = inventory.clone();
+    stale_current_source["current_source_review"]["source_pins"][0]["line_count"] = Value::from(0);
+    assert!(validate_current_source_review(&stale_current_source).is_err());
+
+    let mut promoted_execution = inventory.clone();
+    promoted_execution["current_source_review"]["execution_receipts_rebound"] = Value::Bool(true);
+    assert!(validate_current_source_review(&promoted_execution).is_err());
 
     let mut dependency_exit = inventory.clone();
     dependency_exit["authority"]["dependency_exit_allowed"] = Value::Bool(true);

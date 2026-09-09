@@ -15,6 +15,13 @@ by a candidate, terminates in `KEEP_OR_DEFER`.
 
 ## Authority and provenance
 
+The September 9 review records five current source pins separately from the
+original grammar packet. R1 has since recorded the fix that makes invalid
+direct-vector patterns redact the whole value; its syntax corpus is unchanged.
+Current release metadata and source-review entries do not change this grammar,
+its limits or goldens, or rebind historical execution receipts. The verifier
+checks current file bytes and preserves the complete original grammar packet.
+
 The grammar is derived from the executable R1 inventory in
 `artifacts/regex_privacy_capability_inventory_v1.json` and checked against the
 published syntax for the exact resolved packages:

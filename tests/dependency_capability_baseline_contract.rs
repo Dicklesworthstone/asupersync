@@ -82,6 +82,100 @@ fn artifact() -> Value {
     parse_json(ARTIFACT_PATH)
 }
 
+fn validate_current_source_review(value: &Value) -> Result<(), String> {
+    let mut historical = value.clone();
+    historical
+        .as_object_mut()
+        .ok_or("baseline must be an object")?
+        .remove("current_source_review");
+    let bytes = serde_json::to_vec(&historical).map_err(|error| error.to_string())?;
+    if sha256_hex(&bytes) != "a33be858097d38d417ef3fedb41cb73efe0afbd5a74101c8f19c5a6684975598" {
+        return Err("historical baseline changed".to_owned());
+    }
+    let review = &value["current_source_review"];
+    if review["claim_scope"] != "CURRENT_SOURCE_STATIC_REVIEW_ONLY"
+        || review["execution_receipts_rebound"] != false
+    {
+        return Err("source review must not rebind historical execution".to_owned());
+    }
+    let pins = review["source_pins"]
+        .as_array()
+        .ok_or("missing current source pins")?;
+    let paths = pins
+        .iter()
+        .map(|pin| string(pin, "path"))
+        .collect::<BTreeSet<_>>();
+    let expected = BTreeSet::from([
+        "Cargo.toml",
+        "Cargo.lock",
+        "artifacts/dependency_capability_registry_v1.json",
+        "scripts/run_dependency_sovereignty_e2e.sh",
+        "asupersync-macros/Cargo.toml",
+        "src/cx/cx.rs",
+        "src/cx/scope.rs",
+        "src/net/tcp/stream.rs",
+        "src/sync/semaphore.rs",
+        "src/sync/mod.rs",
+        "src/time/mod.rs",
+        "src/bin/asupersync.rs",
+        "src/lib.rs",
+        "src/net/atp/transport_quic/mod.rs",
+        "src/net/atp/transport_rq/mod.rs",
+        "src/net/mod.rs",
+        "src/test_logging.rs",
+    ]);
+    if pins.len() != expected.len() || paths != expected {
+        return Err("current source review coverage changed".to_owned());
+    }
+    for pin in pins {
+        let path = string(pin, "path");
+        if sha256_hex(&read_repo_bytes(path)) != string(pin, "sha256")
+            || read_repo_file(path).lines().count() as u64 != unsigned(pin, "line_count")
+        {
+            return Err(format!("current source changed: {path}"));
+        }
+    }
+    let census = &review["historical_tempfile_census"];
+    if census["src_paths"] != 81
+        || census["src_tokens"] != 274
+        || census["test_paths"] != 98
+        || census["bench_paths"] != 2
+        || census["example_paths"] != 1
+    {
+        return Err("historical tempfile census changed".to_owned());
+    }
+    Ok(())
+}
+
+fn assert_reviewed_source(value: &Value, path: &str, historical_sha: &str, historical_lines: u64) {
+    if path == ARTIFACT_PATH {
+        assert_eq!(
+            historical_sha,
+            "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858"
+        );
+        assert_eq!(historical_lines, 3264);
+        validate_current_source_review(value).expect("frozen baseline self-reference");
+        return;
+    }
+    let replacement = array(&value["current_source_review"], "source_pins")
+        .iter()
+        .find(|pin| string(pin, "path") == path);
+    let (expected_sha, expected_lines) = replacement
+        .map_or((historical_sha, historical_lines), |pin| {
+            (string(pin, "sha256"), unsigned(pin, "line_count"))
+        });
+    assert_eq!(
+        sha256_hex(&read_repo_bytes(path)),
+        expected_sha,
+        "current hash: {path}"
+    );
+    assert_eq!(
+        read_repo_file(path).lines().count() as u64,
+        expected_lines,
+        "current lines: {path}"
+    );
+}
+
 fn registry() -> Value {
     parse_json(REGISTRY_PATH)
 }
@@ -163,6 +257,7 @@ fn simple_toml_dependency_requirement<'a>(section: &'a str, dependency: &str) ->
 fn production_before_test_module(source: &str) -> &str {
     source
         .split_once("\n#[cfg(test)]\nmod tests")
+        .or_else(|| source.split_once("\n#[cfg(test)]\ninclude!(\"transport_quic_tests.rs\");"))
         .map(|(production, _)| production)
         .expect("source must have a top-level cfg(test) module boundary")
 }
@@ -1016,6 +1111,7 @@ fn runner_and_docs_expose_replay_logging_and_no_claim_boundaries() {
 #[test]
 fn hash_map_terminal_keep_is_source_pinned_and_fail_closed() {
     let value = artifact();
+    validate_current_source_review(&value).expect("current source review and frozen baseline");
     let audit = object(&value, "hash_map_static_audit");
     assert_eq!(string(audit, "audit_id"), HASH_MAP_AUDIT_ID);
     assert_eq!(string(audit, "bead_id"), HASH_MAP_BEAD_ID);
@@ -1084,16 +1180,11 @@ fn hash_map_terminal_keep_is_source_pinned_and_fail_closed() {
     );
     for pin in pins {
         let path = string(pin, "path");
-        let source = read_repo_file(path);
-        assert_eq!(
-            sha256_hex(&read_repo_bytes(path)),
+        assert_reviewed_source(
+            &value,
+            path,
             string(pin, "sha256"),
-            "source pin drift for {path}"
-        );
-        assert_eq!(
-            u64::try_from(source.lines().count()).expect("line count fits u64"),
             unsigned(pin, "line_count"),
-            "line-count drift for {path}"
         );
         assert!(!string(pin, "role").trim().is_empty());
     }
@@ -1456,6 +1547,7 @@ fn hash_map_terminal_keep_is_source_pinned_and_fail_closed() {
 #[test]
 fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
     let value = artifact();
+    validate_current_source_review(&value).expect("current source review and frozen baseline");
     let audit = object(&value, "host_benchmark_metadata_static_audit");
     assert_eq!(string(audit, "audit_id"), HOST_METADATA_AUDIT_ID);
     assert_eq!(string(audit, "bead_id"), HOST_METADATA_BEAD_ID);
@@ -1522,16 +1614,11 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
             assert!(!string(pin, "role").trim().is_empty());
             continue;
         }
-        let source = read_repo_file(path);
-        assert_eq!(
-            sha256_hex(&read_repo_bytes(path)),
+        assert_reviewed_source(
+            &value,
+            path,
             string(pin, "sha256"),
-            "source pin drift for {path}"
-        );
-        assert_eq!(
-            u64::try_from(source.lines().count()).expect("line count fits u64"),
             unsigned(pin, "line_count"),
-            "line-count drift for {path}"
         );
         assert!(!string(pin, "role").trim().is_empty());
     }
@@ -1746,6 +1833,8 @@ fn host_benchmark_metadata_static_audit_is_source_pinned_and_fail_closed() {
 
 #[test]
 fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
+    let reviewed = artifact();
+    validate_current_source_review(&reviewed).expect("current source review and frozen baseline");
     let expected_pins = BTreeMap::from([
         (
             "Cargo.lock",
@@ -1847,17 +1936,7 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         ),
     ]);
     for (path, (expected_sha, expected_lines)) in expected_pins {
-        let source = read_repo_file(path);
-        assert_eq!(
-            sha256_hex(source.as_bytes()),
-            expected_sha,
-            "tempfile checkpoint source drifted: {path}"
-        );
-        assert_eq!(
-            u64::try_from(source.lines().count()).expect("line count fits u64"),
-            expected_lines,
-            "tempfile checkpoint line count drifted: {path}"
-        );
+        assert_reviewed_source(&reviewed, path, expected_sha, expected_lines);
     }
 
     let manifest = read_repo_file("Cargo.toml");
@@ -1969,7 +2048,11 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
     }
 
     let source_paths = rust_source_paths_with_token("tempfile::");
-    assert_eq!(source_paths.len(), 81);
+    let current_census = &reviewed["current_source_review"]["current_tempfile_census"];
+    assert_eq!(
+        source_paths.len() as u64,
+        unsigned(current_census, "src_paths")
+    );
     for required in [
         "src/atp/benchmark/suite.rs",
         "src/bin/asupersync.rs",
@@ -1989,8 +2072,11 @@ fn tempfile_claim_time_profile_checkpoint_is_source_pinned_and_fail_closed() {
         .iter()
         .map(|path| count_occurrences(&read_repo_file(path), "tempfile::"))
         .sum::<u64>();
-    assert_eq!(source_token_count, 274);
-    assert_eq!(rust_paths_under_with_token("tests", "tempfile::").len(), 98);
+    assert_eq!(source_token_count, unsigned(current_census, "src_tokens"));
+    assert_eq!(
+        rust_paths_under_with_token("tests", "tempfile::").len() as u64,
+        unsigned(current_census, "test_paths")
+    );
     assert_eq!(
         rust_paths_under_with_token("benches", "tempfile::").len(),
         2
@@ -2109,6 +2195,17 @@ fn missing_capability_is_rejected() {
 
 #[test]
 fn schema_and_taxonomy_drift_are_rejected() {
+    let original = artifact();
+    validate_current_source_review(&original).expect("valid source review before mutations");
+    let mut rewritten_history = original.clone();
+    rewritten_history["captured_at_utc"] = Value::String("2026-09-09".to_owned());
+    assert!(validate_current_source_review(&rewritten_history).is_err());
+    let mut stale_current = original.clone();
+    stale_current["current_source_review"]["source_pins"][0]["line_count"] = Value::from(0);
+    assert!(validate_current_source_review(&stale_current).is_err());
+    let mut promoted_execution = original;
+    promoted_execution["current_source_review"]["execution_receipts_rebound"] = Value::Bool(true);
+    assert!(validate_current_source_review(&promoted_execution).is_err());
     let mut value = artifact();
     value["schema_version"] = Value::from(2);
     assert_invalid(value, "schema_version must be 1");
@@ -2327,6 +2424,7 @@ fn sqlite_cycle_policy_remains_visible() {
 #[test]
 fn visibility_macro_terminal_keep_is_source_pinned_and_fail_closed() {
     let value = artifact();
+    validate_current_source_review(&value).expect("current source review and frozen baseline");
     let audit = object(&value, "visibility_macro_static_audit");
     assert_eq!(string(audit, "audit_id"), VISIBILITY_AUDIT_ID);
     assert_eq!(string(audit, "bead_id"), VISIBILITY_BEAD_ID);
@@ -2405,16 +2503,11 @@ fn visibility_macro_terminal_keep_is_source_pinned_and_fail_closed() {
     );
     for pin in pins {
         let path = string(pin, "path");
-        let source = read_repo_file(path);
-        assert_eq!(
-            sha256_hex(&read_repo_bytes(path)),
+        assert_reviewed_source(
+            &value,
+            path,
             string(pin, "sha256"),
-            "source pin drift for {path}"
-        );
-        assert_eq!(
-            u64::try_from(source.lines().count()).expect("line count fits u64"),
             unsigned(pin, "line_count"),
-            "line-count drift for {path}"
         );
         assert!(!string(pin, "role").trim().is_empty());
     }
@@ -2761,6 +2854,7 @@ fn visibility_macro_terminal_keep_is_source_pinned_and_fail_closed() {
 #[test]
 fn slab_terminal_keep_is_source_pinned_and_rejects_misbound_evidence() {
     let value = artifact();
+    validate_current_source_review(&value).expect("current source review and frozen baseline");
     let audit = object(&value, "slab_static_audit");
     assert_eq!(string(audit, "audit_id"), SLAB_AUDIT_ID);
     assert_eq!(string(audit, "bead_id"), SLAB_BEAD_ID);
@@ -2828,16 +2922,11 @@ fn slab_terminal_keep_is_source_pinned_and_rejects_misbound_evidence() {
     );
     for pin in pins {
         let path = string(pin, "path");
-        let source = read_repo_file(path);
-        assert_eq!(
-            sha256_hex(&read_repo_bytes(path)),
+        assert_reviewed_source(
+            &value,
+            path,
             string(pin, "sha256"),
-            "source pin drift for {path}"
-        );
-        assert_eq!(
-            u64::try_from(source.lines().count()).expect("line count fits u64"),
             unsigned(pin, "line_count"),
-            "line-count drift for {path}"
         );
         assert!(!string(pin, "role").trim().is_empty());
     }
@@ -3147,10 +3236,9 @@ fn slab_terminal_keep_is_source_pinned_and_rejects_misbound_evidence() {
         count_trimmed_lines(&rate_source, "#[test]"),
         unsigned(declared_counts, "rate_limit")
     );
-    assert_eq!(
-        count_trimmed_lines(&semaphore_source, "#[test]"),
-        unsigned(declared_counts, "semaphore")
-    );
+    // Four checked-admission regressions were added after the ef4e2566b8 baseline.
+    assert_eq!(unsigned(declared_counts, "semaphore"), 73);
+    assert_eq!(count_trimmed_lines(&semaphore_source, "#[test]"), 77);
     assert_eq!(
         count_trimmed_lines(&waiter_source, "#[test]"),
         unsigned(declared_counts, "waiter")

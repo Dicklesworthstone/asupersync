@@ -47,6 +47,19 @@
       "role": "resolved incumbent regex dependency revision"
     }
   ],
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner": "asupersync-ghxhvm",
+    "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "execution_receipts_rebound": false,
+    "reviewed_changes": "otel.rs changes an equivalent optional-value predicate and a test lint exemption; the built-in corpus now separates current source review from its original vectors. The lockfile changes workspace release versions and unrelated chacha20. The four fixed fast paths remain disabled, and all named-host latency/allocation measurements retain their original source revisions.",
+    "source_pins": [
+      {"path":"src/observability/otel.rs","sha256":"2f344446249759aad8880a443d1bdb87249630cb7e010ae35b69daca0d97803b","line_count":15911},
+      {"path":"artifacts/regex_built_in_detector_corpus_v1.json","sha256":"2d0cb90c1a6020a14517266c655bfbed5a47484355ef93dacff068aece17cccc","line_count":1405},
+      {"path":"scripts/alloc_census.sh","sha256":"6968d0224c35e075d1baa8a2cafb14c0c17f6a24c3cc2ebc1a49e81f91acb577","line_count":274},
+      {"path":"Cargo.lock","sha256":"8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb","line_count":4664}
+    ]
+  },
   "predecessor_evidence": [
     {
       "phase": "R2.1",

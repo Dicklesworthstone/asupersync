@@ -84,6 +84,30 @@
       "line_count": 4824
     }
   ],
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner": "asupersync-ghxhvm",
+    "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "execution_receipts_rebound": false,
+    "reviewed_changes": [
+      "Cargo.toml now declares release 0.4.11, additive remote-service, cfg(test)-only package exclusions and compatibility-preserving lint allowances; the optional metrics regex edge is unchanged.",
+      "Cargo.lock changes nine workspace versions and chacha20 0.10.1 to 0.10.2 relative to the historical pin; regex 1.13.1, regex-syntax 0.8.11 and their checksums are unchanged.",
+      "otel.rs replaces best_end.map_or(true, predicate) with the equivalent is_none_or(predicate), and documents a narrow lint exemption for the existing Kelvin-sign test. Privacy behavior and the disabled fixed-scanner gate are unchanged.",
+      "The capability registry and API map include reviewed additive release surfaces. CAP-REGEX-PRIVACY remains KEEP_INCUMBENT; historical corpus, authority, gaps and execution receipts below are retained exactly."
+    ],
+    "source_pins": [
+      {"path":"Cargo.toml","sha256":"5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e","line_count":1121},
+      {"path":"Cargo.lock","sha256":"8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb","line_count":4664},
+      {"path":"src/observability/otel.rs","sha256":"2f344446249759aad8880a443d1bdb87249630cb7e010ae35b69daca0d97803b","line_count":15911},
+      {"path":"src/observability/mod.rs","sha256":"2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b","line_count":1194},
+      {"path":"src/net/atp/chunk/artifact.rs","sha256":"21b5131f5c5c2502b96bd61363a3bc21072062a0b9473bd602ab478a6b77cea9","line_count":1597},
+      {"path":"tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs","sha256":"30ff1e567a41f74b869f4b47ead951618331130f13ae7edd570a8a7013d57744","line_count":1015},
+      {"path":"docs/adr/dep_plan_adr_012_regex_privacy.md","sha256":"76456b9192cc828f59b9c9a5bb19d20b31dc7e8171554e73bc8f4391c892301c","line_count":145},
+      {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa","line_count":7067},
+      {"path":"artifacts/dependency_marginal_ledger_v1.json","sha256":"d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3","line_count":187615},
+      {"path":"artifacts/api_surface_map_v1.json","sha256":"3b63065b42c489cb38b872b35c6902a109848fd9d95120e21205a9fb88d708a4","line_count":5446}
+    ]
+  },
   "dependency_resolution": {
     "manifest_requirement": "1.12",
     "resolved_version": "1.13.1",

@@ -67,6 +67,12 @@ The September 8 review under
 policy and campaign identities. The artifact records the previous API,
 diagnostic and changed CLI snapshots alongside the reviewed current projection.
 
+The September 9 follow-up records the six-line ATP compiler-attribute removal
+in `3905867d576d90e19442f53939cd1061ce95ba1d`. Its parent matches the previous
+13,563-line source pin; the current file has 13,557 lines. Commands, parser
+attributes, help, environment handling and exit behavior are unchanged. This
+source review does not rebind historical execution receipts.
+
 Two verification-only features map to `CAP-REAL-SERVICE-E2E` and
 `CAP-VERIFICATION-PROFILES`: `cross-subsystem-recovery-e2e` composes maintained
 native recovery fixtures, while `distributed-hash-snapshot-recovery-e2e`

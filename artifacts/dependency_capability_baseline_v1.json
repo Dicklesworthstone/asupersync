@@ -7,6 +7,38 @@
   "baseline_source_revision": "6a0d2c79eaf989b649ad0b63dcbec9a1169e3abf",
   "captured_at_utc": "2026-07-24",
   "purpose": "Freeze replayable incumbent behavior for every CAP A1 capability before dependency replacement. This artifact records what is executable now and classifies every remaining gap without treating absence of evidence as permission to cut over.",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner": "asupersync-ghxhvm",
+    "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "execution_receipts_rebound": false,
+    "reviewed_changes": [
+      "Release manifests and the lockfile have changed, while the incumbent hashbrown, slab, visibility, host-metadata and tempfile dependencies remain. Additive registry and runner routes do not promote the original KEEP decisions or blocked replacement matrices.",
+      "Cx/Scope add checked credit and combinator APIs; TCP registration now uses the fallback driver; semaphore cleanup and test coverage grew. The verifier still checks the exact incumbent call-site sets, attribute expansion boundaries, slab ownership surfaces and lifecycle semantics below against current source.",
+      "The CLI includes Unix remote-service, ATP QUIC unit tests moved into sibling modules, and test-logging cleanup coverage grew. Existing private tempfile permissions and production ownership anchors remain checked. Source and test token counts are a current lexical inventory, not a replay of the historical claim-time profile matrix."
+    ],
+    "historical_tempfile_census": {"src_paths":81,"src_tokens":274,"test_paths":98,"bench_paths":2,"example_paths":1},
+    "current_tempfile_census": {"src_paths":82,"src_tokens":275,"test_paths":100,"bench_paths":2,"example_paths":1},
+    "source_pins": [
+      {"path":"Cargo.toml","sha256":"5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e","line_count":1121},
+      {"path":"Cargo.lock","sha256":"8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb","line_count":4664},
+      {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa","line_count":7067},
+      {"path":"scripts/run_dependency_sovereignty_e2e.sh","sha256":"b2d7894ca7412f96602389a591186acf665698416aeebf4989c53f281300f72b","line_count":1869},
+      {"path":"asupersync-macros/Cargo.toml","sha256":"be7311c6a6bfd82797f9666307455606bdb6cba881541e446556bca350b36d2e","line_count":37},
+      {"path":"src/cx/cx.rs","sha256":"55a0f73ff93231459635f00a0b1b2e5be99b1c88844c50975583933577852162","line_count":8178},
+      {"path":"src/cx/scope.rs","sha256":"774c3e0ac08ad9836c3a62976d34f8ab02872421bb976a6551c7a150637df35e","line_count":4089},
+      {"path":"src/net/tcp/stream.rs","sha256":"af537d7d902572337edae668493393822364be4837a021ae78e2fba2f87fff54","line_count":3006},
+      {"path":"src/sync/semaphore.rs","sha256":"2449a9837de9cff0752dc1dc656fcdcc62f22b47452983810b3f1c52548d3b27","line_count":5972},
+      {"path":"src/sync/mod.rs","sha256":"4f4473b49f82b705bc30fd287afb70068feb6acff27d2f7913a5163a4edc5327","line_count":147},
+      {"path":"src/time/mod.rs","sha256":"3f1cebd6c954bc745efce2babf0d4e2626126b04f188c612f2bfc80235c1983f","line_count":81},
+      {"path":"src/bin/asupersync.rs","sha256":"db9679da2c0ba6050f209264fb353da75892b0046429dffe0ba7edce5d74517a","line_count":17878},
+      {"path":"src/lib.rs","sha256":"baec6f62836d2b3dca6b56ae5bd3d0c2d9717ac60a2d4268b28e509cefe36d36","line_count":513},
+      {"path":"src/net/atp/transport_quic/mod.rs","sha256":"7304791e9bb6ddb2b4d27ef50c4c2edbe31e4a57189ccdbef15217650b1fa314","line_count":11313},
+      {"path":"src/net/atp/transport_rq/mod.rs","sha256":"b4e94f5c675ac12a3a9e99f2d22ff08c008a824d3259a6ae375532724b764eaa","line_count":16628},
+      {"path":"src/net/mod.rs","sha256":"c160a24254f0eaf4ee7bc9407213798990399c28f159d41d3b298eb99222646b","line_count":122},
+      {"path":"src/test_logging.rs","sha256":"4a6a4fbf3167443f49f4ff732042573ea336e6e4c876746c357ef50533679318","line_count":6058}
+    ]
+  },
   "case_classes": [
     "positive",
     "empty_boundary",

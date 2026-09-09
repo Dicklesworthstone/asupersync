@@ -4235,9 +4235,18 @@
         ]
       },
       {
-        "source_path": "src/bin/atp.rs",
-        "line_count": 13563,
-        "sha256": "38c928471ded51ce016414a04b18bf476a2f3bbf9590b11a60409e4191fd0a20",
+      "source_path": "src/bin/atp.rs",
+        "line_count": 13557,
+        "sha256": "7f81086ac8b9a28ad071efde2c052153d0e436fe3fbcd780e239e028829ff799",
+        "release_source_review": {
+          "reviewed_date_utc": "2026-09-09",
+          "owner": "asupersync-ghxhvm",
+          "previous_line_count": 13563,
+          "previous_sha256": "38c928471ded51ce016414a04b18bf476a2f3bbf9590b11a60409e4191fd0a20",
+          "source_revision": "3905867d576d90e19442f53939cd1061ce95ba1d",
+          "delta": "Removed only the recursion_limit crate attribute and its five accompanying comment/blank lines after receive future erasure. The exact parent matches the previous source digest; CLI commands, parser attributes, environment handling, help and exit behavior are byte-identical.",
+          "execution_receipts_rebound": false
+        },
         "reviewed_prior_snapshot": {
           "source_revision": "73e00b348c2172ccc528f57546bc9e9d01d0e43e",
           "line_count": 12723,

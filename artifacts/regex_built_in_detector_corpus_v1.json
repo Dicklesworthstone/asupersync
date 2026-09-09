@@ -100,6 +100,23 @@
       "role": "executable-partial blocking baseline authority"
     }
   ],
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner": "asupersync-ghxhvm",
+    "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "execution_receipts_rebound": false,
+    "reviewed_changes": "Current release metadata and registry/API inventories are reviewed separately from the frozen R2 vectors and named-host handoff. otel.rs changes only an equivalent optional-value predicate and an existing Unicode-test lint exemption; detector order, patterns, disabled fast paths and KEEP_INCUMBENT remain unchanged. R1 adds current source pins without rewriting its original corpus.",
+    "source_pins": [
+      {"path":"Cargo.toml","sha256":"5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e","line_count":1121},
+      {"path":"Cargo.lock","sha256":"8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb","line_count":4664},
+      {"path":"src/observability/otel.rs","sha256":"2f344446249759aad8880a443d1bdb87249630cb7e010ae35b69daca0d97803b","line_count":15911},
+      {"path":"src/observability/mod.rs","sha256":"2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b","line_count":1194},
+      {"path":"artifacts/regex_privacy_capability_inventory_v1.json","sha256":"a19f39988dccde57c7368823918cfe567180ec2af52517d23021f3630e1adf55","line_count":1039},
+      {"path":"docs/adr/dep_plan_adr_012_regex_privacy.md","sha256":"76456b9192cc828f59b9c9a5bb19d20b31dc7e8171554e73bc8f4391c892301c","line_count":145},
+      {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa","line_count":7067},
+      {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"49e85f8defbccb4e9cce3c37d302e965b36de518f8929999928d9464e83ee791","line_count":3296}
+    ]
+  },
   "post_capture_provenance_refresh": {
     "refresh_id": "RGX-R2-SOURCE-PIN-REFRESH-2026-08-06",
     "recorded_date_utc": "2026-08-06",

@@ -318,6 +318,42 @@ impl DispatchKey {
     }
 }
 
+fn validate_current_source_review(corpus: &Value) -> Result<(), String> {
+    let mut historical = corpus.clone();
+    historical
+        .as_object_mut()
+        .ok_or("corpus must be an object")?
+        .remove("current_source_review");
+    if canonical_sha256(&historical)
+        != "236091c19770b77d24b668749303dfc44aa42eaaacc6e00d7c747b63e2dd7a25"
+    {
+        return Err("historical detector corpus changed".to_owned());
+    }
+    let review = &corpus["current_source_review"];
+    if review["claim_scope"] != "CURRENT_SOURCE_STATIC_REVIEW_ONLY"
+        || review["execution_receipts_rebound"] != false
+    {
+        return Err("source review must not rebind historical execution".to_owned());
+    }
+    let pins = review["source_pins"]
+        .as_array()
+        .ok_or("missing current pins")?;
+    if pins.len() != array(corpus, "source_pins").len()
+        || row_ids(pins, "path") != row_ids(array(corpus, "source_pins"), "path")
+    {
+        return Err("current source coverage changed".to_owned());
+    }
+    for pin in pins {
+        let path = text(pin, "path");
+        if sha256_hex(&read_repo_bytes(path)) != text(pin, "sha256")
+            || read_repo_file(path).lines().count() as u64 != number(pin, "line_count")
+        {
+            return Err(format!("current source changed: {path}"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_post_capture_provenance_refresh(corpus: &Value) -> Result<(), String> {
     let refresh = &corpus["post_capture_provenance_refresh"];
     for (key, expected) in [
@@ -884,7 +920,8 @@ fn schema_references_coverage_and_claim_projection_are_closed() {
 #[test]
 fn source_pins_and_authority_rows_are_current() {
     let corpus = artifact();
-    let pins = array(&corpus, "source_pins");
+    validate_current_source_review(&corpus).expect("current source review and frozen corpus");
+    let pins = array(&corpus["current_source_review"], "source_pins");
     assert_eq!(
         pins.len(),
         usize::try_from(number(&corpus["source_pin_scope"], "path_count"))
@@ -1310,6 +1347,19 @@ fn docs_ignore_rule_and_static_no_claims_are_discoverable() {
 #[test]
 fn structural_mutations_fail_closed() {
     let original = artifact();
+    validate_current_source_review(&original).expect("valid source review before mutations");
+
+    let mut rewritten_history = original.clone();
+    rewritten_history["source_pins"][0]["sha256"] = Value::String("0".repeat(64));
+    assert!(validate_current_source_review(&rewritten_history).is_err());
+
+    let mut stale_current = original.clone();
+    stale_current["current_source_review"]["source_pins"][0]["line_count"] = Value::from(0);
+    assert!(validate_current_source_review(&stale_current).is_err());
+
+    let mut promoted_execution = original.clone();
+    promoted_execution["current_source_review"]["execution_receipts_rebound"] = Value::Bool(true);
+    assert!(validate_current_source_review(&promoted_execution).is_err());
 
     let mut unknown = original.clone();
     unknown["policy"]["unknown_rows"] = Value::from(1);
