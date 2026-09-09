@@ -47,6 +47,15 @@ Every source contract in the machine packet is content-pinned by SHA-256. The
 focused verifier also reads `.beads/issues.jsonl` and refuses signoff if a child
 is not closed.
 
+The v0.4.11 refresh is a source reconciliation of that earlier decision. The
+registry's [source review](./typed_format_registry.md#v0411-source-review)
+records the additive production-schedule projection, current obligation-handoff
+message, remote CLI dispatch, and metadata-only snapshot documentation. The
+existing replay codec, snapshot implementation, generic payload goldens and
+published-v0.3.9 corpus remain unchanged. Updated pins do not constitute a new
+historical writer run or proof of lossless production replay, executable
+snapshot restoration, or eventual quiescence.
+
 ## Registry reconciliation
 
 The terminal packet requires the live registry to retain:

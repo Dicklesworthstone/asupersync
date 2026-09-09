@@ -6,6 +6,13 @@
   "program_id": "asupersync-ir2uf0",
   "title": "Typed-format generic and persisted parity terminal decision",
   "policy_as_of_date_utc": "2026-07-26",
+  "release_source_review": {
+    "reviewed_at_utc": "2026-09-09",
+    "source_commit": "0e22fec3adabc68f9ad9d8fca4fda83306b51218",
+    "registry_review": "artifacts/typed_format_registry_v1.json#/release_source_review",
+    "scope": "Refresh the registry join and the snapshot/replay source pins after semantic review. Snapshot changes are documentation-only; the ReplayTrace schema and codec are unchanged beneath the additive ProductionSchedule API. The registry separately records the current handoff-message extension and exact lexical census.",
+    "no_claim_boundary": "This reconciliation preserves the earlier scoped KEEP decision and does not create fresh historical-writer, projection, handoff, executable-restoration, eventual-quiescence, performance, or release evidence."
+  },
   "capability_ids": [
     "CAP-PERSISTED-TRACE-SNAPSHOT",
     "CAP-SERDE-GENERIC"
@@ -84,7 +91,7 @@
   "source_contracts": [
     {
       "path": "artifacts/typed_format_registry_v1.json",
-      "sha256": "14dee86742499aacfbc9813a38a965713d409d7859cba555e96f926693a6bae9",
+      "sha256": "2e26fd5474f8a7bbcbcb48b106d811e6d9771c045fae89cae32a0ceb9363cb53",
       "role": "canonical row-level inventory, pins, corpora, consumers, and A6 decisions"
     },
     {
@@ -104,7 +111,7 @@
     },
     {
       "path": "src/lab/snapshot_restore.rs",
-      "sha256": "f778ae73629550c16b789cad5674cdd93a4ca45bc3377fc0ae0881b542dc3d6a",
+      "sha256": "b0d65cc323f5d8ab9bcb91859f768155f245ac70e5475dd4acd330a7ae32b3b9",
       "role": "versioned runtime snapshot implementation"
     },
     {
@@ -114,7 +121,7 @@
     },
     {
       "path": "src/trace/replay.rs",
-      "sha256": "a5dd73ff157b0526d37b21a21de80cd67a6599da2c1e76c581bf0d0930380145",
+      "sha256": "b47a4c045653fa4a12540a177dcb1824111a8899d8380695e0751fae7fdef954",
       "role": "versioned deterministic replay representation"
     },
     {

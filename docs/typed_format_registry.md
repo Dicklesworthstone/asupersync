@@ -62,6 +62,42 @@ with:
 The broad scan catches a new direct call anywhere. The explicit rows prevent a
 high-risk persisted call from hiding behind an aggregate count.
 
+### v0.4.11 source review
+
+The 2026-09-09 review records 4,384 Rust files, 6,756 literal JSON tokens and
+259 source paths containing direct JSON tokens. Seven inline-test extractions
+replace their original paths; extracted QUIC tests add a second path. Other
+additions cover test receipts, ATP diagnostics, dependency-table tooling,
+private regex configuration, remote transport and bounded web JSON collection.
+The direct MessagePack/Bincode counts and file rosters are unchanged.
+
+The seven refreshed source pins include changes with distinct meanings:
+
+- `ProductionSchedule` is an additive projection into the existing schema-1
+  `ReplayTrace`. Its summary reports omitted events, and completion uses a
+  placeholder outcome. It does not establish lossless production replay.
+- The private `obligation_handoff_v1` JSON message uses the existing `UserTrace`
+  envelope and a 2,048-byte admission limit. Strict decoding checks fields,
+  holder generations and ticket order. Browser redaction retains decoded
+  structural IDs/tickets and emits a fixed invalid marker for malformed
+  reserved messages. The outer event enums and schema versions stay unchanged;
+  the new message is current evidence only.
+- Snapshot changes correct documentation: materialization produces metadata,
+  without executable futures, resumed tasks or an eventual-quiescence proof.
+  Non-doc implementation bytes are unchanged.
+- The CLI adds opt-in remote service/probe dispatch while preserving the trace
+  command implementation. Remote JSON protocol compatibility belongs to
+  `tests/remote_transport_lifecycle_contract.rs`, separately from this persisted
+  trace inventory. Private regex configuration likewise retains its own
+  versioned, bounded contract in `artifacts/regex_vm_terminal_receipt_v1.json`.
+- Cargo changes update release packaging, workspace versions, opt-in remote
+  service support, lint policy and the unrelated `chacha20` lock entry. All
+  three registered serialization dependencies retain their exact pins.
+
+The review preserves all 48 source pins, four format profiles, 13 persisted
+surfaces, payload goldens and historical corpus bytes. It does not turn the new
+projection or handoff behavior into historical compatibility evidence.
+
 ## Compatibility vocabulary
 
 `EXACT_BYTES` means existing accepted bytes remain readability-sensitive.

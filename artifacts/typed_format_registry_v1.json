@@ -6,6 +6,27 @@
   "title": "Complete public, generic, persisted, corpus, and consumer inventory for typed formats",
   "policy_as_of_date_utc": "2026-07-26",
   "policy_as_of_commit": "9992352969dfc9fa0be3f1c2c515189609f8ee05",
+  "release_source_review": {
+    "reviewed_at_utc": "2026-09-09",
+    "source_commit": "0e22fec3adabc68f9ad9d8fca4fda83306b51218",
+    "previous_registry_commit": "b76d2db92a4cfb8f4892d0d4d294be36bc44d9c1",
+    "previous_census_commit": "9eb0600e6",
+    "scope": "Reviewed seven changed source pins and the lexical census against the v0.4.9 inventory. Policy authority, generic codec decisions, payload goldens, historical corpus bytes, evidence-state partitions, and the 48-path pin scope are retained.",
+    "changes": [
+      "Cargo.toml adds release packaging exclusions, the opt-in remote-service feature, updated workspace versions and lint policy. Cargo.lock changes workspace versions and chacha20 0.10.1 to 0.10.2. The three registered serialization dependencies retain their versions, checksums and configuration.",
+      "src/trace/replay.rs adds ProductionSchedule and projection support types, re-exported by src/trace/mod.rs. The existing ReplayTrace codec and schema-1 representation are unchanged. Projection intentionally drops non-schedule events and supplies a placeholder completion outcome; it is not a lossless production replay or a new historical compatibility receipt.",
+      "src/trace/event.rs adds the private obligation_handoff_v1 message within the existing UserTrace envelope, bounded to 2048 bytes with strict fields, holder-generation and ticket-order checks. Browser redaction preserves decoded structural IDs/tickets and replaces malformed reserved messages with a fixed invalid marker. Outer event enums and schema versions are unchanged; this is a current semantic extension, not historical handoff evidence.",
+      "src/lab/snapshot_restore.rs changes documentation only: materialization restores snapshot metadata, not executable futures or proven eventual quiescence. Non-doc source bytes are identical to the previous pinned implementation.",
+      "src/bin/asupersync.rs adds opt-in remote service/probe configuration, output and dispatch. Existing trace command implementation bytes are unchanged; the new remote protocol has its own lifecycle contract.",
+      "The source JSON path census moves 251 to 259: seven inline-test extractions replace their old paths, QUIC tests add a second path, and new paths cover test receipts, the private regex configuration and remote transport. Remaining token growth is ATP diagnostics, dependency-table tooling, OTEL fixtures, web JSON collection and handoff messages. Binary codec call counts and file rosters are unchanged."
+    ],
+    "adjacent_json_boundaries": [
+      "PrivatePatternConfig in src/observability/regex_vm.rs is a crate-private versioned configuration with explicit document/compile limits and strict fields; its owned-format evidence stays in artifacts/regex_vm_terminal_receipt_v1.json.",
+      "Remote service JSON is bounded transport framing, not a persisted trace/snapshot format; tests/remote_transport_lifecycle_contract.rs owns its exact protocol goldens and refusal behavior.",
+      "Web Json<T> extraction remains arbitrary DeserializeOwned over bounded request bodies; it does not create a persisted artifact family."
+    ],
+    "no_claim_boundary": "This source review and census refresh do not rerun historical writers, prove new projection/handoff runtime behavior, or promote any current-only evidence to historical, replacement, performance or release proof."
+  },
   "capability_ids": [
     "CAP-PERSISTED-TRACE-SNAPSHOT",
     "CAP-SERDE-GENERIC"
@@ -89,8 +110,8 @@
       "SerializationFormat::Custom"
     ],
     "totals": {
-      "rust_files": 4340,
-      "serde_json::": 6359,
+      "rust_files": 4384,
+      "serde_json::": 6756,
       "rmp_serde::": 70,
       "bincode::": 32,
       "SerializationFormat::": 160,
@@ -101,8 +122,8 @@
       {
         "path": "src",
         "classification": "MIXED_PRODUCTION_AND_INLINE_TEST; SEMANTIC unless an explicit persisted/public surface overrides it",
-        "rust_files": 1452,
-        "serde_json::": 2459,
+        "rust_files": 1474,
+        "serde_json::": 2530,
         "rmp_serde::": 48,
         "bincode::": 21,
         "SerializationFormat::": 82,
@@ -112,8 +133,8 @@
       {
         "path": "tests",
         "classification": "TEST_OR_EXTERNAL_CONSUMER_EVIDENCE; no production compatibility claim",
-        "rust_files": 1919,
-        "serde_json::": 3330,
+        "rust_files": 1941,
+        "serde_json::": 3656,
         "rmp_serde::": 9,
         "bincode::": 11,
         "SerializationFormat::": 23,
@@ -268,7 +289,7 @@
     },
     {
       "token": "serde_json::",
-      "path_count": 251,
+      "path_count": 259,
       "classification": "All src paths are lexically covered by scan_profile. Persisted/public exceptions are enumerated below; the remainder is semantic JSON or inline-test/tooling use and carries no exact-byte claim."
     }
   ],
@@ -287,7 +308,7 @@
       "resource_bounds": "SerdeCodec itself has no input-length cap. TypedSymbol applies its envelope cap. Trace readers apply per-metadata, per-event, compressed-chunk, and preallocation caps.",
       "error_contract": "Public SerdeCodec owns stringified SerializationError and DeserializationError. ReplayTrace::to_bytes exposes rmp_serde::encode::Error; ReplayTrace::from_bytes owns ReplayDecodeError containing rmp decode failures.",
       "version_policy": "No generic payload version byte. TypedSymbol, trace-file, replay-metadata, and streaming containers own their versions.",
-      "migration_policy": "The standalone downstream fixture pins one current rmp-serde 1.3.1 payload golden. Existing trace MessagePack remains readable, but no prior-release committed byte corpus or proven historical migration reader exists.",
+      "migration_policy": "The standalone downstream fixture pins one current rmp-serde 1.3.1 payload golden. The separate persisted rows register the exact published-v0.3.9 trace, replay and typed-symbol corpus; that finite historical evidence does not establish arbitrary generic-payload migration.",
       "state": "CURRENT_CORPUS_ONLY"
     },
     {
@@ -304,7 +325,7 @@
       "resource_bounds": "SerdeCodec itself has no decode byte limit and ignores trailing decoded bytes. TypedSymbol bounds its payload; distributed snapshot bounds its owned framing before vector-clock decode.",
       "error_contract": "Public SerdeCodec stringifies bincode EncodeError and DecodeError into owned errors. Distributed snapshot maps codec failures into SnapshotError.",
       "version_policy": "No generic payload version byte. TypedSymbol owns its header version; distributed snapshot v2 owns the Bincode vector-clock field.",
-      "migration_policy": "The legacy configuration is part of the accepted baseline, and the standalone downstream fixture pins one current bincode-next 3.1.1 legacy-config payload golden. There is no prior-release committed Bincode corpus or cross-version migration reader.",
+      "migration_policy": "The legacy configuration is part of the accepted baseline, and the standalone downstream fixture pins one current bincode-next 3.1.1 legacy-config payload golden. The separate persisted rows register exact published-v0.3.9 typed-symbol and distributed-snapshot artifacts; that finite corpus does not establish arbitrary generic-payload migration.",
       "state": "CURRENT_CORPUS_ONLY"
     },
     {
@@ -614,7 +635,7 @@
         "CORPUS-HISTORICAL-V039"
       ],
       "state": "HISTORICAL_CORPUS_VERIFIED",
-      "no_claim_boundary": "The published v0.3.9 blob proves compatibility only for replay schema 1 and its recorded semantics, not an unimplemented lower-version migration."
+      "no_claim_boundary": "The published v0.3.9 blob proves compatibility only for replay schema 1 and its recorded semantics, not an unimplemented lower-version migration. The additive ProductionSchedule projection uses this representation but deliberately omits non-schedule events and supplies a placeholder completion outcome; it is not lossless production replay evidence."
     },
     {
       "surface_id": "PERSIST-TRACE-STREAM",
@@ -720,13 +741,13 @@
       "compatibility_class": "SEMANTIC",
       "exactness_detail": "Schema name browser-trace-schema-v1 and event meaning are owned; JSON whitespace and map order are not.",
       "canonical_ordering": "Event order is significant; object member order is not a general contract.",
-      "resource_bounds": "No format-wide JSON byte cap in this module.",
-      "version_policy": "TRACE_EVENT_SCHEMA_VERSION 1 and BROWSER_TRACE_SCHEMA_VERSION browser-trace-schema-v1; an explicit v0 alias path exists.",
+      "resource_bounds": "No format-wide JSON byte cap in this module. The private obligation-handoff message separately enforces a 2048-byte ceiling before JSON decoding.",
+      "version_policy": "TRACE_EVENT_SCHEMA_VERSION 1 and BROWSER_TRACE_SCHEMA_VERSION browser-trace-schema-v1; an explicit v0 alias path exists. Private obligation_handoff_v1 messages use the existing UserTrace envelope without extending its exhaustive enums.",
       "error_contract": "Owned browser trace validation errors plus serde_json failures.",
       "migration_policy": "v0 alias decode is an active compatibility path; no committed external v0 corpus is registered here.",
       "corpus_ids": [],
       "state": "CURRENT_CORPUS_ONLY",
-      "no_claim_boundary": "Alias unit tests do not establish a broad historical corpus."
+      "no_claim_boundary": "Alias unit tests do not establish a broad historical corpus. Current browser redaction preserves only strictly decoded handoff IDs/tickets and emits a fixed invalid marker for malformed reserved messages; this is not historical handoff evidence."
     },
     {
       "surface_id": "PERSIST-GOLDEN-TRACE-JSON",
@@ -808,7 +829,7 @@
         "CORPUS-HISTORICAL-V039"
       ],
       "state": "HISTORICAL_CORPUS_VERIFIED",
-      "no_claim_boundary": "The published-v0.3.9 schema-1 raw JSON fixture proves explicit promotion to the current schema and cancel-safe atomic installation only; it does not prove trace/report compatibility, performance, dependency removal, or production cutover."
+      "no_claim_boundary": "The published-v0.3.9 schema-1 raw JSON fixture proves explicit promotion to the current schema and cancel-safe atomic installation only; it does not restore executable futures, establish eventual quiescence, or prove trace/report compatibility, performance, dependency removal, or production cutover."
     },
     {
       "surface_id": "PERSIST-LAB-SCENARIO-AND-EXPLORER-JSON",
@@ -1052,11 +1073,11 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3"
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a"
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb"
     },
     {
       "path": "src/types/mod.rs",
@@ -1072,11 +1093,11 @@
     },
     {
       "path": "src/trace/mod.rs",
-      "sha256": "49392d9a64ca911ce644624f181236cc9d1fa4e4c5f1f8d9ba8a462a31c9f47e"
+      "sha256": "a4cea4ed4b15007492fece0b620a5c6e7b09e0537261f3c6727cc900b9816566"
     },
     {
       "path": "src/trace/replay.rs",
-      "sha256": "a5dd73ff157b0526d37b21a21de80cd67a6599da2c1e76c581bf0d0930380145"
+      "sha256": "b47a4c045653fa4a12540a177dcb1824111a8899d8380695e0751fae7fdef954"
     },
     {
       "path": "src/trace/compat.rs",
@@ -1096,7 +1117,7 @@
     },
     {
       "path": "src/trace/event.rs",
-      "sha256": "c773c8902b36735cc6c99b2bd77e9fd4f8709af83a93b03eb441cf4deb1664d6"
+      "sha256": "440eb0eca318ff65cb2b75a2cf838a339d0e22e7370d62c33533c536014f5933"
     },
     {
       "path": "src/trace/format.rs",
@@ -1116,7 +1137,7 @@
     },
     {
       "path": "src/lab/snapshot_restore.rs",
-      "sha256": "f778ae73629550c16b789cad5674cdd93a4ca45bc3377fc0ae0881b542dc3d6a"
+      "sha256": "b0d65cc323f5d8ab9bcb91859f768155f245ac70e5475dd4acd330a7ae32b3b9"
     },
     {
       "path": "src/lab/scenario.rs",
@@ -1148,7 +1169,7 @@
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7"
+      "sha256": "db9679da2c0ba6050f209264fb353da75892b0046429dffe0ba7edce5d74517a"
     },
     {
       "path": "tests/property_trace_schema.rs",
