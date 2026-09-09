@@ -90,9 +90,10 @@ collects the changes since the published `v0.4.10` source.
   borrow the worker (from inside a task poll, from the background thread, or
   from another OS thread while the worker is on loan) polls its future on the
   caller as before, without a registered root task. After the root completes,
-  `block_on` drains already-runnable work for a bounded number of turns and
-  never waits on timers or I/O; tasks parked on them continue on the
-  background thread.
+  `block_on` drains already-runnable work under a bounded stop-predicate check
+  budget and never waits on timers or I/O. Remaining `Send` tasks continue on
+  the background thread; local tasks wait for their owning thread to drive
+  the runtime again.
 - Dropping the final runtime owner from one of its async workers transfers
   worker joins to a teardown thread, allowing the current poll to return
   without trying to join itself. The teardown job retains runtime state

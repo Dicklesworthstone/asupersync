@@ -3225,9 +3225,9 @@ impl RuntimeBuilder {
     /// thread join — deadlocks here, whereas a plain `worker_threads(1)`
     /// runtime keeps that task running on its own worker thread; await the
     /// task instead. After the root completes, `block_on` drains work that is
-    /// already runnable for a bounded number of dispatch turns and then
-    /// returns; tasks parked on timers or I/O are left to the background
-    /// thread rather than waited for.
+    /// already runnable under a bounded stop-predicate check budget, without
+    /// waiting on timers or I/O. Remaining `Send` tasks resume on the background
+    /// thread; local tasks resume when their owning thread drives the runtime.
     ///
     /// Configuring more than one worker after this preset keeps the plain
     /// worker-thread topology (`worker_threads(1)` alone does not enable the

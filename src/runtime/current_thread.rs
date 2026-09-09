@@ -39,9 +39,9 @@
 //!   runnable (no dispatchable task, ready finalizer, queued command, or
 //!   already-arrived reactor readiness) or [`POST_ROOT_DRAIN_TURNS`] stop-predicate
 //!   checks were spent, never waiting on timers or I/O. A cancellation-blind
-//!   self-waking task therefore cannot keep `block_on` from returning; work
-//!   still runnable or parked afterwards continues on the background thread
-//!   once it resumes the worker.
+//!   self-waking task therefore cannot keep `block_on` from returning. Remaining
+//!   `Send` work continues on the background thread once it resumes the worker;
+//!   local tasks wait until their owning thread drives the runtime again.
 //! - A root panic is caught around the poll and destructor; the stub is retired, the
 //!   worker is returned, and the original payload is re-raised on the caller
 //!   (`block_on` propagates root panics exactly as before).
