@@ -38,7 +38,7 @@ const PATH_TOKEN: &str = concat!("hex", "::");
 const SOURCE_PIN_PATHS_SHA256: &str =
     "80353758136d41417f488d73c3d4877981600331f04dff3061590d31e08ff23f";
 const CLAIMS_PROJECTION_SHA256: &str =
-    "be8ecce740929dfc3ed395d76c03899fa3a4e4cf7658552aca2da157ebc0816c";
+    "f488332e9ef9003ba4869566ee610066d68e135d1af22d2ae2ed60f9ae726ef6";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -536,13 +536,13 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     let census = object(inventory, "occurrence_census");
     for (key, expected) in [
         ("files", 109),
-        ("lexical_tokens", 272),
-        ("code_or_type_references", 269),
+        ("lexical_tokens", 279),
+        ("code_or_type_references", 276),
         ("comment_tokens", 3),
         ("cfg_any_disabled_reference_count", 4),
         ("cfg_test_references_embedded_in_production_files", 16),
         ("test_or_test_internals_module_references", 2),
-        ("test_or_conformance_group_references", 151),
+        ("test_or_conformance_group_references", 158),
         ("active_production_references", 96),
         ("unknown_occurrences", 0),
     ] {
@@ -558,7 +558,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             ("FromHexError".to_owned(), 4),
             ("decode".to_owned(), 36),
             ("decode_to_slice".to_owned(), 11),
-            ("encode".to_owned(), 220),
+            ("encode".to_owned(), 227),
             ("tests".to_owned(), 1),
         ])
         || symbol_map(census_value, "code_or_type_symbols")
@@ -566,7 +566,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
                 ("FromHexError".to_owned(), 4),
                 ("decode".to_owned(), 34),
                 ("decode_to_slice".to_owned(), 11),
-                ("encode".to_owned(), 220),
+                ("encode".to_owned(), 227),
             ])
     {
         return Err("occurrence symbol summaries drifted".to_owned());
@@ -580,7 +580,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
     )?;
     let expected_root_counts = BTreeMap::from([
         ("src", (52, 183)),
-        ("tests", (56, 87)),
+        ("tests", (56, 94)),
         ("conformance", (1, 2)),
         ("examples", (0, 0)),
         ("benches", (0, 0)),
@@ -1111,14 +1111,14 @@ fn complete_direct_path_census_matches_source() {
         }
     }
     assert_eq!(actual.len(), 109);
-    assert_eq!(lexical_symbols.values().sum::<u64>(), 272);
+    assert_eq!(lexical_symbols.values().sum::<u64>(), 279);
     assert_eq!(
         lexical_symbols,
         BTreeMap::from([
             ("FromHexError".to_owned(), 4),
             ("decode".to_owned(), 36),
             ("decode_to_slice".to_owned(), 11),
-            ("encode".to_owned(), 220),
+            ("encode".to_owned(), 227),
             ("tests".to_owned(), 1),
         ])
     );
@@ -1133,7 +1133,7 @@ fn complete_direct_path_census_matches_source() {
                 totals
             },
         );
-    assert_eq!(code_symbols.values().sum::<u64>(), 269);
+    assert_eq!(code_symbols.values().sum::<u64>(), 276);
     assert_eq!(code_symbols.get("decode"), Some(&34));
 }
 
@@ -1185,7 +1185,7 @@ fn reservation_groups_are_disjoint_complete_and_digest_pinned() {
         );
     }
     assert_eq!(counts.values().map(|row| row.0).sum::<u64>(), 109);
-    assert_eq!(counts.values().map(|row| row.1).sum::<u64>(), 272);
+    assert_eq!(counts.values().map(|row| row.1).sum::<u64>(), 279);
 }
 
 #[test]
@@ -1296,7 +1296,7 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         .map(|row| symbol_total(&symbol_map(row, "symbols")))
         .sum();
     assert_eq!(call_site_disabled_total, 4);
-    assert_eq!(test_conformance_total, 151);
+    assert_eq!(test_conformance_total, 158);
 
     let logging = find_row(
         array(&inventory, "call_sites"),
@@ -1309,7 +1309,7 @@ fn comments_and_disabled_rows_remain_separate_from_active_behavior() {
         "cfg(any(test, feature = test-internals))"
     );
     assert_eq!(symbol_total(&symbol_map(logging, "symbols")), 2);
-    assert_eq!(269 - test_conformance_total - 16 - 2 - 4, 96);
+    assert_eq!(276 - test_conformance_total - 16 - 2 - 4, 96);
 }
 
 #[test]
