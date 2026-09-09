@@ -116,6 +116,22 @@ use super::{
 /// Using a constant (rather than peeking the first packet's header) means the
 /// current accept path is single-connection-per-port; per-connection DCID demux
 /// over a shared port is Phase-D work.
+/// Opt-in stderr tracing for ATP/RQ benchmark diagnosis. Reuses the existing
+/// ATP_RQ_TRACE switch so matrix runs can grep one trace stream across RQ and
+/// QUIC transports. Defined ahead of every use: `macro_rules!` scoping is
+/// textual.
+macro_rules! quic_rqtrace {
+    ($($arg:tt)*) => {
+        if rqtrace_enabled() {
+            eprintln!(
+                "[ATP_RQ_TRACE] [atp-quic] t={}ms {}",
+                rqtrace_elapsed_millis(),
+                format!($($arg)*)
+            );
+        }
+    };
+}
+
 const ATP_QUIC_INITIAL_DCID: &[u8] = &[0xA7, 0x9C, 0x10, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
 /// Client source connection ID carried in the client's handshake long headers.
 const ATP_QUIC_CLIENT_SCID: &[u8] = &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
@@ -198,41 +214,81 @@ async fn keep_peer_alive_during_local_work(
     if !cadence.due(Instant::now(), LOCAL_WORK_KEEP_ALIVE_CADENCE) {
         return Ok(false);
     }
-    let _ = link.pump_inbound_for(cx, Duration::ZERO).await?;
-    send_and_flush_native_keep_alive(cx, link, control).await?;
+    emit_keep_alive(cx, link, control).await?;
     Ok(true)
 }
 
-/// Pings (and drains/acknowledges) at [`LOCAL_WORK_KEEP_ALIVE_CADENCE`]
-/// forever; only ever returns an error. Raced against a long blocking step by
-/// [`keep_peer_alive_while`].
-async fn ping_peer_forever<T>(
+/// One keep-alive emission: drain whatever the socket already holds without
+/// waiting (acknowledging the sender's outstanding frames), then flush the
+/// ACKs plus a PING. Never raced against anything: a flush interrupted
+/// mid-await would leave generated packets unsent and, for a queued control
+/// frame, a packet number the in-flight ledger never learned about.
+async fn emit_keep_alive(
     cx: &Cx,
     link: &mut QuicLink,
     control: &mut NativeQuicFrameTransport,
-) -> Result<T, QuicTransportError> {
-    let mut cadence = LocalWorkKeepAlive::new(Instant::now());
-    loop {
-        crate::time::sleep(cx.now(), LOCAL_WORK_KEEP_ALIVE_CADENCE).await;
-        keep_peer_alive_during_local_work(cx, link, control, &mut cadence).await?;
-    }
+) -> Result<(), QuicTransportError> {
+    let _ = link.pump_inbound_for(cx, Duration::ZERO).await?;
+    send_and_flush_native_keep_alive(cx, link, control).await
+}
+
+/// What the keep-alive loop observed when its race resolved.
+enum KeepAliveTurn<T> {
+    /// The long step finished.
+    Done(Result<T, QuicTransportError>),
+    /// The cadence elapsed; the step is still running.
+    Tick,
 }
 
 /// Runs `work` (a long blocking step such as a decoded-block write or the
 /// member-file batch of a packed tree, executed on a blocking thread) while
-/// keeping the peer alive: the socket is drained and acknowledged and a
-/// keep-alive PING goes out at the cadence until `work` completes. Without
-/// this the receiver is silent for the whole step; a step stretched by disk
-/// load past the sender's idle budget (20 s of a blocked datagram cwnd, or the
-/// proof wait) made the sender declare a healthy receiver dead (GH#67
-/// follow-up, asupersync-t64ggs).
+/// keeping the peer alive: at [`LOCAL_WORK_KEEP_ALIVE_CADENCE`] the socket is
+/// drained and acknowledged and a keep-alive PING goes out until `work`
+/// completes. Without this the receiver is silent for the whole step; a step
+/// stretched by disk load past the sender's idle budget (20 s of a blocked
+/// datagram cwnd, or the proof wait) made the sender declare a healthy
+/// receiver dead (GH#67 follow-up, asupersync-t64ggs).
+///
+/// Only the cadence sleep is raced against `work`; each keep-alive emission
+/// runs to completion, and `work` is always driven to completion even after
+/// a keep-alive fails, because the blocking step is not cancel-safe (a
+/// detached write would keep running while the staging directory is torn
+/// down). A keep-alive error is reported after `work` finishes.
 async fn keep_peer_alive_while<T>(
     cx: &Cx,
     link: &mut QuicLink,
     control: &mut NativeQuicFrameTransport,
     work: impl std::future::Future<Output = Result<T, QuicTransportError>>,
 ) -> Result<T, QuicTransportError> {
-    futures_lite::future::or(work, ping_peer_forever(cx, link, control)).await
+    let mut work = std::pin::pin!(work);
+    let mut keep_alive_failure: Option<QuicTransportError> = None;
+    loop {
+        let turn = {
+            let step = async { KeepAliveTurn::Done(work.as_mut().await) };
+            let tick = async {
+                crate::time::sleep(cx.now(), LOCAL_WORK_KEEP_ALIVE_CADENCE).await;
+                KeepAliveTurn::Tick
+            };
+            futures_lite::future::or(step, tick).await
+        };
+        match turn {
+            KeepAliveTurn::Done(result) => {
+                return match keep_alive_failure {
+                    Some(failure) => Err(failure),
+                    None => result,
+                };
+            }
+            KeepAliveTurn::Tick => {
+                // Keep trying at every tick: a transient failure must not
+                // silence the receiver for the rest of the step. The last
+                // failure is still reported once the step has finished.
+                if let Err(failure) = emit_keep_alive(cx, link, control).await {
+                    quic_rqtrace!("receiver: keep_alive_failed error={failure:?}");
+                    keep_alive_failure = Some(failure);
+                }
+            }
+        }
+    }
 }
 
 /// RAII backstop for the native QUIC receiver staging directory.
@@ -693,21 +749,6 @@ fn paced_repair_round_idle_grace(
         .clamp(ROUND_PROGRESS_IDLE_GRACE, config.idle_timeout)
 }
 
-/// Opt-in stderr tracing for ATP/RQ benchmark diagnosis. Reuses the existing
-/// ATP_RQ_TRACE switch so matrix runs can grep one trace stream across RQ and
-/// QUIC transports.
-macro_rules! quic_rqtrace {
-    ($($arg:tt)*) => {
-        if std::env::var_os("ATP_RQ_TRACE").is_some() {
-            eprintln!(
-                "[ATP_RQ_TRACE] [atp-quic] t={}ms {}",
-                rqtrace_elapsed_millis(),
-                format!($($arg)*)
-            );
-        }
-    };
-}
-
 /// Milliseconds since the first trace line of this process, so interleaved
 /// sender/receiver traces can be ordered on one clock.
 fn rqtrace_elapsed_millis() -> u128 {
@@ -744,8 +785,12 @@ async fn trace_blocking_roundtrip_probe(label: &'static str) {
 }
 
 /// True when `ATP_RQ_TRACE` opt-in tracing is enabled for this process.
+/// Whether `ATP_RQ_TRACE` tracing is on. Read once per process: the check
+/// sits on every socket wait, and an environment lookup there takes the
+/// process-global environment lock each time.
 fn rqtrace_enabled() -> bool {
-    std::env::var_os("ATP_RQ_TRACE").is_some()
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ATP_RQ_TRACE").is_some())
 }
 
 /// Snapshot of the process-global fallback I/O driver counters (GH#67
@@ -1349,11 +1394,13 @@ async fn send_native_proof_until_close<T: serde::Serialize + Sync>(
     control.send(cx, &mut link.conn, &proof_frame)?;
     let proof_packets = link.flush(cx).await?;
     let proof_frames = link.last_flushed_stream_frames();
-    super::quic_progress(format_args!(
+    // Happy path of every transfer: trace-gated, since `wait_diagnostics`
+    // reads /proc and this would otherwise print to stderr on each run.
+    quic_rqtrace!(
         "receiver: proof_sent packets={proof_packets} stream_frames={} {}",
         proof_frames.len(),
         link.wait_diagnostics()
-    ));
+    );
 
     let max_attempts =
         TERMINAL_PROOF_RETRANSMIT_ATTEMPTS.min(needmore_pto_attempt_budget(config.idle_timeout));
@@ -2789,6 +2836,11 @@ pub struct QuicLink {
     /// resets to [`SOURCE_STREAM_PTO`] on real ACK progress — see the cap's
     /// docs for the spurious-loss wedge this prevents (br-asupersync-daqxbz).
     app_loss_stall_pto: Duration,
+    /// When `app_loss_stall_pto` last doubled. The stall expiry is
+    /// re-entered on every ~200 ms iteration while the source stream is
+    /// cwnd-blocked, so without this the threshold doubled per iteration
+    /// instead of once per interval and saturated within a second.
+    stall_backoff_at: Option<Instant>,
     /// Sender-side limiter telemetry (br-asupersync-bi2462.2).
     ///
     /// Stall reasons with held time, cwnd and in-flight peaks,
@@ -3538,10 +3590,7 @@ impl QuicLink {
             // packet lost before its ACK can return. Back the wall-clock
             // stall threshold off exponentially until real ACK progress
             // resets it (br-asupersync-daqxbz).
-            self.app_loss_stall_pto = self
-                .app_loss_stall_pto
-                .saturating_mul(2)
-                .min(APP_LOSS_STALL_PTO_MAX);
+            self.double_stall_pto();
             quic_rqtrace!(
                 "sender: app_data_loss_timeout operation={} lost_packets={} lost_bytes={} bytes_in_flight={} congestion_window={} pto_count={} stall_pto_ms={}",
                 operation,
@@ -3572,19 +3621,50 @@ impl QuicLink {
     /// outstanding, as RFC 9002 §6.2.1 does for PTO; real ACK progress resets
     /// it in `apply_source_stream_ack_ranges`.
     fn back_off_untracked_stall_pto(&mut self, operation: &'static str) {
-        if self.in_flight_stream_frames.is_empty() {
+        if self.in_flight_stream_frames.is_empty() || !self.double_stall_pto() {
             return;
         }
-        self.app_loss_stall_pto = self
-            .app_loss_stall_pto
-            .saturating_mul(2)
-            .min(APP_LOSS_STALL_PTO_MAX);
         quic_rqtrace!(
             "sender: app_data_stall_backoff operation={} in_flight_stream_packets={} stall_pto_ms={}",
             operation,
             self.in_flight_stream_frames.len(),
             self.app_loss_stall_pto.as_millis(),
         );
+    }
+
+    /// Double the wall-clock stall threshold (capped at
+    /// [`APP_LOSS_STALL_PTO_MAX`]) at most once per current interval.
+    ///
+    /// The stall expiry is re-entered on every loop iteration while the
+    /// source stream stays cwnd-blocked (the callers `continue` without
+    /// re-arming their retransmit clock), so an unconditional doubling ran
+    /// 200 -> 400 -> 800 -> 1600 -> 2000 ms within a second and left the
+    /// 20 s / 45 s wait budgets with a tenth of their retransmit rounds under
+    /// real loss. Returns whether the threshold changed.
+    fn double_stall_pto(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(at) = self.stall_backoff_at
+            && now.saturating_duration_since(at) < self.app_loss_stall_pto
+        {
+            return false;
+        }
+        let next = self
+            .app_loss_stall_pto
+            .saturating_mul(2)
+            .min(APP_LOSS_STALL_PTO_MAX);
+        self.stall_backoff_at = Some(now);
+        if next == self.app_loss_stall_pto {
+            return false;
+        }
+        self.app_loss_stall_pto = next;
+        true
+    }
+
+    /// Restore the stall threshold to its base value (real ACK progress or a
+    /// fresh source stream).
+    fn reset_stall_pto(&mut self) {
+        self.app_loss_stall_pto = SOURCE_STREAM_PTO;
+        self.stall_backoff_at = None;
     }
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
@@ -4150,7 +4230,7 @@ impl QuicLink {
             self.stream_rate_acked_bytes = self.stream_rate_acked_bytes.saturating_add(acked_bytes);
             self.maybe_update_source_stream_rate();
             // Real ACK progress: the loss-expiry cadence is honest again.
-            self.app_loss_stall_pto = SOURCE_STREAM_PTO;
+            self.reset_stall_pto();
         }
         let removed = before.saturating_sub(self.in_flight_stream_frames.len());
         Ok((removed, threshold_requeued_frames))
@@ -4159,6 +4239,9 @@ impl QuicLink {
     /// Arm delivery-clocked adaptive pacing for an active paced source stream,
     /// seeded from the current pacing decision's rate.
     fn begin_source_stream_rate_control(&mut self, initial_pacing_bytes_per_s: u64) {
+        // A saturated stall threshold from the previous entry must not
+        // govern the first loss of a fresh stream.
+        self.reset_stall_pto();
         self.stream_rate_controller = Some(SourceStreamRatePacer::new(initial_pacing_bytes_per_s));
         self.stream_rate_window_started_micros = self.stream_rate_now_micros();
         self.stream_rate_sent_bytes = 0;
@@ -6101,6 +6184,7 @@ fn link_from_handshake(
         final_handshake_flight,
         last_final_flight_resend: None,
         app_loss_stall_pto: SOURCE_STREAM_PTO,
+        stall_backoff_at: None,
         sender_handoff: QuicSenderHandoffStats::default(),
         limiter: QuicSendLimiterReport::default(),
         source_stream_window_request: None,

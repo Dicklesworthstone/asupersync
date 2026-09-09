@@ -1532,10 +1532,23 @@ fn global_fallback_io_driver() -> Option<&'static IoDriverHandle> {
 #[cfg(not(target_arch = "wasm32"))]
 fn fallback_io_pump_loop(driver: &IoDriverHandle) -> ! {
     loop {
-        match driver.turn_with(None, |_, _| {}) {
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => std::thread::park_timeout(FALLBACK_IO_PUMP_ERROR_BACKOFF),
+        // A panic inside a reactor turn must not silently end the only thread
+        // that wakes driverless sockets (every such socket would park forever
+        // with no self-wake fallback): report it, back off, and keep pumping.
+        let turned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.turn_with(None, |_, _| {})
+        }));
+        match turned {
+            Ok(Ok(_)) => {}
+            Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => {}
+            Ok(Err(_)) => std::thread::park_timeout(FALLBACK_IO_PUMP_ERROR_BACKOFF),
+            Err(_panic) => {
+                crate::tracing_compat::warn!(
+                    target: "asupersync::net::udp",
+                    "GH#67: the fallback I/O pump caught a panic in a reactor turn; continuing"
+                );
+                std::thread::park_timeout(FALLBACK_IO_PUMP_ERROR_BACKOFF);
+            }
         }
     }
 }

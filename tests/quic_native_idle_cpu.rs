@@ -317,8 +317,35 @@ fn idle_connection_with_silent_peer_parks_instead_of_spinning() {
 
         // The server is never driven again: it is the silent peer. Only the
         // client loops its bounded receive wait.
+        let probe_before = asupersync::net::fallback_io_driver_probe()
+            .expect("driverless polls during the handshake started the fallback I/O driver");
         let first = measure_idle_window(&cx, &mut client, IDLE_WINDOW).await;
         let second = measure_idle_window(&cx, &mut client, IDLE_WINDOW).await;
+        let probe_after = asupersync::net::fallback_io_driver_probe().expect("probe after idle");
+
+        // A parked wait wakes once per bounded window (plus the window's own
+        // remainder); a polling loop that stays under the CPU threshold by
+        // sleeping in tiny slices would still show hundreds of wakeups here.
+        let max_wakeups = u32::try_from(IDLE_WINDOW.as_millis() / IDLE_DRIVE_STEP.as_millis())
+            .expect("window/step ratio fits u32")
+            + 2;
+        for (label, outcome) in [("first", first), ("second", second)] {
+            assert!(
+                outcome.wakeups <= max_wakeups,
+                "{label} idle window woke {} times; a parked wait wakes at most {max_wakeups}: {outcome:?}",
+                outcome.wakeups
+            );
+        }
+        // The socket really parked on the fallback driver: it was re-armed
+        // during the idle windows and never took the legacy self-wake path.
+        assert!(
+            probe_after.fallback_rearms > probe_before.fallback_rearms,
+            "idle windows must re-arm the fallback registration: before={probe_before:?} after={probe_after:?}"
+        );
+        assert_eq!(
+            probe_after.fallback_self_wakes, probe_before.fallback_self_wakes,
+            "no legacy self-wake may occur while idle: before={probe_before:?} after={probe_after:?}"
+        );
         let best = if second.cpu_fraction_percent < first.cpu_fraction_percent {
             second
         } else {

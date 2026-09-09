@@ -1623,6 +1623,12 @@ mod tests {
             .begin_handshake()
             .expect("transport begins handshake");
         transport.on_established().expect("transport establishes");
+        // All four packets leave just before the ACK arrives so that only the
+        // packet threshold (pn 1 + 3 <= 4) declares loss: the RTT sample
+        // taken from this same ACK (16 ms if the packets were spread over
+        // 1..=4 ms) would otherwise also expire the older packets by the time
+        // threshold, and this test is about the recovery counters, not the
+        // threshold arithmetic.
         for packet_number in 1..=4 {
             transport.on_packet_sent(SentPacketMeta {
                 space: PacketNumberSpace::ApplicationData,
@@ -1630,7 +1636,7 @@ mod tests {
                 bytes: 1_200,
                 ack_eliciting: true,
                 in_flight: true,
-                time_sent_micros: packet_number * 1_000,
+                time_sent_micros: 19_000,
             });
         }
 
