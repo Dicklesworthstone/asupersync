@@ -1492,10 +1492,10 @@ fn global_fallback_io_driver() -> Option<&'static IoDriverHandle> {
         .get_or_init(|| {
             let reactor = match create_reactor() {
                 Ok(reactor) => reactor,
-                Err(err) => {
+                Err(_err) => {
                     crate::tracing_compat::warn!(
                         target: "asupersync::net::udp",
-                        error = %err,
+                        error = %_err,
                         "GH#67: no reactor backend for the process-global fallback I/O driver; \
                          driverless UDP polls keep the immediate self-wake path"
                     );
@@ -1510,10 +1510,10 @@ fn global_fallback_io_driver() -> Option<&'static IoDriverHandle> {
                 .spawn(move || fallback_io_pump_loop(&pump_driver))
             {
                 Ok(_handle) => Some(GlobalFallbackIoDriver { driver }),
-                Err(err) => {
+                Err(_err) => {
                     crate::tracing_compat::warn!(
                         target: "asupersync::net::udp",
-                        error = %err,
+                        error = %_err,
                         "GH#67: could not spawn the process-global fallback I/O pump; \
                          driverless UDP polls keep the immediate self-wake path"
                     );
