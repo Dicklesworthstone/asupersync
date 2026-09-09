@@ -1573,8 +1573,9 @@ mod fallback_io_probe {
     }
 }
 
-/// Snapshot of the process-global fallback I/O driver (GH#67): the pump's
-/// reactor statistics plus the socket-side counters from
+/// Snapshot of the process-global fallback I/O driver (GH#67).
+///
+/// The pump's reactor statistics plus the socket-side counters from
 /// [`fallback_io_probe`]. Tests use it to tell "no datagram reached the
 /// socket" from "the socket was never re-polled after its wake".
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
@@ -1602,9 +1603,11 @@ pub struct FallbackIoDriverProbe {
     pub fallback_self_wakes: u64,
 }
 
-/// Returns a snapshot of the fallback I/O driver's counters, or `None` when
-/// the driver was never started (no driverless socket poll happened yet) or
-/// could not be created. Never starts the driver as a side effect.
+/// Returns a snapshot of the fallback I/O driver's counters.
+///
+/// `None` when the driver was never started (no driverless socket poll
+/// happened yet) or could not be created. Never starts the driver as a side
+/// effect.
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
 #[must_use]
 pub fn fallback_io_driver_probe() -> Option<FallbackIoDriverProbe> {

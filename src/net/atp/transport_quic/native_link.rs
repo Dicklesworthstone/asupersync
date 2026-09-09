@@ -152,6 +152,89 @@ async fn send_and_flush_native_keep_alive(
     Ok(())
 }
 
+/// Keep-alive cadence while the receiver is busy with local work (the
+/// per-member commit of a packed tree, staging writes) and would otherwise
+/// neither pump nor acknowledge. The sender's proof waits are liveness-bounded,
+/// so receiver silence longer than the sender's idle budget reads as a dead
+/// peer even when the commit is merely slow: with the caller-driven executor
+/// parked instead of self-waking (GH#67), a 2000-member commit was measured at
+/// 39 s while the sender's 45 s window, started before the commit, expired
+/// three seconds before the Proof existed (GH#67 follow-up, asupersync-t64ggs).
+const LOCAL_WORK_KEEP_ALIVE_CADENCE: Duration = Duration::from_millis(200);
+
+/// Rate limiter for [`keep_peer_alive_during_local_work`]: at most one
+/// keep-alive per cadence, measured from the previous emission.
+struct LocalWorkKeepAlive {
+    last: Instant,
+}
+
+impl LocalWorkKeepAlive {
+    fn new(now: Instant) -> Self {
+        Self { last: now }
+    }
+
+    /// True (and re-based) when `now` is at least `cadence` past the previous
+    /// emission; false otherwise. Never fires twice within one cadence.
+    fn due(&mut self, now: Instant, cadence: Duration) -> bool {
+        if now.saturating_duration_since(self.last) < cadence {
+            return false;
+        }
+        self.last = now;
+        true
+    }
+}
+
+/// Called from long local work loops on the receiver. When a keep-alive is
+/// due, drain whatever the socket already holds without waiting (so the
+/// sender's outstanding frames get acknowledged and its stall retransmits
+/// stop), then flush: the ACK frames plus a keep-alive PING prove liveness.
+/// Returns whether a keep-alive was emitted.
+async fn keep_peer_alive_during_local_work(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    cadence: &mut LocalWorkKeepAlive,
+) -> Result<bool, QuicTransportError> {
+    if !cadence.due(Instant::now(), LOCAL_WORK_KEEP_ALIVE_CADENCE) {
+        return Ok(false);
+    }
+    let _ = link.pump_inbound_for(cx, Duration::ZERO).await?;
+    send_and_flush_native_keep_alive(cx, link, control).await?;
+    Ok(true)
+}
+
+/// Pings (and drains/acknowledges) at [`LOCAL_WORK_KEEP_ALIVE_CADENCE`]
+/// forever; only ever returns an error. Raced against a long blocking step by
+/// [`keep_peer_alive_while`].
+async fn ping_peer_forever<T>(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+) -> Result<T, QuicTransportError> {
+    let mut cadence = LocalWorkKeepAlive::new(Instant::now());
+    loop {
+        crate::time::sleep(cx.now(), LOCAL_WORK_KEEP_ALIVE_CADENCE).await;
+        keep_peer_alive_during_local_work(cx, link, control, &mut cadence).await?;
+    }
+}
+
+/// Runs `work` (a long blocking step such as a decoded-block write or the
+/// member-file batch of a packed tree, executed on a blocking thread) while
+/// keeping the peer alive: the socket is drained and acknowledged and a
+/// keep-alive PING goes out at the cadence until `work` completes. Without
+/// this the receiver is silent for the whole step; a step stretched by disk
+/// load past the sender's idle budget (20 s of a blocked datagram cwnd, or the
+/// proof wait) made the sender declare a healthy receiver dead (GH#67
+/// follow-up, asupersync-t64ggs).
+async fn keep_peer_alive_while<T>(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    work: impl std::future::Future<Output = Result<T, QuicTransportError>>,
+) -> Result<T, QuicTransportError> {
+    futures_lite::future::or(work, ping_peer_forever(cx, link, control)).await
+}
+
 /// RAII backstop for the native QUIC receiver staging directory.
 ///
 /// Cooperative success and error paths remove the directory asynchronously and
@@ -546,6 +629,22 @@ const ROUND_PROGRESS_IDLE_GRACE: Duration = NEEDMORE_PTO;
 /// gets a larger convergence window.
 const MIN_NEEDMORE_PTO_ATTEMPTS: u32 = 1;
 
+/// Idle-budget accounting for `next_control_frame_with_stream_pto`: a pump
+/// window that delivered any 1-RTT packet (a keep-alive PING during the peer's
+/// long local commit included) proves the peer is alive and restarts the
+/// count, so the budget bounds CONSECUTIVE silent windows exactly like
+/// `next_control_frame`'s idle window and the source-stream recovery clock.
+/// Counting silent windows cumulatively let a receiver that was alive but slow
+/// (its commit crawls under the parked caller-driven executor, GH#67
+/// follow-up) exhaust the sender's budget between keep-alives.
+fn stream_pto_attempts_after_pump(attempts: u32, pumped: usize) -> u32 {
+    if pumped > 0 {
+        0
+    } else {
+        attempts.saturating_add(1)
+    }
+}
+
 fn needmore_pto_attempt_budget(idle_timeout: Duration) -> u32 {
     let pto_millis = NEEDMORE_PTO.as_millis().max(1);
     let idle_millis = idle_timeout.as_millis().max(pto_millis);
@@ -617,11 +716,21 @@ async fn trace_blocking_roundtrip_probe(label: &'static str) {
         return;
     }
     for hop in 0..3u8 {
-        let started = Instant::now();
-        let _ = crate::runtime::spawn_blocking_io(|| Ok::<(), std::io::Error>(())).await;
+        let before = Instant::now();
+        let closure_started =
+            crate::runtime::spawn_blocking_io(|| Ok::<Instant, std::io::Error>(Instant::now()))
+                .await
+                .unwrap_or(before);
+        let resumed = Instant::now();
         quic_rqtrace!(
-            "blocking_roundtrip_probe label={label} hop={hop} elapsed_us={}",
-            started.elapsed().as_micros()
+            "blocking_roundtrip_probe label={label} hop={hop} spawn_us={} wake_us={} total_us={}",
+            closure_started
+                .saturating_duration_since(before)
+                .as_micros(),
+            resumed
+                .saturating_duration_since(closure_started)
+                .as_micros(),
+            resumed.saturating_duration_since(before).as_micros(),
         );
     }
 }
@@ -5594,11 +5703,10 @@ impl QuicLink {
             }
             self.flush(cx).await?;
             let pumped = self.pump_inbound_for(cx, pto).await?;
+            attempts = stream_pto_attempts_after_pump(attempts, pumped);
             if pumped > 0 && last_retransmit.elapsed() < pto {
                 continue;
             }
-
-            attempts = attempts.saturating_add(1);
             quic_rqtrace!(
                 "proof_wait_attempt operation={operation} attempt={attempts} max_attempts={max_attempts} pumped={pumped} {}",
                 self.wait_diagnostics()
@@ -9268,17 +9376,36 @@ async fn commit_staged_entries(
                         metadata: member.metadata.clone(),
                     });
                 }
-                let mut batch = write_quic_packed_member_batch(
-                    &staged_entry.staging_path,
-                    &writes,
-                    options.sparse_files(),
+                let mut batch = keep_peer_alive_while(
+                    cx,
+                    link,
+                    control,
+                    write_quic_packed_member_batch(
+                        &staged_entry.staging_path,
+                        &writes,
+                        options.sparse_files(),
+                    ),
                 )
                 .await?;
                 for (path, report) in &batch.reports {
                     super::trace_quic_metadata_skips(cx, path, report);
                 }
+                let mut member_clock = Instant::now();
+                let mut member_keep_alive = LocalWorkKeepAlive::new(Instant::now());
                 for (member_index, (member, write)) in entry.members.iter().zip(&writes).enumerate()
                 {
+                    keep_peer_alive_during_local_work(cx, link, control, &mut member_keep_alive)
+                        .await?;
+                    if member_index % 250 == 0 {
+                        quic_rqtrace!(
+                            "receiver: commit_member entry={} index={member_index} of={} since_prev_ms={}",
+                            entry.index,
+                            entry.members.len(),
+                            member_clock.elapsed().as_millis()
+                        );
+                        member_clock = Instant::now();
+                        trace_blocking_roundtrip_probe("commit_member").await;
+                    }
                     if let Some(parent) = write.out_path.parent() {
                         crate::fs::create_dir_all(parent).await?;
                     }
@@ -10029,9 +10156,13 @@ async fn write_completed_native_blocks(
                 ))
             })?;
         let write_started = Instant::now(); // ubs:ignore - monotonic staging timing, not crypto randomness
-        staged_entry
-            .write_block(entry, block.sbn, &block.data, config)
-            .await?;
+        keep_peer_alive_while(
+            cx,
+            link,
+            control,
+            staged_entry.write_block(entry, block.sbn, &block.data, config),
+        )
+        .await?;
         intake_stats.record_staging_write(write_started.elapsed(), block.data.len());
         quic_rqtrace!(
             "receiver: write_block entry={} sbn={} bytes={} elapsed_ms={}",
@@ -11097,6 +11228,210 @@ pub async fn bind_server_endpoint(
     listen: SocketAddr,
 ) -> Result<QuicUdpEndpoint, QuicTransportError> {
     bind_endpoint(cx, listen).await
+}
+
+/// GH#67 follow-up (asupersync-t64ggs): a slow-but-alive receiver must not
+/// look dead to the sender, and a receiver busy with local work must keep
+/// proving it is alive. Mechanism tests over real loopback UDP.
+#[cfg(test)]
+mod gh67_liveness_tests {
+    use super::*;
+    use crate::net::quic_native::handshake_driver::tests::{
+        CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert,
+    };
+    use crate::net::quic_native::handshake_driver::{client_config, server_config};
+    use futures_lite::future::{block_on, zip};
+
+    async fn established_loopback_links(cx: &Cx, config: &QuicConfig) -> (QuicLink, QuicLink) {
+        let endpoint = bind_endpoint(cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind endpoint");
+        let address = endpoint.local_addr();
+        let client_tls = QuicClientTls {
+            server_name: ServerName::try_from("localhost").unwrap(),
+            config: client_config(
+                vec![parse_one_cert(CA_CERT_PEM)],
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap(),
+        };
+        let server_tls = QuicServerTls {
+            config: server_config(
+                vec![parse_one_cert(LEAF_CERT_PEM)],
+                leaf_key(),
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap(),
+        };
+        let (client, server) = zip(
+            connect(cx, address, &client_tls, config),
+            accept(cx, endpoint, &server_tls, config),
+        )
+        .await;
+        let client = client.expect("client link");
+        let (mut server, early) = server.expect("server link");
+        server.ingest_packets(cx, early).expect("early packets");
+        (client, server)
+    }
+
+    #[test]
+    fn stream_pto_budget_counts_consecutive_silent_windows() {
+        assert_eq!(stream_pto_attempts_after_pump(0, 0), 1);
+        assert_eq!(stream_pto_attempts_after_pump(5, 0), 6);
+        assert_eq!(
+            stream_pto_attempts_after_pump(5, 1),
+            0,
+            "any 1-RTT packet from the peer restarts the silent-window count"
+        );
+        assert_eq!(stream_pto_attempts_after_pump(u32::MAX, 0), u32::MAX);
+    }
+
+    #[test]
+    fn local_work_keep_alive_fires_once_per_cadence() {
+        let start = Instant::now();
+        let cadence = Duration::from_millis(200);
+        let mut keep_alive = LocalWorkKeepAlive::new(start);
+        assert!(!keep_alive.due(start, cadence));
+        assert!(!keep_alive.due(start + Duration::from_millis(199), cadence));
+        assert!(keep_alive.due(start + Duration::from_millis(200), cadence));
+        assert!(
+            !keep_alive.due(start + Duration::from_millis(399), cadence),
+            "re-based on the emission, not on the poll"
+        );
+        assert!(keep_alive.due(start + Duration::from_millis(400), cadence));
+    }
+
+    /// Sender side: with a 3 s idle budget (two 1.5 s windows) the proof wait
+    /// used to give up after ANY three silent windows in total, even with a
+    /// keep-alive between each pair. The peer here pings every 2.2 s (one
+    /// silent window per gap, three gaps) and then answers at ~8 s; the
+    /// cumulative count died in the third gap (~5.9 s).
+    #[test]
+    fn proof_wait_survives_a_slow_but_pinging_peer_over_real_udp() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_secs(3),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let control_stream = super::super::first_client_bidi_stream();
+            // The client opens its control stream (as the sender's Hello does)
+            // and writes on it so the server can answer on the same stream.
+            let mut client_control = NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
+            assert_eq!(client_control.stream, control_stream);
+            let mut server_control = NativeQuicFrameTransport::for_stream(control_stream);
+            let opener = Frame::empty(FrameType::KeepAlive).unwrap();
+            client_control.send(&cx, &mut client.conn, &opener).unwrap();
+            client.flush(&cx).await.unwrap();
+            let opened_at = Instant::now();
+            loop {
+                server
+                    .pump_inbound_for(&cx, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                if server_control
+                    .try_recv(&cx, &mut server.conn)
+                    .unwrap()
+                    .is_some()
+                {
+                    break;
+                }
+                assert!(
+                    opened_at.elapsed() < Duration::from_secs(10),
+                    "control stream never opened"
+                );
+            }
+
+            let placeholder = [SentControlStreamFrame {
+                stream: control_stream,
+                offset: 0,
+                len: 1,
+            }];
+            let client_wait = async {
+                let started = Instant::now();
+                let frame = client
+                    .next_control_frame_with_stream_pto(
+                        &cx,
+                        &mut client_control,
+                        "gh67 proof wait",
+                        &placeholder,
+                        "gh67_test_pto",
+                    )
+                    .await;
+                (started.elapsed(), frame.map(|frame| frame.frame_type()))
+            };
+            let server_pinger = async {
+                for _ in 0..3 {
+                    crate::time::sleep(cx.now(), Duration::from_millis(2200)).await;
+                    send_and_flush_native_keep_alive(&cx, &mut server, &mut server_control)
+                        .await
+                        .unwrap();
+                }
+                crate::time::sleep(cx.now(), Duration::from_millis(1400)).await;
+                let proof = Frame::empty(FrameType::Proof).unwrap();
+                server_control.send(&cx, &mut server.conn, &proof).unwrap();
+                server.flush(&cx).await.unwrap();
+            };
+            let ((elapsed, frame), ()) = zip(client_wait, server_pinger).await;
+            assert_eq!(
+                frame.expect("proof after three keep-alives"),
+                FrameType::Proof
+            );
+            assert!(
+                elapsed >= Duration::from_millis(7500),
+                "the wait must have outlived the cumulative budget (~5.9 s): {elapsed:?}"
+            );
+            assert!(elapsed < Duration::from_secs(12), "{elapsed:?}");
+        });
+    }
+
+    /// Receiver side: a long blocking step raced with the keep-alive pinger
+    /// keeps the peer fed at the cadence (and drains the socket) until the
+    /// step completes; the step's result is returned unchanged.
+    #[test]
+    fn long_blocking_step_keeps_pinging_the_peer_over_real_udp() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig::default();
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let mut server_control =
+                NativeQuicFrameTransport::for_stream(super::super::first_client_bidi_stream());
+            let work = async {
+                let started = crate::runtime::spawn_blocking_io(|| {
+                    std::thread::sleep(Duration::from_millis(1100));
+                    Ok::<Instant, std::io::Error>(Instant::now())
+                })
+                .await
+                .expect("blocking step");
+                Ok::<Instant, QuicTransportError>(started)
+            };
+            let server_side = async {
+                let began = Instant::now();
+                let finished = keep_peer_alive_while(&cx, &mut server, &mut server_control, work)
+                    .await
+                    .expect("raced step result");
+                (began, finished)
+            };
+            let client_listener = async {
+                let started = Instant::now();
+                let mut packets = 0usize;
+                while started.elapsed() < Duration::from_millis(1700) {
+                    packets += client
+                        .pump_inbound_for(&cx, Duration::from_millis(200))
+                        .await
+                        .unwrap();
+                }
+                packets
+            };
+            let ((began, finished), packets) = zip(server_side, client_listener).await;
+            assert!(finished.saturating_duration_since(began) >= Duration::from_millis(1000));
+            assert!(
+                (4..=8).contains(&packets),
+                "expected roughly one keep-alive per 200 ms over 1.1 s, got {packets}"
+            );
+        });
+    }
 }
 
 #[cfg(test)]
