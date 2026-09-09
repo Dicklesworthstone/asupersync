@@ -47,12 +47,14 @@
     },
     {
       "path": "artifacts/proof_lane_manifest_v1.json",
-      "sha256": "2fca2058fbb12dd6f366829caed9b691626c0574848aed4d6a89b32a832c3314",
+      "sha256": "2cbb4d70e8da51513425674f3df6eec33957cfbcbd1eb2a1c313e2520a1ae648",
+      "reviewed_prior_sha256": "2fca2058fbb12dd6f366829caed9b691626c0574848aed4d6a89b32a832c3314",
       "covers": "RCH lane command policy and cache-hit claim scopes"
     },
     {
       "path": "artifacts/proof_status_snapshot_v1.json",
-      "sha256": "0e4eb56ce078f620e9a754063c2af656ebceeded0c67669da65f66a953e4a5a6",
+      "sha256": "59c142a0a9f11e3ff732d4a7dd6bad3144e0d7833fb4590039bd7dcfd57a040b",
+      "reviewed_prior_sha256": "0e4eb56ce078f620e9a754063c2af656ebceeded0c67669da65f66a953e4a5a6",
       "covers": "fresh pass, approved cache hit, rerun-required, blocked, no-win, and unsupported status rows"
     },
     {
@@ -71,6 +73,13 @@
       "covers": "deterministic proof reuse Markdown query golden"
     }
   ],
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "reviewed_prior_source_commit": "6ab560f2d77a94638cb1ad566cab0ca30388f343",
+    "changes": "The manifest adds the direct-minimal downstream and dependency CI provenance lanes, refines the dependency budget/supply-chain/fuzz descriptions, and the status snapshot adds bounded evidence freshness. Proof reuse policies and status rows retain their original authority.",
+    "claim_scope": "CURRENT_SOURCE_REFERENCE_RECONCILIATION_ONLY",
+    "execution_receipts_rebound": false
+  },
   "required_child_gates": [
     {
       "bead_id": "asupersync-5pziae.1",

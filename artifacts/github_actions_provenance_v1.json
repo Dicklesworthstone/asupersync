@@ -21,10 +21,10 @@
       ".github/workflows/tokio_parity_dashboard_drift.yml"
     ],
     "workflow_file_count": 12,
-    "action_reference_count": 182,
+    "action_reference_count": 191,
     "distinct_action_repository_count": 13,
     "reference_classes": {
-      "remote_actions": 182,
+      "remote_actions": 191,
       "local_actions": 0,
       "reusable_workflows": 0,
       "container_actions": 0,
@@ -56,7 +56,7 @@
       "source_ref": "v4.3.0",
       "sha": "0057852bfaa89a56745cba8c7296529d2fc39830",
       "version_comment": "v4.3.0",
-      "occurrences": 27,
+      "occurrences": 30,
       "source_ref_url": "https://github.com/actions/cache/releases/tag/v4.3.0",
       "provenance_url": "https://github.com/actions/cache/commit/0057852bfaa89a56745cba8c7296529d2fc39830"
     },
@@ -74,7 +74,7 @@
       "source_ref": "v4.4.0",
       "sha": "11d5960a326750d5838078e36cf38b85af677262",
       "version_comment": "v4.4.0",
-      "occurrences": 47,
+      "occurrences": 50,
       "source_ref_url": "https://github.com/actions/checkout/releases/tag/v4.4.0",
       "provenance_url": "https://github.com/actions/checkout/commit/11d5960a326750d5838078e36cf38b85af677262"
     },
@@ -128,7 +128,7 @@
       "source_ref": "v4.6.2",
       "sha": "ea165f8d65b6e75b540449e92b4886f43607fa02",
       "version_comment": "v4.6.2",
-      "occurrences": 51,
+      "occurrences": 52,
       "source_ref_url": "https://github.com/actions/upload-artifact/releases/tag/v4.6.2",
       "provenance_url": "https://github.com/actions/upload-artifact/commit/ea165f8d65b6e75b540449e92b4886f43607fa02"
     },
@@ -155,7 +155,7 @@
       "source_ref": "upstream branch snapshot 2026-07-16",
       "sha": "2c7215f132e9ebf062739d9130488b56d53c060c",
       "version_comment": "upstream branch snapshot 2026-07-16",
-      "occurrences": 39,
+      "occurrences": 41,
       "source_ref_url": "https://github.com/dtolnay/rust-toolchain/tree/2c7215f132e9ebf062739d9130488b56d53c060c",
       "provenance_url": "https://github.com/dtolnay/rust-toolchain/commit/2c7215f132e9ebf062739d9130488b56d53c060c"
     },
@@ -177,6 +177,16 @@
     "behavior_preservation": "Existing major-version lines were retained. Branch-selected Rust and tool installer behavior is explicit in workflow inputs after pinning.",
     "scope": "Reference resolution, readable provenance, occurrence reconciliation, and branch-input preservation. This receipt does not assert upstream trustworthiness."
   },
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "reviewed_prior_commit": "5ba64923cffa193d093d0785b5174774e612a7cb",
+    "prior_action_reference_count": 182,
+    "current_action_reference_count": 191,
+    "added_call_sites": "The lean-build, tla-tlc, and real-servers jobs in ci.yml add three checkout, three cache, two rust-toolchain, and one upload-artifact references. All use previously reviewed SHAs and comments; the 12 workflow files and 13 action repositories are unchanged.",
+    "prior_occurrences": {"actions/cache": 27, "actions/checkout@11d5960a326750d5838078e36cf38b85af677262": 47, "actions/upload-artifact": 51, "dtolnay/rust-toolchain": 39},
+    "claim_scope": "STATIC_REFERENCE_CENSUS_ONLY",
+    "workflows_executed": false
+  },
   "update_contract": {
     "automated_tag_drift": "forbidden",
     "required_review_steps": [
@@ -195,9 +205,9 @@
     "focused_command": "cargo test -p asupersync --test github_actions_provenance_contract -- --nocapture",
     "execution_status": "NOT_EXECUTED_IN_THIS_STATIC_ONLY_SLICE",
     "static_observations": [
-      "All 182 uses references contain a lowercase 40-hex revision.",
-      "All 182 uses references contain a nonempty human-readable trailing comment.",
-      "The 15 inventory rows sum to 182 occurrences across 13 action repositories and 12 workflow files."
+      "All 191 uses references contain a lowercase 40-hex revision.",
+      "All 191 uses references contain a nonempty human-readable trailing comment.",
+      "The 15 inventory rows sum to 191 occurrences across 13 action repositories and 12 workflow files."
     ]
   },
   "no_claim_boundaries": [

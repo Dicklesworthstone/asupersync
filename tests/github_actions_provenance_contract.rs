@@ -175,7 +175,7 @@ fn every_workflow_reference_matches_the_reviewed_inventory() {
     assert_eq!(
         policy["inventory"]["reference_classes"],
         serde_json::json!({
-            "remote_actions": 182,
+            "remote_actions": observed.values().sum::<u64>(),
             "local_actions": 0,
             "reusable_workflows": 0,
             "container_actions": 0,
