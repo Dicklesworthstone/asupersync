@@ -3,10 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-VALIDATOR="$SCRIPT_DIR/../../sw/scripts/validate-skill.py"
+VALIDATOR="${ASUPERSYNC_SKILL_VALIDATOR:-$SCRIPT_DIR/../../sw/scripts/validate-skill.py}"
 
 if [[ ! -f "$VALIDATOR" ]]; then
   echo "error: validator not found: $VALIDATOR" >&2
+  echo "Set ASUPERSYNC_SKILL_VALIDATOR to the installed sw/scripts/validate-skill.py path." >&2
   exit 1
 fi
 
@@ -101,7 +102,7 @@ require_text "v0.4.9 is the functional baseline" \
   "status card must name the published source baseline"
 require_text "3c73a334c" \
   "$SKILL_DIR/references/SOURCE-MAP.md" \
-  "status card must identify the current post-v0.4.9 gRPC delta"
+  "status card must identify the source delta after the GitHub v0.4.9 baseline"
 require_text '`Cx::spawn_local` requires a worker-local lane' \
   "$SKILL_DIR/SKILL.md" \
   "entrypoint must route local tasks through a real owner-worker lane"
@@ -497,9 +498,12 @@ if missing:
     raise SystemExit(1)
 print("live repository path references passed")
 PY
-  require_text 'version = "0.4.9"' \
+  require_text 'version = "0.4.11"' \
     "$ASUPERSYNC_SOURCE_ROOT/Cargo.toml" \
-    "live source does not match the documented v0.4.9 workspace baseline"
+    "live source does not match the documented v0.4.11 release candidate"
+  require_text 'workspace version 0.4.11 is unpublished' \
+    "$SKILL_DIR/references/SOURCE-MAP.md" \
+    "status card must distinguish candidate version from publication"
   require_text 'ProtoMessage, ProtoOneof' \
     "$ASUPERSYNC_SOURCE_ROOT/src/lib.rs" \
     "live source lacks the documented protobuf proc-macro derives"
@@ -509,10 +513,10 @@ PY
   require_text '"entry_points": 19' \
     "$ASUPERSYNC_SOURCE_ROOT/artifacts/api_surface_map_v1.json" \
     "live API map no longer matches the documented entry-point count"
-  require_text '"modules": 120' \
+  require_text '"modules": 121' \
     "$ASUPERSYNC_SOURCE_ROOT/artifacts/api_surface_map_v1.json" \
     "live API map no longer matches the documented module count"
-  require_text '"root_exports": 315' \
+  require_text '"root_exports": 369' \
     "$ASUPERSYNC_SOURCE_ROOT/artifacts/api_surface_map_v1.json" \
     "live API map no longer matches the documented root-export count"
   for browser_package in browser-core browser react next; do

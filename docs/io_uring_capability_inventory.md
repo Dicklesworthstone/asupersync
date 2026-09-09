@@ -45,8 +45,9 @@ surfaces. The important ownership flow is:
 4. `RuntimeBuilder` otherwise installs the selected platform reactor unless a
    caller injects a reactor or driver, or disables the whole platform path.
 5. `IoDriver` consumes only the generic `Reactor` readiness interface.
-6. Default `File` owned-buffer helpers and `OpenOptions` offload blocking work,
-   while the default poll traits issue direct file syscalls on their caller;
+6. Default `File` owned-buffer helpers, poll traits, and `OpenOptions` offload
+   blocking work when a runtime blocking pool exists. Poll traits retain an
+   inline fallback without a pool and bound each read/write syscall to 128 KiB.
    `IoUringFile` remains a separate opt-in type.
 7. TCP listeners, full streams, and owned split halves perform ordinary socket
    I/O after readiness. Borrowed split halves have no reactor registration and
@@ -73,7 +74,7 @@ the runtime inspector and cannot establish operation support.
 | Reactor | live one-shot readiness | no advanced data-plane operations | URING-2 onward |
 | Epoll fallback | live Linux/Android readiness backend with feature-disabled or ring-create receipt | focused executable receipt and target matrix remain | URING-2 |
 | Buffer scaffold | cached fixed-buffer and provided-group selected-receive probes, classic kernel registration, and manual IDs | probe buffers and IDs remain unused by runtime data-plane I/O | URING-3 |
-| Default file API | owned helpers offload; poll traits block directly | separate from opt-in io_uring and unsuitable as an async comparator | URING-7 |
+| Default file API | owned helpers and poll traits offload with a pool; inline fallback without one | separate from opt-in io_uring; comparator must declare pool configuration | URING-7 |
 | File I/O | Linux-only file-local ring driven synchronously in poll | no fixed/selected buffer and unsuitable as an async comparator | URING-3 |
 | Path and directory I/O | Linux-only independent one-operation rings | outside one capability/fallback model | URING-2 |
 | TCP listener | ordinary accept plus readiness; bounded multishot accept probe is separate | no runtime multishot lifecycle | URING-4 |
@@ -85,13 +86,12 @@ the runtime inspector and cannot establish operation support.
 | Inspector | generic `IoStats` plus immutable driver/runtime capability snapshots | focused executable receipt and target matrix remain | URING-2 |
 | Tests | mock pool, live readiness, filesystem lifecycle | no advanced-capability matrix | URING-7 |
 | Benchmark | synthetic completion bookkeeping | no real-socket comparison | URING-7 |
-| Boundary ledger | four relevant rows and 47 locators | 20 filesystem locators are stale; all 26 reactor locators are exact | URING-3 |
+| Boundary ledger | four relevant rows and 47 locators, all exact | future source movement requires locator reconciliation | URING-3 |
 | Historical file | excluded from live module graph | version heuristic is not authority | URING-2 |
 
-The four pinned rows contain 47 locators. All 26 reactor locators and one
-filesystem locator match exactly; 20 filesystem locators retain their pattern
-at a different line. The artifact reconciles every recorded locator to its
-current line. URING-3 owns the remaining filesystem alignment.
+The four pinned rows contain 47 locators. All 26 reactor locators and 21
+filesystem locators match exactly. The artifact reconciles every recorded
+locator to its current line; URING-3 retains ownership of future alignment.
 
 Five material source-accuracy records are explicit. The file module header names
 `OPENAT` and `CLOSE` as ring operations even though constructors call
@@ -109,7 +109,7 @@ promoted into capability or execution evidence.
 
 | Evidence | What it currently covers | What it does not cover |
 |---|---|---|
-| Inline reactor tests | intended readiness and pool bookkeeping plus deterministic fixed/provided/SQPOLL completion classification and force-off gating | runtime data-plane advanced I/O |
+| Inline reactor tests | readiness and pool bookkeeping, all six bounded operation probe sources, deterministic completion classification and force-off gating | runtime data-plane advanced I/O |
 | Buffer-pool conformance test | simulated API shape | kernel registration, live acquisition, leases |
 | Reactor integration and stress | one-shot readiness lifecycle | advanced buffer, multishot, or configured runtime SQPOLL paths |
 | Filesystem E2E | opt-in file lifecycle and attribution | its mislabeled default-helper case, advanced buffers, network paths |
@@ -126,7 +126,7 @@ later one.
 
 | Capability ID | Current state | Required before activation |
 |---|---|---|
-| `URING-CAP-FIXED-BUFFERS` | live registration probe plus scaffold; not used by the data plane | real fixed operation, linear lease, terminal drain |
+| `URING-CAP-FIXED-BUFFERS` | bounded fixed write/read probe plus scaffold; not used by the data plane | runtime fixed I/O, linear lease, terminal data-plane drain |
 | `URING-CAP-PROVIDED-GROUPS` | live bounded selected-receive probe; not used by the data plane | runtime lease and data-plane integration |
 | `URING-CAP-MAPPED-BUFFER-RING` | live bounded mapped-ring probe; not used by the data plane | runtime lease integration, terminal data-plane drain, real comparator |
 | `URING-CAP-MULTISHOT-ACCEPT` | live bounded loopback probe; not used by the data plane | runtime generation tags, bounded descriptor queue and listener lifecycle |
@@ -327,6 +327,16 @@ The dispositions are disjoint. Their precedence is `UNSUPPORTED`, then
   retained and rollback remains explicit.
 
 ## Static validation boundary
+
+The September 9 release review compares all 28 pins with
+`9eb0600e6ef4d17633dff3dc43ad99c64e72adbe`. The reviewed changes add the
+weak reactor wake handle, root-task accounting and retirement, file poll-trait
+offload with settled cursor operations, filesystem regression sources, and
+portable TCP socket-option tests. The io_uring implementation and its six
+probe sources are unchanged. Its four unsafe-ledger rows still have 47 exact
+locators. Current source pins include these changes and corrected inventory
+prose; historical compile and timeout receipts below retain their original
+source identities. This review supplies no new kernel or performance result.
 
 The 2026-08-07 claim-time pin audit found two later source changes. The
 `RuntimeBuilder` diff adds the versioned TOML/JSON configuration layer while

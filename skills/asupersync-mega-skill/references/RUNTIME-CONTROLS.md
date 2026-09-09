@@ -89,13 +89,16 @@ needs v0.4.9 or a source revision containing commit `a4b16b4e0` before using it.
 
 ## Enter The Owning Worker For Local Tasks
 
-`Cx::spawn_local` requires the worker-local lane owned by the same runtime. A
-direct `Runtime::block_on`, an entry-macro body, `run_test`, or
-`run_test_with_cx` does not by itself install that lane; attempting local spawn
-there can return `SpawnError::LocalSchedulerUnavailable` (ASUP-E004). Attaching
-a blocking-pool handle does not change this.
+`Cx::spawn_local` requires the worker-local lane owned by the same runtime.
+On current `main`, `RuntimeBuilder::current_thread()` installs that lane on
+the caller during `Runtime::block_on`; its root `Cx` can spawn `!Send` tasks
+that run on the calling thread. This behavior is source-bound to commits
+`daaa8b609` and `8bacdbac3`; check the release card before assuming it is
+published. A different runtime's context or a harness without an owner lane
+still returns `SpawnError::LocalSchedulerUnavailable` (ASUP-E004). Attaching
+a blocking-pool handle does not install a local lane.
 
-For a `!Send` local-task test or embedder path, enter a real scheduler worker
+For other runtime flavors, enter a real scheduler worker
 through `runtime.block_on(runtime.handle().spawn(async { ... }))`, obtain
 `Cx::current()` inside that worker future, and call `spawn_local` there. Create
 the non-`Send` guard or state inside the local future rather than moving it

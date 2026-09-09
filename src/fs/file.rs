@@ -490,9 +490,9 @@ impl File {
     }
 }
 
-// Phase 0: Poll-based traits use direct blocking I/O against the underlying
-// std::fs::File. Shared handles inherit the platform's shared-cursor semantics
-// and use the same gate as the owned cursor operations.
+// Poll-based traits offload bounded syscalls when a blocking pool is present,
+// retaining the inline fallback otherwise. Shared handles use the same cursor
+// gate as the owned operations, including while a started syscall settles.
 
 impl File {
     /// Submits one bounded blocking syscall to the runtime blocking pool on

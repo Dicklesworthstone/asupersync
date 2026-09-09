@@ -94,12 +94,13 @@ requirements call for them.
   and completes with `()` while timeout/deadline combinators retain outcome
   classification. Native worker tests, not Lab-only models, prove this boundary.
 - `Cx::spawn_local` requires a worker-local lane owned by the same runtime. A
-  direct `Runtime::block_on`, entry-macro body, `run_test`, or
-  `run_test_with_cx` does not by itself install that lane and may return
-  `LocalSchedulerUnavailable` (ASUP-E004). Enter a real worker with
-  `runtime.block_on(runtime.handle().spawn(async { ... }))`, obtain
-  `Cx::current()` there, then spawn the `!Send` future and prove it reached the
-  parked state before aborting it.
+  current-thread runtime installs that lane on the caller during `block_on`,
+  so its root `Cx` accepts `!Send` local tasks. A context from another runtime
+  or a harness without a local lane still returns `LocalSchedulerUnavailable`
+  (ASUP-E004). For other runtime flavors, enter an owner worker with
+  `runtime.block_on(runtime.handle().spawn(async { ... }))` and obtain
+  `Cx::current()` there. Cancellation evidence must prove the local task
+  reached the parked state before aborting it.
 - Use deterministic tests as part of normal development, not as optional polish.
 - Treat `Cx::for_testing()` and `Cx::for_request()` as test/internal harness
   paths, not production architecture.
@@ -128,6 +129,17 @@ The planner's `summary.final_verdict`, `proof_pack.proof_commands`,
 `semantic_map.recommendations`, and `operator_report.phase_plan` are inputs to
 the decision. `scripts/audit-target.sh` is only bounded inventory; its optional
 Cargo graph probe is explicit and can touch Cargo state.
+
+From the repository root, use `scripts/migration_readiness_planner.py`:
+
+```bash
+python3 scripts/migration_readiness_planner.py --dry-run --scenario tokio-http-service
+python3 scripts/migration_readiness_planner.py --project-root /path/to/rust/project --output-root target/migration-readiness
+python3 scripts/migration_readiness_planner.py --execute --output-root target/migration-planner-fixtures
+```
+
+`--execute` runs the planner's fixture scenarios; it does not execute the
+generated proof commands or establish downstream runtime correctness.
 
 For more-than-parity design:
 [LEVERAGE-PLAYBOOK](references/LEVERAGE-PLAYBOOK.md),
@@ -203,3 +215,5 @@ ASUPERSYNC_SOURCE_ROOT=/path/to/asupersync ./scripts/validate.sh
 
 The second form also validates referenced repository paths and release-sensitive
 source anchors. It does not compile Asupersync or replace RCH proof.
+If the `sw` skill is installed elsewhere, set `ASUPERSYNC_SKILL_VALIDATOR` to
+its `sw/scripts/validate-skill.py` path for either command.

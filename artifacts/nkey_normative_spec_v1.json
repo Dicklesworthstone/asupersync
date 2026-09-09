@@ -6,6 +6,15 @@
   "capability_id": "CAP-NKEY-AUTH",
   "baseline_revision": "d14477867f3b8d3472443b87ba0851a440af61a6",
   "captured_date_utc": "2026-07-25",
+  "source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "reviewed_source_revision": "594e4b37a",
+    "prior_inventory_revision": "b76d2db92a4cfb8f4892d0d4d294be36bc44d9c1",
+    "prior_nats_source_revision": "ac996c8e37fe053fb73c34f219f3a84191caa5c1",
+    "release_bead": "asupersync-ghxhvm",
+    "scope": "Six source pins changed. Sixteen prior pins match the prior inventory revision; its older NATS pin matches ac996c8. NatsConfig and the intervening credential, nonce and JWT authentication definitions remain byte-identical. The protocol engine moved into NatsConnection with a region-owned supervisor, direct compatibility mode, fail-closed parser teardown, committed-reply cleanup and bare-503 wording. Connection authentication completes before supervisor publication. The CAP-NKEY-AUTH registry row and resolved nkeys version/features are unchanged.",
+    "no_claim_boundary": "This source review does not rebind historical evidence, close signer-chain or secret-disposition gaps, prove live NATS interoperability, or authorize production key replacement."
+  },
   "authority": {
     "decision": "FULL_NOMINAL_FORMAT_WITH_FAIL_CLOSED_ROLE_POLICY",
     "registry_disposition": "KEEP_UNTIL_PARITY",
@@ -40,23 +49,23 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
-      "line_count": 1074
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
     },
     {
       "path": "Cargo.lock",
-      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
       "line_count": 4664
     },
     {
       "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
-      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
-      "line_count": 332
+      "sha256": "10388000250a021e2bdd21ad7e46edcea192dacacac87ad1234abedec92b4ac3",
+      "line_count": 368
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
-      "line_count": 6927
+      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
+      "line_count": 7058
     },
     {
       "path": "artifacts/dependency_api_adr_registry_v1.json",
@@ -65,8 +74,8 @@
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
-      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
-      "line_count": 4824
+      "sha256": "3b63065b42c489cb38b872b35c6902a109848fd9d95120e21205a9fb88d708a4",
+      "line_count": 5446
     },
     {
       "path": "docs/adr/dep_plan_adr_007_nkey_auth.md",
@@ -75,8 +84,8 @@
     },
     {
       "path": "src/messaging/nats.rs",
-      "sha256": "3cd0a5ca3c96c64c626066bd6813c089f7bfe663f81a80cf0339bddf534552dc",
-      "line_count": 5539
+      "sha256": "00c34d14c5d7db72875828a681e31f594683c0bceaaa6109e7cd0f52799b2f27",
+      "line_count": 6458
     },
     {
       "path": "src/security/keys/mod.rs",

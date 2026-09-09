@@ -14,7 +14,7 @@
 
 A spec-first, cancel-correct, capability-secure async runtime for Rust with
 1,700+ tracked files under `src/`, including 1,400+ Rust files; the generated
-API map currently lists 19 entry points, 120 modules, and 315 root exports.
+API map currently lists 19 entry points, 121 modules, and 369 root exports.
 That artifact is a lexical root-export inventory: it has no per-item support
 class, includes cfg-gated test/legacy modules, and proves neither default
 production availability nor runtime behavior. Refresh live counts from
@@ -41,13 +41,17 @@ guarantees:
 
 ## Release and Live-HEAD Status
 
-Last reconciled: 2026-08-21.
+Last reconciled: 2026-09-09. Publication status was checked separately on
+GitHub and crates.io; a workspace version is not proof of publication.
 
 | Boundary | Current status | Authority |
 |---|---|---|
-| Published Rust release | v0.4.9 is the functional baseline | annotated tag, release registry, `Cargo.toml` |
+| GitHub release assets | v0.4.9 is the functional baseline for the latest published GitHub release | annotated tag and GitHub release registry |
+| Published Rust crate | crates.io lists `asupersync` 0.4.10 | crates.io package registry |
+| Working release candidate | workspace version 0.4.11 is unpublished; browser JavaScript packages remain at 0.4.9 pending reconciliation | live `Cargo.toml`, package manifests, and release tracker `asupersync-ghxhvm` |
 | 0.4.x compatibility floor | v0.4.3 public API and documented behavior remain mandatory | live `AGENTS.md` compatibility policy |
-| Unreleased `main` delta | Registered unary `ServiceHandler` implementations can route over native H2 through additive `ServiceHandlerFuture`, `call_unary`, `dispatch_registered_unary`, `dispatch_registered_unary_with_trailers`, `bind_registered_http2`, and `serve_http2`; legacy-shaped impl blocks need no new required trait item, while metadata-only dispatch and `Server::serve` retain their established fail-closed/probe roles | commit `3c73a334c`; `src/grpc/{service,server}.rs`; focused real-H2 and audit tests |
+| Source after the GitHub baseline | Registered unary `ServiceHandler` implementations can route over native H2 through additive `ServiceHandlerFuture`, `call_unary`, `dispatch_registered_unary`, `dispatch_registered_unary_with_trailers`, `bind_registered_http2`, and `serve_http2`; legacy-shaped impl blocks need no new required trait item, while metadata-only dispatch and `Server::serve` retain their established fail-closed/probe roles. This row does not classify the delta against the later crates.io package. | commit `3c73a334c`; `src/grpc/{service,server}.rs`; focused real-H2 and audit tests |
+| Current-thread root correction on `main` | `block_on` runs its root as a caller-thread task with an owned local lane. The root counts toward task admission and keeps `is_quiescent()` false until it retires. | commits `daaa8b609` and `8bacdbac3`; `tests/runtime_current_thread_root_task.rs`; release bead `asupersync-94jh37` |
 | Open correctness boundaries | Callback/waker execution under runtime-state locks (`asupersync-909482`) and ATP receive-watchdog acceptance (`asupersync-2qas9c`) remain unshipped until live tracker/source evidence says otherwise | live Beads plus focused source/proof |
 
 This card is the canonical summary for current release, post-release, and
@@ -92,7 +96,7 @@ Severity lattice: `Ok < Err < Cancelled < Panicked`. Monotone aggregation.
 
 | Workspace member / package | Purpose |
 |-------|---------|
-| `asupersync` | Main runtime (1,700+ tracked files under `src/`, 120 API-map modules) |
+| `asupersync` | Main runtime (1,700+ tracked files under `src/`, 121 API-map modules) |
 | `asupersync-macros` | Proc macros: `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, `select!`; entry attributes `#[main]`, `#[test]`, `#[lab_test]`; protobuf derives `ProtoMessage` / `ProtoOneof`; explicit-path-only `proc_macros::session_protocol!` |
 | `asupersync-browser-core` | Canonical browser-runtime core for JS/TS packages |
 | `asupersync-tokio-compat` | Quarantined interop bridge for stubborn Tokio-only dependencies |

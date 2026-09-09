@@ -235,7 +235,7 @@
       "fixture_graph": {
         "graph_source": "cargo_tree_fixture",
         "observed_package_count": 214,
-        "command_excerpt": "cargo check --manifest-path fuzz/Cargo.toml",
+        "command_excerpt": "cargo check -j 2 --locked --manifest-path fuzz/Cargo.toml",
         "expected_signal": "cargo check exits 0 or records the first fuzz target compile blocker",
         "tree_excerpt": [
           "asupersync-fuzz v0.0.0 (/repo/fuzz)",

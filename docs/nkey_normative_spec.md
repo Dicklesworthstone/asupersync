@@ -7,6 +7,14 @@ This is the operator-readable companion to
 `asupersync-dep-p4-nkeys-poc60v.1.1` at revision
 `d14477867f3b8d3472443b87ba0851a440af61a6`.
 
+The September 9 release review updates six source pins after checking their
+deltas. The older NATS source pin matches `ac996c8e37fe`; its `NatsConfig`,
+credential, nonce and JWT authentication definitions are unchanged. The
+protocol engine now belongs to a connection supervisor when runtime spawn is
+available, with a direct compatibility mode otherwise. Authentication completes
+before that supervisor is published. This review adds no signer-chain,
+secret-disposition or live-service proof and preserves the fourteen routed gaps.
+
 The specification has zero unknown or ambiguous rows. N2-N6 may implement the
 frozen rows, but production integration, cutover and dependency removal remain
 forbidden. A newly discovered unknown or ambiguity blocks its affected child

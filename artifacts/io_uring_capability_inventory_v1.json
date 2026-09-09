@@ -4,6 +4,15 @@
   "bead_id": "asupersync-sched-hot-path-perf-bt4y5f.7.1",
   "captured_date_utc": "2026-08-05",
   "base_commit": "1efe207a647d8d790dbc553d7c275c1ba620dba6",
+  "inventory_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "reviewed_source_revision": "81cd5d5ab31f0188703df78b14518586a899d86d",
+    "prior_pin_revision": "9eb0600e6ef4d17633dff3dc43ad99c64e72adbe",
+    "release_bead": "asupersync-ghxhvm",
+    "scope": "All 28 prior pins matched the prior revision. Review covers release manifest changes, the weak reactor wake handle, root-task accounting and retirement, bounded file poll-trait offload and cursor settlement, added filesystem test sources, portable TCP option tests, and unsafe-ledger relocation documentation. The reactor implementation, six probe sources and four relevant ledger rows are unchanged.",
+    "corrections": "Default File poll traits offload only when a runtime blocking pool exists and retain an inline fallback otherwise. Existing typed fallback reasons, all six probe sources and all 47 exact locators supersede stale prose within this inventory.",
+    "no_claim_boundary": "Current source pins do not rebind historical compile or timeout receipts, establish new kernel or platform outcomes, prove performance, authorize advanced data-plane adoption, or close a tracker task."
+  },
   "disposition": "STATIC_INVENTORY_CURRENT_URING2_CONTROL_PLANE_IN_PROGRESS",
   "validation_state": {
     "source_hashes_checked": true,
@@ -97,8 +106,8 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121,
       "role": "io-uring feature and optional dependency edge"
     },
     {
@@ -127,20 +136,20 @@
     },
     {
       "path": "src/runtime/io_driver.rs",
-      "sha256": "4d661727d302e20cf106acaf6f7df36d6b3ef1b534ea76bca06ff7dcf007acbe",
-      "line_count": 2982,
+      "sha256": "3a834d44261b7a9a104dcd635dc375fd21f447500a828addac765168a8eea6ad",
+      "line_count": 2988,
       "role": "generic reactor consumer and immutable capability inspector surface"
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "43e4f8b0d8a68c4978c447d2b0f52bc11ca198482f7a61c59d4495c9842b62b4",
-      "line_count": 9597,
+      "sha256": "0e1c94cab515b252bc6e659666166c47fd76b450bed99e65d962082184f916ba",
+      "line_count": 11302,
       "role": "platform-reactor policy, dependency injection, terminal fallback receipt and public runtime inspectors"
     },
     {
       "path": "src/runtime/state.rs",
-      "sha256": "97029bd90cae9a35396bc2c157a955ba30ba456fcbedaf947facdf783449f14e",
-      "line_count": 10190,
+      "sha256": "7d6311d55dfe7471a5e2ccc91da5f0699e3d9926b9c244e6fb82ba2c479ec10d",
+      "line_count": 11286,
       "role": "driver-independent immutable reactor capability receipt storage"
     },
     {
@@ -151,9 +160,9 @@
     },
     {
       "path": "src/fs/file.rs",
-      "sha256": "c293dee58bfcbdd7c5214c8fe7ae8c2706fa1f5a9d5a1322baaea42849973062",
-      "line_count": 821,
-      "role": "default file API with offloaded owned helpers and directly blocking poll traits"
+      "sha256": "ebbb2e64a6d0f63b801307c27beb74737ff2d23aa657b984e47332b38796a5f4",
+      "line_count": 1179,
+      "role": "default file API with owned and poll-trait blocking-pool offload, inline fallback without a pool, and settled cursor operations"
     },
     {
       "path": "src/fs/open_options.rs",
@@ -187,8 +196,8 @@
     },
     {
       "path": "src/net/tcp/stream.rs",
-      "sha256": "6c4fb29d9224963d3aedd13cd6e3d25c4daea2814eff349b368bc5ce7b9b21d4",
-      "line_count": 2909,
+      "sha256": "6eb2b1bb7f109e424bc42eedd2467a53435c14a0155e76ba3c9e0820869edad0",
+      "line_count": 2915,
       "role": "full TCP stream ordinary socket I/O plus generic readiness"
     },
     {
@@ -235,8 +244,8 @@
     },
     {
       "path": "tests/e2e_fs.rs",
-      "sha256": "1e1d1ab8bd5f34d921297d3d0c50cc0bbeac194ab246f51672fa5e056a190b85",
-      "line_count": 2078,
+      "sha256": "5993cfb0fc1348e018d308dacc46db9eaf8b525ba4c45e32cddfa81036c4b53a",
+      "line_count": 2760,
       "role": "feature-gated filesystem operation and lifecycle evidence"
     },
     {
@@ -247,20 +256,20 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "fc42eaabb33e6014bb8b886d98f0f2087973823531e81ac49d552b3296bc5aae",
+      "sha256": "548644695eac7f83e9c6545e3f447780cdfbc9bc0986e3d3fde7611230707f77",
       "line_count": 6441,
       "role": "machine inventory of low-level reactor and harness boundaries"
     },
     {
       "path": "docs/io_uring_capability_inventory.md",
-      "sha256": "76ae10a2c3835ff44fd15e8e3c1dc862c7ce65636fda51f9d1adf501654dbdff",
-      "line_count": 387,
+      "sha256": "d3407a83eca166ab01faae5cff7882b7ee87c17093e280f988021731554d24c6",
+      "line_count": 397,
       "role": "human interpretation, ownership, and no-claim boundary"
     },
     {
       "path": "docs/unsafe_boundary_ledger.md",
-      "sha256": "d555e1c0c63c72fe47b35db3f52744ce7cf83187a9816fdc9068f2b775de1df7",
-      "line_count": 204,
+      "sha256": "49c614b57035ffbe7f2085f012553ed92a7442f63cd34b4afb762eaa26c1ed1e",
+      "line_count": 224,
       "role": "category-level review and no-claim policy"
     }
   ],
@@ -279,8 +288,8 @@
       "category": "backend_factory",
       "paths": ["src/runtime/reactor/mod.rs"],
       "anchors": ["pub fn create_reactor() -> io::Result<Arc<dyn Reactor>>", "if let Ok(reactor) = IoUringReactor::new()"],
-      "current_state": "TRY_IO_URING_THEN_SILENT_EPOLL_FALLBACK",
-      "gap": "the discarded construction error cannot be inspected or classified",
+      "current_state": "TRY_IO_URING_THEN_EPOLL_WITH_TYPED_FALLBACK_SNAPSHOT",
+      "gap": "the snapshot retains a bounded ring-create reason, while the raw construction error is discarded",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
     },
     {
@@ -298,7 +307,7 @@
       "paths": ["src/runtime/reactor/mod.rs", "src/runtime/reactor/epoll.rs"],
       "anchors": ["Arc::new(EpollReactor::new()?)", "pub struct EpollReactor", "impl Reactor for EpollReactor"],
       "current_state": "LIVE_LINUX_OR_ANDROID_READINESS_FALLBACK",
-      "gap": "the io_uring construction error is discarded before epoll selection, so the fallback reason is not inspectable",
+      "gap": "the bounded fallback reason is inspectable; focused executable and target-matrix receipts remain separate requirements",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
     },
     {
@@ -323,9 +332,9 @@
       "surface_id": "URING-SURFACE-FS-DEFAULT",
       "category": "filesystem_consumer",
       "paths": ["src/fs/file.rs", "src/fs/open_options.rs"],
-      "anchors": ["pub struct File", "pub struct OpenOptions", "spawn_blocking_io", "Phase 0: Poll-based traits use direct blocking I/O"],
-      "current_state": "OWNED_ASYNC_HELPERS_OFFLOAD_WHILE_POLL_TRAITS_BLOCK_DIRECTLY",
-      "gap": "IoUringFile is a separate opt-in type; the default poll traits still issue direct file syscalls on the caller",
+      "anchors": ["pub struct File", "pub struct OpenOptions", "spawn_blocking_io", "const POLL_IO_CHUNK_BYTES: usize = 128 * 1024", "fn submit_blocking", "spawn_blocking_on_pool", "None => Box::pin(std::future::ready(run()))", "fn settle_foreign_pending"],
+      "current_state": "OWNED_AND_POLL_TRAIT_POOL_OFFLOAD_WITH_INLINE_NO_POOL_FALLBACK",
+      "gap": "IoUringFile remains a separate opt-in type; comparators must declare blocking-pool configuration because the no-pool fallback still blocks the caller",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.7"
     },
     {
@@ -379,7 +388,7 @@
       "paths": ["src/runtime/builder.rs"],
       "anchors": ["pub fn enable_platform_reactor", "pub fn with_reactor", "pub fn io_uring_capability_policy", "runtime_builder_platform_reactor_unavailable"],
       "current_state": "TYPED_CAPABILITY_POLICY_WITH_PLATFORM_ENABLE_OR_INJECT",
-      "gap": "three requested capabilities still lack authoritative live operation probes",
+      "gap": "all six requested operation probe sources exist; focused executable and feature/target receipts remain pending in this checkpoint",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
     },
     {
@@ -397,7 +406,7 @@
       "paths": ["src/runtime/io_driver.rs", "src/runtime/state.rs", "src/runtime/builder.rs"],
       "anchors": ["pub struct IoStats", "pub fn stats(&self) -> IoStats", "pub const fn capability_snapshot", "pub fn io_reactor_capability_snapshot"],
       "current_state": "GENERIC_OPERATION_COUNTERS_PLUS_IMMUTABLE_DRIVER_AND_RUNTIME_CAPABILITY_SNAPSHOTS",
-      "gap": "three requested capabilities still lack authoritative live operation probes",
+      "gap": "all six requested operation probe sources exist; focused executable and feature/target receipts remain pending in this checkpoint",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
     },
     {
@@ -773,7 +782,7 @@
     "global_disable_precedes_probe": true,
     "per_capability_mask_precedes_probe": true,
     "deterministic_fixture": "inject requested capability states and probe outcomes without consulting the host",
-    "implementation_state": "typed policy and deterministic resolution are implemented; fixed buffers, provided groups and requested-only SQPOLL have bounded operation probes and the other three authoritative live operation probes remain pending",
+    "implementation_state": "typed policy and deterministic resolution are implemented with all six bounded operation probe sources; focused executable and feature/target receipts remain pending in this checkpoint",
     "forced_off_result": {
       "requested": true,
       "supported": "NOT_PROBED",
