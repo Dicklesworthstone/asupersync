@@ -6,6 +6,7 @@
 use crate::runtime::stored_task::LocalStoredTask;
 use crate::types::TaskId;
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
 /// Arena-indexed local task storage, replacing `HashMap<TaskId, LocalStoredTask>`
@@ -72,22 +73,74 @@ impl LocalTaskStore {
 static NEXT_LOCAL_STORE_KEY: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(1);
 
-/// Keys of retired runtimes, published so that every thread drops the stores
-/// it still holds for them on its next local-store operation. Bounded: once
-/// it holds more than [`RETIRED_LOCAL_STORE_KEYS_CAP`] keys the oldest half
-/// is forgotten (a store keyed by a forgotten key can only leak, never alias,
-/// because keys are unique).
-static RETIRED_LOCAL_STORE_KEYS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+/// Inclusive intervals of retired keys. Adjacent retirements coalesce, while
+/// gaps preserve keys belonging to live runtimes. Retirement is never forgotten:
+/// a thread can remain idle across arbitrarily many later runtime lifetimes.
+#[derive(Clone)]
+struct RetiredLocalStoreKeys(BTreeMap<usize, usize>);
+
+impl RetiredLocalStoreKeys {
+    const fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    fn contains(&self, key: usize) -> bool {
+        self.0
+            .range(..=key)
+            .next_back()
+            .is_some_and(|(_, end)| *end >= key)
+    }
+
+    /// Returns whether this is the first retirement of `key`.
+    fn insert(&mut self, key: usize) -> bool {
+        let mut start = key;
+        let mut end = key;
+        if let Some((&previous_start, &previous_end)) = self.0.range(..=key).next_back() {
+            if previous_end >= key {
+                return false;
+            }
+            if previous_end.checked_add(1) == Some(key) {
+                start = previous_start;
+                self.0.remove(&previous_start);
+            }
+        }
+        if let Some(next_key) = key.checked_add(1)
+            && let Some(next_end) = self.0.remove(&next_key)
+        {
+            end = next_end;
+        }
+        self.0.insert(start, end);
+        true
+    }
+}
+
+/// Retirements published to all threads, compressed by contiguous key range.
+static RETIRED_LOCAL_STORE_KEYS: std::sync::Mutex<RetiredLocalStoreKeys> =
+    std::sync::Mutex::new(RetiredLocalStoreKeys::new());
 /// Bumped on every retirement; threads compare it against their last-seen
 /// value so the purge check on the store hot path is one atomic load.
 static RETIRED_LOCAL_STORE_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
-const RETIRED_LOCAL_STORE_KEYS_CAP: usize = 4_096;
 
 /// Allocates a fresh, process-unique local-store key for a runtime.
 #[must_use]
 pub(crate) fn allocate_local_store_key() -> usize {
-    NEXT_LOCAL_STORE_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    allocate_local_store_key_from(&NEXT_LOCAL_STORE_KEY)
+}
+
+fn allocate_local_store_key_from(next: &std::sync::atomic::AtomicUsize) -> usize {
+    use std::sync::atomic::Ordering;
+
+    let mut key = next.load(Ordering::Relaxed);
+    loop {
+        let successor = key
+            .checked_add(1)
+            .expect("process-wide local-store key space exhausted");
+        match next.compare_exchange_weak(key, successor, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return key,
+            Err(observed) => key = observed,
+        }
+    }
 }
 
 /// Marks `key` retired process-wide: every thread drops the store it holds
@@ -100,14 +153,9 @@ pub(crate) fn publish_retired_local_store_key(key: usize) {
     let mut retired = RETIRED_LOCAL_STORE_KEYS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if retired.contains(&key) {
+    if !retired.insert(key) {
         return;
     }
-    if retired.len() >= RETIRED_LOCAL_STORE_KEYS_CAP {
-        let keep_from = retired.len() / 2;
-        retired.drain(..keep_from);
-    }
-    retired.push(key);
     drop(retired);
     RETIRED_LOCAL_STORE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
@@ -130,7 +178,7 @@ fn purge_retired_local_stores() {
         let mut dropped = Vec::new();
         let mut index = 0;
         while index < stores.len() {
-            if retired.contains(&stores[index].0) {
+            if retired.contains(stores[index].0) {
                 dropped.push(stores.swap_remove(index));
             } else {
                 index += 1;
@@ -285,6 +333,62 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    #[test]
+    fn retirement_intervals_preserve_live_gaps_and_merge_out_of_order() {
+        let mut retired = RetiredLocalStoreKeys::new();
+        for key in [8, 4, 6, 2, 7, 3] {
+            assert!(retired.insert(key));
+        }
+        assert_eq!(retired.0, BTreeMap::from([(2, 4), (6, 8)]));
+        for key in [0, 1, 5, 9, usize::MAX] {
+            assert!(!retired.contains(key), "live key {key} must survive");
+        }
+        for key in [2, 3, 4, 6, 7, 8] {
+            assert!(retired.contains(key));
+            assert!(!retired.insert(key), "duplicate retirement {key}");
+        }
+        assert!(retired.insert(5));
+        assert_eq!(retired.0, BTreeMap::from([(2, 8)]));
+        assert!(retired.insert(usize::MAX));
+        assert!(retired.insert(usize::MAX - 1));
+        assert!(!retired.insert(usize::MAX));
+        assert!(retired.contains(usize::MAX));
+        assert!(!retired.contains(usize::MAX - 2));
+        assert_eq!(
+            retired.0,
+            BTreeMap::from([(2, 8), (usize::MAX - 1, usize::MAX)])
+        );
+    }
+
+    #[test]
+    fn retirement_history_survives_more_than_the_old_key_cap() {
+        let mut retired = RetiredLocalStoreKeys::new();
+        assert!(retired.insert(2));
+        for key in 4..=10_000 {
+            assert!(retired.insert(key));
+        }
+        assert!(retired.contains(2), "the oldest retirement must survive");
+        assert!(!retired.contains(1), "an older live runtime must survive");
+        assert!(
+            !retired.contains(3),
+            "a live runtime between ranges survives"
+        );
+        assert_eq!(retired.0, BTreeMap::from([(2, 2), (4, 10_000)]));
+    }
+
+    #[test]
+    fn local_store_key_exhaustion_never_wraps_or_reuses_a_key() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let next = AtomicUsize::new(usize::MAX - 1);
+        assert_eq!(allocate_local_store_key_from(&next), usize::MAX - 1);
+        for _ in 0..2 {
+            let exhausted = std::panic::catch_unwind(|| allocate_local_store_key_from(&next));
+            assert!(exhausted.is_err(), "exhaustion must fail closed each time");
+            assert_eq!(next.load(Ordering::Relaxed), usize::MAX);
+        }
     }
 
     /// asupersync-1fyc8f: keys are process-unique and never reused.

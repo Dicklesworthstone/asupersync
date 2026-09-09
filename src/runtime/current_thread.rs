@@ -37,8 +37,8 @@
 //!   of its record, independent of queue order) and then drains runnable
 //!   work with a bounded policy: dispatch turns continue until nothing is
 //!   runnable (no dispatchable task, ready finalizer, queued command, or
-//!   already-arrived reactor readiness) or [`POST_ROOT_DRAIN_TURNS`] turns
-//!   were spent, never waiting on timers or I/O. A cancellation-blind
+//!   already-arrived reactor readiness) or [`POST_ROOT_DRAIN_TURNS`] stop-predicate
+//!   checks were spent, never waiting on timers or I/O. A cancellation-blind
 //!   self-waking task therefore cannot keep `block_on` from returning; work
 //!   still runnable or parked afterwards continues on the background thread
 //!   once it resumes the worker.
@@ -124,8 +124,9 @@ const SHUTDOWN_ROOT_PARK_SLICE: Duration = Duration::from_millis(1);
 /// dispatch turns (matches the background observation loop it replaces).
 const DRAIN_IDLE_SLICE: Duration = Duration::from_millis(1);
 
-/// Dispatch-turn budget of the post-root drain: `block_on` returns once
-/// nothing is runnable or this many turns were spent, whichever is first.
+/// Stop-predicate check budget of the post-root drain: `block_on` returns once
+/// nothing is runnable or this many checks were spent, whichever is first.
+/// The worker can check more than once per dispatch turn.
 pub const POST_ROOT_DRAIN_TURNS: u32 = 64;
 
 /// How often (in dispatch turns) the caller-driven root-region drain
@@ -696,7 +697,7 @@ fn drive_root_on<F: Future>(
 
     // Phase 3: retire the stub with one direct poll of its record (so the
     // root leaves task accounting regardless of queue order), then drain
-    // runnable work: until idle or the turn budget is spent, never waiting
+    // runnable work: until idle or the predicate-check budget is spent, never waiting
     // on timers or I/O. A shutdown cuts this short like any other task.
     if let Ok(stub) = stub.as_ref() {
         stub.finish_now(loaned(slot));

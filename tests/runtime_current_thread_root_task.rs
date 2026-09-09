@@ -21,8 +21,100 @@ use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::observability::TaskInspectorConfig;
-use asupersync::runtime::{Runtime, RuntimeBuilder, yield_now};
+use asupersync::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder, yield_now};
 use asupersync::sync::{LockError, Mutex, OwnedMutexGuard};
+
+/// A paused caller must observe retirement even after thousands of other
+/// runtimes have come and gone. An older live runtime remains a control for
+/// implementations that incorrectly retire every key below a high-water mark.
+#[test]
+#[cfg(feature = "test-internals")]
+fn current_thread_delayed_retirement_preserves_only_the_live_runtime() {
+    use asupersync::runtime::local::{keyed_local_store_count, local_task_count};
+
+    struct DroppedOnCaller(Arc<AtomicUsize>, thread::ThreadId);
+    impl Drop for DroppedOnCaller {
+        fn drop(&mut self) {
+            assert_eq!(thread::current().id(), self.1);
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn park_local(runtime: &Runtime, dropped: Arc<AtomicUsize>) {
+        let signal = Rc::new(DroppedOnCaller(dropped, thread::current().id()));
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("root Cx");
+            let _task = cx
+                .spawn_local(move |_| async move {
+                    let _signal = signal;
+                    std::future::pending::<()>().await;
+                })
+                .expect("park a thread-affine task");
+            yield_now().await;
+        });
+    }
+
+    let old_drops = Arc::new(AtomicUsize::new(0));
+    let live_drops = Arc::new(AtomicUsize::new(0));
+    let old_probe = Arc::clone(&old_drops);
+    let live_probe = Arc::clone(&live_drops);
+    let (runtime_tx, runtime_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let (counts_tx, counts_rx) = mpsc::channel();
+    let helper = thread::spawn(move || {
+        let live = RuntimeBuilder::current_thread()
+            .build()
+            .expect("live runtime");
+        park_local(&live, live_probe.clone());
+        let old = RuntimeBuilder::current_thread()
+            .build()
+            .expect("old runtime");
+        park_local(&old, old_probe.clone());
+        let before = keyed_local_store_count();
+        runtime_tx
+            .send(old)
+            .expect("transfer runtime for retirement");
+        resume_rx.recv().expect("wait for later retirements");
+        let _ = local_task_count();
+        counts_tx
+            .send((
+                before,
+                keyed_local_store_count(),
+                old_probe.load(Ordering::SeqCst),
+                live_probe.load(Ordering::SeqCst),
+            ))
+            .expect("report counts before thread exit");
+        let value = live.block_on(async {
+            let cx = Cx::current().expect("surviving root Cx");
+            let value = Rc::new(7);
+            let mut task = cx.spawn_local(move |_| async move { *value }).unwrap();
+            task.join(&cx).await.unwrap()
+        });
+        drop(live);
+        value
+    });
+
+    let old = runtime_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("receive old runtime");
+    drop(old);
+    for _ in 0..4_100 {
+        drop(
+            RuntimeBuilder::current_thread()
+                .build()
+                .expect("runtime churn"),
+        );
+    }
+    resume_tx.send(()).expect("resume original caller");
+    let observed = counts_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("caller observes retirement");
+    let value = helper.join().expect("caller completes");
+    assert_eq!(observed, (2, 1, 1, 0), "only the retired store is purged");
+    assert_eq!(value, 7, "the older live runtime remains usable");
+    assert_eq!(old_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(live_drops.load(Ordering::SeqCst), 1);
+}
 
 /// Repro A: a task spawned from the root of a current-thread runtime runs
 /// on the calling thread (Tokio `new_current_thread` semantics).
@@ -903,6 +995,161 @@ fn current_thread_block_on_returns_despite_cancellation_blind_self_waker() {
         polls > 0,
         "the self-waking task must have been polled at least once by the drain"
     );
+}
+
+/// A real registered timer that is not ready must not make the post-root
+/// drain wait for its deadline.
+#[test]
+fn current_thread_block_on_returns_with_a_timer_parked_local_task() {
+    let (sent, received) = mpsc::channel();
+    let caller = thread::spawn(move || {
+        let timer = asupersync::time::TimerDriverHandle::with_wall_clock();
+        let runtime = RuntimeBuilder::current_thread()
+            .with_timer_driver(timer.clone())
+            .build()
+            .expect("current-thread runtime with a real timer");
+        let task = runtime.block_on(async {
+            let cx = Cx::current().expect("root Cx");
+            let value = Rc::new(42);
+            let task = cx
+                .spawn_local(move |child| async move {
+                    asupersync::time::sleep(child.now(), Duration::from_secs(3_600)).await;
+                    *value
+                })
+                .expect("timer-parked local task");
+            while timer.pending_count() == 0 {
+                yield_now().await;
+            }
+            task
+        });
+        sent.send((task.is_finished(), timer.pending_count()))
+            .expect("report before the timer deadline");
+        drop(runtime);
+    });
+    let (finished, pending_timers) = received
+        .recv_timeout(Duration::from_secs(10))
+        .expect("block_on must return without waiting for a parked timer");
+    caller.join().expect("caller shuts down");
+    assert!(!finished, "the child must still be parked at root return");
+    assert!(pending_timers > 0, "the real timer was registered");
+}
+
+/// A second caller must retain the caller-polled fallback while another OS
+/// thread owns the worker, including for a self-waking !Send future.
+#[test]
+fn current_thread_concurrent_block_on_completes_without_taking_the_worker() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let owner_runtime = runtime.clone();
+    let (entered, owner_entered) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let owner = thread::spawn(move || {
+        owner_runtime.block_on(async {
+            entered.send(()).unwrap();
+            released
+                .recv_timeout(Duration::from_secs(15))
+                .expect("release the first caller");
+            let caller = thread::current().id();
+            let cx = Cx::current().expect("first caller retains root Cx");
+            let mut child = cx.spawn_local(move |_| async move { caller }).unwrap();
+            assert_eq!(child.join(&cx).await.unwrap(), caller);
+        });
+    });
+    owner_entered
+        .recv_timeout(Duration::from_secs(10))
+        .expect("first caller acquired the worker");
+    let second_runtime = runtime.clone();
+    let (completed, completion) = mpsc::channel();
+    let second = thread::spawn(move || {
+        let caller = thread::current().id();
+        let value = Rc::new(42);
+        let observed = second_runtime.block_on(async {
+            yield_now().await;
+            (*value, thread::current().id())
+        });
+        completed.send((observed, caller)).unwrap();
+    });
+    let observed = completion.recv_timeout(Duration::from_secs(5));
+    release
+        .send(())
+        .expect("release the first caller even on failure");
+    owner.join().expect("first caller remains usable");
+    second.join().expect("second caller completes");
+    let ((value, actual), caller) = observed.expect("concurrent caller must not wait for the loan");
+    assert_eq!(value, 42);
+    assert_eq!(actual, caller, "fallback polls on the second caller");
+}
+
+/// Cancellation from a foreign thread cannot poll or destroy a parked
+/// !Send future. Its owning caller must resume the drain to finish cleanup.
+#[test]
+fn current_thread_foreign_local_drain_times_out_then_owner_drains() {
+    struct LocalDrop(Arc<AtomicUsize>, thread::ThreadId);
+    impl Drop for LocalDrop {
+        fn drop(&mut self) {
+            assert_eq!(thread::current().id(), self.1);
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let owner_drops = dropped.clone();
+    let owner_polls = polls.clone();
+    let (ready, parked) = mpsc::channel();
+    let (resume, resumed) = mpsc::channel();
+    let (finished, drained) = mpsc::channel();
+    let owner = thread::spawn(move || {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let caller = thread::current().id();
+        let marker = Rc::new(LocalDrop(owner_drops, caller));
+        let child_polls = owner_polls.clone();
+        let child = runtime.block_on(async {
+            let cx = Cx::current().expect("root Cx");
+            let child = cx
+                .spawn_local(move |child_cx| async move {
+                    let _marker = marker;
+                    poll_fn(|_| {
+                        assert_eq!(thread::current().id(), caller);
+                        child_polls.fetch_add(1, Ordering::SeqCst);
+                        if child_cx.checkpoint().is_err() {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                })
+                .unwrap();
+            while owner_polls.load(Ordering::SeqCst) == 0 {
+                yield_now().await;
+            }
+            child
+        });
+        ready.send(runtime.clone()).unwrap();
+        resumed.recv().expect("wait for foreign drain result");
+        let outcome = runtime.drain_root_region(Duration::from_secs(2));
+        finished.send((outcome, child.is_finished())).unwrap();
+    });
+    let runtime = parked
+        .recv_timeout(Duration::from_secs(10))
+        .expect("local task is parked on its owner");
+    let before = polls.load(Ordering::SeqCst);
+    let foreign_outcome = runtime.drain_root_region(Duration::from_millis(50));
+    let after = polls.load(Ordering::SeqCst);
+    let foreign_drops = dropped.load(Ordering::SeqCst);
+    resume.send(()).unwrap();
+    let owned_result = drained
+        .recv_timeout(Duration::from_secs(10))
+        .expect("owning caller completes the drain");
+    owner.join().expect("owning caller finishes");
+    assert_eq!(foreign_outcome, RootDrainOutcome::TimedOut);
+    assert_eq!(before, after, "foreign drain cannot poll the local future");
+    assert_eq!(
+        foreign_drops, 0,
+        "foreign drain cannot destroy the local future"
+    );
+    assert_eq!(owned_result, (RootDrainOutcome::Quiescent, true));
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
 
 /// Re-entrancy: a root may call `block_on` on its own runtime again, to any
