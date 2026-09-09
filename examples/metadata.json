@@ -200,7 +200,7 @@
       "file": "examples/appspec_reference_journey.rs",
       "loc": {
         "start": 1,
-        "end": 382
+        "end": 389
       },
       "kind": "rust",
       "demonstrates": [
@@ -210,7 +210,7 @@
       ],
       "feature_flags": [],
       "run_command": "cargo run --example appspec_reference_journey",
-      "description": "Production reference AppSpec journey proving explicit Cx ownership, quiescence, and fail-closed lowering."
+      "description": "Declarative AppSpec and Lab lifecycle journey demonstrating explicit Cx ownership, quiescence, and fail-closed lowering; declared services are metadata."
     },
     {
       "name": "atp_daemon_basic",
@@ -563,7 +563,7 @@
       "file": "examples/onramp_level3.rs",
       "loc": {
         "start": 1,
-        "end": 42
+        "end": 41
       },
       "kind": "rust",
       "demonstrates": [
@@ -580,7 +580,7 @@
       "file": "examples/production_service.rs",
       "loc": {
         "start": 1,
-        "end": 174
+        "end": 182
       },
       "kind": "rust",
       "demonstrates": [
