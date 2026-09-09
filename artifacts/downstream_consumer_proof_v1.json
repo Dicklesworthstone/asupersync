@@ -9,28 +9,43 @@
   "minimum_version_policy": {
     "bead_id": "asupersync-mnotoo.3.5",
     "toolchain_path": "rust-toolchain.toml",
-    "toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
-    "toolchain_channel": "nightly-2026-07-05",
+    "toolchain_sha256": "99838b6a25561af2c5b180941bb81adad3ef25f22ae297a6f7ddec2caa151c6f",
+    "toolchain_channel": "nightly-2026-08-31",
     "root_manifest_path": "Cargo.toml",
-    "root_manifest_sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+    "root_manifest_sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
     "fixture_manifest_sha256": "d47df61ac5359be24bef210d62f4d72b4a45b3d6c4c7189f2766c509a71fc3b3",
     "tracked_lock_path": "tests/fixtures/downstream-consumer-proof/Cargo.lock",
-    "tracked_lock_sha256": "de886934a709b70389afc553daa0a5a91b3d716f1ce51a4bc7198dfb6649c19a",
+    "tracked_lock_sha256": "df2f05cb56cdfb9af589bc0716fc08077f987f90716d53910e099ce9b18b5b33",
     "tracked_package_count": 214,
     "resolution_policy": "direct-minimal-versions",
-    "generation_command": "cargo +nightly-2026-07-05 -Z direct-minimal-versions generate-lockfile --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml",
+    "generation_command": "cargo +nightly-2026-08-31 -Z direct-minimal-versions generate-lockfile --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml",
+    "prior_snapshot": {
+      "toolchain_channel": "nightly-2026-07-05",
+      "toolchain_sha256": "7be955420e9a82164d4c4307e141035b29cd395ba6f621af32f3fddfb4013f63",
+      "root_manifest_sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+      "tracked_lock_sha256": "de886934a709b70389afc553daa0a5a91b3d716f1ce51a4bc7198dfb6649c19a",
+      "direct_minimal_receipt": {"worker_id": "ovh-a", "job_id": 29988810699833377, "exit_code": 0, "duration_ms": 84310, "observed_at": "2026-08-23T11:43:54Z"},
+      "transitive_minimal_receipt": {"worker_id": "ovh-a", "job_id": 29988810699833376, "exit_code": 101, "diagnostic": "E0635 unknown feature stdsimd"}
+    },
     "fresh_remote_receipt": {
       "worker_id": "ovh-a",
-      "job_id": 29988810699833377,
+      "job_id": 30013852322103469,
       "exit_code": 0,
-      "duration_ms": 84310,
-      "observed_at": "2026-08-23T11:43:54Z"
+      "duration_ms": 131904,
+      "observed_at": "2026-09-09T19:44:51Z",
+      "source_base": "ef5126b5ffb753d06e12659e2cafcfb5c342a943",
+      "overlay_fingerprint": "5f1e1886e7885d713618793b7144408bb6fedd15e415ac76bd58c75e9df5f250",
+      "scope": "Locked default external-consumer compilation only; no runtime, full-transitive-minimal, other-feature, or other-platform claim."
     },
     "transitive_minimal_probe": {
       "status": "blocked_upstream_transitive_range",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-07-05 check -j 2 -Z minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-08-31 check -j 2 -Z minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
       "worker_id": "ovh-a",
-      "job_id": 29988810699833376,
+      "job_id": 30013852322103473,
+      "observed_at": "2026-09-09T19:47:24Z",
+      "lock_generation_command": "cargo +nightly-2026-08-31 -Z minimal-versions generate-lockfile --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml",
+      "lock_artifact": "target/copperoak-release-0411-minimal-locks-r1/transitive-minimal-Cargo.lock",
+      "lock_sha256": "52704083ff56dba8ae32a3bdcefe411ae72f4df93dd0dd110bf6d71937cc6eeb",
       "exit_code": 101,
       "selected_package": "curve25519-dalek 4.0.0",
       "dependency_path": "asupersync -> nkeys 0.4.5 -> ed25519-dalek 2.0.0 -> curve25519-dalek 4.0.0",
@@ -43,7 +58,7 @@
       "Re-run the full transitive-minimal probe; preserve the precise blocker unless it reaches terminal green without a local fallback or a production-only constraint dependency."
     ],
     "stable_subset_bound": "No numeric stable MSRV is declared because Cargo.toml has no rust-version. The separate stable lane remains --no-default-features --features proc-macros.",
-    "default_feature_bound": "The exact nightly-2026-07-05 snapshot is required because default features include nightly-outcome-try; it is not a numeric MSRV range."
+    "default_feature_bound": "The exact nightly-2026-08-31 snapshot is required because default features include nightly-outcome-try; it is not a numeric MSRV range."
   },
   "positive_profiles": [
     {
@@ -118,8 +133,8 @@
       "fixture_features": [],
       "root_feature_flags": [],
       "lock_path": "tests/fixtures/downstream-consumer-proof/Cargo.lock",
-      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-07-05 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
-      "expected_signal": "the independent direct-minimal lock compiles the default consumer on pinned nightly-2026-07-05 and exits 0"
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-08-31 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "expected_signal": "the independent direct-minimal lock compiles the default consumer on pinned nightly-2026-08-31 and exits 0"
     },
     {
       "profile_id": "default-no-tokio-tree",

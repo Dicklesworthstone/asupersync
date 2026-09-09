@@ -1236,7 +1236,7 @@ fn ci_executes_native_cancellation_regression_before_broader_proofs() {
     );
 }
 
-fn native_cancellation_sentinels() -> [&'static str; 40] {
+fn native_cancellation_sentinels() -> [&'static str; 41] {
     [
         "run_test_preserves_typed_cancellation_from_a_parked_spawn",
         "abort_repolls_a_mutex_parked_operation_to_graceful_cancellation",
@@ -1255,6 +1255,7 @@ fn native_cancellation_sentinels() -> [&'static str; 40] {
         "spawn_blocking_discards_a_late_value_after_wrapper_cancellation",
         "spawn_blocking_in_discards_a_late_value_after_wrapper_cancellation",
         "legacy_state_task_panic_after_abort_remains_panicked",
+        "legacy_state_ready_future_drop_panic_is_published_as_join_error",
         "legacy_state_task_keeps_cancellation_dominant_result_attribution",
         "terminal_publication_boundary_preserves_panics_as_join_errors",
         "panic_during_cancel_cleanup_outranks_task_cancellation",

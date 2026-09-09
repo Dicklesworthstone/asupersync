@@ -25,7 +25,8 @@
   "source_contracts": [
     {
       "path": "artifacts/github_actions_provenance_v1.json",
-      "sha256": "672dfd9850e494f6142f588a430c682fa61c20fb911136c5770d29cfce80485e",
+      "sha256": "f8564e12398ceacd5819507b537aa6ccce49629031f99476cc3c6d07898316a7",
+      "reviewed_prior_sha256": "672dfd9850e494f6142f588a430c682fa61c20fb911136c5770d29cfce80485e",
       "owner_bead_id": "asupersync-mnotoo.3.1"
     },
     {
@@ -35,7 +36,8 @@
     },
     {
       "path": "artifacts/downstream_consumer_proof_v1.json",
-      "sha256": "b75a883ef6c479759a6a6dac64825f1cc3694b721528da157c157de45793ec8e",
+      "sha256": "d05ddf80091b5141a93cde95d9a01c51cdfd3bfe3a8c0ebf3c413f3243c817df",
+      "reviewed_prior_sha256": "b75a883ef6c479759a6a6dac64825f1cc3694b721528da157c157de45793ec8e",
       "owner_bead_id": "asupersync-mnotoo.3.5"
     },
     {
@@ -125,7 +127,8 @@
   ],
   "github_actions_provenance": {
     "workflow_file_count": 12,
-    "action_reference_count": 182,
+    "action_reference_count": 191,
+    "reviewed_prior_action_reference_count": 182,
     "distinct_action_repository_count": 13,
     "exception_count": 0,
     "revision_format": "lowercase-full-40-hex-commit-sha",
@@ -257,7 +260,7 @@
     "excluded_fuzz_lock_sha256": "140ccbf6f1351c0531c0b492baef50bd88aba898698e0f4e5a170a0d6ba247ff",
     "review_scope": "Current source joins after review of release/path versions, packaging, remote-service composition, lint/toolchain settings and the existing ChaCha20 patch. CopperOak additionally reviewed 44def7dfb: restoring the CLI subtree and main binary changes only package.include in parsed Cargo.toml, leaving dependency, feature, target, profile, workspace and lockfile inputs unchanged. The profile/target catalog remains the prior budget projection; the four fresh Linux oracle graphs are recorded in dependency_oracle_policy_v1.json, not a rerun of this whole consumer matrix or a package build proof."
   },
-  "downstream_minimum_version_receipt": {
+  "prior_downstream_minimum_version_receipt": {
     "toolchain": "nightly-2026-07-05",
     "resolution_policy": "direct-minimal-versions",
     "tracked_package_count": 214,
@@ -271,6 +274,24 @@
     "blocker_diagnostic": "E0635 unknown feature stdsimd",
     "numeric_stable_msrv_claimed": false,
     "universal_vendor_reproducibility_claimed": false
+  },
+  "downstream_minimum_version_receipt": {
+    "toolchain": "nightly-2026-08-31",
+    "resolution_policy": "direct-minimal-versions",
+    "tracked_package_count": 214,
+    "direct_minimal_status": "pass",
+    "direct_minimal_rch_job_id": 30013852322103469,
+    "direct_minimal_rch_worker": "ovh-a",
+    "direct_minimal_observed_at": "2026-09-09T19:44:51Z",
+    "full_transitive_minimal_status": "blocked_upstream_transitive_range",
+    "full_transitive_minimal_rch_job_id": 30013852322103473,
+    "full_transitive_minimal_observed_at": "2026-09-09T19:47:24Z",
+    "blocker_package": "curve25519-dalek 4.0.0",
+    "blocker_path": "asupersync -> nkeys 0.4.5 -> ed25519-dalek 2.0.0 -> curve25519-dalek 4.0.0",
+    "blocker_diagnostic": "E0635 unknown feature stdsimd",
+    "numeric_stable_msrv_claimed": false,
+    "universal_vendor_reproducibility_claimed": false,
+    "scope": "Fresh locked default external-consumer compile and separate full-transitive-minimal blocker only; original downstream receipt retained separately."
   },
   "generated_dependency_documentation_receipt": {
     "status": "pass",

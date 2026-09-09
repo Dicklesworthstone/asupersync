@@ -179,6 +179,7 @@ fn blocking_graph_has_cycle(issues: &BTreeMap<String, Value>) -> bool {
 #[test]
 fn source_contracts_are_content_pinned_and_closed() {
     let artifact = json(ARTIFACT_PATH);
+    assert_current_source_review(&artifact);
     let issues = tracker_issues();
 
     assert_eq!(artifact["schema_version"], 1);
@@ -199,7 +200,9 @@ fn source_contracts_are_content_pinned_and_closed() {
     assert_eq!(sources.len(), 8);
     for source in sources {
         let path = string(source, "path");
-        let expected_digest = string(source, "sha256");
+        let expected_digest = artifact["current_source_review"]["source_hashes"][path]
+            .as_str()
+            .unwrap_or_else(|| string(source, "sha256"));
         assert_eq!(expected_digest.len(), 64, "{path} digest must be SHA-256");
         assert_eq!(
             sha256_hex(read_repo_file(path).as_bytes()),
@@ -326,10 +329,15 @@ fn baseline_matrix_and_provenance_are_frozen() {
     let ledger = json(LEDGER_PATH);
     let baseline = json(BASELINE_PATH);
     let matrix = &artifact["baseline_provenance"];
+    assert_current_source_review(&artifact);
 
     assert_eq!(
-        string(matrix, "ledger_source_commit"),
+        string(&artifact["current_source_review"], "ledger_source_commit"),
         string(&ledger, "source_commit")
+    );
+    assert_eq!(
+        artifact["current_source_review"]["marginal_measurement_count"],
+        array(&ledger, "marginal_measurements").len()
     );
     assert_eq!(
         string(matrix, "capability_baseline_revision"),
@@ -486,6 +494,8 @@ fn every_later_plan_row_is_transitively_blocked_by_the_gate() {
     let verification = json(MATRIX_PATH);
     let issues = tracker_issues();
     let graph = &artifact["graph_gate"];
+    let current = &artifact["current_source_review"];
+    assert_current_source_review(&artifact);
 
     assert!(!blocking_graph_has_cycle(&issues));
     let direct_dependents = issues
@@ -507,7 +517,7 @@ fn every_later_plan_row_is_transitively_blocked_by_the_gate() {
         .collect::<Vec<_>>();
     assert_eq!(
         later_rows.len() as u64,
-        graph["later_matrix_row_count"]
+        current["later_matrix_row_count"]
             .as_u64()
             .expect("later_matrix_row_count")
     );
@@ -525,12 +535,68 @@ fn every_later_plan_row_is_transitively_blocked_by_the_gate() {
         BTreeMap::from([
             ("architecture", 15),
             ("decision", 15),
-            ("implementation", 109),
-            ("verification", 200),
+            ("implementation", 108),
+            ("verification", 202),
         ])
     );
-    assert_eq!(graph["later_implementation_row_count"], 109);
+    assert_eq!(current["later_implementation_row_count"], 108);
+    assert_eq!(
+        serde_json::to_value(&roles).expect("current roles"),
+        current["later_role_counts"]
+    );
     assert_eq!(graph["blocking_graph_cycle_count"], 0);
+}
+
+fn assert_current_source_review(artifact: &Value) {
+    let mut historical = artifact.clone();
+    historical
+        .as_object_mut()
+        .expect("aggregate object")
+        .remove("current_source_review");
+    assert_eq!(
+        sha256_hex(&serde_json::to_vec(&historical).expect("canonical historical aggregate")),
+        "855c9aa1bdd21a7432014fef6545496146c5b208b0320926f87ebde22db95234",
+        "historical aggregate provenance and decisions must remain unchanged"
+    );
+    let review = &artifact["current_source_review"];
+    assert_eq!(review["execution_receipts_rebound"], false);
+    assert_eq!(review["cutover_authority"], false);
+    let hashes = review["source_hashes"]
+        .as_object()
+        .expect("reviewed hashes");
+    assert_eq!(
+        hashes.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            LEDGER_PATH,
+            ORACLE_PATH,
+            "artifacts/dependency_capability_registry_v1.json",
+            BASELINE_PATH,
+            MATRIX_PATH,
+        ])
+    );
+    for (path, expected) in hashes {
+        assert_eq!(
+            expected.as_str().expect("hash string"),
+            sha256_hex(read_repo_file(path).as_bytes()),
+            "current aggregate input drift: {path}"
+        );
+    }
+}
+
+#[test]
+fn current_source_review_rejects_stale_inputs_and_historical_rebinding() {
+    let baseline = json(ARTIFACT_PATH);
+    assert_current_source_review(&baseline);
+    let mut stale = baseline.clone();
+    stale["current_source_review"]["source_hashes"][LEDGER_PATH] = Value::String("0".repeat(64));
+    let mut rewritten = baseline.clone();
+    rewritten["baseline_provenance"]["ledger_source_commit"] =
+        baseline["current_source_review"]["ledger_source_commit"].clone();
+    let mut authorized = baseline;
+    authorized["current_source_review"]["cutover_authority"] = Value::Bool(true);
+    for rejected in [stale, rewritten, authorized] {
+        assert!(std::panic::catch_unwind(|| assert_current_source_review(&rejected)).is_err());
+    }
 }
 
 #[test]

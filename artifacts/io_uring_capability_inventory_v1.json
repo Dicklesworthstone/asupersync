@@ -13,6 +13,14 @@
     "corrections": "Default File poll traits offload only when a runtime blocking pool exists and retain an inline fallback otherwise. Existing typed fallback reasons, all six probe sources and all 47 exact locators supersede stale prose within this inventory.",
     "no_claim_boundary": "Current source pins do not rebind historical compile or timeout receipts, establish new kernel or platform outcomes, prove performance, authorize advanced data-plane adoption, or close a tracker task."
   },
+  "release_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "reviewed_source_revision": "ce14e7a5783597aedc723d7811f96c8da1a7ef11",
+    "prior_builder_sha256": "0e1c94cab515b252bc6e659666166c47fd76b450bed99e65d962082184f916ba",
+    "prior_stream_sha256": "6eb2b1bb7f109e424bc42eedd2467a53435c14a0155e76ba3c9e0820869edad0",
+    "scope": "Builder startup-hook placement, reentrant current-thread roots, bounded draining, and local-store retirement were reviewed. Full TCP streams now use ReactorRegistration and park on the process-global fallback I/O driver when no ambient driver exists; the existing re-wake helper remains the final fallback. Kernel probes, advanced data-plane authority, historical receipts and no-claim boundaries are unchanged.",
+    "execution_receipts_rebound": false
+  },
   "disposition": "STATIC_INVENTORY_CURRENT_URING2_CONTROL_PLANE_IN_PROGRESS",
   "validation_state": {
     "source_hashes_checked": true,
@@ -92,7 +100,7 @@
     "historical_non_module_path": "src/runtime/reactor/uring.rs",
     "runtime_support_authority": "bounded operation probes and their terminal results",
     "kernel_version_role": "informational metadata only",
-    "unknown_or_probe_error_action": "retain ordinary readiness or epoll when available, otherwise timer-backed or immediate re-polling, and report an exact reason",
+    "unknown_or_probe_error_action": "retain ordinary readiness or epoll when available; full TCP streams attempt the process-global fallback driver before timer-backed or immediate re-polling; report an exact reason",
     "production_default_changed": false
   },
   "inventory_scope": {
@@ -142,8 +150,8 @@
     },
     {
       "path": "src/runtime/builder.rs",
-      "sha256": "0e1c94cab515b252bc6e659666166c47fd76b450bed99e65d962082184f916ba",
-      "line_count": 11302,
+      "sha256": "270b1831e56b0dbcbf38746c8eb24ea390b6458ae2c4a9114b3b241c5f75ea85",
+      "line_count": 11447,
       "role": "platform-reactor policy, dependency injection, terminal fallback receipt and public runtime inspectors"
     },
     {
@@ -196,8 +204,8 @@
     },
     {
       "path": "src/net/tcp/stream.rs",
-      "sha256": "6eb2b1bb7f109e424bc42eedd2467a53435c14a0155e76ba3c9e0820869edad0",
-      "line_count": 2915,
+      "sha256": "af537d7d902572337edae668493393822364be4837a021ae78e2fba2f87fff54",
+      "line_count": 3006,
       "role": "full TCP stream ordinary socket I/O plus generic readiness"
     },
     {
@@ -262,8 +270,8 @@
     },
     {
       "path": "docs/io_uring_capability_inventory.md",
-      "sha256": "d3407a83eca166ab01faae5cff7882b7ee87c17093e280f988021731554d24c6",
-      "line_count": 397,
+      "sha256": "0100b20d7e5f55409aabe02868125c73021afec24c6a502012339cfcfde39e06",
+      "line_count": 401,
       "role": "human interpretation, ownership, and no-claim boundary"
     },
     {
@@ -396,8 +404,8 @@
       "category": "terminal_fallback",
       "paths": ["src/runtime/builder.rs", "src/runtime/state.rs", "src/net/tcp/listener.rs", "src/net/tcp/stream.rs", "src/net/tcp/split.rs"],
       "anchors": ["runtime_builder_platform_reactor_unavailable", "falling back to timer-paced I/O polling", "set_unavailable_io_reactor_capability_snapshot", "InterestRegistrationMode::FallbackPoll", "const FALLBACK_IO_BACKOFF: Duration = Duration::from_millis(1)", "fallback_rewake", "wake_by_ref"],
-      "current_state": "RUNTIME_CONTINUES_WITHOUT_REACTOR_AND_SOCKET_PATHS_REPOLL",
-      "gap": "socket re-poll behavior remains the terminal incumbent path; the typed runtime snapshot now makes that selection observable",
+      "current_state": "RUNTIME_SNAPSHOT_WITH_TCP_FALLBACK_READINESS_THEN_REPOLL",
+      "gap": "full TCP streams attempt fallback-driver readiness before the terminal re-poll helper; listener and split paths retain their separate behavior, and the typed runtime snapshot describes the runtime's own driver selection",
       "owner_bead": "asupersync-sched-hot-path-perf-bt4y5f.7.2"
     },
     {
