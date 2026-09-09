@@ -78,7 +78,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 31852,
       "record_count": 299,
-      "sha256": "8f5e8239663a35b0dc860a86dfdd923dc85f8d88556f39fbfa10b75684f1819e"
+      "sha256": "a513ab9ed521c792709c56d5085815ba5e3ee0e0d7929ba8c0aa36962e1e6eab"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -86,7 +86,7 @@
       "path": "docs/kafka_k0_baseline_disposition.md",
       "byte_count": 22466,
       "record_count": 358,
-      "sha256": "18b4435646f36f457b5bc03828759daad78c6936a5c10169d07e77620f49041d"
+      "sha256": "6c95d74240efd5639910370a1e481a25d9c1c0043f32c114422e26599a43f0b0"
     },
     {
       "input_id": "K1-INPUT-K0-5-CONTRACT",
@@ -94,7 +94,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 107239,
       "record_count": 2629,
-      "sha256": "2e83aa776ba236632f2dade544ed1725bc30a3df4cf6f4c10ffa03638d75d777"
+      "sha256": "fcaac4c63189df32228dc23ca4c0a5f2afb6754e5c580789d7e00cab1b53a4c6"
     },
     {
       "input_id": "K1-INPUT-ADR",
@@ -538,13 +538,13 @@
     "source_pin_rollup": {
       "row_count": 267,
       "stage_counts": {"K0.1": 14, "K0.2": 8, "K0.3": 225, "K0.4": 20},
-      "canonical_json_sha256": "1a5e081dec2b116455b813a324c47897a8c2adb179fef638e067b9d9b3b074ad",
+      "canonical_json_sha256": "4d4cd56dee4b24a9fc67cc5eb11a34cfa1d22eab508d5d816009d0ec68e9bb6e",
       "unique_path_count": 248,
       "unique_path_set_sha256": "c9f1f8ae0ce140c27e05919606a947d93c660f9aa978e762f1cbcc232c200ddb",
       "overlap_group_count": 15,
       "overlap_pin_row_count": 34,
       "overlap_pin_tuple_rule": "For each source-pin row whose path occurs in more than one child packet, serialize path<TAB>child<TAB>pin_id<TAB>sha256; bytewise sort the records and append one LF per row.",
-      "overlap_pin_projection_sha256": "a83160709d49613c658a8d70d80beebc6fb563f646e2dd0ca7c8802fe1d95b5e",
+      "overlap_pin_projection_sha256": "ccd6f96f55bc053948b8a675814a17408548f36d81af37fac89dceaf87d35a19",
       "conflicting_overlap_groups": []
     },
     "unknown_blockers": {
@@ -585,7 +585,7 @@
     },
     "claims_projection": {
       "child_claim_record_count": 93,
-      "child_claim_projection_sha256": "74f3359505a1a6816502cc7293e46c2abaa32e9de0ed514e72cf8fd76f139e6b",
+      "child_claim_projection_sha256": "a4dc21b49e344bd9c8ba43adabd2c2551b33f7e029494347e1c8f30059ef2f50",
       "aggregate_claim_count": 7,
       "aggregate_claim_projection_sha256": "2a4867239016cef413e38d68bc1d788de89a23bac7ac08890632256013b4d1b6",
       "migration_claim_state": "BLOCKED",
