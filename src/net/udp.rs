@@ -87,7 +87,7 @@ fn suppress_windows_udp_connection_reset(socket: &StdUdpSocket) -> io::Result<()
 }
 
 #[cfg(not(windows))]
-// The native socket-setup path calls this no-op stub; the wasm profile
+// The native socket-setup path needs no Windows-specific control on other OSes; wasm
 // never opens raw UDP sockets, matching this file's wasm precedent.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn suppress_windows_udp_connection_reset(_socket: &StdUdpSocket) -> io::Result<()> {
@@ -2425,7 +2425,7 @@ impl UdpSocket {
     /// Unlike the all-packets async helper, this may return a successful prefix
     /// without an error. Its caller owns and retries the unsent suffix. No
     /// datagram has been sent when this returns Pending.
-    // Native-only callers (the QUIC endpoint); the wasm32 body is a stub.
+    // Native-only callers (the QUIC endpoint); wasm32 explicitly returns Unsupported.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn poll_send_batch_to_with_strategy(
         &mut self,
