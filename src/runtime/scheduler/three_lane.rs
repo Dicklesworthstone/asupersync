@@ -4910,12 +4910,12 @@ impl ThreeLaneWorker {
     /// current-thread driver borrows the worker for `Runtime::block_on`).
     ///
     /// Returns when shutdown is signalled, or when `should_stop` returns
-    /// true and this thread's local-spawn lane is empty. The predicate is
+    /// true, even if this thread's local-spawn lane is not empty. The predicate is
     /// checked between dispatches and before every park, so a caller that
     /// raises a flag and wakes this worker (parker + reactor) regains the
-    /// thread at the next dispatch boundary. The lane condition makes sure
-    /// `!Send` spawns parked by the last dispatched task are admitted to this
-    /// worker before the thread is handed back.
+    /// thread at the next dispatch boundary. Pending `!Send` spawns stay on
+    /// this thread's lane for its next dispatch loop; the loan protocol refuses
+    /// a worker handover while that lane remains non-empty.
     ///
     /// With `return_when_idle` the loop also returns instead of parking once
     /// nothing is runnable: no dispatchable task, no ready finalizer, no
