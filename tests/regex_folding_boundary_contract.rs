@@ -24,10 +24,12 @@ const SOURCE_PATH: &str = "src/observability/regex_boundaries.rs";
 const SYNTAX_SOURCE_PATH: &str = "src/observability/regex_syntax.rs";
 const SEMANTICS_SOURCE_PATH: &str = "src/observability/regex_semantics.rs";
 const CARGO_PATH: &str = "Cargo.toml";
+// Reviewed private limit serde derives in da992970c. Historical job source
+// hashes remain unchanged in the artifact's proof section.
 const FROZEN_SYNTAX_SHA256: &str =
-    "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e";
+    "17dd552c2e5d9ec5e7e06bc4c14d29aac7f0c175609f389d720ad94b6a3514ac";
 const FROZEN_SEMANTICS_SHA256: &str =
-    "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8";
+    "ab0821e49cb0233c31ec23172c18fde56610e42136ec42dd14da0b02cb1cc64c";
 
 fn load_contract() -> Value {
     let text = fs::read_to_string(ARTIFACT_PATH).expect("fold/boundary artifact must be readable");

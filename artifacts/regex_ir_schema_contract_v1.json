@@ -4,6 +4,13 @@
   "bead_id": "asupersync-5z2scg.8.3.3.1",
   "capability_id": "CAP-REGEX-PRIVACY",
   "captured_at_utc": "2026-07-26T00:04:00Z",
+  "source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "change_revision": "da992970cbb0590014a36236682c138cd83b41a4",
+    "scope": "All four previous source pins match the parent of this revision. The only subsequent change adds serde derives with deny_unknown_fields to private limit structs. Program representation, validation, accounting formulas and default ceilings are unchanged; Program does not gain deserialization.",
+    "historical_proof_preserved": true,
+    "no_claim_boundary": "The refreshed hashes and byte counts do not rebind historical job receipts or establish configured-loading, persistence, matcher, performance or dependency-cutover proof."
+  },
   "ir_id": "ASUP-REGEX-THOMPSON-IR-V1",
   "ir_schema_version": 1,
   "diagnostic_schema_id": "asupersync-regex-thompson-ir-diagnostic-v1",
@@ -34,26 +41,26 @@
   "sources": [
     {
       "path": "src/observability/regex_ir.rs",
-      "sha256": "de4906beb838fda2c57bccfdb16316e8de661e564940a47e7b9b87f065311cb3",
-      "bytes": 45049,
+      "sha256": "aa287fd02abd3a2a4196e01b9c27d86937cb220f796e652263c94726b28f48b4",
+      "bytes": 45117,
       "role": "private versioned IR schema, accounting, diagnostics and validator"
     },
     {
       "path": "src/observability/regex_syntax.rs",
-      "sha256": "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e",
-      "bytes": 119085,
+      "sha256": "17dd552c2e5d9ec5e7e06bc4c14d29aac7f0c175609f389d720ad94b6a3514ac",
+      "bytes": 119221,
       "role": "accepted AST and source-span authority"
     },
     {
       "path": "src/observability/regex_semantics.rs",
-      "sha256": "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8",
-      "bytes": 44015,
+      "sha256": "ab0821e49cb0233c31ec23172c18fde56610e42136ec42dd14da0b02cb1cc64c",
+      "bytes": 44083,
       "role": "canonical Unicode and byte class authority"
     },
     {
       "path": "src/observability/regex_boundaries.rs",
-      "sha256": "406f280de9dcc99cedc47c5fcef4f32b6574f2d0d178d3061540c00b15128ab0",
-      "bytes": 49540,
+      "sha256": "3f87bdd55ad86cd40d4eb7300595abea4133ec76dac1d144132714abc7835658",
+      "bytes": 49608,
       "role": "fold and zero-width assertion authority"
     }
   ],

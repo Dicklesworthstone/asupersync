@@ -186,7 +186,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
 
     for (key, count, id_key) in [
         ("occurrence_census", 7, "occurrence_id"),
-        ("call_inventory", 7, "call_id"),
+        ("call_inventory", 8, "call_id"),
         ("public_and_operator_surfaces", 6, "surface_id"),
         ("semantic_matrix", 14, "semantic_id"),
         ("error_matrix", 7, "error_id"),
@@ -211,9 +211,9 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
             .iter()
             .filter(|call| text(call, "scope") == "test")
             .count()
-            != 2
+            != 3
     {
-        return Err("call inventory must retain five production and two test calls".to_owned());
+        return Err("call inventory must retain five production and three test calls".to_owned());
     }
     for call_id in ["XATTR-CALL-PROD-LIST-DEREF", "XATTR-CALL-PROD-GET-DEREF"] {
         if find_row(calls, "call_id", call_id)
@@ -499,10 +499,9 @@ fn source_topology_matches_the_exact_call_and_policy_inventory() {
     // legitimately exercises xattr APIs in test fixtures (for example the
     // FIFO symlink-swap assertion at the end of the file), and the artifact
     // census tracks those under test scope rather than as production calls.
-    let production = metadata
-        .split("#[cfg(test)]")
-        .next()
-        .expect("production prefix before the test module");
+    let (production, metadata_tests) = metadata
+        .split_once("#[cfg(test)]")
+        .expect("production prefix and metadata test module");
     for (marker, count) in [
         ("xattr::list_deref(", 1),
         ("xattr::list(", 1),
@@ -523,12 +522,16 @@ fn source_topology_matches_the_exact_call_and_policy_inventory() {
         "return BTreeMap::new();",
         "report.mark_skipped(\"xattr\", format!(\"{name}: {e}\"))",
         "xattr apply skipped for non-FIFO special file",
+        "if !meta.xattrs.is_empty() && (!special_file || fifo)",
     ] {
         assert!(
             metadata.contains(marker),
             "metadata source must retain {marker}"
         );
     }
+    assert_eq!(metadata_tests.matches("xattr::get(").count(), 1);
+    assert!(metadata_tests.contains("fn fifo_xattr_apply_does_not_follow_a_swapped_symlink()"));
+    assert!(metadata_tests.contains("FIFO xattr application followed a swapped symlink"));
 
     let policy = read_repo_file(POLICY_SOURCE_PATH);
     for marker in [

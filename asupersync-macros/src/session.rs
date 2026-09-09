@@ -583,7 +583,7 @@ mod tests {
             }
         });
         assert_eq!(def.name, "test_proto");
-        assert!(def.type_params.is_empty());
+        assert_eq!(def.type_params, [] as [proc_macro2::Ident; 0]);
         assert!(matches!(&def.obligation, ObligationSpec::Fixed(v) if v == "SendPermit"));
         assert_eq!(def.messages.len(), 1);
         assert_eq!(def.messages[0].name, "Foo");

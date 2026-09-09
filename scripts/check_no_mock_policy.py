@@ -530,7 +530,9 @@ def _item_extent(source: str, mask: bytearray, i: int) -> tuple[int, bool] | Non
     Returns ``(end_offset, is_braced)``, or ``None`` when the extent is ambiguous
     and the caller must fail closed.
 
-    A `;` at brace-depth 0 ends a statement item. This is why depth matters
+    A `;` or `,` outside delimiters ends a statement or enum/field item.
+    Commas inside tuple variants and function parameters are not terminators.
+    This is why depth matters
     rather than "first brace wins": `use crate::foo::{A, B};` opens braces that
     are part of a path, not a body, so the item still ends at its semicolon.
     Otherwise the first balanced top-level `{...}` is the body, confirmed once
@@ -539,12 +541,25 @@ def _item_extent(source: str, mask: bytearray, i: int) -> tuple[int, bool] | Non
     n = len(source)
     cursor = i
     depth = 0
+    delimiters: list[str] = []
+    # Restrict comma termination to a variant/field-shaped prefix. In a
+    # function return type such as Result<A, B>, the comma is not an item end.
+    comma_terminated = (
+        re.match(r"\s*(?:r#)?[A-Za-z_][A-Za-z_0-9]*\s*(?=[(:,=])", source[i:])
+        is not None
+    )
     first_close: int | None = None
 
     while cursor < n:
         if mask[cursor] != 0:
             char = source[cursor]
-            if char == "{":
+            if char in "([":
+                delimiters.append(char)
+            elif char in ")]":
+                expected = "(" if char == ")" else "["
+                if not delimiters or delimiters.pop() != expected:
+                    return None
+            elif char == "{":
                 if depth == 0 and first_close is not None:
                     return (first_close, True)
                 depth += 1
@@ -557,8 +572,8 @@ def _item_extent(source: str, mask: bytearray, i: int) -> tuple[int, bool] | Non
                 depth -= 1
                 if depth == 0 and first_close is None:
                     first_close = cursor
-            elif depth == 0:
-                if char == ";":
+            elif depth == 0 and not delimiters:
+                if char == ";" or (char == "," and comma_terminated):
                     return (cursor, False)
                 if first_close is not None and not char.isspace():
                     return (first_close, True)
@@ -635,6 +650,16 @@ def cfg_test_regions(source: str) -> list[tuple[int, int]] | None:
         if extent is None:
             return None
         end_offset, is_braced = extent
+
+        # Regions are line-granular. Never exclude an unguarded field or item
+        # sharing the terminal line, even when the first item was resolved.
+        line_end = source.find("\n", end_offset)
+        line_end = len(source) if line_end < 0 else line_end
+        if any(
+            mask[offset] and not source[offset].isspace() and source[offset] != ","
+            for offset in range(end_offset + 1, line_end)
+        ):
+            return None
 
         if is_braced:
             attribute_indent = _indent_width(source, start)
@@ -1230,6 +1255,39 @@ def run_policy_fixture_self_tests(policy_path: pathlib.Path) -> int:
         return 1
 
     # An unlexable file must fail closed: no regions, so every hit is production.
+    # A comma-terminated tuple variant must not make the entire file ambiguous
+    # or consume the next, production variant. Internal tuple commas are data.
+    variant_source = (
+        "enum Socket {\n"
+        "    #[cfg(test)]\n"
+        f"    Test((u8, u8)), // {TERM_MOCK}\n"
+        f"    Native(u8), // {TERM_PLACEHOLDER}\n"
+        "}\n"
+    )
+    if cfg_test_regions(variant_source) != [(2, 3)]:
+        print("policy fixture failed: tuple variant extent is not exact")
+        return 1
+    variant_report = evaluate_fixture(cfg_test_path, variant_source)
+    if (
+        variant_report["status"] != "fail"
+        or variant_report["scan_counts"]["test_gated_hits"] != 1
+        or variant_report["scan_counts"]["test_gated_undetermined_paths"] != 0
+    ):
+        print("policy fixture failed: production variant was hidden or test variant unresolved")
+        return 1
+    if cfg_test_regions("enum E {\n    #[cfg(test)]\n    Test, Native,\n}\n") is not None:
+        print("policy fixture failed: same-line production variant did not fail closed")
+        return 1
+    generic_return = (
+        "#[cfg(test)]\n"
+        "fn helper(input: (u8, u8)) -> Result<u8, Error> {\n"
+        "    Ok(input.0)\n"
+        "}\n"
+        "fn production() {}\n"
+    )
+    if cfg_test_regions(generic_return) != [(1, 4)]:
+        print("policy fixture failed: generic return-type comma ended the function early")
+        return 1
     if cfg_test_regions(f"/* unterminated\n#[cfg(test)]\nmod tests {{ {TERM_STUB} }}\n") is not None:
         print("policy fixture failed: unterminated block comment did not fail closed")
         return 1

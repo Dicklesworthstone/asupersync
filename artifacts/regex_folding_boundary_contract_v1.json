@@ -6,6 +6,13 @@
   "capability_id": "CAP-REGEX-PRIVACY",
   "semantics_id": "ASUP-REGEX-FOLD-BOUNDARY-V1",
   "captured_date_utc": "2026-07-25",
+  "source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "change_revision": "da992970cbb0590014a36236682c138cd83b41a4",
+    "scope": "All three previous source pins match the parent of this revision. The only subsequent change adds serde derives with deny_unknown_fields to private limit structs. Folding, boundary evaluation, accepted syntax, limits and defaults are unchanged.",
+    "historical_proof_preserved": true,
+    "no_claim_boundary": "This source review does not rebind historical job receipts or establish configured-loading, production matcher, performance or dependency-cutover proof."
+  },
   "decision": {
     "disposition": "STAGED_SIMPLE_FOLD_AND_BOUNDARY_SEMANTICS",
     "incumbent_state": "RETAIN_REGEX_AND_REGEX_SYNTAX",
@@ -31,10 +38,10 @@
   "authority": {
     "syntax_contract": "ASUP-REGEX-SYNTAX-V1",
     "syntax_source": "src/observability/regex_syntax.rs",
-    "syntax_source_sha256": "25ba1e6b24ce2741c39b831c580dda716a6c0d4113470c159382fb2a842cc98e",
+    "syntax_source_sha256": "17dd552c2e5d9ec5e7e06bc4c14d29aac7f0c175609f389d720ad94b6a3514ac",
     "character_semantics_contract": "ASUP-REGEX-CHAR-SEMANTICS-V1",
     "character_semantics_source": "src/observability/regex_semantics.rs",
-    "character_semantics_source_sha256": "00b1f03c2c823c74cae289750a2c1498b78452da635f55570ef37ffc53cde0f8",
+    "character_semantics_source_sha256": "ab0821e49cb0233c31ec23172c18fde56610e42136ec42dd14da0b02cb1cc64c",
     "retained_backend": "regex-syntax@0.8.11",
     "unicode_version": "16.0.0",
     "consumer_input_type": "&str pattern and &str haystack",
@@ -45,7 +52,7 @@
   },
   "source": {
     "path": "src/observability/regex_boundaries.rs",
-    "sha256": "406f280de9dcc99cedc47c5fcef4f32b6574f2d0d178d3061540c00b15128ab0",
+    "sha256": "3f87bdd55ad86cd40d4eb7300595abea4133ec76dac1d144132714abc7835658",
     "module_wiring": "src/observability/mod.rs",
     "visibility": "pub(crate)",
     "feature": "metrics",

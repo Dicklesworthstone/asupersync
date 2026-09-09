@@ -7,6 +7,14 @@ This is the operator-readable companion to
 `CAP-XATTR` baseline for `asupersync-3u3tej.3.1` at revision
 `e958dadee7b692faaf51bee42352d4bc6e7738ef`.
 
+The September 9 release review compares the thirteen source pins captured at
+`8612748ed7cd41c3536bfb7f63fb0eaa4ddde910` with
+`352b3695d3cb84a6296bb307a7880a6c9fafc2f8`. The artifact records the eight changed
+files and preserves the original graph measurement and terminal decision.
+This review also corrects two inventory omissions: FIFO application already
+attempts no-follow attribute writes, and its symlink-swap test contributes a
+third direct test call. Source review does not establish fresh runtime evidence.
+
 The gate outcome is terminal `DEFER`. The `xattr` crate remains in place,
 `implementation_children_authorized` is false, and no source, manifest,
 lockfile, registry, or dependency change is approved by this inventory. The
@@ -48,21 +56,27 @@ There are five direct production calls, all in
 | Call | Operation | Link behavior | Current reachability |
 | --- | --- | --- | --- |
 | `xattr::list_deref` | list | follows target | unreachable today |
-| `xattr::list` | list | operates on the link itself | regular files/directories |
+| `xattr::list` | list | operates on the link itself | non-symlink entries, including special files |
 | `xattr::get_deref` | get | follows target | unreachable today |
-| `xattr::get` | get | operates on the link itself | regular files/directories |
-| `xattr::set` | set | operates on the link itself | destination files/directories |
+| `xattr::get` | get | operates on the link itself | non-symlink entries, including special files |
+| `xattr::set` | set | operates on the link itself | destination files/directories and FIFOs |
 
 The helper accepts a dereference flag, but the production caller passes
 `false`. Symlink metadata returns before extended-attribute capture, so the
 two dereference branches are currently unreachable and neither link nor
 target xattrs are preserved for symlink entries.
 
-The TCP metadata fixture contains the only two direct test calls: a plain
+The TCP metadata fixture contains two direct test calls: a plain
 `set` helper and a plain `get` assertion on a regular file. The fixture
 returns successfully when the setup `set` fails. It therefore proves exact
 value bytes only when setup succeeds; it does not retain a typed unsupported
 receipt.
+
+The third direct test call is the `get` in
+`fifo_xattr_apply_does_not_follow_a_swapped_symlink` inside the metadata module.
+It checks that applying FIFO metadata to a substituted symlink does not write
+the forbidden value on the target. It does not establish successful attribute
+preservation on an actual FIFO or a cross-platform transfer.
 
 No production or test call removes an attribute, and no production call uses
 the incumbent's fd extension trait.
@@ -97,7 +111,8 @@ Capture is best effort:
 Application is also best effort. Plain `xattr::set` is called once per
 canonical map entry. A failure records the attribute name plus display text
 in `MetadataApplyReport` and later entries continue. Earlier successful writes
-are not rolled back. Special-file entries skip xattr application.
+are not rolled back. FIFO entries attempt the same no-follow set operation;
+other special-file entries skip xattr application.
 
 The async entry points delegate their synchronous cores to blocking tasks.
 The synchronous list/get/set calls have no cancellation token, and applying

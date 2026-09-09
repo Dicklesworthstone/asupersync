@@ -5,6 +5,14 @@
   "bead_id": "asupersync-3u3tej.3.1",
   "capability_id": "CAP-XATTR",
   "baseline_revision": "e958dadee7b692faaf51bee42352d4bc6e7738ef",
+  "inventory_review": {
+    "reviewed_at_utc": "2026-09-09",
+    "source_revision": "352b3695d3cb84a6296bb307a7880a6c9fafc2f8",
+    "prior_pin_revision": "8612748ed7cd41c3536bfb7f63fb0eaa4ddde910",
+    "owner_bead_id": "asupersync-ghxhvm",
+    "delta": "All thirteen prior source pins match 8612748ed. Eight current pins changed: release versions, package exclusions and lint configuration; chacha20 0.10.2; preservation-policy reconciliation; additive remote-service API/registry coverage; unsafe locator and test-module moves; an infallible Unix nanosecond widening; and bonded UDP advertisement plus QUIC limiter reporting. The CAP-XATTR registry row, xattr/rustix versions, metadata policy, five production xattr calls, historical marginal ledger and missing canonical scenarios are unchanged. Correct the previously omitted in-file FIFO test get call and the existing FIFO apply exception.",
+    "no_claim_boundary": "This review binds the current source inventory only. It does not renew the historical graph measurement, execute the FIFO fixture, establish platform parity, close any routed gap, or authorize dependency replacement."
+  },
   "purpose": "Freeze the claim-time xattr call, API, error, platform, ATP journey, marginal graph, and replacement-cost inventory; issue a terminal owner gate without authorizing implementation.",
   "authority": {
     "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
@@ -30,23 +38,23 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
-      "line_count": 1074
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
     },
     {
       "path": "Cargo.lock",
-      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
       "line_count": 4664
     },
     {
       "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
-      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
-      "line_count": 332
+      "sha256": "10388000250a021e2bdd21ad7e46edcea192dacacac87ad1234abedec92b4ac3",
+      "line_count": 368
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
-      "line_count": 6927
+      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
+      "line_count": 7058
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
@@ -60,18 +68,18 @@
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
-      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
-      "line_count": 4824
+      "sha256": "3b63065b42c489cb38b872b35c6902a109848fd9d95120e21205a9fb88d708a4",
+      "line_count": 5446
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "fc42eaabb33e6014bb8b886d98f0f2087973823531e81ac49d552b3296bc5aae",
+      "sha256": "548644695eac7f83e9c6545e3f447780cdfbc9bc0986e3d3fde7611230707f77",
       "line_count": 6441
     },
     {
       "path": "src/net/atp/transport_common/metadata.rs",
-      "sha256": "a1ed461e2fe3f91da64b3b39e203cb9b15df1d49f62abfd55d1d0d7c0e6792cb",
-      "line_count": 4171
+      "sha256": "0f78aee43293387d7db3ec7e66e04a4a76effd630df391cef146408e4051a0b3",
+      "line_count": 4174
     },
     {
       "path": "src/atp/object.rs",
@@ -80,8 +88,8 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "3480c6b5e17a964135c707169a941c78ab1245a1b98a6ec2fdf2d38156845424",
-      "line_count": 13343
+      "sha256": "7f81086ac8b9a28ad071efde2c052153d0e436fe3fbcd780e239e028829ff799",
+      "line_count": 13557
     },
     {
       "path": "tests/atp_tcp_metadata_fidelity.rs",
@@ -226,7 +234,7 @@
       "operation": "list",
       "symlink_semantics": "operate on link itself",
       "currently_reachable": true,
-      "result_handling": "used for regular files and directories; a list error becomes an empty map"
+      "result_handling": "used for non-symlink entries, including special files; a list error becomes an empty map"
     },
     {
       "call_id": "XATTR-CALL-PROD-GET-DEREF",
@@ -277,6 +285,16 @@
       "symlink_semantics": "regular-file fixture",
       "currently_reachable": true,
       "result_handling": "asserts exact value bytes when setup succeeded"
+    },
+    {
+      "call_id": "XATTR-CALL-TEST-FIFO-GET",
+      "scope": "test",
+      "path": "src/net/atp/transport_common/metadata.rs",
+      "api": "xattr::get",
+      "operation": "get",
+      "symlink_semantics": "inspect the regular target after applying FIFO metadata to a substituted symlink",
+      "currently_reachable": true,
+      "result_handling": "asserts the no-follow apply did not write the forbidden value through the symlink; source presence alone is not terminal execution evidence"
     }
   ],
   "public_and_operator_surfaces": [
@@ -296,7 +314,7 @@
       "surface_id": "XATTR-CAPTURE-SYNC",
       "state": "PARTIAL",
       "path": "read_entry_metadata_sync",
-      "semantics": "best-effort regular-file and directory capture; symlink entries return before xattr capture"
+      "semantics": "best-effort non-symlink entry capture, including special files; symlink entries return before xattr capture"
     },
     {
       "surface_id": "XATTR-APPLY-SYNC",
@@ -405,7 +423,7 @@
     {
       "semantic_id": "XATTR-SEM-SPECIAL-FILES",
       "state": "PRESENT",
-      "observed": "metadata application skips xattrs for FIFO, socket, block-device, and character-device entries",
+      "observed": "metadata application attempts no-follow xattr set for FIFO entries and skips socket, block-device, and character-device entries",
       "contract_boundary": "capture and transfer behavior for every special-file/filesystem combination is not baselined",
       "route": "ATP metadata baseline"
     },

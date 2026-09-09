@@ -6,6 +6,21 @@
   "capability_id": "CAP-SIGNALS",
   "baseline_revision": "1d8c77755daac957c52438d09d1dfca9b9c6cfc4",
   "captured_date_utc": "2026-07-25",
+  "inventory_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "reviewed_source_revision": "81cd5d5ab31f0188703df78b14518586a899d86d",
+    "prior_pin_revision": "b76d2db92a4cfb8f4892d0d4d294be36bc44d9c1",
+    "release_bead": "asupersync-ghxhvm",
+    "scope": "All 21 prior source pins matched the prior revision. The eight changed files were reviewed before refreshing their pins; the claim-time DEFER decision and historical marginal graph remain unchanged.",
+    "changes": [
+      "Cargo manifest and lockfile changes cover workspace versions, archive exclusions, additive remote-service features, lint policy and chacha20; the signal-hook edge and resolved signal packages are unchanged.",
+      "The dependency plan now states the accepted capability-preservation policy. The CAP-SIGNALS registry row is unchanged, and API-map growth adds no CAP-SIGNALS row.",
+      "The three signal/process unsafe-ledger rows retain their operations and categories; process test locators moved.",
+      "signal.rs adds only the managed supervisor SignalSlot delivery model under its Unix test module. It injects recorded delivery and does not send an OS signal or install an OS handler.",
+      "process.rs changes only Unix test expectations for macOS environment/cwd behavior and bounded child-exit polling. Production signal delivery and process-authority behavior are unchanged."
+    ],
+    "no_claim_boundary": "This review does not rerun the historical graph measurement, establish a new runtime or platform receipt, close the thirteen routed gaps, or authorize signal-hook replacement."
+  },
   "authority": {
     "plan": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
     "registry": "artifacts/dependency_capability_registry_v1.json",
@@ -41,23 +56,23 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
-      "line_count": 1074
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
     },
     {
       "path": "Cargo.lock",
-      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
       "line_count": 4664
     },
     {
       "path": "COMPREHENSIVE_DEPENDENCY_REPLACEMENT_PLAN.md",
-      "sha256": "401b39c99f4909a7e805e0992327d2408fe54aed65610783830031b66083b7b0",
-      "line_count": 332
+      "sha256": "10388000250a021e2bdd21ad7e46edcea192dacacac87ad1234abedec92b4ac3",
+      "line_count": 368
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
-      "line_count": 6927
+      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
+      "line_count": 7058
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
@@ -66,12 +81,12 @@
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
-      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
-      "line_count": 4824
+      "sha256": "3b63065b42c489cb38b872b35c6902a109848fd9d95120e21205a9fb88d708a4",
+      "line_count": 5446
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "fc42eaabb33e6014bb8b886d98f0f2087973823531e81ac49d552b3296bc5aae",
+      "sha256": "548644695eac7f83e9c6545e3f447780cdfbc9bc0986e3d3fde7611230707f77",
       "line_count": 6441
     },
     {
@@ -86,8 +101,8 @@
     },
     {
       "path": "src/signal/signal.rs",
-      "sha256": "9b691e5a7ed50c070775563b6aeaa3b59ae409e41428e96931a880d56e6eb866",
-      "line_count": 1634
+      "sha256": "e8bf2e577d33f0ee38d0989f23cc60c944cf55896baee30e686c244a2237c15a",
+      "line_count": 2094
     },
     {
       "path": "src/signal/ctrl_c.rs",
@@ -116,8 +131,8 @@
     },
     {
       "path": "src/process.rs",
-      "sha256": "853a9c853849ae89b65e1fd017816103ae39587ce478e3e9b7140d7802bc4a92",
-      "line_count": 5274
+      "sha256": "c56a6ddaf3bb7e293d09407aeb3874747deb8230972cdf57b37784e0122e31af",
+      "line_count": 5286
     },
     {
       "path": "src/atp/daemon_control.rs",

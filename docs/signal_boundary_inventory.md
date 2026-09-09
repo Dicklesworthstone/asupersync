@@ -7,6 +7,15 @@ This is the operator-readable companion to
 `CAP-SIGNALS` baseline for `asupersync-3u3tej.1.1` at revision
 `1d8c77755daac957c52438d09d1dfca9b9c6cfc4`.
 
+The September 9 release review refreshes source pins from
+`b76d2db92a4cfb8f4892d0d4d294be36bc44d9c1` after checking the changed files.
+Production signal and process-control code is unchanged. The new managed
+supervisor test injects a `SignalSlot` delivery; it does not send an OS signal
+or install a handler. Process changes are test portability and exit-polling
+repairs. Manifest, lockfile, policy, API-map and ledger changes retain the
+signal dependency and boundary. This review does not renew the historical
+graph measurements or provide fresh platform runtime evidence.
+
 The gate outcome is terminal `DEFER`. `signal-hook` remains in place, no
 replacement child is authorized, and no source or dependency change is
 approved by this inventory. The result is not an endorsement of the current

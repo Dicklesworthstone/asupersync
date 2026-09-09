@@ -210,7 +210,8 @@ fn no_mock_policy_metadata_is_actionable_and_not_overbroad() {
 fn no_mock_policy_lexical_exceptions_preserve_uncovered_production_hits() {
     // Exercise the scanner's real coverage decision with the current source
     // lines and an extra bad line on each path. The whole-tree gate below
-    // remains independent; no exception covers PBFT production markers.
+    // remains independent. PBFT warning markers retain an explicit unfinished
+    // production classification and owning issue; new gaps remain uncovered.
     command_output(
         {
             let mut command = Command::new("python3");
@@ -257,11 +258,20 @@ for path in paths:
     assert coverage(path, path_hits + [invented])[0] == "violation", path
 
 pbft_hits = [hit for hit in hits if hit.path == pbft]
-if pbft_hits:
-    assert coverage(pbft, pbft_hits)[0] == "violation", "PBFT must not be waived"
+assert pbft_hits, "the documented unfinished PBFT path must remain visible"
+status, entry = coverage(pbft, pbft_hits)
+assert status == "allowlist" and entry.get("justified_text"), (pbft, status)
+assert entry["category"] == "production_stub", "PBFT is still unfinished production code"
+assert entry["replacement_issue"] == "asupersync-gap-snapshot-transport-swim-pbft-e6drlx"
+without_pbft = dict(policy)
+without_pbft["allowlist_entries"] = [
+    row for row in policy["allowlist_entries"] if row.get("pattern") != pbft
+]
+assert coverage(pbft, pbft_hits, without_pbft)[0] == "violation"
 invented_pbft = scanner["Hit"](pbft, 0, 'return Ok("fake success");', ("fake",))
 assert coverage(pbft, [invented_pbft])[0] == "violation", "new PBFT gaps must fail"
-print(f"three lexical exceptions stay narrow; {len(pbft_hits)} live PBFT hits uncovered")
+assert coverage(pbft, pbft_hits + [invented_pbft])[0] == "violation"
+print(f"three lexical exceptions stay narrow; {len(pbft_hits)} live PBFT hits retain an unfinished-code owner")
 "#,
                 )
                 .current_dir(repo_path(""));
