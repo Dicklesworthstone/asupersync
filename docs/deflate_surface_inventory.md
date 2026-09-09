@@ -4,6 +4,14 @@ This runbook owns the terminal A1 inventory for `asupersync-0h6myr.5.1`
 and `CAP-HTTP-COMPRESSION`. The machine-readable authority is
 `artifacts/deflate_surface_inventory_v1.json`.
 
+The 2026-09-09 source review records eleven pin transitions through
+`a936ad83b`. It preserves the original KEEP decision, platform matrix,
+validation receipts and unresolved gaps as historical A1 evidence. The
+gRPC encode path now checks plaintext size before compression as well as
+the resulting frame size. The compression implementations, flate2 edges
+and backend versions remain unchanged; this review supplies no new platform
+or interoperability result.
+
 ## Decision
 
 The verdict is `KEEP_INCUMBENT`. This bead makes no production source change,

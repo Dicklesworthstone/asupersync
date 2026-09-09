@@ -5,6 +5,16 @@
   "capability_id": "CAP-CACHE-LAYOUT",
   "authority": "EXPERIMENT_EVIDENCE_ONLY",
   "captured_date_utc": "2026-07-27",
+  "source_review": {
+    "date_utc": "2026-09-09",
+    "commit": "a936ad83b243b0991c14be1117d81985cc41f749",
+    "scope": "Current source pins only. The measured benchmark, CachePadded implementation, all alignment fields, original measurements, platform matrix and terminal DEFER decision are unchanged. Historical execution receipts are not reruns on this commit.",
+    "transitions": [
+      {"path":".gitignore","previous_sha256":"b6e282deaef63c69bdc6dd053ef46743117c5c761e8f29b5641434c8838366c7","review":"Artifact and scratch rules changed; the cache experiment allowlist remains present."},
+      {"path":"src/runtime/scheduler/three_lane.rs","previous_sha256":"95133c33fbfac1ce32625234aca1a4fb262b6594d562ba5beb95aec8965f9156","review":"Scheduler lifecycle, caller-thread execution and task accounting changed outside WorkerCoordinator. Its next_wake CachePadded field and coordinator implementation are unchanged."},
+      {"path":"src/runtime/spawn_mailbox.rs","previous_sha256":"d7e36a0b2ceef7becbc1f8c298c3f61ffc77990bf5156d8b24e27aee1a9bfbad","review":"Checked spawn admission and obligation handling changed outside SpawnIdAllocator. Its eight CachePadded shard counters and allocator implementation are unchanged."}
+    ]
+  },
   "production_policy": {
     "global_alignment_bytes": 64,
     "global_change_made": false,
@@ -597,8 +607,8 @@
   "source_pins": [
     {
       "path": ".gitignore",
-      "sha256": "b6e282deaef63c69bdc6dd053ef46743117c5c761e8f29b5641434c8838366c7",
-      "line_count": 581
+      "sha256": "1a7d8ba56b0dd70453099f70c4ee25c1cd9c7e25216b807200ae8d6b4851c4e6",
+      "line_count": 585
     },
     {
       "path": "benches/lab_iocap_contention.rs",
@@ -622,13 +632,13 @@
     },
     {
       "path": "src/runtime/scheduler/three_lane.rs",
-      "sha256": "95133c33fbfac1ce32625234aca1a4fb262b6594d562ba5beb95aec8965f9156",
-      "line_count": 8210
+      "sha256": "8fca45d5c80d22aa5f57f91e3e5194278e3b95fac4138324cee468f24bd331de",
+      "line_count": 8554
     },
     {
       "path": "src/runtime/spawn_mailbox.rs",
-      "sha256": "d7e36a0b2ceef7becbc1f8c298c3f61ffc77990bf5156d8b24e27aee1a9bfbad",
-      "line_count": 5011
+      "sha256": "c528fdd6c4f7df5f722e6551f898c4089edda7f417c9899d651490a1d5d92bcc",
+      "line_count": 5217
     },
     {
       "path": "src/runtime/epoch_tracking.rs",

@@ -7,6 +7,16 @@
   "captured_date_utc": "2026-07-27",
   "benchmark_baseline_commit": "06c08d95a35acb93494be16778ad04eb3e96c0a1",
   "evidence_packet_baseline_commit": "876110528f810c3334a99450a521daa27995a3ec",
+  "source_review": {
+    "date_utc": "2026-09-09",
+    "commit": "a936ad83b243b0991c14be1117d81985cc41f749",
+    "scope": "Current source pins only; the original benchmark baselines, formal execution, measurements, gaps and terminal KEEP decision are unchanged historical evidence. No benchmark was rerun for this review.",
+    "transitions": [
+      {"path":"Cargo.toml","previous_sha256":"541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7","review":"Release versions, package exclusions, unrelated features and lint policy changed; the crossbeam-queue edge remains unchanged."},
+      {"path":"Cargo.lock","previous_sha256":"95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880","review":"Workspace versions and unrelated packages changed; crossbeam-queue 0.3.13 and crossbeam-utils 0.8.22 retain their checksums."},
+      {"path":"src/channel/mpsc.rs","previous_sha256":"fbf7913778316a4bb8e92402d4429fc820f979c6385f788989d74a41d21c0966","review":"Checked obligation admission was added and inline tests moved to mpsc_tests.rs. The channel still uses a single mutex and VecDeque, with no crossbeam queue edge. All five production crossbeam owners and the measured exporter benchmark are byte-identical to their recorded pins."}
+    ]
+  },
   "production_behavior_change_made": false,
   "dependency": {
     "manifest_name": "crossbeam-queue",
@@ -263,18 +273,18 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "541ed6be1f748cd2897f18ba2679c6d34ff84a57d480db5a11c40ff007f1f1c7",
-      "line_count": 1064
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
     },
     {
       "path": "Cargo.lock",
-      "sha256": "95d3aaec0e58be196f08e4b30792f90129213af86ae8e34d2c5862b9feb15880",
-      "line_count": 4665
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664
     },
     {
       "path": "src/channel/mpsc.rs",
-      "sha256": "fbf7913778316a4bb8e92402d4429fc820f979c6385f788989d74a41d21c0966",
-      "line_count": 6476
+      "sha256": "39406c42fe84013de2b2dffe2207cc034b3382700be3ace7f1bb94c7f8178807",
+      "line_count": 2096
     },
     {
       "path": "src/runtime/scheduler/global_queue.rs",

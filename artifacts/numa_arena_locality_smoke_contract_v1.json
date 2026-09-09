@@ -3,6 +3,12 @@
   "runner_bundle_schema_version": "numa-arena-locality-smoke-bundle-v1",
   "runner_report_schema_version": "numa-arena-locality-smoke-run-report-v1",
   "runner_script": "scripts/run_numa_arena_locality_smoke.sh",
+  "layout_review": {
+    "date_utc": "2026-09-09",
+    "source_commit": "a936ad83b243b0991c14be1117d81985cc41f749",
+    "reason": "RegionRecord now stores shared state and RegionInner behind Arc and keeps Send-only finalizers outside that shared inner. Its arena slot is 672 bytes smaller than the August projection; 1024 region slots reduce this size-based estimate by 688128 bytes. Task, obligation and recycler capacities are unchanged.",
+    "scope": "These values sum inline arena slots and TaskRecord recycler storage only. They exclude allocations behind Arc and other fields, so the smaller estimate is not measured RSS or a total-memory reduction. Placement, touch, synthetic latency, fallback and ownership projections are unchanged."
+  },
   "report_artifacts": [
     {
       "schema_version": "asupersync.numa-arena-locality-report.v1",
@@ -43,8 +49,8 @@
         "task_record_pool_touches_by_cohort": [3200,640,640,640,640,640,640,640]
       },
       "expected_report_projection_tracing_integration_override": {
-        "rss_estimated_bytes": 4579328,
-        "projection_hash": 590824046390275574
+        "rss_estimated_bytes": 3891200,
+        "projection_hash": 7122571150300955625
       },
       "expected_report_projection": {
         "allocator_contention_events": 50,
@@ -59,10 +65,10 @@
         "operator_verdict": "ready_for_rch",
         "ownership_preserved": true,
         "placement_fingerprint": 16186555795550753782,
-        "projection_hash": 13334944783242869037,
+        "projection_hash": 5093211075760995019,
         "region_capacity": 1024,
         "remote_touch_reduction_ratio": 0.3352,
-        "rss_estimated_bytes": 4526080,
+        "rss_estimated_bytes": 3837952,
         "safe_fallback_profile": "disabled",
         "scenario_id": "AA-NUMA-ARENA-LOCALITY-WIN-64C-256G",
         "selected_policy": "cohort_pinned",
@@ -108,8 +114,8 @@
         "task_record_pool_touches_by_cohort": [3200,640,640,640,640,640,640,640]
       },
       "expected_report_projection_tracing_integration_override": {
-        "rss_estimated_bytes": 4579328,
-        "projection_hash": 16319984444304610262
+        "rss_estimated_bytes": 3891200,
+        "projection_hash": 4680667146276906575
       },
       "expected_report_projection": {
         "allocator_contention_events": 61,
@@ -126,10 +132,10 @@
         "operator_verdict": "fallback_only",
         "ownership_preserved": true,
         "placement_fingerprint": 16186555795550753782,
-        "projection_hash": 7238730300032333139,
+        "projection_hash": 2145234591242013909,
         "region_capacity": 1024,
         "remote_touch_reduction_ratio": 0.0,
-        "rss_estimated_bytes": 4526080,
+        "rss_estimated_bytes": 3837952,
         "safe_fallback_profile": "disabled",
         "scenario_id": "AA-NUMA-ARENA-LOCALITY-LOW-CONFIDENCE-FALLBACK",
         "selected_policy": "disabled",
@@ -175,8 +181,8 @@
         "task_record_pool_touches_by_cohort": [1024,1024,1024,1024,1024,1024,1024,1024]
       },
       "expected_report_projection_tracing_integration_override": {
-        "rss_estimated_bytes": 4579328,
-        "projection_hash": 5320284201290239861
+        "rss_estimated_bytes": 3891200,
+        "projection_hash": 10639483891190942924
       },
       "expected_report_projection": {
         "allocator_contention_events": 66,
@@ -193,10 +199,10 @@
         "operator_verdict": "fallback_only",
         "ownership_preserved": true,
         "placement_fingerprint": 14518773727983361882,
-        "projection_hash": 1316302406687632124,
+        "projection_hash": 12903930801098385010,
         "region_capacity": 1024,
         "remote_touch_reduction_ratio": 0.0,
-        "rss_estimated_bytes": 4526080,
+        "rss_estimated_bytes": 3837952,
         "safe_fallback_profile": "disabled",
         "scenario_id": "AA-NUMA-ARENA-LOCALITY-NO-WIN-FALLBACK",
         "selected_policy": "disabled",
@@ -242,8 +248,8 @@
         "task_record_pool_touches_by_cohort": []
       },
       "expected_report_projection_tracing_integration_override": {
-        "rss_estimated_bytes": 4579328,
-        "projection_hash": 14785312561949101708
+        "rss_estimated_bytes": 3891200,
+        "projection_hash": 1089880803185802821
       },
       "expected_report_projection": {
         "allocator_contention_events": 0,
@@ -260,10 +266,10 @@
         "operator_verdict": "template_only",
         "ownership_preserved": true,
         "placement_fingerprint": 675868731199239589,
-        "projection_hash": 12671276796678330901,
+        "projection_hash": 3670723093120693203,
         "region_capacity": 1024,
         "remote_touch_reduction_ratio": 0.0,
-        "rss_estimated_bytes": 4526080,
+        "rss_estimated_bytes": 3837952,
         "safe_fallback_profile": "disabled",
         "scenario_id": "AA-NUMA-ARENA-LOCALITY-REAL-HOST-TEMPLATE",
         "selected_policy": "disabled",
