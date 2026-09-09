@@ -11,6 +11,11 @@
     "source_commit": "0e22fec3adabc68f9ad9d8fca4fda83306b51218",
     "previous_registry_commit": "b76d2db92a4cfb8f4892d0d4d294be36bc44d9c1",
     "previous_census_commit": "9eb0600e6",
+    "subsequent_authority_pin_review": {
+      "source_commit": "cad61b7b1b0238f9925b68c3f58e1927e3ee2b79",
+      "change": "ADR005 adds the existing offline-tuner-logging-parity scenario to its evidence roster. The typed-format DEP-ADR-001 authority, capability decisions, schema definitions, codecs and corpus evidence are unchanged.",
+      "evidence_boundary": "This shared registry pin update does not rerun the recorded offline-tuner campaign or grant new typed-format authority."
+    },
     "scope": "Reviewed seven changed source pins and the lexical census against the v0.4.9 inventory. Policy authority, generic codec decisions, payload goldens, historical corpus bytes, evidence-state partitions, and the 48-path pin scope are retained.",
     "changes": [
       "Cargo.toml adds release packaging exclusions, the opt-in remote-service feature, updated workspace versions and lint policy. Cargo.lock changes workspace versions and chacha20 0.10.1 to 0.10.2. The three registered serialization dependencies retain their versions, checksums and configuration.",
@@ -1261,7 +1266,7 @@
     },
     {
       "path": "artifacts/dependency_api_adr_registry_v1.json",
-      "sha256": "aba29040cbbcc6daba7166bbe0a3eacca1483b4c4522125bd5d93f6c0091d3d1"
+      "sha256": "54c022426dfb1053607621fbdf7a1e4d9b4a4caad85460201eb44654ae512f0e"
     }
   ],
   "unknown_blockers": [],

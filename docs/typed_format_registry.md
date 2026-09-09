@@ -64,6 +64,11 @@ high-risk persisted call from hiding behind an aggregate count.
 
 ### v0.4.11 source review
 
+The subsequent `cad61b7b1` authority-pin review records ADR005's addition of
+the existing `offline-tuner-logging-parity` scenario. DEP-ADR-001 and the
+typed-format decisions, schemas, codecs and corpus evidence are unchanged;
+this inventory update does not rerun the offline-tuner campaign.
+
 The 2026-09-09 review records 4,384 Rust files, 6,756 literal JSON tokens and
 259 source paths containing direct JSON tokens. Seven inline-test extractions
 replace their original paths; extracted QUIC tests add a second path. Other

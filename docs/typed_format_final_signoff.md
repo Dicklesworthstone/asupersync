@@ -56,6 +56,9 @@ published-v0.3.9 corpus remain unchanged. Updated pins do not constitute a new
 historical writer run or proof of lossless production replay, executable
 snapshot restoration, or eventual quiescence.
 
+The later registry join includes the reviewed `cad61b7b1` ADR005 scenario
+addition. It preserves DEP-ADR-001 and all typed-format decision authority.
+
 ## Registry reconciliation
 
 The terminal packet requires the live registry to retain:
