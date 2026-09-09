@@ -114,7 +114,12 @@ fn measure_driverless_wait<T: Send + 'static>(
 fn note_if_spinning(failures: &mut Vec<String>, label: &str, outcome: IdleOutcome) {
     if outcome.cpu_fraction_percent > MAX_IDLE_CPU_PERCENT {
         failures.push(format!(
-            "{label}: a driverless wait must park, not spin (GH#67 / tx9j0f): {outcome:?}"
+            "{label}: a driverless wait must park, not spin (GH#67 / tx9j0f): \
+             {cpu} ms of CPU over a {wall} ms idle window ({percent} %, limit {limit} %)",
+            cpu = outcome.cpu_ms,
+            wall = outcome.wall_ms,
+            percent = outcome.cpu_fraction_percent,
+            limit = MAX_IDLE_CPU_PERCENT,
         ));
     }
 }
@@ -203,7 +208,7 @@ fn driverless_socket_waits_park_instead_of_spinning() {
     // Unix listener: accept waits for a std peer to connect.
     let dir = tempfile::tempdir().expect("create temp dir");
     let path = dir.path().join("driverless_idle.sock");
-    let unix_listener = UnixListener::bind(&path).expect("bind unix listener");
+    let unix_listener = block_on(UnixListener::bind(&path)).expect("bind unix listener");
     let connect_path = path.clone();
     let (accept_outcome, accepted) = measure_driverless_wait(
         "unix listener accept",
