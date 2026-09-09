@@ -18,8 +18,8 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "bad9549b68314af8c45635b57ee55939e90bb0c8dbe82fca5b2fa5748282d02c";
-const DOC_SHA256: &str = "51c93058dd653ccd2c4700da56273868700e8def28d976acb3fe0b458bde3f82";
+const ARTIFACT_SHA256: &str = "e45f6c161d3cd16b3ea5431606586a423f8ac8cf90b6242c6893e45435fcaf4c";
+const DOC_SHA256: &str = "4b9cfb6d563231304905c044e9172668c6afa0ca5d666ed7a73139b4b15ff962";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
 const BEAD_ID: &str = "asupersync-dep-p7-kafka-removal-sarszu.1.5";
@@ -228,7 +228,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.3",
         role: "contract_file",
         path: "tests/kafka_downstream_user_journey_inventory_contract.rs",
-        sha256: "8a8c2a0bc219c11e8fa1f6bbbf5a2c05287d794d4fa72e58a5f20976d4bb2f57",
+        sha256: "02368959273ac4a19c2c19d4b32140ed4bbe983469ae60909993daec438b51f4",
         byte_count: 219_718,
         record_count: 5_452,
     },
@@ -252,7 +252,7 @@ const CHILD_FILE_PINS: &[ChildFilePin] = &[
         packet_id: "K0.4",
         role: "contract_file",
         path: "tests/kafka_broker_fixture_provenance_matrix_contract.rs",
-        sha256: "0b9d92c304078719df11232dd5ef0250117985440155d6083354a6e4fb9c96c8",
+        sha256: "7d7906b249970b5b67f1740f7bfa18870a1f2ae748b84e4b88dec172306dd04e",
         byte_count: 133_727,
         record_count: 3_567,
     },

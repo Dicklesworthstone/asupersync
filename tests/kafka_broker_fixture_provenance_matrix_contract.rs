@@ -18,7 +18,7 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_broker_fixture_provenance_matrix_v1.json";
 const DOC_PATH: &str = "docs/kafka_broker_fixture_provenance_matrix.md";
 const K0_3_PATH: &str = "artifacts/kafka_downstream_user_journey_inventory_v1.json";
-const ARTIFACT_SHA256: &str = "2228335cc9b1fd4e8d221d8356ce1d6610b271b2a3f4e8b45ab2f23ce982f09c";
+const ARTIFACT_SHA256: &str = "74d07801b6f5464733eb9974577b3bc1ca6509e19ea0fbc0aed423ac94ca0017";
 const DOC_SHA256: &str = "23b278530c81ef134c9a15c7e71ce3d1a8900f3abaaff2287daaa7138fab9196";
 const ARTIFACT_ID: &str = "kafka-broker-fixture-provenance-matrix-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";

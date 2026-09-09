@@ -78,7 +78,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 31852,
       "record_count": 299,
-      "sha256": "2637b0607e1f283e308d1857a2ad8e1ccea48cef3a50a1298e7c8d5c3c0eacb3"
+      "sha256": "e45f6c161d3cd16b3ea5431606586a423f8ac8cf90b6242c6893e45435fcaf4c"
     },
     {
       "input_id": "K1-INPUT-K0-5-DOCUMENT",
@@ -94,7 +94,7 @@
       "path": "tests/kafka_k0_baseline_disposition_contract.rs",
       "byte_count": 107239,
       "record_count": 2629,
-      "sha256": "332c2c2e1690f2e9cb80b88280c076bc07124e729c49494ed6533ec85ce35e11"
+      "sha256": "92e29c629b55d365a083e194f632c7a66a0935c3ea354427e2c6779d3b9fdc22"
     },
     {
       "input_id": "K1-INPUT-ADR",
