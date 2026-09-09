@@ -299,11 +299,29 @@ fn observability_evidence_runner_lists_and_self_tests() {
 
     let artifact_root = repo_path("target/mock-code-finder/asupersync-uw9zg9-contract-test")
         .join(std::process::id().to_string());
+    // A wall-clock correction must not invalidate the failed-child summary.
+    let backwards_clock = r#"() {
+        if [[ "$1" == "+%s%3N" ]]; then
+            if [[ -e "$ASUP_OBSERVABILITY_TEST_CLOCK_MARKER" ]]; then
+                printf '0\n'
+            else
+                : > "$ASUP_OBSERVABILITY_TEST_CLOCK_MARKER"
+                printf '1000\n'
+            fi
+        else
+            command date "$@"
+        fi
+    }"#;
     let self_test_output = Command::new("bash")
         .arg("scripts/run_observability_evidence.sh")
         .arg("--self-test")
         .arg("--artifact-root")
         .arg(&artifact_root)
+        .env("BASH_FUNC_date%%", backwards_clock)
+        .env(
+            "ASUP_OBSERVABILITY_TEST_CLOCK_MARKER",
+            artifact_root.join("clock-step-observed"),
+        )
         .current_dir(repo_path(""))
         .output()
         .expect("run observability evidence runner self-test");

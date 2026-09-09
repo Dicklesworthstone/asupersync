@@ -18,7 +18,7 @@ use std::path::PathBuf;
 const ARTIFACT_PATH: &str = "artifacts/kafka_k0_baseline_disposition_v1.json";
 const DOC_PATH: &str = "docs/kafka_k0_baseline_disposition.md";
 const TRACKER_PATH: &str = ".beads/issues.jsonl";
-const ARTIFACT_SHA256: &str = "e45f6c161d3cd16b3ea5431606586a423f8ac8cf90b6242c6893e45435fcaf4c";
+const ARTIFACT_SHA256: &str = "54b6bb375a97aaf6fc47d275d1f7832781380dafed531e8cf23c964a8834fcc2";
 const DOC_SHA256: &str = "4b9cfb6d563231304905c044e9172668c6afa0ca5d666ed7a73139b4b15ff962";
 const ARTIFACT_ID: &str = "kafka-k0-baseline-disposition-v1";
 const PROGRAM_ID: &str = "asupersync-ir2uf0";
@@ -83,7 +83,7 @@ const ROUTE_OWNER_ID_SHA256: &str =
 const REDUCED_UNKNOWN_SELECTOR_SHA256: &str =
     "4db0a2323e257d602025afc0647109df63c1a401f2bb323a5a1a3f95bc8c8f4a";
 const SOURCE_PIN_FULL_ROW_SHA256: &str =
-    "53bcde5ffc35c3c0a78f2feb4a50098aa53b13d32432dea0e1f3d21884f337ce";
+    "9b70ef098234a5c52c9c668955a6d8088690b5417404f3ff0f980027835ea341";
 const SOURCE_PIN_PATH_SHA256: &str =
     "c9f1f8ae0ce140c27e05919606a947d93c660f9aa978e762f1cbcc232c200ddb";
 const SOURCE_PIN_OVERLAP_SHA256: &str =

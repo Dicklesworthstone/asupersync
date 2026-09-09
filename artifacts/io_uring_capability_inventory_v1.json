@@ -264,7 +264,7 @@
     },
     {
       "path": "artifacts/unsafe_boundary_ledger_v1.json",
-      "sha256": "548644695eac7f83e9c6545e3f447780cdfbc9bc0986e3d3fde7611230707f77",
+      "sha256": "76517a81673a84ef3c4815884fe8add267cfdc3d8f06f84848391bcbdd5b0529",
       "line_count": 6441,
       "role": "machine inventory of low-level reactor and harness boundaries"
     },
@@ -276,8 +276,8 @@
     },
     {
       "path": "docs/unsafe_boundary_ledger.md",
-      "sha256": "49c614b57035ffbe7f2085f012553ed92a7442f63cd34b4afb762eaa26c1ed1e",
-      "line_count": 224,
+      "sha256": "b5645fc8599d55af618b013006cb42505ee75a0362292bb781a0bce98709551d",
+      "line_count": 232,
       "role": "category-level review and no-claim policy"
     }
   ],

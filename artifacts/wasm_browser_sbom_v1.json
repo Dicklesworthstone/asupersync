@@ -70,7 +70,7 @@
       "path": "packages/browser-core/index.js",
       "package": "@asupersync/browser-core",
       "kind": "package-file",
-      "sha256": "8e502eb39a97fbf9eecf9a8ad80c7ebb114ee52443e1cb60ffce63f62e93935e"
+      "sha256": "f8144b2f31dd4fb95356b1eaca6b5f11563b3a0bd865232cc9b95cc2d65dd101"
     },
     {
       "path": "packages/browser-core/index.d.ts",
