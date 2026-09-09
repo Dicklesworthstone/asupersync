@@ -3206,8 +3206,28 @@ impl RuntimeBuilder {
     /// thread runs the worker, so work spawned through a handle keeps
     /// making progress (unlike Tokio's `current_thread`, which only runs
     /// inside `block_on`). The root future itself is polled in place on the
-    /// caller and may be `!Send` and non-`'static`. Nested `block_on` calls
-    /// on the driving thread poll their future directly, as before.
+    /// caller and may be `!Send` and non-`'static`.
+    ///
+    /// A nested `block_on` on the same runtime from the root future (or from
+    /// its destructor) drives the same worker re-entrantly on the same
+    /// thread, with its own registered root task and its own bounded
+    /// post-root drain. A `block_on` that cannot borrow the worker — from
+    /// inside a task poll, from the runtime's background thread, or from
+    /// another OS thread while the worker is already on loan — polls its
+    /// future directly on the caller as before GH#58: that root is not a
+    /// registered task, and `spawn_local` from it is accepted only when the
+    /// calling thread is itself a runtime worker.
+    ///
+    /// Caveat: the worker is parked for the duration of each poll of the
+    /// root future, so nothing else on the runtime (spawned tasks, timers,
+    /// reactor turns) progresses until that poll returns. A root that blocks
+    /// its thread synchronously on a spawned task — a std channel `recv`, a
+    /// thread join — deadlocks here, whereas a plain `worker_threads(1)`
+    /// runtime keeps that task running on its own worker thread; await the
+    /// task instead. After the root completes, `block_on` drains work that is
+    /// already runnable for a bounded number of dispatch turns and then
+    /// returns; tasks parked on timers or I/O are left to the background
+    /// thread rather than waited for.
     ///
     /// Configuring more than one worker after this preset keeps the plain
     /// worker-thread topology (`worker_threads(1)` alone does not enable the
@@ -3593,6 +3613,21 @@ impl Runtime {
     /// available via [`Runtime::current_handle`]. This allows futures inside
     /// `block_on` to spawn tasks onto the real scheduler without having to
     /// thread the handle through every layer.
+    ///
+    /// How the future runs depends on the runtime flavor:
+    ///
+    /// - On a [`RuntimeBuilder::current_thread`] runtime the calling thread
+    ///   borrows the runtime's single worker for the life of the call: the
+    ///   root future is a registered task with `spawn_local` authority, every
+    ///   task, timer and reactor turn of the runtime runs on the caller, and
+    ///   nothing else progresses while the root itself is being polled. See
+    ///   the preset's docs for the nesting rules and the synchronous-blocking
+    ///   caveat. After the root completes, already-runnable work is drained
+    ///   for a bounded number of dispatch turns before this returns.
+    /// - On every other flavor the future is polled in place on the caller
+    ///   with a request-scoped [`Cx`](crate::cx::Cx) and is not a registered
+    ///   task; spawned tasks run on the worker threads and keep running after
+    ///   this returns.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _guard = ScopedRuntimeHandle::new(self.handle());
         // #41: install an ambient Cx backed by this runtime's drivers
@@ -3610,10 +3645,12 @@ impl Runtime {
         // GH#58 / br-asupersync-94jh37: on a `RuntimeBuilder::current_thread()`
         // runtime the calling thread drives the single worker for the life
         // of this call and the root is a registered task (see
-        // `crate::runtime::current_thread`). The driver hands the future
-        // back untouched when the worker cannot be borrowed (nested or
-        // concurrent `block_on`, worker thread, shutdown), in which case the
-        // caller-polled path below runs exactly as before.
+        // `crate::runtime::current_thread`). A nested call from the root
+        // future drives the worker re-entrantly. The driver hands the future
+        // back untouched when the worker cannot be borrowed (a call from
+        // inside a task poll, a concurrent call from another thread while the
+        // worker is on loan, the worker thread itself, shutdown), in which
+        // case the caller-polled path below runs exactly as before.
         let future = match self.inner.current_thread_driver.get() {
             Some(driver) => match driver.drive(&self.inner.scheduler, &request_cx, future) {
                 Ok(output) => return output,

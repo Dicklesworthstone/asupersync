@@ -80,6 +80,19 @@ collects the changes since the published `v0.4.10` source.
   an inner panic, while a distinct nested runtime keeps its own task ownership.
   The root also counts toward `max_tasks`: a limit of one leaves no capacity
   for child tasks while `block_on` is running.
+  Caveat for `RuntimeBuilder::current_thread()`: the calling thread is the
+  runtime's only worker while `block_on` runs, and that worker is parked for
+  the duration of every poll of the root future, so no spawned task, timer,
+  or reactor turn progresses until the poll returns. A root that blocks its
+  thread synchronously on a spawned task (a std channel `recv`, a thread join)
+  now deadlocks where a plain `worker_threads(1)` runtime kept that task
+  running on its own thread; await the task instead. A `block_on` that cannot
+  borrow the worker (from inside a task poll, from the background thread, or
+  from another OS thread while the worker is on loan) polls its future on the
+  caller as before, without a registered root task. After the root completes,
+  `block_on` drains already-runnable work for a bounded number of turns and
+  never waits on timers or I/O; tasks parked on them continue on the
+  background thread.
 - Dropping the final runtime owner from one of its async workers transfers
   worker joins to a teardown thread, allowing the current poll to return
   without trying to join itself. The teardown job retains runtime state
