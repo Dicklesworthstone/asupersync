@@ -572,6 +572,7 @@ fn assert_current_source_review(artifact: &Value) {
             "artifacts/dependency_capability_registry_v1.json",
             BASELINE_PATH,
             MATRIX_PATH,
+            "artifacts/dependency_verification_final_signoff_v1.json",
         ])
     );
     for (path, expected) in hashes {

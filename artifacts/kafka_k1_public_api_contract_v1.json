@@ -82,7 +82,7 @@
       "path": "artifacts/kafka_k1_obligation_index_v1.json",
       "byte_count": 44410,
       "record_count": 751,
-      "sha256": "062daa19feae37b4822bfd4fc76a8549b5f4ef6c04696ad7fe0ac161b676bef7"
+      "sha256": "2166b455ef1ea7cbd9e58a92904ed95f3d3de80bfa34d38cd42b9d7a9779df08"
     },
     {
       "input_id": "K1-3-INPUT-K1-1-DOCUMENT",
@@ -98,7 +98,7 @@
       "path": "tests/kafka_k1_client_contract.rs",
       "byte_count": 99472,
       "record_count": 2688,
-      "sha256": "875cfd9ad625a59794030bb30605aeabda87fdfcbd16397fb494f1e15f1c27fd"
+      "sha256": "2524c22a2d0397508ba5231025fe86e0df7b94670e017a4d8d44636f20f65685"
     },
     {
       "input_id": "K1-3-INPUT-K0-5",
@@ -106,7 +106,7 @@
       "path": "artifacts/kafka_k0_baseline_disposition_v1.json",
       "byte_count": 31852,
       "record_count": 299,
-      "sha256": "54b6bb375a97aaf6fc47d275d1f7832781380dafed531e8cf23c964a8834fcc2"
+      "sha256": "b039c2a5924fa1710f9bb5f0f606575f644874f738893e382d29147ac6c983ae"
     },
     {
       "input_id": "K1-3-INPUT-K0-1",
@@ -130,7 +130,7 @@
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
       "byte_count": 1295370,
       "record_count": 19932,
-      "sha256": "047e7e70b952397847916f8c4d16c1655c40fa6e726da1d249a43b9068feb61e"
+      "sha256": "81c63df6e2584a1a882d4dd5977afbf0154cad817870f0fafe5292e15959dee4"
     },
     {
       "input_id": "K1-3-INPUT-ADR",

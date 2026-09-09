@@ -161,7 +161,7 @@
     "authority_anchor": {
       "artifact_id": "kafka-downstream-user-journey-inventory-v1",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "sha256": "047e7e70b952397847916f8c4d16c1655c40fa6e726da1d249a43b9068feb61e",
+      "sha256": "81c63df6e2584a1a882d4dd5977afbf0154cad817870f0fafe5292e15959dee4",
       "authority_revision": "ae22e710d87412b38e546b32e9702106619481d5",
       "captured_date_utc": "2026-08-03",
       "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN"
@@ -293,7 +293,7 @@
     {
       "pin_id": "KAFKA-K0-4-PIN-001-K0-3-AUTHORITY",
       "path": "artifacts/kafka_downstream_user_journey_inventory_v1.json",
-      "sha256": "047e7e70b952397847916f8c4d16c1655c40fa6e726da1d249a43b9068feb61e",
+      "sha256": "81c63df6e2584a1a882d4dd5977afbf0154cad817870f0fafe5292e15959dee4",
       "byte_count": 1295370,
       "record_count": 19932
     },

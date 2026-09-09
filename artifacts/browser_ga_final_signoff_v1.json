@@ -135,7 +135,7 @@
     "scope": "Current candidate package versions and hashes only. The original decision, candidate window, package rows, and GA authority remain historical and do not authorize this candidate's publication or GA promotion.",
     "current_hashes": {
       "packages/browser-core/package.json": "e3007336e5420c5e912744dbdc0874ada1977d61761b81d3ca6cf039aa0ea006",
-      "packages/browser-core/index.js": "f8144b2f31dd4fb95356b1eaca6b5f11563b3a0bd865232cc9b95cc2d65dd101",
+      "packages/browser-core/index.js": "b56619dd48edf7564d0742719b13bc83e028c778ec177482cd083dc838959abe",
       "packages/browser-core/index.d.ts": "7b4c9697f9bee810f467b99c83bc22f1ad508e76349f1353e0f60a4f60142442",
       "packages/browser-core/asupersync.js": "7e2b71cc51108487491728418b8827a17f4666369cefe791328457730daf696c",
       "packages/browser-core/asupersync.d.ts": "6fa9bdc6f4221bd7417c434755a322a855e7e5dbfff18abceb73532d6732499a",
