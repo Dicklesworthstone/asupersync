@@ -871,7 +871,10 @@ mod tests {
 
         let state = Arc::new(ContendedMutex::new("request_race", RuntimeState::new()));
         let scheduler = Arc::new(ThreeLaneScheduler::new(1, &state));
-        let driver = Arc::new(CurrentThreadDriver::new(None, 0x5eec));
+        let driver = Arc::new(CurrentThreadDriver::new(
+            None,
+            crate::runtime::local::allocate_local_store_key(),
+        ));
         let caller_driver = Arc::clone(&driver);
         let (sent, received) = mpsc::channel();
         let caller = std::thread::spawn(move || {
@@ -940,15 +943,17 @@ mod tests {
             ScopedLocalStoreKey, keyed_local_store_count, local_task_count,
         };
         let before = keyed_local_store_count();
-        let driver = CurrentThreadDriver::new(None, 0x5eed);
-        let other = CurrentThreadDriver::new(None, 0x5eee);
+        let driver_key = crate::runtime::local::allocate_local_store_key();
+        let other_key = crate::runtime::local::allocate_local_store_key();
+        let driver = CurrentThreadDriver::new(None, driver_key);
+        let other = CurrentThreadDriver::new(None, other_key);
         {
-            let _key = ScopedLocalStoreKey::new(0x5eed);
+            let _key = ScopedLocalStoreKey::new(driver_key);
             // Touching the store materializes this runtime's entry.
             assert_eq!(local_task_count(), 0);
         }
         {
-            let _key = ScopedLocalStoreKey::new(0x5eee);
+            let _key = ScopedLocalStoreKey::new(other_key);
             assert_eq!(local_task_count(), 0);
         }
         assert_eq!(keyed_local_store_count(), before + 2);
