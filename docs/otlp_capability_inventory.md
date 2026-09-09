@@ -13,20 +13,36 @@ The governing decision is `DEP-ADR-003`: `ADDITIVE_COEXISTENCE`,
 OpenTelemetry ecosystem bridge cover different signals, so both remain. This
 inventory authorizes no dependency exit.
 
+The signal, profile, gap, and execution rows preserve the original July
+inventory. They are not a current support matrix: the later
+`docs/otlp_metrics_mapping_contract.md` records the additive owned fixed
+metrics provider and corrects this packet's cumulative-temporality and
+snapshot-queue claims. Consult the signal-specific contracts before using a
+frozen gap as a statement about current source.
+
+On 2026-09-09, the root manifest, lock, and `otel.rs` pins were reviewed from
+`9eb0600e6ef4d17633dff3dc43ad99c64e72adbe` through
+`594e4b37a3aa1d193beb273e15079d3ed19a8cab`. Public module declarations, the
+OpenTelemetry dependency versions/features, and the fixed metrics mapping
+remain unchanged. The source delta adds disabled privacy-scanner fast paths,
+fail-closed handling of invalid direct privacy patterns, and allocation-free
+Luhn validation. Manifest changes concern versioning, packaging, a separate
+remote-service feature, and lint configuration. The refreshed source pins do
+not renew any historical collector, graph, or downstream execution receipt.
+
 ## Frozen signal map
 
-| Signal or integration | Current production state | Gate | Production route | Child |
+| Signal or integration | Captured production state | Gate | Production route | Child |
 | --- | --- | --- | --- | --- |
 | Logs | `SHIPPED_OWNED` | `metrics` | `LogsSnapshot::to_otlp_protobuf` to `OtlpLogsHttpExporter::export_async` to owned OTLP/HTTP | A5 |
 | Metrics | `SHIPPED_VIA_DEPENDENCY` | `metrics` | `OtelMetrics` records into a caller-supplied `Meter`; the embedder SDK collects and exports | A3 |
 | Traces | `SHIPPED_OWNED_INPROCESS` | default | owned bounded in-process exporter; collector-bound spans use an embedder `BoxedTracer` | A4 |
 | External provider bridge | `SHIPPED_VIA_DEPENDENCY` | `metrics` | all three `OtelMetrics` constructors accept a caller-supplied `Meter` | A11 |
 
-The asymmetry is intentional and binding. Logs have an owned production wire
-encoder. Metrics and traces do not: their owned request builders remain
-test/fuzz-gated because the generated reference messages carry the quarantined
-Tokio dependency chain. The default-feature trace pipeline must remain
-reachable even when `metrics` is disabled.
+At capture, logs had an owned production wire encoder; metrics and traces used
+test/fuzz-gated generated request builders with the quarantined Tokio chain.
+Later owned provider contracts supersede that captured absence. The
+default-feature trace pipeline must remain reachable when `metrics` is disabled.
 
 ## Supported feature profiles
 

@@ -796,14 +796,14 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "590cb3e34654e71708ca8b623007aaaa4b35b20d602c1455c16890ef7352a72c",
-      "line_count": 14523,
+      "sha256": "2f344446249759aad8880a443d1bdb87249630cb7e010ae35b69daca0d97803b",
+      "line_count": 15911,
       "anchors": ["pub enum CardinalityOverflow", "pub struct MetricsSnapshot", "pub struct OtelMetrics", "pub struct OwnedOtlpMetrics", "pub async fn send_owned_metrics", "pub fn metrics_request_from_snapshot"]
     },
     {
       "path": "src/observability/otlp_proto.rs",
-      "sha256": "1d9b19295230754329a93ce474c16366b01842ec1bf64796d5f5b42e16fe17c5",
-      "line_count": 8666,
+      "sha256": "72f8464319c42c3d33de55edd55fec0df6d80982f406cf0abced0fb644e00ee4",
+      "line_count": 8682,
       "anchors": ["MAX_DATA_POINTS_PER_METRIC", "pub(crate) enum AggregationTemporality", "pub(crate) enum MetricData", "pub(crate) struct ExportMetricsServiceRequest", "owned_otlp_metrics_numeric_invariants_refuse_nonfinite_and_reversed_ranges"]
     },
     {
@@ -892,8 +892,8 @@
     },
     {
       "path": "tests/protobuf_owned_otlp_schema_contract.rs",
-      "sha256": "839ea47e26ae4e9c9e85c60453ec5dbb778548ba4822bb0e365c8f5b932331d6",
-      "line_count": 2193,
+      "sha256": "6320979acfc73b769dc68c11076f85f419b4b970cfde0b35be1a5ad5ea8b6969",
+      "line_count": 2237,
       "anchors": ["The JSON-shaped fixture is not protobuf wire evidence", "Generated request builders are test/fuzz gated"]
     },
     {
@@ -904,20 +904,20 @@
     },
     {
       "path": "artifacts/otlp_capability_inventory_v1.json",
-      "sha256": "1703c7c62da34a9f18135ec4d24d3858f7a62b2956bbc83e1693dac681ba3c2c",
+      "sha256": "29ebbf5264b3c718daabba19402e51c84b6d04c226e313b7ec4e53d7fc2123de",
       "line_count": 1046,
       "anchors": ["SHIPPED_VIA_DEPENDENCY", "OTLP-GAP-01", "asupersync-5z2scg.2.3"]
     },
     {
       "path": "artifacts/protobuf_owned_otlp_schema_v1.json",
-      "sha256": "37a600ed0e6e02dcfc3fd4bed6617b33e25c57ee6e003087cf4a863d4ec5b132",
+      "sha256": "637be7b94f4271664892a1385a937cb467903f230b6c768dc0e326f209252e47",
       "line_count": 1126,
       "anchors": ["NEW_A3_SCHEMA_POLICY_NOT_INCUMBENT_PARITY", "data_points_per_metric", "signal_construction_separation"]
     },
     {
       "path": "docs/otlp_capability_inventory.md",
-      "sha256": "57c875073528cf4bc4df7ae24de9ac3605aa78d75bd4f382bfb23d2fbe4ca32f",
-      "line_count": 218,
+      "sha256": "994b243c48e8642bd329adcabc19b18a3db07d84b15979a269fb562ad3604187",
+      "line_count": 234,
       "anchors": ["Metrics | `SHIPPED_VIA_DEPENDENCY`", "no owned production metrics/traces encoder"]
     },
     {

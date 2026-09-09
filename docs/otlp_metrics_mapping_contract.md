@@ -13,6 +13,20 @@ Status: additive fixed-provider implementation complete. Focused execution is
 and a digest-pinned official `otelcol-contrib` v0.157.0 acceptance case. A fast
 loopback receiver remains only a wire/decode smoke test.
 
+Source-pin review on 2026-09-09 compared the prior inventory revision
+`9eb0600e6ef4d17633dff3dc43ad99c64e72adbe` with
+`594e4b37a3aa1d193beb273e15079d3ed19a8cab`. The fixed provider's configuration,
+mapping, 23 callbacks, and `send_owned_metrics` body are unchanged. The larger
+`otel.rs` adds privacy scanners whose production fast path remains disabled,
+conservative redaction for invalid direct regex patterns, and allocation-free
+Luhn validation; these do not add metric descriptors. The owned protobuf
+production code is unchanged; its test names now use registered A3 prefixes,
+and its contract checks that census. Six source pins were reconciled after
+this review, including the reviewed provenance updates in the parent OTLP and
+protobuf authority packets. The original claim revision and collector receipt above remain
+historical evidence; this refresh does not assert a new collector run or that
+the separate protobuf authority packet's live repository pins pass.
+
 ## Outcome
 
 This tranche reviews three OTLP-relevant metrics surfaces that must not be

@@ -15,6 +15,19 @@ default-plus-metrics library check are present. Unit-test execution, reference
 bytes, the feature matrix, and runtime integration remain pending. The public
 arbitrary `prost::Message` capability and every incumbent OTLP path stay intact.
 
+The execution statuses below describe the original authority packet. A
+2026-09-09 source review reconciled the root lock and three source pins from
+`544c0d0980f1bbfbec09f4c55da84a8f6d37995a` to
+`594e4b37a3aa1d193beb273e15079d3ed19a8cab`: the resolved OpenTelemetry/prost/
+tonic package records, generated-oracle features, all owned production schema
+bytes, and the fixed metrics mapper remain unchanged. Manifest changes add
+the release version, package exclusions, an optional remote-service feature,
+and lint configuration. OTLP unit identifiers and a test-only lint annotation
+changed; privacy helpers changed outside the finite schema. This review
+rebinds source provenance without renewing the historical execution receipts,
+refreshing excluded fuzz authority, or changing any schema, cap, or cutover
+decision.
+
 ## Outcome
 
 The root workspace has enough local evidence to pin the exact wire schema:
@@ -39,10 +52,10 @@ semantic conventions; it is not the OTLP wire-schema version.
 
 ## Root lock authority and stale fuzz lock
 
-The root `Cargo.lock` resolves `opentelemetry-proto` `0.32.0`. The fuzz manifest
-requests `0.32`, but `fuzz/Cargo.lock` still resolves `0.31.0`. That lock is
-explicitly excluded from A3 authority. This packet does not refresh it, run it,
-or treat it as v0.32 evidence.
+The root `Cargo.lock` resolves `opentelemetry-proto` `0.32.0`. At the original
+capture, the fuzz manifest requested `0.32` while its lock resolved `0.31.0`.
+That recorded lock is explicitly excluded from A3 authority. This packet does
+not refresh it, run it, or treat it as current fuzz-version evidence.
 
 Generated OTLP messages remain a test/fuzz differential oracle. They may not
 enter the default or `metrics` production graphs, because their tonic path

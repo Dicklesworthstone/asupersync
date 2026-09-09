@@ -40,13 +40,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664
     },
     {
       "path": "src/observability/mod.rs",
@@ -55,8 +55,8 @@
     },
     {
       "path": "src/observability/otel.rs",
-      "sha256": "590cb3e34654e71708ca8b623007aaaa4b35b20d602c1455c16890ef7352a72c",
-      "line_count": 14523
+      "sha256": "2f344446249759aad8880a443d1bdb87249630cb7e010ae35b69daca0d97803b",
+      "line_count": 15911
     },
     {
       "path": "src/observability/otlp_trace_exporter.rs",
