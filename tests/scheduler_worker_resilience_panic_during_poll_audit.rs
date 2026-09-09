@@ -139,7 +139,9 @@ fn run_loop_continues_after_execute_returns() {
 
     // The run_loop signature.
     assert!(
-        source.contains("pub fn run_loop(&mut self) {"),
+        source.contains(
+            "pub fn run_loop(&mut self) {\n        self.run_loop_until(&mut || false, false);\n    }"
+        ),
         "REGRESSION: ThreeLaneWorker::run_loop signature changed. \
          The dispatch loop is the structural mechanism for \
          worker resilience — without it, the worker can't \
@@ -147,18 +149,20 @@ fn run_loop_continues_after_execute_returns() {
     );
 
     // The continue-after-execute pattern.
-    let fn_marker = "pub fn run_loop(&mut self) {";
-    let start = source.find(fn_marker).expect("run_loop fn");
-    let window_end = (start + 3000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    let fn_marker = "pub(crate) fn run_loop_until(";
+    let start = source.find(fn_marker).expect("run_loop_until fn");
+    let end = source[start..]
+        .find("\n    }\n")
+        .expect("run_loop_until close");
+    let body = &source[start..start + end];
+    let execute = body.find("self.execute(task);").expect("task dispatch");
+    let after_execute = &body[execute..];
+    let branch_end = after_execute
+        .find("\n            }")
+        .expect("dispatch branch close");
 
     assert!(
-        body.contains("self.execute(task);") && body.contains("continue;"),
+        after_execute[..branch_end].contains("continue;"),
         "REGRESSION: run_loop no longer calls self.execute() \
          followed by continue. A panic in one task could now \
          exit the loop — the worker thread terminates and \
@@ -168,7 +172,9 @@ fn run_loop_continues_after_execute_returns() {
     // The shutdown gate is the loop's exit condition — NOT a
     // panic-driven exit.
     assert!(
-        body.contains("while !self.shutdown.load(Ordering::Relaxed) {"),
+        body.contains(
+            "'dispatch: loop {\n            if self.shutdown.load(Ordering::Relaxed) {\n                break;"
+        ),
         "REGRESSION: run_loop's exit condition is no longer \
          the shutdown atomic. If a non-shutdown condition \
          can break the loop, the worker may exit on the \

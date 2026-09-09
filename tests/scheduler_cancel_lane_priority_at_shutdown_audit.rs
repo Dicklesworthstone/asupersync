@@ -27,8 +27,8 @@
 //!   ```
 //!
 //!   It signals workers and wakes parked workers; the workers'
-//!   `run_loop` (three_lane.rs:3164) exits at the next
-//!   iteration of `while !self.shutdown.load(...)`. No explicit
+//!   `run_loop` delegates to `run_loop_until` with both optional
+//!   stop conditions disabled and exits at the next shutdown check. No explicit
 //!   "drain cancel lane before exiting" phase is needed because
 //!   the upper layer (Region::close) has already drained all
 //!   live tasks and their cancellations.
@@ -167,20 +167,27 @@ fn three_lane_scheduler_shutdown_is_minimal_signal_plus_wake() {
 #[test]
 fn run_loop_exits_on_shutdown_flag() {
     // Pin: the worker run loop checks `self.shutdown.load(...)`
-    // as its top-level loop condition. A regression that
+    // at the top of its dispatch loop. A regression that
     // removed this check would let workers run forever after
     // shutdown was signaled.
     let source = read_three_lane_source();
 
-    let fn_marker = "pub fn run_loop(&mut self) {";
-    let start = source.find(fn_marker).expect("run_loop fn");
-    let body_end = source[start..].find("\n    }\n").expect("run_loop close");
+    assert!(source.contains(
+        "pub fn run_loop(&mut self) {\n        self.run_loop_until(&mut || false, false);\n    }"
+    ));
+    let fn_marker = "pub(crate) fn run_loop_until(";
+    let start = source.find(fn_marker).expect("run_loop_until fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("run_loop_until close");
     let body = &source[start..start + body_end];
 
     assert!(
-        body.contains("while !self.shutdown.load(Ordering::Relaxed) {"),
-        "REGRESSION: run_loop no longer guards on \
-         `while !self.shutdown.load(Ordering::Relaxed)`. \
+        body.contains(
+            "'dispatch: loop {\n            if self.shutdown.load(Ordering::Relaxed) {\n                break;"
+        ),
+        "REGRESSION: run_loop_until no longer checks shutdown \
+         at the start of every dispatch iteration. \
          Without the check, workers will continue running \
          after shutdown is signaled — never exiting.\n\n\
          fn body:\n{body}",
@@ -193,7 +200,7 @@ fn run_loop_exits_on_shutdown_flag() {
         .matches("if self.shutdown.load(Ordering::Relaxed)")
         .count();
     assert!(
-        backoff_check_count >= 1,
+        backoff_check_count >= 2,
         "REGRESSION: run_loop's inner backoff loop no longer \
          re-checks the shutdown flag. A worker spinning in the \
          park backoff phase would not observe the flag flip \

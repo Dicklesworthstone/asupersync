@@ -1,3 +1,4 @@
+#[cfg(test)]
 mod tests {
     #![allow(
         clippy::pedantic,

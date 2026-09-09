@@ -151,11 +151,15 @@ fn worker_run_loop_sets_thread_local_fast_queue() {
     // forcing all in-worker spawns through the global path.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
-    let fn_marker = "pub fn run_loop(&mut self) {";
-    let start = source.find(fn_marker).expect("run_loop fn");
-    // run_loop is long; take the first ~500 lines for the
-    // setup section.
-    let body = source_window(&source, start, 500);
+    assert!(source.contains(
+        "pub fn run_loop(&mut self) {\n        self.run_loop_until(&mut || false, false);\n    }"
+    ));
+    let fn_marker = "pub(crate) fn run_loop_until(";
+    let start = source.find(fn_marker).expect("run_loop_until fn");
+    let setup_end = source[start..]
+        .find("'dispatch: loop {")
+        .expect("worker dispatch loop");
+    let body = &source[start..start + setup_end];
 
     assert!(
         body.contains("LocalQueue::set_current(self.fast_queue.clone())"),

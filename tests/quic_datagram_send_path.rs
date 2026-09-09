@@ -145,7 +145,8 @@ fn oversized_datagram_rejected_and_full_queue_drops_oldest() {
     let mut conn = fresh_connection();
 
     // A payload whose encoded frame exceeds the max DATAGRAM frame size is
-    // rejected, and nothing is enqueued.
+    // rejected, and nothing is enqueued. Before a peer CID is known, the
+    // protected packet budget is 1200 - (1 + 20-byte CID + 4-byte PN + 16-byte tag).
     let err = conn
         .send_datagram(&cx, Bytes::from(vec![0u8; 4096]))
         .expect_err("oversized datagram must be rejected");
@@ -153,8 +154,8 @@ fn oversized_datagram_rejected_and_full_queue_drops_oldest() {
         err,
         NativeQuicConnectionError::DatagramTooLarge {
             payload_len: 4096,
-            max_frame_size: 1200,
-            ..
+            encoded_len: 4099,
+            max_frame_size: 1159,
         }
     ));
     assert_eq!(conn.pending_outbound_datagram_count(), 0);

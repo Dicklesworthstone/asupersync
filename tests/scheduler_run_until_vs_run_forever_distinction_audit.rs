@@ -20,16 +20,11 @@
 //!      run_loop`** (three_lane.rs:3154):
 //!      ```ignore
 //!      pub fn run_loop(&mut self) {
-//!          while !self.shutdown.load(Ordering::Relaxed) {
-//!              if let Some(task) = self.next_task() {
-//!                  self.execute(task);
-//!                  continue;
-//!              }
-//!              ...
-//!          }
+//!          self.run_loop_until(&mut || false, false);
 //!      }
 //!      ```
-//!      Worker threads call this. Loops while !shutdown.
+//!      Worker threads call this. The shared dispatch loop checks shutdown;
+//!      this entry point disables its stop predicate and idle return.
 //!      Dispatches all tasks reaching the worker — never
 //!      returns until shutdown atomic is set.
 //!
@@ -176,20 +171,32 @@ fn read(rel: &str) -> String {
 
 #[test]
 fn run_loop_exits_only_on_shutdown_atomic() {
-    // Pin (link 1): run_loop loops while !shutdown. The
+    // Pin (link 1): run_loop disables the optional stop conditions. The
     // shutdown atomic is the ONLY exit condition. Without
     // this, the worker would exit early on some other
     // condition and stop processing spawned tasks.
     let source = read("src/runtime/scheduler/three_lane.rs");
 
     assert!(
-        source.contains("pub fn run_loop(&mut self) {")
-            && source.contains("while !self.shutdown.load(Ordering::Relaxed) {"),
+        source.contains(
+            "pub fn run_loop(&mut self) {\n        self.run_loop_until(&mut || false, false);\n    }"
+        ),
         "REGRESSION: run_loop signature or exit condition \
          changed. The worker-forever-loop semantics requires \
          shutdown-atomic-as-only-exit; otherwise spawned \
          tasks may be stranded.",
     );
+    let start = source
+        .find("pub(crate) fn run_loop_until(")
+        .expect("run_loop_until fn");
+    let end = source[start..]
+        .find("\n    }\n")
+        .expect("run_loop_until close");
+    let body = &source[start..start + end];
+    assert!(body.contains(
+        "'dispatch: loop {\n            if self.shutdown.load(Ordering::Relaxed) {\n                break;"
+    ));
+    assert!(body.contains("if self.shutdown.load(Ordering::Relaxed) || should_stop() {"));
 }
 
 #[test]

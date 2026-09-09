@@ -101,9 +101,7 @@ use std::time::{Duration, Instant};
 use crate::cx::Cx;
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::local::ScopedLocalStoreKey;
-use crate::runtime::scheduler::three_lane::{
-    ScopedWorkerId, ThreeLaneScheduler, ThreeLaneWorker, current_worker_id,
-};
+use crate::runtime::scheduler::three_lane::{ScopedWorkerId, ThreeLaneScheduler, ThreeLaneWorker};
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::spawn_mailbox::{
     self, LocalSpawnRequest, ScopedLocalSpawnLaneOwner, SpawnGateway, SpawnMailbox,
@@ -315,11 +313,7 @@ impl CurrentThreadDriver {
     /// thread itself, a concurrent borrower, a refused handover, or
     /// shutdown).
     fn acquire(&self, scheduler: &ThreeLaneScheduler) -> Option<Box<ThreeLaneWorker>> {
-        // A thread that is already inside a worker loop (this runtime's
-        // driving thread re-entering `block_on`, or any worker thread) keeps
-        // that worker's thread-local task store; a second worker on the same
-        // thread would share it.
-        if current_worker_id().is_some() || self.on_background_thread() {
+        if self.on_background_thread() {
             return None;
         }
         let mut slot = self.lock_slot();

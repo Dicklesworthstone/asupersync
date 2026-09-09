@@ -199,11 +199,12 @@ fn no_blanket_impl_for_display_or_error() {
 fn no_internal_server_error_substitution_in_handler_err_path() {
     // Pin (d)+(e): the FnHandler / FnHandler1..4 call sites do
     // NOT contain a hardcoded "Internal Server Error" message
-    // for the user-handler-error path. The two
-    // INTERNAL_SERVER_ERROR references in handler.rs are
-    // runtime-level (block_on contention, runtime build
-    // failure) — NOT user-error paths.
+    // for the user-handler-error path. Test-only extractor failures do
+    // not belong to the production dispatch surface.
     let source = read("src/web/handler.rs");
+    let (source, _) = source
+        .split_once("#[cfg(test)]\nmod tests {")
+        .expect("separate the production handler from its test fixtures");
 
     // Find every `INTERNAL_SERVER_ERROR` occurrence and verify
     // it is in a runtime / block_on context, not a handler-Err

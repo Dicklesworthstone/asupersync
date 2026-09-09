@@ -12,8 +12,8 @@
 //!   `normalize_trace_default` returns a trace of the same length, and
 //!   `HappensBeforeGraph::from_trace` / `RaceDetector::from_trace` run on it;
 //! - `RuntimeHandle::trace_snapshot` returns the same view;
-//! - planted negative: a runtime that spawned nothing exports no `Spawn`
-//!   event.
+//! - planted negative: an unused runtime exports no `Spawn` event; driving
+//!   an empty root exports exactly that root's `Spawn` and `Complete` events.
 //!
 //! No-claim: this does not prove schedule re-execution (replay of a
 //! production interleaving in the lab is a separate gap), nor completeness
@@ -117,7 +117,6 @@ fn runtime_that_spawned_nothing_exports_no_spawn_events_planted_negative() {
     let runtime = RuntimeBuilder::current_thread()
         .build()
         .expect("build runtime");
-    runtime.block_on(async {});
     let events = runtime.trace_snapshot();
     assert!(
         events
@@ -125,4 +124,19 @@ fn runtime_that_spawned_nothing_exports_no_spawn_events_planted_negative() {
             .all(|event| event.kind != TraceEventKind::Spawn),
         "no task was spawned, so no Spawn event may appear: {events:?}"
     );
+
+    let root = runtime.block_on(async { Cx::current().expect("root cx").task_id() });
+    let events = runtime.trace_snapshot();
+    for kind in [TraceEventKind::Spawn, TraceEventKind::Complete] {
+        assert_eq!(
+            task_events(&events, kind, root).count(),
+            1,
+            "the empty root is still a real task: {events:?}"
+        );
+        assert_eq!(
+            events.iter().filter(|event| event.kind == kind).count(),
+            1,
+            "the empty root must not create phantom child tasks: {events:?}"
+        );
+    }
 }
