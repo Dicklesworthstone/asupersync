@@ -14,8 +14,16 @@ source revision being evaluated and retain its terminal evidence.
 ## VER-A5-SPARSE-FEATURES
 
 The artifact contains one direct sparse profile for every feature declared in
-the root `Cargo.toml`. The contract joins those 57 profiles to the 57 feature
+the root `Cargo.toml`. The contract joins those 60 profiles to the 60 feature
 rows in `artifacts/dependency_capability_registry_v1.json`.
+
+The September 9, 2026 source review adds the maintained
+`cross-subsystem-recovery-e2e` and `distributed-hash-snapshot-recovery-e2e`
+verification profiles and the opt-in Unix `remote-service` profile. Each
+remains `RERUN_REQUIRED`. The first two select test harnesses; the third enables
+`cli` plus `tls` and exposes the Unix service boundary. These compile coordinates
+do not establish recovery or service behavior. The original foundation
+`claim_base_revision` remains recorded in the artifact.
 
 - `default-nightly` uses the pinned nightly toolchain and the default feature
   set.
@@ -49,13 +57,18 @@ The compact matrix is a checked relational projection:
 
 1. Each feature and capability names platform selectors in the capability
    registry.
-2. `platform_selector_expansions` maps all 14 live selectors to concrete target
+2. `platform_selector_expansions` maps all 15 live selectors to concrete target
    coordinates.
 3. Each concrete target names a host, target triple, execution kind, compile
    outcome, runtime outcome, exact command when executable, and blocker when it
    is not.
 4. The contract expands every feature/capability selector and rejects missing
    selectors or target IDs.
+
+The `unix` selector expands to the catalog's Linux, macOS, Android, and BSD
+targets. It excludes Windows and browser wasm. Each target retains its own
+recorded compile/runtime disposition; selector membership is not platform
+acceptance.
 
 Current target dispositions are intentionally conservative:
 
