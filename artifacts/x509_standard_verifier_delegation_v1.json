@@ -20,38 +20,38 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121,
       "role": "dependency and feature baseline"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666,
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664,
       "role": "resolved dependency baseline"
     },
     {
       "path": "src/net/quic_native/handshake_driver.rs",
-      "sha256": "45f42e39f573517fd9e71c2c3315e0c05c305e8d896fc75862e85287a85cf7ca",
-      "line_count": 1896,
+      "sha256": "560b5fcedc339b82187893ff549717f701c4fc5e50f299e6c22239acc47961c6",
+      "line_count": 2828,
       "role": "shared standard-first exact-leaf verifier and focused tests"
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "fa68f1bfb4f6e59fd3d4a0c781a5e5b7b2cce13ad2d39ee2ec084f068a837c9f",
-      "line_count": 12723,
+      "sha256": "7f81086ac8b9a28ad071efde2c052153d0e436fe3fbcd780e239e028829ff799",
+      "line_count": 13557,
       "role": "ATP delegation caller and preserved CLI error mapping"
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "76c170d0de9e4c47438180ff7d5aaff5b1826e61213b407d1be5780f0ece10e1",
+      "sha256": "3fc7e488370e69fad3dc31edd61772d8cd4e2e6e1c4ef8a2ccb9f269df73b367",
       "line_count": 1073,
       "role": "A1 ownership, residue, and routed-gap inventory"
     },
     {
       "path": "docs/x509_validation_ownership_inventory.md",
-      "sha256": "bbb1ee2367d186c4c415b7413596c1891951999e9b8c40cb0f4711f9ad880991",
-      "line_count": 308,
+      "sha256": "a1bb0855bd2966439bc2bba30c68b1b0948a4d67bfe077292931639c58f84af2",
+      "line_count": 325,
       "role": "A1 operator inventory"
     },
     {

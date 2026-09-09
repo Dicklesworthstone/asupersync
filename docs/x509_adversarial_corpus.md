@@ -6,6 +6,11 @@ machine packet is
 security outcomes, differential dispositions, source pins, execution receipts,
 rollback triggers, and no-claim boundaries.
 
+The recorded campaign is **INCOMPLETE**: its eight execution receipts remain
+`PENDING` with no exit codes. The contract checks receipt consistency and
+requires every receipt to pass before the packet may say `COMPLETE`. A passing
+contract test alone does not complete the parser, fuzz, or all-target campaign.
+
 ## Evidence surfaces
 
 The corpus has three deliberately separate oracle domains:
@@ -41,6 +46,9 @@ Every observed divergence must be one of these approved cases:
 
 - `der_min` rejects duplicate extension OIDs even when `x509-parser` can
   structurally decode them.
+- `der_min` rejects a cleared SubjectPublicKeyInfo SEQUENCE constructed bit
+  with `ConstructedBit`; `x509-parser` 0.18.1 tolerates that bit in the same
+  complete certificate. The differential regression test records both results.
 - The pinned-leaf residue profile rejects critical extensions outside its
   KeyUsage, SubjectAltName, and ExtendedKeyUsage allow-set.
 - `der_min` returns validity, EKU, KU, SAN, and BasicConstraints facts without

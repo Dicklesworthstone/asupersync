@@ -5,6 +5,7 @@
   "program_id": "dependency-sovereignty",
   "capability_id": "CAP-TLS-X509",
   "captured_date_utc": "2026-07-27",
+  "execution_state": "INCOMPLETE",
   "authority": {
     "state": "A5_EVIDENCE_ONLY",
     "statement": "This packet records adversarial parser, differential, delegated-verifier, and bounded-fuzz evidence. It grants no call-site migration or dependency-cutover authority."
@@ -188,8 +189,8 @@
       "class": "malformed SubjectPublicKeyInfo framing",
       "provenance_id": "A5-PROV-DER-BUILDER",
       "evidence_test": "differential_divergences_are_narrow_and_explained",
-      "expected_security_outcome": "der_min and complete x509-parser overlap both reject",
-      "divergence": "NONE"
+      "expected_security_outcome": "der_min rejects a cleared SubjectPublicKeyInfo SEQUENCE constructed bit with ConstructedBit; x509-parser 0.18.1 structurally accepts the same complete certificate",
+      "divergence": "INTENTIONAL_STRICTER_DER_MIN_REJECTION_THAN_STRUCTURAL_X509_PARSER"
     },
     {
       "case_id": "X509-A5-WILDCARD-VALID",
@@ -245,6 +246,7 @@
     "delegated_scope": "rustls/WebPKI owns chain signatures, trust anchors, time, DNS wildcard matching, and name constraints. Local exact-pin policy owns the approved facts after standard-first UnknownIssuer fallback.",
     "intentional_differential_divergences": [
       "der_min rejects duplicate extension OIDs even when x509-parser can structurally decode them",
+      "der_min rejects a cleared SubjectPublicKeyInfo SEQUENCE constructed bit that x509-parser 0.18.1 tolerates",
       "the pinned-leaf profile rejects critical extensions outside its KU, SAN, and EKU allow-set",
       "der_min emits time, EKU, KU, SAN, and BasicConstraints facts without applying caller policy"
     ],
@@ -278,13 +280,13 @@
   "source_pins": [
     {
       "path": "src/tls/der_min.rs",
-      "sha256": "7dd184fc463c637185af372e28e7196468378cfe60be6f53834e9f2c59ccc64d",
-      "line_count": 2086
+      "sha256": "77565b078a33e2c185a3743908d5d31f9d75ee838f4ce780ad1da28fb137b958",
+      "line_count": 2090
     },
     {
       "path": "fuzz/Cargo.toml",
-      "sha256": "857925379ab7068f3faf94435e44b87adfc96c2d716f19b5c1cfdffbbfbd580d",
-      "line_count": 6233
+      "sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
+      "line_count": 6234
     },
     {
       "path": "fuzz/fuzz_targets/x509_der_residue.rs",

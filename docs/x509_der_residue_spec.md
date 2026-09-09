@@ -11,6 +11,12 @@ The reader described here does not replace rustls/WebPKI. It exists only for
 the four non-delegable facts retained by the A1 inventory and the A2
 standard-first decision.
 
+The 2026-09-09 release review refreshes live source-contract pins and the A1/A2
+artifact joins. The existing normative projection retains the independently
+reviewed identities and policy hash; approval is not extended to a new policy.
+The certificate-shape and validation blocks remain unchanged, and the private
+A4 implementation remains separate from production call-site migration.
+
 ## Authority boundary
 
 The planned reader accepts exactly one complete certificate DER byte slice and

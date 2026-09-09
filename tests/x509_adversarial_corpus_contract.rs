@@ -91,6 +91,42 @@ fn verify(root_path: &str, leaf_path: &str, hostname: &str) -> Result<(), QuicTl
         .map(|_| ())
 }
 
+fn execution_receipts_are_consistent(artifact: &Value) -> bool {
+    let Some(receipts) = artifact["execution_receipts"].as_array() else {
+        return false;
+    };
+    let expected = BTreeSet::from([
+        "A5-DER-MIN-FOCUSED",
+        "A5-DELEGATED-CORPUS",
+        "A5-CORPUS-CONTRACT",
+        "A5-FUZZ-BUILD",
+        "A5-FUZZ-RUN",
+        "A5-UBS",
+        "A5-ALL-TARGET-CHECK",
+        "A5-ALL-TARGET-CLIPPY",
+    ]);
+    let actual: BTreeSet<_> = receipts
+        .iter()
+        .filter_map(|receipt| receipt["receipt_id"].as_str())
+        .collect();
+    if receipts.len() != expected.len() || actual != expected {
+        return false;
+    }
+    if !receipts.iter().all(|receipt| {
+        receipt["command"].as_str().is_some_and(|s| !s.is_empty())
+            && match receipt["status"].as_str() {
+                Some("PENDING") => receipt.get("exit_code") == Some(&Value::Null),
+                Some("PASS") => receipt["exit_code"].as_i64() == Some(0),
+                Some("FAIL") => receipt["exit_code"].as_i64().is_some_and(|code| code != 0),
+                _ => false,
+            }
+    }) {
+        return false;
+    }
+    let complete = receipts.iter().all(|receipt| receipt["status"] == "PASS");
+    artifact["execution_state"] == if complete { "COMPLETE" } else { "INCOMPLETE" }
+}
+
 #[test]
 fn artifact_identity_case_set_and_receipts_are_fail_closed() {
     let artifact = parse(ARTIFACT_PATH);
@@ -147,13 +183,52 @@ fn artifact_identity_case_set_and_receipts_are_fail_closed() {
         );
     }
 
-    let receipts = array(&artifact, "execution_receipts");
-    assert!(receipts.len() >= 6);
-    assert!(receipts.iter().all(|receipt| {
-        receipt["status"].as_str() == Some("PASS") && receipt["exit_code"].as_i64() == Some(0)
-    }));
+    assert!(execution_receipts_are_consistent(&artifact));
     assert!(array(&artifact, "no_claim_boundaries").len() >= 8);
     assert!(array(&artifact, "rollback_triggers").len() >= 6);
+}
+
+#[test]
+fn receipt_mutations_cannot_claim_unfinished_or_failed_executions_passed() {
+    let artifact = parse(ARTIFACT_PATH);
+    assert!(execution_receipts_are_consistent(&artifact));
+
+    let mut completed = artifact.clone();
+    for receipt in completed["execution_receipts"].as_array_mut().unwrap() {
+        receipt["status"] = "PASS".into();
+        receipt["exit_code"] = 0.into();
+    }
+    completed["execution_state"] = "COMPLETE".into();
+    assert!(execution_receipts_are_consistent(&completed));
+
+    for (status, exit_code) in [("PENDING", Value::Null), ("FAIL", 1.into())] {
+        let mut incomplete = completed.clone();
+        incomplete["execution_receipts"][0]["status"] = status.into();
+        incomplete["execution_receipts"][0]["exit_code"] = exit_code;
+        assert!(!execution_receipts_are_consistent(&incomplete));
+        incomplete["execution_state"] = "INCOMPLETE".into();
+        assert!(execution_receipts_are_consistent(&incomplete));
+    }
+
+    for (status, exit_code) in [
+        ("PASS", Value::Null),
+        ("PASS", 1.into()),
+        ("PENDING", 0.into()),
+        ("FAIL", 0.into()),
+        ("UNKNOWN", Value::Null),
+    ] {
+        let mut inconsistent = completed.clone();
+        inconsistent["execution_receipts"][0]["status"] = status.into();
+        inconsistent["execution_receipts"][0]["exit_code"] = exit_code;
+        assert!(!execution_receipts_are_consistent(&inconsistent));
+    }
+
+    let mut missing = completed.clone();
+    missing["execution_receipts"].as_array_mut().unwrap().pop();
+    assert!(!execution_receipts_are_consistent(&missing));
+    let mut duplicate = completed;
+    duplicate["execution_receipts"][0] = duplicate["execution_receipts"][1].clone();
+    assert!(!execution_receipts_are_consistent(&duplicate));
 }
 
 #[test]

@@ -13,8 +13,25 @@ The governing disposition remains `KEEP_UNTIL_PARITY` /
 cutover authority, or authorize removing `x509-parser`. A2
 (`asupersync-0h6myr.3.2`) updates the baseline in place after consolidating the
 two exact-leaf paths behind one standard-verifier-first policy. A3
-(`asupersync-0h6myr.3.3`) now owns the independently approved smallest-safe
-residue specification; A4 implementation remains pending.
+(`asupersync-0h6myr.3.3`) owns the independently approved smallest-safe
+residue specification. The private `tls::der_min` implementation and its
+adversarial corpus are separate successor evidence; the production parser
+ownership below still retains the incumbent.
+
+The v0.4.11 source review refreshes eleven live source pins. Compared with
+`3cb2dc6d`, the exact-leaf shape check, fallback constructor, WebPKI delegation
+implementation, explicit QUIC identity verifier, ATP CLI verifier constructor,
+and acceptor certificate preflight are byte-identical. The changed QUIC files
+contain packet/header protection and transport work; acceptor changes cover
+documentation and test expectations. This comparison does not establish
+equivalence of those surrounding transport changes.
+
+The X.509 capability and baseline rows and the locked X.509/rustls/WebPKI
+packages are unchanged. The eight marginal-ledger cells differ only in their
+manifest and lockfile fingerprints; their graph counts and classifications
+are unchanged. Historical baseline dates and successor execution receipts
+remain historical. This review adds no new interoperability, fuzz, or
+performance measurement and preserves `KEEP_INCUMBENT`.
 
 ## Locked graph and scope
 

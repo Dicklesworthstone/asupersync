@@ -107,14 +107,14 @@
   "source_contracts": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061,
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121,
       "role": "tls feature and x509-parser dependency baseline"
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666,
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664,
       "role": "resolved dependency baseline"
     },
     {
@@ -131,26 +131,26 @@
     },
     {
       "path": "src/tls/acceptor.rs",
-      "sha256": "1bbf5b9c2fe8d12c029a5e3effe3bede9513c9d094c69e1ff93145b6d76847e6",
-      "line_count": 2785,
+      "sha256": "cac1d4bc3d6d282a89d2c96767d87db6f38e75efdc56d09738c3fcc4fd3ed741",
+      "line_count": 2808,
       "role": "X509-R3 server-chain preflight incumbent"
     },
     {
       "path": "src/net/quic_native/handshake_driver.rs",
-      "sha256": "45f42e39f573517fd9e71c2c3315e0c05c305e8d896fc75862e85287a85cf7ca",
-      "line_count": 1896,
+      "sha256": "560b5fcedc339b82187893ff549717f701c4fc5e50f299e6c22239acc47961c6",
+      "line_count": 2828,
       "role": "X509-R4 shared exact-leaf shape incumbent"
     },
     {
       "path": "artifacts/x509_validation_ownership_inventory_v1.json",
-      "sha256": "76c170d0de9e4c47438180ff7d5aaff5b1826e61213b407d1be5780f0ece10e1",
+      "sha256": "3fc7e488370e69fad3dc31edd61772d8cd4e2e6e1c4ef8a2ccb9f269df73b367",
       "line_count": 1073,
       "role": "A1 call-site, owner, residue, and routed-gap authority"
     },
     {
       "path": "docs/x509_validation_ownership_inventory.md",
-      "sha256": "bbb1ee2367d186c4c415b7413596c1891951999e9b8c40cb0f4711f9ad880991",
-      "line_count": 308,
+      "sha256": "a1bb0855bd2966439bc2bba30c68b1b0948a4d67bfe077292931639c58f84af2",
+      "line_count": 325,
       "role": "A1 operator inventory"
     },
     {
@@ -161,7 +161,7 @@
     },
     {
       "path": "artifacts/x509_standard_verifier_delegation_v1.json",
-      "sha256": "688a6ad505507543d32a218a9e63bc93490e674aa763b1376a9a8e5b415c45b6",
+      "sha256": "75fc76028057544ded3a12a6d0b2a025bbef217aad2d880f29a25e21822ced07",
       "line_count": 345,
       "role": "A2 standard-first delegation and retained-policy authority"
     },

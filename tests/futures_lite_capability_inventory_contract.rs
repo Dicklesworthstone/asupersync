@@ -735,7 +735,7 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
     let snapshot = inventory
         .get("post_baseline_current_snapshot")
         .expect("post-baseline current snapshot");
-    if text(snapshot, "captured_date_utc") != "2026-08-20"
+    if text(snapshot, "captured_date_utc") != "2026-09-09"
         || snapshot.get("historical_baseline_preserved") != Some(&Value::Bool(true))
         || text(snapshot, "source_status") != "STATIC_SOURCE_PROGRESS"
         || text(snapshot, "evidence_state") != "SOURCE_BASELINED"
@@ -759,10 +759,10 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
     let current = snapshot
         .get("current_occurrence")
         .expect("current occurrence snapshot");
-    if current.get("file_count").and_then(Value::as_u64) != Some(319)
-        || current.get("token_count").and_then(Value::as_u64) != Some(1401)
+    if current.get("file_count").and_then(Value::as_u64) != Some(330)
+        || current.get("token_count").and_then(Value::as_u64) != Some(1527)
         || text(current, "digest_sha256")
-            != "ad12626acad123fc907c51ab8fd6471f5caeac7c6c854ebf9fdf52c7a5a229aa"
+            != "727060c116017ed85c44440e288e6a862a89bacbaaf8e6d105386a79561efeb9"
         || array(current, "scope_rows").len() != 6
         || array(snapshot, "current_migration_reservation_groups").len() != 4
     {
@@ -777,12 +777,14 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
         "artifacts/dependency_capability_registry_v1.json",
         "artifacts/dependency_marginal_ledger_v1.json",
         "artifacts/api_surface_map_v1.json",
+        "asupersync-tokio-compat/Cargo.toml",
+        "src/web/router.rs",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     if row_ids(reconciliations, "path") != expected_paths {
-        return Err("current snapshot must reconcile the exact six drifted pins".to_owned());
+        return Err("current snapshot must reconcile the exact eight drifted pins".to_owned());
     }
     let expected_reconciliations = [
         (
@@ -800,7 +802,7 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
         (
             "src/sync/notify.rs",
             "11d85d8cc9bcd7ec6c21245dba5b58f381b3aa4c54dc3d8d17d01f68b213a3ef",
-            "CAPABILITY_PROJECTION_UNCHANGED",
+            "TOKEN_LINES_PRESERVED_ACROSS_TEST_SPLIT",
             Some("ff73e9793bd9748d2e82dba7b4d16e27830b5d35491c2759021dcbb81b33b2c7"),
         ),
         (
@@ -819,6 +821,18 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
             "artifacts/api_surface_map_v1.json",
             "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
             "CAPABILITY_PROJECTION_UNCHANGED",
+            None,
+        ),
+        (
+            "asupersync-tokio-compat/Cargo.toml",
+            "e1e3a701a38ef8f7b2659bfa3e966746ad4a718a9d2447d127926765b21aa0a5",
+            "RELEASE_VERSION_ONLY",
+            None,
+        ),
+        (
+            "src/web/router.rs",
+            "d31de4ab5694c39d45374577a549ff190a4bbd8539bfc0b646d6751bd32400f2",
+            "INCUMBENT_CALL_PRESERVED_WITH_ADDITIONAL_TESTS",
             None,
         ),
     ];
@@ -841,6 +855,55 @@ fn validate_current_snapshot(inventory: &Value) -> Result<(), String> {
             })
         {
             return Err(format!("source-pin reconciliation drift: {path}"));
+        }
+    }
+
+    let races = array(snapshot, "new_production_races");
+    let expected_races = [
+        (
+            "FUT-PROD-REMOTE-SESSION-RACE",
+            "src/remote.rs",
+            "remote_session_race_io",
+            "tls",
+        ),
+        (
+            "FUT-PROD-REMOTE-CLIENT-RACE",
+            "src/remote.rs",
+            "remote_client_race_cancellation",
+            "tls and not wasm32",
+        ),
+        (
+            "FUT-PROD-REMOTE-DRIVER-RACE",
+            "src/remote.rs",
+            "drive_native_remote_session",
+            "tls and not wasm32",
+        ),
+        (
+            "FUT-PROD-MULTIPART-READ-RACE",
+            "src/web/multipart.rs",
+            "read_more",
+            "all supported root targets",
+        ),
+    ];
+    if races.len() != expected_races.len()
+        || row_ids(races, "site_id") != expected_races.iter().map(|row| row.0.to_owned()).collect()
+        || snapshot["current_production_token_count"].as_u64() != Some(8)
+    {
+        return Err("current production inventory must retain four additional races".to_owned());
+    }
+    for (id, path, function, cfg) in expected_races {
+        let row = find_row(races, "site_id", id);
+        if text(row, "path") != path
+            || text(row, "function") != function
+            || text(row, "cfg") != cfg
+            || row["token_occurrences"].as_u64() != Some(1)
+            || text(row, "loser_policy") != "DROP_FUTURE_ONLY"
+            || row["structured_loser_drain_proven"].as_bool() != Some(false)
+            || !source_pins.iter().any(|pin| pin["path"] == path)
+        {
+            return Err(format!(
+                "current race ownership or no-drain boundary drift: {id}"
+            ));
         }
     }
 
@@ -1578,8 +1641,8 @@ fn identity_authority_zero_unknown_and_docs_are_fail_closed() {
         "does not authorize closing A2",
         "ATP progress runtime path remains",
         "Post-baseline current snapshot",
-        "319",
-        "1,401",
+        "330",
+        "1,527",
         "FUT A3 focused unit kernel progress",
         "ACCEPTANCE_IMPLEMENTED_ALONGSIDE_INCUMBENT",
         "ACCEPTANCE_FOCUSED_TESTS_PASSED",
@@ -1853,7 +1916,36 @@ fn production_public_and_comment_only_sites_match_source() {
     assert!(signal.contains("asupersync-reload-sighup"));
     assert!(signal.contains("asupersync-shutdown-"));
 
+    let remote = read_repo_file("src/remote.rs");
+    let multipart = read_repo_file("src/web/multipart.rs");
+    let race_call = format!("{TOKEN}::future::race(");
+    assert_eq!(remote.matches(&race_call).count(), 3);
+    assert_eq!(multipart.matches(&race_call).count(), 1);
+    for function in [
+        "remote_session_race_io",
+        "remote_client_race_cancellation",
+        "drive_native_remote_session",
+    ] {
+        assert!(remote.contains(&format!("async fn {function}")));
+    }
+    assert!(remote.contains(".cancel(cx, reason)"));
+    assert!(remote.contains(".renew_lease(cx, lease)"));
+    assert!(multipart.contains("wait_for_streaming_multipart_cancellation(cx).await"));
+    assert!(multipart.contains("return Err(StreamingMultipartError::cancelled(kind))"));
+
     let notify = read_repo_file("src/sync/notify.rs");
+    let notify_tests = read_repo_file("src/sync/notify_tests.rs");
+    let mut notify_lines: Vec<_> = notify
+        .lines()
+        .chain(notify_tests.lines())
+        .filter(|line| line.contains(TOKEN))
+        .collect();
+    notify_lines.sort_unstable();
+    let projection = notify_lines.join("\n") + "\n";
+    assert_eq!(
+        hex_bytes(&Sha256::digest(projection.as_bytes())),
+        "ff73e9793bd9748d2e82dba7b4d16e27830b5d35491c2759021dcbb81b33b2c7"
+    );
     assert_eq!(
         notify
             .matches(&format!("{TOKEN}::future::block_on(async"))
@@ -2282,6 +2374,18 @@ fn malformed_inventory_mutations_fail_closed() {
     drop_panic_contained["a5_panic_boundary_receipt"]["poll_helper_contract"]["drop_panic_contained"] =
         Value::Bool(false);
     assert!(validate_inventory(&drop_panic_contained).is_err());
+
+    let mut race_omitted = canonical.clone();
+    race_omitted["post_baseline_current_snapshot"]["new_production_races"]
+        .as_array_mut()
+        .unwrap()
+        .pop();
+    assert!(validate_inventory(&race_omitted).is_err());
+
+    let mut forged_drain = canonical.clone();
+    forged_drain["post_baseline_current_snapshot"]["new_production_races"][0]["structured_loser_drain_proven"] =
+        Value::Bool(true);
+    assert!(validate_inventory(&forged_drain).is_err());
 
     let mut baseline_rewritten = canonical;
     baseline_rewritten["post_baseline_current_snapshot"]["historical_baseline_preserved"] =
