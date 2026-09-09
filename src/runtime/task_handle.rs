@@ -121,28 +121,61 @@ impl<T> ObservedSpawnCompletion<T> {
 /// [`SpawnCompletionPolicy`] before calling [`publish_terminal_result`]. The
 /// cancellation reason is sampled immediately after the terminal user poll so
 /// a later abort cannot rewrite an already-observed completion.
-pub(crate) async fn observe_spawn_completion<F, T>(
+pub(crate) fn observe_spawn_completion<F, T>(
     future: F,
     completion_cx: Cx,
     policy: SpawnCompletionPolicy,
-) -> ObservedSpawnCompletion<T>
+) -> SpawnCompletionObserver<F>
 where
     F: std::future::Future<Output = T>,
 {
-    let track_cancellation_acknowledgement = matches!(
+    SpawnCompletionObserver {
+        future: Some(future),
+        completion_cx,
         policy,
-        SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult
-    );
-    let mut future = std::pin::pin!(future);
-    let mut cancelled_before_first_poll = None;
-    let mut cancellation_acknowledged = false;
-    let mut cancellation_requested_at_completion = false;
-    let mut cancel_reason_at_completion = None;
-    let value = std::future::poll_fn(|poll_cx| {
-        if track_cancellation_acknowledgement && cancelled_before_first_poll.is_none() {
-            cancelled_before_first_poll = Some(completion_cx.inner.read().is_cancel_requested());
+        cancelled_before_first_poll: None,
+        cancellation_acknowledged: false,
+    }
+}
+
+// A named future keeps Send checking proportional to the user future's
+// structure instead of adding an async witness, PollFn closure, and borrowed
+// pin at every nested spawn boundary. Pin projection needs no allocation and
+// also supports the non-Send futures accepted by local spawn APIs.
+#[pin_project::pin_project]
+pub(crate) struct SpawnCompletionObserver<F> {
+    #[pin]
+    future: Option<F>,
+    completion_cx: Cx,
+    policy: SpawnCompletionPolicy,
+    cancelled_before_first_poll: Option<bool>,
+    cancellation_acknowledged: bool,
+}
+
+impl<F: std::future::Future> std::future::Future for SpawnCompletionObserver<F> {
+    type Output = ObservedSpawnCompletion<F::Output>;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        poll_cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let mut this = self.project();
+        let track_cancellation_acknowledgement = matches!(
+            this.policy,
+            SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult
+        );
+        if track_cancellation_acknowledgement && this.cancelled_before_first_poll.is_none() {
+            *this.cancelled_before_first_poll =
+                Some(this.completion_cx.inner.read().is_cancel_requested());
         }
-        let poll = future.as_mut().poll(poll_cx);
+        let poll = this
+            .future
+            .as_mut()
+            .as_pin_mut()
+            .expect("spawn completion observer polled after completion")
+            .poll(poll_cx);
+        let mut cancellation_requested_at_completion = false;
+        let mut cancel_reason_at_completion = None;
         // Healthy tasks pay one stable atomic load rather than acquiring the
         // context lock after every Pending poll. A checkpoint that
         // acknowledges cancellation also publishes this stable bit. Terminal
@@ -150,30 +183,36 @@ where
         // replacement remains observable even when user code never
         // checkpointed.
         if poll.is_ready()
-            || (track_cancellation_acknowledgement && completion_cx.has_published_cancellation())
+            || (track_cancellation_acknowledgement
+                && this.completion_cx.has_published_cancellation())
         {
             // The scheduler consumes and clears the per-poll acknowledgement
             // after `Poll::Pending`, so retain whether any user poll observed
             // it before control returns to the scheduler.
-            let inner = completion_cx.inner.read();
+            let inner = this.completion_cx.inner.read();
             if track_cancellation_acknowledgement {
-                cancellation_acknowledged |= inner.cancel_acknowledged;
+                *this.cancellation_acknowledged |= inner.cancel_acknowledged;
             }
             if poll.is_ready() {
                 cancellation_requested_at_completion = inner.is_cancel_requested();
                 cancel_reason_at_completion.clone_from(&inner.cancel_reason);
             }
         }
-        poll
-    })
-    .await;
-    ObservedSpawnCompletion {
-        value,
-        policy,
-        cancel_reason_at_completion,
-        cancelled_before_first_poll: cancelled_before_first_poll.unwrap_or(false),
-        cancellation_acknowledged,
-        cancellation_requested_at_completion,
+        if poll.is_ready() {
+            // The async observer also dropped the completed user future before
+            // returning Ready. Keep its destructor inside the producer's poll
+            // panic boundary, after freezing the terminal cancellation facts.
+            // Pin::set drops in place and supports !Unpin user futures.
+            this.future.set(None);
+        }
+        poll.map(|value| ObservedSpawnCompletion {
+            value,
+            policy: *this.policy,
+            cancel_reason_at_completion,
+            cancelled_before_first_poll: this.cancelled_before_first_poll.unwrap_or(false),
+            cancellation_acknowledged: *this.cancellation_acknowledged,
+            cancellation_requested_at_completion,
+        })
     }
 }
 

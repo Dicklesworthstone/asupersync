@@ -774,6 +774,74 @@ fn legacy_state_task_panic_after_abort_remains_panicked() {
 }
 
 #[test]
+fn legacy_state_ready_future_drop_panic_is_published_as_join_error() {
+    struct ReadyThenDropPanic {
+        drops: Arc<AtomicUsize>,
+        _pinned: std::marker::PhantomPinned,
+    }
+
+    impl std::future::Future for ReadyThenDropPanic {
+        type Output = u8;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _poll_cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Ready(7)
+        }
+    }
+
+    impl Drop for ReadyThenDropPanic {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+            panic!("legacy-ready-future-drop-panic-sentinel");
+        }
+    }
+
+    for aborted in [false, true] {
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (task_id, mut handle) = state
+            .create_task(
+                region,
+                Budget::INFINITE,
+                ReadyThenDropPanic {
+                    drops: Arc::clone(&drops),
+                    _pinned: std::marker::PhantomPinned,
+                },
+            )
+            .expect("create legacy task with a pinned user future");
+        if aborted {
+            handle.abort();
+        }
+
+        let mut poll_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let terminal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state
+                .get_stored_future(task_id)
+                .expect("legacy task future is stored")
+                .poll(&mut poll_cx)
+        }));
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert!(
+            terminal.is_ok_and(|poll| poll.is_ready()),
+            "a completed future's destructor must run inside the task panic boundary",
+        );
+        match handle.try_join() {
+            Err(JoinError::Panicked(payload)) => assert!(
+                payload
+                    .message()
+                    .contains("legacy-ready-future-drop-panic-sentinel")
+            ),
+            other => panic!(
+                "destructor panic must outrank both the returned value and cancellation (aborted={aborted}): {other:?}"
+            ),
+        }
+    }
+}
+
+#[test]
 fn legacy_state_task_keeps_cancellation_dominant_result_attribution() {
     struct PendingThenValue {
         polls: Arc<AtomicUsize>,
@@ -1441,7 +1509,11 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
         task_handle.contains("PreserveAcknowledgedCancellationResult")
             && task_handle.contains("CancellationDominant")
             && task_handle.contains("pub(crate) fn classify_spawn_completion<T>(")
-            && task_handle.contains("pub(crate) async fn observe_spawn_completion<F, T>(")
+            && task_handle.contains("pub(crate) fn observe_spawn_completion<F, T>(")
+            && task_handle.contains("pub(crate) struct SpawnCompletionObserver<F>")
+            && task_handle.contains(
+                "impl<F: std::future::Future> std::future::Future for SpawnCompletionObserver<F>",
+            )
             && task_handle.contains("cancelled_before_first_poll"),
         "TaskHandle policy must distinguish acknowledged cancellation results, cancellation-blind late values, structured task cancellation, and pre-poll cancellation",
     );
