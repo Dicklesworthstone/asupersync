@@ -619,4 +619,12 @@ located semantic diagnostics.
 may issue a terminal KEEP, DEFER, or CUTOVER decision; CUTOVER and dependency
 exit remain unauthorized until every declared prerequisite is satisfied.
 
+The 2026-09-09 release review refreshes twelve source fingerprints against
+`d1d9923bf`, compared with v0.4.9 (`3cb2dc6d0`). The CLI scenario loader,
+diagnostic YAML snapshot helper, YAML capability and baseline rows, and API
+journey retain their prior contents. The artifact records the surrounding
+version, runtime, test, and inventory changes. Historical A3/A4 receipts,
+parser expectations, gaps, and `KEEP_INCUMBENT` authority remain unchanged;
+the fingerprint review supplies no new gap-closure or cutover evidence.
+
 <!-- END SCENARIO YAML CAPABILITY INVENTORY -->

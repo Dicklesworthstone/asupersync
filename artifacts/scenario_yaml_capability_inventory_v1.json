@@ -11,6 +11,21 @@
   "captured_date_utc": "2026-07-24",
   "baseline_revision": "295136459f9e3e38e7373394e713866ec0693a8d",
   "authority_revision": "673a905631c5580cdc8037315569b72bd636ecca",
+  "release_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "reviewed_revision": "d1d9923bf",
+    "previous_release_revision": "3cb2dc6d0",
+    "scope": "Refresh twelve source fingerprints after reviewing changes since v0.4.9; retain all historical authority, A3/A4 receipts, parser expectations, gaps, and dependency dispositions.",
+    "findings": [
+      "Cargo manifests and lockfile changed for release versions, packaging, runtime features and unrelated dependencies. The three serde_yaml edges and resolved serde_yaml 0.9.34+deprecated / unsafe-libyaml 0.2.11 pair remain unchanged.",
+      "The root CLI adds remote-service commands and tests; load_scenario is byte-identical. The frankenlab adoption test changes an empty-string assertion without changing YAML input or parsing.",
+      "Example metadata adjusts unrelated Rust example lengths and the AppSpec description. Scenario/YAML example rows and corpus bytes remain unchanged.",
+      "TESTING_FOR_AGENTS adds obligation-mailbox guidance. The methodology contract adds performance fixtures after its existing YAML workflow checks.",
+      "Diagnostics now reads live state through scoped views and exposes cancellation explanations; assert_diagnostic_yaml_snapshot is byte-identical.",
+      "The CAP-SCENARIO-YAML-JSON registry row, capability baseline row, and lab_scenario_yaml API journey are byte-equivalent as parsed JSON. Changes elsewhere in those shared inventories do not promote YAML parity."
+    ],
+    "no_claim": "Source review is not new runtime, performance, parser replacement, dependency cutover, A4 gap closure, or release-readiness evidence."
+  },
   "authority": {
     "adr_id": "DEP-ADR-004",
     "adr_bead_id": "asupersync-dep-p3-api-adrs-h3jspm.4",
@@ -61,13 +76,13 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
-      "line_count": 1061
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
     },
     {
       "path": "Cargo.lock",
-      "sha256": "dc66ff7b4e6d1e75fac66fad2f90f528019a4da55e6012714160e158cc63d236",
-      "line_count": 4666
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664
     },
     {
       "path": "src/lab/scenario.rs",
@@ -91,12 +106,12 @@
     },
     {
       "path": "src/bin/asupersync.rs",
-      "sha256": "39719e72f1c00122ec4730aab2e2404086292ac46ced4e9290bb206a3b618ec7",
-      "line_count": 16791
+      "sha256": "db9679da2c0ba6050f209264fb353da75892b0046429dffe0ba7edce5d74517a",
+      "line_count": 17878
     },
     {
       "path": "frankenlab/Cargo.toml",
-      "sha256": "eb2f4304b457daccbda6dae2d569340b2350f2cf664b2e392095b72f3a09e42b",
+      "sha256": "d7e216793bd1e9f802414d6c61c1a1187afb26bce3ccbe646dfdca8a22df0796",
       "line_count": 33
     },
     {
@@ -111,12 +126,12 @@
     },
     {
       "path": "frankenlab/tests/adoption_funnel.rs",
-      "sha256": "bbc7a62ec6ae021cd52f502fdaac79273c36878ae0c810ee9784c481c4d5d7ff",
+      "sha256": "eb50e95a0b3f69ebaed5672081f42a664e779a69458eccca1491ed5bfc199a14",
       "line_count": 173
     },
     {
       "path": "examples/metadata.json",
-      "sha256": "d12e92a1dd6ea27a9df3e58336f6483726a8fd9e13290cd1caf8aebecb502c84",
+      "sha256": "bddd0ae5621dbe5999102cd34558475c5529c8486499c6186c357dc732234b36",
       "line_count": 908
     },
     {
@@ -126,8 +141,8 @@
     },
     {
       "path": "TESTING_FOR_AGENTS.md",
-      "sha256": "1d9bd9cb99dc7176d581e7e8f0ab7a0a30523ac122f58222732db82d326d1a72",
-      "line_count": 387
+      "sha256": "541114c5e40e6b50802c04fa7571392808cdca9da6ec643c4bd2f99979dfa570",
+      "line_count": 414
     },
     {
       "path": "docs/adoption/getting_started.md",
@@ -151,8 +166,8 @@
     },
     {
       "path": "tests/phase6_methodology_gate_contract.rs",
-      "sha256": "a9ef28336cac25ecd925676148f30d8b71ac43a1df1180757c0df50dc9e84ed1",
-      "line_count": 622
+      "sha256": "5a5fc542545412837e8a2c9ff7e6bfe5aa08c976e6d11f4d8d31857d7a935b7f",
+      "line_count": 804
     },
     {
       "path": "tests/examples_metadata_contract.rs",
@@ -171,8 +186,8 @@
     },
     {
       "path": "src/observability/diagnostics.rs",
-      "sha256": "e26a88ce0fd375bc3157d9220e2304d3fa9f0e64080ce406ed072ffd470f4693",
-      "line_count": 8111
+      "sha256": "f4e45563ab80313107903fafe029f45a8adae883ec83b4924d8e839436194856",
+      "line_count": 8174
     },
     {
       "path": "scripts/provision_kafka_test_env.rs",
@@ -206,18 +221,18 @@
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
-      "sha256": "9fa15cca1a7b202ff7a9accc78bb7a052a8f4f830b37ae450959b539633d01fd",
-      "line_count": 6929
+      "sha256": "d7a93913591a64bbd3fd8368db090ae7f24ae6354db7f19a5d1b9e3aed759a75",
+      "line_count": 7058
     },
     {
       "path": "artifacts/dependency_capability_baseline_v1.json",
-      "sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
-      "line_count": 3210
+      "sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+      "line_count": 3264
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
-      "sha256": "7dfbb239422630e1ef9c875e7542c4cee440211233dc7b734611fa8481d54178",
-      "line_count": 4824
+      "sha256": "3b63065b42c489cb38b872b35c6902a109848fd9d95120e21205a9fb88d708a4",
+      "line_count": 5446
     }
   ],
   "feature_profiles": [
