@@ -12,13 +12,22 @@ The current disposition is
 `KEEP_UNTIL_PARITY`: no parser replacement, command removal, option removal, or
 dependency exit is authorized.
 
+The 2026-09-09 release review preserves the original 13 source pins, eight
+logging-audit pins, old line anchors, and executed logging-parity receipt.
+`base_commit` records the original inventory lineage; later pins name their
+own exact historical snapshots. Unchanged anchors refer to those historical
+bytes. Six explicit main-source replacements and three audit replacements
+bind the current source, while new remote/config anchors refer to current
+lines. The review adds source coverage and does not replay the logging matrix
+or establish fresh release acceptance.
+
 ## What is frozen
 
 The primary boundary is exactly four binaries and two shared CLI files:
 
 | Source | Reachability | Required features | Parser / subcommand / args / value-enum derives | Clap arg / command / value attributes | Command variants |
 |---|---|---|---:|---:|---:|
-| `src/bin/asupersync.rs` | binary root | `cli` | 1 / 10 / 52 / 4 | 174 / 12 / 3 | 83 |
+| `src/bin/asupersync.rs` | binary root | `cli`; remote family needs `remote-service` and Unix | 1 / 11 / 54 / 4 | 175 / 13 / 3 | 86 |
 | `src/bin/atp.rs` | binary root | `atp-cli` | 7 / 1 / 0 / 4 | 99 / 8 / 0 | 9 |
 | `src/bin/atpd.rs` | binary root | `atpd-daemon` | 1 / 2 / 3 / 0 | 18 / 5 / 0 | 11 |
 | `src/bin/offline_tuner.rs` | binary root | `cli,simd-intrinsics` | 1 / 1 / 0 / 1 | 15 / 4 / 3 | 5 |
@@ -32,15 +41,15 @@ parsers, delimiters, actions, and other clap attributes part of the frozen
 snapshot.
 
 The field-level state is `COMPLETE_6_OF_6_PRIMARY_SOURCES`. The normalization
-cohort covers all 490 `#[arg]` attributes across the six primary sources plus
+cohort covers all 491 `#[arg]` attributes across the six primary sources plus
 37 implicit positionals: 25 in `asupersync`, ten in standalone `atp`, and two
-identity paths in `atpd`. Eleven `asupersync` fields and five detached-tree
+identity paths in `atpd`. Twelve `asupersync` fields and five detached-tree
 fields marked only with `#[command(flatten/subcommand)]` are parser plumbing,
-not arguments, and are therefore excluded from the 527 field rows. Complete
+not arguments, and are therefore excluded from the 528 field rows. Complete
 here means complete static field normalization for the six pinned sources; it
 does not mean complete byte captures, parser execution, or binary reachability.
 
-There are 159 indexed command variants across the six files. Only 108 belong
+There are 162 indexed command variants across the six files. Only 111 belong
 to binary-root command trees. The remaining 51 are the detached shared ATP
 tree.
 
@@ -54,11 +63,19 @@ cannot be interpreted from the six parser files alone.
 
 ### `asupersync`
 
-The root has five families: `atp`, `trace`, `conformance`, `lab`, and `doctor`.
-Their nested command enums contain 83 variants in total. The largest families
+The root has five unconditional families: `atp`, `trace`, `conformance`, `lab`,
+and `doctor`. Their nested enums contain 83 variants. The `remote` family adds
+`serve` and `probe` only under `all(feature = "remote-service", unix)`, bringing
+the complete source union to 86 variants. The largest families
 are ATP (including pairing, inbox, directory, and ATP-trace children) and
 Doctor. All are declared in the binary rather than in the exported shared ATP
 tree.
+
+`remote probe` adds one required String option, `--payload`, which is consumed
+as UTF-8 bytes. `RemoteArgs.command` is subcommand plumbing. Both remote leaves
+require the root `--config` TOML path and reject its absence. These are static
+source observations; their rendered parser bytes and platform cells remain
+uncaptured. Windows and `cli`-only builds do not expose this remote family.
 
 Four argument groups—ATP doctor, verify, replay, and proof—come from
 `src/cli/args.rs`. `CommonArgs` itself is not a clap-derived type; the binary
@@ -99,18 +116,18 @@ after parsing.
 
 ## Field-normalization cohort
 
-The machine artifact records 527 field rows under
+The machine artifact records 528 field rows under
 `COMPLETE_6_OF_6_PRIMARY_SOURCES`:
 
 | Source | Annotated fields | Implicit positionals | Normalized rows |
 |---|---:|---:|---:|
-| `src/bin/asupersync.rs` | 174 | 25 | 199 |
+| `src/bin/asupersync.rs` | 175 | 25 | 200 |
 | `src/bin/atp.rs` | 99 | 10 | 109 |
 | `src/bin/atpd.rs` | 18 | 2 | 20 |
 | `src/bin/offline_tuner.rs` | 15 | 0 | 15 |
 | `src/cli/args.rs` | 20 | 0 | 20 |
 | `src/cli/atp_command_tree.rs` | 164 | 0 | 164 |
-| **Cohort total** | **490** | **37** | **527** |
+| **Cohort total** | **491** | **37** | **528** |
 
 Each row records a stable field ID, owner type, Rust field declaration, option
 or positional shape, source attribute, explicit default, cardinality, scope,
@@ -123,13 +140,12 @@ byte evidence.
 
 The cohort makes these previously compressed distinctions visible:
 
-- `asupersync` contributes 174 annotated fields and 25 implicit positionals.
-  Its eleven flatten/subcommand plumbing fields are intentionally outside the
+- `asupersync` contributes 175 annotated fields and 25 implicit positionals.
+  Its twelve flatten/subcommand plumbing fields are intentionally outside the
   argument-row count.
-- Root `asupersync` verbosity, quiet, debug, and config values are copied into
-  `CommonArgs`, but only format, color, and the command are used by main
-  dispatch; those four values are classified as
-  `COPIED_TO_COMMON_ARGS_NOT_DISPATCHED`.
+- Root `asupersync` verbosity, quiet, and debug remain
+  `COPIED_TO_COMMON_ARGS_NOT_DISPATCHED`. Config now reaches `run` and the
+  gated remote serve/probe loaders; the five existing families ignore it.
 - `asupersync doctor recipe-list --json` is `PARSED_UNUSED_GAP`: the command
   dispatcher ignores the argument payload.
 - Other `asupersync` rows classified as struct-dispatched establish only the
@@ -203,11 +219,10 @@ The static source establishes these boundaries:
 - For `asupersync`, explicit format/color flags bypass auto detection. Auto
   format consults `CI` and then `ASUPERSYNC_OUTPUT_FORMAT`; auto color consults
   `NO_COLOR`, then `CLICOLOR_FORCE`, then terminal state.
-- Root-level `asupersync` verbosity, quiet, debug, and config values are parsed
-  and copied into `CommonArgs`, but the current main path consumes only the
-  effective format and color before dispatch. None of those four root values
-  reaches `run`. This is a frozen gap, not an invitation to assign new
-  semantics in the inventory bead.
+- Root-level `asupersync` config now reaches `run` through
+  `common.config.as_deref()` and the remote loaders under the Unix
+  `remote-service` gate. Root verbosity, quiet, and debug still have no
+  downstream consumer; existing command families still ignore root config.
 - Standalone `atp` reads `ATP_RQ_AUTH_KEY_HEX`, `SSL_CERT_FILE`,
   `SSL_CERT_DIR`, and `HOME` outside clap. It does not consume the detached
   ATP configuration manager.
@@ -301,10 +316,13 @@ are intentionally not claimed byte-deterministic across runs.
 
 `tests/cli_clap_surface_inventory_contract.rs` verifies source
 fingerprints, line counts, declaration and attribute counts, indexed command
-variants, the 527-row complete static field-normalization cohort,
+variants, the 528-row complete static field-normalization cohort,
 feature/environment/config/exit boundary markers, documentation markers, the
 still-empty broad byte-golden state, and the executed offline-tuner cutover
-subreceipt. Its focused Cargo test is remote-required.
+subreceipt. Its focused Cargo test is remote-required. The original ADR's
+527-row snapshot remains historical; current source normalization adds the
+single remote payload row. Exact historical pin and execution digests reject
+rewritten provenance even when a current replacement exists.
 
 ## No-claim boundary
 
@@ -314,7 +332,7 @@ matrix and proves only its scoped logging cutover. It does not prove rendered
 help or error stability across the full CLI, non-UTF-8 handling, other-platform
 parity, performance, release readiness, or broad workspace health.
 
-Field normalization covers all six primary sources, but even the 527 normalized
+Field normalization covers all six primary sources, but even the 528 normalized
 rows do not substitute for captured parser bytes. The detached tree still has
 no binary parser root, and its 60 public-model plus 104 workflow-model rows do
 not establish user reachability. The `asupersync` and standalone ATP dispatch

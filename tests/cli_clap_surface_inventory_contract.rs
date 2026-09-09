@@ -171,9 +171,218 @@ fn find_primary<'a>(artifact: &'a Value, path: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing primary source {path}"))
 }
 
+fn canonical_value_hash(value: &Value) -> String {
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let sorted = map.iter().collect::<std::collections::BTreeMap<_, _>>();
+                Value::Object(
+                    sorted
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), canonical(v)))
+                        .collect(),
+                )
+            }
+            Value::Array(rows) => Value::Array(rows.iter().map(canonical).collect()),
+            _ => value.clone(),
+        }
+    }
+    let mut bytes = serde_json::to_vec(&canonical(value)).expect("canonical JSON");
+    bytes.push(b'\n');
+    sha256_hex(&bytes)
+}
+
+fn validate_current_source_review(artifact: &Value) -> Result<(), String> {
+    let review = &artifact["current_source_review"];
+    for (pointer, field, digest) in [
+        (
+            "/source_pins",
+            "historical_source_pin_projection_sha256",
+            "1a0b157e0795dc51c57ea55348191ba12c6b7d6935bad0b672e001ed8e910e2f",
+        ),
+        (
+            "/env_logger_static_audit/source_pins",
+            "historical_audit_pin_projection_sha256",
+            "1951560ed8d90c0bf3d31fc8ee3bc47cf0d3dc8d7b5e336a04c177d76d129e00",
+        ),
+        (
+            "/env_logger_static_audit/execution_evidence",
+            "historical_logging_execution_sha256",
+            "a25ca2abad164552b3d3d257d7540441b5474b5f1954b1218d9bdf33a3bbd807",
+        ),
+    ] {
+        let value = artifact
+            .pointer(pointer)
+            .ok_or_else(|| format!("missing {pointer}"))?;
+        if canonical_value_hash(value) != digest || review[field].as_str() != Some(digest) {
+            return Err(format!("historical provenance drift: {pointer}"));
+        }
+    }
+    if review["historical_execution_receipts_preserved"].as_bool() != Some(true)
+        || review["fresh_logging_parity_claimed"].as_bool() != Some(false)
+        || review["release_acceptance_claimed"].as_bool() != Some(false)
+        || review["reviewed_date_utc"].as_str() != Some("2026-09-09")
+        || review["release_owner"].as_str() != Some("asupersync-ghxhvm")
+    {
+        return Err("current review evidence scope drift".to_owned());
+    }
+    for (key, expected) in [
+        (
+            "source_pin_replacements",
+            vec![
+                "src/bin/asupersync.rs",
+                "src/bin/atp.rs",
+                "Cargo.toml",
+                "src/lib.rs",
+                "src/cli/atp_config.rs",
+                "src/cli/atp_workflows.rs",
+            ],
+        ),
+        (
+            "audit_source_pin_replacements",
+            vec![
+                "Cargo.toml",
+                "Cargo.lock",
+                "scripts/run_dependency_sovereignty_e2e.sh",
+            ],
+        ),
+    ] {
+        let rows = review[key]
+            .as_array()
+            .ok_or_else(|| format!("missing {key}"))?;
+        let mut paths = BTreeSet::new();
+        for row in rows {
+            let path = row["path"]
+                .as_str()
+                .ok_or_else(|| format!("missing {key} path"))?;
+            if !paths.insert(path.to_owned()) {
+                return Err(format!("duplicate current pin: {path}"));
+            }
+            let bytes =
+                std::fs::read(repo_path(path)).map_err(|error| format!("read {path}: {error}"))?;
+            let source =
+                std::str::from_utf8(&bytes).map_err(|error| format!("UTF-8 {path}: {error}"))?;
+            if row["sha256"].as_str() != Some(sha256_hex(&bytes).as_str())
+                || row["line_count"].as_u64() != Some(source.lines().count() as u64)
+            {
+                return Err(format!("current source pin drift: {path}"));
+            }
+        }
+        if paths != expected_set(&expected) {
+            return Err(format!("current replacement path set drift: {key}"));
+        }
+    }
+    Ok(())
+}
+
+fn current_pin<'a>(artifact: &'a Value, historical: &'a Value, audit: bool) -> &'a Value {
+    let key = if audit {
+        "audit_source_pin_replacements"
+    } else {
+        "source_pin_replacements"
+    };
+    array(&artifact["current_source_review"], key)
+        .iter()
+        .find(|row| row["path"] == historical["path"])
+        .unwrap_or(historical)
+}
+
+fn validate_remote_cli_source(source: &str, artifact: &Value) -> Result<(), String> {
+    for marker in [
+        "#[cfg(all(feature = \"remote-service\", unix))]\n    Remote(RemoteArgs)",
+        "#[cfg(all(feature = \"remote-service\", unix))]\n#[derive(Args, Debug)]\nstruct RemoteArgs",
+        "#[cfg(all(feature = \"remote-service\", unix))]\n#[derive(Subcommand, Debug)]\nenum RemoteCommand",
+        "#[cfg(all(feature = \"remote-service\", unix))]\n#[derive(Args, Debug)]\nstruct RemoteProbeArgs",
+        "let run_result = run(cli.command, common.config.as_deref(), &mut output)",
+        "Command::Remote(args) => run_remote(args, _config_path, output)",
+        "RemoteCommand::Serve => remote_serve(config_path, output)",
+        "RemoteCommand::Probe(args) => remote_probe(args, config_path, output)",
+        "let config = load_remote_probe_config(config_path)?",
+        "RemoteComputationServiceBootstrap::from_toml_file(config_path, computations)",
+        "let payload = args.payload.into_bytes()",
+    ] {
+        if !source.contains(marker) {
+            return Err(format!("remote CLI source boundary missing: {marker}"));
+        }
+    }
+    let rows = array(&artifact["field_normalization"], "rows");
+    for (id, state) in [
+        (
+            "CLI-ASUP-ROOT-CONFIG",
+            "DISPATCHED_TO_REMOTE_CONFIG_WHEN_REMOTE_SERVICE_UNIX",
+        ),
+        (
+            "CLI-ASUP-REMOTE-PROBE-PAYLOAD",
+            "CONSUMED_BY_REMOTE_PROBE_PAYLOAD_BYTES",
+        ),
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row["field_id"].as_str() == Some(id))
+            .ok_or_else(|| format!("missing remote field {id}"))?;
+        if row["consumer_state"].as_str() != Some(state) {
+            return Err(format!("remote field consumer drift: {id}"));
+        }
+    }
+    let remote = &artifact["current_source_review"]["remote_surface"];
+    if remote["cfg"].as_str() != Some("all(feature = \"remote-service\", unix)")
+        || remote["byte_goldens_captured"].as_bool() != Some(false)
+        || remote["runtime_or_broker_proven"].as_bool() != Some(false)
+    {
+        return Err("remote CLI feature/evidence scope drift".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn current_review_rejects_rewritten_history_and_lost_remote_boundaries() {
+    let artifact = repo_json(ARTIFACT_PATH);
+    validate_current_source_review(&artifact).expect("valid review baseline");
+    let source = read_repo_file("src/bin/asupersync.rs");
+    validate_remote_cli_source(&source, &artifact).expect("valid remote source baseline");
+
+    let mut historical = artifact.clone();
+    historical["source_pins"][0]["sha256"] = Value::String("0".repeat(64));
+    assert!(
+        validate_current_source_review(&historical)
+            .expect_err("a replacement must not conceal historical pin corruption")
+            .contains("historical provenance drift")
+    );
+
+    let mut receipt = artifact.clone();
+    receipt["env_logger_static_audit"]["execution_evidence"]["post_cutover"]["remote_exit_code"] =
+        Value::from(1);
+    assert!(
+        validate_current_source_review(&receipt)
+            .expect_err("historical parity receipt cannot be rewritten")
+            .contains("historical provenance drift")
+    );
+
+    let mut current = artifact.clone();
+    current["current_source_review"]["source_pin_replacements"][0]["sha256"] =
+        Value::String("0".repeat(64));
+    assert!(
+        validate_current_source_review(&current)
+            .expect_err("current source identity must remain exact")
+            .contains("current source pin drift")
+    );
+
+    let lost_config = source.replace("common.config.as_deref()", "None");
+    assert_ne!(source, lost_config);
+    assert!(validate_remote_cli_source(&lost_config, &artifact).is_err());
+    let widened_cfg = source.replace(
+        "#[cfg(all(feature = \"remote-service\", unix))]\n#[derive(Args, Debug)]\nstruct RemoteProbeArgs",
+        "#[derive(Args, Debug)]\nstruct RemoteProbeArgs",
+    );
+    assert_ne!(source, widened_cfg);
+    assert!(validate_remote_cli_source(&widened_cfg, &artifact).is_err());
+}
+
 #[test]
 fn source_pins_and_six_file_boundary_match_main() {
     let artifact = repo_json(ARTIFACT_PATH);
+    validate_current_source_review(&artifact)
+        .expect("current source review must authenticate history");
     assert_eq!(unsigned(&artifact, "schema_version"), 1);
     assert_eq!(text(&artifact, "artifact_id"), ARTIFACT_ID);
     assert_eq!(text(&artifact, "bead_id"), BEAD_ID);
@@ -190,6 +399,7 @@ fn source_pins_and_six_file_boundary_match_main() {
         let path = text(pin, "path");
         assert!(pinned_paths.insert(path.to_owned()), "duplicate pin {path}");
         assert!(!text(pin, "role").is_empty());
+        let pin = current_pin(&artifact, pin, false);
         let bytes = read_repo_bytes(path);
         assert_eq!(
             sha256_hex(&bytes),
@@ -229,7 +439,7 @@ fn source_pins_and_six_file_boundary_match_main() {
 fn declaration_indexes_and_annotation_counts_are_exact() {
     let artifact = repo_json(ARTIFACT_PATH);
     let expected = [
-        ("src/bin/asupersync.rs", 1, 10, 52, 4, 174, 12, 3),
+        ("src/bin/asupersync.rs", 1, 11, 54, 4, 175, 13, 3),
         ("src/bin/atp.rs", 7, 1, 0, 4, 99, 8, 0),
         ("src/bin/atpd.rs", 1, 2, 3, 0, 18, 5, 0),
         ("src/bin/offline_tuner.rs", 1, 1, 0, 1, 15, 4, 3),
@@ -355,8 +565,8 @@ fn every_indexed_command_variant_is_present_and_reachability_is_explicit() {
         }
     }
 
-    assert_eq!(total_variants, 159);
-    assert_eq!(binary_variants, 108);
+    assert_eq!(total_variants, 162);
+    assert_eq!(binary_variants, 111);
     let detached = find_primary(&artifact, "src/cli/atp_command_tree.rs");
     assert_eq!(
         text(detached, "reachability"),
@@ -404,16 +614,16 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
     assert!(array(&normalization, "remaining_primary_sources").is_empty());
     assert_eq!(
         unsigned(&normalization, "annotated_arg_attribute_count"),
-        490
+        491
     );
     assert_eq!(unsigned(&normalization, "implicit_positional_count"), 37);
-    assert_eq!(unsigned(&normalization, "normalized_field_count"), 527);
+    assert_eq!(unsigned(&normalization, "normalized_field_count"), 528);
     assert!(text(&normalization, "spelling_policy").contains("not byte-capture evidence"));
 
     let rows = array(&normalization, "rows");
-    assert_eq!(rows.len(), 527);
+    assert_eq!(rows.len(), 528);
     for (path, expected_count) in [
-        ("src/bin/asupersync.rs", 199_usize),
+        ("src/bin/asupersync.rs", 200_usize),
         ("src/bin/atp.rs", 109_usize),
         ("src/bin/atpd.rs", 20_usize),
         ("src/bin/offline_tuner.rs", 15),
@@ -458,7 +668,7 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
                         != Some("NONE_IMPLICIT_POSITIONAL")
             })
             .count(),
-        174
+        175
     );
     assert_eq!(
         rows.iter()
@@ -559,7 +769,7 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
             parsed_unused.insert(field_id.to_owned());
         }
     }
-    assert_eq!(annotated, 490);
+    assert_eq!(annotated, 491);
     assert_eq!(implicit, 37);
     assert_eq!(
         parsed_unused,
@@ -654,7 +864,8 @@ fn feature_environment_config_and_exit_boundaries_fail_closed() {
     let asupersync = read_repo_file("src/bin/asupersync.rs");
     assert!(asupersync.contains("config: self.config.clone()"));
     assert!(asupersync.contains("let format = effective_output_format"));
-    assert!(asupersync.contains("let run_result = run(cli.command, &mut output)"));
+    validate_remote_cli_source(&asupersync, &artifact)
+        .expect("current remote/config source boundary");
     let output = read_repo_file("src/cli/output.rs");
     for marker in [
         "CI",
@@ -694,6 +905,8 @@ fn feature_environment_config_and_exit_boundaries_fail_closed() {
 #[test]
 fn offline_tuner_env_logger_cutover_is_source_pinned_and_fail_closed() {
     let artifact = repo_json(ARTIFACT_PATH);
+    validate_current_source_review(&artifact)
+        .expect("current audit pins must preserve historical parity");
     let audit = Value::Object(object(&artifact, "env_logger_static_audit").clone());
     assert_eq!(
         text(&audit, "audit_id"),
@@ -737,6 +950,8 @@ fn offline_tuner_env_logger_cutover_is_source_pinned_and_fail_closed() {
             pinned_paths.insert(path.to_owned()),
             "duplicate audit pin {path}"
         );
+        assert!(!text(pin, "role").is_empty());
+        let pin = current_pin(&artifact, pin, true);
         let bytes = read_repo_bytes(path);
         assert_eq!(
             sha256_hex(&bytes),
@@ -749,7 +964,6 @@ fn offline_tuner_env_logger_cutover_is_source_pinned_and_fail_closed() {
             unsigned(pin, "line_count"),
             "audit line-count drift: {path}"
         );
-        assert!(!text(pin, "role").is_empty());
     }
     assert_eq!(
         pinned_paths,
@@ -1023,7 +1237,7 @@ fn byte_golden_matrix_is_required_but_not_fabricated() {
             .iter()
             .map(|row| unsigned(row, "command_variant_count"))
             .sum::<u64>(),
-        108
+        111
     );
     for row in matrix {
         assert_eq!(text(row, "state"), "MISSING");
@@ -1056,14 +1270,14 @@ fn documentation_and_adr_keep_the_static_completion_boundary_visible() {
     for marker in [
         ARTIFACT_ID,
         BEAD_ID,
-        "159",
-        "108",
-        "527",
-        "490",
+        "162",
+        "111",
+        "528",
+        "491",
         "164",
         "60",
         "104",
-        "199",
+        "200",
         "109",
         "COMPLETE_6_OF_6_PRIMARY_SOURCES",
         "PARSED_UNUSED_GAP",

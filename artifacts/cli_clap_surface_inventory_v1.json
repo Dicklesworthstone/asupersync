@@ -3,6 +3,45 @@
   "artifact_id": "cli-clap-surface-inventory-v1",
   "bead_id": "asupersync-5z2scg.7.1",
   "base_commit": "6f999aadc2b7c2b721dad264e3ac4e14cb64d2dd",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "release_owner": "asupersync-ghxhvm",
+    "historical_scope": "base_commit is the original inventory provenance, not a claim that all later source pins came from that commit. The original 13 main pins, eight env_logger audit pins, old line anchors, verification receipt, and executed logging-parity evidence remain historical. Unchanged anchors refer to the exact historical source pin; current replacements and new remote/config anchors are explicit below.",
+    "historical_source_pin_projection_sha256": "1a0b157e0795dc51c57ea55348191ba12c6b7d6935bad0b672e001ed8e910e2f",
+    "historical_audit_pin_projection_sha256": "1951560ed8d90c0bf3d31fc8ee3bc47cf0d3dc8d7b5e336a04c177d76d129e00",
+    "historical_logging_execution_sha256": "a25ca2abad164552b3d3d257d7540441b5474b5f1954b1218d9bdf33a3bbd807",
+    "source_pin_replacements": [
+      {"path": "src/bin/asupersync.rs", "sha256": "db9679da2c0ba6050f209264fb353da75892b0046429dffe0ba7edce5d74517a", "line_count": 17878, "historical_pin_commit": "0b2c1beaa0447d9e1e7d26f4c598ef68a1fdd087"},
+      {"path": "src/bin/atp.rs", "sha256": "7f81086ac8b9a28ad071efde2c052153d0e436fe3fbcd780e239e028829ff799", "line_count": 13557, "historical_pin_commit": "73e00b348c2172ccc528f57546bc9e9d01d0e43e"},
+      {"path": "Cargo.toml", "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e", "line_count": 1121, "historical_pin_commit": "376c313540a58d2c8e6618cf40b4ac87ed36ec53"},
+      {"path": "src/lib.rs", "sha256": "baec6f62836d2b3dca6b56ae5bd3d0c2d9717ac60a2d4268b28e509cefe36d36", "line_count": 513, "historical_pin_commit": "2c7f2dd883cbbac1df6581f65673cf23eb40ee3d"},
+      {"path": "src/cli/atp_config.rs", "sha256": "92b848aeb2b488290f1eaf3fb6f4c281100841f184e023b9ca6a38025601349e", "line_count": 1021, "historical_pin_commit": "8d94b8b9e4361863599db9a17f7badd4179b2609"},
+      {"path": "src/cli/atp_workflows.rs", "sha256": "552e87ffb23988adb422609577741f9503c7451a74040f97b83d24d81e5ffba0", "line_count": 1973, "historical_pin_commit": "2cd4d2cbba854cfed79cc2c816c75f10e55a9fd3"}
+    ],
+    "audit_source_pin_replacements": [
+      {"path": "Cargo.toml", "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e", "line_count": 1121},
+      {"path": "Cargo.lock", "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb", "line_count": 4664},
+      {"path": "scripts/run_dependency_sovereignty_e2e.sh", "sha256": "b2d7894ca7412f96602389a591186acf665698416aeebf4989c53f281300f72b", "line_count": 1869}
+    ],
+    "reviewed_changes": [
+      "The remote-service plus unix gate adds RemoteArgs, RemoteProbeArgs, Command::Remote, and RemoteCommand::{Serve, Probe}; its one payload argument expands normalization from 527 to 528 rows. Counts describe the complete static source union, not every feature/target build.",
+      "CommonArgs.config now reaches run and the remote serve/probe configuration loaders. Root verbosity, quiet, and debug still have no downstream consumer. Config has no new semantics for the five existing command families.",
+      "Exact historical atp_config and atp_workflows pins resolve to snapshots that already contain their current production behavior; only tests changed. This review does not label earlier typed configuration work or persisted hash behavior as new.",
+      "Standalone ATP parser declarations and argument counts remain unchanged despite implementation/test additions. Manifest/library pins include release and remote-service admission changes; logging audit pin replacements establish current source identity, not fresh execution of historical parity receipts."
+    ],
+    "remote_surface": {
+      "cfg": "all(feature = \"remote-service\", unix)",
+      "command_variants": ["Command::Remote", "RemoteCommand::Serve", "RemoteCommand::Probe"],
+      "argument_types": ["RemoteArgs", "RemoteProbeArgs"],
+      "normalized_field_id": "CLI-ASUP-REMOTE-PROBE-PAYLOAD",
+      "current_anchors": ["src/bin/asupersync.rs:170-204", "src/bin/asupersync.rs:3754", "src/bin/asupersync.rs:3790-3834", "src/bin/asupersync.rs:4386-4423"],
+      "byte_goldens_captured": false,
+      "runtime_or_broker_proven": false
+    },
+    "historical_execution_receipts_preserved": true,
+    "fresh_logging_parity_claimed": false,
+    "release_acceptance_claimed": false
+  },
   "capability_ids": [
     "CAP-CLI-ASUPERSYNC",
     "CAP-CLI-ATP",
@@ -119,6 +158,8 @@
       "parser_derived_types": ["Cli"],
       "argument_group_types": [
         "CommonArgsCli",
+        "RemoteArgs",
+        "RemoteProbeArgs",
         "AtpArgs",
         "AtpDirectoryArgs",
         "AtpEarlyUsabilityArgs",
@@ -185,8 +226,14 @@
             "Trace=trace",
             "Conformance=conformance",
             "Lab=lab",
-            "Doctor=doctor"
+            "Doctor=doctor",
+            "Remote=remote"
           ]
+        },
+        {
+          "rust_type": "RemoteCommand",
+          "cfg": "all(feature = \"remote-service\", unix)",
+          "variants": ["Serve=serve", "Probe=probe"]
         },
         {
           "rust_type": "AtpCommand",
@@ -295,14 +342,14 @@
           ]
         }
       ],
-      "command_variant_count": 83,
+      "command_variant_count": 86,
       "annotation_counts": {
         "derive_parser": 1,
-        "derive_subcommand": 10,
-        "derive_args": 52,
+        "derive_subcommand": 11,
+        "derive_args": 54,
         "derive_value_enum": 4,
-        "arg_attributes": 174,
-        "command_attributes": 12,
+        "arg_attributes": 175,
+        "command_attributes": 13,
         "value_attributes": 3,
         "clap_env_attributes": 0
       }
@@ -593,9 +640,9 @@
       "src/cli/atp_command_tree.rs"
     ],
     "remaining_primary_sources": [],
-    "annotated_arg_attribute_count": 490,
+    "annotated_arg_attribute_count": 491,
     "implicit_positional_count": 37,
-    "normalized_field_count": 527,
+    "normalized_field_count": 528,
     "spelling_policy": "EXPLICIT names are copied from attributes; DERIVED names are source-review expectations from Rust field spelling and are not byte-capture evidence",
     "rows": [
       {
@@ -3485,8 +3532,25 @@
         "source_default": "NONE_EXPLICIT",
         "cardinality": "ZERO_OR_ONE",
         "scope": "ASUPERSYNC_ROOT_LOCAL",
-        "consumer_state": "COPIED_TO_COMMON_ARGS_NOT_DISPATCHED",
-        "consumer_anchors": ["src/bin/asupersync.rs:153", "src/bin/asupersync.rs:3602"]
+        "consumer_state": "DISPATCHED_TO_REMOTE_CONFIG_WHEN_REMOTE_SERVICE_UNIX",
+        "consumer_anchors": ["src/bin/asupersync.rs:153", "src/bin/asupersync.rs:3754", "src/bin/asupersync.rs:3790-3810", "src/bin/asupersync.rs:3842", "src/bin/asupersync.rs:4419"]
+      },
+      {
+        "field_id": "CLI-ASUP-REMOTE-PROBE-PAYLOAD",
+        "source_path": "src/bin/asupersync.rs",
+        "owner_type": "RemoteProbeArgs",
+        "rust_field": "payload",
+        "field_declaration": "payload: String,",
+        "cli_spelling": "--payload",
+        "argument_kind": "OPTION",
+        "spelling_basis": "DERIVED_LONG",
+        "field_type": "String",
+        "source_attribute": "#[arg(long)]",
+        "source_default": "NONE_EXPLICIT",
+        "cardinality": "EXACTLY_ONE",
+        "scope": "ASUPERSYNC_REMOTE_PROBE_LOCAL_REMOTE_SERVICE_UNIX",
+        "consumer_state": "CONSUMED_BY_REMOTE_PROBE_PAYLOAD_BYTES",
+        "consumer_anchors": ["src/bin/asupersync.rs:198-204", "src/bin/asupersync.rs:3810", "src/bin/asupersync.rs:3940"]
       },
       {
         "field_id": "CLI-ASUP-CONFORMANCE-MATRIX-ROOT",
@@ -6986,8 +7050,8 @@
       {
         "gap_id": "CLI-FIELD-GAP-09",
         "state": "SOURCE_OBSERVED_GAP",
-        "contract": "asupersync root verbosity, quiet, debug, and config values are copied into CommonArgs but main dispatch passes only the command into run, so those four values have no downstream consumer",
-        "anchors": ["src/bin/asupersync.rs:148", "src/bin/asupersync.rs:3598", "src/bin/asupersync.rs:3602"]
+        "contract": "asupersync root verbosity, quiet, and debug remain copied into CommonArgs without downstream consumers. Config now reaches run and, only with remote-service plus unix, the remote serve/probe loaders; the existing five command families do not consume that path.",
+        "anchors": ["src/bin/asupersync.rs:148-154", "src/bin/asupersync.rs:3746-3754", "src/bin/asupersync.rs:3790-3810"]
       },
       {
         "gap_id": "CLI-FIELD-GAP-10",
@@ -6998,13 +7062,13 @@
       {
         "gap_id": "CLI-FIELD-GAP-11",
         "state": "SOURCE_OBSERVED",
-        "contract": "asupersync contributes 174 #[arg] declarations plus 25 implicit positional fields; its eleven #[command(flatten/subcommand)] plumbing fields are intentionally excluded from argument-row counts",
+        "contract": "asupersync contributes 175 #[arg] declarations plus 25 implicit positional fields; its twelve #[command(flatten/subcommand)] plumbing fields, including RemoteArgs.command, are intentionally excluded from argument-row counts",
         "anchors": ["src/bin/asupersync.rs:111", "src/bin/asupersync.rs:231", "src/bin/asupersync.rs:558", "src/bin/asupersync.rs:2976"]
       },
       {
         "gap_id": "CLI-FIELD-GAP-12",
         "state": "SOURCE_OBSERVED_BOUNDARY",
-        "contract": "the 199 asupersync rows freeze parser population and struct-level dispatch only; they do not claim independent per-field dataflow or command behavior",
+        "contract": "the 200 asupersync rows freeze parser population and source-level dispatch, including the explicit remote payload/config consumers; the inventory does not establish independent behavior for every field",
         "anchors": ["src/bin/asupersync.rs:3602", "src/bin/asupersync.rs:3648", "src/bin/asupersync.rs:5466", "src/bin/asupersync.rs:5552"]
       },
       {
@@ -7100,8 +7164,8 @@
     {
       "contract_id": "CLI-CONFIG-01",
       "state": "SOURCE_OBSERVED_GAP",
-      "contract": "asupersync root verbosity, quiet, debug, and config values are parsed and copied into CommonArgs but main dispatch consumes only format and color; none of those four root values reaches run",
-      "anchors": ["src/bin/asupersync.rs:141", "src/bin/asupersync.rs:146", "src/bin/asupersync.rs:3597", "src/bin/asupersync.rs:3638"]
+      "contract": "asupersync parses root config into CommonArgs and passes common.config.as_deref() through run to remote serve/probe under remote-service plus unix. Both require an explicit TOML path; existing five command families ignore it. Root verbosity, quiet, and debug retain their copied-but-unused gap.",
+      "anchors": ["src/bin/asupersync.rs:141-154", "src/bin/asupersync.rs:3754", "src/bin/asupersync.rs:3790-3810", "src/bin/asupersync.rs:3834-3844", "src/bin/asupersync.rs:4386-4423"]
     },
     {
       "contract_id": "CLI-CONFIG-02",
@@ -7193,7 +7257,9 @@
       {
         "binary": "asupersync",
         "required_features": ["cli"],
-        "command_variant_count": 83,
+        "additional_feature_cells": ["cli,remote-service"],
+        "command_variant_count": 86,
+        "command_count_scope": "Static source union; cli alone exposes 83 variants, remote-service plus unix adds three. Windows does not expose the remote family.",
         "platform_cells": ["linux", "macos", "windows"],
         "state": "MISSING"
       },
@@ -7520,7 +7586,7 @@
     "No byte-level help, usage, version, stdout, stderr, or exit-code golden was captured.",
     "The broad four-binary byte-golden matrix remains unexecuted; the scoped offline-tuner subreceipt executed one Linux clean-overlay matrix only.",
     "The scoped offline-tuner unit, real-binary integration, and canonical E2E lanes ran remotely; no broad CLI, workspace, benchmark-performance, or cross-platform lane was run.",
-    "Field normalization covers all six primary sources with 527 static rows, but it is not byte-capture or parser-execution evidence.",
+    "Field normalization covers all six primary sources with 528 current static rows, but it is not byte-capture or parser-execution evidence.",
     "Asupersync consumer states freeze parser-struct dispatch only; they are not independent per-field dataflow or behavioral proof.",
     "Standalone atp consumer states freeze parser-struct dispatch only; they are not independent per-field dataflow or behavioral proof.",
     "Derived long, short, and value-name spellings in normalized rows are static review expectations, not captured help or parser bytes.",
