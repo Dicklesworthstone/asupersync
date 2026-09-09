@@ -351,6 +351,106 @@ fn current_thread_root_destructor_runs_before_retirement_and_drain() {
     );
 }
 
+/// Keeps a destructor action in the actual root future until it is dropped.
+struct RootDropAction<F: FnOnce()> {
+    on_drop: Option<F>,
+    panic_in_poll: bool,
+}
+
+impl<F: FnOnce()> std::future::Future for RootDropAction<F> {
+    type Output = u8;
+
+    fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<u8> {
+        assert!(!self.panic_in_poll, "root poll boom");
+        Poll::Ready(7)
+    }
+}
+
+impl<F: FnOnce()> Drop for RootDropAction<F> {
+    fn drop(&mut self) {
+        if let Some(on_drop) = self.on_drop.take() {
+            on_drop();
+        }
+    }
+}
+
+#[test]
+fn current_thread_root_destructor_can_reenter_and_join_local_work() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    let completed = Cell::new(0);
+    runtime.block_on(RootDropAction {
+        on_drop: Some(|| {
+            let cx = Cx::current().expect("root destructor Cx");
+            let local = Rc::new(42_u32);
+            let task = cx
+                .spawn_local(move |_| async move { *local })
+                .expect("root destructor has local spawn authority");
+            completed.set(join_all_within(
+                &runtime,
+                vec![task],
+                Duration::from_secs(2),
+            ));
+            assert_eq!(
+                Cx::current().expect("restored destructor Cx").task_id(),
+                cx.task_id()
+            );
+        }),
+        panic_in_poll: false,
+    });
+    assert_eq!(
+        completed.get(),
+        1,
+        "root destructor could not drive its local child"
+    );
+    assert!(runtime.is_quiescent());
+}
+
+#[test]
+fn current_thread_root_destructor_panic_still_drains_and_returns_worker() {
+    let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+    for panic_in_poll in [false, true] {
+        let ran = Rc::new(Cell::new(false));
+        let child_ran = Rc::clone(&ran);
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            runtime.block_on(RootDropAction {
+                on_drop: Some(|| {
+                    let cx = Cx::current().expect("root destructor Cx");
+                    let _child = cx
+                        .spawn_local(move |_| async move {
+                            child_ran.set(true);
+                        })
+                        .expect("destructor local spawn");
+                    panic!("root drop boom");
+                }),
+                panic_in_poll,
+            })
+        }));
+        let payload = outcome.expect_err("root panic must propagate");
+        let expected = if panic_in_poll {
+            "root poll boom"
+        } else {
+            "root drop boom"
+        };
+        assert_eq!(payload.downcast_ref::<&str>().copied(), Some(expected));
+        assert!(ran.get(), "destructor panic skipped runnable child drain");
+        assert!(
+            runtime.is_quiescent(),
+            "panicking destructor leaked root accounting"
+        );
+        let caller = thread::current().id();
+        assert_eq!(
+            runtime.block_on(async {
+                runtime
+                    .handle()
+                    .spawn(async { thread::current().id() })
+                    .await
+            }),
+            caller,
+            "worker must remain usable on caller after destructor panic"
+        );
+    }
+}
+
 /// Control: the root future may be `!Send` and borrow the caller's stack.
 #[test]
 fn current_thread_block_on_accepts_non_send_root_future() {

@@ -376,12 +376,16 @@ impl NativeThreadHostServices {
             let handle = builder
                 .spawn(move || {
                     let _guard = ScopedRuntimeHandle::new(runtime_handle);
-                    if let Some(callback) = on_start.as_ref() {
-                        callback();
-                    }
                     match current_thread_driver {
-                        Some(driver) => driver.run_background(worker),
+                        Some(driver) => driver.run_background(worker, || {
+                            if let Some(callback) = on_start.as_ref() {
+                                callback();
+                            }
+                        }),
                         None => {
+                            if let Some(callback) = on_start.as_ref() {
+                                callback();
+                            }
                             let mut worker = worker;
                             worker.run_loop();
                         }

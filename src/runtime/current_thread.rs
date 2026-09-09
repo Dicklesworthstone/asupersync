@@ -32,7 +32,8 @@
 //!   root future completes, so
 //!   [`Runtime::is_quiescent`](crate::runtime::Runtime::is_quiescent) is
 //!   false while the root runs.
-//! - After the root completes, `block_on` retires the stub (one direct poll
+//! - After the root completes, `block_on` drops the root future in place
+//!   with its task context still installed, then retires the stub (one direct poll
 //!   of its record, independent of queue order) and then drains runnable
 //!   work with a bounded policy: dispatch turns continue until nothing is
 //!   runnable (no dispatchable task, ready finalizer, queued command, or
@@ -41,7 +42,7 @@
 //!   self-waking task therefore cannot keep `block_on` from returning; work
 //!   still runnable or parked afterwards continues on the background thread
 //!   once it resumes the worker.
-//! - A root panic is caught around the poll; the stub is retired, the
+//! - A root panic is caught around the poll and destructor; the stub is retired, the
 //!   worker is returned, and the original payload is re-raised on the caller
 //!   (`block_on` propagates root panics exactly as before).
 //!
@@ -149,10 +150,10 @@ fn recover_worker(erased: ErasedWorker) -> Box<ThreeLaneWorker> {
 enum WorkerSlot {
     /// The background thread is running the worker.
     Background,
-    /// A `block_on` caller asked the background thread to yield the worker.
-    Requested,
-    /// The background thread stopped and left the worker for the requester.
-    Offered(ErasedWorker),
+    /// This caller asked the background thread to yield the worker.
+    Requested(ThreadId),
+    /// The background thread stopped and left the worker for this caller.
+    Offered(ThreadId, ErasedWorker),
     /// A `block_on` caller is driving the worker.
     Loaned,
     /// The caller handed the worker back; the background thread resumes it.
@@ -235,13 +236,18 @@ impl CurrentThreadDriver {
     /// a `block_on` caller asks for it, offers it (unless this thread still
     /// owns live local tasks, which must be polled here), waits for it to
     /// come back, and repeats; exits once the scheduler shutdown flag is set.
-    pub fn run_background(&self, worker: ThreeLaneWorker) {
+    pub fn run_background(&self, worker: ThreeLaneWorker, on_start: impl FnOnce()) {
+        // Cover the startup hook as well as dispatch: a dead background
+        // thread can never answer a loan request. Install its identity first
+        // too, so a hook that calls block_on never waits for itself.
+        let _close_on_exit = BackgroundExit(self);
         *self
             .background_thread
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(std::thread::current().id());
         let shutdown = Arc::clone(&worker.shutdown);
         let _store_key = ScopedLocalStoreKey::new(worker.local_store_key());
+        on_start();
         let mut worker = Box::new(worker);
         loop {
             worker.run_loop_until(
@@ -259,11 +265,11 @@ impl CurrentThreadDriver {
                 && spawn_mailbox::local_spawn_lane_is_empty();
             let mut slot = self.lock_slot();
             match *slot {
-                WorkerSlot::Requested if can_offer => {
-                    *slot = WorkerSlot::Offered(erase_worker(worker));
+                WorkerSlot::Requested(owner) if can_offer => {
+                    *slot = WorkerSlot::Offered(owner, erase_worker(worker));
                     self.changed.notify_all();
                 }
-                WorkerSlot::Requested => {
+                WorkerSlot::Requested(_) => {
                     // Refused: the requester falls back to polling its root
                     // on its own thread while this worker keeps running.
                     *slot = WorkerSlot::Background;
@@ -285,6 +291,7 @@ impl CurrentThreadDriver {
                     WorkerSlot::Returned(returned) => {
                         *slot = WorkerSlot::Background;
                         worker = recover_worker(returned);
+                        self.changed.notify_all();
                         break;
                     }
                     WorkerSlot::Closed => {
@@ -316,12 +323,13 @@ impl CurrentThreadDriver {
         if self.on_background_thread() {
             return None;
         }
+        let requester = std::thread::current().id();
         let mut slot = self.lock_slot();
         match std::mem::replace(&mut *slot, WorkerSlot::Loaned) {
             // Fast path: the previous borrower handed the worker back and the
             // background thread has not resumed it yet.
             WorkerSlot::Returned(worker) => return Some(recover_worker(worker)),
-            WorkerSlot::Background => *slot = WorkerSlot::Requested,
+            WorkerSlot::Background => *slot = WorkerSlot::Requested(requester),
             other => {
                 *slot = other;
                 return None;
@@ -332,22 +340,26 @@ impl CurrentThreadDriver {
         scheduler.wake_all();
         loop {
             match std::mem::replace(&mut *slot, WorkerSlot::Loaned) {
-                WorkerSlot::Offered(worker) => {
+                WorkerSlot::Offered(owner, worker) if owner == requester => {
                     self.handover_requested.store(false, Ordering::Release);
                     return Some(recover_worker(worker));
                 }
-                // The background thread refused the handover (it owns live
-                // local tasks) and cleared the flag itself.
-                WorkerSlot::Background => {
-                    *slot = WorkerSlot::Background;
-                    return None;
+                WorkerSlot::Requested(owner) if owner == requester => {
+                    *slot = WorkerSlot::Requested(owner);
                 }
                 WorkerSlot::Closed => {
                     *slot = WorkerSlot::Closed;
                     self.handover_requested.store(false, Ordering::Release);
                     return None;
                 }
-                other => *slot = other,
+                // A refusal can be followed by a new request and even an
+                // offer before this waiter reacquires the mutex. Only wait
+                // for our own request; never consume another caller's offer
+                // or clear its handover flag.
+                other => {
+                    *slot = other;
+                    return None;
+                }
             }
             slot = self
                 .changed
@@ -493,6 +505,15 @@ impl CurrentThreadDriver {
     }
 }
 
+/// Close the loan protocol even when a worker hook or dispatch unwinds.
+struct BackgroundExit<'a>(&'a CurrentThreadDriver);
+
+impl Drop for BackgroundExit<'_> {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
+}
+
 /// Where a loaned worker goes back when the loan ends.
 enum LoanReturn {
     /// To the background thread (the ordinary `block_on`).
@@ -601,7 +622,9 @@ fn drive_root_on<F: Future>(
     };
     let waker = Waker::from(Arc::clone(&root_waker));
     let mut ctx = Context::from_waker(&waker);
-    let mut future = pin!(future);
+    // Pin an Option so the actual !Unpin future can be dropped in place
+    // before retiring its stub, without moving it or allocating a box.
+    let mut future = pin!(Some(future));
 
     // Phase 1: admit the root stub and take its admission-minted Cx. The
     // first dispatch turn drains the lane, admits the stub on this worker
@@ -621,14 +644,25 @@ fn drive_root_on<F: Future>(
     // (dispatch, admission, timers, reactor, park) in between.
     let result = loop {
         if loaned(slot).shutdown.load(Ordering::Acquire) {
-            break drive_root_after_shutdown(loaned(slot), &root_waker, &mut ctx, future.as_mut());
+            break drive_root_after_shutdown(
+                loaned(slot),
+                &root_waker,
+                &mut ctx,
+                future.as_mut().as_pin_mut().expect("root is still live"),
+            );
         }
         if root_waker.take_woken() {
             let parked = slot
                 .take()
                 .expect("worker stays on loan for the whole drive");
             driver.park_reentrant(parked);
-            let polled = catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(&mut ctx)));
+            let polled = catch_unwind(AssertUnwindSafe(|| {
+                future
+                    .as_mut()
+                    .as_pin_mut()
+                    .expect("root is still live")
+                    .poll(&mut ctx)
+            }));
             *slot = Some(
                 driver
                     .take_reentrant()
@@ -646,6 +680,18 @@ fn drive_root_on<F: Future>(
             loaned(slot).run_loop_until(&mut || root_waker.is_woken(), false);
         }
     };
+    // Drop is user code too: keep its task Cx/accounting live and make the
+    // worker available to nested block_on calls from the destructor. Catch
+    // a destructor panic so retirement and worker return still happen;
+    // preserve the original poll panic if both operations panic.
+    driver.park_reentrant(slot.take().expect("worker stays on loan through root drop"));
+    let dropped = catch_unwind(AssertUnwindSafe(|| future.set(None)));
+    *slot = Some(
+        driver
+            .take_reentrant()
+            .expect("a nested drive hands the worker back before root drop returns"),
+    );
+    let result = result.and_then(|output| dropped.map(|()| output));
     drop(root_cx_guard);
 
     // Phase 3: retire the stub with one direct poll of its record (so the
@@ -801,6 +847,24 @@ mod tests {
     /// The refused caller must not wait for a foreign loan to finish.
     #[test]
     fn refused_request_does_not_wait_for_a_foreign_loan() {
+        assert_refused_request_returns(WorkerSlot::Loaned);
+    }
+
+    #[test]
+    fn refused_request_does_not_wait_for_a_new_requester() {
+        assert_refused_request_returns(WorkerSlot::Requested(std::thread::current().id()));
+    }
+
+    #[test]
+    fn refused_request_does_not_steal_a_new_requesters_offer() {
+        // The erased value must never be touched by the refused caller.
+        assert_refused_request_returns(WorkerSlot::Offered(
+            std::thread::current().id(),
+            Box::new(()),
+        ));
+    }
+
+    fn assert_refused_request_returns(replacement: WorkerSlot) {
         use crate::runtime::RuntimeState;
         use crate::sync::ContendedMutex;
         use std::sync::mpsc;
@@ -816,13 +880,14 @@ mod tests {
         });
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut request_seen = false;
+        let expected_state = std::mem::discriminant(&replacement);
         while Instant::now() < deadline {
             let mut slot = driver.lock_slot();
             if driver.handover_requested.load(Ordering::Acquire) {
                 request_seen = true;
                 // The background refusal and R2 acquisition happen while
                 // R1 is asleep; only their final state is observable to R1.
-                *slot = WorkerSlot::Loaned;
+                *slot = replacement;
                 driver.changed.notify_all();
                 break;
             }
@@ -830,6 +895,8 @@ mod tests {
             std::thread::yield_now();
         }
         let result = received.recv_timeout(Duration::from_secs(2));
+        let final_state = std::mem::discriminant(&*driver.lock_slot());
+        let flag_retained = driver.handover_requested.load(Ordering::Acquire);
         driver.shutdown();
         caller.join().expect("requester exits after cleanup");
         assert!(
@@ -837,6 +904,11 @@ mod tests {
             "requester must actually enter the handover wait"
         );
         assert!(result.expect("refused requester waited on a foreign loan"));
+        assert_eq!(final_state, expected_state, "foreign slot was consumed");
+        assert!(
+            flag_retained,
+            "refused caller cleared a foreign request flag"
+        );
     }
 
     /// `ScopedLocalStoreKey` restores the key of the thread that created it,
