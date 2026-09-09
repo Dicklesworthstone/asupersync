@@ -1019,9 +1019,10 @@ fn phase8_stable_diagnostics_are_additive_executable_and_quiescent() {
     let source_contracts = phase8["source_contracts"]
         .as_array()
         .expect("phase8 source contracts");
-    assert_eq!(source_contracts.len(), 2);
+    assert_eq!(source_contracts.len(), 3);
     for (path, source) in [
         ("src/database/sqlite.rs", SQLITE_SOURCE),
+        ("src/database/sqlite_tests.rs", SQLITE_TESTS),
         (
             "tests/fixtures/sqlite-parity-consumer/src/main.rs",
             CONSUMER_SOURCE,

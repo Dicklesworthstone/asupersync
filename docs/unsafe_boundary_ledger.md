@@ -44,6 +44,16 @@ requirements; only physical paths and the 33 operation locators change.
 Each parent includes its test file under `cfg(test)`. This relocation adds no
 unsafe operation and makes no new runtime or platform safety claim.
 
+The remaining 0.4.11 locator reconciliation uses committed
+`227451925b014cd3a47c351d204a401b82d633d8`. Existing unsafe statements were
+matched through unchanged source spans from the 0.4.9 release, including
+the allocation fixture and environment guards whose surrounding tests grew.
+The epoll deregistration locator also names the existing `raw_fd` operand
+correctly. Site IDs, categories, invariants, evidence requirements, and the
+100-row/892-operation inventory remain unchanged. The exact syntax scan
+must still pass; these location updates establish no new platform or runtime
+safety result.
+
 ## Row Schema
 
 Each `sites[]` row must include:
