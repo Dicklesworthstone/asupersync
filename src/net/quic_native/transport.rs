@@ -306,15 +306,6 @@ impl LossRecovery {
         if ack_ranges.is_empty() {
             return AckEvent::empty();
         }
-        let loss_delay = self.loss_delay_micros();
-        // RFC 9002 §6.1.2: a packet is only time-threshold lost once
-        // `now - time_sent >= loss_delay`. A saturating subtraction would floor
-        // the boundary to 0 when `now < loss_delay` (true early in a connection,
-        // where the default loss delay is ~375ms with no RTT samples), causing
-        // packets sent at t=0 to be falsely declared lost. Use checked_sub and
-        // skip the time test until the boundary is reachable (mirrors the fix in
-        // `net/atp/loss/detector.rs` and `net/atp/quic/recovery.rs`).
-        let time_threshold = now_micros.checked_sub(loss_delay);
         let mut event = AckEvent::empty();
         let mut newest_lost_packet_sent_micros: Option<u64> = None;
         // RFC 9002 B.5: Only grow cwnd for packets sent AFTER the recovery
@@ -384,6 +375,15 @@ impl LossRecovery {
             };
             self.rtt.update(sample, effective_ack_delay);
         }
+
+        // RFC 9002 Appendix A.7 updates RTT before detecting losses from the
+        // same ACK. Using the previous estimate can falsely lose packets when
+        // path latency grows, or retain expired packets when it shrinks.
+        let loss_delay = self.loss_delay_micros();
+        // RFC 9002 section 6.1.2: use checked subtraction so an early clock
+        // does not floor the boundary to zero and falsely lose packets sent
+        // at t=0 before a complete loss-delay interval has elapsed.
+        let time_threshold = now_micros.checked_sub(loss_delay);
 
         // Packet-threshold loss detection (kPacketThreshold = 3)
         let mut survivors = VecDeque::with_capacity(self.sent_packets.len());
@@ -1084,6 +1084,35 @@ mod tests {
         assert_eq!(repeated.lost_packets, 0);
         assert_eq!(t.bytes_in_flight(), 0);
         assert_eq!(t.rtt(), &original_rtt);
+    }
+
+    #[test]
+    fn ack_loss_detection_uses_the_rtt_sample_from_that_ack() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 0));
+        t.on_ack_received(PacketNumberSpace::ApplicationData, &[0], 0, 10_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(10_000));
+
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 20_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 21_000));
+        // This ACK witnesses the path growing from 10ms to 100ms. Packet 1
+        // is only 101ms old, below 9/8 of the newly observed RTT; using the
+        // previous 10ms estimate would falsely declare it lost.
+        let delayed = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 121_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(100_000));
+        assert_eq!(delayed.acked_packets, 1);
+        assert_eq!(delayed.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 100);
+
+        // A subsequent fast ACK must still detect the genuinely old packet.
+        // The packet-number gap is only two, so this is time-threshold loss.
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 3, 130_000));
+        let recovered = t.on_ack_received(PacketNumberSpace::ApplicationData, &[3], 0, 131_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(1_000));
+        assert_eq!(recovered.acked_packets, 1);
+        assert_eq!(recovered.lost_packets, 1);
+        assert_eq!(recovered.lost_bytes, 100);
+        assert_eq!(t.bytes_in_flight(), 0);
     }
 
     #[test]
