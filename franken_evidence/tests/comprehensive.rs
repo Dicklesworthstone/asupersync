@@ -306,11 +306,11 @@ fn full_pipeline_builder_to_jsonl_to_render() {
     let mut diff_ctx = DiffContext::new();
     for entry in &read_back {
         let l0 = render::level0(entry);
-        assert!(!l0.is_empty());
+        assert_ne!(l0, "");
         assert!(l0.len() <= 120);
 
         let l0a = render::level0_ansi(entry);
-        assert!(!l0a.is_empty());
+        assert_ne!(l0a, "");
         assert!(l0a.contains("\x1b["));
 
         let l1 = render::level1(entry);

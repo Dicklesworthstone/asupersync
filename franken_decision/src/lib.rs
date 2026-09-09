@@ -1799,7 +1799,7 @@ mod tests {
                     };
                     let outcome = evaluate(c.as_ref(), &posterior, &ctx)
                         .expect("legacy test invariant: action in range");
-                    assert!(!outcome.action_name.is_empty());
+                    assert_ne!(outcome.action_name, "");
                     assert_eq!(outcome.expected_losses.len(), 2);
                     let evidence = outcome.audit_entry.to_evidence_ledger();
                     assert!(evidence.is_valid());

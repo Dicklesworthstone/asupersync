@@ -123,6 +123,133 @@
       "line_count": 1015
     }
   ],
+  "release_review": {
+    "release_version": "0.4.11",
+    "reviewed_date_utc": "2026-09-09",
+    "comparison_revision": "3cb2dc6d",
+    "historical_receipts_preserved": true,
+    "dependency_exit_allowed": false,
+    "source_transitions": [
+      {
+        "path": "Cargo.toml",
+        "previous_sha256": "914cb85f3b3ef24c06e41f332cb21c2361163c99c186d4a8234b237323792b2b",
+        "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+        "line_count": 1121,
+        "review": "Package, feature, target, and dependency declarations grew; remote-service adds two strict TOML consumers while the existing TOML dependency remains."
+      },
+      {
+        "path": "src/runtime/builder.rs",
+        "previous_sha256": "43e4f8b0d8a68c4978c447d2b0f52bc11ca198482f7a61c59d4495c9842b62b4",
+        "sha256": "0e1c94cab515b252bc6e659666166c47fd76b450bed99e65d962082184f916ba",
+        "line_count": 11302,
+        "review": "Caller-thread root execution, runtime lifecycle, and test changes; from_toml/from_toml_str and typed TOML parsing remain unchanged. This is not a runtime-equivalence claim."
+      },
+      {
+        "path": "src/cli/atp_config.rs",
+        "previous_sha256": "b6e56aefd2d04371f37958f7070053374cfe2aa2ce1db0ada2eab56161f27a2f",
+        "sha256": "92b848aeb2b488290f1eaf3fb6f4c281100841f184e023b9ca6a38025601349e",
+        "line_count": 1021,
+        "review": "Precedence test now explicitly leaves the absent CLI profile unset; parser, writer, models, and manager layer behavior are unchanged."
+      },
+      {
+        "path": "src/bin/dependency_marginal_ledger.rs",
+        "previous_sha256": "5d87b82df1edac2037a6410c7bae0ec20d0e8bb5574f62ef44b58591c5bfc79a",
+        "sha256": "dd41fe6732c719987341acf10046452ea7c7cfe26fee5b88610f9228420906c6",
+        "line_count": 3485,
+        "review": "Dependency projection and budget reporting grew; the existing generic TOML manifest parser and shadow writer remain."
+      },
+      {
+        "path": "franken_decision/src/lib.rs",
+        "previous_sha256": "7011ddd729e1a8176ce34481148a141cf7029116492fd249f88aeb0b2233c7f9",
+        "sha256": "8acf222b8b9e021686994e8d110f3816c2ccc489e5dcb34c333f96e4289fde57",
+        "line_count": 2300,
+        "review": "One test assertion now uses assert_ne! for the same nonempty action name; TOML round-trip tests and production code are unchanged."
+      }
+    ],
+    "additional_source_pins": [
+      {
+        "path": "src/remote.rs",
+        "sha256": "7093b77700a548a87a58775926f5a25a7030a5d5d41f390fe390b4d2dc68f1bd",
+        "line_count": 13516
+      },
+      {
+        "path": "src/bin/asupersync.rs",
+        "sha256": "db9679da2c0ba6050f209264fb353da75892b0046429dffe0ba7edce5d74517a",
+        "line_count": 17878
+      }
+    ],
+    "additional_toml_surfaces": [
+      {
+        "surface_id": "CFG-TOML-REMOTE-SERVICE",
+        "feature_gate": "all(feature = remote-service, unix)",
+        "source_path": "src/remote.rs",
+        "entrypoint": "remote::RemoteComputationServiceBootstrap::from_toml_file; asupersync remote --config <PATH> serve",
+        "models": [
+          {
+            "name": "RemoteComputationServiceFileConfig",
+            "fields": [
+              "schema_version:u32", "protocol:String", "listen:String",
+              "listen_scope:RemoteComputationServiceListenScope",
+              "server_certificate_chain:PathBuf", "server_private_key:PathBuf",
+              "client_ca_bundle:PathBuf", "max_frame_bytes:usize", "max_connections:usize",
+              "tls_handshake_timeout_ms:u64", "initial_frame_timeout_ms:u64",
+              "drain_timeout_ms:u64", "idempotency_retention_ms:u64",
+              "max_idempotency_records_per_peer:usize", "peers:Vec<RemoteComputationServicePeerConfig>"
+            ]
+          },
+          {
+            "name": "RemoteComputationServicePeerConfig",
+            "fields": ["node_id:String", "spki_sha256:Vec<String>", "computations:Vec<String>"]
+          }
+        ],
+        "unknown_fields": "REJECT_AT_ROOT_AND_PEER",
+        "required_fields": "ALL; peers must be nonempty",
+        "schema_version": 2,
+        "protocol": "3.0",
+        "precedence": "Explicit TOML file only; no ambient configuration layers or fallback to defaults.",
+        "path_policy": "Relative certificate/key/CA paths resolve against the config parent; absolute paths remain absolute; no base confinement.",
+        "validation": "Strict decode, schema/protocol, literal listener and exposure scope, nonzero limits/timeouts, unique peer nodes, nonempty pins/grants, unique computation names, registered computations, and TLS credentials are validated before bind.",
+        "errors": "RemoteComputationServiceBootstrapError distinguishes Read, Decode, Invalid, Tls, UnknownComputation, and PeerGrant; CLI configuration refusal is remote_service_config_invalid.",
+        "write_behavior": "NO_WRITER",
+        "resource_limit": "Whole-file read; no TOML file-size or nesting ceiling.",
+        "existing_test": "tests/remote_transport_lifecycle_contract.rs::configured_remote_service_config_fails_closed_before_bind",
+        "evidence_state": "SOURCE_BASELINED"
+      },
+      {
+        "surface_id": "CFG-TOML-REMOTE-PROBE",
+        "feature_gate": "all(feature = remote-service, unix)",
+        "source_path": "src/bin/asupersync.rs",
+        "entrypoint": "asupersync remote --config <PATH> probe --payload <TEXT>; load_remote_probe_config",
+        "models": [
+          {
+            "name": "RemoteProbeFileConfig",
+            "fields": [
+              "schema_version:u32", "protocol:String", "bootstrap_endpoints:Vec<String>",
+              "server_name:String", "server_ca_bundle:PathBuf", "client_certificate_chain:PathBuf",
+              "client_private_key:PathBuf", "server_spki_sha256:Vec<String>", "origin_node:String",
+              "max_frame_bytes:usize", "connect_timeout_ms:u64", "tls_handshake_timeout_ms:u64",
+              "attempt_timeout_ms:u64", "completion_timeout_ms:u64", "max_attempts:usize",
+              "initial_backoff_ms:u64", "max_backoff_ms:u64", "lease_ms:u64", "full_jitter:bool",
+              "tcp_nodelay:bool"
+            ]
+          }
+        ],
+        "unknown_fields": "REJECT_AT_ROOT",
+        "required_fields": "ALL; bootstrap_endpoints and server_spki_sha256 must be nonempty",
+        "schema_version": 1,
+        "protocol": "3.0",
+        "precedence": "Explicit TOML file only; the CLI payload supplies computation data, not a configuration overlay.",
+        "path_policy": "Relative CA/certificate/key paths resolve against the config parent; absolute paths remain absolute; no base confinement.",
+        "validation": "Strict decode, schema/protocol, unique literal endpoints, trimmed nonempty names, valid unique SPKI pins, nonzero frame/attempt/deadline bounds, connect/TLS deadlines within the attempt deadline, and ordered backoff bounds.",
+        "errors": "File reads use io_error; decode and semantic failures use remote_probe_config_invalid with path context and USER_ERROR exit status.",
+        "write_behavior": "NO_WRITER",
+        "resource_limit": "Whole-file read; no TOML file-size or nesting ceiling.",
+        "existing_test": "src/bin/asupersync.rs::tests::remote_probe_config_rejects_unknown_toml_fields; remote_probe_config_validation_fails_closed",
+        "evidence_state": "SOURCE_BASELINED"
+      }
+    ],
+    "no_claim_boundary": "This review extends the five historical surfaces with two strict remote-service TOML surfaces. It does not rewrite A1-A3 execution receipts, add JSON support to the new surfaces, prove live remote service operation, or authorize dependency exit."
+  },
   "feature_profiles": [
     {
       "profile_id": "CFG-PROFILE-DEFAULT",

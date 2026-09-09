@@ -17,9 +17,10 @@ terminal A5 may authorize removing the incumbent `toml` dependency.
 
 ## What actually parses TOML
 
-The repository does not have one TOML configuration schema. It has five
-production or internal-tool surfaces with different defaults, required fields,
-errors, path policies, and write behavior.
+The original A1-A3 inventory covers five production or internal-tool surfaces
+with different defaults, required fields, errors, path policies, and write
+behavior. The v0.4.11 review adds the two strict remote-service schemas below,
+bringing the current inventory to seven surfaces.
 
 | Stable ID | Build profile | Live owner | Typed fields | Empty document | Additive JSON source state | Write behavior |
 | --- | --- | --- | ---: | --- | --- | --- |
@@ -28,6 +29,34 @@ errors, path policies, and write behavior.
 | `CFG-TOML-ATP-INSTALL` | `cli` | `cli/atp_config.rs`, `cli/first_run.rs`, `cli/upgrade.rs` | 14 | rejected: required fields missing | model parse/projection API | pretty direct TOML write |
 | `CFG-TOML-ATPD` | `atpd-daemon` | `bin/atpd.rs` | 45 | loader rejects; start falls back to defaults | `.json` loader plus redacted projection | none |
 | `CFG-TOML-DEPENDENCY-LEDGER` | `dependency-ledger` | `bin/dependency_marginal_ledger.rs` | generic `toml::Value` | parser accepts, Cargo consumer may not | explicitly not an application-config model | pretty generated shadow TOML manifest |
+
+The `release_review` section preserves the older receipts and records current
+source transitions separately. The new schemas require `remote-service` on
+Unix and have no JSON loader or writer:
+
+| Stable ID | Entry point | Typed fields | Schema version | Unknown fields |
+| --- | --- | --- | ---: | --- |
+| `CFG-TOML-REMOTE-SERVICE` | `RemoteComputationServiceBootstrap::from_toml_file`; `remote --config <PATH> serve` | 15 root fields, including `peers`, plus 3 fields per peer | 2 | rejected at root and in each peer |
+| `CFG-TOML-REMOTE-PROBE` | `remote --config <PATH> probe --payload <TEXT>` | 20 required root fields | 1 | rejected at root |
+
+Both accept protocol `3.0`, require an explicit file, and propagate read,
+decode, and semantic failures. They do not fall back to default configuration.
+Relative credential paths resolve against the file's parent directory;
+absolute paths remain absolute. Neither loader confines paths or limits the
+TOML document size or nesting depth.
+
+The service validates listener exposure, limits, deadlines, peer identities,
+SPKI pins, and computation grants before binding. Its errors distinguish
+`Read`, `Decode`, `Invalid`, `Tls`, `UnknownComputation`, and `PeerGrant`.
+The probe validates endpoints, names, SPKI pins, frame/attempt limits, and
+deadline/backoff ordering. Its decode and semantic failures use
+`remote_probe_config_invalid`; file reads retain the CLI I/O error. The CLI
+service configuration refusal uses `remote_service_config_invalid`.
+
+The artifact enumerates all three typed structs and compares their fields to
+the live source. Existing service-bootstrap and probe tests exercise the real
+parsers and refusal paths. This source review does not establish a new live
+service run or extend the historical A2 JSON evidence to these schemas.
 
 Three adjacent surfaces are deliberately separated:
 
@@ -38,9 +67,11 @@ Three adjacent surfaces are deliberately separated:
 - `CFG-NON-TOML-RAPTORQ` is the public `src/config.rs` `ConfigLoader`. It is an
   INI-style line parser with six sections and 33 exact keys. It is not TOML.
 
-That last distinction is material. The capability registry and API surface map
-currently route TOML ownership to `src/config.rs`; the live code route above is
-the source-pinned truth.
+The capability registry and API surface map still route TOML ownership to
+`src/config.rs`, which has no TOML parser. Its other listed owner,
+`src/bin/asupersync.rs`, now parses the remote-probe schema. The original
+`CFG-GAP-01` observation predates that addition; the routes above describe the
+current source.
 
 ## Exact typed fields
 
@@ -99,18 +130,19 @@ duplicates and table conflicts. Typed behavior is narrower:
 
 - there is no typed datetime field; a datetime is accepted only when attached
   to an unknown ignored key;
-- arrays are typed only on the atpd string-vector fields;
+- arrays are typed on the atpd fields and the remote-service endpoint, pin,
+  peer, and computation-grant fields;
 - generic `toml::Value` integers are bounded by signed 64-bit representation,
   while direct deserialization into ATP's `u64` fields accepts values through
   `u64::MAX`;
 - known fields with the wrong type fail;
 - duplicate and conflicting definitions fail before serde deserialization.
 
-All current typed models accept and ignore unknown fields because none uses
-`deny_unknown_fields`. That includes unknown keys beside QUIC/auth and other
-security-adjacent settings. The inventory records this observed compatibility
-behavior and separately records its conflict with the registry's fail-closed
-unknown-security-field invariant.
+The four historical typed application families accept and ignore unknown
+fields. That includes unknown keys beside QUIC/auth and other security-adjacent
+settings, conflicting with the registry's fail-closed unknown-security-field
+invariant. The two newer remote-service families use `deny_unknown_fields`
+and reject those keys, including unknown peer fields.
 
 Comments and input ordering are accepted but discarded. `to_string_pretty`
 emits a semantic representation; it does not preserve an operator's comments
@@ -140,8 +172,10 @@ ATP command configuration merges:
 `load_all()` never reads it. Daemon and local read/parse failures are swallowed
 as absent layers. A separate programmatic overlay trap is now executable:
 constructing a nominally partial layer with `..AtpConfig::default()` injects
-`Some` defaults for unrelated keys. The existing precedence test currently
-gets `Auto` where it expects the lower-priority `SyncTree` profile.
+`Some` defaults for unrelated keys. The historical precedence test got `Auto`
+where it expected the lower-priority `SyncTree` profile. The release repair
+explicitly sets `profile: None` for its CLI layer; the manager's production
+behavior is unchanged.
 
 Atpd starts from a successfully parsed file and then applies selected start
 arguments. Its boolean flags can enable settings but cannot disable a

@@ -148,7 +148,7 @@ fn json_output_is_valid() {
 
     // Verify it serializes without error
     let serialized = serde_json::to_string(&json).expect("JSON serialization failed");
-    assert!(!serialized.is_empty());
+    assert_ne!(serialized, "");
 }
 
 // -----------------------------------------------------------------------

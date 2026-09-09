@@ -604,6 +604,140 @@ fn validate_a2_implementation_receipt(inventory: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_release_review(inventory: &Value) -> Result<(), String> {
+    let review = inventory
+        .get("release_review")
+        .ok_or_else(|| "release source review is required".to_owned())?;
+    if text(review, "release_version") != "0.4.11"
+        || review
+            .get("historical_receipts_preserved")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || review
+            .get("dependency_exit_allowed")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("release review must preserve historical receipts and KEEP".to_owned());
+    }
+    let transitions = array(review, "source_transitions");
+    let expected_paths = [
+        "Cargo.toml",
+        "src/runtime/builder.rs",
+        "src/cli/atp_config.rs",
+        "src/bin/dependency_marginal_ledger.rs",
+        "franken_decision/src/lib.rs",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if transitions.len() != 5 || row_ids(transitions, "path") != expected_paths {
+        return Err("release review must classify five source transitions".to_owned());
+    }
+    for transition in transitions {
+        let previous = find_row(
+            array(inventory, "source_pins"),
+            "path",
+            text(transition, "path"),
+        );
+        if text(transition, "previous_sha256") != text(previous, "sha256")
+            || text(transition, "review").trim().is_empty()
+        {
+            return Err("source transition must join its historical pin and review".to_owned());
+        }
+    }
+    let additional_pins = array(review, "additional_source_pins");
+    if additional_pins.len() != 2
+        || row_ids(additional_pins, "path")
+            != ["src/remote.rs", "src/bin/asupersync.rs"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+    {
+        return Err("both remote TOML source owners must be pinned".to_owned());
+    }
+    let surfaces = array(review, "additional_toml_surfaces");
+    if surfaces.len() != 2
+        || row_ids(surfaces, "surface_id")
+            != ["CFG-TOML-REMOTE-SERVICE", "CFG-TOML-REMOTE-PROBE"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+    {
+        return Err("release review must classify both strict remote schemas".to_owned());
+    }
+    for (id, schema_version, unknown_fields, expected_models) in [
+        (
+            "CFG-TOML-REMOTE-SERVICE",
+            2,
+            "REJECT_AT_ROOT_AND_PEER",
+            &[
+                ("RemoteComputationServiceFileConfig", 15),
+                ("RemoteComputationServicePeerConfig", 3),
+            ][..],
+        ),
+        (
+            "CFG-TOML-REMOTE-PROBE",
+            1,
+            "REJECT_AT_ROOT",
+            &[("RemoteProbeFileConfig", 20)][..],
+        ),
+    ] {
+        let surface = find_row(surfaces, "surface_id", id);
+        if surface.get("schema_version").and_then(Value::as_u64) != Some(schema_version)
+            || text(surface, "protocol") != "3.0"
+            || text(surface, "unknown_fields") != unknown_fields
+            || text(surface, "feature_gate") != "all(feature = remote-service, unix)"
+            || text(surface, "write_behavior") != "NO_WRITER"
+        {
+            return Err(format!("{id} strict schema policy drifted"));
+        }
+        for field in [
+            "entrypoint",
+            "required_fields",
+            "precedence",
+            "path_policy",
+            "validation",
+            "errors",
+            "resource_limit",
+            "existing_test",
+        ] {
+            if text(surface, field).trim().is_empty() {
+                return Err(format!("{id} must classify {field}"));
+            }
+        }
+        let source = read_repo_file(text(surface, "source_path"));
+        let models = array(surface, "models");
+        if models.len() != expected_models.len() {
+            return Err(format!("{id} typed model inventory drifted"));
+        }
+        for (name, field_count) in expected_models {
+            let model = find_row(models, "name", name);
+            let declaration = format!("#[serde(deny_unknown_fields)]\nstruct {name} {{\n");
+            let fields = source
+                .split_once(&declaration)
+                .and_then(|(_, body)| body.split_once("\n}"))
+                .ok_or_else(|| format!("{name} strict source declaration is missing"))?
+                .0;
+            let actual_fields: BTreeSet<String> = fields
+                .lines()
+                .map(|line| line.trim().trim_end_matches(','))
+                .filter(|line| !line.is_empty())
+                .map(|line| line.chars().filter(|c| !c.is_whitespace()).collect())
+                .collect();
+            if array(model, "fields").len() != *field_count
+                || actual_fields.len() != *field_count
+                || string_set(model, "fields") != actual_fields
+            {
+                return Err(format!(
+                    "{name} field inventory differs from the live schema"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_inventory(inventory: &Value) -> Result<(), String> {
     if inventory.get("schema_version").and_then(Value::as_u64) != Some(1) {
         return Err("schema_version must be 1".to_owned());
@@ -981,6 +1115,7 @@ fn validate_inventory(inventory: &Value) -> Result<(), String> {
         return Err("top-level no-claim boundary is required".to_owned());
     }
     validate_post_a3_provenance_refresh(inventory)?;
+    validate_release_review(inventory)?;
     Ok(())
 }
 
@@ -989,7 +1124,16 @@ fn inventory_is_complete_source_pinned_and_zero_unknown() {
     let inventory = artifact();
     validate_inventory(&inventory).unwrap_or_else(|error| panic!("{error}"));
 
-    for pin in array(&inventory, "source_pins") {
+    let review = &inventory["release_review"];
+    let transitions = array(review, "source_transitions");
+    for historical_pin in array(&inventory, "source_pins")
+        .iter()
+        .chain(array(review, "additional_source_pins"))
+    {
+        let pin = transitions
+            .iter()
+            .find(|row| text(row, "path") == text(historical_pin, "path"))
+            .unwrap_or(historical_pin);
         let path = text(pin, "path");
         let bytes = read_repo_bytes(path);
         let digest = hex::encode(Sha256::digest(&bytes));
@@ -1344,6 +1488,23 @@ fn precedence_io_errors_consumers_and_docs_remain_explicit() {
 #[test]
 fn fail_closed_mutations_are_rejected() {
     let inventory = artifact();
+
+    let mut missing_remote_surface = inventory.clone();
+    missing_remote_surface["release_review"]["additional_toml_surfaces"]
+        .as_array_mut()
+        .expect("remote surfaces")
+        .pop();
+    assert!(validate_inventory(&missing_remote_surface).is_err());
+
+    let mut ignored_remote_fields = inventory.clone();
+    ignored_remote_fields["release_review"]["additional_toml_surfaces"][0]["unknown_fields"] =
+        Value::String("ACCEPT_AND_IGNORE".to_owned());
+    assert!(validate_inventory(&ignored_remote_fields).is_err());
+
+    let mut wrong_remote_field = inventory.clone();
+    wrong_remote_field["release_review"]["additional_toml_surfaces"][1]["models"][0]["fields"][0] =
+        Value::String("schema_version:Option<u32>".to_owned());
+    assert!(validate_inventory(&wrong_remote_field).is_err());
 
     let mut dependency_exit = inventory.clone();
     dependency_exit["authority"]["dependency_exit_allowed"] = Value::Bool(true);

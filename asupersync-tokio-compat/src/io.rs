@@ -317,18 +317,18 @@ mod tests {
     fn tokio_io_wraps_and_unwraps() {
         let data: Vec<u8> = Vec::new();
         let wrapped = TokioIo::new(data);
-        assert!(wrapped.inner().is_empty());
+        assert_eq!(wrapped.inner(), &Vec::<u8>::new());
         let unwrapped = wrapped.into_inner();
-        assert!(unwrapped.is_empty());
+        assert_eq!(unwrapped, Vec::<u8>::new());
     }
 
     #[test]
     fn asupersync_io_wraps_and_unwraps() {
         let data: Vec<u8> = Vec::new();
         let wrapped = AsupersyncIo::new(data);
-        assert!(wrapped.inner().is_empty());
+        assert_eq!(wrapped.inner(), &Vec::<u8>::new());
         let unwrapped = wrapped.into_inner();
-        assert!(unwrapped.is_empty());
+        assert_eq!(unwrapped, Vec::<u8>::new());
     }
 
     #[cfg(feature = "tokio-io")]

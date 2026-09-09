@@ -1255,7 +1255,7 @@ mod tests {
         let caps = NoCaps;
         assert_eq!(caps.count(), 0);
         assert!(caps.is_empty());
-        assert!(caps.capability_names().is_empty());
+        assert_eq!(caps.capability_names(), Vec::<&str>::new());
     }
 
     #[test]
