@@ -6,7 +6,9 @@
 
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
-use crate::http::h1::stream::{BodyKind as StreamingBodyKind, RequestHead};
+use crate::http::h1::stream::BodyKind as StreamingBodyKind;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h1::stream::RequestHead;
 use crate::http::h1::types::{self, Method, Request, Response, Version};
 use memchr::{memchr, memchr_iter, memmem};
 use std::fmt;

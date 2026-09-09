@@ -368,6 +368,8 @@ impl FromRequest for Multipart {
     where
         Self: Send + 'a,
     {
+        #[cfg(target_arch = "wasm32")]
+        let _ = cx;
         #[cfg(not(target_arch = "wasm32"))]
         if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
             return extract_streaming_multipart(cx, req).await;

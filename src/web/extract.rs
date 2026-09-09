@@ -1563,6 +1563,8 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
     where
         Self: Send + 'a,
     {
+        #[cfg(target_arch = "wasm32")]
+        let _ = cx;
         #[cfg(not(target_arch = "wasm32"))]
         if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
             let limit = json_body_limit(&req);
@@ -1661,6 +1663,8 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
     where
         Self: Send + 'a,
     {
+        #[cfg(target_arch = "wasm32")]
+        let _ = cx;
         #[cfg(not(target_arch = "wasm32"))]
         if req.extensions.get_typed::<StreamingRawBodySlot>().is_some() {
             let limit = form_body_limit(&req);

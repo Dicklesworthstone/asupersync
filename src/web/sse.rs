@@ -393,6 +393,9 @@ pub struct StreamingSse<S = VecSseSource> {
 /// chunked response terminator.
 #[derive(Debug, Clone)]
 pub struct Http1SseResponse<S = VecSseSource> {
+    // Preserve stream ownership and Drop on browser targets, where the
+    // native HTTP/1 server consuming this descriptor is unavailable.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     stream: StreamingSse<S>,
     frame_capacity: NonZeroUsize,
 }
@@ -404,6 +407,7 @@ impl<S> Http1SseResponse<S> {
         self.frame_capacity
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_parts(self) -> (StreamingSse<S>, NonZeroUsize) {
         (self.stream, self.frame_capacity)
     }
@@ -510,6 +514,7 @@ impl<S: StreamingSseSource> StreamingSse<S> {
 
     /// Release producer-side state when the server suppresses or abandons a
     /// response before transport ownership begins.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn cancel_for_server_abort(&mut self) {
         self.cancel_source();
     }

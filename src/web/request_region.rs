@@ -65,11 +65,13 @@ pub(crate) const HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC: &str =
 /// the protocol transport arm that observed a peer reset/EOF/write error owns
 /// the corresponding client-abort diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) enum ServerProducerCancellation {
     DeadlineExceeded,
     Cancelled,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn classify_server_producer_cancellation(cx: &Cx) -> ServerProducerCancellation {
     match cx.cancel_reason().map(|reason| reason.kind) {
         Some(CancelKind::Timeout | CancelKind::Deadline) => {
@@ -882,6 +884,7 @@ impl ServerRequestRegion {
 
     /// Retain the exact scheduler-admitted body authority: identity, gateway,
     /// cancellation state and budget are never minted or reconstructed here.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn from_body_cx(protocol: &'static str, cx: Cx, now: Time) -> Self {
         Self {
             owned_drain_timer: cx.timer_driver(),

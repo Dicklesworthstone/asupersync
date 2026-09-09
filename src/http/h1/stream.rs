@@ -1258,6 +1258,7 @@ impl IncomingRequestBodyWriter {
     ///
     /// This is crate-private because protocol drivers, rather than application
     /// code, own the authority to classify an underlying connection failure.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn fail(&mut self, error: IncomingBodyError) {
         self.fail_sender(error);
     }
@@ -1783,6 +1784,9 @@ struct OutgoingBodyChannelIdentity;
 pub struct OutgoingBody {
     receiver: mpsc::Receiver<Result<Frame<BytesCursor>, HttpError>>,
     cx: Cx,
+    // The native server validates sender/body pairing; browser callers retain
+    // the same channel representation without that transport entry point.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     channel_identity: Arc<OutgoingBodyChannelIdentity>,
     done: bool,
     size_hint: SizeHint,
@@ -1905,6 +1909,7 @@ impl Body for OutgoingBody {
 #[derive(Debug)]
 pub struct OutgoingBodySender {
     sender: Option<mpsc::Sender<Result<Frame<BytesCursor>, HttpError>>>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     channel_identity: Arc<OutgoingBodyChannelIdentity>,
     kind: BodyKind,
     max_frame_bytes: Option<NonZeroUsize>,
@@ -1953,6 +1958,7 @@ impl OutgoingBodySender {
     }
 
     /// Returns whether this sender is the authoritative peer of `body`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn is_peer_of(&self, body: &OutgoingBody) -> bool {
         Arc::ptr_eq(&self.channel_identity, &body.channel_identity)
     }
@@ -2326,6 +2332,9 @@ pub struct Http1ProducedResponse {
     body_kind: BodyKind,
     capacity: NonZeroUsize,
     max_frame_bytes: NonZeroUsize,
+    // Retain ownership (including captured-value Drop) on all targets; only
+    // the native server starts the producer through `into_parts`.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     producer: Http1ProducedResponseFactory,
 }
 
@@ -2499,14 +2508,17 @@ impl Http1ProducedResponse {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_head(self) -> ResponseHead {
         self.head
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn head_mut(&mut self) -> &mut ResponseHead {
         &mut self.head
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn into_parts(self, cx: &Cx) -> (StreamingResponse, Http1ProducedResponseFuture) {
         let (sender, body) = OutgoingBody::channel_with_capacity_and_max_frame_bytes(
             cx,
