@@ -28,7 +28,7 @@ The primary boundary is exactly four binaries and two shared CLI files:
 | Source | Reachability | Required features | Parser / subcommand / args / value-enum derives | Clap arg / command / value attributes | Command variants |
 |---|---|---|---:|---:|---:|
 | `src/bin/asupersync.rs` | binary root | `cli`; remote family needs `remote-service` and Unix | 1 / 11 / 54 / 4 | 175 / 13 / 3 | 86 |
-| `src/bin/atp.rs` | binary root | `atp-cli` | 7 / 1 / 0 / 4 | 99 / 8 / 0 | 9 |
+| `src/bin/atp.rs` | binary root | `atp-cli` | 7 / 1 / 0 / 4 | 110 / 8 / 0 | 9 |
 | `src/bin/atpd.rs` | binary root | `atpd-daemon` | 1 / 2 / 3 / 0 | 18 / 5 / 0 | 11 |
 | `src/bin/offline_tuner.rs` | binary root | `cli,simd-intrinsics` | 1 / 1 / 0 / 1 | 15 / 4 / 3 | 5 |
 | `src/cli/args.rs` | shared by the library and `asupersync` | `cli` | 0 / 0 / 4 / 0 | 20 / 0 / 0 | 0 |
@@ -41,11 +41,11 @@ parsers, delimiters, actions, and other clap attributes part of the frozen
 snapshot.
 
 The field-level state is `COMPLETE_6_OF_6_PRIMARY_SOURCES`. The normalization
-cohort covers all 491 `#[arg]` attributes across the six primary sources plus
+cohort covers all 502 `#[arg]` attributes across the six primary sources plus
 37 implicit positionals: 25 in `asupersync`, ten in standalone `atp`, and two
 identity paths in `atpd`. Twelve `asupersync` fields and five detached-tree
 fields marked only with `#[command(flatten/subcommand)]` are parser plumbing,
-not arguments, and are therefore excluded from the 528 field rows. Complete
+not arguments, and are therefore excluded from the 539 field rows. Complete
 here means complete static field normalization for the six pinned sources; it
 does not mean complete byte captures, parser execution, or binary reachability.
 
@@ -91,12 +91,21 @@ clap alias declaration.
 
 `SendArgs`, `RecvArgs`, and the four bonded-transfer argument types derive
 `Parser` rather than `Args`. That distinction is source-observed and preserved
-in the artifact. Together they declare 99 annotated fields and nine implicit
+in the artifact. Together they declare 110 annotated fields and nine implicit
 positionals; the hidden inline `__delta-state-export` command contributes the
-tenth implicit positional, for 109 normalized standalone-ATP rows. Their
+tenth implicit positional, for 120 normalized standalone-ATP rows. Their
 consumer classifications freeze only the parser-struct handoff to the command
 dispatcher, except for the directly dispatched delta-export destination. They
 do not claim independent per-field dataflow or behavior.
+
+The current source adds eleven ATP options: xattr, special-file, and sparse-file
+opt-ins for send and recv/serve; special-file and sparse-file opt-ins for
+bond-recv and bond-pull; and repeatable IP-valued `bond-recv --udp-advertise`.
+RQ/QUIC transport checks and the Unix sparse-receiver check remain explicit
+source behavior. Sender sparse mode requires SSH bootstrap; bonded pull's
+receiver options are not forwarded to donors. These rows inventory the
+declarations and dispatch, without claiming successful transfers or metadata
+preservation.
 
 ### `atpd`
 
@@ -116,18 +125,18 @@ after parsing.
 
 ## Field-normalization cohort
 
-The machine artifact records 528 field rows under
+The machine artifact records 539 field rows under
 `COMPLETE_6_OF_6_PRIMARY_SOURCES`:
 
 | Source | Annotated fields | Implicit positionals | Normalized rows |
 |---|---:|---:|---:|
 | `src/bin/asupersync.rs` | 175 | 25 | 200 |
-| `src/bin/atp.rs` | 99 | 10 | 109 |
+| `src/bin/atp.rs` | 110 | 10 | 120 |
 | `src/bin/atpd.rs` | 18 | 2 | 20 |
 | `src/bin/offline_tuner.rs` | 15 | 0 | 15 |
 | `src/cli/args.rs` | 20 | 0 | 20 |
 | `src/cli/atp_command_tree.rs` | 164 | 0 | 164 |
-| **Cohort total** | **491** | **37** | **528** |
+| **Cohort total** | **502** | **37** | **539** |
 
 Each row records a stable field ID, owner type, Rust field declaration, option
 or positional shape, source attribute, explicit default, cardinality, scope,
@@ -316,12 +325,12 @@ are intentionally not claimed byte-deterministic across runs.
 
 `tests/cli_clap_surface_inventory_contract.rs` verifies source
 fingerprints, line counts, declaration and attribute counts, indexed command
-variants, the 528-row complete static field-normalization cohort,
+variants, the 539-row complete static field-normalization cohort,
 feature/environment/config/exit boundary markers, documentation markers, the
 still-empty broad byte-golden state, and the executed offline-tuner cutover
 subreceipt. Its focused Cargo test is remote-required. The original ADR's
 527-row snapshot remains historical; current source normalization adds the
-single remote payload row. Exact historical pin and execution digests reject
+remote payload row and eleven standalone ATP rows. Exact historical pin and execution digests reject
 rewritten provenance even when a current replacement exists.
 
 ## No-claim boundary
@@ -332,7 +341,7 @@ matrix and proves only its scoped logging cutover. It does not prove rendered
 help or error stability across the full CLI, non-UTF-8 handling, other-platform
 parity, performance, release readiness, or broad workspace health.
 
-Field normalization covers all six primary sources, but even the 528 normalized
+Field normalization covers all six primary sources, but even the 539 normalized
 rows do not substitute for captured parser bytes. The detached tree still has
 no binary parser root, and its 60 public-model plus 104 workflow-model rows do
 not establish user reachability. The `asupersync` and standalone ATP dispatch

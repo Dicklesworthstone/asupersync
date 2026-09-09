@@ -334,12 +334,70 @@ fn validate_remote_cli_source(source: &str, artifact: &Value) -> Result<(), Stri
     Ok(())
 }
 
+fn validate_added_atp_fields(source: &str, artifact: &Value) -> Result<(), String> {
+    let rows = array(&artifact["field_normalization"], "rows");
+    for (owner, fields, dispatcher) in [
+        (
+            "SendArgs",
+            &["preserve_xattrs", "allow_special_files", "sparse_files"][..],
+            "STRUCT_DISPATCHED_TO_RUN_SEND",
+        ),
+        (
+            "RecvArgs",
+            &["preserve_xattrs", "allow_special_files", "sparse_files"][..],
+            "STRUCT_DISPATCHED_TO_RUN_RECV",
+        ),
+        (
+            "BondRecvArgs",
+            &["udp_advertise", "allow_special_files", "sparse_files"][..],
+            "STRUCT_DISPATCHED_TO_RUN_BOND_RECV",
+        ),
+        (
+            "BondPullArgs",
+            &["allow_special_files", "sparse_files"][..],
+            "STRUCT_DISPATCHED_TO_RUN_BOND_PULL",
+        ),
+    ] {
+        let declaration = format!("struct {owner} {{");
+        let body = source
+            .split_once(&declaration)
+            .and_then(|(_, tail)| tail.split_once("\n}"))
+            .map(|(body, _)| body)
+            .ok_or_else(|| format!("missing ATP owner {owner}"))?;
+        for field in fields {
+            let row = rows
+                .iter()
+                .find(|row| {
+                    row["source_path"].as_str() == Some("src/bin/atp.rs")
+                        && row["owner_type"].as_str() == Some(owner)
+                        && row["rust_field"].as_str() == Some(*field)
+                })
+                .ok_or_else(|| format!("missing added ATP field {owner}.{field}"))?;
+            let (field_type, cardinality) = if *field == "udp_advertise" {
+                ("Vec<IpAddr>", "ZERO_OR_MORE")
+            } else {
+                ("bool", "PRESENCE_BOOL")
+            };
+            if !body.contains(&format!("{field}: {field_type},"))
+                || row["field_type"].as_str() != Some(field_type)
+                || row["cardinality"].as_str() != Some(cardinality)
+                || row["consumer_state"].as_str() != Some(dispatcher)
+            {
+                return Err(format!("added ATP field contract drift: {owner}.{field}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn current_review_rejects_rewritten_history_and_lost_remote_boundaries() {
     let artifact = repo_json(ARTIFACT_PATH);
     validate_current_source_review(&artifact).expect("valid review baseline");
     let source = read_repo_file("src/bin/asupersync.rs");
     validate_remote_cli_source(&source, &artifact).expect("valid remote source baseline");
+    let atp_source = read_repo_file("src/bin/atp.rs");
+    validate_added_atp_fields(&atp_source, &artifact).expect("valid added ATP field baseline");
 
     let mut historical = artifact.clone();
     historical["source_pins"][0]["sha256"] = Value::String("0".repeat(64));
@@ -376,6 +434,20 @@ fn current_review_rejects_rewritten_history_and_lost_remote_boundaries() {
     );
     assert_ne!(source, widened_cfg);
     assert!(validate_remote_cli_source(&widened_cfg, &artifact).is_err());
+
+    let mut wrong_address_type = artifact.clone();
+    let address = wrong_address_type["field_normalization"]["rows"]
+        .as_array_mut()
+        .expect("field rows")
+        .iter_mut()
+        .find(|row| row["field_id"] == "CLI-ATP-BOND-RECV-UDP-ADVERTISE")
+        .expect("UDP advertisement field");
+    address["field_type"] = Value::String("String".to_owned());
+    assert!(
+        validate_added_atp_fields(&atp_source, &wrong_address_type)
+            .expect_err("UDP advertisement must retain typed repeatable IP values")
+            .contains("added ATP field contract drift")
+    );
 }
 
 #[test]
@@ -440,7 +512,7 @@ fn declaration_indexes_and_annotation_counts_are_exact() {
     let artifact = repo_json(ARTIFACT_PATH);
     let expected = [
         ("src/bin/asupersync.rs", 1, 11, 54, 4, 175, 13, 3),
-        ("src/bin/atp.rs", 7, 1, 0, 4, 99, 8, 0),
+        ("src/bin/atp.rs", 7, 1, 0, 4, 110, 8, 0),
         ("src/bin/atpd.rs", 1, 2, 3, 0, 18, 5, 0),
         ("src/bin/offline_tuner.rs", 1, 1, 0, 1, 15, 4, 3),
         ("src/cli/args.rs", 0, 0, 4, 0, 20, 0, 0),
@@ -590,6 +662,8 @@ fn every_indexed_command_variant_is_present_and_reachability_is_explicit() {
 #[test]
 fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
     let artifact = repo_json(ARTIFACT_PATH);
+    validate_added_atp_fields(&read_repo_file("src/bin/atp.rs"), &artifact)
+        .expect("current ATP metadata and UDP argument source boundary");
     let scope = Value::Object(object(&artifact, "scope").clone());
     assert_eq!(
         text(&scope, "argument_surface_state"),
@@ -614,17 +688,17 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
     assert!(array(&normalization, "remaining_primary_sources").is_empty());
     assert_eq!(
         unsigned(&normalization, "annotated_arg_attribute_count"),
-        491
+        502
     );
     assert_eq!(unsigned(&normalization, "implicit_positional_count"), 37);
-    assert_eq!(unsigned(&normalization, "normalized_field_count"), 528);
+    assert_eq!(unsigned(&normalization, "normalized_field_count"), 539);
     assert!(text(&normalization, "spelling_policy").contains("not byte-capture evidence"));
 
     let rows = array(&normalization, "rows");
-    assert_eq!(rows.len(), 528);
+    assert_eq!(rows.len(), 539);
     for (path, expected_count) in [
         ("src/bin/asupersync.rs", 200_usize),
-        ("src/bin/atp.rs", 109_usize),
+        ("src/bin/atp.rs", 120_usize),
         ("src/bin/atpd.rs", 20_usize),
         ("src/bin/offline_tuner.rs", 15),
         ("src/cli/args.rs", 20),
@@ -648,7 +722,7 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
                         .is_some_and(|state| state.starts_with("STRUCT_DISPATCHED_TO_"))
             })
             .count(),
-        108
+        119
     );
     assert_eq!(
         rows.iter()
@@ -769,7 +843,7 @@ fn complete_field_normalization_cohort_is_exact_and_source_anchored() {
             parsed_unused.insert(field_id.to_owned());
         }
     }
-    assert_eq!(annotated, 491);
+    assert_eq!(annotated, 502);
     assert_eq!(implicit, 37);
     assert_eq!(
         parsed_unused,
@@ -1272,13 +1346,13 @@ fn documentation_and_adr_keep_the_static_completion_boundary_visible() {
         BEAD_ID,
         "162",
         "111",
-        "528",
-        "491",
+        "539",
+        "502",
         "164",
         "60",
         "104",
         "200",
-        "109",
+        "120",
         "COMPLETE_6_OF_6_PRIMARY_SOURCES",
         "PARSED_UNUSED_GAP",
         "zero complete byte goldens",
