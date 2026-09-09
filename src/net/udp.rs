@@ -5158,10 +5158,10 @@ mod tests {
             let registered =
                 fallback_io_driver_probe().expect("driverless poll starts the fallback driver");
             assert!(
-                registered.fallback_registrations >= before.fallback_registrations + 1,
+                registered.fallback_registrations > before.fallback_registrations,
                 "idle poll registers on the fallback driver: {registered:?} vs {before:?}"
             );
-            assert!(registered.registrations >= before.registrations + 1);
+            assert!(registered.registrations > before.registrations);
 
             assert!(matches!(
                 socket.poll_recv_from(&task_cx, &mut buf),
@@ -5169,7 +5169,7 @@ mod tests {
             ));
             let rearmed = fallback_io_driver_probe().expect("probe");
             assert!(
-                rearmed.fallback_rearms >= registered.fallback_rearms + 1,
+                rearmed.fallback_rearms > registered.fallback_rearms,
                 "second idle poll re-arms the fallback registration: {rearmed:?}"
             );
             assert_eq!(
@@ -5182,11 +5182,11 @@ mod tests {
                 .expect("fallback reactor pump delivers the readiness wake");
             let woken = fallback_io_driver_probe().expect("probe");
             assert!(
-                woken.wakers_dispatched >= rearmed.wakers_dispatched + 1,
+                woken.wakers_dispatched > rearmed.wakers_dispatched,
                 "the pump dispatched the socket's wake: {woken:?} vs {rearmed:?}"
             );
-            assert!(woken.events_received >= rearmed.events_received + 1);
-            assert!(woken.polls >= rearmed.polls + 1);
+            assert!(woken.events_received > rearmed.events_received);
+            assert!(woken.polls > rearmed.polls);
             assert!(matches!(
                 socket.poll_recv_from(&task_cx, &mut buf),
                 Poll::Ready(Ok((5, _)))
