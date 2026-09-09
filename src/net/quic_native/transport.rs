@@ -364,9 +364,7 @@ impl LossRecovery {
         // newly acknowledged, and at least one newly acknowledged packet
         // must be ack-eliciting. They need not be the same packet. A frame
         // repeating its largest packet cannot sample an older new ACK.
-        if newly_acked_ack_eliciting
-            && let Some(time_sent) = largest_acked_time
-        {
+        if newly_acked_ack_eliciting && let Some(time_sent) = largest_acked_time {
             let sample = now_micros.saturating_sub(time_sent);
             let effective_ack_delay = if space == PacketNumberSpace::ApplicationData {
                 ack_delay_micros
