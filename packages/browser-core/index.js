@@ -92,7 +92,8 @@ function parseJson(raw, label) {
   try {
     return JSON.parse(raw);
   } catch (error) {
-    throw new Error(`${label} returned invalid JSON: ${errorMessage(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} returned invalid JSON: ${message}`);
   }
 }
 
@@ -105,6 +106,9 @@ function vjson(consumerVersion) {
 function errorMessage(error) {
   if (error instanceof Error) {
     return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
   }
   return String(error);
 }
@@ -595,10 +599,6 @@ function failOut(code, recoverability, message) {
   return Outcome.err(code, recoverability, message);
 }
 
-function webTransportRejection(operation, message, code = "invalid_handle") {
-  return failOut(code, "permanent", `webtransport_${operation} rejected: ${message}`);
-}
-
 function cancelOut(kind, phase, message, originTask = null) {
   return Outcome.cancelled({
     kind,
@@ -725,6 +725,16 @@ function encodeWebTransportDatagram(value, label) {
   return Uint8Array.from(normalizeByteArray(value, label));
 }
 
+function queueWebTransportOutcome(state, outcome, { terminal = false } = {}) {
+  if (terminal) {
+    if (state.terminalQueued) {
+      return;
+    }
+    state.terminalQueued = true;
+  }
+  state.inbox.push(outcome);
+}
+
 function isTerminalOutcome(outcome) {
   return Boolean(outcome) && typeof outcome === "object" && outcome.outcome !== "ok";
 }
@@ -737,14 +747,6 @@ function settleHostWebTransportState(state, outcome, closeReason = undefined) {
   INFLIGHT_WEBTRANSPORTS.delete(state.sessionKey);
   closeHostWebTransportState(state, closeReason);
   void task_join(state.taskHandle, outcome, state.consumerVersion);
-}
-
-function failWebTransportState(state, error, message, reason) {
-  settleHostWebTransportState(
-    state,
-    failOut("internal_failure", "transient", `webtransport ${message}: ${errorMessage(error)}`),
-    reason,
-  );
 }
 
 function closeHostWebTransportState(state, reason = undefined) {
@@ -796,14 +798,30 @@ function flushPendingWebTransportWrites(state, sessionOrigin) {
         try {
           await state.writer.write(datagram);
         } catch (error) {
-          failWebTransportState(state, error, "datagram write failed", "write_failure");
+          settleHostWebTransportState(
+            state,
+            failOut(
+              "internal_failure",
+              "transient",
+              `webtransport datagram write failed: ${errorMessage(error)}`,
+            ),
+            "write_failure",
+          );
           break;
         }
       }
     })
     .catch((error) => {
       if (!state.closed) {
-        failWebTransportState(state, error, "write queue failed", "write_queue_failure");
+        settleHostWebTransportState(
+          state,
+          failOut(
+            "internal_failure",
+            "transient",
+            `webtransport write queue failed: ${errorMessage(error)}`,
+          ),
+          "write_queue_failure",
+        );
       }
     })
     .finally(() => {
@@ -832,14 +850,20 @@ async function pumpWebTransportReads(state, sessionOrigin) {
         return;
       }
       if (value !== undefined) {
-        state.inbox.push(
+        queueWebTransportOutcome(
+          state,
           Outcome.ok(Uint8Array.from(normalizeByteArray(value, "webtransport datagram"))),
         );
       }
     } catch (error) {
       if (!state.closed) {
-        failWebTransportState(
-          state, error, "datagram read failed",
+        settleHostWebTransportState(
+          state,
+          failOut(
+            "internal_failure",
+            "transient",
+            `webtransport datagram read failed: ${errorMessage(error)}`,
+          ),
           "read_failure",
         );
       }
@@ -868,8 +892,13 @@ function monitorWebTransportClosure(state, sessionOrigin) {
       if (state.closed) {
         return;
       }
-      failWebTransportState(
-        state, error, "session closed with error",
+      settleHostWebTransportState(
+        state,
+        failOut(
+          "internal_failure",
+          "transient",
+          `webtransport session closed with error: ${errorMessage(error)}`,
+        ),
         "session_closed_error",
       );
     },
@@ -917,21 +946,13 @@ async function initializeWebTransportState(state, sessionOrigin) {
   }
 }
 
-function lookupWebTransportState(request, operation, take = false, required = true) {
-  let sessionKey;
-  let state;
-  try {
-    sessionKey = keyOf(request.session, take ? "sessionHandle" : "request.session", "task");
-    state = INFLIGHT_WEBTRANSPORTS.get(sessionKey);
-    if (take && state) {
-      INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
-    }
-  } catch (error) {
-    return webTransportRejection(operation, errorMessage(error));
+function takeWebTransportState(sessionHandle) {
+  const sessionKey = keyOf(sessionHandle, "sessionHandle", "task");
+  const state = INFLIGHT_WEBTRANSPORTS.get(sessionKey);
+  if (!state) {
+    return { sessionKey, state: null };
   }
-  if (required && !state) {
-    return webTransportRejection(operation, "unknown WebTransport session handle");
-  }
+  INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
   return { sessionKey, state };
 }
 
@@ -1169,28 +1190,36 @@ export function websocket_send(request, consumerVersion = null) {
   );
 }
 
-function socketRequest(operation, fn, request, consumerVersion, fields) {
-  return invokeOutcomeOperation(operation, () => fn(
-    requestJsonWithHandle("socket", request.socket, "request.socket", "task", fields?.()),
-    vjson(consumerVersion),
-  ));
-}
-
 export function websocket_recv(request, consumerVersion = null) {
-  return socketRequest("websocket_recv", rawWebSocketRecv, request, consumerVersion);
+  return invokeOutcomeOperation("websocket_recv", () =>
+    rawWebSocketRecv(
+      requestJsonWithHandle("socket", request.socket, "request.socket", "task"),
+      vjson(consumerVersion),
+    ),
+  );
 }
 
 export function websocket_close(request, consumerVersion = null) {
-  return socketRequest("websocket_close", rawWebSocketClose, request, consumerVersion, () => ({
-    reason: request.reason ?? undefined,
-  }));
+  return invokeOutcomeOperation("websocket_close", () =>
+    rawWebSocketClose(
+      requestJsonWithHandle("socket", request.socket, "request.socket", "task", {
+        reason: request.reason ?? undefined,
+      }),
+      vjson(consumerVersion),
+    ),
+  );
 }
 
 export function websocket_cancel(request, consumerVersion = null) {
-  return socketRequest("websocket_cancel", rawWebSocketCancel, request, consumerVersion, () => ({
-    kind: request.kind,
-    message: request.message ?? undefined,
-  }));
+  return invokeOutcomeOperation("websocket_cancel", () =>
+    rawWebSocketCancel(
+      requestJsonWithHandle("socket", request.socket, "request.socket", "task", {
+        kind: request.kind,
+        message: request.message ?? undefined,
+      }),
+      vjson(consumerVersion),
+    ),
+  );
 }
 
 export function webtransport_open(request, consumerVersion = null) {
@@ -1198,10 +1227,10 @@ export function webtransport_open(request, consumerVersion = null) {
   try {
     normalizedUrl = normalizeWebTransportUrl(request.url);
   } catch (error) {
-    return webTransportRejection(
-      "open",
-      `${errorMessage(error)}. Use fetch or WebSocket when a valid HTTPS WebTransport endpoint is unavailable.`,
+    return failOut(
       "compatibility_rejected",
+      "permanent",
+      `webtransport_open rejected: ${errorMessage(error)}. Use fetch or WebSocket when a valid HTTPS WebTransport endpoint is unavailable.`,
     );
   }
   const WebTransportConstructor = resolveWebTransportConstructor();
@@ -1236,6 +1265,7 @@ export function webtransport_open(request, consumerVersion = null) {
       ready: false,
       closed: false,
       settled: false,
+      terminalQueued: false,
       reader: null,
       writer: null,
       flushPromise: null,
@@ -1255,27 +1285,65 @@ export function webtransport_open(request, consumerVersion = null) {
 }
 
 export function webtransport_send(request, _consumerVersion = null) {
-  const found = lookupWebTransportState(request, "send");
-  if (found.outcome === "err") return found;
-  const { state } = found;
+  let state;
+  try {
+    state = INFLIGHT_WEBTRANSPORTS.get(keyOf(request.session, "request.session", "task"));
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_send rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (!state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_send rejected: unknown WebTransport session handle",
+    );
+  }
   if (state.closed) {
-    return webTransportRejection("send", "WebTransport session is already closed");
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_send rejected: WebTransport session is already closed",
+    );
   }
   try {
     state.pendingWrites.push(
       encodeWebTransportDatagram(request.value, "request.value"),
     );
   } catch (error) {
-    return webTransportRejection("send", errorMessage(error), "compatibility_rejected");
+    return failOut(
+      "compatibility_rejected",
+      "permanent",
+      `webtransport_send rejected: ${errorMessage(error)}`,
+    );
   }
   flushPendingWebTransportWrites(state, state.sessionOrigin);
   return Outcome.ok(undefined);
 }
 
 export function webtransport_recv(request, _consumerVersion = null) {
-  const found = lookupWebTransportState(request, "recv");
-  if (found.outcome === "err") return found;
-  const { sessionKey, state } = found;
+  let sessionKey;
+  let state;
+  try {
+    sessionKey = keyOf(request.session, "request.session", "task");
+    state = INFLIGHT_WEBTRANSPORTS.get(sessionKey);
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_recv rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (!state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_recv rejected: unknown WebTransport session handle",
+    );
+  }
   const result = state.inbox.shift() ?? Outcome.ok(undefined);
   if (isTerminalOutcome(result)) {
     INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
@@ -1284,8 +1352,23 @@ export function webtransport_recv(request, _consumerVersion = null) {
 }
 
 export function webtransport_close(request, consumerVersion = null) {
-  const taken = lookupWebTransportState(request, "close", true);
-  if (taken.outcome === "err") return taken;
+  let taken;
+  try {
+    taken = takeWebTransportState(request.session);
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_close rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (!taken.state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_close rejected: unknown WebTransport session handle",
+    );
+  }
   taken.state.settled = true;
   closeHostWebTransportState(taken.state, request.reason);
   const outcome = cancelOut(
@@ -1309,8 +1392,16 @@ export function webtransport_cancel(request, consumerVersion = null) {
   if (cancelled.outcome !== "ok") {
     return cancelled;
   }
-  const taken = lookupWebTransportState(request, "cancel", true, false);
-  if (taken.outcome === "err") return taken;
+  let taken;
+  try {
+    taken = takeWebTransportState(request.session);
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_cancel rejected: ${errorMessage(error)}`,
+    );
+  }
   if (taken.state) {
     taken.state.settled = true;
     closeHostWebTransportState(taken.state, request.message);
