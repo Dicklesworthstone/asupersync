@@ -778,6 +778,14 @@ impl Future for LocalLazyFactoryTask {
     }
 }
 
+/// `!Send` mirror of [`UnadmittedCancelFn`]: fired on the owner worker when
+/// a local spawn request is cancelled before admission.
+pub type LocalUnadmittedCancelFn = Box<dyn FnOnce(CancelReason)>;
+
+/// `!Send` mirror of [`AdmissionErrorFn`]: fired on the owner worker when
+/// a local spawn request fails admission.
+pub type LocalAdmissionErrorFn = Box<dyn FnOnce(SpawnError)>;
+
 /// A local spawn request parked on the owner thread's lane.
 ///
 /// Mirrors [`SpawnRequestParts`] for the `!Send` lane: provisional id,
@@ -793,9 +801,9 @@ pub struct LocalSpawnRequest {
     /// The local factory awaiting its admission-built Cx.
     pub factory: LocalSpawnFactoryFn,
     /// Completion slot for cancel-before-admission.
-    pub on_unadmitted_cancel: Option<UnadmittedCancelFn>,
+    pub on_unadmitted_cancel: Option<LocalUnadmittedCancelFn>,
     /// Completion slot for non-cancellation admission failures.
-    pub on_admission_error: Option<AdmissionErrorFn>,
+    pub on_admission_error: Option<LocalAdmissionErrorFn>,
     /// Pending-spawn credit on the owning region; released only after the
     /// task is visible in the region's task list (or on denial, last).
     pub pending_reservation: Option<crate::record::region::PendingSpawnReservation>,

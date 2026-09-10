@@ -5823,7 +5823,10 @@ impl ThreeLaneWorker {
     /// slots are user code and must not run under the runtime lock.
     /// Admitted tasks are injected into the global ready lane so any worker
     /// can pick them up.
-    fn drain_spawn_admissions(&mut self) {
+    fn drain_spawn_admissions(&mut self) -> usize {
+        #[cfg(target_arch = "wasm32")]
+        const SPAWN_ADMISSION_BATCH: usize = 32;
+        #[cfg(not(target_arch = "wasm32"))]
         const SPAWN_ADMISSION_BATCH: usize = 1;
         const OBLIGATION_POST_BATCH: usize = 64;
 
@@ -5844,16 +5847,17 @@ impl ThreeLaneWorker {
         }
 
         let Some(mailbox) = self.spawn_mailbox.as_ref() else {
-            return;
+            return 0;
         };
         if mailbox.spawn_requests_are_empty() {
-            return;
+            return 0;
         }
         let mailbox = Arc::clone(mailbox);
         let mut requests = Vec::with_capacity(SPAWN_ADMISSION_BATCH);
         if mailbox.dequeue_batch_into(SPAWN_ADMISSION_BATCH, &mut requests) == 0 {
-            return;
+            return 0;
         }
+        let count = requests.len();
 
         let mut admitted: SmallVec<
             [(
@@ -5934,6 +5938,8 @@ impl ThreeLaneWorker {
         for effects in spawn_effects {
             effects.dispatch();
         }
+        let denied_regions: SmallVec<[crate::types::RegionId; 4]> =
+            denied.iter().map(|(parts, _)| parts.region).collect();
         for (parts, error) in denied {
             match error {
                 crate::runtime::state::SpawnError::RegionClosed(_)
@@ -5945,9 +5951,19 @@ impl ThreeLaneWorker {
                 other => parts.resolve_failed(other),
             }
         }
+        if !denied_regions.is_empty() {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for region in denied_regions {
+                state.advance_region_state(region);
+            }
+        }
         for wakes in cancel_wakes {
             wakes.dispatch();
         }
+        count
     }
 
     /// Admits owner-pinned local spawn requests parked on this worker's
@@ -5958,11 +5974,11 @@ impl ThreeLaneWorker {
     /// tasks are pinned to this worker, stored in the thread-local task
     /// slot, and scheduled on the non-stealable local queue — they are
     /// never exposed to stealers.
-    fn drain_local_spawn_admissions(&mut self) {
+    fn drain_local_spawn_admissions(&mut self) -> usize {
         const LOCAL_SPAWN_ADMISSION_BATCH: usize = 16;
 
         if crate::runtime::spawn_mailbox::local_spawn_lane_is_empty() {
-            return;
+            return 0;
         }
         let mut requests = Vec::with_capacity(LOCAL_SPAWN_ADMISSION_BATCH);
         if crate::runtime::spawn_mailbox::drain_local_spawn_lane(
@@ -5970,8 +5986,9 @@ impl ThreeLaneWorker {
             &mut requests,
         ) == 0
         {
-            return;
+            return 0;
         }
+        let count = requests.len();
 
         let mut admitted: Vec<(
             TaskId,
@@ -6075,6 +6092,8 @@ impl ThreeLaneWorker {
         for effects in spawn_effects {
             effects.dispatch();
         }
+        let denied_regions: SmallVec<[crate::types::RegionId; 4]> =
+            denied.iter().map(|(request, _)| request.region).collect();
         for (request, error) in denied {
             match error {
                 crate::runtime::state::SpawnError::RegionClosed(_)
@@ -6086,9 +6105,19 @@ impl ThreeLaneWorker {
                 other => request.resolve_failed(other),
             }
         }
+        if !denied_regions.is_empty() {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for region in denied_regions {
+                state.advance_region_state(region);
+            }
+        }
         for wakes in cancel_wakes {
             wakes.dispatch();
         }
+        count
     }
 
     /// Applies region lifecycle commands (bd-asupersync-ambient-child-region-0fm8l)
@@ -6097,19 +6126,20 @@ impl ThreeLaneWorker {
     /// authoritative record transitions under the runtime lock and publishes
     /// mint outcomes into caller-shared slots strictly after the lock drops,
     /// mirroring the "publish lanes, then dispatch Wakers" spawn discipline.
-    fn drain_region_commands(&mut self) {
+    fn drain_region_commands(&mut self) -> usize {
         const REGION_COMMAND_BATCH: usize = 8;
 
         let Some(mailbox) = self.spawn_mailbox.as_ref() else {
-            return;
+            return 0;
         };
         if mailbox.region_commands_are_empty() {
-            return;
+            return 0;
         }
         let mut commands = Vec::with_capacity(REGION_COMMAND_BATCH);
         if mailbox.dequeue_region_commands_into(REGION_COMMAND_BATCH, &mut commands) == 0 {
-            return;
+            return 0;
         }
+        let count = commands.len();
 
         let mut publications: Vec<(
             std::sync::Arc<crate::runtime::spawn_mailbox::AdmittedRegionSlot>,
@@ -6167,6 +6197,7 @@ impl ThreeLaneWorker {
         for (slot, outcome) in publications {
             slot.publish(outcome);
         }
+        count
     }
 
     pub fn next_task(&mut self) -> Option<TaskId> {
@@ -7051,6 +7082,12 @@ impl ThreeLaneWorker {
         }
         if self.schedule_ready_finalizers() {
             return self.run_once();
+        }
+        let drained = self.drain_spawn_admissions()
+            + self.drain_local_spawn_admissions()
+            + self.drain_region_commands();
+        if drained > 0 {
+            return true;
         }
         false
     }

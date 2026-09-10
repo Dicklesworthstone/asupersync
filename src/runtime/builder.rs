@@ -193,7 +193,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -536,8 +536,10 @@ pub struct BrowserWorkerPump {
     worker: Mutex<Option<ThreeLaneWorker>>,
     in_pump: AtomicBool,
     scheduled: AtomicBool,
+    wake_requested: AtomicBool,
     microtask_burst_limit: usize,
     self_weak: Mutex<Weak<Self>>,
+    pump_turns: AtomicU32,
 }
 
 impl BrowserWorkerPump {
@@ -548,12 +550,14 @@ impl BrowserWorkerPump {
             worker: Mutex::new(None),
             in_pump: AtomicBool::new(false),
             scheduled: AtomicBool::new(false),
+            wake_requested: AtomicBool::new(false),
             microtask_burst_limit: if microtask_burst_limit == 0 {
                 32
             } else {
                 microtask_burst_limit
             },
             self_weak: Mutex::new(Weak::new()),
+            pump_turns: AtomicU32::new(0),
         }
     }
 
@@ -568,8 +572,14 @@ impl BrowserWorkerPump {
         self.microtask_burst_limit
     }
 
+    /// Returns the total number of pump turns executed by this pump.
+    #[must_use]
+    pub fn pump_turns(&self) -> u32 {
+        self.pump_turns.load(Ordering::Relaxed)
+    }
+
     /// Installs the single worker and registers its wake notifier.
-    pub fn install_worker(&self, worker: ThreeLaneWorker, _runtime: &Arc<RuntimeInner>) {
+    fn install_worker(&self, worker: ThreeLaneWorker, _runtime: &Arc<RuntimeInner>) {
         let weak_self = self.self_weak.lock().clone();
         worker.set_wake_notifier(Arc::new(move || {
             if let Some(pump) = weak_self.upgrade() {
@@ -581,24 +591,43 @@ impl BrowserWorkerPump {
 
     /// Schedules a microtask pump step if not already scheduled.
     pub fn schedule_pump(&self) {
+        self.wake_requested.store(true, Ordering::Release);
         if self.scheduled.swap(true, Ordering::AcqRel) {
             return;
         }
         let weak_self = self.self_weak.lock().clone();
         schedule_microtask(move || {
             if let Some(pump) = weak_self.upgrade() {
-                pump.scheduled.store(false, Ordering::Release);
-                let outcome = pump.drain_batch(pump.microtask_burst_limit);
-                if matches!(outcome, PumpDrainOutcome::BurstLimitReached(_)) {
-                    let weak_yield = pump.self_weak.lock().clone();
-                    schedule_macro_yield(move || {
-                        if let Some(p) = weak_yield.upgrade() {
-                            p.schedule_pump();
-                        }
-                    });
-                }
+                pump.run_pump_turn();
             }
         });
+    }
+
+    fn run_pump_turn(&self) {
+        self.pump_turns.fetch_add(1, Ordering::Relaxed);
+        self.wake_requested.store(false, Ordering::Release);
+        let outcome = self.drain_batch(self.microtask_burst_limit);
+        if matches!(outcome, PumpDrainOutcome::BurstLimitReached(_)) {
+            let weak_yield = self.self_weak.lock().clone();
+            schedule_macro_yield(move || {
+                if let Some(pump) = weak_yield.upgrade() {
+                    pump.run_pump_turn();
+                }
+            });
+            return;
+        }
+
+        self.scheduled.store(false, Ordering::Release);
+        if self.wake_requested.load(Ordering::Acquire) {
+            if !self.scheduled.swap(true, Ordering::AcqRel) {
+                let weak_self = self.self_weak.lock().clone();
+                schedule_microtask(move || {
+                    if let Some(pump) = weak_self.upgrade() {
+                        pump.run_pump_turn();
+                    }
+                });
+            }
+        }
     }
 
     /// Drains runnable tasks up to `max_steps`, enforcing the re-entrancy guard.
@@ -638,7 +667,10 @@ impl BrowserWorkerPump {
 
     /// Executes a single pump step.
     pub fn step(&self) -> bool {
-        matches!(self.drain_batch(1), PumpDrainOutcome::Completed(1))
+        matches!(
+            self.drain_batch(1),
+            PumpDrainOutcome::Completed(1) | PumpDrainOutcome::BurstLimitReached(1)
+        )
     }
 
     /// Runs until all currently queued tasks have finished executing.
@@ -663,7 +695,9 @@ impl std::fmt::Debug for BrowserWorkerPump {
         f.debug_struct("BrowserWorkerPump")
             .field("in_pump", &self.in_pump.load(Ordering::Relaxed))
             .field("scheduled", &self.scheduled.load(Ordering::Relaxed))
+            .field("wake_requested", &self.wake_requested.load(Ordering::Relaxed))
             .field("microtask_burst_limit", &self.microtask_burst_limit)
+            .field("pump_turns", &self.pump_turns.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -692,10 +726,19 @@ fn schedule_microtask<F: FnOnce() + 'static>(f: F) {
 fn schedule_macro_yield<F: FnOnce() + 'static>(f: F) {
     use wasm_bindgen::JsCast;
     if let Ok(channel) = web_sys::MessageChannel::new() {
-        let cb = wasm_bindgen::closure::Closure::once_into_js(f);
+        let port1 = channel.port1();
+        let port2 = channel.port2();
+        let p1 = port1.clone();
+        let p2 = port2.clone();
+        let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
+            p1.set_onmessage(None);
+            p1.close();
+            p2.close();
+            f();
+        });
         if let Ok(func) = cb.dyn_into::<js_sys::Function>() {
-            channel.port1().set_onmessage(Some(&func));
-            let _ = channel.port2().post_message(&wasm_bindgen::JsValue::UNDEFINED);
+            port1.set_onmessage(Some(&func));
+            let _ = port2.post_message(&wasm_bindgen::JsValue::UNDEFINED);
         }
     } else {
         schedule_microtask(f);
@@ -2584,9 +2627,15 @@ impl RuntimeBuilder {
 
     /// Set the host services implementation for worker and deadline-monitor lifecycle.
     #[must_use]
-    pub fn host_services(mut self, host_services: Arc<dyn RuntimeHostServices>) -> Self {
+    fn host_services(mut self, host_services: Arc<dyn RuntimeHostServices>) -> Self {
         self.host_services = host_services;
         self
+    }
+
+    /// Configures the runtime with browser host services for single-worker execution.
+    #[must_use]
+    pub fn browser_host_services(self, host_services: Arc<BrowserHostServices>) -> Self {
+        self.host_services(host_services)
     }
 
     /// Set the runtime-wide admission ceiling for borrowed scoped CPU workers.
@@ -3453,7 +3502,16 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn enable_time(mut self) -> Self {
         if self.timer_driver.is_none() {
-            self.timer_driver = Some(TimerDriverHandle::with_wall_clock());
+            #[cfg(target_arch = "wasm32")]
+            {
+                self.timer_driver = Some(TimerDriverHandle::with_browser_clock(Arc::new(
+                    crate::time::BrowserMonotonicClock::default(),
+                )));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.timer_driver = Some(TimerDriverHandle::with_wall_clock());
+            }
         }
         self
     }
@@ -5002,7 +5060,7 @@ pub struct LocalJoinHandle<T> {
 }
 
 impl<T> LocalJoinHandle<T> {
-    pub(crate) fn new(state: Arc<Mutex<JoinState<T>>>) -> Self {
+    fn new(state: Arc<Mutex<JoinState<T>>>) -> Self {
         Self {
             state,
             completed: false,
@@ -5277,6 +5335,11 @@ impl RuntimeInner {
                     config.metrics_provider.clone(),
                 );
                 state.set_io_driver(IoDriverHandle::new(reactor));
+                #[cfg(target_arch = "wasm32")]
+                state.set_timer_driver(TimerDriverHandle::with_browser_clock(Arc::new(
+                    crate::time::BrowserMonotonicClock::default(),
+                )));
+                #[cfg(not(target_arch = "wasm32"))]
                 state.set_timer_driver(TimerDriverHandle::with_wall_clock());
                 state.set_logical_clock_mode(LogicalClockMode::Hybrid);
                 state
@@ -5317,6 +5380,11 @@ impl RuntimeInner {
         guard.set_obligation_leak_response(config.obligation_leak_response);
         guard.set_leak_escalation(config.leak_escalation);
         if guard.timer_driver().is_none() {
+            #[cfg(target_arch = "wasm32")]
+            guard.set_timer_driver(TimerDriverHandle::with_browser_clock(Arc::new(
+                crate::time::BrowserMonotonicClock::default(),
+            )));
+            #[cfg(not(target_arch = "wasm32"))]
             guard.set_timer_driver(TimerDriverHandle::with_wall_clock());
         }
         let root = guard.create_root_region(Budget::INFINITE);
@@ -5585,11 +5653,11 @@ impl RuntimeInner {
 
         let cancel_producer = JoinProducer::new(Arc::clone(&join_state));
         let error_producer = JoinProducer::new(Arc::clone(&join_state));
-        let on_unadmitted_cancel: Option<crate::runtime::spawn_mailbox::UnadmittedCancelFn> =
+        let on_unadmitted_cancel: Option<crate::runtime::spawn_mailbox::LocalUnadmittedCancelFn> =
             Some(Box::new(move |reason| {
                 cancel_producer.cancel(reason);
             }));
-        let on_admission_error: Option<crate::runtime::spawn_mailbox::AdmissionErrorFn> =
+        let on_admission_error: Option<crate::runtime::spawn_mailbox::LocalAdmissionErrorFn> =
             Some(Box::new(move |error| {
                 let mut reason = crate::types::CancelReason::user("spawn admission failed");
                 reason.message = Some(error.to_string());
@@ -11995,7 +12063,7 @@ worker_threads = 16
 
         // 1. Threadless startup check
         let runtime = RuntimeBuilder::new()
-            .host_services(host_services)
+            .browser_host_services(host_services)
             .build()
             .expect("threadless runtime builder build succeeds");
 
@@ -12059,7 +12127,80 @@ worker_threads = 16
         let result = Pin::new(&mut handle).poll(&mut cx);
         assert_eq!(result, Poll::Ready(Ok(123)));
 
-        // 5. Cancelled/dropped before completion returns Err(JoinError::Cancelled) rather than panicking
+        // 4b. Local future with !Send output (real Rc output regression for E0277)
+        let mut rc_handle = runtime.spawn_local(async move {
+            Rc::new(42u32)
+        });
+        assert!(!rc_handle.is_finished());
+        assert_eq!(runtime_pump.run_until_idle(), 1);
+        assert!(rc_handle.is_finished());
+        let mut rc_cx = Context::from_waker(&waker);
+        match Pin::new(&mut rc_handle).poll(&mut rc_cx) {
+            Poll::Ready(Ok(rc_val)) => assert_eq!(*rc_val, 42),
+            other => panic!("expected Ready(Ok(Rc(42))), got {other:?}"),
+        }
+
+        // 5. BrowserWorkerPump::step single-step execution check with a real spawned local future
+        let step_value = Rc::new(Cell::new(200u32));
+        let step_val_clone = Rc::clone(&step_value);
+        let mut step_handle = runtime.spawn_local(async move {
+            step_val_clone.set(step_val_clone.get() + 42);
+            step_val_clone.get()
+        });
+
+        assert!(!step_handle.is_finished());
+        // step() must return true when executing the task, not false due to BurstLimitReached(1)
+        assert!(runtime_pump.step(), "step() must return true when a task was executed");
+        assert!(step_handle.is_finished());
+        assert_eq!(step_value.get(), 242);
+
+        // Additional step when idle must return false
+        assert!(!runtime_pump.step(), "step() must return false when queues are idle");
+
+        let mut step_cx = Context::from_waker(&waker);
+        let step_result = Pin::new(&mut step_handle).poll(&mut step_cx);
+        assert_eq!(step_result, Poll::Ready(Ok(242)));
+
+        // 6. Self-waking local future burst-limit enforcement and multi-batch resolution
+        let sw_counter = Rc::new(Cell::new(0u32));
+        let sw_clone = Rc::clone(&sw_counter);
+        struct SelfWaker {
+            remaining: u32,
+            count: Rc<Cell<u32>>,
+        }
+        impl std::future::Future for SelfWaker {
+            type Output = u32;
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                self.count.set(self.count.get() + 1);
+                if self.remaining == 0 {
+                    Poll::Ready(self.count.get())
+                } else {
+                    self.remaining -= 1;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            }
+        }
+        let mut sw_handle = runtime.spawn_local(SelfWaker {
+            remaining: 5,
+            count: sw_clone,
+        });
+        // runtime_pump has burst limit 4; draining a burst of 4 should yield BurstLimitReached(4)
+        let sw_batch1 = runtime_pump.drain_batch(4);
+        assert_eq!(sw_batch1, PumpDrainOutcome::BurstLimitReached(4));
+        assert!(!sw_handle.is_finished());
+        assert_eq!(sw_counter.get(), 4);
+
+        // Second batch completes the remaining 2 steps (5th poll + 6th final poll)
+        let sw_batch2 = runtime_pump.drain_batch(4);
+        assert_eq!(sw_batch2, PumpDrainOutcome::Completed(2));
+        assert!(sw_handle.is_finished());
+        assert_eq!(sw_counter.get(), 6);
+
+        let mut sw_cx = Context::from_waker(&waker);
+        assert_eq!(Pin::new(&mut sw_handle).poll(&mut sw_cx), Poll::Ready(Ok(6)));
+
+        // 7. Cancelled/dropped before completion returns Err(JoinError::Cancelled) rather than panicking
         let mut cancelled_handle = runtime.spawn_local(std::future::pending::<u32>());
         assert!(!cancelled_handle.is_finished());
         drop(runtime);
