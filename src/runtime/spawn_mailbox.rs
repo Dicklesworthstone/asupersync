@@ -916,11 +916,16 @@ impl Drop for ScopedLocalSpawnLaneOwner {
 
 /// Returns true only when the current worker-local lane belongs to `gateway`.
 pub(crate) fn local_spawn_lane_is_owned_by(gateway: &SpawnGateway) -> bool {
+    local_spawn_lane_is_owned_by_mailbox(gateway.mailbox())
+}
+
+/// Returns true only when the current worker-local lane belongs to `mailbox`.
+pub(crate) fn local_spawn_lane_is_owned_by_mailbox(mailbox: &Arc<SpawnMailbox>) -> bool {
     LOCAL_SPAWN_OWNER.with(|owner| {
         owner
             .borrow()
             .as_ref()
-            .is_some_and(|mailbox| Arc::ptr_eq(mailbox, gateway.mailbox()))
+            .is_some_and(|owned| Arc::ptr_eq(owned, mailbox))
     })
 }
 

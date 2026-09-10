@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::observability::TaskInspectorConfig;
-use asupersync::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder, yield_now};
+use asupersync::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder, SpawnError, yield_now};
 use asupersync::sync::{LockError, Mutex, OwnedMutexGuard};
 
 /// A paused caller must observe retirement even after thousands of other
@@ -199,6 +199,35 @@ fn current_thread_spawn_local_from_root_runs_on_calling_thread() {
 
 /// Repro C: the active root future is live work; the runtime is not
 /// quiescent while it runs.
+/// A `!Send` request parks on the calling thread's lane and only a worker
+/// driving that thread admits it. From a thread no worker drives, the request
+/// and its join handle would be stranded forever, so `Runtime::spawn_local`
+/// refuses it the way `Cx::spawn_local` does; inside the current-thread
+/// `block_on` root the caller is the worker and the task runs to completion.
+#[test]
+fn current_thread_runtime_spawn_local_refuses_a_thread_no_worker_drives() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build asupersync runtime");
+
+    match runtime.try_spawn_local(async { 7_u8 }) {
+        Err(SpawnError::LocalSchedulerUnavailable) => {}
+        Err(other) => panic!("unexpected refusal: {other:?}"),
+        Ok(_) => panic!("a request parked on a thread no worker drives must be refused"),
+    }
+
+    let joined = runtime.block_on(async {
+        let handle = runtime
+            .try_spawn_local(async { 7_u8 })
+            .expect("the block_on root drives this thread's lane");
+        handle.await
+    });
+    assert!(
+        matches!(joined, Ok(7)),
+        "local task must run on the root's thread: {joined:?}"
+    );
+}
+
 #[test]
 fn current_thread_root_is_live_in_quiescence_accounting() {
     let runtime = RuntimeBuilder::current_thread()

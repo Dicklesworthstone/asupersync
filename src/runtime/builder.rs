@@ -5220,6 +5220,10 @@ struct RuntimeInner {
     root_region: crate::types::RegionId,
     /// Lock-free spawn intake (Some only in `SpawnAdmissionMode::Mailbox`).
     spawn_mailbox: Option<Arc<crate::runtime::spawn_mailbox::SpawnMailbox>>,
+    /// The mailbox every worker of this runtime owns its thread-local `!Send`
+    /// lane under, kept regardless of the admission mode so `spawn_local` can
+    /// tell whether the calling thread's lane is one this runtime drains.
+    local_lane_mailbox: Arc<crate::runtime::spawn_mailbox::SpawnMailbox>,
     /// Root-region pending-spawn counter handle for mailbox-mode producers.
     root_pending_spawns: Option<Arc<crate::record::region::PendingSpawnCounter>>,
     /// Timer handle for producer-side enqueue timestamps in mailbox mode.
@@ -5544,6 +5548,9 @@ impl RuntimeInner {
             ));
             (mailbox, pending, clock)
         };
+        // Every worker owns its thread-local `!Send` lane under this mailbox
+        // whatever the admission mode; `spawn_local` identifies the lane by it.
+        let local_lane_mailbox = Arc::clone(&mailbox);
         let spawn_mailbox =
             if config.spawn_admission == crate::runtime::config::SpawnAdmissionMode::Mailbox {
                 Some(mailbox)
@@ -5572,6 +5579,7 @@ impl RuntimeInner {
                 worker_threads: Mutex::new(Vec::new()),
                 root_region,
                 spawn_mailbox,
+                local_lane_mailbox,
                 root_pending_spawns,
                 spawn_clock,
                 spawn_liveness: Mutex::new(Some(spawn_liveness)),
@@ -5638,6 +5646,20 @@ impl RuntimeInner {
         F::Output: 'static,
     {
         let spawn_guard = self.spawn_liveness_guard()?;
+        // A `!Send` request parks on the calling thread's lane and is only
+        // admitted by a worker driving that thread. The browser pump drives
+        // the single wasm thread, so any caller there is served; on a native
+        // runtime a caller outside this runtime's worker threads or its
+        // current-thread `block_on` root would strand the request and its
+        // join handle forever, so refuse it the way `Cx::spawn_local` does.
+        if self.browser_pump.get().is_none()
+            && (crate::runtime::scheduler::three_lane::current_worker_id().is_none()
+                || !crate::runtime::spawn_mailbox::local_spawn_lane_is_owned_by_mailbox(
+                    &self.local_lane_mailbox,
+                ))
+        {
+            return Err(SpawnError::LocalSchedulerUnavailable);
+        }
         let join_state = Arc::new(Mutex::new(JoinState::new()));
         let task_producer = JoinProducer::new(Arc::clone(&join_state));
 
@@ -12064,8 +12086,11 @@ worker_threads = 16
 
         let host_services = Arc::new(BrowserHostServices::with_burst_limit(4));
 
-        // 1. Threadless startup check
+        // 1. Threadless startup check. The pump requires exactly one worker;
+        // the builder's default worker count follows the host's parallelism,
+        // so pin it or this test only passes on single-worker machines.
         let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
             .browser_host_services(host_services)
             .build()
             .expect("threadless runtime builder build succeeds");
