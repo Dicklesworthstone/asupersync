@@ -2528,12 +2528,21 @@ impl RemotePeerAdmissionPolicy {
             }
         })?;
         let certificate = crate::tls::Certificate::from_der(certificate_der);
-        certificate_pins.validate(&certificate).map_err(|error| {
+        // `validate` reports a mismatch as `Ok(false)` when the pin set is in
+        // report-only mode; admission must fail closed on that value too,
+        // independently of the grant-time enforcing-set check.
+        let pinned = certificate_pins.validate(&certificate).map_err(|error| {
             RemotePeerAdmissionError::TlsPeerCertificateRejected {
                 peer: hello.peer_node().clone(),
                 detail: error.to_string(),
             }
         })?;
+        if !pinned {
+            return Err(RemotePeerAdmissionError::TlsPeerCertificateRejected {
+                peer: hello.peer_node().clone(),
+                detail: "peer certificate matches no pin in the grant's pin set".to_owned(),
+            });
+        }
         self.admit_grant(hello, grant)
     }
 
@@ -4454,8 +4463,12 @@ where
         read_remote_service_frame(cx, &mut framed).await?
     };
     let remote_task_id = wire_request.remote_task_id;
-    let uses_v3_session_envelope = execution_mode == RemoteServiceExecutionMode::LeaseBound
-        && wire_request.hello().protocol_version() == RemoteProtocolVersion::V3;
+    // A V3 client decodes every reply as a session event, including the
+    // `LifecycleUnavailable` refusal an inline-mode server sends it; the
+    // envelope therefore follows the peer's protocol version, not the
+    // server's execution mode.
+    let uses_v3_session_envelope =
+        wire_request.hello().protocol_version() == RemoteProtocolVersion::V3;
     let (response, terminal_commit) = match policy
         .admit_tls_peer(wire_request.hello(), &**framed.get_ref())
     {
@@ -4992,11 +5005,16 @@ where
                 break remote_service_expire_child(cx, child, child_region_id).await;
             }
             RemoteServiceV3Race::Completed(joined) => {
-                child.close().await.map_err(|error| {
-                    RemoteComputationServiceError::Transport(io::Error::other(format!(
-                        "remote computation lifecycle could not close V3 child region: {error}"
-                    )))
-                })?;
+                // A close failure is a terminal outcome of this request, not
+                // an early exit: returning here would skip the idempotency
+                // commit below and leave the key in flight for the peer's
+                // record budget (never evicted while in flight).
+                if let Err(error) = child.close().await {
+                    break Err(remote_service_execution_lifecycle_error(
+                        "close V3 child region",
+                        error,
+                    ));
+                }
                 break remote_service_joined_outcome(joined);
             }
             RemoteServiceV3Race::Flushed => {
@@ -7333,7 +7351,11 @@ async fn drive_native_remote_session(
                 ));
             }
             NativeRemoteSessionRace::Event(Err(error)) => {
-                return Err(map_native_remote_session_error(cx, control, error));
+                return Err(map_native_remote_session_error(
+                    cx,
+                    control.cancel_reason(),
+                    error,
+                ));
             }
             NativeRemoteSessionRace::Control(Ok(())) => {
                 // Mark the control exchange before inspecting coalesced state.
@@ -7342,17 +7364,18 @@ async fn drive_native_remote_session(
                 // stream instead of waiting behind a lost renewal reply.
                 shared.set_control_in_flight(task_id, true);
                 if let Some(reason) = control.take_cancel() {
-                    let response = session
-                        .cancel(cx, reason)
-                        .await
-                        .map_err(|error| map_native_remote_session_error(cx, control, error))?;
+                    // `take_cancel` cleared the pending reason; a failed
+                    // Cancel exchange must still surface as this cancellation
+                    // rather than as a transport error.
+                    let response = session.cancel(cx, reason.clone()).await.map_err(|error| {
+                        map_native_remote_session_error(cx, Some(reason.clone()), error)
+                    })?;
                     return map_native_remote_response(response);
                 }
                 if let Some(lease) = control.take_renewal() {
-                    let event = session
-                        .renew_lease(cx, lease)
-                        .await
-                        .map_err(|error| map_native_remote_session_error(cx, control, error))?;
+                    let event = session.renew_lease(cx, lease).await.map_err(|error| {
+                        map_native_remote_session_error(cx, control.cancel_reason(), error)
+                    })?;
                     shared.set_control_in_flight(task_id, false);
                     match event {
                         RemoteServiceSessionEvent::LeaseRenewed { .. } => {}
@@ -7402,12 +7425,16 @@ fn map_native_remote_client_error(cx: &Cx, error: RemoteComputationClientError) 
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+/// Maps a session failure to the caller's view. `pending_cancel` is the
+/// cancellation the driver was carrying when the exchange failed: the
+/// control's still-pending reason, or the reason `take_cancel` had already
+/// removed for the Cancel exchange itself.
 fn map_native_remote_session_error(
     cx: &Cx,
-    control: &NativeRemoteControl,
+    pending_cancel: Option<CancelReason>,
     error: RemoteServiceSessionError,
 ) -> RemoteError {
-    if let Some(reason) = control.cancel_reason().or_else(|| cx.cancel_reason()) {
+    if let Some(reason) = pending_cancel.or_else(|| cx.cancel_reason()) {
         return RemoteError::Cancelled(reason);
     }
     if matches!(error, RemoteServiceSessionError::Cancelled) {
@@ -9110,10 +9137,28 @@ impl RemoteComputationService {
                 connection_tasks.spawn(&service_cx, move |connection_cx| async move {
                     let _guard = guard;
                     let exchange = async {
-                        let mut stream = tls_acceptor
-                            .accept(stream)
+                        // The connection slot is held from registration on, so
+                        // an unauthenticated peer must not be able to sit in
+                        // the TLS handshake indefinitely: an acceptor built
+                        // without its own handshake timeout would otherwise let
+                        // idle TCP connects pin the listener at capacity. The
+                        // first-frame budget bounds the handshake as well.
+                        let handshake = tls_acceptor.accept(stream);
+                        let mut stream = if tls_acceptor.handshake_timeout().is_some() {
+                            handshake.await
+                        } else {
+                            match crate::time::timeout(
+                                connection_cx.now(),
+                                initial_frame_timeout,
+                                handshake,
+                            )
                             .await
-                            .map_err(RemoteComputationConnectionError::Tls)?;
+                            {
+                                Ok(result) => result,
+                                Err(_) => Err(TlsError::Timeout(initial_frame_timeout)),
+                            }
+                        }
+                        .map_err(RemoteComputationConnectionError::Tls)?;
                         serve_tls_computation_once_with_idempotency(
                             &connection_cx,
                             &mut stream,
