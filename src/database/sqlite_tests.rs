@@ -491,6 +491,12 @@ mod tests {
     const INFINITE_QUERY: &str =
         "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c";
 
+    /// A write that never finishes on its own; interrupting it makes SQLite
+    /// roll back the enclosing transaction (`sqlite3VdbeHalt`: a special
+    /// error on a non-read-only statement forces `sqlite3RollbackAll`).
+    const INFINITE_INSERT: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) \
+                                   INSERT INTO sink (v) SELECT x FROM c";
+
     fn run_signalled_infinite_query(
         conn: &rusqlite::Connection,
         started: std::sync::mpsc::SyncSender<()>,
@@ -998,12 +1004,15 @@ mod tests {
     #[test]
     fn sqlite_p5_explicit_interrupt_stops_statement_and_preserves_connection() {
         let cx = create_test_cx();
-        let conn = block_on(async {
+        let mut conn = block_on(async {
             match SqliteConnection::open_in_memory(&cx).await {
                 Outcome::Ok(conn) => conn,
                 other => panic!("open_in_memory failed: {other:?}"),
             }
         });
+        // An armed statement timeout must not turn an explicit interrupt into
+        // `StatementTimeout`: only the deadline handler firing is a timeout.
+        conn.set_statement_timeout_override(Some(Duration::from_secs(30)));
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
         let mut operation = Box::pin(conn.run_connection_op(
             &cx,
@@ -1020,6 +1029,9 @@ mod tests {
 
         conn.interrupt();
         match block_on(operation) {
+            Outcome::Err(SqliteError::StatementTimeout { limit }) => {
+                panic!("explicit interrupt relabelled as a {limit:?} statement timeout")
+            }
             Outcome::Err(err) if sqlite_error_is_interrupt(&err) => {}
             other => panic!("explicit interrupt must surface SQLite interruption: {other:?}"),
         }
@@ -1027,6 +1039,189 @@ mod tests {
             match conn.query_unchecked(&cx, "SELECT 1", &[]).await {
                 Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
                 other => panic!("connection unusable after explicit interrupt: {other:?}"),
+            }
+        });
+    }
+
+    /// The interrupt predicate matches SQLite's whole rendered message, not
+    /// a substring: an unrelated error whose text mentions interruption keeps
+    /// its identity instead of being relabelled as a timeout or a
+    /// cancellation.
+    #[test]
+    fn sqlite_error_is_interrupt_matches_only_the_engine_interruption_message() {
+        for rendered in [
+            "interrupted",
+            "Interrupted",
+            "Error code 9: interrupted",
+            " interrupted\n",
+        ] {
+            assert!(
+                sqlite_error_is_interrupt(&SqliteError::Sqlite(rendered.to_string())),
+                "{rendered:?} is SQLite's interruption error"
+            );
+        }
+        for rendered in [
+            "NOT NULL constraint failed: jobs.interrupted_at",
+            "CHECK constraint failed: status IN ('running', 'interrupted')",
+            "interrupted by policy",
+            "Error code 19: constraint failed (interrupted)",
+        ] {
+            assert!(
+                !sqlite_error_is_interrupt(&SqliteError::Sqlite(rendered.to_string())),
+                "{rendered:?} merely mentions interruption"
+            );
+        }
+        assert!(!sqlite_error_is_interrupt(
+            &SqliteError::TransactionFinished
+        ));
+    }
+
+    /// A statement timeout is armed and the statement fails on a constraint
+    /// whose column name contains "interrupt". The substring predicate used
+    /// to relabel that as `StatementTimeout`, hiding the violation, on both
+    /// the one-shot and the row-stream path.
+    #[test]
+    fn constraint_error_naming_interruption_is_not_relabelled_as_timeout() {
+        init_test_logging();
+        let cx = create_test_cx();
+        block_on(async {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            conn.set_statement_timeout_override(Some(Duration::from_secs(30)));
+            match conn
+                .execute_unchecked(&cx, "CREATE TABLE jobs (interrupted_at TEXT NOT NULL)", &[])
+                .await
+            {
+                Outcome::Ok(_) => {}
+                other => panic!("create table failed: {other:?}"),
+            }
+
+            match conn
+                .execute(&cx, "INSERT INTO jobs (interrupted_at) VALUES (NULL)", &[])
+                .await
+            {
+                Outcome::Err(SqliteError::Sqlite(message)) => assert!(
+                    message.contains("NOT NULL constraint failed"),
+                    "constraint violation must surface verbatim: {message}"
+                ),
+                other => panic!("expected the constraint violation, got {other:?}"),
+            }
+
+            let mut stream = match conn
+                .query_stream_unchecked(
+                    &cx,
+                    "INSERT INTO jobs (interrupted_at) VALUES (NULL) RETURNING interrupted_at",
+                    &[],
+                )
+                .await
+            {
+                Outcome::Ok(stream) => stream,
+                other => panic!("query_stream failed: {other:?}"),
+            };
+            match stream.next(&cx).await {
+                Outcome::Err(SqliteError::Sqlite(message)) => assert!(
+                    message.contains("NOT NULL constraint failed"),
+                    "stream constraint violation must surface verbatim: {message}"
+                ),
+                other => panic!("expected the stream constraint violation, got {other:?}"),
+            }
+            drop(stream);
+
+            match conn.query_unchecked(&cx, "SELECT 1", &[]).await {
+                Outcome::Ok(rows) => assert_eq!(rows.len(), 1),
+                other => panic!("connection unusable after constraint violation: {other:?}"),
+            }
+        });
+    }
+
+    /// SQLite rolls a transaction back on its own when a write statement is
+    /// interrupted, here by the statement-timeout deadline. Every later
+    /// statement through the handle must report the finished transaction
+    /// instead of running in autocommit mode and persisting outside it.
+    #[test]
+    fn interrupted_write_finishes_the_transaction_for_later_statements() {
+        init_test_logging();
+        let cx = create_test_cx();
+        block_on(async {
+            let mut conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+            for sql in [
+                "CREATE TABLE sink (v INTEGER)",
+                "CREATE TABLE audit (v INTEGER)",
+            ] {
+                match conn.execute_unchecked(&cx, sql, &[]).await {
+                    Outcome::Ok(_) => {}
+                    other => panic!("{sql} failed: {other:?}"),
+                }
+            }
+            // Short: the module's timing-sensitive tests share one 4-thread
+            // pool with this runaway write and its rollback (pj1q40).
+            conn.set_statement_timeout_override(Some(Duration::from_millis(5)));
+
+            let tx = match conn.begin(&cx).await {
+                Outcome::Ok(tx) => tx,
+                Outcome::Err(error) => panic!("begin failed: {error:?}"),
+                Outcome::Cancelled(reason) => panic!("begin cancelled: {reason:?}"),
+                Outcome::Panicked(_) => panic!("begin panicked"),
+            };
+            match tx.execute_unchecked(&cx, INFINITE_INSERT, &[]).await {
+                Outcome::Err(SqliteError::StatementTimeout { .. }) => {}
+                other => panic!("runaway write must hit the statement timeout: {other:?}"),
+            }
+            // The engine already rolled back and returned to autocommit: the
+            // handle must not let this statement run (and persist) outside
+            // the transaction the caller believes it is in.
+            match tx
+                .execute(&cx, "INSERT INTO audit (v) VALUES (1)", &[])
+                .await
+            {
+                Outcome::Err(SqliteError::TransactionFinished) => {}
+                other => panic!(
+                    "statement after the engine rollback must report the finished \
+                     transaction: {other:?}"
+                ),
+            }
+            match tx.query(&cx, "SELECT v FROM audit", &[]).await {
+                Outcome::Err(SqliteError::TransactionFinished) => {}
+                other => panic!("query after the engine rollback must report it: {other:?}"),
+            }
+            match tx.commit(&cx).await {
+                Outcome::Err(SqliteError::TransactionFinished) => {}
+                other => panic!("commit after the engine rollback must report it: {other:?}"),
+            }
+
+            for table in ["audit", "sink"] {
+                let sql = format!("SELECT COUNT(*) AS count FROM {table}");
+                match conn.query_unchecked(&cx, &sql, &[]).await {
+                    Outcome::Ok(rows) => assert_eq!(
+                        rows[0].get_i64("count").expect("count column"),
+                        0,
+                        "nothing may persist from the rolled-back transaction ({table})"
+                    ),
+                    other => panic!("{sql} failed: {other:?}"),
+                }
+            }
+            // The mirror is repaired: a fresh transaction works normally.
+            let tx = match conn.begin(&cx).await {
+                Outcome::Ok(tx) => tx,
+                Outcome::Err(error) => panic!("begin after repair failed: {error:?}"),
+                Outcome::Cancelled(reason) => panic!("begin after repair cancelled: {reason:?}"),
+                Outcome::Panicked(_) => panic!("begin after repair panicked"),
+            };
+            match tx
+                .execute(&cx, "INSERT INTO audit (v) VALUES (2)", &[])
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("fresh transaction statement failed: {other:?}"),
+            }
+            match tx.commit(&cx).await {
+                Outcome::Ok(()) => {}
+                other => panic!("fresh transaction commit failed: {other:?}"),
             }
         });
     }

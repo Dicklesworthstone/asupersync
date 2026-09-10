@@ -47,7 +47,7 @@ use std::future::poll_fn;
 use std::marker::PhantomData;
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 use std::time::Duration;
@@ -69,15 +69,18 @@ fn sqlite_cancelled_reason(cx: &Cx) -> CancelReason {
 }
 
 /// True when a [`SqliteError`] carries SQLITE_INTERRUPT. Call sites map
-/// rusqlite errors to strings, so this matches the canonical "interrupted"
-/// message text (br-asupersync-server-stack-hardening-eeexl1.1.2). Used to
-/// relabel an interrupt caused by the armed deadline progress handler as
-/// [`SqliteError::StatementTimeout`].
+/// rusqlite errors to strings, so this matches the whole rendered message
+/// against the engine's two renderings of that code and nothing else: the
+/// `sqlite3_errmsg` text (`interrupted`) or rusqlite's code-only form
+/// (`Error code 9: interrupted`). A substring match relabelled every error
+/// whose text merely mentioned interruption, such as `NOT NULL constraint
+/// failed: jobs.interrupted_at`, as a timeout or a cancellation, hiding the
+/// real failure (br-asupersync-server-stack-hardening-eeexl1.1.2).
 fn sqlite_error_is_interrupt(err: &SqliteError) -> bool {
     match err {
         SqliteError::Sqlite(msg) => {
-            let msg = msg.to_ascii_lowercase();
-            msg.contains("interrupt")
+            let msg = msg.trim().to_ascii_lowercase();
+            msg == "interrupted" || msg == "error code 9: interrupted"
         }
         _ => false,
     }
@@ -553,6 +556,64 @@ fn advance_transaction_generation(transaction_generation: &AtomicU64) -> Option<
         })
         .ok()
         .and_then(|generation| generation.checked_add(1))
+}
+
+/// Refuses an operation once SQLite has ended the managed transaction behind
+/// the mirror's back.
+///
+/// SQLite rolls the whole transaction back on its own and returns the
+/// connection to autocommit when a write statement is interrupted (the
+/// deadline progress handler or [`SqliteConnection::interrupt`]) or fails
+/// with `SQLITE_FULL`, `SQLITE_IOERR`, or `SQLITE_NOMEM` without a statement
+/// journal. Only the COMMIT/ROLLBACK workers used to notice; every statement
+/// issued through the [`SqliteTransaction`] handle in between ran in
+/// autocommit mode and persisted immediately, outside the transaction the
+/// caller believed it was still in. Runs under the connection mutex before
+/// each statement: when the mirror says a transaction is open but the engine
+/// is in autocommit, it repairs the mirror, retires the handle's generation
+/// (so its `commit`/`rollback` also report the finished transaction) and
+/// fails this statement with [`SqliteError::TransactionFinished`].
+///
+/// A statement issued through a handle also carries the handle's physical
+/// generation in `expected_generation`; once that generation has been
+/// retired (by this repair, a drop-rollback drain, or the finish workers)
+/// every later statement through the handle reports the finished
+/// transaction instead of running against whatever the connection is doing
+/// now.
+fn ensure_managed_transaction_open(
+    conn: &rusqlite::Connection,
+    transaction_state: &Mutex<TransactionState>,
+    transaction_generation: &AtomicU64,
+    expected_generation: Option<u64>,
+) -> Result<(), SqliteError> {
+    let mut state = transaction_state.lock();
+    if expected_generation
+        .is_some_and(|expected| transaction_generation.load(Ordering::Acquire) != expected)
+    {
+        return Err(SqliteError::TransactionFinished);
+    }
+    if *state == TransactionState::InTransaction && conn.is_autocommit() {
+        let _ = advance_transaction_generation(transaction_generation);
+        *state = TransactionState::Autocommit;
+        return Err(SqliteError::TransactionFinished);
+    }
+    Ok(())
+}
+
+/// The legacy (string-error) statement executor shared by the plain and the
+/// transaction-handle execute paths.
+fn execute_legacy_statement(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: &[SqliteValue],
+) -> Result<u64, SqliteError> {
+    let params_refs: Vec<&dyn rusqlite::ToSql> = params
+        .iter()
+        .map(|value| value as &dyn rusqlite::ToSql)
+        .collect();
+    conn.execute(sql, params_refs.as_slice())
+        .map(|rows| rows as u64)
+        .map_err(|error| SqliteError::Sqlite(error.to_string()))
 }
 
 fn rollback_orphaned_transaction_generation_guarded(
@@ -2602,7 +2663,7 @@ impl SqliteConnection {
         R: Send + 'static,
         F: FnOnce(&rusqlite::Connection) -> Result<R, SqliteError> + Send + 'static,
     {
-        self.run_connection_op_inner(cx, op_name, SqliteOperation::BlockingPool, f)
+        self.run_connection_op_inner(cx, op_name, SqliteOperation::BlockingPool, None, f)
             .await
     }
 
@@ -2617,15 +2678,18 @@ impl SqliteConnection {
         R: Send + 'static,
         F: FnOnce(&rusqlite::Connection) -> Result<R, SqliteOperationError> + Send + 'static,
     {
-        self.run_connection_op_inner(cx, op_name, operation, f)
+        self.run_connection_op_inner(cx, op_name, operation, None, f)
             .await
     }
 
+    /// `expected_generation` is `Some` for statements issued through a
+    /// [`SqliteTransaction`] handle; see [`ensure_managed_transaction_open`].
     async fn run_connection_op_inner<R, E, F>(
         &self,
         cx: &Cx,
         op_name: &'static str,
         operation: SqliteOperation,
+        expected_generation: Option<u64>,
         f: F,
     ) -> Outcome<R, E>
     where
@@ -2658,6 +2722,8 @@ impl SqliteConnection {
         }
 
         let inner = Arc::clone(&self.inner);
+        let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_generation = Arc::clone(&self.transaction_generation);
         let phase = Arc::new(Mutex::new(SqliteConnectionOpPhase::Queued));
         let worker_phase = Arc::clone(&phase);
         let (tx, mut rx) = crate::channel::oneshot::channel();
@@ -2695,10 +2761,21 @@ impl SqliteConnection {
                     }
                 }
 
+                // Set by the deadline progress handler when it aborts the
+                // statement, so only an interrupt this operation itself
+                // caused is relabelled as a timeout below.
+                let deadline_fired = Arc::new(AtomicBool::new(false));
                 let result = (|| {
                     let conn = guard
                         .get()
                         .map_err(|error| E::from_legacy(operation, error))?;
+                    ensure_managed_transaction_open(
+                        conn,
+                        transaction_state.as_ref(),
+                        transaction_generation.as_ref(),
+                        expected_generation,
+                    )
+                    .map_err(|error| E::from_legacy(operation, error))?;
                     // br-asupersync-server-stack-hardening-eeexl1.1.2: arm the
                     // budget-derived statement timeout for the duration of this
                     // operation. Wall-clock by necessity — the deadline fires on
@@ -2707,9 +2784,16 @@ impl SqliteConnection {
                     // without the requested bound would void the contract.
                     if let Some(limit) = timeout {
                         let deadline = std::time::Instant::now() + limit;
+                        let fired = Arc::clone(&deadline_fired);
                         conn.progress_handler(
                             TIMEOUT_PROGRESS_OPS,
-                            Some(move || std::time::Instant::now() >= deadline),
+                            Some(move || {
+                                if std::time::Instant::now() < deadline {
+                                    return false;
+                                }
+                                fired.store(true, Ordering::Release);
+                                true
+                            }),
                         )
                         .map_err(|e| {
                             E::from_legacy(
@@ -2739,7 +2823,9 @@ impl SqliteConnection {
                         drop(guard);
                         return SqliteConnectionOpCompletion::Cancelled;
                     }
-                    (_, Some(limit), Err(err)) if err.is_interrupt() => {
+                    (_, Some(limit), Err(err))
+                        if deadline_fired.load(Ordering::Acquire) && err.is_interrupt() =>
+                    {
                         Err(E::statement_timeout(operation, limit))
                     }
                     (_, _, result) => result,
@@ -3070,16 +3156,38 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteError> {
-        self.execute_unchecked_with(cx, sql, params, |conn, sql, params| {
-            let params_refs: Vec<&dyn rusqlite::ToSql> = params
-                .iter()
-                .map(|value| value as &dyn rusqlite::ToSql)
-                .collect();
-            conn.execute(sql, params_refs.as_slice())
-                .map(|rows| rows as u64)
-                .map_err(|error| SqliteError::Sqlite(error.to_string()))
-        })
-        .await
+        self.execute_unchecked_with(cx, sql, params, None, execute_legacy_statement)
+            .await
+    }
+
+    /// [`Self::execute`] issued through a [`SqliteTransaction`] handle: the
+    /// statement runs only while `generation` is still the connection's
+    /// physical transaction and otherwise reports the finished transaction.
+    async fn execute_in_transaction(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        generation: u64,
+    ) -> Outcome<u64, SqliteError> {
+        if let Err(err) = validate_checked_sql_statement(sql) {
+            return Outcome::Err(err);
+        }
+        self.execute_unchecked_in_transaction(cx, sql, params, generation)
+            .await
+    }
+
+    /// [`Self::execute_unchecked`] issued through a [`SqliteTransaction`]
+    /// handle; see [`Self::execute_in_transaction`].
+    async fn execute_unchecked_in_transaction(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        generation: u64,
+    ) -> Outcome<u64, SqliteError> {
+        self.execute_unchecked_with(cx, sql, params, Some(generation), execute_legacy_statement)
+            .await
     }
 
     /// Executes a checked statement and preserves structured engine
@@ -3109,6 +3217,36 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteOperationError> {
+        self.execute_unchecked_diagnosed_impl(cx, sql, params, None)
+            .await
+    }
+
+    /// [`Self::execute_diagnosed`] issued through a [`SqliteTransaction`]
+    /// handle; see [`Self::execute_in_transaction`].
+    async fn execute_diagnosed_in_transaction(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        generation: u64,
+    ) -> Outcome<u64, SqliteOperationError> {
+        if let Err(error) = validate_checked_sql_statement(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        self.execute_unchecked_diagnosed_impl(cx, sql, params, Some(generation))
+            .await
+    }
+
+    async fn execute_unchecked_diagnosed_impl(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        expected_generation: Option<u64>,
+    ) -> Outcome<u64, SqliteOperationError> {
         if let Err(error) = ensure_unchecked_sql_surface(sql) {
             return Outcome::Err(SqliteOperationError::from_legacy(
                 SqliteOperation::Validation,
@@ -3133,10 +3271,11 @@ impl SqliteConnection {
 
         let sql = sql.to_string();
         let params = params.to_vec();
-        self.run_connection_op_diagnosed(
+        self.run_connection_op_inner(
             cx,
             "sqlite diagnosed execute",
             SqliteOperation::Step,
+            expected_generation,
             move |conn| {
                 let mut statement = conn.prepare_cached(&sql).map_err(|error| {
                     SqliteOperationError::from_rusqlite(SqliteOperation::Prepare, error)
@@ -3162,7 +3301,7 @@ impl SqliteConnection {
         sql: &'static str,
         effect: TransactionWorkerEffect,
     ) -> Outcome<u64, SqliteError> {
-        self.execute_unchecked_with(cx, sql, &[], move |conn, sql, _params| {
+        self.execute_unchecked_with(cx, sql, &[], None, move |conn, sql, _params| {
             effect.execute_worker(conn, sql)
         })
         .await
@@ -3211,6 +3350,7 @@ impl SqliteConnection {
         cx: &Cx,
         sql: &str,
         params: &[SqliteValue],
+        expected_generation: Option<u64>,
         execute: F,
     ) -> Outcome<u64, SqliteError>
     where
@@ -3242,9 +3382,13 @@ impl SqliteConnection {
 
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
-        self.run_connection_op(cx, "sqlite execute", move |conn| {
-            execute(conn, &sql, &params)
-        })
+        self.run_connection_op_inner(
+            cx,
+            "sqlite execute",
+            SqliteOperation::BlockingPool,
+            expected_generation,
+            move |conn| execute(conn, &sql, &params),
+        )
         .await
     }
 
@@ -3377,6 +3521,32 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Vec<SqliteRow>, SqliteError> {
+        self.query_unchecked_impl(cx, sql, params, None).await
+    }
+
+    /// [`Self::query`] issued through a [`SqliteTransaction`] handle; see
+    /// [`Self::execute_in_transaction`].
+    async fn query_in_transaction(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        generation: u64,
+    ) -> Outcome<Vec<SqliteRow>, SqliteError> {
+        if let Err(err) = validate_checked_sql_statement(sql) {
+            return Outcome::Err(err);
+        }
+        self.query_unchecked_impl(cx, sql, params, Some(generation))
+            .await
+    }
+
+    async fn query_unchecked_impl(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        expected_generation: Option<u64>,
+    ) -> Outcome<Vec<SqliteRow>, SqliteError> {
         if let Err(err) = ensure_unchecked_sql_surface(sql) {
             return Outcome::Err(err);
         }
@@ -3401,32 +3571,38 @@ impl SqliteConnection {
 
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
-        self.run_connection_op(cx, "sqlite query", move |conn| {
-            let params_refs: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+        self.run_connection_op_inner(
+            cx,
+            "sqlite query",
+            SqliteOperation::BlockingPool,
+            expected_generation,
+            move |conn| {
+                let params_refs: Vec<&dyn rusqlite::ToSql> =
+                    params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
 
-            let mut stmt = conn
-                .prepare_cached(&sql)
-                .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                let mut stmt = conn
+                    .prepare_cached(&sql)
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-            let mut rows = stmt
-                .query(params_refs.as_slice())
-                .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
+                let mut rows = stmt
+                    .query(params_refs.as_slice())
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
 
-            let mut result = Vec::new();
-            let mut metadata = None;
-            while let Some(row) = rows
-                .next()
-                .map_err(|e| SqliteError::Sqlite(e.to_string()))?
-            {
-                let (column_names, columns) =
-                    metadata.get_or_insert_with(|| sqlite_row_metadata(row));
-                result.push(sqlite_row_from_rusqlite_row(row, column_names, columns)?);
-            }
-            drop(rows);
-            drop(stmt);
-            Ok(result)
-        })
+                let mut result = Vec::new();
+                let mut metadata = None;
+                while let Some(row) = rows
+                    .next()
+                    .map_err(|e| SqliteError::Sqlite(e.to_string()))?
+                {
+                    let (column_names, columns) =
+                        metadata.get_or_insert_with(|| sqlite_row_metadata(row));
+                    result.push(sqlite_row_from_rusqlite_row(row, column_names, columns)?);
+                }
+                drop(rows);
+                drop(stmt);
+                Ok(result)
+            },
+        )
         .await
     }
 
@@ -3457,6 +3633,36 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Vec<SqliteRow>, SqliteOperationError> {
+        self.query_unchecked_diagnosed_impl(cx, sql, params, None)
+            .await
+    }
+
+    /// [`Self::query_diagnosed`] issued through a [`SqliteTransaction`]
+    /// handle; see [`Self::execute_in_transaction`].
+    async fn query_diagnosed_in_transaction(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        generation: u64,
+    ) -> Outcome<Vec<SqliteRow>, SqliteOperationError> {
+        if let Err(error) = validate_checked_sql_statement(sql) {
+            return Outcome::Err(SqliteOperationError::from_legacy(
+                SqliteOperation::Validation,
+                error,
+            ));
+        }
+        self.query_unchecked_diagnosed_impl(cx, sql, params, Some(generation))
+            .await
+    }
+
+    async fn query_unchecked_diagnosed_impl(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+        expected_generation: Option<u64>,
+    ) -> Outcome<Vec<SqliteRow>, SqliteOperationError> {
         if let Err(error) = ensure_unchecked_sql_surface(sql) {
             return Outcome::Err(SqliteOperationError::from_legacy(
                 SqliteOperation::Validation,
@@ -3481,10 +3687,11 @@ impl SqliteConnection {
 
         let sql = sql.to_string();
         let params = params.to_vec();
-        self.run_connection_op_diagnosed(
+        self.run_connection_op_inner(
             cx,
             "sqlite diagnosed query",
             SqliteOperation::Step,
+            expected_generation,
             move |conn| {
                 let params_refs: Vec<&dyn rusqlite::ToSql> = params
                     .iter()
@@ -3602,6 +3809,8 @@ impl SqliteConnection {
         let sql = sql.to_string();
         let params: Vec<SqliteValue> = params.to_vec();
         let inner = Arc::clone(&self.inner);
+        let transaction_state = Arc::clone(&self.transaction_state);
+        let transaction_generation = Arc::clone(&self.transaction_generation);
         let counters = Arc::new(SqliteRowStreamCounters::default());
         let worker_counters = Arc::clone(&counters);
         let (sender, receiver) = mpsc::channel(SQLITE_ROW_STREAM_CHANNEL_CAPACITY);
@@ -3613,6 +3822,9 @@ impl SqliteConnection {
             /// `run_connection_op`.
             const TIMEOUT_PROGRESS_OPS: i32 = 1000;
 
+            // See `run_connection_op`: only an interrupt raised by this
+            // stream's own deadline handler is relabelled as a timeout.
+            let deadline_fired = Arc::new(AtomicBool::new(false));
             let result = (|| {
                 let guard = inner.lock();
                 {
@@ -3634,11 +3846,24 @@ impl SqliteConnection {
                 }
                 let body_result = (|| {
                     let conn = guard.get()?;
+                    ensure_managed_transaction_open(
+                        conn,
+                        transaction_state.as_ref(),
+                        transaction_generation.as_ref(),
+                        None,
+                    )?;
                     if let Some(limit) = timeout {
                         let deadline = std::time::Instant::now() + limit;
+                        let fired = Arc::clone(&deadline_fired);
                         conn.progress_handler(
                             TIMEOUT_PROGRESS_OPS,
-                            Some(move || std::time::Instant::now() >= deadline),
+                            Some(move || {
+                                if std::time::Instant::now() < deadline {
+                                    return false;
+                                }
+                                fired.store(true, Ordering::Release);
+                                true
+                            }),
                         )
                         .map_err(|e| {
                             SqliteError::Sqlite(format!("failed to arm statement timeout: {e}"))
@@ -3696,7 +3921,10 @@ impl SqliteConnection {
             // `run_connection_op`); a consumer-driven interrupt discards
             // the message during the drain instead.
             let result = match (timeout, result) {
-                (Some(limit), Err(err)) if sqlite_error_is_interrupt(&err) => {
+                (Some(limit), Err(err))
+                    if deadline_fired.load(Ordering::Acquire)
+                        && sqlite_error_is_interrupt(&err) =>
+                {
                     Err(SqliteError::StatementTimeout { limit })
                 }
                 (_, result) => result,
@@ -4629,7 +4857,9 @@ impl SqliteTransaction<'_> {
         if self.finished {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
-        self.conn.execute(cx, sql, params).await
+        self.conn
+            .execute_in_transaction(cx, sql, params, self.generation)
+            .await
     }
 
     /// Executes a statement inside this transaction with structured
@@ -4646,7 +4876,9 @@ impl SqliteTransaction<'_> {
                 SqliteError::TransactionFinished,
             ));
         }
-        self.conn.execute_diagnosed(cx, sql, params).await
+        self.conn
+            .execute_diagnosed_in_transaction(cx, sql, params, self.generation)
+            .await
     }
 
     /// Executes trusted transaction-control SQL within this transaction.
@@ -4659,7 +4891,9 @@ impl SqliteTransaction<'_> {
         if self.finished {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
-        self.conn.execute_unchecked(cx, sql, params).await
+        self.conn
+            .execute_unchecked_in_transaction(cx, sql, params, self.generation)
+            .await
     }
 
     /// Executes a query within this transaction.
@@ -4672,7 +4906,9 @@ impl SqliteTransaction<'_> {
         if self.finished {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
-        self.conn.query(cx, sql, params).await
+        self.conn
+            .query_in_transaction(cx, sql, params, self.generation)
+            .await
     }
 
     /// Executes a query inside this transaction with structured diagnostics.
@@ -4688,7 +4924,9 @@ impl SqliteTransaction<'_> {
                 SqliteError::TransactionFinished,
             ));
         }
-        self.conn.query_diagnosed(cx, sql, params).await
+        self.conn
+            .query_diagnosed_in_transaction(cx, sql, params, self.generation)
+            .await
     }
 }
 
