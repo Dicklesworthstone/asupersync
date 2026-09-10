@@ -463,6 +463,9 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         Fut::Output: Send + 'static,
     {
         // Create task record
+        if !cx.runtime_mask.has(cap::CapMask::SPAWN) {
+            return Err(SpawnError::RuntimeUnavailable);
+        }
         let task_id = self.create_task_record(state)?;
 
         let (child_cx, child_cx_full) = self.build_child_task_cx(state, cx, task_id);
@@ -979,7 +982,11 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         mut h1: TaskHandle<T>,
         mut h2: TaskHandle<T>,
     ) -> Result<T, JoinError> {
-        let race_id = self.record_loser_drain_start(cx, vec![h1.task_id(), h2.task_id()]);
+        // Mailbox handles change from provisional to arena IDs at admission.
+        // Use the identities recorded at race start for every history event.
+        let first_task = h1.task_id();
+        let second_task = h2.task_id();
+        let race_id = self.record_loser_drain_start(cx, vec![first_task, second_task]);
         let winner = {
             let f1 = h1.join_with_drop_reason(cx, CancelReason::race_loser());
             let mut f1 = std::pin::pin!(f1);
@@ -992,7 +999,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
 
         match winner {
             Either::Left(res) => {
-                Self::record_loser_drain_task_complete(cx, h1.task_id());
+                Self::record_loser_drain_task_complete(cx, first_task);
                 if matches!(&res, Err(JoinError::Panicked(_)))
                     && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
                 {
@@ -1001,14 +1008,14 @@ impl<'scope, P: Policy> Scope<'scope, P> {
                     // once so a cooperative loser can observe cancellation, then
                     // preserve the winner panic without deadlocking the test.
                     if Self::best_effort_poll_loser_join(cx, &mut h2) {
-                        Self::record_loser_drain_task_complete(cx, h2.task_id());
+                        Self::record_loser_drain_task_complete(cx, second_task);
                     }
-                    Self::record_loser_drain_complete(cx, race_id, h1.task_id());
+                    Self::record_loser_drain_complete(cx, race_id, first_task);
                     return res;
                 }
                 let loser_res = h2.join(cx).await;
-                Self::record_loser_drain_task_complete(cx, h2.task_id());
-                Self::record_loser_drain_complete(cx, race_id, h1.task_id());
+                Self::record_loser_drain_task_complete(cx, second_task);
+                Self::record_loser_drain_complete(cx, race_id, first_task);
                 if let Err(JoinError::Panicked(p)) = res {
                     Err(JoinError::Panicked(p))
                 } else if let Err(JoinError::Panicked(p)) = loser_res {
@@ -1018,20 +1025,20 @@ impl<'scope, P: Policy> Scope<'scope, P> {
                 }
             }
             Either::Right(res) => {
-                Self::record_loser_drain_task_complete(cx, h2.task_id());
+                Self::record_loser_drain_task_complete(cx, second_task);
                 if matches!(&res, Err(JoinError::Panicked(_)))
                     && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
                 {
                     // See the left-branch comment above.
                     if Self::best_effort_poll_loser_join(cx, &mut h1) {
-                        Self::record_loser_drain_task_complete(cx, h1.task_id());
+                        Self::record_loser_drain_task_complete(cx, first_task);
                     }
-                    Self::record_loser_drain_complete(cx, race_id, h2.task_id());
+                    Self::record_loser_drain_complete(cx, race_id, second_task);
                     return res;
                 }
                 let loser_res = h1.join(cx).await;
-                Self::record_loser_drain_task_complete(cx, h1.task_id());
-                Self::record_loser_drain_complete(cx, race_id, h2.task_id());
+                Self::record_loser_drain_task_complete(cx, first_task);
+                Self::record_loser_drain_complete(cx, race_id, second_task);
                 if let Err(JoinError::Panicked(p)) = res {
                     Err(JoinError::Panicked(p))
                 } else if let Err(JoinError::Panicked(p)) = loser_res {
@@ -1222,6 +1229,8 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             })
             .await;
         }
+        // Keep the start IDs even when mailbox admission replaces a handle's
+        // provisional identity while its join future is pending.
         let participant_tasks: Vec<_> = handles.iter().map(TaskHandle::task_id).collect();
         let race_id = self.record_loser_drain_start(cx, participant_tasks.clone());
 
@@ -1278,7 +1287,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
                 continue;
             }
             if let Some(res) = ready_results[i].take() {
-                Self::record_loser_drain_task_complete(cx, handle.task_id());
+                Self::record_loser_drain_task_complete(cx, participant_tasks[i]);
                 if let Err(JoinError::Panicked(p)) = res {
                     if loser_panic.is_none() {
                         loser_panic = Some(p);
@@ -1286,7 +1295,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
                 }
             } else if handle.is_finished() {
                 let res = handle.join(cx).await;
-                Self::record_loser_drain_task_complete(cx, handle.task_id());
+                Self::record_loser_drain_task_complete(cx, participant_tasks[i]);
                 if let Err(JoinError::Panicked(p)) = res {
                     if loser_panic.is_none() {
                         loser_panic = Some(p);
@@ -1312,7 +1321,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             // preserve the winner panic without deadlocking the test.
             for idx in pending_loser_indices {
                 if Self::best_effort_poll_loser_join(cx, &mut handles[idx]) {
-                    Self::record_loser_drain_task_complete(cx, handles[idx].task_id());
+                    Self::record_loser_drain_task_complete(cx, participant_tasks[idx]);
                 }
             }
             Self::record_loser_drain_complete(cx, race_id, winner_task);
@@ -1320,7 +1329,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         }
         for idx in pending_loser_indices {
             let res = handles[idx].join(cx).await;
-            Self::record_loser_drain_task_complete(cx, handles[idx].task_id());
+            Self::record_loser_drain_task_complete(cx, participant_tasks[idx]);
             if let Err(JoinError::Panicked(p)) = res {
                 if loser_panic.is_none() {
                     loser_panic = Some(p);
@@ -1421,6 +1430,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
                     .region(self.region)
                     .map(crate::record::RegionRecord::pending_spawn_handle),
             );
+        child_cx.runtime_mask = parent_cx.runtime_mask;
         let child_cx_full = child_cx.retype::<cap::All>();
 
         (child_cx, child_cx_full)
@@ -1663,6 +1673,8 @@ impl<P: Policy> Scope<'_, P> {
         }
 
         let mut handles = self.spawn_quorum_branches(cx, branches).await?;
+        // Quorum branches can still be awaiting mailbox admission. Completion
+        // history must use the same identities as this start record.
         let participants: Vec<TaskId> = handles.iter().map(TaskHandle::task_id).collect();
         let race_id = self.record_loser_drain_start(cx, participants.clone());
 
@@ -1687,7 +1699,7 @@ impl<P: Policy> Scope<'_, P> {
                     } else {
                         failures += 1;
                     }
-                    Self::record_loser_drain_task_complete(cx, handle.task_id());
+                    Self::record_loser_drain_task_complete(cx, participants[index]);
                     outcomes[index] = Some(outcome);
                 }
             }
@@ -1724,7 +1736,7 @@ impl<P: Policy> Scope<'_, P> {
                 continue;
             }
             let outcome = branch_join_to_outcome(handle.join(cx).await);
-            Self::record_loser_drain_task_complete(cx, handle.task_id());
+            Self::record_loser_drain_task_complete(cx, participants[index]);
             outcomes[index] = Some(outcome);
         }
 

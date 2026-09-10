@@ -13,8 +13,9 @@
 #                        `cargo check --all-targets` compiles examples but never
 #                        runs them, so before this lane the headline programs
 #                        could exit non-zero and no gate would notice.
-#   3. integration_lane  the tests/api_v2_integration.rs surface lane.
-#   4. artifact_contract self-check over the emitted artifacts.
+#   3. integration_lane  the on-ramp plus API-v2 lifecycle/property suite (.11).
+#   4. spawn_caps        compile-fail proof for PureCaps and WebCaps (.11).
+#   5. artifact_contract self-check over the emitted artifacts.
 #
 # Every stage appends one events.ndjson row carrying its own repro command, so
 # a failure names the stage AND the exact command to re-run. `--rehearse-failure`
@@ -26,10 +27,12 @@
 # stage pays ~170-192s of rch dispatch + source sync + artifact retrieval even
 # warm on one worker (runs full10: 711.8s, full11: 725.5s wall; stage walls
 # 180.9/171.5/192.2/180.1s on the green run). Four cargo stages make ~12min
-# the structural floor, and RCH-E301 forbids batching them into one dispatch.
-# The lane budget is therefore <=15min (TIMEOUT_SEC default 900) with a
-# per-stage guideline of <=240s — NOT the original epic's <5min, which is
-# unreachable as long as per-stage rch round-trips cost what they cost.
+# the structural floor for the original journey. The capability compile-fail
+# stage is additional and can take longer on a cold worker. RCH-E301 forbids
+# batching Cargo commands into an unclassified shell dispatch.
+# The original four-stage journey budget was <=15min. TIMEOUT_SEC (default
+# 900) is a per-stage timeout, not a bound on this expanded suite's total wall
+# time. The additional compile-fail stage has its own dependency build.
 # Slimming retrieval or an rch suite-batching feature would lower the floor;
 # both are rch-owner asks recorded on the bead.
 
@@ -85,8 +88,9 @@ usage() {
 Usage: scripts/run_api_v2_e2e.sh [options]
 
 Runs the API-v2 on-ramp journey end to end: the DX line budget, the three
-on-ramp example programs, the api_v2_integration test lane, and an artifact
-contract check. Emits summary.json + events.ndjson under the run directory.
+on-ramp example programs, the api_v2_integration test lane, capability
+compile-fail checks, and an artifact contract check. Emits summary.json +
+events.ndjson under the run directory.
 
 Options:
   --output-root <dir>   Root for run_<id>/ artifacts (default: target/e2e-results/api_v2).
@@ -244,9 +248,11 @@ rch_cargo() {
     # An explicit array, not an unquoted ${VAR:+...} expansion: word-splitting
     # rules differ between shells, and an empty TARGET_DIR must contribute zero
     # arguments rather than an empty one.
-    local -a env_prefix=()
+    # Keep tracing from interleaving partial lines with libtest's named
+    # sentinel results. Assertion failures still retain their full output.
+    local -a env_prefix=(env RUST_LOG=error)
     if [[ -n "${TARGET_DIR}" ]]; then
-        env_prefix=(env "CARGO_TARGET_DIR=${TARGET_DIR}")
+        env_prefix+=("CARGO_TARGET_DIR=${TARGET_DIR}")
     fi
 
     start="$(now_ms)"
@@ -266,7 +272,9 @@ rch_cargo() {
     RCH_REQUIRE_REMOTE=1 timeout "${TIMEOUT_SEC}" "${RCH_BIN}" exec \
         --base HEAD --clean-overlay \
         -o examples/hello.rs -o examples/spawn_fanout.rs \
-        -o examples/deterministic_test.rs -o tests/api_v2_integration.rs -- \
+        -o examples/deterministic_test.rs -o tests/api_v2_integration.rs \
+        -o tests/compile_fail/spawn_without_capability.rs \
+        -o tests/compile_fail/spawn_without_capability.stderr -- \
         "${env_prefix[@]}" "$@" > "${out_file}" 2> "${rch_log}"
     RCH_STATUS=$?
     set -e
@@ -323,8 +331,11 @@ offload_ok() {
 
 run_example() {
     local name="$1"
-    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o examples/${name}.rs -o tests/api_v2_integration.rs -- cargo run --quiet --example ${name}"
-    rch_cargo "run_example:${name}" "${name}.stdout" cargo run --quiet --example "${name}"
+    # RCH admission estimates from argv; an environment-only job limit can
+    # still request 16 slots and refuse an otherwise suitable worker.
+    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o examples/${name}.rs -o tests/api_v2_integration.rs -- cargo run --locked -j ${CARGO_BUILD_JOBS:-4} --quiet --example ${name}"
+    rch_cargo "run_example:${name}" "${name}.stdout" \
+        cargo run --locked -j "${CARGO_BUILD_JOBS:-4}" --quiet --example "${name}"
     offload_ok "run_example:${name}" "${repro}" || return 1
 
     if (( RCH_STATUS != 0 )); then
@@ -344,9 +355,9 @@ run_example() {
 }
 
 run_integration_lane() {
-    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o tests/api_v2_integration.rs -- cargo test -p asupersync --test api_v2_integration --features test-internals"
+    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o tests/api_v2_integration.rs -- cargo test --locked -j ${CARGO_BUILD_JOBS:-4} -p asupersync --test api_v2_integration --features test-internals"
     rch_cargo "integration_lane" "integration_lane.log" \
-        cargo test -p asupersync --test api_v2_integration --features test-internals
+        cargo test --locked -j "${CARGO_BUILD_JOBS:-4}" -p asupersync --test api_v2_integration --features test-internals
     offload_ok "integration_lane" "${repro}" || return 1
 
     if (( RCH_STATUS != 0 )); then
@@ -354,17 +365,67 @@ run_integration_lane() {
             "exit status ${RCH_STATUS}; see integration_lane.log"
         return 1
     fi
-    # An empty lane is a silently-passing lane. Require observed test results.
-    local passed
-    passed="$(grep -ohE 'test result: ok\. [0-9]+ passed' "${RCH_OUT}" "${RCH_LOG}" | grep -oE '[0-9]+' | head -1 || true)"
-    if [[ -z "${passed}" || "${passed}" -eq 0 ]]; then
+    # Require each lifecycle cell and cross-feature sentinel, not merely a
+    # nonzero total from the original six on-ramp tests.
+    local verified
+    if ! verified="$(python3 - "${RCH_OUT}" "${RCH_LOG}" <<'PY'
+import pathlib, re, sys
+
+text = "\n".join(pathlib.Path(path).read_text() for path in sys.argv[1:])
+required = {
+    f"lifecycle::{executor}_{region}_{phase}_close"
+    for executor in ("lab", "native")
+    for region in ("root", "child", "grandchild")
+    for phase in ("before", "during", "after")
+}
+required.update((
+    "lifecycle::mailbox_spawn_cancel_close_interleavings_256_cases",
+    "pure_and_web_caps_preserve_identity_and_refuse_ambient_spawn",
+    "child_region_preserves_parent_ambient_capabilities",
+    "lifecycle::legacy_scope_spawn_preserves_ambient_capabilities",
+    "dropping_pending_join_next_then_cancel_all_drains_the_same_members",
+    "join_set_poll_budget_exhaustion_mid_fanout_drains_every_member",
+    "entry_scope_join_race_and_select_compose_under_lab",
+    "mailbox_race_participants_keep_identity_and_run_loser_cleanup",
+    "mailbox_quorum_participants_keep_identity_and_run_loser_cleanup",
+    "channel_stream_and_bulk_permit_journey_releases_every_obligation",
+    "local_and_blocking_spawns_keep_region_and_scope_budgets",
+))
+passed = set(re.findall(r"^test ([\w:]+) \.\.\. ok$", text, re.MULTILINE))
+missing = sorted(required - passed)
+summary = re.search(
+    r"test result: ok\. ([1-9][0-9]*) passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+    text,
+)
+if missing or summary is None:
+    print(f"missing sentinels={missing}; complete unfiltered summary={summary is not None}")
+    sys.exit(1)
+print(f"{summary.group(1)} tests passed; all 18 lifecycle cells and cross-feature sentinels passed")
+PY
+)"; then
         emit_event "integration_lane" "fail" "${RCH_MS}" "${repro}" \
-            "lane reported no passing tests; a lane that runs nothing proves nothing"
+            "${verified}"
         return 1
     fi
     emit_event "integration_lane" "pass" "${RCH_MS}" "${repro}" \
-        "${passed} tests passed (${RCH_REMOTE_EVIDENCE})"
+        "${verified} (${RCH_REMOTE_EVIDENCE})"
     return 0
+}
+
+run_spawn_caps() {
+    local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o tests/compile_fail/spawn_without_capability.rs -o tests/compile_fail/spawn_without_capability.stderr -- cargo test --locked -j ${CARGO_BUILD_JOBS:-4} -p asupersync --test compile_fail_spawn -- --ignored --exact compile_fail"
+    rch_cargo "spawn_caps" "spawn_caps.log" \
+        cargo test --locked -j "${CARGO_BUILD_JOBS:-4}" -p asupersync --test compile_fail_spawn -- --ignored --exact compile_fail
+    offload_ok "spawn_caps" "${repro}" || return 1
+    if (( RCH_STATUS != 0 )) || \
+       ! grep -qF 'test tests/compile_fail/spawn_without_capability.rs ... ok' "${RCH_OUT}" "${RCH_LOG}" || \
+       ! grep -qF 'test result: ok. 1 passed; 0 failed; 0 ignored' "${RCH_OUT}" "${RCH_LOG}"; then
+        emit_event "spawn_caps" "fail" "${RCH_MS}" "${repro}" \
+            "capability compile-fail proof missing or failed; exit ${RCH_STATUS}"
+        return 1
+    fi
+    emit_event "spawn_caps" "pass" "${RCH_MS}" "${repro}" \
+        "PureCaps and WebCaps both reject spawn (${RCH_REMOTE_EVIDENCE})"
 }
 
 run_cargo_stages() {
@@ -373,6 +434,7 @@ run_cargo_stages() {
         run_example "${example}" || rc=1
     done
     run_integration_lane || rc=1
+    run_spawn_caps || rc=1
 
     # Every expected stage must have reported. A missing stage is a silent gap,
     # not a pass.
@@ -381,6 +443,7 @@ run_cargo_stages() {
         grep -q "\"stage\":\"run_example:${expected}\"" "${EVENTS}" || missing+=("run_example:${expected}")
     done
     grep -q '"stage":"integration_lane"' "${EVENTS}" || missing+=("integration_lane")
+    grep -q '"stage":"spawn_caps"' "${EVENTS}" || missing+=("spawn_caps")
     if (( ${#missing[@]} > 0 )); then
         emit_event "cargo_stage_coverage" "fail" 0 "bash scripts/run_api_v2_e2e.sh" \
             "stages never reported: ${missing[*]}"

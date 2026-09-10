@@ -4129,10 +4129,15 @@ impl RuntimeState {
         }
         let region = parts.region;
         let budget = parts.budget;
-        let (task_id, cx, now) = match self.admit_spawn_record_in(region, budget, tasks, regions) {
-            Ok(admitted) => admitted,
-            Err(error) => return SpawnAdmission::Denied { parts, error },
-        };
+        let runtime_mask = parts
+            .admitted_slot
+            .as_ref()
+            .map_or_else(crate::cx::cap::CapMask::all, |slot| slot.runtime_mask());
+        let (task_id, cx, now) =
+            match self.admit_spawn_record_in(region, budget, runtime_mask, tasks, regions) {
+                Ok(admitted) => admitted,
+                Err(error) => return SpawnAdmission::Denied { parts, error },
+            };
         self.finish_send_spawn_admission_in(parts, task_id, &cx, now, tasks)
     }
 
@@ -4146,6 +4151,7 @@ impl RuntimeState {
         &mut self,
         region: RegionId,
         budget: Budget,
+        runtime_mask: crate::cx::cap::CapMask,
         tasks: &mut AdmissionTaskTarget<'_>,
         regions: &AdmissionRegionTarget<'_>,
     ) -> Result<(TaskId, crate::cx::Cx, Time), SpawnError> {
@@ -4261,12 +4267,15 @@ impl RuntimeState {
         // publish the first scheduler lane. Cancellation mutates this Cx while
         // the gate is false but delegates lane/Waker publication to the
         // AdmissionPublication handoff.
-        let cx = cx.with_obligation_admission(
+        let mut cx = cx.with_obligation_admission(
             regions
                 .resolve_ref(&self.regions)
                 .get(region.arena_index())
                 .map(|record| record.obligation_admission_handle(task_id)),
         );
+        // The scheduler must install the inherited authority for the entire
+        // task lifetime, including factory construction and panic cleanup.
+        cx.runtime_mask = runtime_mask;
         cx.inner.write().runnable_publication =
             crate::types::task_context::RunnablePublication::Unpublished;
         cx.set_trace_buffer(self.trace_handle());
@@ -4562,10 +4571,15 @@ impl RuntimeState {
         }
         let region = request.region;
         let budget = request.budget;
-        let (task_id, cx, now) = match self.admit_spawn_record_in(region, budget, tasks, regions) {
-            Ok(admitted) => admitted,
-            Err(error) => return LocalSpawnAdmission::Denied { request, error },
-        };
+        let runtime_mask = request
+            .admitted_slot
+            .as_ref()
+            .map_or_else(crate::cx::cap::CapMask::all, |slot| slot.runtime_mask());
+        let (task_id, cx, now) =
+            match self.admit_spawn_record_in(region, budget, runtime_mask, tasks, regions) {
+                Ok(admitted) => admitted,
+                Err(error) => return LocalSpawnAdmission::Denied { request, error },
+            };
         tasks
             .resolve(&mut self.tasks)
             .update_task(task_id, |record| {
