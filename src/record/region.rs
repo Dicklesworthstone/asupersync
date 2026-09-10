@@ -528,10 +528,16 @@ impl ObligationAdmissionHandle {
         if !claim() {
             return false;
         }
-        inner.pending_obligations = inner
-            .pending_obligations
-            .checked_sub(1)
-            .expect("accepted obligation quota released exactly once");
+        // Tolerate an accounting skew exactly as `resolve_obligation` does:
+        // this runs from `ObligationToken::drop`, where a panic during a task
+        // unwind aborts the process. Saturate, count it, and go on.
+        match inner.pending_obligations.checked_sub(1) {
+            Some(remaining) => inner.pending_obligations = remaining,
+            None => {
+                debug_assert!(false, "accepted obligation quota released more than once");
+                inner.pending_obligations = 0;
+            }
+        }
         true
     }
 
