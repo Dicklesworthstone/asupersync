@@ -10077,8 +10077,19 @@ async fn reject_quic_existing_symlink(path: &Path) -> Result<(), QuicTransportEr
     }
 }
 
+/// Creates the receiver's destination root and rejects any symlink or reparse
+/// point on its ancestor chain, before and after the create.
+///
+/// A relative destination (`atp recv out/dir`, the bench harness's cell paths)
+/// ends its `ancestors()` walk at the empty path, which names no file: the
+/// post-create pass below must skip it, exactly as the per-entry ancestor
+/// walks already do, or every relative destination fails with a spurious
+/// "No such file or directory" after the manifest (asupersync-wlbrlr).
 async fn prepare_quic_destination_root(dest_dir: &Path) -> Result<(), QuicTransportError> {
-    for candidate in dest_dir.ancestors() {
+    for candidate in dest_dir
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
         match path_is_link_or_reparse(candidate).await {
             Ok(true) => {
                 return Err(QuicTransportError::Source(format!(
@@ -10092,7 +10103,10 @@ async fn prepare_quic_destination_root(dest_dir: &Path) -> Result<(), QuicTransp
         }
     }
     crate::fs::create_dir_all(dest_dir).await?;
-    for candidate in dest_dir.ancestors() {
+    for candidate in dest_dir
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
         match path_is_link_or_reparse(candidate).await {
             Ok(true) => {
                 return Err(QuicTransportError::Source(format!(

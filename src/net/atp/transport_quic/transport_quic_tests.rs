@@ -126,6 +126,37 @@ mod tests {
         futures_lite::future::block_on(fut)
     }
 
+    /// asupersync-wlbrlr: a relative destination root's `ancestors()` walk
+    /// ends at the empty path; the post-create symlink pass must skip it
+    /// instead of failing the receive with a spurious NotFound.
+    #[test]
+    fn prepare_quic_destination_root_accepts_a_relative_path() {
+        // `tempfile` absolutizes a relative parent, so the relative path is
+        // built by hand under the package-local `target/` (cargo runs the
+        // test binary from the package root; `target/` is ignored by git).
+        let parent = std::path::PathBuf::from("target").join(format!(
+            "quic-relative-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos())
+        ));
+        std::fs::create_dir_all(&parent).expect("relative parent dir");
+        let dest = parent.join("nested").join("dest");
+        assert!(dest.is_relative(), "{}", dest.display());
+
+        let relative = block_on(prepare_quic_destination_root(&dest));
+        let created = dest.is_dir();
+        let absolute = block_on(prepare_quic_destination_root(
+            &std::env::current_dir().expect("cwd").join(&dest),
+        ));
+        let _ = std::fs::remove_dir_all(&parent);
+
+        relative.expect("a relative destination root is prepared like an absolute one");
+        assert!(created, "destination root created: {}", dest.display());
+        absolute.expect("the absolute spelling of the same root is prepared too");
+    }
+
     fn trusted_quic_config() -> QuicConfig {
         QuicConfig::default().allow_unauthenticated_for_trusted_transport()
     }
