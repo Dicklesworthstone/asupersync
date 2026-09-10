@@ -1586,7 +1586,9 @@ mod wasm32_runtime_builder_microtask_pump {
             "task must remain unfinished while waiting for macrotask yield"
         );
 
-        let result = handle.await.expect("self-waking future resolves across burst yields");
+        let result = handle
+            .await
+            .expect("self-waking future resolves across burst yields");
         assert_eq!(result, 11);
         assert_eq!(poll_count.get(), 11);
     }

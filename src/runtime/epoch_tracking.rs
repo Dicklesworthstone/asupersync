@@ -214,8 +214,7 @@ impl GlobalEpochCounter {
 
     /// Force epoch advancement (bypasses rate limiting).
     pub fn force_advance(&self) -> u64 {
-        self.last_advance
-            .store(now_nanos(), Ordering::Release);
+        self.last_advance.store(now_nanos(), Ordering::Release);
         self.advance_epoch()
     }
 

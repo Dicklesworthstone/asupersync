@@ -95,7 +95,8 @@ impl Wake for AcceptWaiters {
 pub struct TcpListener {
     /// Reactor registration for accept readiness, aware of the process-global
     /// fallback I/O driver (GH#67, asupersync-2rb75p).
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // wasm-browser-minimal: reactor paths are cfg-gated off on wasm32
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    // wasm-browser-minimal: reactor paths are cfg-gated off on wasm32
     registration: Mutex<ReactorRegistration>,
     pub(crate) inner: net::TcpListener,
     accept_storm: Mutex<AcceptStormState>,
@@ -105,7 +106,8 @@ pub struct TcpListener {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InterestRegistrationMode {
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // wasm-browser-minimal: reactor paths are cfg-gated off on wasm32
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    // wasm-browser-minimal: reactor paths are cfg-gated off on wasm32
     ReactorArmed,
     FallbackPoll,
 }

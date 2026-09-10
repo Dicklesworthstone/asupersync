@@ -695,7 +695,10 @@ impl std::fmt::Debug for BrowserWorkerPump {
         f.debug_struct("BrowserWorkerPump")
             .field("in_pump", &self.in_pump.load(Ordering::Relaxed))
             .field("scheduled", &self.scheduled.load(Ordering::Relaxed))
-            .field("wake_requested", &self.wake_requested.load(Ordering::Relaxed))
+            .field(
+                "wake_requested",
+                &self.wake_requested.load(Ordering::Relaxed),
+            )
             .field("microtask_burst_limit", &self.microtask_burst_limit)
             .field("pump_turns", &self.pump_turns.load(Ordering::Relaxed))
             .finish()
@@ -12128,9 +12131,7 @@ worker_threads = 16
         assert_eq!(result, Poll::Ready(Ok(123)));
 
         // 4b. Local future with !Send output (real Rc output regression for E0277)
-        let mut rc_handle = runtime.spawn_local(async move {
-            Rc::new(42u32)
-        });
+        let mut rc_handle = runtime.spawn_local(async move { Rc::new(42u32) });
         assert!(!rc_handle.is_finished());
         assert_eq!(runtime_pump.run_until_idle(), 1);
         assert!(rc_handle.is_finished());
@@ -12150,12 +12151,18 @@ worker_threads = 16
 
         assert!(!step_handle.is_finished());
         // step() must return true when executing the task, not false due to BurstLimitReached(1)
-        assert!(runtime_pump.step(), "step() must return true when a task was executed");
+        assert!(
+            runtime_pump.step(),
+            "step() must return true when a task was executed"
+        );
         assert!(step_handle.is_finished());
         assert_eq!(step_value.get(), 242);
 
         // Additional step when idle must return false
-        assert!(!runtime_pump.step(), "step() must return false when queues are idle");
+        assert!(
+            !runtime_pump.step(),
+            "step() must return false when queues are idle"
+        );
 
         let mut step_cx = Context::from_waker(&waker);
         let step_result = Pin::new(&mut step_handle).poll(&mut step_cx);
@@ -12198,7 +12205,10 @@ worker_threads = 16
         assert_eq!(sw_counter.get(), 6);
 
         let mut sw_cx = Context::from_waker(&waker);
-        assert_eq!(Pin::new(&mut sw_handle).poll(&mut sw_cx), Poll::Ready(Ok(6)));
+        assert_eq!(
+            Pin::new(&mut sw_handle).poll(&mut sw_cx),
+            Poll::Ready(Ok(6))
+        );
 
         // 7. Cancelled/dropped before completion returns Err(JoinError::Cancelled) rather than panicking
         let mut cancelled_handle = runtime.spawn_local(std::future::pending::<u32>());
