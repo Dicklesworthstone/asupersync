@@ -456,6 +456,7 @@ struct SplitIoState {
     /// (GH#67): such a registration is retired through the ordinary
     /// transition path and re-made on the ambient driver as soon as one is
     /// present (asupersync-9e6a28).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // wasm-browser-minimal: fallback registration paths are cfg-gated off on wasm32
     registration_on_fallback: bool,
     registration_transition: bool,
     read_waiter: Option<DirectionWaiter>,
