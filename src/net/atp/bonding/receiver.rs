@@ -615,6 +615,11 @@ impl BondedReceiverFeedbackPlan {
 pub struct BondedReceiverSymbolSet {
     seen: BTreeSet<BondedSymbolKey>,
     source_seen: BTreeSet<BondedSymbolKey>,
+    /// Retained unique symbols per `(object_id, sbn)`, kept in step with
+    /// `seen` so the per-block retention check on every novel symbol is a
+    /// lookup rather than a scan of every symbol retained so far (which made
+    /// a bounded transfer quadratic in its symbol count).
+    block_symbol_counts: BTreeMap<(ObjectId, u8), u32>,
     donor_stats: BTreeMap<u32, BondedDonorIngressStats>,
     auth_rejections_by_donor: BTreeMap<u32, u64>,
     aggregate: BondedReceiverIngressStats,
@@ -627,6 +632,7 @@ impl BondedReceiverSymbolSet {
         Self {
             seen: BTreeSet::new(),
             source_seen: BTreeSet::new(),
+            block_symbol_counts: BTreeMap::new(),
             donor_stats: BTreeMap::new(),
             auth_rejections_by_donor: BTreeMap::new(),
             aggregate: BondedReceiverIngressStats {
@@ -722,6 +728,11 @@ impl BondedReceiverSymbolSet {
             BondedSymbolDisposition::RejectedByRetention { key, reason }
         } else {
             self.seen.insert(key);
+            let block_count = self
+                .block_symbol_counts
+                .entry((key.object_id, key.sbn))
+                .or_insert(0);
+            *block_count = block_count.saturating_add(1);
             let source_symbol = kind.is_source();
             if source_symbol {
                 self.source_seen.insert(key);
@@ -762,11 +773,10 @@ impl BondedReceiverSymbolSet {
     }
 
     fn block_symbol_count(&self, object_id: ObjectId, sbn: u8) -> u32 {
-        self.seen
-            .iter()
-            .filter(|key| key.object_id == object_id && key.sbn == sbn)
-            .count()
-            .min(u32::MAX as usize) as u32
+        self.block_symbol_counts
+            .get(&(object_id, sbn))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Return true if the unified set already contains `key`.
@@ -1297,6 +1307,55 @@ mod tests {
                 .symbols_rejected_by_retention,
             1
         );
+    }
+
+    /// The per-block retention count is a lookup kept in step with `seen`; it
+    /// must agree with a scan of the retained keys after any interleaving of
+    /// accepts, duplicates and retention rejects across blocks and objects.
+    #[test]
+    fn block_symbol_count_matches_a_scan_of_retained_keys() {
+        let mut set = BondedReceiverSymbolSet::new();
+        let retention = BondedReceiverRetentionPolicy::bounded(3, 7);
+        let objects = [ObjectId::new_for_test(1), ObjectId::new_for_test(2)];
+        let mut donor = 0;
+        for round in 0..3u32 {
+            for (object_index, object_id) in objects.iter().enumerate() {
+                let object_offset = u32::try_from(object_index).expect("two objects");
+                for sbn in 0..3u8 {
+                    for esi in 0..4u32 {
+                        let kind = if esi % 2 == 0 {
+                            SymbolKind::Source
+                        } else {
+                            SymbolKind::Repair
+                        };
+                        // Keys repeat across rounds for the first object, so
+                        // duplicates interleave with novel and rejected ones.
+                        let key =
+                            BondedSymbolKey::new(*object_id, sbn, esi + round * object_offset);
+                        let _ = set.record_key_with_retention(donor % 4, key, kind, retention);
+                        donor += 1;
+                    }
+                }
+            }
+        }
+
+        for object_id in objects {
+            for sbn in 0..4u8 {
+                let scanned = set
+                    .seen
+                    .iter()
+                    .filter(|key| key.object_id == object_id && key.sbn == sbn)
+                    .count();
+                assert_eq!(
+                    usize::try_from(set.block_symbol_count(object_id, sbn)).expect("count fits"),
+                    scanned,
+                    "object {object_id:?} sbn {sbn}"
+                );
+                assert!(scanned <= 3, "block cap holds for {object_id:?} sbn {sbn}");
+            }
+        }
+        assert!(set.len() <= 7, "transfer cap holds");
+        assert_eq!(set.len(), set.seen.len());
     }
 
     #[test]
