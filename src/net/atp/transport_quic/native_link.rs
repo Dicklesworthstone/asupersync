@@ -5997,6 +5997,19 @@ impl QuicLink {
         operation: &'static str,
     ) -> Result<Frame, QuicTransportError> {
         let started = Instant::now();
+        // Liveness clock: any 1-RTT packet from the peer (a keep-alive PING
+        // during its long packed-tree commit, an ACK of a retransmit)
+        // restarts the idle window, so `idle_timeout` bounds CONSECUTIVE
+        // silence exactly like `next_control_frame` and the stream-PTO wait.
+        // Measuring the wait from its start instead let a receiver that
+        // pinged every 200 ms through a 26-113 s commit trip the sender's 45 s
+        // budget with 149 pumped windows on record (asupersync-ybczmx). The
+        // absolute cap still keeps a peer that stays alive but never delivers
+        // the Proof from holding the session open forever.
+        let mut last_peer_packet = Instant::now();
+        let liveness_cap = self
+            .idle_timeout
+            .saturating_mul(PROOF_WAIT_LIVENESS_MULTIPLIER);
         let mut last_retransmit = Instant::now();
         let mut loops = 0u64;
         let mut flush_continues = 0u64;
@@ -6009,14 +6022,26 @@ impl QuicLink {
         let mut pto_empty_drains = 0u64;
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-            if started.elapsed() >= self.idle_timeout {
+            let silent_for = last_peer_packet.elapsed();
+            let waited_for = started.elapsed();
+            let expired = if silent_for >= self.idle_timeout {
+                Some(("source_stream_proof_timeout", self.idle_timeout))
+            } else if waited_for >= liveness_cap {
+                Some(("source_stream_proof_liveness_cap", liveness_cap))
+            } else {
+                None
+            };
+            if let Some((kind, timeout)) = expired {
                 super::quic_progress(format_args!(
-                    "control: source_stream_proof_timeout operation={operation} loops={loops} \
-                     pto_expiries={pto_expiries} {}",
+                    "control: {kind} operation={operation} loops={loops} \
+                     pto_expiries={pto_expiries} silent_ms={} waited_ms={} {}",
+                    silent_for.as_millis(),
+                    waited_for.as_millis(),
                     self.wait_diagnostics()
                 ));
                 return Err(QuicTransportError::Quic(format!(
-                    "transport timeout during {operation} after {:?}; \
+                    "transport timeout during {operation} after {timeout:?} ({kind}: \
+                     silent_ms={} waited_ms={}); \
                      in_flight_stream_packets={} pending_stream_frames={} \
                      pending_stream_bytes={} pacing_rate_bytes_per_s={} \
                      udp_packets_received={} one_rtt_packets_ingested={} \
@@ -6027,7 +6052,8 @@ impl QuicLink {
                      pto_blocked_pending={pto_blocked_pending} \
                      pto_retransmit_frames={pto_retransmit_frames} \
                      pto_empty_drains={pto_empty_drains} bytes_in_flight={} cwnd={}",
-                    self.idle_timeout,
+                    silent_for.as_millis(),
+                    waited_for.as_millis(),
                     self.in_flight_stream_frames.len(),
                     self.conn.pending_stream_frame_count(),
                     self.conn.pending_stream_data_bytes(),
@@ -6049,6 +6075,7 @@ impl QuicLink {
             let flushed = self.flush(cx).await?;
             let pumped = self.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
             if pumped > 0 {
+                last_peer_packet = Instant::now();
                 pump_continues = pump_continues.saturating_add(1);
                 let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
                 let retransmit_frames =
@@ -11602,6 +11629,179 @@ mod gh67_liveness_tests {
                 "the wait must have outlived the cumulative budget (~5.9 s): {elapsed:?}"
             );
             assert!(elapsed < Duration::from_secs(12), "{elapsed:?}");
+        });
+    }
+
+    /// Opens the client's control stream (as the sender's Hello does) and
+    /// pumps the server until it holds the opener, returning both ends.
+    async fn opened_control_streams(
+        cx: &Cx,
+        client: &mut QuicLink,
+        server: &mut QuicLink,
+    ) -> (NativeQuicFrameTransport, NativeQuicFrameTransport) {
+        let control_stream = super::super::first_client_bidi_stream();
+        let mut client_control = NativeQuicFrameTransport::open(cx, &mut client.conn).unwrap();
+        assert_eq!(client_control.stream, control_stream);
+        let mut server_control = NativeQuicFrameTransport::for_stream(control_stream);
+        let opener = Frame::empty(FrameType::KeepAlive).unwrap();
+        client_control.send(cx, &mut client.conn, &opener).unwrap();
+        client.flush(cx).await.unwrap();
+        let opened_at = Instant::now();
+        loop {
+            server
+                .pump_inbound_for(cx, Duration::from_secs(2))
+                .await
+                .unwrap();
+            if server_control
+                .try_recv(cx, &mut server.conn)
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                opened_at.elapsed() < Duration::from_secs(10),
+                "control stream never opened"
+            );
+        }
+        (client_control, server_control)
+    }
+
+    /// Sender side, pure-stream path (asupersync-ybczmx): the source-stream
+    /// proof wait measured its idle budget from the start of the wait, so a
+    /// receiver that pinged every 200 ms through a long packed-tree commit
+    /// was declared dead the moment the budget elapsed (149 pumped windows on
+    /// record when the 45 s budget fired). The peer here pings every 400 ms
+    /// for 4.4 s against a 2 s budget and then answers; the old clock died
+    /// at 2 s.
+    #[test]
+    fn source_stream_proof_wait_survives_a_slow_but_pinging_peer_over_real_udp() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_secs(2),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let (mut client_control, mut server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+            let client_wait = async {
+                let started = Instant::now();
+                let frame = client
+                    .next_control_frame_with_source_stream_recovery(
+                        &cx,
+                        &mut client_control,
+                        "ybczmx proof wait",
+                    )
+                    .await;
+                (started.elapsed(), frame.map(|frame| frame.frame_type()))
+            };
+            let server_pinger = async {
+                for _ in 0..11 {
+                    crate::time::sleep(cx.now(), Duration::from_millis(400)).await;
+                    send_and_flush_native_keep_alive(&cx, &mut server, &mut server_control)
+                        .await
+                        .unwrap();
+                }
+                let proof = Frame::empty(FrameType::Proof).unwrap();
+                server_control.send(&cx, &mut server.conn, &proof).unwrap();
+                server.flush(&cx).await.unwrap();
+            };
+            let ((elapsed, frame), ()) = zip(client_wait, server_pinger).await;
+            assert_eq!(
+                frame.expect("proof after eleven keep-alives"),
+                FrameType::Proof
+            );
+            assert!(
+                elapsed >= Duration::from_millis(4000),
+                "the wait must have outlived the 2 s budget measured from its start: {elapsed:?}"
+            );
+            assert!(elapsed < Duration::from_secs(12), "{elapsed:?}");
+        });
+    }
+
+    /// A peer that stays silent still fails closed after one idle budget of
+    /// silence, well before the liveness cap.
+    #[test]
+    fn source_stream_proof_wait_fails_closed_after_an_idle_budget_of_silence() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_secs(1),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let (mut client_control, _server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+            let started = Instant::now();
+            let result = client
+                .next_control_frame_with_source_stream_recovery(
+                    &cx,
+                    &mut client_control,
+                    "ybczmx silent peer",
+                )
+                .await;
+            let elapsed = started.elapsed();
+            match result {
+                Err(QuicTransportError::Quic(message)) => assert!(
+                    message.contains("source_stream_proof_timeout"),
+                    "silence must expire on the idle clock: {message}"
+                ),
+                Err(other) => panic!("unexpected error class: {other:?}"),
+                Ok(frame) => panic!("a silent peer delivered {:?}", frame.frame_type()),
+            }
+            assert!(
+                elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(6),
+                "one idle budget of silence, not the 8 s liveness cap: {elapsed:?}"
+            );
+        });
+    }
+
+    /// A peer that keeps pinging but never delivers the Proof is bounded by
+    /// the absolute liveness cap (eight idle budgets), not held forever.
+    #[test]
+    fn source_stream_proof_wait_caps_a_live_peer_that_never_answers_over_real_udp() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_millis(500),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let (mut client_control, mut server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+            let client_wait = async {
+                let started = Instant::now();
+                let result = client
+                    .next_control_frame_with_source_stream_recovery(
+                        &cx,
+                        &mut client_control,
+                        "ybczmx capped wait",
+                    )
+                    .await;
+                (started.elapsed(), result)
+            };
+            let server_pinger = async {
+                for _ in 0..70 {
+                    crate::time::sleep(cx.now(), Duration::from_millis(100)).await;
+                    send_and_flush_native_keep_alive(&cx, &mut server, &mut server_control)
+                        .await
+                        .unwrap();
+                }
+            };
+            let ((elapsed, result), ()) = zip(client_wait, server_pinger).await;
+            match result {
+                Err(QuicTransportError::Quic(message)) => assert!(
+                    message.contains("source_stream_proof_liveness_cap"),
+                    "a live peer that never answers must hit the cap: {message}"
+                ),
+                Err(other) => panic!("unexpected error class: {other:?}"),
+                Ok(frame) => panic!("the peer never sent a frame, got {:?}", frame.frame_type()),
+            }
+            assert!(
+                elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(7),
+                "cap = 8 x 500 ms: {elapsed:?}"
+            );
         });
     }
 
