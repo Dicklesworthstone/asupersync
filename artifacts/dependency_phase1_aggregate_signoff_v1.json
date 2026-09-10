@@ -19,8 +19,7 @@
       "artifacts/dependency_oracle_policy_v1.json": "841028ea66d8a5f2f50f3d6b0ad5a60320177bbe7e605e0f117cce1abd346773",
       "artifacts/dependency_capability_registry_v1.json": "660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa",
       "artifacts/dependency_capability_baseline_v1.json": "49e85f8defbccb4e9cce3c37d302e965b36de518f8929999928d9464e83ee791",
-      "artifacts/dependency_verification_matrix_v1.json": "d6e0488f1e0b16339e0e20b0c36a55b48e411b904a13d02ceee921a1beab782d",
-      "artifacts/dependency_verification_final_signoff_v1.json": "60d84e981d44ddacd56cb190c3f8b6b896af9fa5c3755b22701336e77d255e05"
+      "artifacts/dependency_verification_matrix_v1.json": "d6e0488f1e0b16339e0e20b0c36a55b48e411b904a13d02ceee921a1beab782d", "artifacts/dependency_verification_final_signoff_v1.json": "60d84e981d44ddacd56cb190c3f8b6b896af9fa5c3755b22701336e77d255e05"
     }
   },
   "source_contracts": [
