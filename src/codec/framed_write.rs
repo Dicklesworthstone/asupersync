@@ -176,6 +176,9 @@ where
     ///
     /// Returns `Poll::Ready(Ok(()))` when the buffer is empty and the
     /// underlying writer has been flushed.
+    ///
+    /// If the writer reports more bytes written than it was given, returns
+    /// `InvalidData` without advancing the buffer for that write.
     pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut write_passes = 0usize;
         while !self.buffer.is_empty() {
@@ -183,9 +186,16 @@ where
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
+            let remaining = self.buffer.len();
             let n = match Pin::new(&mut self.inner).poll_write(cx, &self.buffer) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(n)) if n > remaining => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("writer reported {n} bytes written for {remaining}-byte buffer"),
+                    )));
+                }
                 Poll::Ready(Ok(n)) => n,
             };
             if n == 0 {

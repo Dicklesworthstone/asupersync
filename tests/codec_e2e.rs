@@ -21,7 +21,10 @@ mod common;
 use asupersync::bytes::BytesMut;
 use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec, LinesCodec, LinesCodecError};
 use common::*;
+use std::collections::VecDeque;
 use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 fn init_test(test_name: &str) {
     init_test_logging();
@@ -824,3 +827,128 @@ fn e2e_codec_051_encode_decode_symmetry() {
 
     test_complete!("e2e_codec_051_encode_decode_symmetry");
 }
+
+/// Deliberately violates AsyncWrite's byte-count contract to exercise the
+/// framed adapters' recovery boundary; this is not a native transport model.
+struct OverreportingWriter {
+    steps: VecDeque<WriteFaultStep>,
+    written: Vec<u8>,
+    flushes: usize,
+    shutdowns: usize,
+}
+
+enum WriteFaultStep {
+    Pending,
+    Write(usize),
+    Overreport(usize),
+}
+
+impl asupersync::io::AsyncWrite for OverreportingWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let count = match self.steps.pop_front() {
+            Some(WriteFaultStep::Pending) => {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Some(WriteFaultStep::Overreport(extra)) => {
+                return Poll::Ready(Ok(buf.len().saturating_add(extra)));
+            }
+            Some(WriteFaultStep::Write(count)) => {
+                assert!(count <= buf.len());
+                count
+            }
+            None => buf.len(),
+        };
+        self.written.extend_from_slice(&buf[..count]);
+        Poll::Ready(Ok(count))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.flushes += 1;
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.shutdowns += 1;
+        Poll::Ready(Ok(()))
+    }
+}
+
+// Exercise the same public contract on both adapters without duplicating the
+// fault schedule or its byte-for-byte recovery assertions.
+macro_rules! framed_overreport_regression {
+    ($name:ident, $adapter:ident) => {
+        #[test]
+        fn $name() {
+            init_test(stringify!($name));
+            for prefix in [0, 3] {
+                for extra in [1, usize::MAX] {
+                    for operation in ["flush", "ready", "close"] {
+                        let mut steps = VecDeque::from([WriteFaultStep::Pending]);
+                        if prefix > 0 {
+                            steps.push_back(WriteFaultStep::Write(prefix));
+                        }
+                        steps.push_back(WriteFaultStep::Overreport(extra));
+                        steps.push_back(WriteFaultStep::Pending);
+                        let writer = OverreportingWriter {
+                            steps,
+                            written: Vec::new(),
+                            flushes: 0,
+                            shutdowns: 0,
+                        };
+                        let mut framed = asupersync::codec::$adapter::new(writer, LinesCodec::new())
+                            .with_backpressure_boundary(1);
+                        let mut cx = Context::from_waker(std::task::Waker::noop());
+                        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+                        framed.start_send("hello".to_owned()).expect("encode");
+                        let wire = b"hello\n";
+
+                        assert!(framed.poll_flush(&mut cx).is_pending());
+                        assert_eq!(framed.write_buffer().as_ref(), wire);
+                        assert!(framed.get_ref().written.is_empty());
+
+                        let result = match operation {
+                            "ready" => framed.poll_ready(&mut cx),
+                            "close" => framed.poll_close(&mut cx),
+                            _ => framed.poll_flush(&mut cx),
+                        };
+                        assert!(
+                            matches!(&result, Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::InvalidData),
+                            "prefix={prefix}, extra={extra}, operation={operation}: {result:?}"
+                        );
+                        assert_eq!(framed.write_buffer().as_ref(), &wire[prefix..]);
+                        assert_eq!(framed.get_ref().written, &wire[..prefix]);
+                        assert_eq!(framed.get_ref().flushes, 0);
+                        assert_eq!(framed.get_ref().shutdowns, 0);
+
+                        // Recovery can itself suspend without forgetting which
+                        // prefix was delivered before the invalid count.
+                        assert!(framed.poll_ready(&mut cx).is_pending());
+                        assert_eq!(framed.write_buffer().as_ref(), &wire[prefix..]);
+                        assert_eq!(framed.get_ref().written, &wire[..prefix]);
+                        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+                        assert!(framed.write_buffer().is_empty());
+                        assert_eq!(framed.get_ref().written, wire);
+                        framed.start_send("tail".to_owned()).expect("encode after recovery");
+                        assert!(matches!(framed.poll_close(&mut cx), Poll::Ready(Ok(()))));
+                        assert!(framed.write_buffer().is_empty());
+                        assert_eq!(framed.get_ref().written, b"hello\ntail\n");
+                        assert_eq!(framed.get_ref().flushes, 2);
+                        assert_eq!(framed.get_ref().shutdowns, 1);
+                    }
+                }
+            }
+            test_complete!(stringify!($name));
+        }
+    };
+}
+
+framed_overreport_regression!(e2e_codec_framed_rejects_overreport_and_recovers, Framed);
+framed_overreport_regression!(
+    e2e_codec_framed_write_rejects_overreport_and_recovers,
+    FramedWrite
+);

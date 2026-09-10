@@ -177,7 +177,7 @@ impl<T, U> Framed<T, U> {
         self.backpressure_boundary
     }
 
-    /// Consumes `self` and returns the transport and codec.
+    /// Consumes `self` and returns the transport.
     #[inline]
     pub fn into_inner(self) -> T {
         self.inner
@@ -379,6 +379,9 @@ where
     }
 
     /// Flush all buffered write data to the underlying transport.
+    ///
+    /// If the transport reports more bytes written than it was given, returns
+    /// `InvalidData` without advancing the buffer for that write.
     pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let mut write_passes = 0usize;
         while !self.write_buf.is_empty() {
@@ -386,9 +389,16 @@ where
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
+            let remaining = self.write_buf.len();
             let n = match Pin::new(&mut self.inner).poll_write(cx, &self.write_buf) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(n)) if n > remaining => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("writer reported {n} bytes written for {remaining}-byte buffer"),
+                    )));
+                }
                 Poll::Ready(Ok(n)) => n,
             };
             if n == 0 {
