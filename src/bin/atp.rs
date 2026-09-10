@@ -1541,7 +1541,14 @@ fn auth_key_from_hex(key_hex: &str) -> Result<AuthKey, String> {
     let result = hex::decode_to_slice(key_hex, &mut bytes)
         .map_err(|err| format!("decode RQ auth key hex: {err}"))
         .and_then(|()| {
-            AuthKey::from_bytes(bytes).map_err(|err| format!("RQ auth key rejected: {err}"))
+            // The library's weak-key diagnostic names the offending byte value
+            // and its frequency; a rejected key is still key material, so the
+            // CLI reports a fixed message and never echoes any of it.
+            AuthKey::from_bytes(bytes).map_err(|_| {
+                "RQ auth key rejected: the key does not meet the entropy requirements; \
+                 generate a fresh random 32-byte key"
+                    .to_string()
+            })
         });
     bytes.zeroize();
     result
