@@ -1490,3 +1490,30 @@ mod writable_stream_cancellation {
         assert_cancelled_write_does_not_credit_old_chunk(b"old!", b"new!").await;
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+mod wasm32_runtime_builder_microtask_pump {
+    use asupersync::runtime::RuntimeBuilder;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    async fn wasm_runtime_builder_threadless_single_worker_resolves_local_future() {
+        let runtime = RuntimeBuilder::new()
+            .build()
+            .expect("RuntimeBuilder::build on wasm32 succeeds with threadless BrowserHostServices");
+
+        let probe = Rc::new(Cell::new(0u32));
+        let probe_clone = Rc::clone(&probe);
+
+        let handle = runtime.spawn_local(async move {
+            probe_clone.set(probe_clone.get() + 1);
+            probe_clone.get()
+        });
+
+        let result = handle.await.expect("local task resolves successfully");
+        assert_eq!(result, 1);
+        assert_eq!(probe.get(), 1);
+    }
+}
