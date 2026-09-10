@@ -362,15 +362,54 @@ impl File {
         let Self {
             inner,
             cursor_gate,
-            pending: _,
+            pending,
             #[cfg(feature = "test-internals")]
                 cursor_probe: _,
         } = self;
+        // A poll-trait read still in flight, or read-ahead the caller never
+        // consumed, has moved the OS cursor past the caller's position. Settle
+        // it (the pool task completes on its own thread; the gate below waits
+        // for the same syscall anyway) and rewind, so the escaped handle reads
+        // on from where the caller left off, as the v0.4.3 wrapper did.
+        let rewind = Self::settle_pending_blocking(pending.into_inner())?;
         let _cursor_guard = cursor_gate.lock();
+        if rewind != 0 {
+            let mut file_ref: &std::fs::File = &inner;
+            Seek::seek(&mut file_ref, SeekFrom::Current(-rewind))?;
+        }
         match Arc::try_unwrap(inner) {
             Ok(file) => Ok(file),
             Err(shared) => shared.try_clone(),
         }
+    }
+
+    /// Synchronous counterpart of [`File::settle_trait_pending`] for the
+    /// consuming `into_std` path: drives an outstanding poll-trait syscall to
+    /// completion and returns how many bytes the OS cursor sits past the
+    /// caller's position. A committed write, flush, or seek is the caller's
+    /// cursor (started syscalls commit); only read bytes the caller never
+    /// received count.
+    fn settle_pending_blocking(pending: Option<PendingIo>) -> io::Result<i64> {
+        let unconsumed = match pending {
+            None => 0,
+            Some(PendingIo::ReadAhead { bytes, consumed }) => bytes.len() - consumed,
+            Some(PendingIo::Read { future }) => {
+                futures_lite::future::block_on(future).map_or(0, |bytes| bytes.len())
+            }
+            Some(PendingIo::Write { future }) => {
+                let _ = futures_lite::future::block_on(future);
+                0
+            }
+            Some(PendingIo::Flush { future }) => {
+                let _ = futures_lite::future::block_on(future);
+                0
+            }
+            Some(PendingIo::Seek { future }) => {
+                let _ = futures_lite::future::block_on(future);
+                0
+            }
+        };
+        i64::try_from(unconsumed).map_err(|_| io::Error::other("read-ahead exceeds seek range"))
     }
 
     /// Attempts to sync all OS-internal metadata to disk.
@@ -403,6 +442,11 @@ impl File {
 
     /// Creates a new `File` instance that shares the same underlying file handle
     /// and cursor completion gate.
+    ///
+    /// Each wrapper settles only its own poll-trait state: read-ahead held by
+    /// one clone (a read whose future was dropped mid-flight) is invisible to
+    /// the other, whose next cursor operation starts past those bytes. Use one
+    /// wrapper per logical reader, as with duplicated `std::fs::File` handles.
     pub async fn try_clone(&self) -> io::Result<Self> {
         let file = self.with_inner(|inner| inner.try_clone()).await?;
         Ok(Self {
@@ -766,8 +810,11 @@ impl AsyncWrite for File {
         }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    /// Files have no protocol-level shutdown; this settles any poll-trait
+    /// write still in flight so its error is reported here instead of being
+    /// lost when the handle is dropped, then flushes.
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.poll_flush(cx)
     }
 }
 
@@ -1132,6 +1179,59 @@ mod tests {
             crate::assert_with_log!(len == 0, "shared into_std len", 0u64, len);
         });
         crate::test_complete!("test_file_into_std_when_shared");
+    }
+
+    /// `into_std` after a partial poll-trait read: the caller's cursor is the
+    /// bytes it received, not the OS cursor past the unconsumed read-ahead.
+    #[test]
+    fn test_into_std_rewinds_unconsumed_read_ahead() {
+        init_test("test_into_std_rewinds_unconsumed_read_ahead");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("read_ahead_into_std.txt");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = File::from_std(std::fs::File::open(&path).unwrap());
+        {
+            // A 6-byte chunk the pool read, of which the caller took 2.
+            let mut file_ref: &std::fs::File = &file.inner;
+            let mut chunk = vec![0u8; 6];
+            Read::read_exact(&mut file_ref, &mut chunk).unwrap();
+            *file.pending.lock() = Some(PendingIo::ReadAhead {
+                bytes: chunk,
+                consumed: 2,
+            });
+        }
+        let mut std_file = file.into_std().unwrap();
+        let position = Seek::stream_position(&mut std_file).unwrap();
+        crate::assert_with_log!(position == 2, "cursor after into_std", 2u64, position);
+        let mut rest = String::new();
+        Read::read_to_string(&mut std_file, &mut rest).unwrap();
+        crate::assert_with_log!(rest == "23456789", "bytes after into_std", "23456789", rest);
+        crate::test_complete!("test_into_std_rewinds_unconsumed_read_ahead");
+    }
+
+    /// `into_std` with a poll-trait read still in flight settles it and
+    /// rewinds by everything that read returned, since the caller never saw
+    /// those bytes.
+    #[test]
+    fn test_into_std_settles_in_flight_read() {
+        init_test("test_into_std_settles_in_flight_read");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("in_flight_into_std.txt");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = File::from_std(std::fs::File::open(&path).unwrap());
+        {
+            // The syscall already advanced the OS cursor by 4; the caller has
+            // not polled its future to completion.
+            let mut file_ref: &std::fs::File = &file.inner;
+            let mut chunk = vec![0u8; 4];
+            Read::read_exact(&mut file_ref, &mut chunk).unwrap();
+            let future: PollIoFuture<Vec<u8>> = Box::pin(std::future::ready(Ok(chunk)));
+            *file.pending.lock() = Some(PendingIo::Read { future });
+        }
+        let mut std_file = file.into_std().unwrap();
+        let position = Seek::stream_position(&mut std_file).unwrap();
+        crate::assert_with_log!(position == 0, "cursor after into_std", 0u64, position);
+        crate::test_complete!("test_into_std_settles_in_flight_read");
     }
 
     #[test]
