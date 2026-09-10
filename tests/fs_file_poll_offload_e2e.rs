@@ -4,8 +4,8 @@
 //!
 //! The observable: on a single-worker runtime, a peer task keeps a counter
 //! moving only while the worker is free during the file transfer. With pool
-//! offload every 128 KiB chunk hop returns `Pending`, so the peer advances
-//! once per chunk during one `read_exact` of a 48 MiB buffer (384 chunks). On
+//! offload, pending 128 KiB chunk hops let the peer advance throughout one
+//! `read_exact` of a 48 MiB buffer (384 chunks). On
 //! a runtime built without a blocking pool (`blocking_threads(0, 0)`) the
 //! offload degrades to the inline fallback: the only yields left are
 //! `ReadExact`'s cooperative one every 32 polls (about 12 for this file), so
@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::fs::{File, OpenOptions};
-use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+use asupersync::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use asupersync::runtime::{RuntimeBuilder, yield_now};
 
 const BIG: usize = 48 * 1024 * 1024;
@@ -130,7 +130,7 @@ fn read_exact_starves_the_peer_without_a_blocking_pool_planted_negative() {
 fn chunked_writes_read_ahead_and_relative_seek_stay_consistent() {
     let path = scratch_path("roundtrip");
     let runtime = RuntimeBuilder::current_thread()
-        .blocking_threads(1, 2)
+        .blocking_threads(1, 1)
         .build()
         .expect("runtime with a blocking pool");
     let expected = pattern(3 * 128 * 1024 + 7777);
@@ -149,24 +149,13 @@ fn chunked_writes_read_ahead_and_relative_seek_stay_consistent() {
         file.write_all(&expected).await.expect("write_all");
         file.flush().await.expect("flush");
 
-        // Create real read-ahead: start a large read, poll it exactly once so
-        // a 128 KiB pool syscall is in flight, then abandon that future. The
+        // Create real read-ahead: queue a large read behind the occupied
+        // blocking worker, then abandon that future before it completes. The
         // next, smaller read observes the completed syscall and must keep the
         // surplus bytes as read-ahead instead of dropping them.
         file.seek(SeekFrom::Start(0)).await.expect("seek start");
         let mut abandoned = vec![0u8; 128 * 1024];
-        {
-            let mut in_flight = Box::pin(file.read_exact(&mut abandoned));
-            std::future::poll_fn(|poll_cx| {
-                let first = in_flight.as_mut().poll(poll_cx);
-                assert!(
-                    first.is_pending(),
-                    "with a pool the first poll must submit the syscall and return Pending"
-                );
-                std::task::Poll::Ready(())
-            })
-            .await;
-        }
+        abandon_queued_io(file.read_exact(&mut abandoned)).await;
         let mut head = [0u8; 100];
         file.read_exact(&mut head).await.expect("read head");
         assert_eq!(&head[..], &expected[..100]);
@@ -187,14 +176,7 @@ fn chunked_writes_read_ahead_and_relative_seek_stay_consistent() {
         // Write after a read left read-ahead behind: the write must land at
         // the caller's cursor, not past the read-ahead.
         file.seek(SeekFrom::Start(1000)).await.expect("seek 1000");
-        {
-            let mut in_flight = Box::pin(file.read_exact(&mut abandoned));
-            std::future::poll_fn(|poll_cx| {
-                assert!(in_flight.as_mut().poll(poll_cx).is_pending());
-                std::task::Poll::Ready(())
-            })
-            .await;
-        }
+        abandon_queued_io(file.read_exact(&mut abandoned)).await;
         let mut probe = [0u8; 10];
         file.read_exact(&mut probe).await.expect("read probe");
         assert_eq!(&probe[..], &expected[1000..1010]);
@@ -210,4 +192,190 @@ fn chunked_writes_read_ahead_and_relative_seek_stay_consistent() {
         assert_eq!(&all[1013..], &expected[1013..]);
     });
     assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+async fn abandon_queued_io(future: impl std::future::Future) {
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let mut blocker = Box::pin(asupersync::runtime::spawn_blocking(move || {
+        started_tx.send(()).expect("signal occupied pool worker");
+        release_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("release occupied pool worker");
+    }));
+    std::future::poll_fn(|cx| {
+        assert!(blocker.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("pool worker is occupied before submitting I/O");
+    {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|cx| {
+            assert!(future.as_mut().poll(cx).is_pending(), "I/O is queued");
+            std::task::Poll::Ready(())
+        })
+        .await;
+    }
+    release_tx.send(()).expect("release queued I/O");
+    blocker.await;
+}
+
+fn check_poll_seek_after_abandoned_read(
+    name: &str,
+    seek: SeekFrom,
+    expected_position: Option<usize>,
+    abandon_seek: bool,
+) {
+    let path = scratch_path(name);
+    let expected = pattern(1024);
+    std::fs::write(&path, &expected).expect("write seek fixture");
+    let mut observer = std::fs::File::open(&path).expect("open cursor observer");
+    let mut file = File::from_std(observer.try_clone().expect("share OS cursor"));
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("runtime with a blocking pool");
+
+    runtime.block_on(async move {
+        let mut abandoned = [0u8; 1024];
+        abandon_queued_io(file.read(&mut abandoned)).await;
+        let mut prefix = [0u8; 7];
+        file.read_exact(&mut prefix)
+            .await
+            .expect("resume small read");
+        assert_eq!(prefix, expected[..7]);
+        assert_eq!(
+            std::io::Seek::stream_position(&mut observer).expect("physical cursor"),
+            1024,
+            "the read completed and left 1017 real unread bytes"
+        );
+
+        // UFCS is intentional: File::seek is an owned-method path with a
+        // different implementation. Exercise the AsyncSeek trait adapter.
+        let result = if abandon_seek {
+            abandon_queued_io(AsyncSeekExt::seek(&mut file, seek)).await;
+            // A different trait operation must settle the abandoned seek,
+            // including reporting its error, before another read can start.
+            match file.flush().await {
+                Ok(()) => AsyncSeekExt::stream_position(&mut file).await,
+                Err(error) => Err(error),
+            }
+        } else {
+            AsyncSeekExt::seek(&mut file, seek).await
+        };
+        let resume_at = match expected_position {
+            Some(position) => {
+                assert_eq!(result.expect("valid trait seek"), position as u64);
+                position
+            }
+            None => {
+                assert!(result.is_err(), "invalid seek must fail: {seek:?}");
+                7
+            }
+        };
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail).await.expect("read after seek");
+        assert_eq!(
+            tail,
+            expected[resume_at..],
+            "seek must not lose unread bytes"
+        );
+    });
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
+
+#[test]
+fn poll_seek_rejected_relative_preserves_unread_bytes() {
+    check_poll_seek_after_abandoned_read(
+        "seek-rejected-relative",
+        SeekFrom::Current(-8),
+        None,
+        false,
+    );
+}
+
+#[test]
+fn poll_seek_extreme_relative_preserves_unread_bytes() {
+    check_poll_seek_after_abandoned_read(
+        "seek-extreme-relative",
+        SeekFrom::Current(i64::MIN),
+        None,
+        false,
+    );
+}
+
+#[test]
+fn poll_seek_rejected_end_preserves_unread_bytes() {
+    check_poll_seek_after_abandoned_read("seek-rejected-end", SeekFrom::End(-1025), None, false);
+}
+
+#[test]
+fn poll_seek_valid_positions_account_for_unread_bytes() {
+    for (name, seek, position) in [
+        ("seek-relative", SeekFrom::Current(-2), 5),
+        ("seek-absolute", SeekFrom::Start(12), 12),
+        ("seek-end", SeekFrom::End(-4), 1020),
+    ] {
+        check_poll_seek_after_abandoned_read(name, seek, Some(position), false);
+    }
+}
+
+#[test]
+fn poll_seek_abandoned_operation_settles_before_next_read() {
+    check_poll_seek_after_abandoned_read(
+        "seek-abandoned-valid",
+        SeekFrom::Current(3),
+        Some(10),
+        true,
+    );
+    check_poll_seek_after_abandoned_read(
+        "seek-abandoned-invalid",
+        SeekFrom::Current(-8),
+        None,
+        true,
+    );
+}
+
+#[test]
+fn poll_seek_rejected_with_both_reader_and_file_buffers_preserves_bytes() {
+    for (name, seek) in [
+        ("buffered-seek-relative", SeekFrom::Current(-8)),
+        ("buffered-seek-extreme", SeekFrom::Current(i64::MIN)),
+        ("buffered-seek-end", SeekFrom::End(-1025)),
+    ] {
+        let path = scratch_path(name);
+        let expected = pattern(1024);
+        std::fs::write(&path, &expected).expect("write nested-buffer fixture");
+        let mut observer = std::fs::File::open(&path).expect("open cursor observer");
+        let file = File::from_std(observer.try_clone().expect("share OS cursor"));
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("runtime with a blocking pool");
+        runtime.block_on(async move {
+            let mut reader = BufReader::with_capacity(16, file);
+            let mut abandoned = [0u8; 1024];
+            abandon_queued_io(reader.read(&mut abandoned)).await;
+            let mut prefix = [0u8; 7];
+            reader.read_exact(&mut prefix).await.expect("read prefix");
+            assert_eq!(prefix, expected[..7]);
+            assert_eq!(reader.buffer(), &expected[7..16], "outer read-ahead");
+            assert_eq!(
+                std::io::Seek::stream_position(&mut observer).expect("physical cursor"),
+                1024,
+                "the inner File also retains unread bytes"
+            );
+            assert!(AsyncSeekExt::seek(&mut reader, seek).await.is_err());
+            let mut tail = Vec::new();
+            reader
+                .read_to_end(&mut tail)
+                .await
+                .expect("read nested tail");
+            assert_eq!(tail, expected[7..], "both buffers must resume without loss");
+        });
+        assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+    }
 }

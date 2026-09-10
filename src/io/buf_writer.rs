@@ -100,9 +100,11 @@ impl<W> BufWriter<W> {
     ///
     /// This is the data that has been written to the `BufWriter`
     /// but has not yet been flushed to the underlying writer.
+    /// A prefix accepted during a partial flush is excluded, even if the
+    /// flush subsequently returned `Pending` or an error.
     #[must_use]
     pub fn buffer(&self) -> &[u8] {
-        &self.buf
+        &self.buf[self.written..]
     }
 
     /// Returns the capacity of the internal buffer.
@@ -423,6 +425,94 @@ mod tests {
     }
 
     #[test]
+    fn buf_writer_partial_flush_exposes_only_unwritten_bytes() {
+        struct PartialWriter {
+            bytes: Vec<u8>,
+            interrupted: bool,
+            return_error: bool,
+        }
+
+        impl AsyncWrite for PartialWriter {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                let this = self.get_mut();
+                if this.bytes.len() == 2 && !this.interrupted {
+                    this.interrupted = true;
+                    if this.return_error {
+                        return Poll::Ready(Err(io::Error::other("interrupted flush")));
+                    }
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                let n = buf.len().min(2);
+                this.bytes.extend_from_slice(&buf[..n]);
+                Poll::Ready(Ok(n))
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        init_test("buf_writer_partial_flush_exposes_only_unwritten_bytes");
+        let mut cx = Context::from_waker(Waker::noop());
+        for return_error in [false, true] {
+            for recover_inner in [false, true] {
+                let inner = PartialWriter {
+                    bytes: Vec::new(),
+                    interrupted: false,
+                    return_error,
+                };
+                let mut writer = BufWriter::with_capacity(8, inner);
+                assert!(matches!(
+                    Pin::new(&mut writer).poll_write(&mut cx, b"abcd"),
+                    Poll::Ready(Ok(4))
+                ));
+                let stopped = Pin::new(&mut writer).poll_flush(&mut cx);
+                if return_error {
+                    assert!(matches!(stopped, Poll::Ready(Err(_))));
+                } else {
+                    assert!(stopped.is_pending());
+                }
+                assert_eq!(writer.get_ref().bytes, b"ab", "accepted prefix");
+                assert_eq!(
+                    writer.buffer(),
+                    b"cd",
+                    "only unwritten bytes are recoverable"
+                );
+                if recover_inner {
+                    let remaining = writer.buffer().to_vec();
+                    let mut inner = writer.into_inner();
+                    assert!(matches!(
+                        Pin::new(&mut inner).poll_write(&mut cx, &remaining),
+                        Poll::Ready(Ok(2))
+                    ));
+                    assert_eq!(inner.bytes, b"abcd", "recovery does not duplicate bytes");
+                } else {
+                    assert!(matches!(
+                        Pin::new(&mut writer).poll_flush(&mut cx),
+                        Poll::Ready(Ok(()))
+                    ));
+                    assert!(writer.buffer().is_empty());
+                    assert_eq!(
+                        writer.get_ref().bytes,
+                        b"abcd",
+                        "retry does not duplicate bytes"
+                    );
+                }
+            }
+        }
+        crate::test_complete!("buf_writer_partial_flush_exposes_only_unwritten_bytes");
+    }
+
+    #[test]
     fn buf_writer_flush_rejects_immediate_overreport_without_advancing() {
         init_test("buf_writer_flush_rejects_immediate_overreport_without_advancing");
         let writer = ReportedProgressWriter::new([5]);
@@ -471,10 +561,13 @@ mod tests {
             matches!(flushed, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::InvalidData);
         crate::assert_with_log!(invalid_data, "invalid data", true, invalid_data);
         crate::assert_with_log!(buf_writer.written == 2, "written", 2, buf_writer.written);
+        // Keep the original overreport guard: no bytes or progress beyond
+        // the valid prefix were discarded. The public view is the suffix.
+        assert_eq!(buf_writer.buf, b"abcd");
         crate::assert_with_log!(
-            buf_writer.buffer() == b"abcd",
+            buf_writer.buffer() == b"cd",
             "buffer",
-            b"abcd",
+            b"cd",
             buf_writer.buffer()
         );
         crate::assert_with_log!(

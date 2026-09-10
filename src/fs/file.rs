@@ -843,20 +843,16 @@ impl AsyncSeek for File {
                     *pending = Some(PendingIo::Seek { future });
                 }
                 Some(read_ahead @ PendingIo::ReadAhead { .. }) => {
-                    // Discard unconsumed read-ahead; a relative seek is
-                    // measured from where the caller believes the cursor is.
-                    let unconsumed = Self::unconsumed_read_ahead(Some(&read_ahead));
-                    let adjusted = match pos {
-                        SeekFrom::Current(offset) => {
-                            let unconsumed = i64::try_from(unconsumed)
-                                .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
-                            SeekFrom::Current(offset - unconsumed)
-                        }
-                        absolute => absolute,
-                    };
+                    // Reconcile the physical cursor before the requested
+                    // seek, as the owned seek path does. Combining the
+                    // offsets can overflow, and a failed seek would otherwise
+                    // leave the cursor past bytes the caller never received.
+                    let unconsumed = i64::try_from(Self::unconsumed_read_ahead(Some(&read_ahead)))
+                        .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
                     let future = this.submit_blocking(move |file| {
                         let mut file_ref: &std::fs::File = file;
-                        Seek::seek(&mut file_ref, adjusted)
+                        Seek::seek(&mut file_ref, SeekFrom::Current(-unconsumed))?;
+                        Seek::seek(&mut file_ref, pos)
                     });
                     *pending = Some(PendingIo::Seek { future });
                 }

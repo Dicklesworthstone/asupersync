@@ -7,7 +7,8 @@
 //!
 //! - `poll_read` is cancel-safe. Partial reads are discarded by the caller.
 //! - `poll_fill_buf` is cancel-safe. The buffer state is consistent.
-//! - Lines/read_line are cancel-safe since they use buffered operations.
+//! - Line-read cancellation guarantees depend on the adapter: see
+//!   [`super::LineReader`] and [`super::read_line`] for partial UTF-8 handling.
 
 use super::{AsyncBufRead, AsyncRead, AsyncSeek, ReadBuf};
 use std::io::{self, SeekFrom};

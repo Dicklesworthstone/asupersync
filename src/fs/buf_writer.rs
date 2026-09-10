@@ -52,7 +52,7 @@ impl<W> BufWriter<W> {
         self.inner.into_inner()
     }
 
-    /// Returns the contents of the buffer.
+    /// Returns buffered bytes not yet accepted by the underlying writer.
     #[must_use]
     pub fn buffer(&self) -> &[u8] {
         self.inner.buffer()
@@ -248,9 +248,9 @@ mod tests {
             writer.get_ref().written.as_slice()
         );
         crate::assert_with_log!(
-            writer.buffer() == b"1234",
-            "buffer preserved during partial flush",
-            b"1234",
+            writer.buffer() == b"34",
+            "unwritten suffix preserved during partial flush",
+            b"34",
             writer.buffer()
         );
 
@@ -263,10 +263,15 @@ mod tests {
             pending
         );
         crate::assert_with_log!(
-            writer.buffer() == b"1234",
-            "buffer unchanged while flush blocked",
-            b"1234",
+            writer.buffer() == b"34",
+            "unwritten suffix unchanged while flush blocked",
+            b"34",
             writer.buffer()
+        );
+        assert_eq!(
+            writer.get_ref().written,
+            b"12",
+            "blocked write made no progress"
         );
 
         writer.get_mut().unblock();
