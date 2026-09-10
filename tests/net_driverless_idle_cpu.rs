@@ -21,7 +21,9 @@
 //! Gating: `test-internals` (for the fallback driver probe) and Linux (the CPU
 //! accounting reads `/proc/self/stat`). This file intentionally holds a single
 //! test so the process-wide CPU accounting is not polluted by sibling tests on
-//! other threads; the six driverless waits are measured one after another.
+//! other threads; the seven driverless waits (five socket types, an owned
+//! Unix split half, and a child-process stdout pipe) are measured one after
+//! another.
 
 #![cfg(all(feature = "test-internals", target_os = "linux"))]
 #![allow(missing_docs)]
@@ -259,6 +261,34 @@ fn driverless_socket_waits_park_instead_of_spinning() {
         "unix owned read half returned the released bytes"
     );
 
+    // Child-process pipe (asupersync-cqzuzt): ChildStdout registered readiness
+    // straight on the ambient driver and self-woke without one, so reading a
+    // quiet child's output spun; it parks on the fallback driver now, like
+    // the sockets. The child stays silent past the idle window, then prints
+    // and releases the wait itself.
+    let mut child = asupersync::process::Command::new("sh")
+        .arg("-c")
+        .arg("sleep 1.2; echo child")
+        .stdout(asupersync::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn child");
+    let child_stdout = child.stdout().expect("piped child stdout");
+    let (child_outcome, child_bytes) = measure_driverless_wait(
+        "child stdout read",
+        move |signal| read_one_chunk(child_stdout, &signal),
+        || {
+            // Nothing to release: the child's own output ends the wait.
+            thread::sleep(Duration::from_millis(100));
+        },
+    );
+    note_if_spinning(&mut failures, "child stdout read", child_outcome);
+    assert_eq!(
+        child_bytes, b"child\n",
+        "child stdout read returned the child's line"
+    );
+    let _ = child.wait();
+
     // Unix datagram pair: readiness poll on the async side, std peer sends.
     let (dgram_std, dgram_peer) = StdUnixDatagram::pair().expect("unix datagram pair");
     let mut dgram = UnixDatagram::from_std(dgram_std).expect("wrap datagram");
@@ -307,7 +337,7 @@ fn driverless_socket_waits_park_instead_of_spinning() {
 
     let after = fallback_io_driver_probe().expect("driverless polls start the fallback driver");
     assert!(
-        after.fallback_registrations >= before.fallback_registrations + 6,
+        after.fallback_registrations >= before.fallback_registrations + 7,
         "each driverless wait must register on the fallback driver: {after:?} vs {before:?}"
     );
     assert_eq!(

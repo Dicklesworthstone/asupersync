@@ -34,7 +34,6 @@
 
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
-use crate::runtime::io_driver::IoRegistration;
 #[cfg(unix)]
 use crate::runtime::reactor::Interest;
 use std::collections::BTreeMap;
@@ -102,50 +101,24 @@ fn drain_nonblocking<R: Read>(reader: &mut R, out: &mut Vec<u8>) -> io::Result<(
     }
 }
 
+/// Arms readiness for a child pipe through the crate's fallback-aware
+/// registration: the ambient `Cx` driver when there is one, else the
+/// process-global fallback I/O driver (GH#67), so a driverless caller reading
+/// a child's output parks instead of re-polling in a hot loop. Only when no
+/// reactor can take the fd at all does the caller keep the legacy self-wake.
 #[cfg(unix)]
 fn register_interest(
-    registration: &mut Option<IoRegistration>,
+    registration: &mut crate::net::ReactorRegistration,
     source: &dyn crate::runtime::reactor::Source,
     cx: &Context<'_>,
     interest: Interest,
 ) -> io::Result<()> {
-    if let Some(reg) = registration {
-        let target_interest = interest;
-        // Re-arm reactor interest and conditionally update the waker in a
-        // single lock acquisition (will_wake guard skips the clone).
-        match reg.rearm(target_interest, cx.waker()) {
-            Ok(true) => return Ok(()),
-            Ok(false) => {
-                *registration = None;
-            }
-            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
-                *registration = None;
-                cx.waker().wake_by_ref();
-                return Ok(());
-            }
-            Err(err) => return Err(err),
-        }
-    }
-
-    let Some(current) = Cx::current() else {
-        cx.waker().wake_by_ref();
-        return Ok(());
-    };
-    let Some(driver) = current.io_driver_handle() else {
-        cx.waker().wake_by_ref();
-        return Ok(());
-    };
-
-    match driver.register(source, interest, cx.waker().clone()) {
-        Ok(reg) => {
-            *registration = Some(reg);
-            Ok(())
-        }
-        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+    match registration.arm(source, interest, cx.waker())? {
+        crate::net::Armed::Parked => Ok(()),
+        crate::net::Armed::SelfWake => {
             cx.waker().wake_by_ref();
             Ok(())
         }
-        Err(err) => Err(err),
     }
 }
 
@@ -3149,7 +3122,7 @@ impl Drop for Child {
 #[derive(Debug)]
 pub struct ChildStdin {
     inner: Option<std_process::ChildStdin>,
-    registration: Option<IoRegistration>,
+    registration: crate::net::ReactorRegistration,
 }
 
 impl ChildStdin {
@@ -3158,7 +3131,7 @@ impl ChildStdin {
         set_nonblocking(stdin.as_raw_fd())?;
         Ok(Self {
             inner: Some(stdin),
-            registration: None,
+            registration: crate::net::ReactorRegistration::new(),
         })
     }
 
@@ -3167,7 +3140,7 @@ impl ChildStdin {
         set_nonblocking()?;
         Ok(Self {
             inner: Some(stdin),
-            registration: None,
+            registration: crate::net::ReactorRegistration::new(),
         })
     }
 
@@ -3281,7 +3254,7 @@ impl AsyncWrite for ChildStdin {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
-        this.registration = None;
+        this.registration.clear();
         drop(this.inner.take());
         Poll::Ready(Ok(()))
     }
@@ -3310,7 +3283,7 @@ impl AsyncWrite for ChildStdin {
 pub struct ChildStdout {
     inner: std_process::ChildStdout,
     #[cfg(unix)]
-    registration: Option<IoRegistration>,
+    registration: crate::net::ReactorRegistration,
 }
 
 impl ChildStdout {
@@ -3319,7 +3292,7 @@ impl ChildStdout {
         set_nonblocking(stdout.as_raw_fd())?;
         Ok(Self {
             inner: stdout,
-            registration: None,
+            registration: crate::net::ReactorRegistration::new(),
         })
     }
 
@@ -3410,7 +3383,7 @@ impl AsyncRead for ChildStdout {
 pub struct ChildStderr {
     inner: std_process::ChildStderr,
     #[cfg(unix)]
-    registration: Option<IoRegistration>,
+    registration: crate::net::ReactorRegistration,
 }
 
 impl ChildStderr {
@@ -3419,7 +3392,7 @@ impl ChildStderr {
         set_nonblocking(stderr.as_raw_fd())?;
         Ok(Self {
             inner: stderr,
-            registration: None,
+            registration: crate::net::ReactorRegistration::new(),
         })
     }
 
