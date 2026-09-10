@@ -3738,7 +3738,9 @@ impl QuicLink {
     /// cwnd-blocked control traffic, and ramping them slowed a contended
     /// receiver's per-member progress until the sender's proof wait timed out.
     fn stall_retransmit_packet_cap(&self) -> usize {
-        let shift = self.stall_silent_drains.min(STALL_RETRANSMIT_RAMP_MAX_SHIFT);
+        let shift = self
+            .stall_silent_drains
+            .min(STALL_RETRANSMIT_RAMP_MAX_SHIFT);
         (QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS << shift)
             .min(QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS)
     }

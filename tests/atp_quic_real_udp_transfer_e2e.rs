@@ -1101,7 +1101,10 @@ fn real_udp_quic_tree_manifest_stall_pto_resends_stay_bounded() {
     println!(
         "proof_wait_pto_resends={} max_packets={max_packets} total_packets={total_packets} \
          total_stream_frames={total_frames} resends={resends:?}",
-        resends.iter().filter(|resend| resend.reason.ends_with("proof_wait_pto")).count()
+        resends
+            .iter()
+            .filter(|resend| resend.reason.ends_with("proof_wait_pto"))
+            .count()
     );
     let send = send.unwrap_or_else(|err| {
         panic!("lossy tree-manifest sender must complete: {err:?}; receiver={recv:?}")
