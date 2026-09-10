@@ -629,9 +629,13 @@ impl TcpStream {
         {
             let mut this = self;
             this.shutdown_on_drop = false;
-            let registration = this.registration.take();
+            let (registration, registration_on_fallback) = this.registration.take_parts();
             let inner = this.inner.clone();
-            OwnedReadHalf::new_pair(inner, registration)
+            OwnedReadHalf::new_pair_with_fallback_flag(
+                inner,
+                registration,
+                registration_on_fallback,
+            )
         }
     }
 

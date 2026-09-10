@@ -1725,14 +1725,6 @@ impl ReactorRegistration {
         self.on_fallback = false;
     }
 
-    /// Hands the live registration to another owner of the fd (owned split
-    /// halves), leaving this slot empty.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn take(&mut self) -> Option<IoRegistration> {
-        self.on_fallback = false;
-        self.registration.take()
-    }
-
     /// Arms readiness `interest` for `source` on behalf of `waker`; see the
     /// type docs for the three steps. `Ok(Armed::SelfWake)` means no reactor
     /// took the fd and the caller must re-poll on its own.
@@ -1775,38 +1767,94 @@ impl ReactorRegistration {
         }
 
         // Step 3: fresh registration on the ambient driver, else the fallback.
-        let ambient = Cx::current().and_then(|current| current.io_driver_handle());
-        let (driver, on_fallback): (&IoDriverHandle, bool) = match &ambient {
-            Some(driver) => (driver, false),
-            None => match global_fallback_io_driver() {
-                Some(driver) => (driver, true),
-                None => {
-                    #[cfg(any(test, feature = "test-internals"))]
-                    fallback_io_probe::bump(&fallback_io_probe::SELF_WAKES);
-                    return Ok(Armed::SelfWake);
-                }
-            },
-        };
-        match driver.register(source, interest, waker.clone()) {
-            Ok(registration) => {
-                #[cfg(any(test, feature = "test-internals"))]
-                fallback_io_probe::bump_if(on_fallback, &fallback_io_probe::REGISTRATIONS);
+        match fresh_reactor_registration(source, interest, waker.clone())? {
+            FreshRegistration::Registered {
+                registration,
+                on_fallback,
+            } => {
                 self.registration = Some(registration);
                 self.on_fallback = on_fallback;
                 Ok(Armed::Parked)
             }
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
-                ) =>
-            {
+            FreshRegistration::SelfWake => Ok(Armed::SelfWake),
+        }
+    }
+
+    /// Hands the live registration and its fallback flag to another owner of
+    /// the fd (owned split halves keep their own state), leaving this slot
+    /// empty.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn take_parts(&mut self) -> (Option<IoRegistration>, bool) {
+        let on_fallback = std::mem::replace(&mut self.on_fallback, false);
+        (self.registration.take(), on_fallback)
+    }
+}
+
+/// Outcome of [`fresh_reactor_registration`].
+#[cfg(not(target_arch = "wasm32"))]
+pub enum FreshRegistration {
+    /// The fd is registered; `on_fallback` says whether it sits on the
+    /// process-global fallback driver rather than an ambient `Cx` driver.
+    Registered {
+        registration: IoRegistration,
+        on_fallback: bool,
+    },
+    /// No reactor could take the fd (no driver at all, or the reactor refused
+    /// it); the caller must schedule its own re-poll.
+    SelfWake,
+}
+
+/// Whether the current `Cx` carries an ambient I/O driver (the signal for a
+/// fallback registration to migrate).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ambient_io_driver_present() -> bool {
+    Cx::current()
+        .and_then(|current| current.io_driver_handle())
+        .is_some()
+}
+
+/// Registers `source` on the ambient `Cx` driver when one is present, else on
+/// the process-global fallback driver (GH#67), for callers that keep their own
+/// registration state (owned split halves). Probe counters are bumped here so
+/// every socket type reports through the same [`fallback_io_driver_probe`].
+#[cfg(not(target_arch = "wasm32"))]
+pub fn fresh_reactor_registration(
+    source: &dyn crate::runtime::reactor::Source,
+    interest: Interest,
+    waker: std::task::Waker,
+) -> io::Result<FreshRegistration> {
+    let ambient = Cx::current().and_then(|current| current.io_driver_handle());
+    let (driver, on_fallback): (&IoDriverHandle, bool) = match &ambient {
+        Some(driver) => (driver, false),
+        None => match global_fallback_io_driver() {
+            Some(driver) => (driver, true),
+            None => {
                 #[cfg(any(test, feature = "test-internals"))]
                 fallback_io_probe::bump(&fallback_io_probe::SELF_WAKES);
-                Ok(Armed::SelfWake)
+                return Ok(FreshRegistration::SelfWake);
             }
-            Err(err) => Err(err),
+        },
+    };
+    match driver.register(source, interest, waker) {
+        Ok(registration) => {
+            #[cfg(any(test, feature = "test-internals"))]
+            fallback_io_probe::bump_if(on_fallback, &fallback_io_probe::REGISTRATIONS);
+            Ok(FreshRegistration::Registered {
+                registration,
+                on_fallback,
+            })
         }
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
+            ) =>
+        {
+            #[cfg(any(test, feature = "test-internals"))]
+            fallback_io_probe::bump(&fallback_io_probe::SELF_WAKES);
+            Ok(FreshRegistration::SelfWake)
+        }
+        Err(err) => Err(err),
     }
 }
 

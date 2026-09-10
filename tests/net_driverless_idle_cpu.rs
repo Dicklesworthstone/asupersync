@@ -9,9 +9,10 @@
 //! `UnixStream`, `UnixDatagram` and `UnixListener` kept the immediate
 //! self-wake, so a bounded wait on any of them burned a full core. This test
 //! measures process CPU (`utime + stime` from `/proc/self/stat`) across an
-//! idle window for each of the five socket types while its peer stays silent,
-//! then releases the wait and checks the socket saw exactly the readiness it
-//! was promised.
+//! idle window for each of the five socket types, plus an owned Unix split
+//! half (asupersync-9e6a28: the shared half state registers through the same
+//! fallback-aware path), while its peer stays silent, then releases the wait
+//! and checks the socket saw exactly the readiness it was promised.
 //!
 //! The idle window opens only after the waiting side has acknowledged its
 //! first `Pending` poll (an explicit handshake, not a settle sleep), and every
@@ -20,7 +21,7 @@
 //! Gating: `test-internals` (for the fallback driver probe) and Linux (the CPU
 //! accounting reads `/proc/self/stat`). This file intentionally holds a single
 //! test so the process-wide CPU accounting is not polluted by sibling tests on
-//! other threads; the five socket types are measured one after another.
+//! other threads; the six driverless waits are measured one after another.
 
 #![cfg(all(feature = "test-internals", target_os = "linux"))]
 #![allow(missing_docs)]
@@ -237,6 +238,27 @@ fn driverless_socket_waits_park_instead_of_spinning() {
         "unix stream read returned the released bytes"
     );
 
+    // Owned Unix split half: the halves share one registration state that
+    // registers through the same fallback-aware path (asupersync-9e6a28), so
+    // a driverless read on the owned read half must park too. The write half
+    // stays alive until the test ends so its drop-time shutdown cannot end
+    // the read early.
+    let (split_stream, split_peer) = UnixStream::pair().expect("unix split pair");
+    let (split_read, _split_write) = split_stream.into_split();
+    let (split_outcome, split_bytes) = measure_driverless_wait(
+        "unix owned read half",
+        move |signal| read_one_chunk(split_read, &signal),
+        || {
+            let mut writer = split_peer.as_std();
+            writer.write_all(b"split").expect("peer write");
+        },
+    );
+    note_if_spinning(&mut failures, "unix owned read half", split_outcome);
+    assert_eq!(
+        split_bytes, b"split",
+        "unix owned read half returned the released bytes"
+    );
+
     // Unix datagram pair: readiness poll on the async side, std peer sends.
     let (dgram_std, dgram_peer) = StdUnixDatagram::pair().expect("unix datagram pair");
     let mut dgram = UnixDatagram::from_std(dgram_std).expect("wrap datagram");
@@ -285,8 +307,8 @@ fn driverless_socket_waits_park_instead_of_spinning() {
 
     let after = fallback_io_driver_probe().expect("driverless polls start the fallback driver");
     assert!(
-        after.fallback_registrations >= before.fallback_registrations + 5,
-        "each socket type must register on the fallback driver: {after:?} vs {before:?}"
+        after.fallback_registrations >= before.fallback_registrations + 6,
+        "each driverless wait must register on the fallback driver: {after:?} vs {before:?}"
     );
     assert_eq!(
         after.fallback_self_wakes, before.fallback_self_wakes,
