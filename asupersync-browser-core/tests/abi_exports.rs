@@ -1507,13 +1507,87 @@ mod wasm32_runtime_builder_microtask_pump {
         let probe = Rc::new(Cell::new(0u32));
         let probe_clone = Rc::clone(&probe);
 
+        // Real Rc output regression (F::Output is !Send Rc<u32>)
         let handle = runtime.spawn_local(async move {
             probe_clone.set(probe_clone.get() + 1);
-            probe_clone.get()
+            Rc::new(probe_clone.get())
         });
 
         let result = handle.await.expect("local task resolves successfully");
-        assert_eq!(result, 1);
+        assert_eq!(*result, 1);
         assert_eq!(probe.get(), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn wasm_runtime_builder_self_waking_future_resolves_across_burst_yields() {
+        use asupersync::runtime::BrowserHostServices;
+        use js_sys::Promise;
+        use std::sync::Arc;
+        use wasm_bindgen::JsValue;
+        use wasm_bindgen_futures::JsFuture;
+
+        let host_services = Arc::new(BrowserHostServices::with_burst_limit(4));
+        let runtime = RuntimeBuilder::new()
+            .browser_host_services(host_services)
+            .build()
+            .expect("RuntimeBuilder::build with custom burst limit succeeds");
+
+        let poll_count = Rc::new(Cell::new(0u32));
+        let poll_count_clone = Rc::clone(&poll_count);
+
+        struct SelfWakingCounter {
+            remaining: u32,
+            counter: Rc<Cell<u32>>,
+        }
+
+        impl std::future::Future for SelfWakingCounter {
+            type Output = u32;
+
+            fn poll(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                self.counter.set(self.counter.get() + 1);
+                if self.remaining == 0 {
+                    std::task::Poll::Ready(self.counter.get())
+                } else {
+                    self.remaining -= 1;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            }
+        }
+
+        // Spawn a future that wakes itself 10 times. With burst limit 4,
+        // it must yield to the macrotask event loop across bursts without
+        // starving the browser loop or losing self-wakes.
+        let handle = runtime.spawn_local(SelfWakingCounter {
+            remaining: 10,
+            counter: poll_count_clone,
+        });
+
+        // Await several already-resolved JS Promises (microtasks).
+        // These stay within the current host microtask turn. The pump's first
+        // burst executes exactly 4 steps and must yield to a macrotask.
+        // On a fair pump, subsequent microtasks in the same host turn must NOT
+        // advance the task beyond 4. (The broken pump would advance beyond 4
+        // through microtasks).
+        for _ in 0..5 {
+            let _ = JsFuture::from(Promise::resolve(&JsValue::UNDEFINED)).await;
+        }
+
+        assert_eq!(
+            poll_count.get(),
+            4,
+            "pump must not advance beyond burst limit within the same browser host turn"
+        );
+        assert!(
+            !handle.is_finished(),
+            "task must remain unfinished while waiting for macrotask yield"
+        );
+
+        let result = handle.await.expect("self-waking future resolves across burst yields");
+        assert_eq!(result, 11);
+        assert_eq!(poll_count.get(), 11);
     }
 }
