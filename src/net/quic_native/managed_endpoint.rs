@@ -184,13 +184,19 @@ impl PendingAuthenticatedAccept {
         if self.received_packets == ACCEPT_MAX_PACKETS {
             return Err(accept_error("received packet bound exhausted"));
         }
-        self.received_packets += 1;
+        // Anything that has not authenticated is discarded, never fatal
+        // (RFC 9000 §12.2): the peer's address is spoofable by anyone who saw
+        // the cleartext Initial, so an oversized, malformed, bit-flipped or
+        // forged datagram must not end an admission a real peer is still
+        // driving, and must not consume the accepted-packet bound either.
         if packet.data.len() > max_packet_size {
-            return Err(accept_error("datagram exceeds configured packet bound"));
+            return Ok(());
         }
         let long = packet.data.first().is_some_and(|byte| byte & 0x80 != 0);
         let length = if long { 0 } else { self.local_cid.len() };
-        let header = ProtectedHeaderPrefix::decode(&packet.data, length).map_err(accept_error)?;
+        let Ok(header) = ProtectedHeaderPrefix::decode(&packet.data, length) else {
+            return Ok(());
+        };
         if matches!(header, ProtectedHeaderPrefix::Retry(_)) {
             // Defensive role check for direct callers as well as owns_packet.
             // Retry supplies neither authenticated input credit nor TLS work.
@@ -205,6 +211,7 @@ impl PendingAuthenticatedAccept {
             {
                 return Err(accept_error("early application packet bound exhausted"));
             }
+            self.received_packets += 1;
             self.early_bytes += packet.data.len();
             self.early.push(packet);
             return Ok(());
@@ -223,11 +230,18 @@ impl PendingAuthenticatedAccept {
         }
         let peer_cid = match self.driver.recv_handshake_packet(&packet.data) {
             Ok(cid) => cid,
-            Err(error) if super::handshake_driver::is_stale_handshake_packet_error(&error) => {
+            Err(error)
+                if super::handshake_driver::is_stale_handshake_packet_error(&error)
+                    || super::handshake_driver::is_unauthenticated_handshake_packet_error(
+                        &error,
+                    ) =>
+            {
                 return Ok(());
             }
             Err(error) => return Err(accept_error(error)),
         };
+        // Only an authenticated packet counts toward the accepted bound.
+        self.received_packets += 1;
         // An Initial's publicly derivable keys do not prove return reachability.
         // Until a valid Handshake packet does, only successfully authenticated
         // received bytes fund output, including every actual PTO retransmission.
@@ -3242,6 +3256,80 @@ mod tests {
                 assert_eq!(endpoint.connection_stats().active_connections, 1);
                 endpoint.shutdown(&cx).await.unwrap();
                 assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        /// RFC 9000 §12.2: a datagram that fails authentication is discarded.
+        /// Anyone who saw the cleartext Initial can spoof the client's
+        /// address, so a corrupted copy of that Initial or a long header
+        /// with a bogus Length must neither end the admission nor consume
+        /// its accepted-packet bound; the real Initial still authenticates
+        /// afterwards.
+        #[test]
+        fn managed_accept_discards_unauthenticated_datagrams_without_aborting() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, _timer, mut endpoint, peer, _a) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                let peer = peer.local_addr().unwrap();
+                let b = ConnectionId::new(&[8; 8]).unwrap();
+                let initial = ConnectionId::new(&[9; 8]).unwrap();
+                enable_admission_mechanics(&mut endpoint);
+                endpoint.config.packet_batch_size = 1024;
+                endpoint
+                    .begin_authenticated_accept(
+                        &cx,
+                        server_driver(None),
+                        peer,
+                        initial,
+                        b,
+                        b"atp/1",
+                    )
+                    .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                let incoming = initial_packet(peer, initial, now);
+
+                // A bit-flipped copy of the real Initial fails AEAD under the
+                // live Initial keys.
+                let mut corrupted = incoming.clone();
+                let last = corrupted.data.len() - 1;
+                corrupted.data[last] ^= 0x55;
+                // A version-1 Initial whose Length runs past the datagram.
+                let mut overrun = vec![0xC0, 0, 0, 0, 1, 8];
+                overrun.extend_from_slice(&[9; 8]);
+                overrun.push(0);
+                overrun.push(0);
+                overrun.extend_from_slice(&[0xBF, 0xFF, 0xFF, 0xFF]);
+                overrun.extend_from_slice(&[0u8; 16]);
+                let overrun = ReceivedPacket {
+                    src_addr: peer,
+                    data: overrun,
+                    receive_time: now,
+                    transmit_time: None,
+                };
+                {
+                    let pending = endpoint.pending_authenticated_accept.as_mut().unwrap();
+                    pending
+                        .receive(corrupted, 16_384, now)
+                        .expect("a corrupted datagram is discarded, not fatal");
+                    pending
+                        .receive(overrun, 16_384, now)
+                        .expect("a length-overrun datagram is discarded, not fatal");
+                    assert_eq!(pending.received_packets, 0);
+                    assert_eq!(pending.authenticated_received_bytes, 0);
+                }
+
+                let initial_bytes = incoming.data.len() as u64;
+                endpoint
+                    .process_packet_batch(&cx, vec![incoming])
+                    .await
+                    .unwrap();
+                let pending = endpoint.pending_authenticated_accept.as_ref().unwrap();
+                assert_eq!(pending.authenticated_received_bytes, initial_bytes);
+                assert_eq!(pending.received_packets, 1);
+                endpoint.shutdown(&cx).await.unwrap();
             }));
         }
 

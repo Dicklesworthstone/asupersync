@@ -583,6 +583,30 @@ impl QuicStream {
         len: u64,
         is_fin: bool,
     ) -> Result<u64, QuicStreamError> {
+        // RFC 9000 §3.2 / §3.5: STREAM data that arrives after RESET_STREAM,
+        // or after this side sent STOP_SENDING (the peer may keep sending
+        // until it processes it), is discarded, not a connection error; only
+        // a segment past a known final size is a FINAL_SIZE_ERROR. Treating
+        // it as fatal failed the packet (and every frame coalesced with it)
+        // on ordinary reordering.
+        if let Some((_, final_size)) = self.recv_reset {
+            let end = offset
+                .checked_add(len)
+                .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
+            if end > final_size {
+                return Err(QuicStreamError::InvalidFinalSize {
+                    final_size,
+                    received: end,
+                });
+            }
+            return Ok(0);
+        }
+        if self.receive_stopped_error_code.is_some() {
+            offset
+                .checked_add(len)
+                .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
+            return Ok(0);
+        }
         let end = self.validate_receive_segment(offset, len, is_fin)?;
         let flow_delta = self.recv_credit.consume_to(end)?;
         if is_fin {
@@ -604,12 +628,8 @@ impl QuicStream {
         len: u64,
         is_fin: bool,
     ) -> Result<u64, QuicStreamError> {
-        if let Some((code, final_size)) = self.recv_reset {
-            return Err(QuicStreamError::ReceiveReset { code, final_size });
-        }
-        if let Some(code) = self.receive_stopped_error_code {
-            return Err(QuicStreamError::ReceiveStopped { code });
-        }
+        // Reset and stopped receive sides are handled (discarded) by
+        // `receive_segment` before this validation runs.
         let end = offset
             .checked_add(len)
             .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
@@ -1826,6 +1846,12 @@ impl StreamTable {
             .checked_add(len)
             .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
         let stream = self.stream(id)?;
+        // Data for a reset or stopped receive side is discarded on receipt
+        // (see `receive_segment`), so it is always admissible here and must
+        // not be screened against reassembly limits it will never occupy.
+        if stream.recv_reset.is_some() || stream.receive_stopped_error_code.is_some() {
+            return Ok(false);
+        }
         let connection_delta = end.saturating_sub(stream.recv_credit.used());
         self.recv_connection_credit
             .can_consume(connection_delta)
@@ -3043,6 +3069,51 @@ mod tests {
         s.on_stop_sending(42);
         let err = s.write(1).expect_err("must fail");
         assert_eq!(err, QuicStreamError::SendStopped { code: 42 });
+    }
+
+    /// RFC 9000 §3.2: data arriving after RESET_STREAM is discarded unless
+    /// it contradicts the final size; §3.5: after this side's STOP_SENDING
+    /// the peer may keep sending until it processes the frame. Neither is a
+    /// connection error (it used to fail the whole packet on reordering).
+    #[test]
+    fn stream_data_after_reset_or_stop_is_discarded_not_fatal() {
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 16, 16);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        tbl.accept_remote_stream(id).expect("accept");
+        let s = tbl.stream_mut(id).expect("stream");
+        s.receive_segment(0, 4, false).expect("first segment");
+        s.reset_receive(7, 8).expect("reset with final size 8");
+        assert_eq!(
+            s.receive_segment(4, 4, false)
+                .expect("reordered data inside the final size is discarded"),
+            0
+        );
+        assert_eq!(
+            s.receive_segment(0, 4, false)
+                .expect("duplicate is discarded"),
+            0
+        );
+        let err = s
+            .receive_segment(4, 8, false)
+            .expect_err("data past the declared final size is a final-size error");
+        assert_eq!(
+            err,
+            QuicStreamError::InvalidFinalSize {
+                final_size: 8,
+                received: 12,
+            }
+        );
+
+        let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 16, 16);
+        let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
+        tbl.accept_remote_stream(id).expect("accept");
+        let s = tbl.stream_mut(id).expect("stream");
+        s.stop_receiving(9);
+        assert_eq!(
+            s.receive_segment(0, 4, false)
+                .expect("data after our STOP_SENDING is discarded"),
+            0
+        );
     }
 
     #[test]

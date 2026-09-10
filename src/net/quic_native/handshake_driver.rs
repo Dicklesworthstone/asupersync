@@ -140,6 +140,23 @@ pub(crate) fn is_stale_handshake_packet_error(error: &QuicTlsError) -> bool {
     )
 }
 
+/// A datagram's first packet declared a Length past the datagram's end.
+pub(crate) const PACKET_LENGTH_OVERRUN_CODE: &str = "packet_length_overrun";
+
+/// True for a packet that failed to authenticate under live keys or was not
+/// even well-formed enough to try: a forgery from anyone who saw the
+/// cleartext Initial, a bit-flipped datagram, or a stray. RFC 9000 §12.2
+/// requires such packets to be discarded; they must never end a handshake
+/// that an authenticated peer is still driving.
+pub(crate) fn is_unauthenticated_handshake_packet_error(error: &QuicTlsError) -> bool {
+    matches!(
+        error,
+        QuicTlsError::CryptoProviderFailure { provider, code }
+            if *provider == "rustls-quic-handshake"
+                && (*code == PACKET_UNPROTECT_CODE || *code == PACKET_LENGTH_OVERRUN_CODE)
+    )
+}
+
 fn invalid_certificate(error: CertificateError) -> RustlsError {
     RustlsError::InvalidCertificate(error)
 }
@@ -848,7 +865,7 @@ impl QuicHandshakeDriver {
             };
             let packet_len = match prefix.packet_len(rest.len()) {
                 Ok(len) => len,
-                Err(_) if offset == 0 => return Err(handshake_failure("packet_length_overrun")),
+                Err(_) if offset == 0 => return Err(handshake_failure(PACKET_LENGTH_OVERRUN_CODE)),
                 Err(_) => break,
             };
             match self.process_long_header_packet(&prefix, &rest[..packet_len]) {
@@ -1301,6 +1318,10 @@ pub async fn client_handshake_over_udp(
                     let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
                     continue;
                 }
+                // A forged, corrupted or stray datagram is discarded (RFC
+                // 9000 §12.2) without a retransmit: the PTO clock below still
+                // bounds a handshake the real peer stopped driving.
+                Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
                 Err(err) => return Err(err),
             };
             let sent = driver
@@ -1430,6 +1451,10 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                     }
                     continue;
                 }
+                // A forged, corrupted or stray datagram is discarded (RFC
+                // 9000 §12.2) without a retransmit: the PTO clock still
+                // bounds a handshake the real peer stopped driving.
+                Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
                 Err(err) => return Err(err),
             };
             if peer.is_none() {
