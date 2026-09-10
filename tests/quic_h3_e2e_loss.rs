@@ -712,11 +712,13 @@ fn delayed_ack_report_for_older_loss_does_not_double_reduce_cwnd() {
     t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 5, 1200, 41_000));
 
     let first = t.on_ack_received(PacketNumberSpace::ApplicationData, &[4], 0, 60_000);
-    // The first ACK's 20 ms RTT leaves packet 2 younger than the 22.5 ms loss delay.
+    // Packet 1 crosses the packet threshold; packet 2 must survive this ACK.
+    // Its 21 ms age is below the fresh 20 ms RTT's 22.5 ms loss delay.
     assert_eq!(first.lost_packets, 1, "only packet 1 should be lost");
     let cwnd_after_first = t.congestion_window_bytes();
 
     let second = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 70_000);
+    // ACK 5 now crosses packet 2's packet threshold in the same recovery epoch.
     assert_eq!(second.lost_packets, 1, "second ack should lose packet 2");
     assert_eq!(
         t.congestion_window_bytes(),

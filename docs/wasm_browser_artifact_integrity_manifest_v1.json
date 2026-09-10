@@ -5,12 +5,12 @@
   "entries": [
     {
       "path": "docs/wasm_browser_sbom_v1.json",
-      "sha256": "71b0e13c1e1ce003a112fcd66b919b783be71b9048ee6aa3277343f2cf23a2fd",
+      "sha256": "65d3d8cf810d9e942002c1808b70fe78e79c14c9d0b465c712a95a80bc07e1af",
       "kind": "sbom"
     },
     {
       "path": "docs/wasm_browser_provenance_attestation_v1.json",
-      "sha256": "6077ea402c07b967a7df52f1177a577fb0243d61b9eb2e519196286331777205",
+      "sha256": "f33b8290d4d80d2d11ec79add0e8e9fdbdecc8674bd04bec9cc71e33a07e07c5",
       "kind": "provenance"
     },
     {
@@ -20,7 +20,7 @@
     },
     {
       "path": "packages/browser-core/index.js",
-      "sha256": "8e502eb39a97fbf9eecf9a8ad80c7ebb114ee52443e1cb60ffce63f62e93935e",
+      "sha256": "b56619dd48edf7564d0742719b13bc83e028c778ec177482cd083dc838959abe",
       "kind": "package-file"
     },
     {

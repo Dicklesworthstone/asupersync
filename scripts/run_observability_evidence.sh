@@ -81,6 +81,10 @@ has_scenario() {
     return 1
 }
 
+monotonic_ms() {
+    python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
+}
+
 git_state() {
     local sha
     if ! sha="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null)"; then
@@ -581,12 +585,12 @@ run_scenario() {
         return 0
     fi
 
-    start_ms="$(date +%s%3N)"
+    start_ms="$(monotonic_ms)"
     set +e
     run_command_capture "$scenario_id" "$stdout_path" "$stderr_path"
     rc=$?
     set -e
-    end_ms="$(date +%s%3N)"
+    end_ms="$(monotonic_ms)"
     duration_ms=$((end_ms - start_ms))
     cat "$stdout_path" "$stderr_path" > "$combined_path"
 

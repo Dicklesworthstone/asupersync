@@ -633,7 +633,7 @@
         "target_artifact": "artifacts/dependency_phase1_aggregate_signoff_v1.json",
         "stored_target_sha256": "f99bb9e88291d122b1f075c43480436ed1a94c0389174a472c9684d9b2ebf3c4",
         "stored_target_line_count": 327,
-        "live_target_sha256": "e161faad5a414035bb37280d03a40f7de6143393dd1d6899c05591657e473fc0",
+        "live_target_sha256": "15d7244af72fe94745c7c50030d6724e6c149582e93298e86dc9424ce3303bb5",
         "live_target_line_count": 345,
         "pin_state_at_capture": "historical",
         "edge_classification": "historical_back_reference",
@@ -657,7 +657,7 @@
       {
         "path_alias_id": "baseline-phase1-signoff",
         "source_artifact": "artifacts/dependency_phase1_aggregate_signoff_v1.json",
-        "source_artifact_sha256": "e161faad5a414035bb37280d03a40f7de6143393dd1d6899c05591657e473fc0",
+        "source_artifact_sha256": "15d7244af72fe94745c7c50030d6724e6c149582e93298e86dc9424ce3303bb5",
         "target_artifact": "artifacts/dependency_capability_baseline_v1.json",
         "stored_target_sha256": "168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad",
         "stored_target_line_count": null,
@@ -665,7 +665,7 @@
         "live_target_line_count": 3296,
         "pin_state_at_capture": "historical",
         "edge_classification": "historical_back_reference",
-        "source_node": "artifacts/dependency_phase1_aggregate_signoff_v1.json@e161faad5a414035bb37280d03a40f7de6143393dd1d6899c05591657e473fc0",
+        "source_node": "artifacts/dependency_phase1_aggregate_signoff_v1.json@15d7244af72fe94745c7c50030d6724e6c149582e93298e86dc9424ce3303bb5",
         "target_node": "artifacts/dependency_capability_baseline_v1.json@168e9a0b5f836c1d30b56c1fb6478092d8759b0d1fe144edbdb526cca5a488ad"
       },
       {
