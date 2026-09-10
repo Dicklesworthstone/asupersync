@@ -27,7 +27,21 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn oracle_now() -> Instant {
+    Instant::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn oracle_now() -> u64 {
+    crate::time::wasm_monotonic_nanos()
+}
 
 /// Priority level for scheduling decisions
 pub type Priority = u8;
@@ -60,7 +74,11 @@ pub struct PriorityInversion {
     /// Resource involved in the inversion
     pub resource: ResourceId,
     /// When the inversion started
+    #[cfg(not(target_arch = "wasm32"))]
     pub start_time: Instant,
+    #[cfg(target_arch = "wasm32")]
+    /// When the inversion started (nanoseconds).
+    pub start_time: u64,
     /// Duration of the inversion (None if still ongoing)
     pub duration: Option<Duration>,
     /// Type of inversion detected
@@ -131,7 +149,10 @@ struct TaskState {
     priority: Priority,
     lane: DispatchLane,
     worker_id: Option<WorkerId>,
+    #[cfg(not(target_arch = "wasm32"))]
     start_time: Instant,
+    #[cfg(target_arch = "wasm32")]
+    start_time: u64,
     blocked_on: Option<ResourceId>,
     blocking_tasks: HashSet<TaskId>,
     held_resources: HashSet<ResourceId>,
@@ -144,7 +165,10 @@ struct ResourceState {
     resource_id: ResourceId,
     owner: Option<TaskId>,
     waiters: VecDeque<TaskId>,
+    #[cfg(not(target_arch = "wasm32"))]
     creation_time: Instant,
+    #[cfg(target_arch = "wasm32")]
+    creation_time: u64,
 }
 
 /// Statistics for priority inversion monitoring
@@ -251,7 +275,7 @@ impl PriorityInversionOracle {
             priority,
             lane,
             worker_id,
-            start_time: Instant::now(),
+            start_time: oracle_now(),
             blocked_on: None,
             blocking_tasks: HashSet::new(),
             held_resources: HashSet::new(),
@@ -287,7 +311,7 @@ impl PriorityInversionOracle {
                 resource_id,
                 owner: None,
                 waiters: VecDeque::new(),
-                creation_time: Instant::now(),
+                creation_time: oracle_now(),
             });
 
         resource_state.owner = Some(task_id);
@@ -317,7 +341,7 @@ impl PriorityInversionOracle {
                 resource_id,
                 owner: None,
                 waiters: VecDeque::new(),
-                creation_time: Instant::now(),
+                creation_time: oracle_now(),
             });
 
         resource_state.waiters.push_back(task_id);
@@ -396,7 +420,7 @@ impl PriorityInversionOracle {
 
                 let inversion_id =
                     InversionId::new(self.next_inversion_id.fetch_add(1, Ordering::Relaxed));
-                let start_time = Instant::now();
+                let start_time = oracle_now();
 
                 let impact = if self.config.enable_impact_analysis {
                     self.analyze_inversion_impact(
@@ -520,7 +544,7 @@ impl PriorityInversionOracle {
                                     blocking_task: owner_task,
                                     blocking_priority: owner_state.priority,
                                     resource: resource_id,
-                                    start_time: Instant::now(),
+                                    start_time: oracle_now(),
                                     duration: None,
                                     inversion_type: InversionType::Chain,
                                     task_chain: chain.clone(),
@@ -596,8 +620,12 @@ impl PriorityInversionOracle {
         let mut active = self.active_inversions.write();
 
         if let Some(mut inversion) = active.remove(&inversion_id) {
-            let end_time = Instant::now();
-            let duration = end_time.duration_since(inversion.start_time);
+            #[cfg(not(target_arch = "wasm32"))]
+            let duration = Instant::now().duration_since(inversion.start_time);
+            #[cfg(target_arch = "wasm32")]
+            let duration = Duration::from_nanos(
+                crate::time::wasm_monotonic_nanos().saturating_sub(inversion.start_time),
+            );
 
             // Only record if above minimum duration threshold
             if duration.as_micros() as u64 >= self.config.min_inversion_duration_us {

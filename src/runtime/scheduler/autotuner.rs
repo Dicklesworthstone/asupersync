@@ -9,7 +9,9 @@
 //! The autotuner operates in configuration-driven mode with deterministic
 //! behavior under LabRuntime testing.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use crate::runtime::config::{BlockingPoolAffinityProfile, SchedulerPlacementMode};
 use crate::runtime::scheduler::three_lane::{AdaptiveBatchSizingProfile, PreemptionMetrics};
@@ -48,7 +50,11 @@ impl Default for AutotunerConfig {
 #[derive(Debug, Clone, Default)]
 pub struct HotPathObservation {
     /// Timestamp when observation was recorded.
+    #[cfg(not(target_arch = "wasm32"))]
     pub timestamp: Option<Instant>,
+    #[cfg(target_arch = "wasm32")]
+    /// Timestamp when observation was recorded.
+    pub timestamp: Option<u64>,
     /// Cancel lane dispatch ratio (basis points).
     pub cancel_dispatch_ratio_bps: u16,
     /// Timed lane dispatch ratio (basis points).
@@ -651,7 +657,10 @@ pub struct SchedulerAutotuner {
     config: AutotunerConfig,
     last_observation: Option<HotPathObservation>,
     observation_history: Vec<HotPathObservation>,
+    #[cfg(not(target_arch = "wasm32"))]
     last_adjustment_time: Option<Instant>,
+    #[cfg(target_arch = "wasm32")]
+    last_adjustment_time: Option<u64>,
 }
 
 impl SchedulerAutotuner {
@@ -687,9 +696,12 @@ impl SchedulerAutotuner {
         if let Some(last_adj) = self.last_adjustment_time {
             let current_time = last_obs.timestamp?;
             // Protect against clock skew/inconsistent timestamps
+            #[cfg(not(target_arch = "wasm32"))]
             let elapsed = current_time
                 .checked_duration_since(last_adj)
                 .unwrap_or_else(|| Duration::from_secs(0));
+            #[cfg(target_arch = "wasm32")]
+            let elapsed = Duration::from_nanos(current_time.saturating_sub(last_adj));
             if elapsed < Duration::from_millis(self.config.observation_window_ms) {
                 return None;
             }
@@ -750,7 +762,14 @@ impl SchedulerAutotuner {
 
     /// Mark that autotuner recommendations were applied.
     pub fn mark_adjustment_applied(&mut self) {
-        self.last_adjustment_time = Some(Instant::now());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.last_adjustment_time = Some(Instant::now());
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.last_adjustment_time = Some(crate::time::wasm_monotonic_nanos());
+        }
     }
 
     /// Analyze steal batch size performance and recommend adjustments.
@@ -1730,7 +1749,10 @@ pub fn extract_observation(metrics: &PreemptionMetrics) -> HotPathObservation {
     let estimated_latency = metrics.avg_timeout_park_nanos() / 1000;
 
     HotPathObservation {
+        #[cfg(not(target_arch = "wasm32"))]
         timestamp: Some(Instant::now()),
+        #[cfg(target_arch = "wasm32")]
+        timestamp: Some(crate::time::wasm_monotonic_nanos()),
         cancel_dispatch_ratio_bps: cancel_ratio,
         timed_dispatch_ratio_bps: timed_ratio,
         ready_dispatch_ratio_bps: ready_ratio,

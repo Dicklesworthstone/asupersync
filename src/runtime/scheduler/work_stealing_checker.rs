@@ -23,7 +23,9 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 /// Statistics for work-stealing operations.
 #[derive(Debug, Default, Clone)]
@@ -223,7 +225,10 @@ impl WorkStealingChecker {
             task_id,
             from_worker,
             to_worker,
+            #[cfg(not(target_arch = "wasm32"))]
             start_time: Instant::now(),
+            #[cfg(target_arch = "wasm32")]
+            start_time: crate::time::wasm_monotonic_nanos(),
             checker: self,
             completed: false,
         })
@@ -481,7 +486,10 @@ pub struct StealTracker<'a> {
     task_id: TaskId,
     from_worker: WorkerId,
     to_worker: WorkerId,
+    #[cfg(not(target_arch = "wasm32"))]
     start_time: Instant,
+    #[cfg(target_arch = "wasm32")]
+    start_time: u64,
     checker: &'a WorkStealingChecker,
     completed: bool,
 }
@@ -489,7 +497,12 @@ pub struct StealTracker<'a> {
 impl StealTracker<'_> {
     /// Records successful steal completion.
     pub fn success(mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         let duration = self.start_time.elapsed();
+        #[cfg(target_arch = "wasm32")]
+        let duration = Duration::from_nanos(
+            crate::time::wasm_monotonic_nanos().saturating_sub(self.start_time),
+        );
         self.checker
             .track_steal_success(self.task_id, self.from_worker, self.to_worker, duration);
         self.completed = true;

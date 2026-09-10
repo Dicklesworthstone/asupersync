@@ -16,6 +16,30 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn overhead_start() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn overhead_elapsed(start: std::time::Instant) -> Duration {
+    start.elapsed()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn overhead_start() -> u64 {
+    crate::time::wasm_monotonic_nanos()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline]
+fn overhead_elapsed(start: u64) -> Duration {
+    Duration::from_nanos(crate::time::wasm_monotonic_nanos().saturating_sub(start))
+}
+
 /// Configuration for scheduler invariant monitoring.
 #[derive(Debug, Clone)]
 pub struct InvariantConfig {
@@ -406,7 +430,7 @@ impl SchedulerInvariantMonitor {
             return;
         }
 
-        let start = std::time::Instant::now();
+        let start = overhead_start();
 
         let should_record_violation = {
             let task_state =
@@ -444,7 +468,7 @@ impl SchedulerInvariantMonitor {
             );
         }
 
-        self.update_monitoring_overhead(start.elapsed());
+        self.update_monitoring_overhead(overhead_elapsed(start));
     }
 
     /// Records a task being moved from any previous queue membership into a
@@ -464,7 +488,7 @@ impl SchedulerInvariantMonitor {
             return;
         }
 
-        let start = std::time::Instant::now();
+        let start = overhead_start();
 
         let task_state = self
             .task_states
@@ -486,7 +510,7 @@ impl SchedulerInvariantMonitor {
         task_state.last_update = timestamp;
         task_state.lifecycle_state = "enqueued".to_string();
 
-        self.update_monitoring_overhead(start.elapsed());
+        self.update_monitoring_overhead(overhead_elapsed(start));
     }
 
     /// Records a task being dequeued from a specific queue.
@@ -495,7 +519,7 @@ impl SchedulerInvariantMonitor {
             return;
         }
 
-        let start = std::time::Instant::now();
+        let start = overhead_start();
 
         if let Some(task_state) = self.task_states.get_mut(&task_id) {
             task_state.queues.remove(queue_name);
@@ -509,7 +533,7 @@ impl SchedulerInvariantMonitor {
             self.task_states.remove(&task_id);
         }
 
-        self.update_monitoring_overhead(start.elapsed());
+        self.update_monitoring_overhead(overhead_elapsed(start));
     }
 
     /// Records a task leaving the scheduler queues for execution.
@@ -518,7 +542,7 @@ impl SchedulerInvariantMonitor {
             return;
         }
 
-        let start = std::time::Instant::now();
+        let start = overhead_start();
 
         if let Some(task_state) = self.task_states.get_mut(&task_id) {
             task_state.queues.clear();
@@ -526,7 +550,7 @@ impl SchedulerInvariantMonitor {
         }
         self.task_states.remove(&task_id);
 
-        self.update_monitoring_overhead(start.elapsed());
+        self.update_monitoring_overhead(overhead_elapsed(start));
     }
 
     /// Records a task being cancelled.
@@ -617,7 +641,7 @@ impl SchedulerInvariantMonitor {
             return;
         }
 
-        let start = std::time::Instant::now();
+        let start = overhead_start();
 
         // Check reported vs actual depth
         if snapshot.reported_depth != snapshot.actual_tasks.len() {
@@ -652,7 +676,7 @@ impl SchedulerInvariantMonitor {
             }
         }
 
-        self.update_monitoring_overhead(start.elapsed());
+        self.update_monitoring_overhead(overhead_elapsed(start));
     }
 
     /// Verifies load balancing across workers.
@@ -661,7 +685,7 @@ impl SchedulerInvariantMonitor {
             return;
         }
 
-        let start = std::time::Instant::now();
+        let start = overhead_start();
 
         // Find min and max loaded workers
         let min_worker = worker_loads
@@ -690,7 +714,7 @@ impl SchedulerInvariantMonitor {
             }
         }
 
-        self.update_monitoring_overhead(start.elapsed());
+        self.update_monitoring_overhead(overhead_elapsed(start));
     }
 
     /// Records an invariant violation.

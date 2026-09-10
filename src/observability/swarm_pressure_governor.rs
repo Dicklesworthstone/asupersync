@@ -35,14 +35,14 @@
 use crate::cx::Cx;
 use crate::error::Error;
 use crate::observability::pressure_governor::{
-    AdmissionDecision, PressureGovernor, PressureGovernorConfig, PressureSnapshot,
+    AdmissionDecision, Instant, PressureGovernor, PressureGovernorConfig, PressureSnapshot,
 };
 use crate::runtime::resource_monitor::{DegradationLevel, RegionPriority, ResourceMonitor};
 use crate::types::{RegionId, id::next_bootstrap_region_id};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use thiserror::Error;
 
 const DEFAULT_PEER_PRESSURE_BACKPRESSURE_THRESHOLD: f64 = 0.80;

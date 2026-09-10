@@ -14,7 +14,149 @@ use crate::runtime::Runtime;
 use crate::runtime::resource_monitor::ResourceType;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+pub use std::time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(dead_code)]
+pub struct Instant(u64);
+
+#[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
+impl Instant {
+    #[inline]
+    pub fn now() -> Self {
+        Self(crate::time::wasm_monotonic_nanos())
+    }
+
+    #[inline]
+    pub fn elapsed(&self) -> Duration {
+        Self::now().duration_since(*self)
+    }
+
+    #[inline]
+    pub fn duration_since(&self, earlier: Self) -> Duration {
+        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+    }
+
+    #[inline]
+    pub fn saturating_duration_since(&self, earlier: Self) -> Duration {
+        self.duration_since(earlier)
+    }
+
+    #[inline]
+    pub fn checked_duration_since(&self, earlier: Self) -> Option<Duration> {
+        if self.0 >= earlier.0 {
+            Some(Duration::from_nanos(self.0 - earlier.0))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn checked_add(&self, duration: Duration) -> Option<Self> {
+        let nanos = u64::try_from(duration.as_nanos()).ok()?;
+        self.0.checked_add(nanos).map(Self)
+    }
+
+    #[inline]
+    pub fn checked_sub(&self, duration: Duration) -> Option<Self> {
+        let nanos = u64::try_from(duration.as_nanos()).ok()?;
+        self.0.checked_sub(nanos).map(Self)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Add<Duration> for Instant {
+    type Output = Self;
+    #[inline]
+    fn add(self, duration: Duration) -> Self {
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        Self(self.0.saturating_add(nanos))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Add<Duration> for &Instant {
+    type Output = Instant;
+    #[inline]
+    fn add(self, duration: Duration) -> Instant {
+        *self + duration
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::AddAssign<Duration> for Instant {
+    #[inline]
+    fn add_assign(&mut self, duration: Duration) {
+        *self = *self + duration;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Sub<Duration> for Instant {
+    type Output = Self;
+    #[inline]
+    fn sub(self, duration: Duration) -> Self {
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        Self(self.0.saturating_sub(nanos))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Sub<Duration> for &Instant {
+    type Output = Instant;
+    #[inline]
+    fn sub(self, duration: Duration) -> Instant {
+        *self - duration
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::SubAssign<Duration> for Instant {
+    #[inline]
+    fn sub_assign(&mut self, duration: Duration) {
+        *self = *self - duration;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Sub<Instant> for Instant {
+    type Output = Duration;
+    #[inline]
+    fn sub(self, earlier: Instant) -> Duration {
+        self.duration_since(earlier)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Sub<&Instant> for Instant {
+    type Output = Duration;
+    #[inline]
+    fn sub(self, earlier: &Instant) -> Duration {
+        self.duration_since(*earlier)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Sub<Instant> for &Instant {
+    type Output = Duration;
+    #[inline]
+    fn sub(self, earlier: Instant) -> Duration {
+        self.duration_since(earlier)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::ops::Sub<&Instant> for &Instant {
+    type Output = Duration;
+    #[inline]
+    fn sub(self, earlier: &Instant) -> Duration {
+        self.duration_since(*earlier)
+    }
+}
 
 const CHANNEL_BACKLOG_SAMPLE_UNAVAILABLE: u64 = u64::MAX;
 static NEXT_PRESSURE_GOVERNOR_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
@@ -238,7 +380,7 @@ pub struct SwarmCoordinationState {
     /// Peer runtime pressure states.
     pub peer_states: std::collections::HashMap<u64, PeerPressureState>,
     /// Last coordination timestamp.
-    pub last_coordination: std::time::Instant,
+    pub last_coordination: Instant,
     /// Coordination interval.
     pub coordination_interval: std::time::Duration,
 }
@@ -251,7 +393,7 @@ pub struct PeerPressureState {
     /// Peer's admission rate.
     pub admission_rate: f64,
     /// Last update timestamp.
-    pub last_update: std::time::Instant,
+    pub last_update: Instant,
     /// Whether peer is available for coordination.
     pub available: bool,
 }
@@ -2464,7 +2606,7 @@ mod tests {
         let peer_state = PeerPressureState {
             overall_pressure: 0.3,
             admission_rate: 0.9,
-            last_update: std::time::Instant::now(),
+            last_update: Instant::now(),
             available: true,
         };
 
