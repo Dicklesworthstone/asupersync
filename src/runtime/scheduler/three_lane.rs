@@ -7086,10 +7086,7 @@ impl ThreeLaneWorker {
         let drained = self.drain_spawn_admissions()
             + self.drain_local_spawn_admissions()
             + self.drain_region_commands();
-        if drained > 0 {
-            return true;
-        }
-        false
+        drained > 0
     }
 
     /// Tries to get cancel work from global or local queues.
