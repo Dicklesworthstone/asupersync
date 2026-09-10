@@ -420,6 +420,50 @@ fn authenticated_delta_mismatch_falls_back_to_full_transfer() {
     assert_eq!(std::fs::read(dst_file).unwrap(), payload);
 }
 
+/// asupersync-u4j7sr: the sender's RQ delta chunk manifest took one
+/// `File::read` as one chunk, and since the file poll path hops to the
+/// blocking pool in 128 KiB pieces every file larger than that advertised
+/// 128 KiB chunks against a 1 MiB chunk size; the receiver's fixed-size chunk
+/// validator then failed the whole re-sync with "malformed RQ delta chunk at
+/// position 0" (shipped in v0.4.11; the delta re-sync bench found it). The
+/// 79 KiB payloads above fit one read and never saw it, so this one is
+/// larger than a single read and larger than one chunk.
+#[test]
+fn authenticated_delta_fallback_survives_files_larger_than_one_file_read() {
+    let root = unique_tmp("auth_delta_large");
+    let src_dir = root.join("src");
+    let dst_dir = root.join("dst");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&dst_dir).unwrap();
+
+    let payload: Vec<u8> = (0..1_300_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761).rotate_left(5) >> 9) as u8)
+        .collect();
+    let src_file = src_dir.join("payload.bin");
+    let dst_file = dst_dir.join("payload.bin");
+    std::fs::write(&src_file, &payload).unwrap();
+    std::fs::write(&dst_file, vec![0x5A; payload.len()]).unwrap();
+
+    let mut receiver_config = auth_test_config();
+    receiver_config.enable_delta = true;
+    let mut sender_config = auth_test_config();
+    sender_config.enable_delta = true;
+
+    let (addr, recv_handle) = spawn_receiver(dst_dir.clone(), receiver_config);
+    let send = run_sender(addr, src_file, sender_config)
+        .expect("delta negotiation over a multi-chunk manifest completes");
+    let recv = recv_handle
+        .join()
+        .expect("receiver thread")
+        .expect("receiver validates the multi-chunk delta manifest and commits");
+
+    assert!(send.receipt.committed);
+    assert_eq!(send.bytes_sent, payload.len() as u64);
+    assert!(recv.committed);
+    assert_eq!(recv.bytes_received, payload.len() as u64);
+    assert_eq!(std::fs::read(dst_file).unwrap(), payload);
+}
+
 #[test]
 fn directory_tree_roundtrip_preserves_structure_and_bytes() {
     let root = unique_tmp("dir");

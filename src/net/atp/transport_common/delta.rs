@@ -98,10 +98,91 @@ impl DeltaObjectRequest {
     }
 }
 
+/// Fills `buf` from `reader` until it is full or the reader reports EOF and
+/// returns the byte count (`0` only at EOF).
+///
+/// One `AsyncReadExt::read` is not one chunk: `crate::fs::File`'s poll path
+/// hops to the blocking pool in bounded pieces (128 KiB), so a chunk builder
+/// that treated a single read as a `chunk_size` chunk produced 128 KiB chunks
+/// for every larger file and the peer's fixed-size chunk validator rejected
+/// the manifest as "malformed ... delta chunk at position 0"
+/// (asupersync-u4j7sr). Every delta chunk builder reads through this helper.
+pub async fn read_full_chunk<R>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize>
+where
+    R: crate::io::AsyncRead + Unpin,
+{
+    use crate::io::AsyncReadExt as _;
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let read = reader.read(&mut buf[filled..]).await?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    Ok(filled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// Serves at most `cap` bytes per poll, like `crate::fs::File` does since
+    /// its poll path hops to the blocking pool in bounded pieces.
+    struct ShortReader {
+        data: Vec<u8>,
+        pos: usize,
+        cap: usize,
+    }
+
+    impl crate::io::AsyncRead for ShortReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut crate::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            let n = buf
+                .remaining()
+                .min(this.cap)
+                .min(this.data.len() - this.pos);
+            buf.put_slice(&this.data[this.pos..this.pos + n]);
+            this.pos += n;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// asupersync-u4j7sr: a chunk is the whole buffer (or the tail at EOF),
+    /// not whatever one bounded read happened to return.
+    #[test]
+    fn read_full_chunk_fills_the_buffer_across_short_reads() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let mut reader = ShortReader {
+            data: data.clone(),
+            pos: 0,
+            cap: 128 * 1024,
+        };
+        let mut buf = vec![0u8; 256 * 1024];
+
+        let first = futures_lite::future::block_on(read_full_chunk(&mut reader, &mut buf)).unwrap();
+        assert_eq!(first, buf.len(), "one 128 KiB read is not a chunk");
+        assert_eq!(&buf[..first], &data[..first]);
+
+        let second =
+            futures_lite::future::block_on(read_full_chunk(&mut reader, &mut buf)).unwrap();
+        assert_eq!(
+            second,
+            data.len() - 256 * 1024,
+            "the final chunk is the tail"
+        );
+        assert_eq!(&buf[..second], &data[256 * 1024..]);
+
+        let eof = futures_lite::future::block_on(read_full_chunk(&mut reader, &mut buf)).unwrap();
+        assert_eq!(eof, 0);
+    }
 
     fn assert_legacy_request_fixture(fixture: Value, expected_mode: DeltaWireMode) {
         let decoded: DeltaObjectRequest =

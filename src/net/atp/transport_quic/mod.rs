@@ -4481,8 +4481,9 @@ async fn build_quic_delta_manifest_for_file(
     let mut content_id = ContentId::streaming();
     loop {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-        let read = file
-            .read(&mut buf)
+        // A whole `chunk_size` chunk per iteration (asupersync-u4j7sr): one
+        // read of `crate::fs::File` returns at most 128 KiB.
+        let read = crate::net::atp::transport_common::delta::read_full_chunk(&mut file, &mut buf)
             .await
             .map_err(|error| QuicTransportError::Source(format!("{}: {error}", path.display())))?;
         if read == 0 {

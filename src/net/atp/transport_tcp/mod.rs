@@ -1800,8 +1800,9 @@ async fn append_file_delta_chunks(
     let mut entry_offset = 0u64;
     let mut buf = vec![0u8; chunk_size];
     loop {
-        let n = file
-            .read(&mut buf)
+        // A whole `chunk_size` chunk per iteration (asupersync-u4j7sr): one
+        // read of `crate::fs::File` returns at most 128 KiB.
+        let n = crate::net::atp::transport_common::delta::read_full_chunk(&mut file, &mut buf)
             .await
             .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
         if n == 0 {
@@ -2311,8 +2312,9 @@ async fn append_receiver_delta_chunks(
         .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
     let mut buf = vec![0u8; chunk_size.max(1)];
     loop {
-        let n = file
-            .read(&mut buf)
+        // A whole `chunk_size` chunk per iteration (asupersync-u4j7sr): one
+        // read of `crate::fs::File` returns at most 128 KiB.
+        let n = crate::net::atp::transport_common::delta::read_full_chunk(&mut file, &mut buf)
             .await
             .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
         if n == 0 {
