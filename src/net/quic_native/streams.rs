@@ -3117,14 +3117,24 @@ mod tests {
     }
 
     #[test]
-    fn stop_receiving_blocks_future_reads() {
+    fn stop_receiving_discards_future_receives_and_blocks_reads() {
         let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 16, 16);
         let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
         tbl.accept_remote_stream(id).expect("accept");
         let s = tbl.stream_mut(id).expect("stream");
         s.stop_receiving(9);
-        let err = s.receive(1).expect_err("must fail");
-        assert_eq!(err, QuicStreamError::ReceiveStopped { code: 9 });
+        // RFC 9000 s3.5: the peer may keep sending until it processes our
+        // STOP_SENDING; that data is discarded, not a connection error.
+        s.receive(1)
+            .expect("data after our STOP_SENDING is discarded");
+        assert_eq!(s.receive_stopped_error_code, Some(9));
+        let err = tbl
+            .read_stream_bytes(id, 1)
+            .expect_err("the application read side stays stopped");
+        assert_eq!(
+            err,
+            StreamTableError::Stream(QuicStreamError::ReceiveStopped { code: 9 })
+        );
     }
 
     #[test]
@@ -3140,14 +3150,18 @@ mod tests {
         assert_eq!(s.recv_reset, Some((0x44, 8)));
         assert_eq!(s.final_size, Some(8));
 
+        // RFC 9000 s3.2: a post-reset segment inside the final size is
+        // discarded; only one past the final size is a final-size error.
+        tbl.receive_stream_segment(id, 3, 1, false)
+            .expect("post-reset stream frame inside the final size is discarded");
         let err = tbl
-            .receive_stream_segment(id, 3, 1, false)
-            .expect_err("post-reset stream frame rejected");
+            .receive_stream_segment(id, 3, 8, false)
+            .expect_err("post-reset stream frame past the final size");
         assert_eq!(
             err,
-            StreamTableError::Stream(QuicStreamError::ReceiveReset {
-                code: 0x44,
-                final_size: 8
+            StreamTableError::Stream(QuicStreamError::InvalidFinalSize {
+                final_size: 8,
+                received: 11
             })
         );
         let err = tbl

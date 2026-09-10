@@ -4107,16 +4107,11 @@ mod tests {
         assert_eq!(s.recv_reset, Some((0x44, 8)));
         assert_eq!(s.final_size, Some(8));
 
-        let err = conn
-            .receive_stream_bytes(&cx, stream, 3, Bytes::from_static(b"d"), false)
-            .expect_err("STREAM frames after RESET_STREAM are rejected");
-        assert_eq!(
-            err,
-            NativeQuicConnectionError::Stream(QuicStreamError::ReceiveReset {
-                code: 0x44,
-                final_size: 8
-            })
-        );
+        // RFC 9000 s3.2: a STREAM frame after RESET_STREAM inside the final
+        // size is discarded, not a connection error (it used to fail the
+        // whole packet on ordinary reordering).
+        conn.receive_stream_bytes(&cx, stream, 3, Bytes::from_static(b"d"), false)
+            .expect("STREAM frames after RESET_STREAM are discarded");
 
         let err = conn
             .read_stream_bytes(&cx, stream, 8)
@@ -5331,15 +5326,19 @@ mod tests {
     // --- Gap 5: stop_receiving via connection API ---
 
     #[test]
-    fn stop_receiving_blocks_subsequent_receives() {
+    fn stop_receiving_discards_subsequent_receives_and_blocks_reads() {
         let cx = test_cx();
         let mut conn = established_conn();
         let stream = conn.open_local_bidi(&cx).expect("open");
         conn.stop_receiving(&cx, stream, 0x42)
             .expect("stop_receiving");
+        // RFC 9000 s3.5: the peer may keep sending until it processes our
+        // STOP_SENDING; that data is discarded, not a connection error.
+        conn.receive_stream(&cx, stream, 1)
+            .expect("data after our STOP_SENDING is discarded");
         let err = conn
-            .receive_stream(&cx, stream, 1)
-            .expect_err("must fail after stop_receiving");
+            .read_stream_bytes(&cx, stream, 1)
+            .expect_err("the application read side stays stopped");
         assert_eq!(
             err,
             NativeQuicConnectionError::Stream(QuicStreamError::ReceiveStopped { code: 0x42 })
