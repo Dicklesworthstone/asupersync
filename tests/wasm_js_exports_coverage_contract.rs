@@ -1382,8 +1382,9 @@ fn browser_core_webtransport_terminal_paths_close_and_retire_host_state() {
     for marker in [
         "function isTerminalOutcome(outcome) {",
         "\"read_closed\",",
-        "\"read_failure\",",
-        "\"session_closed_error\",",
+        "function failWebTransportState(state, error, message, reason) {",
+        "failWebTransportState(state, error, \"datagram read failed\", \"read_failure\");",
+        "failWebTransportState(state, error, \"session closed with error\", \"session_closed_error\");",
         "closeHostWebTransportState(state, closeReason);",
         "closeHostWebTransportState(state, reason);",
         "if (isTerminalOutcome(result)) {",
