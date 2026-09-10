@@ -873,12 +873,31 @@ struct AdaptiveBatchRuntimeState {
     last_snapshot: Option<AdaptiveBatchDecisionSnapshot>,
 }
 
-struct WakeNotifier(Mutex<Option<Arc<dyn Fn() + Send + Sync>>>);
+/// Optional wake callback installed by a host pump (the browser microtask
+/// pump on wasm32). Every task wake passes through `notify_wake`, so `armed`
+/// gates the slot: on native no notifier is ever installed and the hottest
+/// path in the runtime must not pay for a mutex round trip to learn that.
+struct WakeNotifier {
+    armed: std::sync::atomic::AtomicBool,
+    slot: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl WakeNotifier {
+    fn new() -> Self {
+        Self {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            slot: Mutex::new(None),
+        }
+    }
+}
 
 impl std::fmt::Debug for WakeNotifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WakeNotifier")
-            .field("is_set", &self.0.lock().is_some())
+            .field(
+                "is_set",
+                &self.armed.load(std::sync::atomic::Ordering::Relaxed),
+            )
             .finish()
     }
 }
@@ -909,7 +928,7 @@ impl WorkerCoordinator {
             next_wake: CachePadded::new(AtomicUsize::new(0)),
             mask,
             io_driver,
-            wake_notifier: WakeNotifier(Mutex::new(None)),
+            wake_notifier: WakeNotifier::new(),
         }
     }
 
@@ -1011,12 +1030,22 @@ impl WorkerCoordinator {
     }
 
     pub(crate) fn set_wake_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) {
-        *self.wake_notifier.0.lock() = Some(notifier);
+        *self.wake_notifier.slot.lock() = Some(notifier);
+        self.wake_notifier
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     #[inline]
     pub(crate) fn notify_wake(&self) {
-        let notifier = self.wake_notifier.0.lock().clone();
+        if !self
+            .wake_notifier
+            .armed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let notifier = self.wake_notifier.slot.lock().clone();
         if let Some(notifier) = notifier {
             notifier();
         }
