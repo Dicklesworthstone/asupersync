@@ -21,6 +21,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+#[cfg(not(target_arch = "wasm32"))]
 static START_TIME: OnceLock<Instant> = OnceLock::new();
 const CUSTOM_TIME_GETTER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
@@ -43,9 +44,30 @@ const CUSTOM_TIME_GETTER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// function in this module" — regardless of which branch it takes. Whichever
 /// time source is constructed first (typically the driver's `WallClock` at
 /// runtime startup) claims the epoch; all later ones share it.
+#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn process_epoch() -> Instant {
     *START_TIME.get_or_init(Instant::now)
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Process epoch is unsupported on wasm32.
+#[must_use]
+pub fn process_epoch() -> Instant {
+    panic!("std::time::Instant is unsupported on wasm32")
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Returns monotonic nanoseconds since first call on wasm32 targets.
+#[must_use]
+pub(crate) fn wasm_monotonic_nanos() -> u64 {
+    static START_MS: OnceLock<f64> = OnceLock::new();
+    static LAST_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let start = *START_MS.get_or_init(js_sys::Date::now);
+    let elapsed_ms = (js_sys::Date::now() - start).max(0.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let nanos = (elapsed_ms * 1_000_000.0) as u64;
+    LAST_NANOS.fetch_max(nanos, Ordering::Relaxed).max(nanos)
 }
 
 #[derive(Debug)]
@@ -244,13 +266,20 @@ pub fn wall_now() -> Time {
     // This preserves compatibility for truly capability-free contexts. The
     // epoch is the shared process epoch so this branch stays comparable with
     // the production `WallClock` timer driver (see `process_epoch`).
-    let start = process_epoch();
-    let now = Instant::now();
-    if now < start {
-        Time::ZERO
-    } else {
-        let elapsed = now.duration_since(start);
-        Time::from_nanos(duration_to_nanos(elapsed))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let start = process_epoch();
+        let now = Instant::now();
+        if now < start {
+            Time::ZERO
+        } else {
+            let elapsed = now.duration_since(start);
+            Time::from_nanos(duration_to_nanos(elapsed))
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Time::from_nanos(wasm_monotonic_nanos())
     }
 }
 

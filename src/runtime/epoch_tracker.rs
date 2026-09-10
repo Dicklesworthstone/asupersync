@@ -1101,9 +1101,18 @@ impl EpochConsistencyTracker {
 
         // Check for consistency violations after this transition
         drop(records); // Release lock before consistency check
+        #[cfg(not(target_arch = "wasm32"))]
         let processing_start = std::time::Instant::now();
+        #[cfg(target_arch = "wasm32")]
+        let processing_start = crate::time::wasm_monotonic_nanos();
+
         self.check_consistency_internal(&publication, now);
+
+        #[cfg(not(target_arch = "wasm32"))]
         let processing_latency = processing_start.elapsed().as_nanos() as u64;
+        #[cfg(target_arch = "wasm32")]
+        let processing_latency =
+            crate::time::wasm_monotonic_nanos().saturating_sub(processing_start);
 
         self.enqueue_telemetry(
             &publication,

@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Shared `Instant` origin used to serialize monotonic timestamps into a
 /// single `u64` nanosecond counter for lockless rate limiting.
 fn time_origin() -> Instant {
@@ -27,6 +28,7 @@ fn time_origin() -> Instant {
     *ORIGIN.get_or_init(Instant::now)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Convert an `Instant` to nanoseconds since [`time_origin`]. Values will
 /// never be zero in practice because callers sample `Instant::now()` strictly
 /// after the origin is captured; we reserve `0` as a "never advanced" sentinel.
@@ -36,11 +38,34 @@ fn instant_to_nanos(t: Instant) -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Convert a serialized nanosecond counter back to an [`Instant`].
 fn nanos_to_instant(nanos: u64) -> Instant {
     time_origin()
         .checked_add(Duration::from_nanos(nanos))
         .unwrap_or_else(Instant::now)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn nanos_to_instant(_nanos: u64) -> Instant {
+    panic!("std::time::Instant is unsupported on wasm32")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[inline]
+fn now_nanos() -> u64 {
+    instant_to_nanos(Instant::now())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_nanos() -> u64 {
+    static START_MS: OnceLock<f64> = OnceLock::new();
+    static LAST_NANOS: AtomicU64 = AtomicU64::new(0);
+    let start = *START_MS.get_or_init(js_sys::Date::now);
+    let elapsed_ms = (js_sys::Date::now() - start).max(0.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let nanos = (elapsed_ms * 1_000_000.0) as u64;
+    LAST_NANOS.fetch_max(nanos, Ordering::Relaxed).max(nanos)
 }
 
 fn next_pin_debug_id() -> u64 {
@@ -145,7 +170,7 @@ impl GlobalEpochCounter {
         // Seed `last_advance` with "now" so the first `try_advance()` call is
         // correctly rate limited until `advance_interval` has elapsed. The
         // counter itself still starts at 1 so epoch 0 can act as a sentinel.
-        let now_nanos = instant_to_nanos(Instant::now());
+        let now_nanos = now_nanos();
         Self {
             epoch: AtomicU64::new(1),
             last_advance: AtomicU64::new(now_nanos.max(1)),
@@ -167,8 +192,7 @@ impl GlobalEpochCounter {
     /// it was throttled because less than `advance_interval` has elapsed
     /// since the previous successful advance.
     pub fn try_advance(&self) -> Option<u64> {
-        let now = Instant::now();
-        let now_nanos = instant_to_nanos(now);
+        let now_nanos = now_nanos();
         let interval_nanos = self.advance_interval.as_nanos() as u64;
 
         loop {
@@ -190,9 +214,8 @@ impl GlobalEpochCounter {
 
     /// Force epoch advancement (bypasses rate limiting).
     pub fn force_advance(&self) -> u64 {
-        let now = Instant::now();
         self.last_advance
-            .store(instant_to_nanos(now), Ordering::Release);
+            .store(now_nanos(), Ordering::Release);
         self.advance_epoch()
     }
 
@@ -277,7 +300,7 @@ impl LocalEpochPin {
             self.pinned_epoch.store(epoch, Ordering::Release);
             self.stats
                 .pin_start
-                .store(instant_to_nanos(Instant::now()).max(1), Ordering::Release);
+                .store(now_nanos().max(1), Ordering::Release);
             self.is_active.store(true, Ordering::Release);
             // SeqCst fence after announcing the pin (mirrors crossbeam-epoch).
             // The pin announce-store and the reclaimer's pin scan in
@@ -337,7 +360,7 @@ impl LocalEpochPin {
 
         if previous_depth == 1 {
             self.is_active.store(false, Ordering::Release);
-            let now = instant_to_nanos(Instant::now());
+            let now = now_nanos();
             let start = self.stats.pin_start.swap(0, Ordering::AcqRel);
             let duration = now.saturating_sub(start);
             let _ = self
@@ -421,7 +444,7 @@ impl SafePointDetector {
 
     /// Check if the given epoch is safe for cleanup.
     pub fn is_safe_point(&self, epoch: u64) -> bool {
-        let start = Instant::now();
+        let start = now_nanos();
         let result = self.compute_safe_point() >= epoch;
 
         // Update statistics
@@ -429,7 +452,7 @@ impl SafePointDetector {
         if result {
             self.stats.safe_point_count.fetch_add(1, Ordering::Relaxed);
         }
-        let elapsed = start.elapsed().as_nanos() as u64;
+        let elapsed = now_nanos().saturating_sub(start);
         self.stats
             .check_time_ns
             .fetch_add(elapsed, Ordering::Relaxed);
@@ -675,7 +698,7 @@ impl DeferredCleanupQueue {
     /// passes `E` to reclaim everything scheduled while the world was at
     /// epochs `< E`.
     pub fn execute_safe_cleanups(&self, safe_epoch: u64) -> usize {
-        let start = Instant::now();
+        let start = now_nanos();
         let mut executed = 0;
         let mut entries_to_requeue = Vec::new();
 
@@ -702,7 +725,7 @@ impl DeferredCleanupQueue {
         if executed > 0 {
             self.execute_count
                 .fetch_add(executed as u64, Ordering::Relaxed);
-            let elapsed = start.elapsed().as_nanos() as u64;
+            let elapsed = now_nanos().saturating_sub(start);
             self.cleanup_time_ns.fetch_add(elapsed, Ordering::Relaxed);
         }
 
