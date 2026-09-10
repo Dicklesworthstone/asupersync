@@ -213,10 +213,11 @@ pub use blocking_pool::{
     BlockingPool, BlockingPoolHandle, BlockingPoolOptions, BlockingTaskHandle,
 };
 pub use builder::{
-    BrowserRuntime, BrowserRuntimeBuildError, BrowserRuntimeBuilder, BrowserRuntimeSelectionResult,
-    BrowserServiceWorkerBrokerSupportDiagnostics, BrowserServiceWorkerBrokerSupportReason,
-    BrowserSharedWorkerCoordinatorSupportDiagnostics, BrowserSharedWorkerCoordinatorSupportReason,
-    BrowserWorkerFallbackTarget, CheckedJoinHandle, DeadlineMonitoringBuilder, JoinHandle,
+    BrowserHostServices, BrowserRuntime, BrowserRuntimeBuildError, BrowserRuntimeBuilder,
+    BrowserRuntimeSelectionResult, BrowserServiceWorkerBrokerSupportDiagnostics,
+    BrowserServiceWorkerBrokerSupportReason, BrowserSharedWorkerCoordinatorSupportDiagnostics,
+    BrowserSharedWorkerCoordinatorSupportReason, BrowserWorkerFallbackTarget, BrowserWorkerPump,
+    CheckedJoinHandle, DeadlineMonitoringBuilder, JoinHandle, LocalJoinHandle, PumpDrainOutcome,
     RootDrainOutcome, Runtime, RuntimeBuilder, RuntimeHandle,
 };
 pub use cache::{

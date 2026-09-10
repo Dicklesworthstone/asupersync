@@ -193,6 +193,7 @@ use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
@@ -243,6 +244,7 @@ impl Drop for ScopedRuntimeHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeHostServicesKind {
     NativeStdThread,
+    BrowserMicrotask,
 }
 
 #[allow(dead_code)] // Used on wasm32 target
@@ -250,6 +252,7 @@ impl RuntimeHostServicesKind {
     const fn as_str(self) -> &'static str {
         match self {
             Self::NativeStdThread => "native-std-thread",
+            Self::BrowserMicrotask => "browser-microtask",
         }
     }
 }
@@ -319,6 +322,10 @@ trait RuntimeHostServices: Send + Sync {
 
     fn browser_contract(&self) -> BrowserHostServicesContract {
         BrowserHostServicesContract::V1
+    }
+
+    fn browser_pump(&self) -> Option<Arc<BrowserWorkerPump>> {
+        None
     }
 
     fn spawn_workers(
@@ -495,7 +502,292 @@ impl RuntimeHostServices for NativeThreadHostServices {
 }
 
 fn default_runtime_host_services() -> Arc<dyn RuntimeHostServices> {
-    Arc::new(NativeThreadHostServices::new())
+    #[cfg(target_arch = "wasm32")]
+    {
+        Arc::new(BrowserHostServices::new())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Arc::new(NativeThreadHostServices::new())
+    }
+}
+
+/// Outcome of draining a batch of scheduler tasks through [`BrowserWorkerPump`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PumpDrainOutcome {
+    /// No runnable tasks were available in the scheduler queues.
+    Idle,
+    /// Successfully executed tasks within the burst limit.
+    Completed(usize),
+    /// Reached the microtask burst limit while more tasks remain runnable.
+    BurstLimitReached(usize),
+    /// The pump was invoked re-entrantly and was rejected by the re-entrancy guard.
+    ReentrantPrevented,
+    /// The underlying worker is currently locked or unavailable.
+    WorkerUnavailable,
+}
+
+/// A microtask-driven execution pump for single-worker browser runtimes.
+///
+/// Drives `ThreeLaneWorker::run_pump_step` in bounded microtask bursts, enforces
+/// a re-entrancy guard against recursive host turn invocation, and yields to the
+/// macro-task event loop when the burst limit is exhausted.
+pub struct BrowserWorkerPump {
+    worker: Mutex<Option<ThreeLaneWorker>>,
+    in_pump: AtomicBool,
+    scheduled: AtomicBool,
+    microtask_burst_limit: usize,
+    self_weak: Mutex<Weak<Self>>,
+}
+
+impl BrowserWorkerPump {
+    /// Creates a new pump with the specified microtask burst limit.
+    #[must_use]
+    pub fn new(microtask_burst_limit: usize) -> Self {
+        Self {
+            worker: Mutex::new(None),
+            in_pump: AtomicBool::new(false),
+            scheduled: AtomicBool::new(false),
+            microtask_burst_limit: if microtask_burst_limit == 0 {
+                32
+            } else {
+                microtask_burst_limit
+            },
+            self_weak: Mutex::new(Weak::new()),
+        }
+    }
+
+    /// Sets the weak reference back to the owning `Arc`.
+    pub fn set_self_weak(&self, weak: Weak<Self>) {
+        *self.self_weak.lock() = weak;
+    }
+
+    /// Returns the configured microtask burst limit.
+    #[must_use]
+    pub fn microtask_burst_limit(&self) -> usize {
+        self.microtask_burst_limit
+    }
+
+    /// Installs the single worker and registers its wake notifier.
+    pub fn install_worker(&self, worker: ThreeLaneWorker, _runtime: &Arc<RuntimeInner>) {
+        let weak_self = self.self_weak.lock().clone();
+        worker.set_wake_notifier(Arc::new(move || {
+            if let Some(pump) = weak_self.upgrade() {
+                pump.schedule_pump();
+            }
+        }));
+        *self.worker.lock() = Some(worker);
+    }
+
+    /// Schedules a microtask pump step if not already scheduled.
+    pub fn schedule_pump(&self) {
+        if self.scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let weak_self = self.self_weak.lock().clone();
+        schedule_microtask(move || {
+            if let Some(pump) = weak_self.upgrade() {
+                pump.scheduled.store(false, Ordering::Release);
+                let outcome = pump.drain_batch(pump.microtask_burst_limit);
+                if matches!(outcome, PumpDrainOutcome::BurstLimitReached(_)) {
+                    let weak_yield = pump.self_weak.lock().clone();
+                    schedule_macro_yield(move || {
+                        if let Some(p) = weak_yield.upgrade() {
+                            p.schedule_pump();
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    /// Drains runnable tasks up to `max_steps`, enforcing the re-entrancy guard.
+    pub fn drain_batch(&self, max_steps: usize) -> PumpDrainOutcome {
+        if self.in_pump.swap(true, Ordering::AcqRel) {
+            return PumpDrainOutcome::ReentrantPrevented;
+        }
+        struct ReentrancyGuard<'a>(&'a AtomicBool);
+        impl Drop for ReentrancyGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _guard = ReentrancyGuard(&self.in_pump);
+
+        let mut worker_guard = match self.worker.try_lock() {
+            Some(g) => g,
+            None => return PumpDrainOutcome::WorkerUnavailable,
+        };
+        let Some(worker) = worker_guard.as_mut() else {
+            return PumpDrainOutcome::WorkerUnavailable;
+        };
+
+        let mut executed = 0;
+        while executed < max_steps {
+            if !worker.run_pump_step() {
+                if executed == 0 {
+                    return PumpDrainOutcome::Idle;
+                }
+                return PumpDrainOutcome::Completed(executed);
+            }
+            executed += 1;
+        }
+
+        PumpDrainOutcome::BurstLimitReached(executed)
+    }
+
+    /// Executes a single pump step.
+    pub fn step(&self) -> bool {
+        matches!(self.drain_batch(1), PumpDrainOutcome::Completed(1))
+    }
+
+    /// Runs until all currently queued tasks have finished executing.
+    pub fn run_until_idle(&self) -> usize {
+        let mut total = 0;
+        loop {
+            match self.drain_batch(self.microtask_burst_limit) {
+                PumpDrainOutcome::Idle => break total,
+                PumpDrainOutcome::Completed(n) | PumpDrainOutcome::BurstLimitReached(n) => {
+                    total += n;
+                }
+                PumpDrainOutcome::ReentrantPrevented | PumpDrainOutcome::WorkerUnavailable => {
+                    break total;
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for BrowserWorkerPump {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserWorkerPump")
+            .field("in_pump", &self.in_pump.load(Ordering::Relaxed))
+            .field("scheduled", &self.scheduled.load(Ordering::Relaxed))
+            .field("microtask_burst_limit", &self.microtask_burst_limit)
+            .finish()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_pump_bindings {
+    use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_name = queueMicrotask, catch)]
+        pub fn js_queue_microtask(cb: &js_sys::Function) -> Result<(), JsValue>;
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn schedule_microtask<F: FnOnce() + 'static>(f: F) {
+    use wasm_bindgen::JsCast;
+    let cb = wasm_bindgen::closure::Closure::once_into_js(f);
+    if let Ok(func) = cb.dyn_into::<js_sys::Function>() {
+        let _ = wasm_pump_bindings::js_queue_microtask(&func);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn schedule_macro_yield<F: FnOnce() + 'static>(f: F) {
+    use wasm_bindgen::JsCast;
+    if let Ok(channel) = web_sys::MessageChannel::new() {
+        let cb = wasm_bindgen::closure::Closure::once_into_js(f);
+        if let Ok(func) = cb.dyn_into::<js_sys::Function>() {
+            channel.port1().set_onmessage(Some(&func));
+            let _ = channel.port2().post_message(&wasm_bindgen::JsValue::UNDEFINED);
+        }
+    } else {
+        schedule_microtask(f);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn schedule_microtask<F: FnOnce() + 'static>(_f: F) {
+    // Native tests drive the pump directly
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn schedule_macro_yield<F: FnOnce() + 'static>(_f: F) {
+    // Native tests drive the pump directly
+}
+
+/// Browser host services providing threadless single-worker startup and microtask scheduling.
+#[derive(Clone, Debug)]
+pub struct BrowserHostServices {
+    pump: Arc<BrowserWorkerPump>,
+}
+
+impl BrowserHostServices {
+    /// Creates a new browser host services instance with default burst limit (32).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_burst_limit(32)
+    }
+
+    /// Creates a new browser host services instance with the specified microtask burst limit.
+    #[must_use]
+    pub fn with_burst_limit(microtask_burst_limit: usize) -> Self {
+        let pump = Arc::new(BrowserWorkerPump::new(microtask_burst_limit));
+        pump.set_self_weak(Arc::downgrade(&pump));
+        Self { pump }
+    }
+
+    /// Returns the underlying browser worker pump.
+    #[must_use]
+    pub fn pump(&self) -> Arc<BrowserWorkerPump> {
+        Arc::clone(&self.pump)
+    }
+}
+
+impl Default for BrowserHostServices {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RuntimeHostServices for BrowserHostServices {
+    fn kind(&self) -> RuntimeHostServicesKind {
+        RuntimeHostServicesKind::BrowserMicrotask
+    }
+
+    fn browser_contract(&self) -> BrowserHostServicesContract {
+        BrowserHostServicesContract::V1
+    }
+
+    fn browser_pump(&self) -> Option<Arc<BrowserWorkerPump>> {
+        Some(Arc::clone(&self.pump))
+    }
+
+    fn spawn_workers(
+        &self,
+        runtime: &Arc<RuntimeInner>,
+        mut workers: Vec<ThreeLaneWorker>,
+    ) -> io::Result<Vec<std::thread::JoinHandle<()>>> {
+        if workers.is_empty() {
+            return Ok(Vec::new());
+        }
+        if workers.len() != 1 {
+            return Err(io::Error::other(format!(
+                "BrowserHostServices requires single-worker topology, got {} workers",
+                workers.len()
+            )));
+        }
+        let Some(worker) = workers.pop() else {
+            return Ok(Vec::new());
+        };
+        self.pump.install_worker(worker, runtime);
+        Ok(Vec::new())
+    }
+
+    fn start_deadline_monitor(
+        &self,
+        _config: &RuntimeConfig,
+        _state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        _dispatch_task_table: Option<Arc<crate::sync::ContendedMutex<crate::runtime::TaskTable>>>,
+    ) -> DeadlineMonitorHostService {
+        DeadlineMonitorHostService::disabled()
+    }
 }
 
 #[allow(dead_code)] // Used on wasm32 target
@@ -2290,6 +2582,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the host services implementation for worker and deadline-monitor lifecycle.
+    #[must_use]
+    pub fn host_services(mut self, host_services: Arc<dyn RuntimeHostServices>) -> Self {
+        self.host_services = host_services;
+        self
+    }
+
     /// Set the runtime-wide admission ceiling for borrowed scoped CPU workers.
     ///
     /// Every [`Cx::scoped_cpu`](crate::cx::Cx::scoped_cpu) call backed by this
@@ -3553,16 +3852,37 @@ impl Runtime {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (
+            if host_services.kind() != RuntimeHostServicesKind::BrowserMicrotask {
+                let _ = (
+                    reactor,
+                    io_driver,
+                    timer_driver,
+                    entropy_source,
+                    terminal_io_reactor_snapshot,
+                    current_thread,
+                );
+                return Err(Error::new(crate::error::ErrorKind::ConfigError)
+                    .with_message(unsupported_browser_bootstrap_message(host_services)));
+            }
+            config.worker_threads = 1;
+            let (inner, workers) = RuntimeInner::new(
+                config,
                 reactor,
                 io_driver,
                 timer_driver,
                 entropy_source,
                 terminal_io_reactor_snapshot,
-                current_thread,
+                host_services,
             );
-            Err(Error::new(crate::error::ErrorKind::ConfigError)
-                .with_message(unsupported_browser_bootstrap_message(host_services)))
+            let inner = Arc::new(inner);
+            if let Some(pump) = host_services.browser_pump() {
+                let _ = inner.browser_pump.set(pump);
+            }
+            let _ = host_services.spawn_workers(&inner, workers).map_err(|e| {
+                Error::new(crate::error::ErrorKind::Internal)
+                    .with_message(format!("runtime init: {e}"))
+            })?;
+            Ok(Self { inner })
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3576,6 +3896,9 @@ impl Runtime {
                 host_services,
             );
             let inner = Arc::new(inner);
+            if let Some(pump) = host_services.browser_pump() {
+                let _ = inner.browser_pump.set(pump);
+            }
             // GH#58: install the current-thread driver before the worker
             // thread exists, so that thread runs the loan protocol from its
             // first dispatch loop.
@@ -3605,6 +3928,40 @@ impl Runtime {
     #[must_use]
     pub fn handle(&self) -> RuntimeHandle {
         RuntimeHandle::strong(Arc::clone(&self.inner))
+    }
+
+    /// Returns the browser worker pump if this runtime was constructed with [`BrowserHostServices`].
+    #[must_use]
+    pub fn browser_pump(&self) -> Option<Arc<BrowserWorkerPump>> {
+        self.inner.browser_pump.get().map(Arc::clone)
+    }
+
+    /// Spawns a local `!Send` future pinned to the runtime's single worker thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime is no longer available or admission is denied.
+    pub fn spawn_local<F>(&self, future: F) -> LocalJoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.try_spawn_local(future)
+            .expect("failed to spawn local task")
+    }
+
+    /// Tries to spawn a local `!Send` future pinned to the runtime's single worker thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] if the runtime has shut down,
+    /// or other admission errors if rejected.
+    pub fn try_spawn_local<F>(&self, future: F) -> Result<LocalJoinHandle<F::Output>, SpawnError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.inner.spawn_local(future)
     }
 
     /// Run a future to completion on the current thread.
@@ -4432,6 +4789,42 @@ impl RuntimeHandle {
         self.try_inner()?.spawn(future)
     }
 
+    /// Returns the browser worker pump if the underlying runtime was constructed with [`BrowserHostServices`].
+    #[must_use]
+    pub fn browser_pump(&self) -> Option<Arc<BrowserWorkerPump>> {
+        self.try_inner()
+            .ok()
+            .and_then(|inner| inner.browser_pump.get().map(Arc::clone))
+    }
+
+    /// Spawns a local `!Send` future pinned to the runtime's single worker thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the runtime is no longer available or admission is denied.
+    pub fn spawn_local<F>(&self, future: F) -> LocalJoinHandle<F::Output>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.try_spawn_local(future)
+            .expect("failed to spawn local task")
+    }
+
+    /// Tries to spawn a local `!Send` future pinned to the runtime's single worker thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpawnError::RuntimeUnavailable`] if the runtime has shut down,
+    /// or other admission errors if rejected.
+    pub fn try_spawn_local<F>(&self, future: F) -> Result<LocalJoinHandle<F::Output>, SpawnError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        self.try_inner()?.spawn_local(future)
+    }
+
     /// Spawn a task with a [`Cx`](crate::cx::Cx) from outside async context.
     ///
     /// Creates a child Cx in the runtime's root region and passes it to the
@@ -4597,6 +4990,88 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
+/// A join handle returned by [`Runtime::spawn_local`] or [`RuntimeHandle::spawn_local`].
+///
+/// Supports caller-supplied `!Send` futures executed on the runtime's single worker thread.
+/// Resolves to `Result<T, crate::runtime::JoinError>` where cancellation or shutdown drop
+/// is reported as an error rather than panicking, while task panics are resumed via `resume_unwind`.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct LocalJoinHandle<T> {
+    state: Arc<Mutex<JoinState<T>>>,
+    completed: bool,
+}
+
+impl<T> LocalJoinHandle<T> {
+    pub(crate) fn new(state: Arc<Mutex<JoinState<T>>>) -> Self {
+        Self {
+            state,
+            completed: false,
+        }
+    }
+
+    /// Returns `true` if the local task has completed or terminated.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        if self.completed {
+            return true;
+        }
+        let guard = lock_state(&self.state);
+        guard.is_terminal() || Arc::strong_count(&self.state) == 1
+    }
+}
+
+impl<T> Future for LocalJoinHandle<T> {
+    type Output = Result<T, crate::runtime::JoinError>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.completed {
+            return Poll::Ready(Err(crate::runtime::JoinError::PolledAfterCompletion));
+        }
+        let mut guard = lock_state(&this.state);
+        if let Some(reason) = guard.cancel_reason.take() {
+            this.completed = true;
+            return Poll::Ready(Err(crate::runtime::JoinError::Cancelled(reason)));
+        }
+        match guard.result.take() {
+            None => {
+                if Arc::strong_count(&this.state) == 1 {
+                    this.completed = true;
+                    return Poll::Ready(Err(crate::runtime::JoinError::Cancelled(
+                        crate::types::CancelReason::shutdown(),
+                    )));
+                }
+
+                if !guard
+                    .waker
+                    .as_ref()
+                    .is_some_and(|w| w.will_wake(cx.waker()))
+                {
+                    guard.waker = Some(cx.waker().clone());
+                }
+                Poll::Pending
+            }
+            Some(Ok(output)) => {
+                this.completed = true;
+                Poll::Ready(Ok(output))
+            }
+            Some(Err(payload)) => {
+                this.completed = true;
+                drop(guard);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for LocalJoinHandle<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalJoinHandle")
+            .field("completed", &self.completed)
+            .finish()
+    }
+}
+
 #[pin_project::pin_project]
 struct CatchUnwind<F> {
     #[pin]
@@ -4721,6 +5196,8 @@ struct RuntimeInner {
     /// (GH#58); unset for every other topology.
     current_thread_driver:
         std::sync::OnceLock<Arc<crate::runtime::current_thread::CurrentThreadDriver>>,
+    /// Browser worker pump if initialized with `BrowserHostServices`.
+    browser_pump: std::sync::OnceLock<Arc<BrowserWorkerPump>>,
 }
 
 impl RuntimeInner {
@@ -5033,6 +5510,7 @@ impl RuntimeInner {
                 request_task_counter: std::sync::atomic::AtomicU32::new(1),
                 shutdown_completion: Arc::new(RuntimeShutdownCompletion::new()),
                 current_thread_driver: std::sync::OnceLock::new(),
+                browser_pump: std::sync::OnceLock::new(),
             },
             workers,
         )
@@ -5081,6 +5559,69 @@ impl RuntimeInner {
             config.blocking.max_threads,
             options,
         ))
+    }
+
+    fn spawn_local<F>(&self, future: F) -> Result<LocalJoinHandle<F::Output>, SpawnError>
+    where
+        F: Future + 'static,
+        F::Output: 'static,
+    {
+        let spawn_guard = self.spawn_liveness_guard()?;
+        let join_state = Arc::new(Mutex::new(JoinState::new()));
+        let task_producer = JoinProducer::new(Arc::clone(&join_state));
+
+        let wrapped = async move {
+            let result = CatchUnwind { inner: future }.await;
+            task_producer.complete(result);
+        };
+
+        let provisional = self.next_request_task_id();
+        let factory: crate::runtime::spawn_mailbox::LocalSpawnFactoryFn = Box::new(move |_cx| {
+            Box::pin(async move {
+                wrapped.await;
+                crate::types::Outcome::Ok(())
+            })
+        });
+
+        let cancel_producer = JoinProducer::new(Arc::clone(&join_state));
+        let error_producer = JoinProducer::new(Arc::clone(&join_state));
+        let on_unadmitted_cancel: Option<crate::runtime::spawn_mailbox::UnadmittedCancelFn> =
+            Some(Box::new(move |reason| {
+                cancel_producer.cancel(reason);
+            }));
+        let on_admission_error: Option<crate::runtime::spawn_mailbox::AdmissionErrorFn> =
+            Some(Box::new(move |error| {
+                let mut reason = crate::types::CancelReason::user("spawn admission failed");
+                reason.message = Some(error.to_string());
+                error_producer.cancel(reason);
+            }));
+
+        let pending_reservation = self
+            .root_pending_spawns
+            .as_ref()
+            .map(|counter| counter.reserve());
+
+        let request = crate::runtime::spawn_mailbox::LocalSpawnRequest {
+            task_id: provisional,
+            region: self.root_region,
+            budget: Budget::new(),
+            factory,
+            on_unadmitted_cancel,
+            on_admission_error,
+            pending_reservation,
+            admitted_slot: None,
+        };
+
+        crate::runtime::spawn_mailbox::enqueue_local_spawn(request);
+
+        if let Some(pump) = self.browser_pump.get() {
+            pump.schedule_pump();
+        } else {
+            self.scheduler.notify_spawn_enqueued();
+        }
+
+        drop(spawn_guard);
+        Ok(LocalJoinHandle::new(join_state))
     }
 
     fn spawn<F>(&self, future: F) -> Result<JoinHandle<F::Output>, SpawnError>
@@ -11442,6 +11983,98 @@ worker_threads = 16
         assert_eq!(
             after, 0,
             "dropping the runtime on another thread must retire that thread's keyed store on its next touch"
+        );
+    }
+
+    #[test]
+    fn browser_host_services_pump_contract_and_local_future_resolution() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let host_services = Arc::new(BrowserHostServices::with_burst_limit(4));
+
+        // 1. Threadless startup check
+        let runtime = RuntimeBuilder::new()
+            .host_services(host_services)
+            .build()
+            .expect("threadless runtime builder build succeeds");
+
+        assert!(
+            lock_state(&runtime.inner.worker_threads).is_empty(),
+            "BrowserHostServices must not spawn worker threads"
+        );
+        let runtime_pump = runtime.browser_pump().expect("browser pump present");
+        assert_eq!(runtime_pump.microtask_burst_limit(), 4);
+
+        // 2. Nonreentrancy guard check
+        runtime_pump.in_pump.store(true, Ordering::SeqCst);
+        let outcome = runtime_pump.drain_batch(10);
+        assert_eq!(outcome, PumpDrainOutcome::ReentrantPrevented);
+        runtime_pump.in_pump.store(false, Ordering::SeqCst);
+
+        // 3. Bounded burst limit check: spawn 10 tasks
+        let counter = Rc::new(Cell::new(0u32));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let c = Rc::clone(&counter);
+            handles.push(runtime.spawn_local(async move {
+                c.set(c.get() + 1);
+            }));
+        }
+
+        // With burst limit 4, draining batches of 4 tasks hits burst limit
+        let batch1 = runtime_pump.drain_batch(4);
+        assert_eq!(batch1, PumpDrainOutcome::BurstLimitReached(4));
+
+        let batch2 = runtime_pump.drain_batch(4);
+        assert_eq!(batch2, PumpDrainOutcome::BurstLimitReached(4));
+
+        let batch3 = runtime_pump.drain_batch(4);
+        assert_eq!(batch3, PumpDrainOutcome::Completed(2));
+
+        let batch4 = runtime_pump.drain_batch(4);
+        assert_eq!(batch4, PumpDrainOutcome::Idle);
+
+        assert_eq!(counter.get(), 10);
+        for handle in handles {
+            assert!(handle.is_finished());
+        }
+
+        // 4. Local !Send future resolution check
+        let value = Rc::new(Cell::new(100u32));
+        let val_clone = Rc::clone(&value);
+        let mut handle = runtime.spawn_local(async move {
+            val_clone.set(val_clone.get() + 23);
+            val_clone.get()
+        });
+
+        assert!(!handle.is_finished());
+        let drained = runtime_pump.run_until_idle();
+        assert_eq!(drained, 1);
+        assert!(handle.is_finished());
+        assert_eq!(value.get(), 123);
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let result = Pin::new(&mut handle).poll(&mut cx);
+        assert_eq!(result, Poll::Ready(Ok(123)));
+
+        // 5. Cancelled/dropped before completion returns Err(JoinError::Cancelled) rather than panicking
+        let mut cancelled_handle = runtime.spawn_local(std::future::pending::<u32>());
+        assert!(!cancelled_handle.is_finished());
+        drop(runtime);
+        assert!(cancelled_handle.is_finished());
+
+        let mut cx2 = Context::from_waker(&waker);
+        match Pin::new(&mut cancelled_handle).poll(&mut cx2) {
+            Poll::Ready(Err(crate::runtime::JoinError::Cancelled(reason))) => {
+                assert!(reason.is_shutdown());
+            }
+            other => panic!("expected cancelled join error, got {other:?}"),
+        }
+        assert_eq!(
+            Pin::new(&mut cancelled_handle).poll(&mut cx2),
+            Poll::Ready(Err(crate::runtime::JoinError::PolledAfterCompletion))
         );
     }
 }

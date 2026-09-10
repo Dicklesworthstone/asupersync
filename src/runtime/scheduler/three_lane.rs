@@ -873,6 +873,16 @@ struct AdaptiveBatchRuntimeState {
     last_snapshot: Option<AdaptiveBatchDecisionSnapshot>,
 }
 
+struct WakeNotifier(Mutex<Option<Arc<dyn Fn() + Send + Sync>>>);
+
+impl std::fmt::Debug for WakeNotifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WakeNotifier")
+            .field("is_set", &self.0.lock().is_some())
+            .finish()
+    }
+}
+
 /// Coordination for waking workers.
 #[derive(Debug)]
 pub(crate) struct WorkerCoordinator {
@@ -883,6 +893,7 @@ pub(crate) struct WorkerCoordinator {
     mask: Option<usize>,
     /// I/O driver handle for waking the reactor.
     io_driver: Option<IoDriverHandle>,
+    wake_notifier: WakeNotifier,
 }
 
 impl WorkerCoordinator {
@@ -898,6 +909,7 @@ impl WorkerCoordinator {
             next_wake: CachePadded::new(AtomicUsize::new(0)),
             mask,
             io_driver,
+            wake_notifier: WakeNotifier(Mutex::new(None)),
         }
     }
 
@@ -935,11 +947,13 @@ impl WorkerCoordinator {
     #[inline]
     pub(crate) fn wake_one(&self) {
         if !self.wake_one_parker_prefer_waiter() {
+            self.notify_wake();
             return;
         }
         if let Some(io) = &self.io_driver {
             let _ = io.wake();
         }
+        self.notify_wake();
     }
 
     /// Publishes one concrete Parker permit without calling the reactor.
@@ -951,12 +965,14 @@ impl WorkerCoordinator {
     #[inline]
     pub(crate) fn wake_one_parker(&self) {
         self.wake_one_parker_prefer_waiter();
+        self.notify_wake();
     }
 
     #[inline]
     pub(crate) fn wake_many(&self, num_wakes: usize) {
         let count = self.parkers.len();
         if count == 0 || num_wakes == 0 {
+            self.notify_wake();
             return;
         }
         if num_wakes >= count {
@@ -969,6 +985,7 @@ impl WorkerCoordinator {
         if let Some(io) = &self.io_driver {
             let _ = io.wake();
         }
+        self.notify_wake();
     }
 
     #[inline]
@@ -979,6 +996,7 @@ impl WorkerCoordinator {
         if let Some(io) = &self.io_driver {
             let _ = io.wake();
         }
+        self.notify_wake();
     }
 
     #[inline]
@@ -988,6 +1006,19 @@ impl WorkerCoordinator {
         }
         if let Some(io) = &self.io_driver {
             let _ = io.wake();
+        }
+        self.notify_wake();
+    }
+
+    pub(crate) fn set_wake_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) {
+        *self.wake_notifier.0.lock() = Some(notifier);
+    }
+
+    #[inline]
+    pub(crate) fn notify_wake(&self) {
+        let notifier = self.wake_notifier.0.lock().clone();
+        if let Some(notifier) = notifier {
+            notifier();
         }
     }
 }
@@ -6993,6 +7024,37 @@ impl ThreeLaneWorker {
         false
     }
 
+    /// Sets a wake notification callback invoked when tasks wake this worker.
+    pub fn set_wake_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) {
+        self.coordinator.set_wake_notifier(notifier);
+    }
+
+    /// Runs a single scheduling pump step with thread-local worker context installed.
+    ///
+    /// Sets up worker-local scheduler state, local ready queue, fast queue,
+    /// worker id, spawn lane owner, and local store key before executing `run_once`.
+    ///
+    /// Returns `true` if a task was executed.
+    pub fn run_pump_step(&mut self) -> bool {
+        let _guard = ScopedLocalScheduler::new(Arc::clone(&self.local));
+        let _queue_guard = LocalQueue::set_current(self.fast_queue.clone());
+        let _local_ready_guard = ScopedLocalReady::new(Arc::clone(&self.local_ready));
+        let _worker_guard = ScopedWorkerId::new(self.id);
+        let _local_spawn_owner_guard = self.spawn_mailbox.as_ref().map(|mailbox| {
+            crate::runtime::spawn_mailbox::ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox))
+        });
+        let _store_key_guard =
+            crate::runtime::local::ScopedLocalStoreKey::new(self.local_store_key());
+        self.rescue_stranded_local_tasks();
+        if self.run_once() {
+            return true;
+        }
+        if self.schedule_ready_finalizers() {
+            return self.run_once();
+        }
+        false
+    }
+
     /// Tries to get cancel work from global or local queues.
     pub(crate) fn try_cancel_work(&mut self) -> Option<TaskId> {
         // Global cancel has priority (cross-thread cancellations)
@@ -7673,6 +7735,7 @@ impl ThreeLaneWorker {
                     cancellation,
                     cx_inner: weak_inner,
                     scheduler_evidence: self.scheduler_evidence.clone(),
+                    coordinator: Arc::clone(&self.coordinator),
                 }))
             } else {
                 Waker::from(Arc::new(ThreeLaneWaker {
@@ -7709,6 +7772,7 @@ impl ThreeLaneWorker {
                         parker: self.parker.clone(),
                         cx_inner: Arc::downgrade(inner),
                         scheduler_evidence: self.scheduler_evidence.clone(),
+                        coordinator: Arc::clone(&self.coordinator),
                     }))
                 } else {
                     Waker::from(Arc::new(CancelLaneWaker {
@@ -8434,6 +8498,7 @@ struct ThreeLaneLocalWaker {
     cancellation: Arc<CxCancellationState>,
     cx_inner: Weak<RwLock<CxInner>>,
     scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
+    coordinator: Arc<WorkerCoordinator>,
 }
 
 impl ThreeLaneLocalWaker {
@@ -8471,6 +8536,7 @@ impl ThreeLaneLocalWaker {
                     .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
             }
             self.parker.unpark();
+            self.coordinator.notify_wake();
         }
     }
 }
@@ -8554,6 +8620,7 @@ struct ThreeLaneLocalCancelWaker {
     parker: Parker,
     cx_inner: Weak<RwLock<CxInner>>,
     scheduler_evidence: Option<Arc<Mutex<SchedulerEvidenceCollector>>>,
+    coordinator: Arc<WorkerCoordinator>,
 }
 
 impl ThreeLaneLocalCancelWaker {
@@ -8596,6 +8663,7 @@ impl ThreeLaneLocalCancelWaker {
                 .record_task_enqueue(self.task_id, crate::time::wall_now().as_nanos());
         }
         self.parker.unpark();
+        self.coordinator.notify_wake();
     }
 }
 
