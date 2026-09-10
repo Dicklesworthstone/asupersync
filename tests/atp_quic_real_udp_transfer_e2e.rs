@@ -605,6 +605,69 @@ fn run_transfer_via_lossy_proxy(
     })
 }
 
+/// Same lossy-proxy transfer, keeping the shared trace collector (sized by
+/// `collector_capacity` entries) so a test can count sender-side events such
+/// as `atp_quic.control_stream.retransmit` over the whole transfer.
+fn run_transfer_via_lossy_proxy_with_collector(
+    send_cfg: QuicConfig,
+    recv_cfg: QuicConfig,
+    source: &Path,
+    dest_dir: &Path,
+    seed: u64,
+    proxy_timeout: Duration,
+    collector_capacity: usize,
+) -> (
+    Result<SendReport, QuicTransportError>,
+    Result<ReceiveReport, QuicTransportError>,
+    LogCollector,
+) {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let collector = LogCollector::new(collector_capacity).with_min_level(LogLevel::Trace);
+        cx.set_log_collector(collector.clone());
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server_endpoint = bind_server_endpoint(&cx, listen)
+            .await
+            .expect("bind server endpoint");
+        let server_addr = server_endpoint.local_addr();
+        let proxy = LossyUdpProxy::spawn_with_rate_timeout(server_addr, seed, None, proxy_timeout);
+        let (send, recv) = zip(
+            send_path(&cx, proxy.addr, source, send_cfg, "atp-quic-client"),
+            receive_on_endpoint(&cx, server_endpoint, dest_dir, &recv_cfg, "atp-quic-server"),
+        )
+        .await;
+        (send, recv, collector)
+    })
+}
+
+/// One sender-side stall-expiry re-send of source-stream frames, as traced by
+/// `atp_quic.control_stream.retransmit` with a `source_stream*_pto` reason.
+#[derive(Debug, Clone)]
+struct StallPtoResend {
+    reason: String,
+    stream_frames: u64,
+    packets: u64,
+}
+
+fn stall_pto_resends(collector: &LogCollector) -> Vec<StallPtoResend> {
+    collector
+        .peek()
+        .into_iter()
+        .filter(|entry| entry.message() == "atp_quic.control_stream.retransmit")
+        .filter_map(|entry| {
+            let reason = entry.get_field("reason")?;
+            if !(reason.starts_with("source_stream") && reason.ends_with("_pto")) {
+                return None;
+            }
+            Some(StallPtoResend {
+                reason: reason.to_string(),
+                stream_frames: entry.get_field("stream_frames")?.parse().ok()?,
+                packets: entry.get_field("packets")?.parse().ok()?,
+            })
+        })
+        .collect()
+}
+
 fn need_more_round_losses(collector: &LogCollector) -> Vec<f64> {
     collector
         .peek()
@@ -956,6 +1019,109 @@ fn real_udp_quic_transfer_recovers_lost_client_finished_flight() {
         std::fs::read(dst.path().join("finished-drop.bin")).expect("read committed"),
         payload,
         "committed bytes must match through a dropped Finished flight"
+    );
+    assert_no_staging_residue(dst.path());
+}
+
+/// The packed 2000-member tree of the br-asupersync-daqxbz regression: the
+/// manifest spans >100 control-stream packets while ~200-byte bodies keep the
+/// bulk phase short. Returns the members as (relative path, bytes).
+fn write_lossy_manifest_tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    std::fs::create_dir_all(root).expect("mkdir tree root");
+    let mut expected = Vec::with_capacity(2000);
+    for index in 0..2000usize {
+        let rel = format!("dir_{:02}/member_{index:04}.bin", index % 40);
+        let path = root.join(&rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        let len = 160 + (index % 11) * 13;
+        let payload = (0..len)
+            .map(|byte| ((byte.wrapping_mul(29) + index.wrapping_mul(13)) % 251) as u8)
+            .collect::<Vec<_>>();
+        std::fs::write(&path, &payload).expect("write tree member");
+        expected.push((rel, payload));
+    }
+    expected
+}
+
+/// Largest single proof-wait stall-expiry re-send the fixed sender may take:
+/// the ramp starts at the 8-packet fast-drain size, doubles only while the
+/// peer stays ACK-silent, and is capped at the 64-packet ack-gap burst
+/// ceiling, so a receiver that stays silent for several intervals never sees
+/// the old 91-146-packet storms rebuild.
+const MAX_STALL_PTO_RESEND_PACKETS: u64 = 64;
+/// Total stall-expiry re-sends over the whole transfer: about twice the
+/// ~150-packet manifest, where the old sender re-sent ~146 packets per storm
+/// for five or more storms.
+const MAX_STALL_PTO_RESEND_TOTAL_PACKETS: u64 = 320;
+
+/// asupersync-9bb6pt: the same lossy packed-tree transfer, measured. Before
+/// the fix the sender's stall expiry (200 ms base) fired at the path RTT
+/// (~200 ms) while it awaited the receiver's Proof, drained every in-flight
+/// source-stream packet (~311 frames / 146 packets) and re-sent all of them,
+/// repeating every stall interval while the receiver — acknowledging once per
+/// drained batch — fell further behind under ~6.7 MB of duplicates; the
+/// head-of-line hole was filled only by the fifth storm at ~9.9 s. The stall
+/// threshold now floors at base + RTT + variance + burst time, and a silent
+/// expiry re-sends a probe-sized burst that grows only with further silence,
+/// so stall-expiry re-sends stay bounded per storm and in total.
+#[test]
+fn real_udp_quic_tree_manifest_stall_pto_resends_stay_bounded() {
+    let src = tempfile::tempdir().expect("src dir");
+    let dst = tempfile::tempdir().expect("dst dir");
+    let root = src.path().join("tree");
+    let expected = write_lossy_manifest_tree(&root);
+    let mut cfg = transport_authenticated_configs();
+    cfg.send.round0_loss_target = 0.10;
+    cfg.recv.round0_loss_target = 0.10;
+    cfg.send.idle_timeout = Duration::from_secs(45);
+    cfg.recv.idle_timeout = Duration::from_secs(45);
+    cfg.send.handshake_timeout = Duration::from_secs(20);
+    cfg.recv.handshake_timeout = Duration::from_secs(20);
+    cfg.send.accept_timeout = Duration::from_secs(20);
+    cfg.recv.accept_timeout = Duration::from_secs(20);
+    let (send, recv, collector) = run_transfer_via_lossy_proxy_with_collector(
+        cfg.send,
+        cfg.recv,
+        &root,
+        dst.path(),
+        0xDA_0B_2D_15,
+        Duration::from_secs(75),
+        65_536,
+    );
+    let resends = stall_pto_resends(&collector);
+    let total_packets: u64 = resends.iter().map(|resend| resend.packets).sum();
+    let total_frames: u64 = resends.iter().map(|resend| resend.stream_frames).sum();
+    let max_packets = resends
+        .iter()
+        .map(|resend| resend.packets)
+        .max()
+        .unwrap_or(0);
+    println!(
+        "proof_wait_pto_resends={} max_packets={max_packets} total_packets={total_packets} \
+         total_stream_frames={total_frames} resends={resends:?}",
+        resends.iter().filter(|resend| resend.reason.ends_with("proof_wait_pto")).count()
+    );
+    let send = send.unwrap_or_else(|err| {
+        panic!("lossy tree-manifest sender must complete: {err:?}; receiver={recv:?}")
+    });
+    let recv = recv.expect("lossy tree-manifest receiver commits");
+    assert!(recv.committed, "receiver must commit the packed tree");
+    assert_eq!(send.transfer_id, recv.transfer_id);
+    assert_eq!(send.files as usize, expected.len());
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert!(
+        max_packets <= MAX_STALL_PTO_RESEND_PACKETS,
+        "a single stall-expiry re-send must stay probe-sized on a live path \
+         (asupersync-9bb6pt): max {max_packets} packets > {MAX_STALL_PTO_RESEND_PACKETS}; \
+         resends={resends:?}"
+    );
+    assert!(
+        total_packets <= MAX_STALL_PTO_RESEND_TOTAL_PACKETS,
+        "stall-expiry re-sends over the transfer must stay bounded \
+         (asupersync-9bb6pt): {total_packets} packets > {MAX_STALL_PTO_RESEND_TOTAL_PACKETS}; \
+         resends={resends:?}"
     );
     assert_no_staging_residue(dst.path());
 }

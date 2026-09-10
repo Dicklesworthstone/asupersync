@@ -1226,7 +1226,22 @@ const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS: usize = 8;
 /// detected set is real burst loss and gets drained in few rounds instead
 /// of 8 packets per PTO-clocked firing.
 const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS: usize = 64;
+/// Ceiling of the stall-expiry (PTO) drain in the flush and unacked-gate
+/// loops. The proof wait no longer uses it: it ramps from the fast-drain size
+/// to the ack-gap burst ceiling via `QuicLink::stall_retransmit_packet_cap`
+/// (asupersync-9bb6pt: an unconditional 256-packet drain every proof-wait
+/// stall interval re-sent ~311 frames per storm to a receiver that was still
+/// draining the previous storm).
 const QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS: usize = 256;
+/// Doublings from [`QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS`] to the
+/// proof wait's ceiling, [`QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS`]
+/// (8 << 3 = 64): a silent proof wait never re-sends more per expiry than the
+/// ack-gap burst drain does, so a storm cannot rebuild itself after a few
+/// silent intervals.
+const STALL_RETRANSMIT_RAMP_MAX_SHIFT: u32 = 3;
+/// RFC 9002 §6.2.1 timer granularity floor for the RTT-variance term of the
+/// stall threshold (`QuicLink::stall_pto_floor`).
+const STALL_PTO_RTT_GRANULARITY_MICROS: u64 = 1_000;
 
 fn packet_lost_by_ack_gap(packet_number: u64, acked_ranges: &[NativeAckRange]) -> bool {
     let Some(largest_acked) = acked_ranges.iter().map(|range| range.largest).max() else {
@@ -2835,12 +2850,21 @@ pub struct QuicLink {
     /// on each expiry that declared loss (cap [`APP_LOSS_STALL_PTO_MAX`]),
     /// resets to [`SOURCE_STREAM_PTO`] on real ACK progress — see the cap's
     /// docs for the spurious-loss wedge this prevents (br-asupersync-daqxbz).
+    /// The proof wait additionally floors it at the path RTT
+    /// ([`Self::stall_pto_floor`], asupersync-9bb6pt).
     app_loss_stall_pto: Duration,
     /// When `app_loss_stall_pto` last doubled. The stall expiry is
     /// re-entered on every ~200 ms iteration while the source stream is
     /// cwnd-blocked, so without this the threshold doubled per iteration
     /// instead of once per interval and saturated within a second.
     stall_backoff_at: Option<Instant>,
+    /// Consecutive proof-wait stall-expiry drains taken while the peer's ACKs
+    /// stayed silent (no ACK progress since the previous drain). Grows that
+    /// drain's re-send cap geometrically from a probe-sized burst, so a receiver that
+    /// is slow to acknowledge (once per drained batch, the GH#67 cadence) is
+    /// not flooded with copies of everything in flight on the very first
+    /// expiry; real ACK progress resets it (asupersync-9bb6pt).
+    stall_silent_drains: u32,
     /// Sender-side limiter telemetry (br-asupersync-bi2462.2).
     ///
     /// Stall reasons with held time, cwnd and in-flight peaks,
@@ -3661,10 +3685,68 @@ impl QuicLink {
     }
 
     /// Restore the stall threshold to its base value (real ACK progress or a
-    /// fresh source stream).
+    /// fresh source stream) and forget the proof-wait silent-drain streak.
     fn reset_stall_pto(&mut self) {
         self.app_loss_stall_pto = SOURCE_STREAM_PTO;
         self.stall_backoff_at = None;
+        self.stall_silent_drains = 0;
+    }
+
+    /// Lowest stall threshold the proof wait uses: the base cadence plus the
+    /// path's smoothed RTT and variance (the RFC 9002 §6.2.1 PTO shape) plus
+    /// the time the last flushed source-stream burst takes to serialize at
+    /// the current pacing rate. Below that an expiry fires before the burst's
+    /// ACKs can possibly return, drains every in-flight packet and re-sends
+    /// copies the receiver is about to acknowledge; the receiver, ACKing once
+    /// per drained batch, falls further behind under the duplicates and the
+    /// storm sustains itself (asupersync-9bb6pt: ~311 frames re-sent per
+    /// ~2 s storm, ~6.7 MB of duplicates queued at the receiver). On a
+    /// loopback path the floor is the 200 ms base; on a 100 ms-each-way lossy
+    /// path it lands near 450 ms. Capped at [`APP_LOSS_STALL_PTO_MAX`].
+    fn stall_pto_floor(&self) -> Duration {
+        let rtt = self.conn.transport().rtt();
+        let path_micros = rtt.smoothed_rtt_micros().map_or(0, |srtt| {
+            let variance = rtt.rttvar_micros().unwrap_or(0).saturating_mul(4);
+            srtt.saturating_add(variance.max(STALL_PTO_RTT_GRANULARITY_MICROS))
+        });
+        let burst_bytes = self
+            .last_flushed_stream_frames
+            .iter()
+            .map(|frame| frame.len)
+            .fold(0u64, u64::saturating_add);
+        let burst_micros = self
+            .stream_rate_controller
+            .as_ref()
+            .map(|pacer| pacer.rate_bytes_per_s)
+            .filter(|rate| *rate > 0)
+            .map_or(0, |rate| burst_bytes.saturating_mul(1_000_000) / rate);
+        SOURCE_STREAM_PTO
+            .saturating_add(Duration::from_micros(path_micros))
+            .saturating_add(Duration::from_micros(burst_micros))
+            .min(APP_LOSS_STALL_PTO_MAX)
+    }
+
+    /// How many in-flight packets the proof wait's stall-expiry drain may
+    /// re-send: a probe-sized burst on the first silent expiry, doubling on
+    /// each further expiry that still saw no ACK progress, up to the ack-gap
+    /// burst ceiling [`QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS`]
+    /// (never the 256-packet flush drain). Real burst loss with a live
+    /// receiver never reaches this path (its ACK gaps drive the fast drain);
+    /// a silent peer gets evidence-bounded copies instead of the whole window
+    /// (asupersync-9bb6pt). The flush and unacked-gate drains keep the full
+    /// [`QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS`] cap: they clock
+    /// cwnd-blocked control traffic, and ramping them slowed a contended
+    /// receiver's per-member progress until the sender's proof wait timed out.
+    fn stall_retransmit_packet_cap(&self) -> usize {
+        let shift = self.stall_silent_drains.min(STALL_RETRANSMIT_RAMP_MAX_SHIFT);
+        (QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS << shift)
+            .min(QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS)
+    }
+
+    /// Record a stall-expiry drain that re-sent in-flight frames without
+    /// ACK progress since the previous one.
+    fn note_stall_retransmit_drain(&mut self) {
+        self.stall_silent_drains = self.stall_silent_drains.saturating_add(1);
     }
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
@@ -5988,7 +6070,10 @@ impl QuicLink {
                 continue;
             }
 
-            if last_retransmit.elapsed() >= self.app_loss_stall_pto {
+            // The proof wait floors the stall threshold at the path RTT
+            // (asupersync-9bb6pt); the other stall loops keep the shared
+            // threshold as is, since they clock cwnd-blocked control traffic.
+            if last_retransmit.elapsed() >= self.app_loss_stall_pto.max(self.stall_pto_floor()) {
                 // Declare PTO loss BEFORE the pending-frames guard: a
                 // cwnd-blocked flush leaves requeued retransmit frames
                 // pending forever, and skipping expiry while frames are
@@ -6003,9 +6088,10 @@ impl QuicLink {
                     continue;
                 }
                 let retransmit_frames = self.drain_limited_in_flight_stream_frames_for_retransmit(
-                    QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
+                    self.stall_retransmit_packet_cap(),
                 );
                 if !retransmit_frames.is_empty() {
+                    self.note_stall_retransmit_drain();
                     pto_retransmit_frames =
                         pto_retransmit_frames.saturating_add(retransmit_frames.len() as u64);
                     super::quic_progress(format_args!(
@@ -6185,6 +6271,7 @@ fn link_from_handshake(
         last_final_flight_resend: None,
         app_loss_stall_pto: SOURCE_STREAM_PTO,
         stall_backoff_at: None,
+        stall_silent_drains: 0,
         sender_handoff: QuicSenderHandoffStats::default(),
         limiter: QuicSendLimiterReport::default(),
         source_stream_window_request: None,
