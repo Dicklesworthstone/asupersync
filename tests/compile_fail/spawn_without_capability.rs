@@ -8,3 +8,7 @@ fn main() {
     let cx: Cx<cap::None> = Cx::detached_cancel_context();
     let _ = cx.spawn(|_cx| async move { 42_u32 });
 }
+
+fn web_cannot_spawn(cx: Cx<asupersync::cx::wrappers::WebCaps>) {
+    let _ = cx.spawn(|_cx| async move { 42_u32 });
+}

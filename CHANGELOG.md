@@ -10,16 +10,17 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-09-09, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. The `v0.4.11` candidate
-collects the changes since the published `v0.4.10` source.
+Scope window: current work through 2026-09-10, reconstructed from git history,
+beads, benchmark ledgers, and live repo artifacts. `v0.4.11` is published;
+changes made afterward appear under Unreleased.
 
 ## Version Timeline
 
-- **v0.4.11 candidate**: runtime cancellation and teardown, root-region drain,
+- **v0.4.11 Release**: runtime cancellation and teardown, root-region drain,
   non-blocking file traits, Kafka lifecycle fixes, and bounded QUIC receive
-  reassembly. Release validation and publication are tracked in
-  `asupersync-ghxhvm`.
+  reassembly. Published from `9b114c1f2` to crates.io and GitHub, with signed
+  Linux, macOS, and Windows assets. Release validation and publication are
+  recorded in `asupersync-ghxhvm`.
 - **v0.4.10 Release**: lock-free `Cx::published_cancel_requested()` for hot
   cancellation polls and a RaptorQ lib-test build fix, preserving the v0.4.3
   public compatibility floor. Published to crates.io on 2026-09-01 from
@@ -68,6 +69,42 @@ collects the changes since the published `v0.4.10` source.
 ---
 
 ## [Unreleased]
+
+### Runtime capabilities and race history
+
+- Spawn APIs reject a context whose runtime capability mask excludes spawning,
+  before allocating a task or invoking its factory. Child-region derivation,
+  task admission, and legacy `Scope` spawning preserve the inherited mask,
+  including during factory construction, resumed polling, and panic cleanup.
+- `Cx::set_current` and `set_current_restricted` preserve restrictions already
+  carried by the supplied context. **Compatibility note:** `set_current`
+  previously installed a full ambient mask even for an already-restricted
+  context. Code that intentionally needs broader authority must retain and
+  explicitly install its original privileged `Cx`; a narrowed copy no longer
+  recovers that authority. Full-authority contexts keep their existing behavior.
+  The owner approved this documented behavior correction on 2026-09-10 for
+  the next `0.5` release boundary; it is not a `0.4.x` patch change.
+- Race and quorum histories retain the participant IDs captured when each race
+  starts, even when mailbox admission replaces provisional task IDs. This
+  prevents false loser-drain violations while retaining cancellation and cleanup.
+- The API-v2 integration lane covers 18 native/lab lifecycle cells, 256 seeded
+  spawn/cancel/close interleavings, capability denial and inheritance, composed
+  macros, loser cleanup, and channel/stream ownership. The journey runner also
+  checks that both PureCaps and WebCaps fail to compile when used to spawn.
+
+### Networking and ATP transfers
+
+- Driverless TCP listener accepts and owned TCP/Unix split halves park on the
+  fallback I/O driver instead of repeatedly waking their executor. Split-half
+  registrations move to the ambient driver when one becomes available.
+- ATP's QUIC source-stream proof wait measures consecutive peer silence, so
+  receiver keep-alives extend a long tree commit within the existing liveness
+  cap. Proof-wait retransmissions also respect the path RTT and ramp their
+  resend budget within the burst ceiling.
+- QUIC receivers accept relative destination paths without attempting to
+  inspect an empty ancestor directory.
+- ATP delta chunk builders fill each chunk across short reads. This repairs
+  delta re-sync failures introduced in `v0.4.11` for files larger than 128 KiB.
 
 ## [v0.4.11] - 2026-09-09
 

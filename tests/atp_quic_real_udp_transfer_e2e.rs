@@ -777,6 +777,62 @@ fn assert_send_fails_closed_before_commit(send: QuicConfig, recv: QuicConfig, fi
     );
 }
 
+/// asupersync-wlbrlr: a RELATIVE destination directory (`atp recv out/dir`,
+/// the bench harness's cell paths) must be accepted. The receiver's
+/// destination-root preparation walked the empty ancestor of a relative path
+/// after `create_dir_all` and failed every such receive with "No such file
+/// or directory" right after the manifest (shipped in v0.4.10 and v0.4.11).
+/// The destination is a directory built by hand inside the package's
+/// `target/` (git-ignored) so its path stays relative to the test's working
+/// directory: cargo runs the test binary from the package root, and
+/// `tempfile` would absolutize a relative parent.
+#[test]
+fn real_udp_quic_transfer_accepts_a_relative_destination_directory() {
+    let src = tempfile::tempdir().expect("src dir");
+    let source = src.path().join("payload.bin");
+    let payload: Vec<u8> = (0..4096u32).map(|i| (i % 241) as u8).collect();
+    std::fs::write(&source, &payload).expect("write source");
+    let dst = Path::new("target").join(format!(
+        "quic-relative-dest-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos())
+    ));
+    std::fs::create_dir_all(&dst).expect("relative dst dir");
+    assert!(
+        dst.is_relative(),
+        "the destination must be relative to the working directory: {}",
+        dst.display()
+    );
+
+    let cfg = authenticated_configs(0x5E1A);
+    let (send, recv) = run_transfer(cfg.send, cfg.recv, &source, &dst);
+    let committed = std::fs::read(dst.join("payload.bin"));
+    let residue = std::fs::read_dir(&dst).map(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".atp-"))
+            .count()
+    });
+    let _ = std::fs::remove_dir_all(&dst);
+
+    let recv = recv.expect("receiver commits into a relative destination directory");
+    let send = send.expect("send_path completes over real UDP");
+    assert_receive_report_counters(&send, &recv, payload.len() as u64, 1);
+    assert!(send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok);
+    assert_eq!(
+        committed.expect("read committed file"),
+        payload,
+        "committed bytes must match the source"
+    );
+    assert_eq!(
+        residue.expect("list the destination"),
+        0,
+        "no staging residue may remain under the relative destination"
+    );
+}
+
 #[test]
 fn real_udp_quic_transfer_single_file_authenticated() {
     let src = tempfile::tempdir().expect("src dir");

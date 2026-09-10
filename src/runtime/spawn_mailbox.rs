@@ -262,6 +262,10 @@ pub struct AdmittedTaskSlot {
     admitted: OnceLock<AdmittedTask>,
     reserved: AtomicBool,
     cancel_gateway: Option<Weak<SpawnGateway>>,
+    // Immutable producer authority, installed on the canonical task context
+    // before admission publishes it. Keeping it private preserves the public
+    // request structs' existing construction surface.
+    runtime_mask: crate::cx::cap::CapMask,
     /// Strongest cancellation requested while canonical identity publication
     /// is still pending. The cache is initialized per slot, so unrelated
     /// spawn producers never serialize through process-global state.
@@ -294,6 +298,7 @@ impl AdmittedTaskSlot {
             admitted: OnceLock::new(),
             reserved: AtomicBool::new(false),
             cancel_gateway: None,
+            runtime_mask: crate::cx::cap::CapMask::all(),
             pending_cancel_reason: OnceLock::new(),
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
@@ -306,9 +311,19 @@ impl AdmittedTaskSlot {
             admitted: OnceLock::new(),
             reserved: AtomicBool::new(false),
             cancel_gateway: Some(Arc::downgrade(&cancel_gateway)),
+            runtime_mask: crate::cx::cap::CapMask::all(),
             pending_cancel_reason: OnceLock::new(),
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
+    }
+
+    pub(crate) fn with_runtime_mask(mut self, mask: crate::cx::cap::CapMask) -> Self {
+        self.runtime_mask = mask;
+        self
+    }
+
+    pub(crate) fn runtime_mask(&self) -> crate::cx::cap::CapMask {
+        self.runtime_mask
     }
 
     /// Returns the canonical identity once admission has published it.

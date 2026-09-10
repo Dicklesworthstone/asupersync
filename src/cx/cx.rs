@@ -696,7 +696,7 @@ impl FullCx {
     /// Returns the current thread-local Cx restriction-stack depth.
     ///
     /// `0` means no ambient context is installed. A plain runtime
-    /// [`set_current`](Self::set_current) contributes one unrestricted frame;
+    /// [`set_current`](Self::set_current) contributes one frame preserving the held mask;
     /// nested [`Cx::set_current_restricted`] or [`push_restriction`](Self::push_restriction)
     /// calls add frames that may narrow the ambient view observed by
     /// [`current`](Self::current).
@@ -793,11 +793,15 @@ impl FullCx {
     /// Installs `cx` as the current ambient task context for the
     /// duration of the returned guard.
     ///
-    /// Pushes a new frame onto the thread-local stack with the FULL
-    /// capability mask. For installations that should narrow the
-    /// ambient view (e.g. when handing control to untrusted code
-    /// that should not see full caps), use
+    /// Pushes a new frame onto the thread-local stack preserving the held
+    /// context's runtime capability mask. For installations that should
+    /// further narrow the ambient view (e.g. when handing control to
+    /// untrusted code that should not see full caps), use
     /// [`Cx::set_current_restricted`] instead.
+    ///
+    /// Reinstalling an already-restricted context no longer restores the full
+    /// ambient mask described by older versions. To deliberately install
+    /// broader authority, retain and supply the original privileged context.
     ///
     /// This is the public ambient-install primitive: the scheduler
     /// calls it once per poll to mirror a task's owned `Cx` into the
@@ -817,11 +821,8 @@ impl FullCx {
         let frame_id = CURRENT_CX_STACK.with(|stack| match cx {
             Some(cx) => {
                 let id = next_current_cx_frame_id();
-                stack.borrow_mut().push(CurrentCxFrame {
-                    id,
-                    cx,
-                    mask: cap::CapMask::all(),
-                });
+                let mask = cx.runtime_mask;
+                stack.borrow_mut().push(CurrentCxFrame { id, cx, mask });
                 Some(id)
             }
             None => None,
@@ -838,8 +839,8 @@ where
     Caps: cap::CapSetRuntimeMask,
 {
     /// Push this cx onto the thread-local restriction stack with
-    /// its OWN runtime mask (computed from the type-level `Caps`
-    /// parameter). While the returned guard is alive, any ambient
+    /// its own runtime mask intersected with the type-level `Caps`
+    /// parameter. While the returned guard is alive, any ambient
     /// `Cx::current()` lookup observes the narrowed mask — even if
     /// the underlying `FullCx` it wraps has every capability bit
     /// set internally.
@@ -859,7 +860,7 @@ where
     #[inline]
     #[must_use]
     pub fn set_current_restricted(self) -> CurrentCxGuard {
-        let mask = <Caps as cap::CapSetRuntimeMask>::MASK;
+        let mask = <Caps as cap::CapSetRuntimeMask>::MASK.intersect(self.runtime_mask);
         let cx = self.retype::<cap::All>();
         let frame_id = CURRENT_CX_STACK.with(|stack| {
             let mut s = stack.borrow_mut();
@@ -4042,7 +4043,9 @@ impl<Caps> Cx<Caps> {
     ///
     /// Fails closed with [`ChildRegionError::NoRuntimeGateway`] when this
     /// context was built without runtime wiring; detached contexts never
-    /// invent ambient authority.
+    /// invent ambient authority. A runtime mask without spawning authority
+    /// returns [`ChildRegionError::RuntimeUnavailable`] before enqueueing.
+    /// The derived context preserves this context's runtime capability mask.
     pub fn open_child_region(
         &self,
         spec: crate::cx::child_region::ChildRegionSpec,
@@ -4051,6 +4054,9 @@ impl<Caps> Cx<Caps> {
         let Some(gateway) = self.handles.spawn_gateway.clone() else {
             return ChildRegionOpening::failed(ChildRegionError::NoRuntimeGateway);
         };
+        if !self.runtime_mask.has(cap::CapMask::SPAWN) {
+            return ChildRegionOpening::failed(ChildRegionError::RuntimeUnavailable);
+        }
         let principal_task_id = gateway.mailbox().allocate_task_id();
         let slot = std::sync::Arc::new(crate::runtime::spawn_mailbox::AdmittedRegionSlot::new());
         let request = crate::runtime::spawn_mailbox::CreateRegionRequest {
@@ -4072,7 +4078,7 @@ impl<Caps> Cx<Caps> {
         {
             return ChildRegionOpening::failed(ChildRegionError::RuntimeUnavailable);
         }
-        ChildRegionOpening::new(slot, gateway.runtime_liveness_weak())
+        ChildRegionOpening::new(slot, gateway.runtime_liveness_weak(), self.runtime_mask)
     }
 
     /// Creates a [`Scope`](super::Scope) bound to this context's region with a custom budget.
@@ -4370,7 +4376,8 @@ where
     /// Returns [`SpawnError::RuntimeUnavailable`](crate::runtime::SpawnError::RuntimeUnavailable)
     /// when this Cx carries no
     /// spawn gateway or region counter (e.g. built by a harness without
-    /// runtime wiring). Admission-time denials (region closing, quota)
+    /// runtime wiring), or its runtime capability mask forbids spawning.
+    /// Admission-time denials (region closing, quota)
     /// resolve through the returned handle as `JoinError::Cancelled`.
     /// Never panics.
     pub fn spawn<F, Fut>(
@@ -4838,6 +4845,9 @@ where
         let Some(_liveness_guard) = gateway.liveness_guard() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
+        if !self.runtime_mask.has(cap::CapMask::SPAWN) {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        }
         if crate::runtime::scheduler::three_lane::current_worker_id().is_none() {
             return Err(crate::runtime::state::SpawnError::LocalSchedulerUnavailable);
         }
@@ -4846,9 +4856,10 @@ where
         }
 
         let provisional = gateway.mailbox().allocate_task_id();
-        let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
-            gateway,
-        )));
+        let admitted_slot = Arc::new(
+            AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
+                .with_runtime_mask(self.runtime_mask),
+        );
         let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
             Fut::Output,
         >(provisional, Arc::clone(&admitted_slot));
@@ -4970,14 +4981,22 @@ where
         use crate::runtime::spawn_mailbox::{AdmittedTaskSlot, SpawnFactoryFn, SpawnRequest};
         use crate::runtime::task_handle::JoinError;
 
+        // Ambient lookup returns a FullCx carrying the narrowed runtime mask.
+        // The HasSpawn type bound alone cannot enforce that restriction. Check
+        // before allocating a task identity or reserving region admission.
+        if !self.runtime_mask.has(cap::CapMask::SPAWN) {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        }
+
         let Some(_liveness_guard) = gateway.liveness_guard() else {
             return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
         };
 
         let provisional = gateway.mailbox().allocate_task_id();
-        let admitted_slot = Arc::new(AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(
-            gateway,
-        )));
+        let admitted_slot = Arc::new(
+            AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
+                .with_runtime_mask(self.runtime_mask),
+        );
         let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
             Fut::Output,
         >(provisional, Arc::clone(&admitted_slot));

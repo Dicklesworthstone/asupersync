@@ -96,7 +96,8 @@ pub enum ChildRegionError {
     /// There is no gateway to carry the mint command, so derivation fails
     /// closed instead of inventing ambient authority.
     NoRuntimeGateway,
-    /// The owning runtime shut down before or while the mint was pending.
+    /// The owning runtime shut down before or while the mint was pending,
+    /// or the caller's runtime capability mask forbids region spawning.
     RuntimeUnavailable,
     /// The authoritative mint rejected the child region (parent closed,
     /// missing, at capacity, or under resource pressure).
@@ -140,13 +141,19 @@ impl From<RegionCreateError> for ChildRegionError {
 pub struct ChildRegionOpening {
     pending: Option<(Arc<AdmittedRegionSlot>, Weak<()>)>,
     failure: Option<ChildRegionError>,
+    parent_mask: crate::cx::cap::CapMask,
 }
 
 impl ChildRegionOpening {
-    pub(crate) fn new(slot: Arc<AdmittedRegionSlot>, liveness: Weak<()>) -> Self {
+    pub(crate) fn new(
+        slot: Arc<AdmittedRegionSlot>,
+        liveness: Weak<()>,
+        parent_mask: crate::cx::cap::CapMask,
+    ) -> Self {
         Self {
             pending: Some((slot, liveness)),
             failure: None,
+            parent_mask,
         }
     }
 
@@ -154,6 +161,7 @@ impl ChildRegionOpening {
         Self {
             pending: None,
             failure: Some(error),
+            parent_mask: crate::cx::cap::CapMask::none(),
         }
     }
 }
@@ -172,7 +180,13 @@ impl Future for ChildRegionOpening {
         if let Some(outcome) = slot.take() {
             this.pending = None;
             return Poll::Ready(match outcome {
-                Ok(admitted) => Ok(ChildRegion::from_admitted(admitted)),
+                Ok(mut admitted) => {
+                    // The scheduler mints the principal with runtime wiring.
+                    // Publication must not restore capabilities that the
+                    // opener's ambient context had already relinquished.
+                    admitted.cx.runtime_mask = admitted.cx.runtime_mask.intersect(this.parent_mask);
+                    Ok(ChildRegion::from_admitted(admitted))
+                }
                 Err(error) => Err(ChildRegionError::Create(error)),
             });
         }

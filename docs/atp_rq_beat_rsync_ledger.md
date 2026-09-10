@@ -4183,3 +4183,37 @@ The limiter report also tells the truth about the path for the first time: `path
 - The hardened gate is measured at **50M**, not 500M: ovh-a's root filesystem is full (the harness keeps every cell's received copy, so a 500M matrix needs ~5 GB and 1.9 GB was free). The 500M re-measurement is still owed and is the number to quote for the headline.
 - `wanqueue` stays out of every claim here: at 2-3 reps it swings 38-52 s for ATP and 27-49 s for rsync on the same host, so nothing about it is separable from noise yet. Needs reps ≥ 5.
 - Growth is capped at 4 MiB and clamped by the receiver's fragment budget. Going higher needs contiguous reassembly chunks to coalesce (node count = holes + 1) so a large window cannot approach the 4096-node guard; and the guard itself should back-pressure rather than fail the connection. Both are follow-ups, not done here.
+
+## 2026-09-10 (SapphireHill) — 0gj4k3: the 9bb6pt proof-wait stall floor + capped silent-drain ramp re-measured on the encrypted lossy board — NOT a regression; and the bench found two escaped 0.4.11 defects on the way
+
+**Question (asupersync-0gj4k3):** 1282915e7 (9bb6pt) replaced the sender's unconditional 256-packet stall-PTO drain at the proof-wait site with an RTT-aware stall floor and an 8→16→32→64-packet ramp over consecutive ACK-silent expiries. Before calling that performance-neutral, re-run the lossy cells against the pre-change baseline.
+
+**Method:** same host (csd), same day, serialized cells (two-sample clear-check), REPS 5 for `500K`/`tree_small`, 3 otherwise, `ATP_MATRIX_TIMEOUT=900`, encrypted tier (`atp-quic-tls13` vs `rsync-ssh-aes128gcm`), regimes `bad` (50mbit/80±20ms/2%) and `broken` (10mbit/200±50ms/10%+reorder 5%+dup 1%), SHA-verified, medians. PRE = release `atp` from b2b9d603e (the parent of 1282915e7) + only the wlbrlr relative-destination fix overlaid so the harness can run; POST = bad26eba5 (9bb6pt + the ybczmx proof-wait clock + the tx9j0f/2rb75p/9e6a28 fallback-driver work + wlbrlr); rsync bars measured once. Runs: `artifacts/atp_bench_matrix/20260910T074614Z_0gj4k3_pre2`, `…/20260910T080711Z_0gj4k3_post3` (its `scorecard_vs_rsync2.md` / `results_with_rsync2.jsonl` merge the bars), `…/20260910T084316Z_0gj4k3_rsync2`. Denominator: 38 reps per binary, 38 rsync reps; every row `status=ok sha_ok=true`; nothing excluded.
+
+| cell | PRE med s | POST med s | POST/PRE | rsync-ssh med s | POST/rsync |
+|---|---:|---:|---:|---:|---:|
+| 500K/bad | 1.25 | 1.25 | 1.00 | 4.47 | **0.28** |
+| 500K/broken | 6.36 | 5.25 | **0.83** | 15.98 | **0.33** |
+| 5M/bad | 2.45 | 2.55 | 1.04 | 5.97 | **0.43** |
+| 5M/broken | 11.66 | 9.06 | **0.78** | 21.38 | **0.42** |
+| 50M/bad | 15.16 | 15.16 | 1.00 | 17.38 | **0.87** |
+| 50M/broken | 81.51 | 85.11 | 1.04 | 97.94 | **0.87** |
+| tree_small/bad | 33.78 | 33.67 | 1.00 | 7.47 | 4.51 |
+| tree_small/broken | 43.48 | 45.38 | 1.04 | 30.29 | 1.50 |
+| tree_big/bad | 13.26 | 12.96 | 0.98 | 9.87 | 1.31 |
+| tree_big/broken | 36.68 | 31.57 | **0.86** | 44.99 | **0.70** |
+
+Per-regime geomean ATP/rsync (score_matrix.py): PRE bad 0.906 / broken 0.733; POST bad **0.908** / broken **0.662**.
+
+**Verdict:** the `bad` regime is unchanged (every POST/PRE ratio within ±4 %, inside rep spread); the `broken` regime is 14–23 % faster on 500K, 5M and tree_big, and the two +4 % cells (50M/broken 85.1 vs 81.5; tree_small/broken 45.4 vs 43.5) sit inside the PRE reps' own spread (PRE 50M/broken ran 79.8–107.0 s, POST 75.7–91.3 s; PRE tree_small/broken 42.4–52.3, POST 43.0–50.4). `feedback_rounds=0` throughout (pure-stream path), sender peak RSS within ±2 MB per cell. The ramp does not need to start higher or reach 256 sooner; 0gj4k3 closes on this.
+
+**Found on the way (both fixed on main, both shipped in 0.4.11):**
+- **wlbrlr (bad26eba5):** the QUIC receiver rejected every RELATIVE destination path with "No such file or directory" right after the manifest (`prepare_quic_destination_root` walked the empty ancestor of a relative path after `create_dir_all`; f06cab3d4, 2026-07-10, in v0.4.10 and v0.4.11). The first cell of this campaign failed on both binaries because my `--out` was relative; the harness's default `--out` is absolute, which is why the July encrypted runs never saw it. Reproduced on plain loopback with the 0.4.11-era release binaries; the fixed binary commits.
+- **u4j7sr (5c1975ec4):** delta re-sync of any file larger than 128 KiB failed on v0.4.11 ("malformed RQ delta chunk at position 0"): the 2026-09-02 fs poll-offload change made `File::read` return at most 128 KiB, and the delta chunk builders (rq, tcp ×2, quic) treated one read as one 1 MiB chunk. Found by the sizeku re-sync gate (6/6 atp cells aborted in 0.1 s while every full sync passed); the fixed binary passes 12/12.
+
+### No-claim
+
+- Encrypted trees on lossy links are a pre-existing loss, not a 9bb6pt effect: `tree_small/bad` 4.5× and `tree_small/broken` 1.5× slower than rsync-ssh, `tree_big/bad` 1.3× (identical on PRE and POST). The July encrypted board measured trees only on `perfect`/`good` (tree_big/perfect 2.46×), so the lossy tree numbers are new; filed as a follow-up, not analysed here.
+- The POST binary carries more than 9bb6pt; whole-object cells never reach the ybczmx proof-wait clock's >45 s regime and the fallback-driver changes only matter without an ambient I/O driver, so the movement is attributed to 9bb6pt, but that attribution is by reasoning, not by a 9bb6pt-only binary.
+- `50M/broken` and `tree_small/broken` cv is well above the spec's 5 % noise flag at 3–5 reps; their ratios should not be over-read in either direction.
+- The sizeku delta re-sync gate (rq lane, `/data/tmp/atp_resync_bench/20260910T084222Z_sizeku`) shows every changed cell shipping the full object (atp/full 1.003–1.016; 1pct at parity with rsync, append 57–576× and insert 2× more bytes than rsync) because RQ/QUIC reject missing-chunk delta "in this rollout"; that is a rollout gate, not a transport measurement, and the harness's `delta_mode_observed` label is a constant, not an observation.
