@@ -2256,6 +2256,7 @@ fn test_local_cancel_removes_from_local_ready() {
         parker: Parker::new(),
         cx_inner: Arc::downgrade(&cx_inner),
         scheduler_evidence: None,
+        coordinator: Arc::new(WorkerCoordinator::new(vec![Parker::new()].into(), None)),
     };
 
     waker.schedule();
@@ -2376,6 +2377,7 @@ fn ordinary_local_waker_promotes_cancelled_task_out_of_local_ready() {
         cancellation: cx_inner.read().cancellation_state(),
         cx_inner: Arc::downgrade(&cx_inner),
         scheduler_evidence: None,
+        coordinator: Arc::new(WorkerCoordinator::new(vec![Parker::new()].into(), None)),
     };
 
     waker.schedule();
@@ -6091,6 +6093,7 @@ fn fast_queue_waker_uses_local_ready_on_same_thread() {
         cancellation: Arc::new(CxCancellationState::new(false)),
         cx_inner: Weak::new(),
         scheduler_evidence: None,
+        coordinator: Arc::new(WorkerCoordinator::new(vec![Parker::new()].into(), None)),
     }));
 
     // Set local_ready TLS (waker uses schedule_local_task, not LocalQueue).
@@ -6133,6 +6136,7 @@ fn fast_queue_waker_falls_back_to_local_ready_cross_thread() {
         cancellation: Arc::new(CxCancellationState::new(false)),
         cx_inner: Weak::new(),
         scheduler_evidence: None,
+        coordinator: Arc::new(WorkerCoordinator::new(vec![Parker::new()].into(), None)),
     }));
 
     waker.wake_by_ref();
