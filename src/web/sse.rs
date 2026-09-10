@@ -460,6 +460,14 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         self
     }
 
+    /// The largest serialized event this stream will emit; the HTTP/1 bridge
+    /// sizes its produced-body frame cap from it so a large event is framed
+    /// rather than failing the stream.
+    #[must_use]
+    pub fn event_bytes_limit(&self) -> usize {
+        self.max_event_bytes
+    }
+
     /// Override the maximum total event bytes emitted by this response.
     ///
     /// Server-authored heartbeat comments remain subject to

@@ -912,7 +912,17 @@ where
         let codec = Http1Codec::new()
             .max_headers_size(self.config.max_headers_size)
             .max_body_size(self.config.max_body_size);
-        let mut framed = Framed::new(io, codec);
+        // The codec assembles a whole Content-Length body (or chunk) in the
+        // read buffer, so the buffer must admit max_headers_size +
+        // max_body_size; Framed's default 8 MiB cap would otherwise drop the
+        // connection with an io error before the 413 the config promises.
+        let max_buffer_len = self
+            .config
+            .max_headers_size
+            .saturating_add(self.config.max_body_size)
+            .saturating_add(64 * 1024)
+            .max(crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN);
+        let mut framed = Framed::new(io, codec).with_max_buffer_len(max_buffer_len);
         let mut state = ConnectionState::new(
             Cx::current()
                 .and_then(|cx| cx.timer_driver())
@@ -1632,9 +1642,16 @@ impl<F> Http1StreamingServer<F> {
             let response = handler(request_cx.clone(), request);
             async move {
                 let (stream, capacity) = response.await.into_parts();
+                // One serialized event is one produced frame, so the frame
+                // cap must admit the stream's own event bound; the channel's
+                // 64 KiB default would end the stream without a terminator
+                // on the first larger event.
+                let max_frame_bytes = std::num::NonZeroUsize::new(stream.event_bytes_limit())
+                    .unwrap_or(std::num::NonZeroUsize::MIN);
                 let guard = LiveSseCancelGuard::new(stream, request_cx);
-                let mut response = Http1ProducedResponse::chunked(
+                let mut response = Http1ProducedResponse::chunked_with_max_frame_bytes(
                     capacity,
+                    max_frame_bytes,
                     200,
                     default_reason(200),
                     move |_producer_cx, sender| produce_live_sse(guard, sender),
@@ -2469,6 +2486,13 @@ async fn read_streaming_request_head<T>(
 where
     T: AsyncRead + Unpin,
 {
+    // One deadline for the whole head, not one per read: a peer trickling
+    // one byte per idle window would otherwise keep a partial head open for
+    // `max_headers_size` windows (slowloris); the buffered server bounds the
+    // entire request read the same way.
+    let head_deadline = config
+        .idle_timeout
+        .map(|idle_timeout| connection_now(cx) + idle_timeout);
     loop {
         if let Some(head) =
             decode_streaming_request_head(buffer, config.max_headers_size, config.max_body_size)?
@@ -2480,8 +2504,8 @@ where
         }
         let mut chunk = [0_u8; 8192];
         let read = io.read(&mut chunk);
-        let count = if let Some(idle_timeout) = config.idle_timeout {
-            match timeout(connection_now(cx), idle_timeout, read).await {
+        let count = if let Some(deadline) = head_deadline {
+            match crate::time::timeout_at(deadline, read).await {
                 Ok(result) => result.map_err(HttpError::Io)?,
                 Err(_) => return Ok(None),
             }
@@ -2555,7 +2579,21 @@ where
         }
 
         let mut chunk = [0_u8; 8192];
-        let count = match io.read(&mut chunk).await {
+        // The body read carries the same idle bound as the connection: a peer
+        // that sends a head and then goes silent (or trickles) must not hold
+        // the connection, its in-flight slot and a handler parked on the
+        // body forever. The body driver runs outside the request region, so
+        // the request budget does not cover it.
+        let read = io.read(&mut chunk);
+        let read_result = if let Some(idle_timeout) = config.idle_timeout {
+            match timeout(connection_now(cx), idle_timeout, read).await {
+                Ok(result) => result,
+                Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            }
+        } else {
+            read.await
+        };
+        let count = match read_result {
             Ok(count) => count,
             Err(_) => {
                 let error = IncomingBodyError::ClientAborted;

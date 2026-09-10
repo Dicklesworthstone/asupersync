@@ -3022,17 +3022,29 @@ where
                     data,
                     end_stream,
                 })) => {
+                    // Bytes buffered for every partially received request on
+                    // this connection, computed before the stream's own entry
+                    // is borrowed below.
+                    let pending_body_total: usize =
+                        pending_requests.values().map(|(_, body)| body.len()).sum();
                     if let Some((_, body)) = pending_requests.get_mut(&stream_id) {
                         if let Some(timeout) = stream_idle_timeout {
                             pending_stream_idle_deadlines
                                 .insert(stream_id, (time_getter)() + timeout);
                         }
-                        if body.len().saturating_add(data.len()) > max_body_size {
-                            // Bound per-stream request buffering: HTTP/2 flow
-                            // control auto-replenishes windows, so without
-                            // this cap one stream could buffer unbounded bytes
-                            // (remote OOM). Refuse the stream and drop its
-                            // partial body.
+                        if body.len().saturating_add(data.len()) > max_body_size
+                            || pending_body_total.saturating_add(data.len())
+                                > connection_pending_body_cap(max_body_size)
+                        {
+                            // Bound request buffering per stream AND per
+                            // connection: HTTP/2 flow control auto-replenishes
+                            // windows, so without the per-stream cap one
+                            // stream could buffer unbounded bytes, and without
+                            // the connection cap one peer could park
+                            // max_concurrent_streams bodies just under the
+                            // stream cap (256 x 16 MiB by default) for as
+                            // long as it keeps the connection open. Refuse
+                            // the stream and drop its partial body.
                             conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);
                             pending_requests.remove(&stream_id);
                             pending_stream_idle_deadlines.remove(&stream_id);
@@ -3371,6 +3383,20 @@ where
     }
 }
 
+/// How many full-size request bodies one connection may hold in partial
+/// receipt at once, as a multiple of [`Http2ListenerConfig::max_body_size`].
+/// Bounds the per-connection buffer (`max_concurrent_streams` x
+/// `max_body_size`, 4 GiB with the defaults) that flow control alone does not,
+/// because the connection auto-replenishes its windows.
+const CONNECTION_PENDING_BODY_MULTIPLIER: usize = 4;
+
+/// Total request-body bytes one connection may buffer across all partially
+/// received streams; a DATA frame that would exceed it refuses its stream with
+/// `ENHANCE_YOUR_CALM`, exactly as the per-stream cap does.
+fn connection_pending_body_cap(max_body_size: usize) -> usize {
+    max_body_size.saturating_mul(CONNECTION_PENDING_BODY_MULTIPLIER)
+}
+
 /// Configuration for the HTTP/2 listener (br-asupersync-eprpk6).
 #[derive(Debug, Clone)]
 pub struct Http2ListenerConfig {
@@ -3391,7 +3417,10 @@ pub struct Http2ListenerConfig {
     pub lb_compat_keep_socket: bool,
     /// Maximum buffered request body per stream before the stream is refused
     /// (h1 parity with `Http1Config::max_body_size`). Bounds receiver memory
-    /// because HTTP/2 flow control auto-replenishes windows.
+    /// because HTTP/2 flow control auto-replenishes windows. One connection
+    /// may additionally hold at most four times this many request-body bytes
+    /// in partial receipt across all its streams; a DATA frame beyond that
+    /// refuses its stream the same way.
     pub max_body_size: usize,
     /// br-asupersync-mfqfst M8: host allow-list policy (h1 parity with
     /// `Http1Config::allowed_hosts`). SECURITY: defends against Host header
