@@ -57,6 +57,26 @@
 //! ```
 
 /// Adaptive latency-hedging controllers.
+/// Counts child terminations independently of a bounded join sweep.
+///
+/// The executing combinators and the managed supervisor poll a bounded
+/// quantum of child handles per coordinator poll, so a sweep over more
+/// children spans several polls. A child that finishes at an index the
+/// current sweep has already passed wakes the coordinator once, that wake
+/// is coalesced with the sweep's own self-wake, and the sweep then ends
+/// without revisiting the index; with no other child left to wake it, the
+/// coordinator would park forever. Every child carries one of these guards
+/// (moved into its future at spawn, so it fires on completion, on
+/// cancellation before the first poll, and on unwind), and the coordinator
+/// restarts its sweep whenever the tally is ahead of the joins it observed.
+pub(crate) struct TerminationTally(pub(crate) std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for TerminationTally {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub mod adaptive_hedge;
 #[cfg(test)]
 pub mod adaptive_hedge_metamorphic;

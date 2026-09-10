@@ -424,7 +424,12 @@ where
                     }
                     let terminal = std::sync::Arc::new(std::sync::Mutex::new(None));
                     let worker_terminal = std::sync::Arc::clone(&terminal);
+                    // Moved into the future at spawn so it fires on every
+                    // terminal path, including cancellation before the
+                    // first poll.
+                    let tally = super::TerminationTally(std::sync::Arc::clone(&owner.terminated));
                     match cx.spawn_in_cancellation_dominant(&scope, move |worker_cx| async move {
+                        let _tally = tally;
                         let outcome = worker(worker_cx).await;
                         *worker_terminal
                             .lock()
@@ -545,6 +550,11 @@ struct PipelineOwner<E> {
     scan_remaining: usize,
     ingress_closed: bool,
     acknowledgements_closed: bool,
+    /// Worker terminations counted by the guard each worker future carries
+    /// (see [`super::TerminationTally`]); compared against `joined_total` so a
+    /// bounded child scan never parks on a termination it already passed.
+    terminated: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    joined_total: usize,
 }
 
 struct PipelineChild<E> {
@@ -573,6 +583,8 @@ impl<E> PipelineOwner<E> {
             scan_remaining: 0,
             ingress_closed: false,
             acknowledgements_closed: false,
+            terminated: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            joined_total: 0,
         }
     }
 
@@ -626,6 +638,7 @@ impl<E> PipelineOwner<E> {
     }
 
     fn joined(&mut self, index: usize, result: Result<(), JoinError>) {
+        self.joined_total = self.joined_total.saturating_add(1);
         let child = self.handles[index].take().expect("joined an owned child");
         let logical = child
             .terminal
@@ -680,8 +693,12 @@ impl<E> PipelineOwner<E> {
             }
         }
         // Finish each bounded scan before sleeping. Once all handles have
-        // registered this waker, an entirely Pending set does not self-wake.
-        if self.scan_remaining != 0 {
+        // registered this waker, an entirely Pending set does not self-wake,
+        // except when a worker terminated at an index this scan already
+        // passed: that wake was coalesced with the scan's own, so rescan.
+        let unobserved_terminations =
+            self.terminated.load(std::sync::atomic::Ordering::Acquire) > self.joined_total;
+        if self.scan_remaining != 0 || unobserved_terminations {
             cx.waker().wake_by_ref();
         }
         progress

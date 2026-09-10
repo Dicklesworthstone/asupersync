@@ -2182,6 +2182,12 @@ mod managed {
         cancel_waker: Option<crate::cx::cx::CancelWakerToken>,
         tracker: RestartTracker,
         report: ManagedSupervisorReport<E>,
+        /// Child terminations counted by the guard each child future carries
+        /// (see [`crate::combinator::TerminationTally`]); compared against
+        /// `joins_observed` so a bounded `wait_exit` sweep never parks on a
+        /// termination it already passed.
+        terminated: Arc<std::sync::atomic::AtomicUsize>,
+        joins_observed: usize,
     }
 
     fn panic_payload(payload: Box<dyn std::any::Any + Send>) -> PanicPayload {
@@ -2217,6 +2223,8 @@ mod managed {
                 cancel_waker: None,
                 tracker,
                 report,
+                terminated: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                joins_observed: 0,
             }
         }
 
@@ -2324,6 +2332,7 @@ mod managed {
         }
 
         fn joined(&mut self, index: usize, result: Result<(), JoinError>) {
+            self.joins_observed = self.joins_observed.saturating_add(1);
             self.observe_start(index);
             let child = self.running[index]
                 .as_mut()
@@ -2428,9 +2437,13 @@ mod managed {
             let child_publication = Arc::clone(&publication);
             let factory = Arc::clone(&self.supervisor.bindings[index].factory);
             let region_id = region.region_id();
+            // Moved into the future at spawn so it fires on every terminal
+            // path, including cancellation before the first poll.
+            let tally = crate::combinator::TerminationTally(Arc::clone(&self.terminated));
             let handle = region
                 .cx()
                 .spawn(move |cx| async move {
+                    let _tally = tally;
                     let identity = ManagedGeneration {
                         number,
                         region: region_id,
@@ -2682,6 +2695,14 @@ mod managed {
                 if self.running.iter().all(Option::is_none) {
                     Poll::Ready(None)
                 } else {
+                    // A child that terminated at an index this sweep already
+                    // passed woke us once, coalesced with the sweep's own
+                    // wake; rescan instead of parking on it.
+                    if self.terminated.load(std::sync::atomic::Ordering::Acquire)
+                        > self.joins_observed
+                    {
+                        poll_cx.waker().wake_by_ref();
+                    }
                     Poll::Pending
                 }
             })

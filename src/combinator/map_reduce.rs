@@ -860,6 +860,9 @@ where
     let mut reduced = 0_usize;
     let mut max_in_flight = 0_usize;
     let mut max_retained = 0_usize;
+    // Child terminations, counted by the guard each child future carries;
+    // ahead of `completed` whenever a join sweep has passed a finished child.
+    let terminated = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     std::future::poll_fn(|poll_cx| {
         owner.cancel_waker = Some(cx.refresh_cancel_waker(owner.cancel_waker, poll_cx.waker()));
@@ -981,7 +984,10 @@ where
                 abort_requested = true;
             }
             let values_pending = owner.discard_completed_values(&mut failures, reduced);
-            if values_pending || scan_pending {
+            // A termination the sweep already passed restarts the sweep.
+            let unobserved_terminations =
+                terminated.load(std::sync::atomic::Ordering::Acquire) > completed;
+            if values_pending || scan_pending || unobserved_terminations {
                 poll_cx.waker().wake_by_ref();
             }
             return if completed == admitted && !values_pending {
@@ -1031,7 +1037,11 @@ where
             let mapper = Arc::clone(&map);
             let returned = Arc::new(parking_lot::Mutex::new(None));
             let child_returned = Arc::clone(&returned);
+            // Moved into the future at spawn so it fires on every terminal
+            // path, including cancellation before the first poll.
+            let tally = super::TerminationTally(Arc::clone(&terminated));
             match cx.spawn_in_cancellation_dominant(scope, move |child| async move {
+                let _tally = tally;
                 let outcome = mapper(child, item).await;
                 *child_returned.lock() = Some(outcome);
             }) {
@@ -1076,6 +1086,7 @@ where
                 || values_pending
                 || owner.next_scan < owner.scan_end
                 || owner.scan_end < admitted
+                || terminated.load(std::sync::atomic::Ordering::Acquire) > completed
             {
                 poll_cx.waker().wake_by_ref();
             }
