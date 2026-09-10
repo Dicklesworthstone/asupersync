@@ -588,8 +588,12 @@ impl UnixStream {
     /// [`reunite`]: OwnedReadHalf::reunite
     #[must_use]
     pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
-        let registration = self.registration.lock().take();
-        OwnedReadHalf::new_pair(self.inner, registration)
+        let (registration, registration_on_fallback) = self.registration.lock().take_parts();
+        OwnedReadHalf::new_pair_with_fallback_flag(
+            self.inner,
+            registration,
+            registration_on_fallback,
+        )
     }
 }
 

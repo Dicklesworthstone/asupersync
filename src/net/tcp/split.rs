@@ -452,6 +452,11 @@ fn registration_interest(read_waiter: bool, write_waiter: bool, fallback: Intere
 /// Per-direction waker state for owned split halves.
 struct SplitIoState {
     registration: Option<IoRegistration>,
+    /// Whether `registration` sits on the process-global fallback I/O driver
+    /// (GH#67): such a registration is retired through the ordinary
+    /// transition path and re-made on the ambient driver as soon as one is
+    /// present (asupersync-9e6a28).
+    registration_on_fallback: bool,
     registration_transition: bool,
     read_waiter: Option<DirectionWaiter>,
     write_waiter: Option<DirectionWaiter>,
@@ -462,6 +467,7 @@ struct SplitIoState {
 fn split_io_state(registration: Option<IoRegistration>) -> SplitIoState {
     SplitIoState {
         registration,
+        registration_on_fallback: false,
         registration_transition: false,
         read_waiter: None,
         write_waiter: None,
@@ -477,6 +483,7 @@ fn split_io_state(registration: Option<IoRegistration>) -> SplitIoState {
 fn adopt_inherited_registration(
     state: &Arc<Mutex<SplitIoState>>,
     registration: Option<IoRegistration>,
+    on_fallback: bool,
 ) {
     let Some(mut registration) = registration else {
         return;
@@ -494,7 +501,9 @@ fn adopt_inherited_registration(
         combined_waker(state, &guard)
     };
     if matches!(registration.rearm(interest, &waker), Ok(true)) {
-        state.lock().registration = Some(registration);
+        let mut guard = state.lock();
+        guard.registration = Some(registration);
+        guard.registration_on_fallback = on_fallback;
     }
 }
 
@@ -558,35 +567,20 @@ impl TcpStreamInner {
             guard.write_waiter.is_some(),
             interest,
         );
-        let Some(current) = Cx::current() else {
-            let waiters = take_all_waiters(&mut guard);
-            guard.registration_transition = false;
-            drop(guard);
-            wake_other_waiters(waiters, cx.waker());
-            crate::net::tcp::stream::fallback_rewake(cx);
-            return Ok(installed);
-        };
-        let Some(driver) = current.io_driver_handle() else {
-            let waiters = take_all_waiters(&mut guard);
-            guard.registration_transition = false;
-            drop(guard);
-            wake_other_waiters(waiters, cx.waker());
-            crate::net::tcp::stream::fallback_rewake(cx);
-            return Ok(installed);
-        };
-
-        match driver.register(&*self.stream, desired_interest, waker) {
-            Ok(registration) => {
+        // Ambient driver first, else the process-global fallback driver
+        // (GH#67, asupersync-9e6a28); only when no reactor takes the fd do
+        // the waiters fall back to the legacy self-wake.
+        match crate::net::udp::fresh_reactor_registration(&*self.stream, desired_interest, waker) {
+            Ok(crate::net::udp::FreshRegistration::Registered {
+                registration,
+                on_fallback,
+            }) => {
                 guard.registration = Some(registration);
+                guard.registration_on_fallback = on_fallback;
                 guard.registration_transition = false;
                 Ok(installed)
             }
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
-                ) =>
-            {
+            Ok(crate::net::udp::FreshRegistration::SelfWake) => {
                 let waiters = take_all_waiters(&mut guard);
                 guard.registration_transition = false;
                 drop(guard);
@@ -634,11 +628,22 @@ impl TcpStreamInner {
                 guard.write_waiter.is_some(),
                 interest,
             );
-            if let Some(rearm_result) = guard
-                .registration
-                .as_mut()
-                .map(|registration| registration.rearm(desired_interest, &waker))
+            // A registration parked on the fallback driver retires through the
+            // ordinary transition path once an ambient driver is present, so
+            // the fresh registration below lands on that driver (GH#67,
+            // asupersync-9e6a28).
+            let rearm_result = if guard.registration.is_some()
+                && guard.registration_on_fallback
+                && crate::net::udp::ambient_io_driver_present()
             {
+                Some(Ok(false))
+            } else {
+                guard
+                    .registration
+                    .as_mut()
+                    .map(|registration| registration.rearm(desired_interest, &waker))
+            };
+            if let Some(rearm_result) = rearm_result {
                 match rearm_result {
                     Ok(true) => {
                         drop(guard);
@@ -682,38 +687,27 @@ impl TcpStreamInner {
                 }
             }
 
-            let Some(current) = Cx::current() else {
-                let fallback_waiters = take_all_waiters(&mut guard);
-                drop(guard);
-                drop(replaced_waiters);
-                wake_other_waiters(fallback_waiters, cx.waker());
-                crate::net::tcp::stream::fallback_rewake(cx);
-                return Ok(installed);
-            };
-            let Some(driver) = current.io_driver_handle() else {
-                let fallback_waiters = take_all_waiters(&mut guard);
-                drop(guard);
-                drop(replaced_waiters);
-                wake_other_waiters(fallback_waiters, cx.waker());
-                crate::net::tcp::stream::fallback_rewake(cx);
-                return Ok(installed);
-            };
-
             // Keep the state lock across fresh registration so concurrent
             // halves cannot both issue reactor ADD for the same socket.
-            match driver.register(&*self.stream, desired_interest, waker) {
-                Ok(registration) => {
+            // Ambient driver first, else the process-global fallback driver
+            // (GH#67, asupersync-9e6a28); only when no reactor takes the fd
+            // do the waiters fall back to the legacy self-wake.
+            match crate::net::udp::fresh_reactor_registration(
+                &*self.stream,
+                desired_interest,
+                waker,
+            ) {
+                Ok(crate::net::udp::FreshRegistration::Registered {
+                    registration,
+                    on_fallback,
+                }) => {
                     guard.registration = Some(registration);
+                    guard.registration_on_fallback = on_fallback;
                     drop(guard);
                     drop(replaced_waiters);
                     Ok(installed)
                 }
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
-                    ) =>
-                {
+                Ok(crate::net::udp::FreshRegistration::SelfWake) => {
                     let fallback_waiters = take_all_waiters(&mut guard);
                     drop(guard);
                     drop(replaced_waiters);
@@ -825,13 +819,27 @@ pub struct OwnedReadHalf {
 
 impl OwnedReadHalf {
     /// Create a paired read and write half sharing the same inner state.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Test constructor: an inherited registration is assumed to sit on an
+    /// ambient driver (`into_split` passes the real flag).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn new_pair(
         stream: Arc<net::TcpStream>,
         registration: Option<IoRegistration>,
     ) -> (Self, OwnedWriteHalf) {
+        Self::new_pair_with_fallback_flag(stream, registration, false)
+    }
+
+    /// Like [`Self::new_pair`], recording whether the inherited registration
+    /// sits on the process-global fallback I/O driver so the halves migrate
+    /// it to an ambient driver later (GH#67, asupersync-9e6a28).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn new_pair_with_fallback_flag(
+        stream: Arc<net::TcpStream>,
+        registration: Option<IoRegistration>,
+        registration_on_fallback: bool,
+    ) -> (Self, OwnedWriteHalf) {
         let state = Arc::new(Mutex::new(split_io_state(None)));
-        adopt_inherited_registration(&state, registration);
+        adopt_inherited_registration(&state, registration, registration_on_fallback);
         let inner = Arc::new(TcpStreamInner { state, stream });
         (
             Self {
@@ -1218,6 +1226,132 @@ mod tests {
     use super::*;
     use crate::cx::Cx;
     use crate::io::AsyncReadVectored;
+
+    /// GH#67 follow-up (asupersync-9e6a28): an owned TCP split half polled
+    /// with no I/O driver on the current `Cx` parks on the process-global
+    /// fallback driver instead of re-waking itself into a hot loop.
+    mod gh67_fallback_io_driver {
+        use super::*;
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use crate::runtime::{IoDriverHandle, LabReactor};
+        use crate::types::{Budget, RegionId, TaskId};
+        use std::io::Write as _;
+        use std::pin::Pin;
+        use std::sync::atomic::Ordering;
+        use std::task::{Context, Poll};
+        use std::time::Duration;
+
+        /// A connected, non-blocking pair: the owned halves under test and
+        /// the std peer that can make them readable at will.
+        fn split_pair() -> (OwnedReadHalf, OwnedWriteHalf, std::net::TcpStream) {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let addr = listener.local_addr().expect("listener addr");
+            let peer = std::net::TcpStream::connect(addr).expect("connect peer");
+            let (accepted, _) = listener.accept().expect("accept");
+            accepted.set_nonblocking(true).expect("nonblocking");
+            let (read_half, write_half) = OwnedReadHalf::new_pair(Arc::new(accepted), None);
+            (read_half, write_half, peer)
+        }
+
+        fn poll_read_once(
+            half: &mut OwnedReadHalf,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            let mut read_buf = ReadBuf::new(buf);
+            match Pin::new(half).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+
+        #[test]
+        fn owned_read_half_without_io_driver_parks_until_data_arrives() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (mut read_half, _write_half, mut peer) = split_pair();
+            let (signal, waker, rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 16];
+
+            assert!(matches!(
+                poll_read_once(&mut read_half, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert_eq!(
+                signal.hits.load(Ordering::SeqCst),
+                0,
+                "driverless poll must park, not self-wake (GH#67)"
+            );
+            assert!(
+                read_half.inner.state.lock().registration_on_fallback,
+                "driverless poll registers the shared half state with the fallback I/O driver"
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "no wake may arrive while the peer is silent"
+            );
+
+            peer.write_all(b"wake").expect("peer write");
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("fallback reactor pump delivers the readiness wake");
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
+            match poll_read_once(&mut read_half, &mut task_cx, &mut buf) {
+                Poll::Ready(Ok(len)) => assert_eq!(&buf[..len], b"wake"),
+                other => panic!("expected the bytes after the wake, got {other:?}"),
+            }
+        }
+
+        /// A half parked on the fallback driver retires that registration
+        /// through the ordinary transition path and re-registers on the
+        /// ambient driver as soon as it is polled under a `Cx` that has one.
+        #[test]
+        fn owned_half_fallback_registration_migrates_to_ambient_io_driver() {
+            assert!(Cx::current().is_none());
+            let (mut read_half, _write_half, _peer) = split_pair();
+            let (_signal, waker, _rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut buf = [0u8; 8];
+
+            assert!(matches!(
+                poll_read_once(&mut read_half, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            assert!(read_half.inner.state.lock().registration_on_fallback);
+
+            let driver = IoDriverHandle::new(Arc::new(LabReactor::new()));
+            assert_eq!(driver.waker_count(), 0);
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(ambient));
+
+            assert!(matches!(
+                poll_read_once(&mut read_half, &mut task_cx, &mut buf),
+                Poll::Pending
+            ));
+            let state = read_half.inner.state.lock();
+            assert!(
+                !state.registration_on_fallback,
+                "ambient driver must take over the registration"
+            );
+            assert!(state.registration.is_some());
+            drop(state);
+            assert_eq!(
+                driver.waker_count(),
+                1,
+                "the ambient driver now owns the halves' combined waker"
+            );
+        }
+    }
     use crate::net::tcp::stream::TcpStream;
     #[cfg(unix)]
     use crate::runtime::io_driver::IoDriverHandle;

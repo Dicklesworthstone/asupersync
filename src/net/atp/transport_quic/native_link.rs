@@ -1226,7 +1226,22 @@ const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS: usize = 8;
 /// detected set is real burst loss and gets drained in few rounds instead
 /// of 8 packets per PTO-clocked firing.
 const QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS: usize = 64;
+/// Ceiling of the stall-expiry (PTO) drain in the flush and unacked-gate
+/// loops. The proof wait no longer uses it: it ramps from the fast-drain size
+/// to the ack-gap burst ceiling via `QuicLink::stall_retransmit_packet_cap`
+/// (asupersync-9bb6pt: an unconditional 256-packet drain every proof-wait
+/// stall interval re-sent ~311 frames per storm to a receiver that was still
+/// draining the previous storm).
 const QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS: usize = 256;
+/// Doublings from [`QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS`] to the
+/// proof wait's ceiling, [`QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS`]
+/// (8 << 3 = 64): a silent proof wait never re-sends more per expiry than the
+/// ack-gap burst drain does, so a storm cannot rebuild itself after a few
+/// silent intervals.
+const STALL_RETRANSMIT_RAMP_MAX_SHIFT: u32 = 3;
+/// RFC 9002 §6.2.1 timer granularity floor for the RTT-variance term of the
+/// stall threshold (`QuicLink::stall_pto_floor`).
+const STALL_PTO_RTT_GRANULARITY_MICROS: u64 = 1_000;
 
 fn packet_lost_by_ack_gap(packet_number: u64, acked_ranges: &[NativeAckRange]) -> bool {
     let Some(largest_acked) = acked_ranges.iter().map(|range| range.largest).max() else {
@@ -2835,12 +2850,21 @@ pub struct QuicLink {
     /// on each expiry that declared loss (cap [`APP_LOSS_STALL_PTO_MAX`]),
     /// resets to [`SOURCE_STREAM_PTO`] on real ACK progress — see the cap's
     /// docs for the spurious-loss wedge this prevents (br-asupersync-daqxbz).
+    /// The proof wait additionally floors it at the path RTT
+    /// ([`Self::stall_pto_floor`], asupersync-9bb6pt).
     app_loss_stall_pto: Duration,
     /// When `app_loss_stall_pto` last doubled. The stall expiry is
     /// re-entered on every ~200 ms iteration while the source stream is
     /// cwnd-blocked, so without this the threshold doubled per iteration
     /// instead of once per interval and saturated within a second.
     stall_backoff_at: Option<Instant>,
+    /// Consecutive proof-wait stall-expiry drains taken while the peer's ACKs
+    /// stayed silent (no ACK progress since the previous drain). Grows that
+    /// drain's re-send cap geometrically from a probe-sized burst, so a receiver that
+    /// is slow to acknowledge (once per drained batch, the GH#67 cadence) is
+    /// not flooded with copies of everything in flight on the very first
+    /// expiry; real ACK progress resets it (asupersync-9bb6pt).
+    stall_silent_drains: u32,
     /// Sender-side limiter telemetry (br-asupersync-bi2462.2).
     ///
     /// Stall reasons with held time, cwnd and in-flight peaks,
@@ -3661,10 +3685,70 @@ impl QuicLink {
     }
 
     /// Restore the stall threshold to its base value (real ACK progress or a
-    /// fresh source stream).
+    /// fresh source stream) and forget the proof-wait silent-drain streak.
     fn reset_stall_pto(&mut self) {
         self.app_loss_stall_pto = SOURCE_STREAM_PTO;
         self.stall_backoff_at = None;
+        self.stall_silent_drains = 0;
+    }
+
+    /// Lowest stall threshold the proof wait uses: the base cadence plus the
+    /// path's smoothed RTT and variance (the RFC 9002 §6.2.1 PTO shape) plus
+    /// the time the last flushed source-stream burst takes to serialize at
+    /// the current pacing rate. Below that an expiry fires before the burst's
+    /// ACKs can possibly return, drains every in-flight packet and re-sends
+    /// copies the receiver is about to acknowledge; the receiver, ACKing once
+    /// per drained batch, falls further behind under the duplicates and the
+    /// storm sustains itself (asupersync-9bb6pt: ~311 frames re-sent per
+    /// ~2 s storm, ~6.7 MB of duplicates queued at the receiver). On a
+    /// loopback path the floor is the 200 ms base; on a 100 ms-each-way lossy
+    /// path it lands near 450 ms. Capped at [`APP_LOSS_STALL_PTO_MAX`].
+    fn stall_pto_floor(&self) -> Duration {
+        let rtt = self.conn.transport().rtt();
+        let path_micros = rtt.smoothed_rtt_micros().map_or(0, |srtt| {
+            let variance = rtt.rttvar_micros().unwrap_or(0).saturating_mul(4);
+            srtt.saturating_add(variance.max(STALL_PTO_RTT_GRANULARITY_MICROS))
+        });
+        let burst_bytes = self
+            .last_flushed_stream_frames
+            .iter()
+            .map(|frame| frame.len)
+            .fold(0u64, u64::saturating_add);
+        let burst_micros = self
+            .stream_rate_controller
+            .as_ref()
+            .map(|pacer| pacer.rate_bytes_per_s)
+            .filter(|rate| *rate > 0)
+            .map_or(0, |rate| burst_bytes.saturating_mul(1_000_000) / rate);
+        SOURCE_STREAM_PTO
+            .saturating_add(Duration::from_micros(path_micros))
+            .saturating_add(Duration::from_micros(burst_micros))
+            .min(APP_LOSS_STALL_PTO_MAX)
+    }
+
+    /// How many in-flight packets the proof wait's stall-expiry drain may
+    /// re-send: a probe-sized burst on the first silent expiry, doubling on
+    /// each further expiry that still saw no ACK progress, up to the ack-gap
+    /// burst ceiling [`QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS`]
+    /// (never the 256-packet flush drain). Real burst loss with a live
+    /// receiver never reaches this path (its ACK gaps drive the fast drain);
+    /// a silent peer gets evidence-bounded copies instead of the whole window
+    /// (asupersync-9bb6pt). The flush and unacked-gate drains keep the full
+    /// [`QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS`] cap: they clock
+    /// cwnd-blocked control traffic, and ramping them slowed a contended
+    /// receiver's per-member progress until the sender's proof wait timed out.
+    fn stall_retransmit_packet_cap(&self) -> usize {
+        let shift = self
+            .stall_silent_drains
+            .min(STALL_RETRANSMIT_RAMP_MAX_SHIFT);
+        (QUIC_SOURCE_STREAM_FAST_RETRANSMIT_MAX_PACKETS << shift)
+            .min(QUIC_SOURCE_STREAM_FAST_RETRANSMIT_BURST_MAX_PACKETS)
+    }
+
+    /// Record a stall-expiry drain that re-sent in-flight frames without
+    /// ACK progress since the previous one.
+    fn note_stall_retransmit_drain(&mut self) {
+        self.stall_silent_drains = self.stall_silent_drains.saturating_add(1);
     }
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
@@ -5913,6 +5997,19 @@ impl QuicLink {
         operation: &'static str,
     ) -> Result<Frame, QuicTransportError> {
         let started = Instant::now();
+        // Liveness clock: any 1-RTT packet from the peer (a keep-alive PING
+        // during its long packed-tree commit, an ACK of a retransmit)
+        // restarts the idle window, so `idle_timeout` bounds CONSECUTIVE
+        // silence exactly like `next_control_frame` and the stream-PTO wait.
+        // Measuring the wait from its start instead let a receiver that
+        // pinged every 200 ms through a 26-113 s commit trip the sender's 45 s
+        // budget with 149 pumped windows on record (asupersync-ybczmx). The
+        // absolute cap still keeps a peer that stays alive but never delivers
+        // the Proof from holding the session open forever.
+        let mut last_peer_packet = Instant::now();
+        let liveness_cap = self
+            .idle_timeout
+            .saturating_mul(PROOF_WAIT_LIVENESS_MULTIPLIER);
         let mut last_retransmit = Instant::now();
         let mut loops = 0u64;
         let mut flush_continues = 0u64;
@@ -5925,14 +6022,26 @@ impl QuicLink {
         let mut pto_empty_drains = 0u64;
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
-            if started.elapsed() >= self.idle_timeout {
+            let silent_for = last_peer_packet.elapsed();
+            let waited_for = started.elapsed();
+            let expired = if silent_for >= self.idle_timeout {
+                Some(("source_stream_proof_timeout", self.idle_timeout))
+            } else if waited_for >= liveness_cap {
+                Some(("source_stream_proof_liveness_cap", liveness_cap))
+            } else {
+                None
+            };
+            if let Some((kind, timeout)) = expired {
                 super::quic_progress(format_args!(
-                    "control: source_stream_proof_timeout operation={operation} loops={loops} \
-                     pto_expiries={pto_expiries} {}",
+                    "control: {kind} operation={operation} loops={loops} \
+                     pto_expiries={pto_expiries} silent_ms={} waited_ms={} {}",
+                    silent_for.as_millis(),
+                    waited_for.as_millis(),
                     self.wait_diagnostics()
                 ));
                 return Err(QuicTransportError::Quic(format!(
-                    "transport timeout during {operation} after {:?}; \
+                    "transport timeout during {operation} after {timeout:?} ({kind}: \
+                     silent_ms={} waited_ms={}); \
                      in_flight_stream_packets={} pending_stream_frames={} \
                      pending_stream_bytes={} pacing_rate_bytes_per_s={} \
                      udp_packets_received={} one_rtt_packets_ingested={} \
@@ -5943,7 +6052,8 @@ impl QuicLink {
                      pto_blocked_pending={pto_blocked_pending} \
                      pto_retransmit_frames={pto_retransmit_frames} \
                      pto_empty_drains={pto_empty_drains} bytes_in_flight={} cwnd={}",
-                    self.idle_timeout,
+                    silent_for.as_millis(),
+                    waited_for.as_millis(),
                     self.in_flight_stream_frames.len(),
                     self.conn.pending_stream_frame_count(),
                     self.conn.pending_stream_data_bytes(),
@@ -5965,6 +6075,7 @@ impl QuicLink {
             let flushed = self.flush(cx).await?;
             let pumped = self.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
             if pumped > 0 {
+                last_peer_packet = Instant::now();
                 pump_continues = pump_continues.saturating_add(1);
                 let latest_stream_ack_ranges = self.latest_stream_ack_ranges.clone();
                 let retransmit_frames =
@@ -5988,7 +6099,10 @@ impl QuicLink {
                 continue;
             }
 
-            if last_retransmit.elapsed() >= self.app_loss_stall_pto {
+            // The proof wait floors the stall threshold at the path RTT
+            // (asupersync-9bb6pt); the other stall loops keep the shared
+            // threshold as is, since they clock cwnd-blocked control traffic.
+            if last_retransmit.elapsed() >= self.app_loss_stall_pto.max(self.stall_pto_floor()) {
                 // Declare PTO loss BEFORE the pending-frames guard: a
                 // cwnd-blocked flush leaves requeued retransmit frames
                 // pending forever, and skipping expiry while frames are
@@ -6003,9 +6117,10 @@ impl QuicLink {
                     continue;
                 }
                 let retransmit_frames = self.drain_limited_in_flight_stream_frames_for_retransmit(
-                    QUIC_SOURCE_STREAM_PTO_RETRANSMIT_MAX_PACKETS,
+                    self.stall_retransmit_packet_cap(),
                 );
                 if !retransmit_frames.is_empty() {
+                    self.note_stall_retransmit_drain();
                     pto_retransmit_frames =
                         pto_retransmit_frames.saturating_add(retransmit_frames.len() as u64);
                     super::quic_progress(format_args!(
@@ -6185,6 +6300,7 @@ fn link_from_handshake(
         last_final_flight_resend: None,
         app_loss_stall_pto: SOURCE_STREAM_PTO,
         stall_backoff_at: None,
+        stall_silent_drains: 0,
         sender_handoff: QuicSenderHandoffStats::default(),
         limiter: QuicSendLimiterReport::default(),
         source_stream_window_request: None,
@@ -11513,6 +11629,179 @@ mod gh67_liveness_tests {
                 "the wait must have outlived the cumulative budget (~5.9 s): {elapsed:?}"
             );
             assert!(elapsed < Duration::from_secs(12), "{elapsed:?}");
+        });
+    }
+
+    /// Opens the client's control stream (as the sender's Hello does) and
+    /// pumps the server until it holds the opener, returning both ends.
+    async fn opened_control_streams(
+        cx: &Cx,
+        client: &mut QuicLink,
+        server: &mut QuicLink,
+    ) -> (NativeQuicFrameTransport, NativeQuicFrameTransport) {
+        let control_stream = super::super::first_client_bidi_stream();
+        let mut client_control = NativeQuicFrameTransport::open(cx, &mut client.conn).unwrap();
+        assert_eq!(client_control.stream, control_stream);
+        let mut server_control = NativeQuicFrameTransport::for_stream(control_stream);
+        let opener = Frame::empty(FrameType::KeepAlive).unwrap();
+        client_control.send(cx, &mut client.conn, &opener).unwrap();
+        client.flush(cx).await.unwrap();
+        let opened_at = Instant::now();
+        loop {
+            server
+                .pump_inbound_for(cx, Duration::from_secs(2))
+                .await
+                .unwrap();
+            if server_control
+                .try_recv(cx, &mut server.conn)
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                opened_at.elapsed() < Duration::from_secs(10),
+                "control stream never opened"
+            );
+        }
+        (client_control, server_control)
+    }
+
+    /// Sender side, pure-stream path (asupersync-ybczmx): the source-stream
+    /// proof wait measured its idle budget from the start of the wait, so a
+    /// receiver that pinged every 200 ms through a long packed-tree commit
+    /// was declared dead the moment the budget elapsed (149 pumped windows on
+    /// record when the 45 s budget fired). The peer here pings every 400 ms
+    /// for 4.4 s against a 2 s budget and then answers; the old clock died
+    /// at 2 s.
+    #[test]
+    fn source_stream_proof_wait_survives_a_slow_but_pinging_peer_over_real_udp() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_secs(2),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let (mut client_control, mut server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+            let client_wait = async {
+                let started = Instant::now();
+                let frame = client
+                    .next_control_frame_with_source_stream_recovery(
+                        &cx,
+                        &mut client_control,
+                        "ybczmx proof wait",
+                    )
+                    .await;
+                (started.elapsed(), frame.map(|frame| frame.frame_type()))
+            };
+            let server_pinger = async {
+                for _ in 0..11 {
+                    crate::time::sleep(cx.now(), Duration::from_millis(400)).await;
+                    send_and_flush_native_keep_alive(&cx, &mut server, &mut server_control)
+                        .await
+                        .unwrap();
+                }
+                let proof = Frame::empty(FrameType::Proof).unwrap();
+                server_control.send(&cx, &mut server.conn, &proof).unwrap();
+                server.flush(&cx).await.unwrap();
+            };
+            let ((elapsed, frame), ()) = zip(client_wait, server_pinger).await;
+            assert_eq!(
+                frame.expect("proof after eleven keep-alives"),
+                FrameType::Proof
+            );
+            assert!(
+                elapsed >= Duration::from_millis(4000),
+                "the wait must have outlived the 2 s budget measured from its start: {elapsed:?}"
+            );
+            assert!(elapsed < Duration::from_secs(12), "{elapsed:?}");
+        });
+    }
+
+    /// A peer that stays silent still fails closed after one idle budget of
+    /// silence, well before the liveness cap.
+    #[test]
+    fn source_stream_proof_wait_fails_closed_after_an_idle_budget_of_silence() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_secs(1),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let (mut client_control, _server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+            let started = Instant::now();
+            let result = client
+                .next_control_frame_with_source_stream_recovery(
+                    &cx,
+                    &mut client_control,
+                    "ybczmx silent peer",
+                )
+                .await;
+            let elapsed = started.elapsed();
+            match result {
+                Err(QuicTransportError::Quic(message)) => assert!(
+                    message.contains("source_stream_proof_timeout"),
+                    "silence must expire on the idle clock: {message}"
+                ),
+                Err(other) => panic!("unexpected error class: {other:?}"),
+                Ok(frame) => panic!("a silent peer delivered {:?}", frame.frame_type()),
+            }
+            assert!(
+                elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(6),
+                "one idle budget of silence, not the 8 s liveness cap: {elapsed:?}"
+            );
+        });
+    }
+
+    /// A peer that keeps pinging but never delivers the Proof is bounded by
+    /// the absolute liveness cap (eight idle budgets), not held forever.
+    #[test]
+    fn source_stream_proof_wait_caps_a_live_peer_that_never_answers_over_real_udp() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_millis(500),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let (mut client_control, mut server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+            let client_wait = async {
+                let started = Instant::now();
+                let result = client
+                    .next_control_frame_with_source_stream_recovery(
+                        &cx,
+                        &mut client_control,
+                        "ybczmx capped wait",
+                    )
+                    .await;
+                (started.elapsed(), result)
+            };
+            let server_pinger = async {
+                for _ in 0..70 {
+                    crate::time::sleep(cx.now(), Duration::from_millis(100)).await;
+                    send_and_flush_native_keep_alive(&cx, &mut server, &mut server_control)
+                        .await
+                        .unwrap();
+                }
+            };
+            let ((elapsed, result), ()) = zip(client_wait, server_pinger).await;
+            match result {
+                Err(QuicTransportError::Quic(message)) => assert!(
+                    message.contains("source_stream_proof_liveness_cap"),
+                    "a live peer that never answers must hit the cap: {message}"
+                ),
+                Err(other) => panic!("unexpected error class: {other:?}"),
+                Ok(frame) => panic!("the peer never sent a frame, got {:?}", frame.frame_type()),
+            }
+            assert!(
+                elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(7),
+                "cap = 8 x 500 ms: {elapsed:?}"
+            );
         });
     }
 
