@@ -63,6 +63,59 @@ fn local_queue(max_task_id: u32) -> LocalQueue {
     LocalQueue::new(setup_runtime_state(max_task_id))
 }
 
+/// Opt-in attribution for the large fixture retained by the task-spawn bench.
+/// This deliberately preserves every raw sample and never runs the Phase 6 gate.
+fn profile_local_queue_fixture() {
+    use std::time::Instant;
+
+    let mut samples = Vec::new();
+    for repetition in 0..20 {
+        let sizes = if repetition % 2 == 0 {
+            [1, 10, 30, 60]
+        } else {
+            [60, 30, 10, 1]
+        };
+        for batch_size in sizes {
+            let setup_start = Instant::now();
+            let queues: Vec<_> = (0..batch_size).map(|_| local_queue(1000)).collect();
+            let setup_ns = setup_start.elapsed().as_nanos();
+
+            // Match the benchmark's batch-wide timing. Keep teardown separate
+            // so a cold task arena cannot be mistaken for queue-push cost.
+            let push_start = Instant::now();
+            for queue in black_box(&queues) {
+                for id in 0..1000 {
+                    queue.push(task(id));
+                }
+            }
+            let push_ns = push_start.elapsed().as_nanos();
+            assert!(queues.iter().all(|queue| queue.len() == 1000));
+
+            let drop_start = Instant::now();
+            drop(black_box(queues));
+            let drop_ns = drop_start.elapsed().as_nanos();
+            samples.push(serde_json::json!({
+                "repetition": repetition,
+                "batch_size": batch_size,
+                "tasks_per_fixture": 1001,
+                "pushes_per_fixture": 1000,
+                "setup_ns": setup_ns,
+                "push_ns": push_ns,
+                "drop_ns": drop_ns,
+            }));
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "schema": "asupersync.local_queue_fixture_profile.v1",
+            "task_record_bytes": std::mem::size_of::<TaskRecord>(),
+            "samples": samples,
+            "scope": "diagnostic stage attribution; not Phase 6 gate evidence",
+        })
+    );
+}
+
 fn setup_obligation_ledger_with_probe(count: u32) -> (ObligationLedger, ObligationId) {
     let mut ledger = ObligationLedger::new();
     let mut probe_id = None;
@@ -701,6 +754,14 @@ criterion_group!(
 );
 
 fn main() {
+    if std::env::var_os("ASUPERSYNC_PHASE6_PROFILE_LOCAL_QUEUE").is_some() {
+        if std::env::var_os("ASUPERSYNC_PHASE6_BASELINE").is_some() {
+            eprintln!("[PHASE6] diagnostic profiling cannot satisfy the baseline gate");
+            std::process::exit(2);
+        }
+        profile_local_queue_fixture();
+        return;
+    }
     benches();
     Criterion::default().configure_from_args().final_summary();
     // The gate implementation is shared with the scheduler hot-path benches
