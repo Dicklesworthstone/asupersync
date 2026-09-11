@@ -213,7 +213,7 @@ expression: inventory
 9	Time	net/atp/sink/writer.rs	Instant::now()
 10	Time	net/atp/sink/writer.rs	SystemTime::now()
 4	Time	net/atp/transport_quic/mod.rs	Instant::now()
-66	Time	net/atp/transport_quic/native_link.rs	Instant::now()
+68	Time	net/atp/transport_quic/native_link.rs	Instant::now()
 17	Time	net/atp/transport_rq/mod.rs	Instant::now()
 2	Time	net/atp/udp/mod.rs	Instant::now()
 2	Time	net/dns/resolver.rs	Instant::now()
@@ -235,13 +235,13 @@ expression: inventory
 1	Time	runtime/deadline_monitor.rs	Instant::now()
 4	Time	runtime/epoch_gc.rs	Instant::now()
 1	Time	runtime/epoch_tracker.rs	std::time::Instant::now()
-7	Time	runtime/epoch_tracking.rs	Instant::now()
+1	Time	runtime/epoch_tracking.rs	Instant::now()
 2	Time	runtime/panic_isolation.rs	Instant::now()
 2	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()
 6	Time	runtime/resource_monitor.rs	Instant::now()
 2	Time	runtime/scheduler/autotuner.rs	Instant::now()
-6	Time	runtime/scheduler/invariant_monitor.rs	std::time::Instant::now()
-6	Time	runtime/scheduler/priority_inversion_oracle.rs	Instant::now()
+1	Time	runtime/scheduler/invariant_monitor.rs	std::time::Instant::now()
+2	Time	runtime/scheduler/priority_inversion_oracle.rs	Instant::now()
 1	Time	runtime/scheduler/work_stealing_checker.rs	Instant::now()
 2	Time	runtime/state.rs	Instant::now()
 3	Time	runtime/state_verifier.rs	SystemTime::now()
@@ -347,7 +347,7 @@ expression: inventory
 1	Io	messaging/stream.rs	File::open(	let file = File::open(path).map_err(|error| StreamError::wal_io(, path, &error))?;
 1	Io	net/atp/sdk/bonded.rs	TcpListener::	let listener = TcpListener::bind(self.listen).await?;
 1	Io	net/atp/sdk/session.rs	std::net::TcpStream	std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
-1	Io	net/atp/sdk/transfer.rs	std::net::TcpStream	std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
+1	Io	net/atp/sdk/transfer.rs	std::net::TcpStream	std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250))
 1	Io	net/atp/sink/writer.rs	std::fs::read(	let payload = std::fs::read(&path).map_err(|error| WriteError::Internal {
 1	Io	net/atp/sink/writer.rs	std::fs::read(	match std::fs::read(file_path) {
 1	Io	net/atp/transport_common/metadata.rs	std::fs::File::open	crate::runtime::spawn_blocking_io(move || std::fs::File::open(parent)?.sync_all()).await
@@ -681,6 +681,7 @@ expression: inventory
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	crate::runtime::spawn_blocking_io(|| Ok::<Instant, std::io::Error>(Instant::now()))
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	if !cadence.due(Instant::now(), LOCAL_WORK_KEEP_ALIVE_CADENCE) {
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	last_early_data_resend = Some(Instant::now());
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	last_peer_packet = Instant::now();
 10	Time	net/atp/transport_quic/native_link.rs	Instant::now()	last_progress = Instant::now();
 5	Time	net/atp/transport_quic/native_link.rs	Instant::now()	last_retransmit = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let accept_started = Instant::now();
@@ -692,6 +693,7 @@ expression: inventory
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let generate_started = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let liveness_start = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut commit_clock = Instant::now();
+1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut last_peer_packet = Instant::now();
 4	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut last_progress = Instant::now();
 2	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut last_retransmit = Instant::now();
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	let mut member_clock = Instant::now();
@@ -773,11 +775,7 @@ expression: inventory
 1	Time	runtime/epoch_gc.rs	Instant::now()	let now = Instant::now();
 1	Time	runtime/epoch_gc.rs	Instant::now()	let start_time = Instant::now();
 1	Time	runtime/epoch_tracker.rs	std::time::Instant::now()	let processing_start = std::time::Instant::now();
-1	Time	runtime/epoch_tracking.rs	Instant::now()	.store(instant_to_nanos(Instant::now()).max(1), Ordering::Release);
-2	Time	runtime/epoch_tracking.rs	Instant::now()	let now = Instant::now();
-1	Time	runtime/epoch_tracking.rs	Instant::now()	let now = instant_to_nanos(Instant::now());
-1	Time	runtime/epoch_tracking.rs	Instant::now()	let now_nanos = instant_to_nanos(Instant::now());
-2	Time	runtime/epoch_tracking.rs	Instant::now()	let start = Instant::now();
+1	Time	runtime/epoch_tracking.rs	Instant::now()	instant_to_nanos(Instant::now())
 2	Time	runtime/panic_isolation.rs	Instant::now()	timestamp: Instant::now(),
 1	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()	let now = SystemTime::now();
 1	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()	self.last_updated = SystemTime::now();
@@ -788,11 +786,9 @@ expression: inventory
 1	Time	runtime/resource_monitor.rs	Instant::now()	timestamp: Instant::now(),
 1	Time	runtime/scheduler/autotuner.rs	Instant::now()	self.last_adjustment_time = Some(Instant::now());
 1	Time	runtime/scheduler/autotuner.rs	Instant::now()	timestamp: Some(Instant::now()),
-6	Time	runtime/scheduler/invariant_monitor.rs	std::time::Instant::now()	let start = std::time::Instant::now();
-2	Time	runtime/scheduler/priority_inversion_oracle.rs	Instant::now()	creation_time: Instant::now(),
-1	Time	runtime/scheduler/priority_inversion_oracle.rs	Instant::now()	let end_time = Instant::now();
-1	Time	runtime/scheduler/priority_inversion_oracle.rs	Instant::now()	let start_time = Instant::now();
-2	Time	runtime/scheduler/priority_inversion_oracle.rs	Instant::now()	start_time: Instant::now(),
+1	Time	runtime/scheduler/invariant_monitor.rs	std::time::Instant::now()	std::time::Instant::now()
+1	Time	runtime/scheduler/priority_inversion_oracle.rs	Instant::now()	Instant::now()
+1	Time	runtime/scheduler/priority_inversion_oracle.rs	Instant::now()	let duration = Instant::now().duration_since(inversion.start_time);
 1	Time	runtime/scheduler/work_stealing_checker.rs	Instant::now()	start_time: Instant::now(),
 2	Time	runtime/state.rs	Instant::now()	let started = Instant::now();
 3	Time	runtime/state_verifier.rs	SystemTime::now()	timestamp: SystemTime::now(),
