@@ -419,7 +419,9 @@ pub struct ManagedEndpointConfig {
     pub connection_config: NativeQuicConnectionConfig,
     /// Whether this endpoint acts as a server (accepts connections).
     pub is_server: bool,
-    /// Connection idle timeout in microseconds.
+    /// Local idle timeout in microseconds. Zero disables this local limit.
+    /// A finite authenticated QUIC timeout can shorten but never extend it;
+    /// all idle periods allow at least three probe intervals.
     pub connection_idle_timeout_micros: u64,
     /// Maximum number of concurrent connections.
     pub max_connections: usize,
@@ -589,7 +591,7 @@ impl ManagedQuicEndpoint {
                 ));
             }
         };
-        let (connection_router, udp_endpoint, pending_incoming) =
+        let (mut connection_router, udp_endpoint, pending_incoming) =
             ConnectionRouter::from_authenticated_parts(
                 parts,
                 config.connection_config,
@@ -597,6 +599,7 @@ impl ManagedQuicEndpoint {
                 deadline,
                 now,
             );
+        connection_router.set_idle_timeout_micros(config.connection_idle_timeout_micros);
         Ok(Self {
             udp_endpoint,
             connection_router,
@@ -922,6 +925,7 @@ impl ManagedQuicEndpoint {
                     connection_id: pending.local_cid,
                     packet,
                     final_handshake_flight: false,
+                    ack_eliciting: false,
                 });
             }
         }
@@ -1001,7 +1005,11 @@ impl ManagedQuicEndpoint {
         let udp_endpoint = QuicUdpEndpoint::bind(cx, addr, config.udp_config.clone()).await?;
 
         // Create connection router
-        let connection_router = ConnectionRouter::new(config.connection_config);
+        let mut connection_router = ConnectionRouter::with_max_connections(
+            config.connection_config,
+            config.max_connections,
+        );
+        connection_router.set_idle_timeout_micros(config.connection_idle_timeout_micros);
 
         // Create timer scheduler
         let timer_scheduler = QuicTimerScheduler::new();
@@ -1221,6 +1229,14 @@ impl ManagedQuicEndpoint {
                 return Err(ManagedEndpointError::Cancelled);
             }
 
+            // Draining connections retain only their route until the drain
+            // deadline. They must never send already queued application/PTO data.
+            self.pending_outgoing.retain(|packet| {
+                !self
+                    .connection_router
+                    .connection_is_terminal(packet.connection_id)
+            });
+
             #[cfg(feature = "tls")]
             {
                 let now = self.timer_scheduler.now(cx)?;
@@ -1391,6 +1407,7 @@ impl ManagedQuicEndpoint {
                             "UDP send made invalid progress".to_string(),
                         ));
                     }
+                    let sent_at = self.timer_scheduler.now(cx);
                     for packet in self.pending_outgoing.drain(..result.packets_processed) {
                         #[cfg(feature = "tls")]
                         if let Some(pending) = &mut self.pending_authenticated_accept {
@@ -1398,8 +1415,12 @@ impl ManagedQuicEndpoint {
                                 pending.sent(packet.packet.data.len());
                             }
                         }
-                        self.connection_router.packet_sent(&packet);
+                        // Commit the entire sent prefix even if clock validation
+                        // fails; retrying it would duplicate transmitted packets.
+                        self.connection_router
+                            .packet_sent(&packet, sent_at.as_ref().ok().copied());
                     }
+                    sent_at?;
                     if let Some(error) = result.error {
                         // The unsent suffix remains available if the owner retries this loop.
                         return Err(ManagedEndpointError::UdpEndpoint(error));
@@ -1647,6 +1668,7 @@ impl ManagedQuicEndpoint {
                 connection_id,
                 packet,
                 final_handshake_flight: false,
+                ack_eliciting: false,
             }));
     }
 
@@ -1686,6 +1708,16 @@ impl ManagedQuicEndpoint {
         }
 
         let now = self.timer_scheduler.now(cx)?.max(deadline);
+        // Each removal commits route and retained-queue ownership together,
+        // before recovery processing can yield or observe cancellation.
+        for cid in self.connection_router.expired_connections(now) {
+            self.remove_connection(cx, cid)?;
+        }
+        self.pending_outgoing.retain(|packet| {
+            !self
+                .connection_router
+                .connection_is_terminal(packet.connection_id)
+        });
         let pending_connections = self
             .pending_outgoing
             .iter()
@@ -1862,6 +1894,53 @@ mod tests {
             .refresh_connection_timer_for_testing(&cx, cid, 1_000)
             .unwrap();
         (cx, clock, driver, endpoint, peer, cid)
+    }
+
+    #[test]
+    fn lifecycle_reaping_idle_endpoint_without_in_flight_packets_accepts_a_new_peer() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().unwrap();
+            let mut endpoint = ManagedQuicEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                ManagedEndpointConfig {
+                    max_connections: 1,
+                    connection_idle_timeout_micros: 10_000_000,
+                    ..ManagedEndpointConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            let cid = ConnectionId::new(b"idle").unwrap();
+            let replacement = ConnectionId::new(b"next").unwrap();
+            let peer = "127.0.0.1:4450".parse().unwrap();
+            endpoint
+                .create_connection_for_testing(&cx, cid, peer)
+                .await
+                .unwrap();
+            let deadline = endpoint
+                .connection_router
+                .next_timer_deadline()
+                .expect("an idle route must have a deadline without any recovery flight");
+            assert!(
+                endpoint
+                    .create_connection_for_testing(&cx, replacement, peer)
+                    .await
+                    .is_err()
+            );
+            endpoint.process_timer_events(&cx, deadline).await.unwrap();
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+            assert!(endpoint.pending_outgoing.is_empty());
+            endpoint
+                .create_connection_for_testing(&cx, replacement, peer)
+                .await
+                .unwrap();
+            assert_eq!(endpoint.connection_stats().active_connections, 1);
+            endpoint.shutdown(&cx).await.unwrap();
+        }));
     }
 
     fn witness_selection_io_wake(owner: &Cx, wake: &SelectionWake, before: usize) {
@@ -3068,6 +3147,7 @@ mod tests {
                     send_time: None,
                 },
                 final_handshake_flight: false,
+                ack_eliciting: false,
             }
         }
 
@@ -3514,6 +3594,63 @@ mod tests {
                 assert!(endpoint.pending_outgoing.is_empty());
                 assert!(endpoint.pending_incoming.is_empty());
                 assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn lifecycle_reaping_preserves_same_address_peer_queues_and_timer() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, _, mut endpoint, peer, a) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                let peer = peer.local_addr().unwrap();
+                let b = ConnectionId::new(&[8; 8]).unwrap();
+                endpoint
+                    .create_connection_for_testing(&cx, b, peer)
+                    .await
+                    .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                let survivor_deadline = endpoint.connection_router.next_timer_deadline();
+                for cid in [a, b, a, b] {
+                    endpoint.pending_outgoing.push_back(routed_packet(
+                        cid,
+                        peer,
+                        cid.as_bytes()[0],
+                    ));
+                    endpoint.pending_incoming.push_back(ManagedIncomingPacket {
+                        packet: short_packet(cid, peer, now),
+                        needs_clock_stamp: false,
+                    });
+                }
+                endpoint
+                    .connection_router
+                    .connection_mut_for_testing(&cx, b)
+                    .unwrap()
+                    .close_immediately(&cx, 0x19)
+                    .unwrap();
+                endpoint.process_timer_events(&cx, now).await.unwrap();
+                assert_eq!(endpoint.connection_stats().active_connections, 1);
+                assert_eq!(
+                    endpoint.connection_router.next_timer_deadline(),
+                    survivor_deadline
+                );
+                assert_eq!(endpoint.pending_outgoing.len(), 2);
+                assert!(
+                    endpoint
+                        .pending_outgoing
+                        .iter()
+                        .all(|packet| packet.connection_id == a)
+                );
+                assert_eq!(endpoint.pending_incoming.len(), 2);
+                assert!(endpoint.pending_incoming.iter().all(|packet| {
+                    endpoint
+                        .connection_router
+                        .retained_packet_connection_id(&packet.packet)
+                        == Some(a)
+                }));
+                endpoint.shutdown(&cx).await.unwrap();
             }));
         }
 

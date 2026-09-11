@@ -548,6 +548,9 @@ impl NativeQuicUdpConnection {
             StreamRole::Client => QuicConnection::client(bound.config),
             StreamRole::Server => QuicConnection::server(bound.config),
         };
+        connection
+            .inner_mut()
+            .set_negotiated_idle_timeout(&local_parameters, &peer_parameters);
         connection.inner_mut().set_remote_stream_limits(
             local_parameters.initial_max_streams_bidi.unwrap_or(0),
             local_parameters.initial_max_streams_uni.unwrap_or(0),

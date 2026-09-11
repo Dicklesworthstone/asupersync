@@ -470,15 +470,18 @@ impl LossRecovery {
         self.congestion_window_bytes = reduced;
     }
 
+    fn base_pto_micros(&self) -> u64 {
+        let srtt = self.rtt.smoothed_rtt_micros().unwrap_or(333_000);
+        let rttvar = self.rtt.rttvar_micros().unwrap_or(srtt / 2);
+        srtt.saturating_add(4u64.saturating_mul(rttvar).max(1_000))
+    }
+
     fn pto_deadline_micros(&self, _now_micros: u64) -> Option<u64> {
         if self.bytes_in_flight == 0 {
             return None;
         }
-        let srtt = self.rtt.smoothed_rtt_micros().unwrap_or(333_000);
-        let rttvar = self.rtt.rttvar_micros().unwrap_or(srtt / 2);
-        let granularity = 1_000;
         let backoff = 1u64 << self.pto_count.min(10);
-        let base_timeout = srtt.saturating_add(4u64.saturating_mul(rttvar).max(granularity));
+        let base_timeout = self.base_pto_micros();
 
         let mut ack_eliciting_in_flight = [false; 3];
         for pkt in &self.sent_packets {
@@ -786,6 +789,19 @@ impl QuicTransportMachine {
     #[must_use]
     pub fn pto_deadline_micros(&self, now_micros: u64) -> Option<u64> {
         self.recovery.pto_deadline_micros(now_micros)
+    }
+
+    /// RFC 9000 section 10.1 permits at least three probe intervals before
+    /// idle expiry. Recovery backoff must not indefinitely move idle expiry.
+    pub(crate) fn idle_timeout_floor_micros(&self) -> u64 {
+        self.recovery
+            .base_pto_micros()
+            .saturating_add(self.recovery.max_ack_delay_micros)
+            .saturating_mul(3)
+    }
+
+    pub(crate) fn drain_deadline_micros(&self) -> Option<u64> {
+        self.drain_deadline_micros
     }
 
     /// Record a PTO timer expiration (backoff signal).

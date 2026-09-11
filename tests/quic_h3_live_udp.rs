@@ -1343,7 +1343,21 @@ async fn managed_handshake(
     server: bool,
     server_addr: std::net::SocketAddr,
 ) -> NativeQuicUdpConnection {
+    managed_handshake_with_idle_timeout(cx, endpoint, server, server_addr, None).await
+}
+
+async fn managed_handshake_with_idle_timeout(
+    cx: &Cx,
+    endpoint: QuicUdpEndpoint,
+    server: bool,
+    server_addr: std::net::SocketAddr,
+    idle_timeout_millis: Option<u64>,
+) -> NativeQuicUdpConnection {
     let config = connection_config();
+    let mut parameters = TransportParameters::decode(&transport_parameters(config)).unwrap();
+    parameters.max_idle_timeout = idle_timeout_millis;
+    let mut encoded_parameters = Vec::new();
+    parameters.encode(&mut encoded_parameters).unwrap();
     let (initial, client_cid, server_cid) = managed_ids();
     assert_ne!(client_cid.len(), server_cid.len());
     if server {
@@ -1353,7 +1367,7 @@ async fn managed_handshake(
             vec![MANAGED_ALPN.to_vec()],
         )
         .unwrap();
-        let driver = QuicHandshakeDriver::server(tls, transport_parameters(config)).unwrap();
+        let driver = QuicHandshakeDriver::server(tls, encoded_parameters).unwrap();
         NativeQuicUdpConnection::accept(
             cx,
             endpoint,
@@ -1374,7 +1388,7 @@ async fn managed_handshake(
         let driver = QuicHandshakeDriver::client(
             tls,
             ServerName::try_from("localhost").unwrap(),
-            transport_parameters(config),
+            encoded_parameters,
         )
         .unwrap();
         NativeQuicUdpConnection::connect(
@@ -1670,6 +1684,157 @@ async fn managed_cancel_parked(cx: &Cx, mut endpoint: ManagedQuicEndpoint) -> Ma
     assert_eq!(endpoint.connection_stats().active_connections, 1);
     println!("MANAGED_QUIC_CANCEL parked=true result=Cancelled retained_connections=1");
     endpoint
+}
+
+#[test]
+fn authenticated_managed_idle_timer_reclaims_capacity_and_accepts_replacement() {
+    assert_managed_idle_reclamation(Some(1), 60_000_000);
+}
+
+#[test]
+fn authenticated_managed_local_idle_limit_caps_a_long_peer_timeout() {
+    assert_managed_idle_reclamation(None, 1);
+}
+
+fn assert_managed_idle_reclamation(server_idle_millis: Option<u64>, local_idle_micros: u64) {
+    let runtime = managed_runtime();
+    let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+        let cx = Cx::current().unwrap();
+        let client_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let server_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let server_addr = server_socket.local_addr();
+        let (silent_client, server) = zip(
+            managed_handshake_with_idle_timeout(
+                &cx,
+                client_socket,
+                false,
+                server_addr,
+                Some(120_000),
+            ),
+            managed_handshake_with_idle_timeout(
+                &cx,
+                server_socket,
+                true,
+                server_addr,
+                server_idle_millis,
+            ),
+        )
+        .await;
+        let mut endpoint = server
+            .into_managed(
+                &cx,
+                ManagedEndpointConfig {
+                    is_server: true,
+                    max_connections: 1,
+                    // Exercise both a shorter negotiated timeout and a shorter
+                    // local limit. Both still honor the three-PTO floor.
+                    connection_idle_timeout_micros: local_idle_micros,
+                    ..ManagedEndpointConfig::default()
+                },
+            )
+            .unwrap();
+        let replacement_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let replacement_addr = replacement_socket.local_addr();
+        let (initial, _, server_cid) = managed_ids();
+        let fresh_driver = || {
+            QuicHandshakeDriver::server(
+                server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![MANAGED_ALPN.to_vec()],
+                )
+                .unwrap(),
+                transport_parameters(connection_config()),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            endpoint.begin_authenticated_accept(
+                &cx,
+                fresh_driver(),
+                replacement_addr,
+                initial,
+                server_cid,
+                MANAGED_ALPN,
+            ),
+            Err(ManagedEndpointError::MaxConnectionsReached { limit: 1 })
+        );
+        let started = Instant::now();
+        let mut application_polls = 0;
+        asupersync::time::timeout(
+            cx.now(),
+            Duration::from_secs(10),
+            endpoint.run_event_loop_with_application(&cx, |_, endpoint, _| {
+                application_polls += 1;
+                if endpoint.connection_stats().active_connections == 0 {
+                    Poll::Ready(Ok(()))
+                } else {
+                    // No application self-wake or polling timer. The native
+                    // QUIC lifecycle timer must wake this parked owner.
+                    Poll::Pending
+                }
+            }),
+        )
+        .await
+        .expect("native idle deadline must wake and reclaim the silent peer")
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(application_polls >= 2);
+        assert_eq!(endpoint.local_addr(), server_addr);
+        assert!(endpoint.negotiated_alpn(server_cid).is_err());
+        endpoint
+            .begin_authenticated_accept(
+                &cx,
+                fresh_driver(),
+                replacement_addr,
+                initial,
+                server_cid,
+                MANAGED_ALPN,
+            )
+            .unwrap();
+        let (replacement, admitted) = asupersync::time::timeout(
+            cx.now(),
+            IO_TIMEOUT,
+            zip(
+                managed_handshake(&cx, replacement_socket, false, server_addr),
+                endpoint.run_event_loop_with_application(&cx, |_, endpoint, _| {
+                    match endpoint.take_authenticated_accept_result() {
+                        Some(result) => Poll::Ready(result),
+                        None => Poll::Pending,
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("replacement completes real TLS on the reclaimed endpoint");
+        assert_eq!(admitted.unwrap(), server_cid);
+        assert_eq!(replacement.peer_addr(), server_addr);
+        assert_eq!(endpoint.connection_stats().active_connections, 1);
+        assert_eq!(endpoint.negotiated_alpn(server_cid).unwrap(), MANAGED_ALPN);
+        assert!(silent_client.connection().can_send_app_data());
+        endpoint.shutdown(&cx).await.unwrap();
+        assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+    });
+    runtime.block_on(runtime.handle().spawn(parent));
+    managed_assert_runtime_cleanup(&runtime);
 }
 
 #[test]

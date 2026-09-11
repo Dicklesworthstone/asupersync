@@ -301,6 +301,7 @@ pub struct NativeQuicConnection {
     active_path_id: u64,
     migration_events: u64,
     drain_timeout_micros: u64,
+    negotiated_idle_timeout_micros: Option<u64>,
     /// True only when the peer's CONNECTION_CLOSE frame initiated the current
     /// draining/closed state. Local shutdown paths leave this false so upper
     /// protocol adapters never misreport operator cleanup as a client abort.
@@ -478,6 +479,7 @@ impl NativeQuicConnection {
             active_path_id: 0,
             migration_events: 0,
             drain_timeout_micros: config.drain_timeout_micros,
+            negotiated_idle_timeout_micros: None,
             peer_close_observed: false,
             peer_address_validated: config.role == StreamRole::Client,
             server_identity_verified: false,
@@ -583,6 +585,21 @@ impl NativeQuicConnection {
     #[must_use]
     pub fn transport(&self) -> &QuicTransportMachine {
         &self.transport
+    }
+
+    pub(crate) fn negotiated_idle_timeout_micros(&self) -> Option<u64> {
+        self.negotiated_idle_timeout_micros
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn set_negotiated_idle_timeout(
+        &mut self,
+        local: &crate::net::quic_core::TransportParameters,
+        peer: &crate::net::quic_core::TransportParameters,
+    ) {
+        self.negotiated_idle_timeout_micros =
+            crate::net::quic_core::TransportParameters::effective_max_idle_timeout(local, peer)
+                .map(|millis| millis.saturating_mul(1_000));
     }
 
     /// Access stream table snapshot.
