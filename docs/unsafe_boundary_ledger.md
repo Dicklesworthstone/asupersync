@@ -62,6 +62,21 @@ The 100 rows and 892 operations retain their categories, safety invariants,
 evidence requirements, and platform coverage limits. This is source alignment,
 not new unsafe code or additional platform execution evidence.
 
+The September 11 reconciliation (`asupersync-8ktzrj`) moves 56 existing
+locators after safe-only source changes: two ATP fd-limit locators, 13 TCP
+test calls, two Unix ancillary locators, 35 process operations, and four
+runtime environment locators. The first four paths match shared `main` at
+`40af2f196b64a8ababf0be339749c6002f795271`; the runtime row includes the
+coordinated `asupersync-a18rx3` builder overlay, SHA-256
+`ea6c501fe7b4a1e165c2f35522729f5c861b5ecec5964cdf1187d0ac2da17fb1`.
+The artifact records that overlay explicitly instead of describing this
+reconciliation as committed-source-only. Matching each operation's source
+preserves both Windows attribute-list entries even though the relocated
+delete operation occupies the update operation's former line. The inventory
+remains 100 rows and 892 operations, with unchanged safety invariants,
+category evidence, and platform coverage limits. The focused RCH contract
+must validate the resulting source/ledger alignment before this bead closes.
+
 ## Row Schema
 
 Each `sites[]` row must include:
