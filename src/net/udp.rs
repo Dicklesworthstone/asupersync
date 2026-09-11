@@ -1818,7 +1818,7 @@ pub fn ambient_io_driver_present() -> bool {
 /// (`FreshRegistration::SelfWake`) that production still takes when no reactor
 /// backend can be started. Since GH#67 the fallback driver takes every fd in
 /// an ordinary test process, which would otherwise leave that path untested.
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
 pub mod fallback_io_test_hooks {
     use std::cell::Cell;
 
@@ -1857,12 +1857,12 @@ pub mod fallback_io_test_hooks {
     }
 }
 
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
 fn fallback_driver_withheld() -> bool {
     fallback_io_test_hooks::withheld()
 }
 
-#[cfg(not(any(test, feature = "test-internals")))]
+#[cfg(all(not(target_arch = "wasm32"), not(any(test, feature = "test-internals"))))]
 const fn fallback_driver_withheld() -> bool {
     false
 }
