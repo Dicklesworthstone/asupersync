@@ -984,7 +984,7 @@ mod tests {
         use crate::runtime::RuntimeState;
         use crate::runtime::spawn_mailbox::LocalSpawnRequest;
         use crate::sync::ContendedMutex;
-        use crate::types::Outcome;
+        use crate::types::{Budget, Outcome};
 
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);

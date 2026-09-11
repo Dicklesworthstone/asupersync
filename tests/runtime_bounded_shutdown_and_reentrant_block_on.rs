@@ -181,8 +181,11 @@ fn browser_local_requests_keep_fifo_across_nested_native_drive() {
         .build()
         .expect("native runtime");
     let recorded = Rc::clone(&order);
-    let second = native
-        .block_on(async { browser.spawn_local(async move { recorded.borrow_mut().push(2) }) });
+    let mut second = None;
+    native.block_on(async {
+        second = Some(browser.spawn_local(async move { recorded.borrow_mut().push(2) }));
+    });
+    let second = second.expect("browser request queued during the native drive");
     assert!(!first.is_finished());
     assert!(!second.is_finished());
     let pump = browser.browser_pump().expect("browser pump");
