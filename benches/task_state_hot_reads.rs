@@ -151,15 +151,18 @@ fn bench_locked_read_contended(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_locked_read_single,
+criterion_group! {
+    name = benches;
+    config = phase6_gate::phase6_criterion();
+    targets = bench_locked_read_single,
     bench_locked_read_contended
-);
+}
 
 fn main() {
     benches();
-    Criterion::default().configure_from_args().final_summary();
+    phase6_gate::phase6_criterion()
+        .configure_from_args()
+        .final_summary();
     if let Err(error) = phase6_gate::run_phase6_p50_gate("sched/task_state/") {
         eprintln!("[PHASE6] baseline gate failed: {error}");
         std::process::exit(2);

@@ -333,6 +333,7 @@ fn incumbent_rows_remain_exact_and_are_not_reinterpreted() {
         "bench_function(\"locked_read_cycle\"",
         "BenchmarkId::new(\"locked_read_contended\", readers)",
         "for readers in [4usize, 8]",
+        "config = phase6_gate::phase6_criterion();",
         "run_phase6_p50_gate(\"sched/task_state/\")",
     ] {
         assert!(bench.contains(required), "benchmark lost {required}");

@@ -458,6 +458,54 @@ fn capture_baseline_quoted_command_runner_ignores_login_shell_profiles() {
 }
 
 #[test]
+fn capture_baseline_requires_a_selected_phase6_invocation() {
+    let temp = tempfile::tempdir().expect("tempdir").keep();
+    let ungated = temp.join("ungated");
+    write_minimal_criterion_output(&ungated);
+    for (invocation, median) in [("phase6-run-first", 11.0), ("phase6-run-second", 22.0)] {
+        write_criterion_benchmark(
+            &temp,
+            &format!("{invocation}/bench"),
+            median,
+            median,
+            0.0,
+            &[1],
+            &[median as u64],
+        );
+    }
+
+    for (case, criterion_dir, expected_median) in [
+        ("ungated", ungated.join("criterion"), Some(1.0)),
+        ("aggregate", temp.join("criterion"), None),
+        ("first", temp.join("criterion/phase6-run-first"), Some(11.0)),
+        ("second", temp.join("criterion/phase6-run-second"), Some(22.0)),
+    ] {
+        let report_path = temp.join(format!("{case}.json"));
+        let output = Command::new("bash")
+            .arg(repo_root().join("scripts/capture_baseline.sh"))
+            .env("CRITERION_DIR", criterion_dir)
+            .env("BASELINE_TMP_PATH", &report_path)
+            .env("WRITE_BENCH_HISTORY", "0")
+            .env("WRITE_SWARM_LEDGER", "0")
+            .output()
+            .expect("run actual baseline exporter without benchmarking");
+        if let Some(median) = expected_median {
+            assert!(output.status.success(), "{case}: {}", String::from_utf8_lossy(&output.stderr));
+            let report: BaselineReport = serde_json::from_slice(&output.stdout).expect("baseline JSON");
+            assert_eq!(report.benchmarks.len(), 1);
+            assert_eq!(report.benchmarks[0].name, "bench");
+            assert_eq!(report.benchmarks[0].median_ns, median);
+        } else {
+            assert!(!output.status.success(), "must not mix retained invocations");
+            assert!(String::from_utf8_lossy(&output.stderr).contains("Set CRITERION_DIR"));
+            assert!(output.stdout.is_empty());
+            assert!(!report_path.exists(), "refusal must precede report creation");
+        }
+    }
+    eprintln!("Phase 6 export fixture retained: {}", temp.display());
+}
+
+#[test]
 fn capture_baseline_default_run_requires_rch() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_minimal_criterion_output(temp.path());

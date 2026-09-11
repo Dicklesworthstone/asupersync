@@ -333,6 +333,7 @@ fn direct_main_benchmark_commands_and_comparator_are_executable_and_fail_closed(
     let runner = read_repo_file(METHODOLOGY_BENCH_PATH);
     for required in [
         "mod phase6_gate;",
+        "config = phase6_gate::phase6_criterion();",
         "run_phase6_p50_gate(\"methodology/\")",
         "std::process::exit(2)",
     ] {
@@ -675,6 +676,38 @@ fn host_family_rows(current_p50_ns: f64, reverse: bool) -> Vec<JsonValue> {
 }
 
 fn run_host_family_fixture(rows: Vec<JsonValue>, omit_first_estimate: bool) -> (bool, String) {
+    run_host_family_fixture_with_stale(rows, omit_first_estimate, false)
+}
+
+fn write_fixture_estimates(home: &Path, omit_first_estimate: bool, omit_control: bool) {
+    for (operation, candidate) in std::iter::once(("methodology/control/present", 100.0))
+        .filter(|_| !omit_control)
+        .chain(
+            HOST_FAMILY_MPSC_OPERATIONS
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !omit_first_estimate || *index != 0)
+                .map(|(_, operation)| (*operation, 110.0)),
+        )
+    {
+        let estimates_dir = home.join(operation.replacen('/', "_", 1)).join("new");
+        std::fs::create_dir_all(&estimates_dir).expect("create fixture estimate directory");
+        std::fs::write(
+            estimates_dir.join("estimates.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "median": {"point_estimate": candidate},
+            }))
+            .expect("encode fixture estimate"),
+        )
+        .expect("write fixture estimate");
+    }
+}
+
+fn run_host_family_fixture_with_stale(
+    rows: Vec<JsonValue>,
+    omit_first_estimate: bool,
+    stale_control: bool,
+) -> (bool, String) {
     // Keep the synthetic input and subprocess receipts for inspection. This
     // exercises the real comparator, without timing a benchmark or changing
     // process-global environment variables in a parallel test runner.
@@ -694,32 +727,37 @@ fn run_host_family_fixture(rows: Vec<JsonValue>, omit_first_estimate: bool) -> (
     )
     .expect("write fixture baseline");
     let criterion_home = fixture_root.join("criterion");
-    for (operation, candidate) in std::iter::once(("methodology/control/present", 100.0)).chain(
-        HOST_FAMILY_MPSC_OPERATIONS
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !omit_first_estimate || *index != 0)
-            .map(|(_, operation)| (*operation, 110.0)),
-    ) {
-        let estimates_dir = criterion_home
-            .join(operation.replacen('/', "_", 1))
-            .join("new");
-        std::fs::create_dir_all(&estimates_dir).expect("create fixture estimate directory");
-        std::fs::write(
-            estimates_dir.join("estimates.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "median": {"point_estimate": candidate},
-            }))
-            .expect("encode fixture estimate"),
-        )
-        .expect("write fixture estimate");
-    }
-    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+    // Populate the historical fixed output path before either invocation.
+    // Those files must never substitute for the current process's output.
+    write_fixture_estimates(&criterion_home, omit_first_estimate, false);
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test executable"));
+    command
         .args(["--exact", "phase6_gate_fixture_child", "--nocapture"])
         .env("ASUPERSYNC_PHASE6_FIXTURE_CHILD", "1")
+        .env(
+            "ASUPERSYNC_PHASE6_FIXTURE_OMIT_FIRST",
+            omit_first_estimate.to_string(),
+        )
+        .env("ASUPERSYNC_PHASE6_FIXTURE_OMIT_CONTROL", "false")
         .env("ASUPERSYNC_PHASE6_BASELINE", &baseline_path)
         .env("ASUPERSYNC_PHASE6_MAX_REGRESSION_PCT", "5")
-        .env("CRITERION_HOME", &criterion_home)
+        .env("CRITERION_HOME", &criterion_home);
+    if stale_control {
+        let priming = command
+            .output()
+            .expect("prime a previous passing invocation");
+        std::fs::write(fixture_root.join("priming-stdout.log"), &priming.stdout)
+            .expect("retain priming stdout");
+        std::fs::write(fixture_root.join("priming-stderr.log"), &priming.stderr)
+            .expect("retain priming stderr");
+        assert!(
+            priming.status.success(),
+            "a fully measured control must pass: {}",
+            String::from_utf8_lossy(&priming.stderr)
+        );
+        command.env("ASUPERSYNC_PHASE6_FIXTURE_OMIT_CONTROL", "true");
+    }
+    let output = command
         .output()
         .expect("run real comparator in a child process");
     std::fs::write(fixture_root.join("stdout.log"), &output.stdout).expect("retain stdout");
@@ -741,6 +779,13 @@ fn phase6_gate_fixture_child() {
     if std::env::var_os("ASUPERSYNC_PHASE6_FIXTURE_CHILD").is_none() {
         return;
     }
+    let _criterion = phase6_gate::phase6_criterion();
+    let home = phase6_gate::current_measurement_directory().expect("fresh measurement directory");
+    write_fixture_estimates(
+        home,
+        std::env::var("ASUPERSYNC_PHASE6_FIXTURE_OMIT_FIRST").as_deref() == Ok("true"),
+        std::env::var("ASUPERSYNC_PHASE6_FIXTURE_OMIT_CONTROL").as_deref() == Ok("true"),
+    );
     phase6_gate::run_phase6_p50_gate("methodology/").unwrap_or_else(|error| panic!("{error}"));
 }
 
@@ -801,4 +846,23 @@ fn phase6_host_family_requires_matching_estimates_and_unique_host_rows() {
     assert!(!passed, "duplicate current-host rows must fail: {output}");
     assert!(output.contains("duplicate operation"), "{output}");
     assert!(output.contains("mpsc_create_cap16"), "{output}");
+}
+
+#[test]
+fn phase6_gate_rejects_stale_passing_estimates() {
+    let (passed, output) =
+        run_host_family_fixture_with_stale(host_family_rows(1000.0, false), false, true);
+    assert!(
+        !passed,
+        "a prior passing estimate must not substitute for this invocation: {output}"
+    );
+    assert!(
+        output.contains("cannot read Phase 6 Criterion estimates"),
+        "{output}"
+    );
+    assert!(output.contains("phase6-run-"), "{output}");
+    assert!(
+        output.contains("methodology_control/present/new/estimates.json"),
+        "{output}"
+    );
 }

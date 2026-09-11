@@ -743,15 +743,16 @@ fn bench_obligation_query(c: &mut Criterion) {
 // MAIN
 // =============================================================================
 
-criterion_group!(
-    benches,
-    bench_task_spawn,
+criterion_group! {
+    name = benches;
+    config = phase6_gate::phase6_criterion();
+    targets = bench_task_spawn,
     bench_task_cancellation,
     bench_channel_send_recv,
     bench_cx_capability_check,
     bench_budget_check,
     bench_obligation_query,
-);
+}
 
 fn main() {
     if std::env::var_os("ASUPERSYNC_PHASE6_PROFILE_LOCAL_QUEUE").is_some() {
@@ -763,7 +764,9 @@ fn main() {
         return;
     }
     benches();
-    Criterion::default().configure_from_args().final_summary();
+    phase6_gate::phase6_criterion()
+        .configure_from_args()
+        .final_summary();
     // The gate implementation is shared with the scheduler hot-path benches
     // (br-asupersync-sched-hot-path-perf-bt4y5f.1); this binary owns exactly
     // the `methodology/` rows of artifacts/baseline.json.
