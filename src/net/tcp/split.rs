@@ -2236,6 +2236,11 @@ mod tests {
         }));
         let task_cx = Context::from_waker(&waker);
         let _current = Cx::set_current(None);
+        // The property under test is the legacy self-wake path (no reactor
+        // takes the fd): its wake must run only after the split state lock is
+        // released. Since GH#67 the process-global fallback driver would take
+        // the fd and park instead, so withhold it for this thread.
+        let _withhold = crate::net::udp::fallback_io_test_hooks::WithholdFallbackDriver::new();
 
         let tokens = read_half
             .inner

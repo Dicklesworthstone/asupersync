@@ -1813,6 +1813,60 @@ pub fn ambient_io_driver_present() -> bool {
         .is_some()
 }
 
+/// Test-only switch that makes the process-global fallback driver look absent
+/// on the current thread, so a test can exercise the legacy self-wake path
+/// (`FreshRegistration::SelfWake`) that production still takes when no reactor
+/// backend can be started. Since GH#67 the fallback driver takes every fd in
+/// an ordinary test process, which would otherwise leave that path untested.
+#[cfg(any(test, feature = "test-internals"))]
+pub mod fallback_io_test_hooks {
+    use std::cell::Cell;
+
+    thread_local! {
+        static WITHHOLD_FALLBACK_DRIVER: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// While alive, `fresh_reactor_registration` on this thread behaves as if
+    /// no fallback driver could be started.
+    pub struct WithholdFallbackDriver {
+        previous: bool,
+    }
+
+    impl WithholdFallbackDriver {
+        #[must_use]
+        pub fn new() -> Self {
+            let previous = WITHHOLD_FALLBACK_DRIVER.with(|flag| flag.replace(true));
+            Self { previous }
+        }
+    }
+
+    impl Default for WithholdFallbackDriver {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Drop for WithholdFallbackDriver {
+        fn drop(&mut self) {
+            WITHHOLD_FALLBACK_DRIVER.with(|flag| flag.set(self.previous));
+        }
+    }
+
+    pub(crate) fn withheld() -> bool {
+        WITHHOLD_FALLBACK_DRIVER.with(Cell::get)
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn fallback_driver_withheld() -> bool {
+    fallback_io_test_hooks::withheld()
+}
+
+#[cfg(not(any(test, feature = "test-internals")))]
+const fn fallback_driver_withheld() -> bool {
+    false
+}
+
 /// Registers `source` on the ambient `Cx` driver when one is present, else on
 /// the process-global fallback driver (GH#67), for callers that keep their own
 /// registration state (owned split halves). Probe counters are bumped here so
@@ -1826,7 +1880,7 @@ pub fn fresh_reactor_registration(
     let ambient = Cx::current().and_then(|current| current.io_driver_handle());
     let (driver, on_fallback): (&IoDriverHandle, bool) = match &ambient {
         Some(driver) => (driver, false),
-        None => match global_fallback_io_driver() {
+        None => match global_fallback_io_driver().filter(|_| !fallback_driver_withheld()) {
             Some(driver) => (driver, true),
             None => {
                 #[cfg(any(test, feature = "test-internals"))]
