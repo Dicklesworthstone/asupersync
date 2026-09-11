@@ -1818,8 +1818,11 @@ pub fn ambient_io_driver_present() -> bool {
 /// (`FreshRegistration::SelfWake`) that production still takes when no reactor
 /// backend can be started. Since GH#67 the fallback driver takes every fd in
 /// an ordinary test process, which would otherwise leave that path untested.
-#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
-pub mod fallback_io_test_hooks {
+/// Unit tests only: nothing outside this crate needs it, and compiling it into
+/// a `test-internals` library build would leave it unconstructed (dead code).
+/// Native tests only: the Cell hooks are not valid on wasm32.
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub(super) mod fallback_io_test_hooks {
     use std::cell::Cell;
 
     thread_local! {
@@ -1828,15 +1831,23 @@ pub mod fallback_io_test_hooks {
 
     /// While alive, `fresh_reactor_registration` on this thread behaves as if
     /// no fallback driver could be started.
+    ///
+    /// Thread-bound (`!Send`, `!Sync`): `Drop` restores the flag of the thread
+    /// that created the guard, so moving it elsewhere would leave that thread
+    /// withholding forever and clobber an unrelated thread's flag instead.
     pub struct WithholdFallbackDriver {
         previous: bool,
+        _thread_bound: std::marker::PhantomData<*mut ()>,
     }
 
     impl WithholdFallbackDriver {
         #[must_use]
         pub fn new() -> Self {
             let previous = WITHHOLD_FALLBACK_DRIVER.with(|flag| flag.replace(true));
-            Self { previous }
+            Self {
+                previous,
+                _thread_bound: std::marker::PhantomData,
+            }
         }
     }
 
@@ -1852,17 +1863,75 @@ pub mod fallback_io_test_hooks {
         }
     }
 
-    pub(crate) fn withheld() -> bool {
+    pub(super) fn withheld() -> bool {
         WITHHOLD_FALLBACK_DRIVER.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::marker::PhantomData;
+
+        /// Autoref probe: `(&Probe::<T>(..)).is_send()` resolves to the
+        /// `Send`-bounded impl when `T: Send`, else to the reference impl.
+        struct Probe<T>(PhantomData<T>);
+        trait SendProbe {
+            fn is_send(&self) -> bool {
+                true
+            }
+        }
+        impl<T: Send> SendProbe for Probe<T> {}
+        trait NotSendProbe {
+            fn is_send(&self) -> bool {
+                false
+            }
+        }
+        impl<T> NotSendProbe for &Probe<T> {}
+
+        #[test]
+        fn withhold_guard_is_thread_bound_and_restores_only_its_thread() {
+            // Keep the same explicit autoref expression as the negative
+            // probe, so this control checks the same method-resolution path.
+            #[allow(clippy::needless_borrow)]
+            let send_control = (&Probe::<u8>(PhantomData)).is_send();
+            assert!(send_control, "probe control");
+            assert!(
+                !(&Probe::<WithholdFallbackDriver>(PhantomData)).is_send(),
+                "the guard restores thread-local state on drop and must not be Send"
+            );
+
+            assert!(!withheld());
+            {
+                let _outer = WithholdFallbackDriver::new();
+                assert!(withheld());
+                {
+                    let _inner = WithholdFallbackDriver::new();
+                    assert!(withheld());
+                }
+                assert!(withheld(), "inner drop restores the outer guard's state");
+            }
+            assert!(!withheld());
+            let other = std::thread::spawn(|| {
+                let _guard = WithholdFallbackDriver::new();
+                withheld()
+            })
+            .join()
+            .expect("probe thread");
+            assert!(other);
+            assert!(
+                !withheld(),
+                "another thread's guard never touches this thread"
+            );
+        }
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+#[cfg(all(not(target_arch = "wasm32"), test))]
 fn fallback_driver_withheld() -> bool {
     fallback_io_test_hooks::withheld()
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(any(test, feature = "test-internals"))))]
+#[cfg(not(all(not(target_arch = "wasm32"), test)))]
 const fn fallback_driver_withheld() -> bool {
     false
 }

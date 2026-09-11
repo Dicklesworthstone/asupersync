@@ -86,6 +86,16 @@ against the tracked rows under the binary's prefix and exits 2 on any p50 more
 than 5% slower. Untracked criterion rows and rows under other prefixes are
 outside the gate.
 
+Each gated invocation writes into a new, retained `phase6-run-*` directory
+under `CRITERION_HOME` (or the usual target Criterion directory). Its exact
+path is printed as `[PHASE6] measurement directory: ...`. Archive that
+directory with the run log. For `scripts/capture_baseline.sh`, set
+`CRITERION_DIR` to that printed directory; the exporter refuses a parent
+containing retained invocations. The comparator reads only that invocation's
+estimates: filtered, list-only, or test-only runs cannot reuse prior passing
+measurements for omitted rows. Ungated runs keep Criterion's normal output
+and saved-baseline behavior. No previous result directories are removed.
+
 ## Environment tags (compare like-to-like ONLY — enforced by the gate)
 
 The RCH fleet is heterogeneous and `rch exec` cannot pin a worker; measured

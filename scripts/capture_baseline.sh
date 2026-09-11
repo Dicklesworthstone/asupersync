@@ -279,6 +279,16 @@ if [[ ! -d "$CRITERION_DIR" ]]; then
     exit 1
 fi
 
+# A gated invocation has its own retained directory. Exporting their parent
+# would mix runs and turn the invocation directory into part of each bench ID.
+for invocation_dir in "$CRITERION_DIR"/phase6-run-*; do
+    if [[ -d "$invocation_dir" ]]; then
+        echo "ERROR: CRITERION_DIR contains retained Phase 6 invocations." >&2
+        echo "Set CRITERION_DIR to the measurement directory printed by the selected run." >&2
+        exit 1
+    fi
+done
+
 find "$CRITERION_DIR" -path '*/new/estimates.json' -type f | sort | while read -r est_file; do
     # Extract benchmark name from path: criterion/<group>/<name>/new/estimates.json
     rel="${est_file#"$CRITERION_DIR"/}"

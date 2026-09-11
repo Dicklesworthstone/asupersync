@@ -32,6 +32,7 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 
@@ -117,6 +118,44 @@ fn criterion_home() -> PathBuf {
     )
 }
 
+static MEASUREMENT_DIRECTORY: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+/// Configures gated measurements in a new, retained directory for this process.
+/// Ungated Criterion runs retain their normal output and saved-baseline behavior.
+pub fn phase6_criterion() -> criterion::Criterion {
+    let criterion = criterion::Criterion::default();
+    if env::var_os(PHASE6_BASELINE_ENV).is_none() {
+        return criterion;
+    }
+    MEASUREMENT_DIRECTORY.get_or_init(|| {
+        let root = criterion_home();
+        fs::create_dir_all(&root)
+            .map_err(|error| format!("cannot create Criterion root {}: {error}", root.display()))?;
+        let directory = tempfile::Builder::new()
+            .prefix("phase6-run-")
+            .tempdir_in(&root)
+            .map_err(|error| format!("cannot create fresh Phase 6 measurement directory: {error}"))?
+            .keep();
+        eprintln!("[PHASE6] measurement directory: {}", directory.display());
+        Ok(directory)
+    });
+    let directory = current_measurement_directory().unwrap_or_else(|error| {
+        eprintln!("[PHASE6] baseline gate failed: {error}");
+        std::process::exit(2);
+    });
+    criterion.output_directory(directory)
+}
+
+pub fn current_measurement_directory() -> Result<&'static Path, String> {
+    match MEASUREMENT_DIRECTORY.get() {
+        Some(Ok(directory)) => Ok(directory.as_path()),
+        Some(Err(error)) => Err(error.clone()),
+        None => {
+            Err("Phase 6 measurement directory was not initialized before Criterion".to_string())
+        }
+    }
+}
+
 fn criterion_directory(operation: &str) -> Result<PathBuf, String> {
     if operation.matches('/').count() < 2 {
         return Err(format!(
@@ -191,6 +230,10 @@ fn row_limit_ns(operation: &str, p50_ns: f64, ci95_upper_ns: Option<f64>) -> Res
 
 /// Runs the Phase 6 p50 gate over the tracked rows owned by `prefix`.
 ///
+/// Criterion must be configured with [`phase6_criterion`]. Only estimates in
+/// this process's fresh directory count; retained output from earlier runs
+/// cannot stand in for benchmarks omitted by a filter or a list-only run.
+///
 /// Returns `Ok(())` when the gate env var is unset (gate not requested) or
 /// when every owned row is within the regression threshold.
 pub fn run_phase6_p50_gate(prefix: &str) -> Result<(), String> {
@@ -220,7 +263,7 @@ pub fn run_phase6_p50_gate(prefix: &str) -> Result<(), String> {
         return Err("tracked Phase 6 baseline contains no rows".to_string());
     }
 
-    let criterion_home = criterion_home();
+    let criterion_home = current_measurement_directory()?;
     let mut operations = BTreeSet::new();
     let mut owned_rows = 0usize;
     let mut compared_rows = 0usize;
