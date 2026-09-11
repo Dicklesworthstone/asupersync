@@ -251,6 +251,12 @@ impl CurrentThreadDriver {
             .unwrap_or_else(PoisonError::into_inner) = Some(std::thread::current().id());
         let shutdown = Arc::clone(&worker.shutdown);
         let _store_key = ScopedLocalStoreKey::new(worker.local_store_key());
+        // The dispatch loop's owner guard ends before the handoff check.
+        // Keep this thread's queued local admissions visible across that gap.
+        let _lane_owner = worker
+            .spawn_mailbox
+            .as_ref()
+            .map(|mailbox| ScopedLocalSpawnLaneOwner::new(Arc::clone(mailbox)));
         on_start();
         let mut worker = Box::new(worker);
         loop {
@@ -305,8 +311,9 @@ impl CurrentThreadDriver {
                     other => *slot = other,
                 }
                 if shutdown.load(Ordering::Acquire) {
-                    *slot = WorkerSlot::Closed;
-                    self.changed.notify_all();
+                    // An unclaimed offer can still own user callbacks.
+                    drop(slot);
+                    self.shutdown();
                     return;
                 }
                 let (guard, _) = self
@@ -884,6 +891,7 @@ mod tests {
         Offered,
         Returned,
         ClosedLoanReturn,
+        BackgroundWaiting,
     }
 
     fn assert_worker_drop_can_reenter(retirement: WorkerRetirement) {
@@ -919,6 +927,28 @@ mod tests {
                 driver.shutdown();
                 driver.release(worker);
             }
+            WorkerRetirement::BackgroundWaiting => {
+                *driver.lock_slot() = WorkerSlot::Requested(std::thread::current().id());
+                driver.handover_requested.store(true, Ordering::Release);
+                let shutdown = Arc::clone(&worker.shutdown);
+                let observer_driver = Arc::clone(&driver);
+                let observer = std::thread::spawn(move || {
+                    let (slot, _) = observer_driver
+                        .changed
+                        .wait_timeout_while(
+                            observer_driver.lock_slot(),
+                            Duration::from_secs(5),
+                            |slot| matches!(slot, WorkerSlot::Requested(_)),
+                        )
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let offered = matches!(*slot, WorkerSlot::Offered(_, _));
+                    shutdown.store(true, Ordering::Release);
+                    observer_driver.changed.notify_all();
+                    offered
+                });
+                driver.run_background(*worker, || {});
+                assert!(observer.join().expect("shutdown observer exits"));
+            }
         }
 
         assert_eq!(
@@ -942,6 +972,91 @@ mod tests {
     #[test]
     fn closed_loan_retires_worker_outside_handoff_lock() {
         assert_worker_drop_can_reenter(WorkerRetirement::ClosedLoanReturn);
+    }
+
+    #[test]
+    fn background_shutdown_retires_offered_worker_outside_handoff_lock() {
+        assert_worker_drop_can_reenter(WorkerRetirement::BackgroundWaiting);
+    }
+
+    #[test]
+    fn background_handoff_refuses_queued_local_admission() {
+        use crate::runtime::RuntimeState;
+        use crate::runtime::spawn_mailbox::LocalSpawnRequest;
+        use crate::sync::ContendedMutex;
+        use crate::types::Outcome;
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let pending = state.region(root).expect("root").pending_spawn_handle();
+        let state = Arc::new(ContendedMutex::new("queued_local_handoff", state));
+        let mailbox = Arc::new(SpawnMailbox::new());
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        scheduler.attach_spawn_mailbox(Arc::clone(&mailbox));
+        let worker = scheduler.take_workers().pop().expect("one real worker");
+        let shutdown = Arc::clone(&worker.shutdown);
+        let driver = Arc::new(CurrentThreadDriver::new(None, worker.local_store_key()));
+        *driver.lock_slot() = WorkerSlot::Requested(std::thread::current().id());
+        driver.handover_requested.store(true, Ordering::Release);
+
+        let observer_driver = Arc::clone(&driver);
+        let observer_shutdown = Arc::clone(&shutdown);
+        let observer = std::thread::spawn(move || {
+            let (slot, timeout) = observer_driver
+                .changed
+                .wait_timeout_while(
+                    observer_driver.lock_slot(),
+                    Duration::from_secs(5),
+                    |slot| matches!(slot, WorkerSlot::Requested(_)),
+                )
+                .unwrap_or_else(PoisonError::into_inner);
+            let offered = matches!(*slot, WorkerSlot::Offered(_, _));
+            let stuck = timeout.timed_out() && matches!(*slot, WorkerSlot::Requested(_));
+            drop(slot);
+            if offered || stuck {
+                // Let the old implementation exit without hanging or moving
+                // the queued !Send factory to the observer thread.
+                observer_shutdown.store(true, Ordering::Release);
+                observer_driver.shutdown();
+            }
+            (offered, stuck)
+        });
+
+        let ran_on = Rc::new(Cell::new(None));
+        let task_ran_on = Rc::clone(&ran_on);
+        driver.run_background(worker, || {
+            spawn_mailbox::enqueue_local_spawn_for_mailbox(
+                LocalSpawnRequest {
+                    task_id: mailbox.allocate_task_id(),
+                    region: root,
+                    budget: Budget::INFINITE,
+                    factory: Box::new(move |_| {
+                        Box::pin(async move {
+                            task_ran_on.set(Some(std::thread::current().id()));
+                            shutdown.store(true, Ordering::Release);
+                            Outcome::Ok(())
+                        })
+                    }),
+                    on_unadmitted_cancel: None,
+                    on_admission_error: None,
+                    pending_reservation: Some(pending.reserve()),
+                    admitted_slot: None,
+                },
+                &mailbox,
+            );
+            assert_eq!(pending.count(), 1, "request is queued before handoff");
+        });
+        let (offered, stuck) = observer.join().expect("handoff observer exits");
+        spawn_mailbox::cancel_local_spawns_for_mailbox(&mailbox);
+
+        assert!(!stuck, "background worker must answer the handoff request");
+        assert!(
+            !offered,
+            "queued local admission must prevent a worker loan"
+        );
+        assert_eq!(ran_on.get(), Some(std::thread::current().id()));
+        assert_eq!(pending.count(), 0, "pending admission credit is released");
+        assert_eq!(Rc::strong_count(&ran_on), 1, "local capture is retired");
     }
 
     /// Reproduce the state visible to R1 when its handover was refused and
