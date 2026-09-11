@@ -490,7 +490,11 @@ fn capture_baseline_requires_a_selected_phase6_invocation() {
             .output()
             .expect("run actual baseline exporter without benchmarking");
         if let Some(median) = expected_median {
-            assert!(output.status.success(), "{case}: {}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             let report: BaselineReport = serde_json::from_slice(&output.stdout).expect("baseline JSON");
             assert_eq!(report.benchmarks.len(), 1);
             assert_eq!(report.benchmarks[0].name, "bench");
