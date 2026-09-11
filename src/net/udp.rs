@@ -1931,7 +1931,7 @@ fn fallback_driver_withheld() -> bool {
     fallback_io_test_hooks::withheld()
 }
 
-#[cfg(not(all(not(target_arch = "wasm32"), test)))]
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
 const fn fallback_driver_withheld() -> bool {
     false
 }
