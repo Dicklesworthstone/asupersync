@@ -878,12 +878,30 @@ impl LocalSpawnRequest {
     }
 }
 
+/// Private routing metadata keeps the public request shape unchanged. A weak
+/// mailbox identity neither retains the runtime nor aliases a later mailbox.
+pub(crate) struct LocalSpawnLaneEntry {
+    owner: Option<Weak<SpawnMailbox>>,
+    request: LocalSpawnRequest,
+}
+
+impl LocalSpawnLaneEntry {
+    fn belongs_to(&self, owner: Option<&Arc<SpawnMailbox>>) -> bool {
+        match (self.owner.as_ref(), owner) {
+            (Some(queued), Some(current)) => std::ptr::eq(queued.as_ptr(), Arc::as_ptr(current)),
+            (Some(_), None) => false,
+            // Unowned entries support detached admission harnesses only.
+            (None, _) => true,
+        }
+    }
+}
+
 thread_local! {
     /// Owner-thread lane of pending local spawn requests. Filled by
-    /// `Cx::spawn_local[_in]` (worker threads only — producers fail closed
-    /// off-worker), drained by the same worker in `next_task` alongside
-    /// the shared mailbox.
-    static LOCAL_SPAWN_LANE: std::cell::RefCell<std::collections::VecDeque<LocalSpawnRequest>> =
+    /// `Cx::spawn_local[_in]` on workers, or by `Runtime::spawn_local` on
+    /// workers and browser host threads. Each worker drains only its runtime's
+    /// requests alongside the shared mailbox.
+    static LOCAL_SPAWN_LANE: std::cell::RefCell<std::collections::VecDeque<LocalSpawnLaneEntry>> =
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
     /// Runtime identity for the worker that owns [`LOCAL_SPAWN_LANE`].
     ///
@@ -931,28 +949,117 @@ pub(crate) fn local_spawn_lane_is_owned_by_mailbox(mailbox: &Arc<SpawnMailbox>) 
 
 /// Parks a local spawn request on the current thread's lane.
 pub(crate) fn enqueue_local_spawn(request: LocalSpawnRequest) {
-    LOCAL_SPAWN_LANE.with(|lane| lane.borrow_mut().push_back(request));
+    let owner = LOCAL_SPAWN_OWNER.with(|owner| owner.borrow().as_ref().map(Arc::downgrade));
+    LOCAL_SPAWN_LANE.with(|lane| {
+        lane.borrow_mut()
+            .push_back(LocalSpawnLaneEntry { owner, request });
+    });
 }
 
-/// Returns true when the current thread has no parked local spawns.
+/// Queues a request for an explicit runtime, including browser callers outside
+/// a pump turn where no worker-local owner is installed.
+pub(crate) fn enqueue_local_spawn_for_mailbox(
+    request: LocalSpawnRequest,
+    mailbox: &Arc<SpawnMailbox>,
+) {
+    LOCAL_SPAWN_LANE.with(|lane| {
+        lane.borrow_mut().push_back(LocalSpawnLaneEntry {
+            owner: Some(Arc::downgrade(mailbox)),
+            request,
+        });
+    });
+}
+
+/// Returns true when the current worker has no parked local spawns.
 pub(crate) fn local_spawn_lane_is_empty() -> bool {
-    LOCAL_SPAWN_LANE.with(|lane| lane.borrow().is_empty())
+    LOCAL_SPAWN_LANE.with(|lane| {
+        let lane = lane.borrow();
+        // Keep the usual empty-lane scheduler check free of owner lookups and
+        // reference-count traffic. The queued Weak keeps its identity unique.
+        lane.is_empty()
+            || LOCAL_SPAWN_OWNER.with(|owner| {
+                let owner = owner.borrow();
+                !lane.iter().any(|entry| entry.belongs_to(owner.as_ref()))
+            })
+    })
 }
 
-/// Moves up to `max` parked local requests into `into`, returning the
-/// number moved.
+/// Moves up to `max` requests belonging to this worker into `into`, preserving
+/// FIFO order and leaving other runtimes' requests on this thread untouched.
 pub(crate) fn drain_local_spawn_lane(max: usize, into: &mut Vec<LocalSpawnRequest>) -> usize {
+    LOCAL_SPAWN_OWNER.with(|owner| {
+        let owner = owner.borrow();
+        drain_local_spawn_lane_matching(max, into, |entry| entry.belongs_to(owner.as_ref()))
+    })
+}
+
+fn drain_local_spawn_lane_matching(
+    max: usize,
+    into: &mut Vec<LocalSpawnRequest>,
+    matches: impl Fn(&LocalSpawnLaneEntry) -> bool,
+) -> usize {
     LOCAL_SPAWN_LANE.with(|lane| {
         let mut lane = lane.borrow_mut();
-        let take = lane.len().min(max);
-        for _ in 0..take {
-            let Some(request) = lane.pop_front() else {
+        let mut moved = 0;
+        while moved < max {
+            let Some(index) = lane.iter().position(&matches) else {
                 break;
             };
-            into.push(request);
+            let entry = lane.remove(index).expect("matching lane entry exists");
+            into.push(entry.request);
+            moved += 1;
         }
-        take
+        moved
     })
+}
+
+/// Sets aside legacy unowned requests during a native drive. Owned requests
+/// stay reachable so dropping their runtime during a nested drive can cancel
+/// them immediately; worker admission already filters by runtime identity.
+pub(crate) fn take_unowned_local_spawn_lane() -> std::collections::VecDeque<LocalSpawnLaneEntry> {
+    LOCAL_SPAWN_LANE.with(|lane| {
+        let mut lane = lane.borrow_mut();
+        let mut unowned = std::collections::VecDeque::new();
+        let count = lane.len();
+        for _ in 0..count {
+            let entry = lane.pop_front().expect("original lane entry exists");
+            if entry.owner.is_none() {
+                unowned.push_back(entry);
+            } else {
+                lane.push_back(entry);
+            }
+        }
+        unowned
+    })
+}
+
+/// Restores requests set aside by a nested native drive, retaining their owners.
+pub(crate) fn restore_local_spawn_lane(
+    mut entries: std::collections::VecDeque<LocalSpawnLaneEntry>,
+) {
+    LOCAL_SPAWN_LANE.with(|lane| {
+        let mut lane = lane.borrow_mut();
+        // Requests queued during the nested drive follow the older outer
+        // requests, including when they belong to the same browser runtime.
+        entries.append(&mut lane);
+        *lane = entries;
+    });
+}
+
+/// Cancels only this runtime's queued requests on the calling thread. Resolve
+/// callbacks and drop captured futures after releasing the thread-local borrow.
+pub(crate) fn cancel_local_spawns_for_mailbox(mailbox: &Arc<SpawnMailbox>) {
+    let owner = Arc::downgrade(mailbox);
+    let mut requests = Vec::new();
+    drain_local_spawn_lane_matching(usize::MAX, &mut requests, |entry| {
+        entry
+            .owner
+            .as_ref()
+            .is_some_and(|queued| Weak::ptr_eq(queued, &owner))
+    });
+    for request in requests {
+        request.resolve_cancelled(CancelReason::shutdown());
+    }
 }
 
 /// A spawn request travelling through the [`SpawnMailbox`].
@@ -4326,6 +4433,43 @@ mod tests {
             lab.state.region(root).expect("root").pending_spawn_count(),
             0,
             "failed off-worker spawn takes no pending credit"
+        );
+    }
+
+    #[test]
+    fn ownerless_local_drain_cannot_take_an_owned_request() {
+        clear_local_spawn_lane_for_test();
+        let (mut lab, parent_cx, root) = lab_with_parent_cx();
+        let mut handle = {
+            let _worker_guard = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+            let _owner_guard = local_spawn_owner_for_test(&parent_cx);
+            parent_cx
+                .spawn_local(|_child| async { 7_u8 })
+                .expect("owner-worker local spawn")
+        };
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            1,
+            "the request is still queued after leaving its owner context"
+        );
+
+        let mut requests = Vec::new();
+        assert!(local_spawn_lane_is_empty(), "this caller owns no requests");
+        assert_eq!(drain_local_spawn_lane(16, &mut requests), 0);
+        let _owner_guard = local_spawn_owner_for_test(&parent_cx);
+        assert!(!local_spawn_lane_is_empty());
+        assert_eq!(drain_local_spawn_lane(16, &mut requests), 1);
+        requests
+            .pop()
+            .expect("the owner's request remains available")
+            .resolve_cancelled(CancelReason::shutdown());
+        assert!(matches!(
+            poll_join_with_lab(&mut lab, &parent_cx, &mut handle),
+            Err(crate::runtime::task_handle::JoinError::Cancelled(reason)) if reason.is_shutdown()
+        ));
+        assert_eq!(
+            lab.state.region(root).expect("root").pending_spawn_count(),
+            0
         );
     }
 
