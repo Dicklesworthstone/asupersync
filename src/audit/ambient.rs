@@ -1514,7 +1514,7 @@ fn test_function() {
     // br-asupersync-bi2462.23, so this count and the snapshot text move only
     // when a site is added, removed or rewritten — never when code above a
     // site shifts.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 738;
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 725;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
