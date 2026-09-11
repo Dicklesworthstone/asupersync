@@ -146,7 +146,7 @@ pub fn phase6_criterion() -> criterion::Criterion {
     criterion.output_directory(directory)
 }
 
-pub(super) fn current_measurement_directory() -> Result<&'static Path, String> {
+pub fn current_measurement_directory() -> Result<&'static Path, String> {
     match MEASUREMENT_DIRECTORY.get() {
         Some(Ok(directory)) => Ok(directory.as_path()),
         Some(Err(error)) => Err(error.clone()),
