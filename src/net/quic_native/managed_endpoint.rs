@@ -3062,6 +3062,8 @@ mod tests {
         }
 
         fn server_driver(cancel_on_certificate: Option<Cx>) -> QuicHandshakeDriver {
+            use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+
             #[derive(Debug)]
             struct CancellingResolver {
                 cx: Cx,
@@ -3081,14 +3083,16 @@ mod tests {
                 }
             }
 
-            let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(include_bytes!(
+            let certs = CertificateDer::pem_reader_iter(&mut std::io::Cursor::new(include_bytes!(
                 "../../../tests/fixtures/tls/server.crt"
             )))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-            let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(include_bytes!(
+            let key = PrivateKeyDer::pem_reader_iter(&mut std::io::Cursor::new(include_bytes!(
                 "../../../tests/fixtures/tls/server.key"
             )))
+            .next()
+            .transpose()
             .unwrap()
             .unwrap();
             let mut config = super::super::super::handshake_driver::server_config(

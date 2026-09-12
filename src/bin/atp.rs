@@ -1086,9 +1086,11 @@ fn validate_requested_bwlimit_transport(
 fn load_cert_chain(
     path: &std::path::Path,
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
     let pem = std::fs::read(path).map_err(|e| format!("read cert {}: {e}", path.display()))?;
     let mut reader = std::io::BufReader::new(pem.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_reader_iter(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("parse certs in {}: {e}", path.display()))?;
     if certs.is_empty() {
@@ -1150,9 +1152,13 @@ fn load_native_root_certs() -> Result<Vec<rustls::pki_types::CertificateDer<'sta
 fn load_private_key(
     path: &std::path::Path,
 ) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
+    use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
+
     let pem = std::fs::read(path).map_err(|e| format!("read key {}: {e}", path.display()))?;
     let mut reader = std::io::BufReader::new(pem.as_slice());
-    rustls_pemfile::private_key(&mut reader)
+    PrivateKeyDer::pem_reader_iter(&mut reader)
+        .next()
+        .transpose()
         .map_err(|e| format!("parse key in {}: {e}", path.display()))?
         .ok_or_else(|| format!("no private key found in {}", path.display()))
 }
@@ -10260,8 +10266,10 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     #[cfg(feature = "tls")]
     fn parse_quic_pinned_leaf_cert() -> rustls::pki_types::CertificateDer<'static> {
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+
         let mut reader = std::io::BufReader::new(QUIC_PINNED_LEAF_CERT_PEM.as_bytes());
-        rustls_pemfile::certs(&mut reader)
+        CertificateDer::pem_reader_iter(&mut reader)
             .next()
             .expect("one cert")
             .expect("valid cert pem")

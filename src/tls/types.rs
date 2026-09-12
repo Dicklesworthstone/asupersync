@@ -4,7 +4,11 @@
 //! and decouple the public interface from rustls internals.
 
 #[cfg(feature = "tls")]
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
+use rustls_pki_types::pem::PemObject;
+#[cfg(feature = "tls")]
+use rustls_pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+};
 
 use std::collections::BTreeSet;
 #[cfg(feature = "tls")]
@@ -47,7 +51,7 @@ impl Certificate {
     #[cfg(feature = "tls")]
     pub fn from_pem(pem: &[u8]) -> Result<Vec<Self>, TlsError> {
         let mut reader = BufReader::new(pem);
-        let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+        let certs: Vec<_> = CertificateDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| TlsError::Certificate(e.to_string()))?;
 
@@ -193,7 +197,7 @@ impl PrivateKey {
         let mut reader = BufReader::new(pem);
 
         // Try PKCS#8 first
-        let pkcs8_keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut reader)
+        let pkcs8_keys: Vec<_> = PrivatePkcs8KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| TlsError::Certificate(e.to_string()))?;
 
@@ -205,7 +209,7 @@ impl PrivateKey {
 
         // Try RSA (PKCS#1)
         let mut reader = BufReader::new(pem);
-        let rsa_keys: Vec<_> = rustls_pemfile::rsa_private_keys(&mut reader)
+        let rsa_keys: Vec<_> = PrivatePkcs1KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| TlsError::Certificate(e.to_string()))?;
 
@@ -217,7 +221,7 @@ impl PrivateKey {
 
         // Try EC (SEC1)
         let mut reader = BufReader::new(pem);
-        let ec_keys: Vec<_> = rustls_pemfile::ec_private_keys(&mut reader)
+        let ec_keys: Vec<_> = PrivateSec1KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| TlsError::Certificate(e.to_string()))?;
 

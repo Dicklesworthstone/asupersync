@@ -15,7 +15,10 @@
 mod tests {
     use crate::test_utils::{init_test_logging, run_test_with_cx};
     use rustls::crypto::ring::default_provider;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+    use rustls::pki_types::{
+        CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, ServerName,
+        pem::PemObject,
+    };
     use rustls::{
         ClientConfig, ClientConnection, Error as RustlsError, ServerConfig, ServerConnection,
     };
@@ -77,7 +80,7 @@ mod tests {
         fn parse_cert(pem: &str) -> Result<CertificateDer<'static>, Box<dyn std::error::Error>> {
             let mut cursor = Cursor::new(pem.as_bytes());
             let certs: Vec<_> =
-                rustls_pemfile::certs(&mut cursor).collect::<Result<Vec<_>, _>>()?;
+                CertificateDer::pem_reader_iter(&mut cursor).collect::<Result<Vec<_>, _>>()?;
             certs
                 .into_iter()
                 .next()
@@ -87,14 +90,14 @@ mod tests {
         fn parse_key(pem: &str) -> Result<PrivateKeyDer<'static>, Box<dyn std::error::Error>> {
             let mut cursor = Cursor::new(pem.as_bytes());
             let keys: Vec<_> =
-                rustls_pemfile::pkcs8_private_keys(&mut cursor).collect::<Result<Vec<_>, _>>()?;
+                PrivatePkcs8KeyDer::pem_reader_iter(&mut cursor).collect::<Result<Vec<_>, _>>()?;
             if let Some(key) = keys.into_iter().next() {
                 return Ok(PrivateKeyDer::Pkcs8(key));
             }
 
             let mut cursor = Cursor::new(pem.as_bytes());
             let keys: Vec<_> =
-                rustls_pemfile::rsa_private_keys(&mut cursor).collect::<Result<Vec<_>, _>>()?;
+                PrivatePkcs1KeyDer::pem_reader_iter(&mut cursor).collect::<Result<Vec<_>, _>>()?;
             if let Some(key) = keys.into_iter().next() {
                 return Ok(PrivateKeyDer::Pkcs1(key));
             }

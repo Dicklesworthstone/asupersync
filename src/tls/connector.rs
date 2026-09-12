@@ -13,7 +13,7 @@ use rustls::ClientConfig;
 #[cfg(feature = "tls")]
 use rustls::ClientConnection;
 #[cfg(feature = "tls")]
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{CertificateDer, CertificateRevocationListDer, ServerName, pem::PemObject};
 
 #[cfg(feature = "tls")]
 use std::future::poll_fn;
@@ -627,7 +627,7 @@ impl TlsConnectorBuilder {
     /// validation. Worse, a non-CA leaf certificate would be accepted
     /// as a trust anchor (any cert it had "signed" would then
     /// validate). The implementation below now (a) parses via
-    /// `rustls_pemfile::certs`, the same path used by
+    /// `CertificateDer::pem_reader_iter`, the same path used by
     /// `Certificate::from_pem`, and (b) gates each candidate on the
     /// `BasicConstraints CA:TRUE` extension via `x509-parser`. Certs
     /// that lack the extension or carry `cA=false` are rejected and
@@ -644,7 +644,7 @@ impl TlsConnectorBuilder {
 
         let mut reader = std::io::BufReader::new(&pem_data[..]);
         let der_certs: Vec<Vec<u8>> =
-            match rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>() {
+            match CertificateDer::pem_reader_iter(&mut reader).collect::<Result<Vec<_>, _>>() {
                 Ok(certs) => certs.into_iter().map(|c| c.to_vec()).collect(),
                 Err(_e) => {
                     #[cfg(feature = "tracing-integration")]
@@ -1126,7 +1126,7 @@ impl TlsConnectorBuilder {
                 Vec::new();
             for pem in &self.crl_pems {
                 let mut reader = std::io::BufReader::new(&pem[..]);
-                let der_iter = rustls_pemfile::crls(&mut reader);
+                let der_iter = CertificateRevocationListDer::pem_reader_iter(&mut reader);
                 for der in der_iter {
                     let der = der.map_err(|e| {
                         TlsError::Configuration(format!("CRL PEM parse error: {e}"))

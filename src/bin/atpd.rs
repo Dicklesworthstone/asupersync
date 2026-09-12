@@ -680,10 +680,12 @@ fn load_daemon_config(config_path: &PathBuf) -> Result<AtpdConfig> {
 
 #[cfg(feature = "tls")]
 fn load_atpd_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
     let pem = std::fs::read(path)
         .map_err(|err| cli_error(format!("read cert {}: {err}", path.display())))?;
     let mut reader = std::io::BufReader::new(pem.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_reader_iter(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|err| cli_error(format!("parse certs in {}: {err}", path.display())))?;
     if certs.is_empty() {
@@ -697,10 +699,14 @@ fn load_atpd_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::Certificat
 
 #[cfg(feature = "tls")]
 fn load_atpd_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
+
     let pem = std::fs::read(path)
         .map_err(|err| cli_error(format!("read key {}: {err}", path.display())))?;
     let mut reader = std::io::BufReader::new(pem.as_slice());
-    rustls_pemfile::private_key(&mut reader)
+    PrivateKeyDer::pem_reader_iter(&mut reader)
+        .next()
+        .transpose()
         .map_err(|err| cli_error(format!("parse key in {}: {err}", path.display())))?
         .ok_or_else(|| cli_error(format!("no private key found in {}", path.display())))
 }
