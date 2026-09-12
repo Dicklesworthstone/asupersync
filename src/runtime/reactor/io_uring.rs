@@ -2037,6 +2037,12 @@ mod imp {
                         ),
                         "unexpected io_uring error kind: {err:?}"
                     );
+                    // A skipped test is indistinguishable from a passing one in
+                    // the summary line; say so on stderr (visible under
+                    // --nocapture) so a "2 passed in 0.00s" lane on a host
+                    // without io_uring is not mistaken for proof
+                    // (asupersync-ttg5bg).
+                    eprintln!("skipping io_uring test: reactor construction failed: {err}");
                     None
                 }
             }
