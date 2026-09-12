@@ -1834,11 +1834,17 @@ dependency-cutover, file-deletion, or local-Cargo-fallback authority.
 ```toml
 [dependencies]
 # crates.io
-asupersync = "0.4.11"
+asupersync = "0.5.0"
 
 # or git
-# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.4.11" }
+# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.5.0" }
 ```
+
+When migrating from `0.4.x`, `Cx::set_current` now preserves restrictions
+already held by its supplied context. Reinstalling a narrowed context no longer
+restores full authority. If broader authority is intended, retain and explicitly
+install the original privileged `Cx`. The public method signatures and ordinary
+full-authority context behavior are unchanged.
 
 ### Feature Flags
 

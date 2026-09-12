@@ -10,12 +10,15 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-09-10, reconstructed from git history,
+Scope window: current work through 2026-09-11, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts. `v0.4.11` is published;
-changes made afterward appear under Unreleased.
+`v0.5.0` is being prepared under `asupersync-v5fn1e`.
 
 ## Version Timeline
 
+- **v0.5.0 candidate**: the approved capability-preserving context installation
+  boundary, browser local-task isolation and shutdown, reentrant worker
+  retirement, QUIC connection reclamation, and buffered I/O recovery.
 - **v0.4.11 Release**: runtime cancellation and teardown, root-region drain,
   non-blocking file traits, Kafka lifecycle fixes, and bounded QUIC receive
   reassembly. Published from `9b114c1f2` to crates.io and GitHub, with signed
@@ -70,6 +73,10 @@ changes made afterward appear under Unreleased.
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-09-11
+
+Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
+
 ### Runtime capabilities and race history
 
 - Spawn APIs reject a context whose runtime capability mask excludes spawning,
@@ -83,7 +90,7 @@ changes made afterward appear under Unreleased.
   explicitly install its original privileged `Cx`; a narrowed copy no longer
   recovers that authority. Full-authority contexts keep their existing behavior.
   The owner approved this documented behavior correction on 2026-09-10 for
-  the next `0.5` release boundary; it is not a `0.4.x` patch change.
+  the `0.5` release boundary. It is the intentional migration from `0.4.x`.
 - Race and quorum histories retain the participant IDs captured when each race
   starts, even when mailbox admission replaces provisional task IDs. This
   prevents false loser-drain violations while retaining cancellation and cleanup.
@@ -92,8 +99,37 @@ changes made afterward appear under Unreleased.
   macros, loser cleanup, and channel/stream ownership. The journey runner also
   checks that both PureCaps and WebCaps fail to compile when used to spawn.
 
+### Runtime lifetime and browser execution
+
+- Browser runtimes admit only their own local tasks, preserve admission order
+  across nested native drives, and cancel queued or parked local tasks on
+  shutdown. A retained browser pump no longer keeps stopped tasks alive.
+- Native current-thread handoff keeps the local admission owner installed while
+  checking for queued work. Local tasks cannot be stranded by lending their
+  owning worker to another thread.
+- Worker retirement and wake-notifier replacement release their mutexes before
+  running user destructors, allowing shutdown callbacks to re-enter safely.
+- Browser microtask pumps drain spawn admissions and resume self-waking local
+  futures across burst yields. Browser time uses a portable monotonic clock.
+
+### Buffered I/O and protocol recovery
+
+- `File::into_std` settles pending reads and rewinds unconsumed read-ahead before
+  returning the standard file. Failed buffer flushes preserve recoverable
+  pending bytes.
+- Framed writers reject an underlying writer's impossible byte count with
+  `InvalidData`, preserving the unacknowledged suffix for a retry.
+- Child-process pipe reads park on the fallback I/O driver when no native
+  runtime driver is installed.
+- HTTP/1 framing and idle request heads are bounded; HTTP/2 limits pending
+  request bodies. SQLite transactions refuse further statements after SQLite
+  has ended the transaction.
+
 ### Networking and ATP transfers
 
+- Native QUIC reclaims idle and closed connections, so vanished peers cannot
+  retain every connection slot indefinitely. Unauthenticated packets and stream
+  data received after reset are discarded.
 - Driverless TCP listener accepts and owned TCP/Unix split halves park on the
   fallback I/O driver instead of repeatedly waking their executor. Split-half
   registrations move to the ambient driver when one becomes available.

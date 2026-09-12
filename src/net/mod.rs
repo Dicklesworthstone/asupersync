@@ -50,7 +50,7 @@ pub mod sys;
 /// but native socket entry points fail fast with `io::ErrorKind::Unsupported`.
 pub mod tcp;
 mod udp;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 pub(crate) use udp::Armed;
 /// Fallback-aware reactor registration shared by every fd-backed async handle
 /// in the crate (sockets here, child-process pipes in `crate::process`).
