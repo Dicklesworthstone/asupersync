@@ -124,8 +124,8 @@
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "f8ef244ecdcadd03aaa94cd021e0d5399491b777b22832a4c68a78ef980c037c",
-      "line_count": 187613
+      "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+      "line_count": 187615
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
