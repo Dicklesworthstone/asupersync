@@ -1126,10 +1126,20 @@ impl<Caps> Cx<Caps> {
         self.handles.io_driver.clone()
     }
 
-    /// Returns a cloned handle to the blocking pool, if present.
+    /// Returns a clone of this context's inherited blocking-pool handle, if present.
+    ///
+    /// Runtime-created contexts and child scopes inherit their owner's pool.
+    /// This accessor only clones an attached handle; it never creates a pool.
+    /// Contexts without a pool, including those explicitly detached with
+    /// [`Cx::with_blocking_pool_handle`], return `None`.
+    ///
+    /// The handle can outlive this context borrow, but the originating runtime
+    /// or caller-owned [`BlockingPool`](crate::runtime::BlockingPool) controls
+    /// the pool's lifetime. Retaining a handle does not prevent owner shutdown;
+    /// the owner must remain alive and accepting work while the handle is used.
     #[inline]
     #[must_use]
-    pub(crate) fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
+    pub fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
         self.handles.blocking_pool.clone()
     }
 

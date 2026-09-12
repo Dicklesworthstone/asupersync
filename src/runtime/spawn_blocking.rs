@@ -442,8 +442,23 @@ mod tests {
             None,
             None,
             None,
-        )
-        .with_blocking_pool_handle(Some(pool.handle()));
+        );
+        assert!(cx.blocking_pool_handle().is_none());
+        let cx = cx.with_blocking_pool_handle(Some(pool.handle()));
+        let inherited = cx.blocking_pool_handle().expect("attached pool handle");
+        let detached = cx.clone().with_blocking_pool_handle(None);
+        assert!(detached.blocking_pool_handle().is_none());
+        assert!(cx.blocking_pool_handle().is_some());
+
+        // The returned handle dispatches actual work through the same pool;
+        // detaching a context clone must not detach or shut down its parent.
+        let executed = Arc::new(AtomicU32::new(0));
+        let executed_in_pool = Arc::clone(&executed);
+        let task = inherited.spawn(move || {
+            executed_in_pool.fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(task.wait_timeout(std::time::Duration::from_secs(5)));
+        assert_eq!(executed.load(Ordering::Relaxed), 1);
 
         let _guard = Cx::set_current(Some(cx));
 
