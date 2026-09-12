@@ -1833,26 +1833,39 @@ mod tests {
         let (received, proof_kind, checkpoints) =
             LabRuntimeTarget::block_on(&mut runtime, async move {
                 let cx = Cx::current().expect("lab runtime should install a current Cx");
-                let sender_cx = cx.clone();
-                let receiver_cx = cx.clone();
+                // asupersync-a2hoy1: a tracked reservation mints a graded
+                // obligation scoped to the caller's region, and the root
+                // region (the `block_on` task's) may not hold obligations
+                // ([ASUP-E103]). Run the sender and receiver in a child region,
+                // which is also what the production path requires; the
+                // former test-only fallback used to hide this.
+                let region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
                 let (tx, mut rx) = tracked_channel::<i32>(1);
 
-                let sender_task_cx = sender_cx.clone();
-                let sender = LabRuntimeTarget::spawn(&sender_cx, Budget::INFINITE, async move {
-                    let permit = tx.reserve(&sender_task_cx).await.expect("reserve failed");
-                    tracing::info!(
-                        event = %serde_json::json!({
-                            "phase": "reserved",
-                            "capacity": 1,
-                        }),
-                        "session_lab_checkpoint"
-                    );
-                    permit.send(42).expect("send failed").kind()
-                });
+                let sender =
+                    LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async move {
+                        let sender_task_cx =
+                            Cx::current().expect("region task should run with a current Cx");
+                        assert_ne!(
+                            sender_task_cx.region_id().as_u64(),
+                            0,
+                            "the sender must reserve from a non-root region"
+                        );
+                        let permit = tx.reserve(&sender_task_cx).await.expect("reserve failed");
+                        tracing::info!(
+                            event = %serde_json::json!({
+                                "phase": "reserved",
+                                "capacity": 1,
+                            }),
+                            "session_lab_checkpoint"
+                        );
+                        permit.send(42).expect("send failed").kind()
+                    });
 
-                let receiver_task_cx = receiver_cx.clone();
                 let receiver =
-                    LabRuntimeTarget::spawn(&receiver_cx, Budget::INFINITE, async move {
+                    LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async move {
+                        let receiver_task_cx =
+                            Cx::current().expect("region task should run with a current Cx");
                         let value = rx.recv(&receiver_task_cx).await.expect("recv failed");
                         tracing::info!(
                             event = %serde_json::json!({
@@ -1902,6 +1915,10 @@ mod tests {
                 for checkpoint in &checkpoints {
                     tracing::info!(event = %checkpoint, "session_lab_checkpoint");
                 }
+
+                // Both region tasks have completed; close the child region so
+                // the lab run ends quiescent with no open region left behind.
+                region.await;
 
                 (received, proof_kind, checkpoints)
             });
