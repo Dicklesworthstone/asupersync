@@ -18,7 +18,8 @@
       "The scanner excludes RCH temporary Cargo homes so third-party registry sources cannot be misclassified as repository unsafe boundaries.",
       "asupersync-ntizv refreshed the src/process.rs live locators and safety contract for exact-image Windows pipes, process attributes, CreateProcessW, and Job Object ownership.",
       "asupersync-8ktzrj reconciles 56 existing locators on shared main after safe-only ATP, network, process, and runtime changes. The coordinated builder source overlay is hash-pinned above; the other four reconciled sources match source_revision. This manual reconciliation preserves every operation, category, invariant, and evidence boundary; the exact syntax contract remains the verification authority.",
-      "Passing the contract proves source/ledger locator alignment only; category evidence still controls any safety claim."
+      "Passing the contract proves source/ledger locator alignment only; category evidence still controls any safety claim.",
+      "The v0.5.0 release reconciliation updates eight existing ATP and ATPD locators against dc3123d8632fe330b4e87983eb321cb6b1689e62 after safe-only PEM parser and test insertions shifted their lines. Operation patterns, categories, invariants, evidence, and no-claim boundaries are unchanged; this note does not replace earlier source provenance or establish fresh unsafe-operation safety proof."
     ]
   },
   "required_row_fields": [
@@ -1655,12 +1656,12 @@
       "operation_locators": [
         {
           "kind": "allow_unsafe_code",
-          "line": 13518,
+          "line": 13642,
           "pattern": "#[allow(unsafe_code)]"
         },
         {
           "kind": "unsafe_block",
-          "line": 13526,
+          "line": 13650,
           "pattern": "unsafe {"
         }
       ]
@@ -1686,32 +1687,32 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1175,
+          "line": 1214,
           "pattern": "let result = unsafe { libc::kill(pid, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1795,
+          "line": 1834,
           "pattern": "let term_result = unsafe { libc::kill(native_pid, libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1806,
+          "line": 1845,
           "pattern": "let check_result = unsafe { libc::kill(native_pid, 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1815,
+          "line": 1854,
           "pattern": "let _ = unsafe { libc::kill(native_pid, libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1832,
+          "line": 1871,
           "pattern": "let errno = unsafe { *libc::__errno_location() };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1965,
+          "line": 2004,
           "pattern": "let signal_result = unsafe { libc::kill(native_pid, libc::SIGHUP) };"
         }
       ]
