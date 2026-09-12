@@ -145,6 +145,10 @@ browser-io = []
 browser-trace = []
 deterministic-mode = []
 native-runtime = []
+# Bounded, dependency-light runtime configuration for native desktop hosts.
+# The profile is additive and does not enable networking, security, database,
+# telemetry, or CLI feature surfaces.
+desktop-runtime-profile = []
 # Canonical wasm browser profiles (FP-BR-* in the wasm build plan).
 wasm-browser-dev = ["wasm-runtime", "browser-io"]
 wasm-browser-prod = ["wasm-runtime", "browser-io"]
