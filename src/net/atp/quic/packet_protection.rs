@@ -429,7 +429,11 @@ impl AtpPacketProtection {
     /// Preload the confidentiality counter so a test can reach the hard limit
     /// without protecting millions of packets.
     #[cfg(any(test, feature = "test-internals"))]
-    pub fn set_protected_packet_count_for_test(&mut self, space: PacketProtectionSpace, count: u64) {
+    pub fn set_protected_packet_count_for_test(
+        &mut self,
+        space: PacketProtectionSpace,
+        count: u64,
+    ) {
         self.protected_under_current_key.insert(space, count);
     }
 

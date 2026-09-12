@@ -1606,12 +1606,7 @@ fn map_tls_error(err: crate::net::quic_native::QuicTlsError) -> QuicTransportErr
 /// Encode the simplified 1-RTT data-plane header for `packet_number`.
 fn encode_one_rtt_header(packet_number: u64, key_phase: bool) -> [u8; ONE_RTT_HEADER_LEN] {
     let mut header = [0u8; ONE_RTT_HEADER_LEN];
-    header[0] = ONE_RTT_FIXED_BIT
-        | if key_phase {
-            ONE_RTT_KEY_PHASE_BIT
-        } else {
-            0
-        };
+    header[0] = ONE_RTT_FIXED_BIT | if key_phase { ONE_RTT_KEY_PHASE_BIT } else { 0 };
     header[1..].copy_from_slice(&packet_number.to_be_bytes());
     header
 }
@@ -11569,16 +11564,13 @@ mod gh67_liveness_tests {
             let cx = Cx::for_testing();
             let config = QuicConfig::default();
             let (mut client, _server) = established_loopback_links(&cx, &config).await;
-            client
-                .protection
-                .set_protected_packet_count_for_test(
-                    PacketProtectionSpace::OneRtt,
-                    AEAD_CONFIDENTIALITY_LIMIT,
-                );
+            client.protection.set_protected_packet_count_for_test(
+                PacketProtectionSpace::OneRtt,
+                AEAD_CONFIDENTIALITY_LIMIT,
+            );
             // Queue a control-stream frame so the flush assembles a 1-RTT batch
             // and reaches the confidentiality guard.
-            let mut client_control =
-                NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
+            let mut client_control = NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
             let frame = Frame::empty(FrameType::KeepAlive).unwrap();
             client_control.send(&cx, &mut client.conn, &frame).unwrap();
             let result = client.flush(&cx).await;
@@ -11601,9 +11593,10 @@ mod gh67_liveness_tests {
             let cx = Cx::for_testing();
             let config = QuicConfig::default();
             let (_client, mut server) = established_loopback_links(&cx, &config).await;
-            server
-                .protection
-                .set_auth_failure_count_for_test(PacketProtectionSpace::OneRtt, AEAD_INTEGRITY_LIMIT);
+            server.protection.set_auth_failure_count_for_test(
+                PacketProtectionSpace::OneRtt,
+                AEAD_INTEGRITY_LIMIT,
+            );
             // A well-formed short-header 1-RTT packet with a high packet number
             // (past the accepted window) and undecryptable body.
             let mut data = encode_one_rtt_header(1_000_000, false).to_vec();
