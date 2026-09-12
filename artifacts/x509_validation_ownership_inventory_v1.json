@@ -59,23 +59,23 @@
   "source_pins": [
     {
       "path": "Cargo.toml",
-      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
-      "line_count": 1121
+      "sha256": "18f73e0c1270fd7d3fa5674c4d30f33d9813668a6dd0a950155011cc34b6262a",
+      "line_count": 1119
     },
     {
       "path": "Cargo.lock",
-      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
-      "line_count": 4664
+      "sha256": "f301a96eb3074665384eb69290c3fa38c625c179a639d10c9b7c7fa90f65571b",
+      "line_count": 4654
     },
     {
       "path": "src/tls/types.rs",
-      "sha256": "752c7070d3e4753a35cfdda85670d1eb2a4bd69760baf0cb7a3e831e0122e45f",
-      "line_count": 1107
+      "sha256": "da1161e25655d76904ec0ef244d2d05ab38b4f6993294b7bf144247b0d4718f6",
+      "line_count": 1188
     },
     {
       "path": "src/tls/connector.rs",
-      "sha256": "c5927184510d211b654224872833f349516afdba4e2012842b280501ff7d6b1a",
-      "line_count": 2049
+      "sha256": "9f522a3ff7aa5f6bb5a5e35ea8f033f79f4de261dae1f5fd04c10716e2d2e7bb",
+      "line_count": 2087
     },
     {
       "path": "src/tls/acceptor.rs",
@@ -89,8 +89,8 @@
     },
     {
       "path": "src/net/quic_native/handshake_driver.rs",
-      "sha256": "560b5fcedc339b82187893ff549717f701c4fc5e50f299e6c22239acc47961c6",
-      "line_count": 2828
+      "sha256": "7ff2fbc0887e4ad68776a8a78fac54e19dcade6fb8544690a3937fcccc63202e",
+      "line_count": 2861
     },
     {
       "path": "src/net/quic_native/tls.rs",
@@ -104,8 +104,8 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "7f81086ac8b9a28ad071efde2c052153d0e436fe3fbcd780e239e028829ff799",
-      "line_count": 13557
+      "sha256": "f071ddf64eb151c70e59ab3462664af9702a23d1e5cada318e0e3308d6741e4e",
+      "line_count": 13624
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
