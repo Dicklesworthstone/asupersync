@@ -1470,6 +1470,44 @@ mod tests {
 
     #[cfg(feature = "tls")]
     #[test]
+    fn test_with_crl_pem_accepts_crl_and_rejects_malformed_tail() {
+        // Public parser fixture from rustls-pemfile 2.2.0 tests/data/crl.pem
+        // (Apache-2.0 / ISC / MIT). This proves CRL configuration, not
+        // revocation enforcement or current validity of this historical CRL.
+        let crl = b"-----BEGIN X509 CRL-----\n\
+MIICiTBzAgEBMA0GCSqGSIb3DQEBCwUAMBoxGDAWBgNVBAMMD3Bvbnl0b3duIFJT\n\
+QSBDQRcNMjMwNjI3MDgyODEyWhcNMjMwNzI3MDgyODEyWjAVMBMCAgHIFw0yMzA2\n\
+MjcwODI3NTlaoA4wDDAKBgNVHRQEAwIBAjANBgkqhkiG9w0BAQsFAAOCAgEAP6EX\n\
+9+hxjx/AqdBpynZXjGkEqigBcLcJ2PADOXngdQI1jC0WuYnZymUimemeULtt8X+1\n\
+ai2KxAuF1m4NEKZsrGKvO+/9s/X1xbGroyHSAMKtZafFopFpoB2aNbYlx7yIyLtD\n\
+BBIZIF50g20U+3izqpHutTD10itdk9TLsSceJHpwTkNJtaWMkOfBV28nKzEzVutV\n\
+f6WzRpURGzui6nQy7aIqImeanpoBoz323psMfC32U0uMBCZltyHNqsX58/2Uhucx\n\
+0IPnitNuhv4scCPf/jeRfGIWDrTf1/25LDzRxyg1S4z9aa+3GM4O3dqy4igZEhgT\n\
+q3pjlJ2hUL5E0oqbZDIQD1SN8UUUv5N2AjwZcxVBNnYeGyuO7YpTBYiu62o73iL2\n\
+CjgElfaMq/9hEr9GR9kJozh7VTxtQPbnr4DiucQvhv8o/A1z+zkC0gj8iCLFtDbO\n\
+8bvDowcdle9LKkrLaBe6sO+fSH/I9Wj8vrEJKsuwaEraIdEaq2VrIMUPEWN0/MH9\n\
+vTwHyadGSMK4CWtrn9fCAgSLw6NX74D7Cx1IaS8vstMjpeUqOS0dk5ThiW47HceB\n\
+DTko7rV5N+RGH2nW1ynLoZKCJQqqZcLilFMyKPui3jifJnQlMFi54jGVgg/D6UQn\n\
+7dA7wb2ux/1hSiaarp+mi7ncVOyByz6/WQP8mfc=\n\
+-----END X509 CRL-----\n";
+        builder_with_test_root()
+            .with_crl_pem([TEST_CERT_PEM, b"\n", crl.as_slice()].concat())
+            .build()
+            .expect("a valid CRL can be configured in a mixed PEM bundle");
+
+        let malformed = b"-----BEGIN X509 CRL-----\n!invalid!\n-----END X509 CRL-----\n";
+        let error = builder_with_test_root()
+            .with_crl_pem([crl.as_slice(), malformed.as_slice()].concat())
+            .build()
+            .expect_err("a later malformed CRL must reject the whole configuration");
+        assert!(matches!(
+            error,
+            TlsError::Configuration(message) if message.starts_with("CRL PEM parse error:")
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
     fn test_with_crl_pem_with_garbage_pem_rejected_at_build() {
         // br-asupersync-p7369s: garbage that doesn't parse as CRL
         // PEM must surface a typed Configuration error, not a panic
