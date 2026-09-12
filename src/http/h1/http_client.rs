@@ -47,7 +47,7 @@ use crate::http::pool::{Pool, PoolConfig, PoolKey};
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::tcp::stream::TcpStream;
 #[cfg(feature = "tls")]
-use crate::tls::{TlsConnectorBuilder, TlsStream};
+use crate::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
 use crate::types::Time;
 use base64::Engine;
 use memchr::memmem;
@@ -1133,6 +1133,15 @@ pub struct HttpClient {
     pool: Arc<Mutex<Pool>>,
     idle_connections: Arc<Mutex<HashMap<PoolKey, Vec<(u64, ClientIo)>>>>,
     cookies: Arc<Mutex<HashMap<String, Vec<StoredCookie>>>>,
+    /// asupersync-bo2caw: the TLS connector, built once per client (shared by
+    /// clones) on first HTTPS use. Building it loads and parses the root
+    /// store and constructs a rustls `ClientConfig`, which used to happen on
+    /// every fresh HTTPS connection; `TlsConnector` clones share the
+    /// `Arc<ClientConfig>`, so each connection now takes a cheap clone. A
+    /// build failure is cached as its message: it is configuration-level (no
+    /// trust anchors installed) and must read the same on every request.
+    #[cfg(feature = "tls")]
+    tls_connector: Arc<std::sync::OnceLock<Result<TlsConnector, String>>>,
 }
 
 impl HttpClient {
@@ -1157,6 +1166,8 @@ impl HttpClient {
             pool: Arc::new(Mutex::new(Pool::with_config(pool_config))),
             idle_connections: Arc::new(Mutex::new(HashMap::new())),
             cookies: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "tls")]
+            tls_connector: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -2030,6 +2041,43 @@ impl HttpClient {
         )
     }
 
+    /// Returns the client's TLS connector, building it on first use
+    /// (asupersync-bo2caw). Every HTTPS connection of this client and of its
+    /// clones shares the one connector; a build failure is reported with the
+    /// same message on every call.
+    #[cfg(feature = "tls")]
+    fn tls_connector(&self) -> Result<TlsConnector, ClientError> {
+        self.tls_connector
+            .get_or_init(|| Self::build_tls_connector(&self.config))
+            .clone()
+            .map_err(ClientError::TlsError)
+    }
+
+    /// Builds the TLS connector from the client configuration: `http/1.1`
+    /// ALPN, the feature-selected public roots, then every explicitly
+    /// installed root certificate.
+    #[cfg(feature = "tls")]
+    fn build_tls_connector(config: &HttpClientConfig) -> Result<TlsConnector, String> {
+        let builder = TlsConnectorBuilder::new().alpn_protocols(vec![b"http/1.1".to_vec()]);
+
+        #[cfg(feature = "tls-native-roots")]
+        let builder = builder.with_native_roots().map_err(|e| e.to_string())?;
+
+        #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
+        let builder = builder.with_webpki_roots();
+
+        // Explicitly installed roots (private CAs, self-signed test servers)
+        // extend whatever the feature roots provided.
+        let builder = config
+            .tls_root_certificates
+            .iter()
+            .fold(builder, |builder, certificate| {
+                builder.add_root_certificate(certificate)
+            });
+
+        builder.build().map_err(|e| e.to_string())
+    }
+
     #[cfg(feature = "tls")]
     async fn tls_connect_stream<T>(
         &self,
@@ -2039,30 +2087,7 @@ impl HttpClient {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let builder = TlsConnectorBuilder::new().alpn_protocols(vec![b"http/1.1".to_vec()]);
-
-        #[cfg(feature = "tls-native-roots")]
-        let builder = builder
-            .with_native_roots()
-            .map_err(|e| ClientError::TlsError(e.to_string()))?;
-
-        #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
-        let builder = builder.with_webpki_roots();
-
-        // Explicitly installed roots (private CAs, self-signed test servers)
-        // extend whatever the feature roots provided.
-        let builder = self
-            .config
-            .tls_root_certificates
-            .iter()
-            .fold(builder, |builder, certificate| {
-                builder.add_root_certificate(certificate)
-            });
-
-        let connector = builder
-            .build()
-            .map_err(|e| ClientError::TlsError(e.to_string()))?;
-
+        let connector = self.tls_connector()?;
         connector
             .connect(domain, stream)
             .await
@@ -3212,6 +3237,42 @@ mod tests {
     use std::cell::Cell;
     use std::future::poll_fn;
     use std::net::TcpListener;
+
+    /// asupersync-bo2caw: the TLS connector is built on the first HTTPS use
+    /// and shared by every later connection and by clones of the client,
+    /// instead of loading the root store and building a rustls config per
+    /// connection. The build outcome, success or the configuration-level
+    /// failure text, is what every request observes.
+    #[test]
+    #[cfg(feature = "tls")]
+    fn tls_connector_is_built_once_per_client_and_shared_by_clones() {
+        let client = HttpClient::new();
+        assert!(
+            client.tls_connector.get().is_none(),
+            "no connector may exist before the first HTTPS use"
+        );
+
+        let first = client.tls_connector().map(|_connector| ());
+        let cached = client
+            .tls_connector
+            .get()
+            .expect("the first use populates the cache");
+        assert_eq!(first.is_ok(), cached.is_ok());
+
+        let clone = client.clone();
+        assert!(
+            Arc::ptr_eq(&client.tls_connector, &clone.tls_connector),
+            "clones must share the connector cache"
+        );
+        let second = clone.tls_connector().map(|_connector| ());
+        assert_eq!(first.is_ok(), second.is_ok());
+
+        // Without a roots feature the default client has no trust anchors and
+        // the build fails closed; the cached text is what every request reports.
+        if let Err(ClientError::TlsError(message)) = &first {
+            assert_eq!(cached.as_ref().err(), Some(message));
+        }
+    }
 
     thread_local! {
         static HTTP_CLIENT_TEST_TIME_NANOS: Cell<u64> = const { Cell::new(0) };
