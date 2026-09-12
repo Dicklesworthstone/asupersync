@@ -2276,6 +2276,53 @@ fn manage_identity(cli: AtpdCli, args: IdentityArgs) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_file_loaders_preserve_chain_and_first_key_selection() {
+        let directory = tempfile::tempdir().expect("PEM test directory");
+        let cert_path = directory.path().join("chain.pem");
+        let key_path = directory.path().join("key.pem");
+        let cert = include_bytes!("../../tests/fixtures/tls/server.crt");
+        std::fs::write(
+            &cert_path,
+            [cert.as_slice(), b"\n", cert.as_slice()].concat(),
+        )
+        .unwrap();
+        let chain = load_atpd_cert_chain(&cert_path).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0], chain[1]);
+
+        let first = b"-----BEGIN RSA PRIVATE KEY-----\nAQID\n-----END RSA PRIVATE KEY-----\n";
+        let second = b"-----BEGIN PRIVATE KEY-----\nBAUG\n-----END PRIVATE KEY-----\n";
+        std::fs::write(&key_path, [first.as_slice(), second.as_slice()].concat()).unwrap();
+        let key = load_atpd_private_key(&key_path).unwrap();
+        assert!(matches!(key, rustls::pki_types::PrivateKeyDer::Pkcs1(_)));
+        assert_eq!(key.secret_der(), &[1, 2, 3]);
+
+        std::fs::write(&key_path, cert).unwrap();
+        assert!(
+            load_atpd_private_key(&key_path)
+                .unwrap_err()
+                .to_string()
+                .contains("no private key")
+        );
+        let malformed = b"-----BEGIN PRIVATE KEY-----\n!invalid!\n-----END PRIVATE KEY-----\n";
+        std::fs::write(&key_path, malformed).unwrap();
+        assert!(
+            load_atpd_private_key(&key_path)
+                .unwrap_err()
+                .to_string()
+                .contains("parse key")
+        );
+        std::fs::write(&cert_path, malformed).unwrap();
+        assert!(
+            load_atpd_cert_chain(&cert_path)
+                .unwrap_err()
+                .to_string()
+                .contains("parse certs")
+        );
+    }
+
     fn loopback(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))
     }

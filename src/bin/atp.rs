@@ -10250,6 +10250,58 @@ mod tests {
     }
 
     const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_file_loaders_keep_first_key_and_reject_bad_input() {
+        let directory = tempfile::tempdir().expect("PEM test directory");
+        let cert_path = directory.path().join("chain.pem");
+        let key_path = directory.path().join("key.pem");
+        let cert = include_bytes!("../../tests/fixtures/tls/server.crt");
+        fs::write(
+            &cert_path,
+            [cert.as_slice(), b"\n", cert.as_slice()].concat(),
+        )
+        .unwrap();
+        let chain = load_cert_chain(&cert_path).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0], chain[1]);
+
+        // The file loader selects the first format encountered, unlike
+        // tls::PrivateKey::from_pem's PKCS#8-first policy.
+        let first = b"-----BEGIN EC PRIVATE KEY-----\nAQID\n-----END EC PRIVATE KEY-----\n";
+        let second = b"-----BEGIN PRIVATE KEY-----\nBAUG\n-----END PRIVATE KEY-----\n";
+        fs::write(&key_path, [first.as_slice(), second.as_slice()].concat()).unwrap();
+        let key = load_private_key(&key_path).unwrap();
+        assert!(matches!(key, rustls::pki_types::PrivateKeyDer::Sec1(_)));
+        assert_eq!(key.secret_der(), &[1, 2, 3]);
+
+        let malformed = b"-----BEGIN PRIVATE KEY-----\n!invalid!\n-----END PRIVATE KEY-----\n";
+        fs::write(&key_path, [first.as_slice(), malformed.as_slice()].concat()).unwrap();
+        assert_eq!(
+            load_private_key(&key_path).unwrap().secret_der(),
+            &[1, 2, 3]
+        );
+        fs::write(&key_path, malformed).unwrap();
+        assert!(
+            load_private_key(&key_path)
+                .unwrap_err()
+                .contains("parse key")
+        );
+        fs::write(&key_path, cert).unwrap();
+        assert!(
+            load_private_key(&key_path)
+                .unwrap_err()
+                .contains("no private key")
+        );
+        fs::write(&cert_path, malformed).unwrap();
+        assert!(
+            load_cert_chain(&cert_path)
+                .unwrap_err()
+                .contains("parse certs")
+        );
+    }
+
     #[cfg(feature = "tls")]
     const QUIC_PINNED_LEAF_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIBwTCCAWigAwIBAgIUTQyiZ96ufyKHVqRYRZBXpRQABGMwCgYIKoZIzj0EAwIw\n\

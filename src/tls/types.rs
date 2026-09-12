@@ -784,6 +784,83 @@ Lru15URJw9pE1Uae8IuzyzHiF1fnn45swnvW3Szb
         assert_eq!(cert.as_der().len(), 2);
     }
 
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_certificate_chain_keeps_order_and_rejects_malformed_tail() {
+        let leaf_pem = include_bytes!("../../tests/fixtures/x509_adversarial/allowed.crt");
+        let ca_pem = include_bytes!("../../tests/fixtures/x509_adversarial/ca.crt");
+        let leaf = Certificate::from_pem(leaf_pem).unwrap().remove(0);
+        let ca = Certificate::from_pem(ca_pem).unwrap().remove(0);
+        let bundle = [leaf_pem.as_slice(), b"\n", ca_pem.as_slice()].concat();
+        let chain = CertificateChain::from_pem(&bundle).unwrap();
+        let parsed: Vec<_> = chain.into_iter().collect();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].as_der(), leaf.as_der());
+        assert_eq!(parsed[1].as_der(), ca.as_der());
+
+        let malformed = b"\n-----BEGIN CERTIFICATE-----\n!invalid!\n-----END CERTIFICATE-----\n";
+        assert!(matches!(
+            Certificate::from_pem(&[bundle.as_slice(), malformed].concat()),
+            Err(TlsError::Certificate(_))
+        ));
+        assert!(matches!(
+            Certificate::from_pem(b"no certificate blocks"),
+            Err(TlsError::Certificate(message)) if message == "no certificates found in PEM"
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_private_keys_preserve_format_precedence_and_first_key() {
+        // These distinct byte payloads test PEM decoding and selection only;
+        // rustls validates the decoded signing key when building TLS configs.
+        let sec1 = b"-----BEGIN EC PRIVATE KEY-----\nAQID\n-----END EC PRIVATE KEY-----\n";
+        let pkcs1 = b"-----BEGIN RSA PRIVATE KEY-----\nBAUG\n-----END RSA PRIVATE KEY-----\n";
+        let pkcs8 = b"-----BEGIN PRIVATE KEY-----\nBwgJ\n-----END PRIVATE KEY-----\n";
+        let later_pkcs8 = b"-----BEGIN PRIVATE KEY-----\nCgsM\n-----END PRIVATE KEY-----\n";
+
+        let key = PrivateKey::from_pem(sec1).unwrap().clone_inner();
+        assert!(matches!(key, PrivateKeyDer::Sec1(_)));
+        assert_eq!(key.secret_der(), &[1, 2, 3]);
+
+        let key = PrivateKey::from_pem(&[sec1.as_slice(), pkcs1.as_slice()].concat())
+            .unwrap()
+            .clone_inner();
+        assert!(matches!(key, PrivateKeyDer::Pkcs1(_)));
+        assert_eq!(key.secret_der(), &[4, 5, 6]);
+
+        let bundle = [
+            sec1.as_slice(),
+            pkcs1.as_slice(),
+            pkcs8.as_slice(),
+            later_pkcs8.as_slice(),
+        ]
+        .concat();
+        let key = PrivateKey::from_pem(&bundle).unwrap().clone_inner();
+        assert!(matches!(key, PrivateKeyDer::Pkcs8(_)));
+        assert_eq!(key.secret_der(), &[7, 8, 9]);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_private_keys_reject_missing_keys_and_malformed_sections() {
+        assert!(matches!(
+            PrivateKey::from_pem(TEST_CERT_PEM),
+            Err(TlsError::Certificate(message)) if message == "no private key found in PEM"
+        ));
+
+        let key = include_bytes!("../../tests/fixtures/tls/server.key");
+        let malformed = b"\n-----BEGIN PRIVATE KEY-----\n!invalid!\n-----END PRIVATE KEY-----\n";
+        let unterminated = b"\n-----BEGIN CERTIFICATE-----\nAQID\n";
+        for tail in [malformed.as_slice(), unterminated.as_slice()] {
+            // The existing API reads the full input even after finding a key.
+            assert!(matches!(
+                PrivateKey::from_pem(&[key.as_slice(), tail].concat()),
+                Err(TlsError::Certificate(_))
+            ));
+        }
+    }
+
     #[test]
     fn certificate_chain_operations() {
         let chain = CertificateChain::new();
