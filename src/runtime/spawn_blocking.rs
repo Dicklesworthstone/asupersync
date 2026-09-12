@@ -203,9 +203,10 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
 
 /// Spawns a blocking operation and returns a Future that yields until completion.
 ///
-/// This function runs the provided closure on the runtime blocking pool when
-/// a current `Cx` is available, and falls back to a dedicated thread when
-/// no runtime context is set.
+/// This function runs the provided closure on the current context's assigned
+/// blocking pool, including when the context has restricted capabilities.
+/// A context without a pool runs the closure inline; without a current context,
+/// the closure runs on a dedicated thread. Pool workers do not inherit a `Cx`.
 ///
 /// # Type Bounds
 ///
@@ -227,6 +228,10 @@ where
     T: Send + 'static,
 {
     if let Some(cx) = Cx::current() {
+        // This helper already accepts the work without a SPAWN capability.
+        // Preserve its assigned execution location even when the public pool
+        // getter is restricted; hiding the handle must not move blocking work
+        // onto the caller's runtime thread.
         if let Some(pool) = cx.blocking_pool_handle() {
             return spawn_blocking_on_pool(pool, f).await;
         }
@@ -509,6 +514,88 @@ mod tests {
             thread_id
         );
         crate::test_complete!("spawn_blocking_inline_when_no_pool");
+    }
+
+    #[test]
+    fn spawn_blocking_preserves_restricted_context_pool_placement() {
+        use std::future::Future;
+
+        init_test("spawn_blocking_preserves_restricted_context_pool_placement");
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime");
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        runtime.block_on(async {
+            let parent = Cx::current().expect("native parent context");
+            let restricted = parent
+                .clone()
+                .with_blocking_pool_handle(Some(pool.handle()))
+                .restrict::<crate::cx::cap::None>();
+            let caller = std::thread::current().id();
+
+            for attached in [true, false] {
+                let installed = if attached {
+                    restricted.clone()
+                } else {
+                    restricted.clone().with_blocking_pool_handle(None)
+                };
+                let expected_ambient = {
+                    let _guard = installed.clone().set_current_restricted();
+                    Cx::current().expect("ambient restriction").capabilities()
+                };
+                assert_eq!(
+                    expected_ambient.effective,
+                    restricted.capabilities().effective
+                );
+                let mut operation = std::pin::pin!(spawn_blocking(|| {
+                    (
+                        std::thread::current().id(),
+                        Cx::current().map(|cx| cx.capabilities()),
+                    )
+                }));
+                let (execution_thread, worker_capabilities) = std::future::poll_fn(|task| {
+                    let guard = installed.clone().set_current_restricted();
+                    let ambient = Cx::current().expect("restricted ambient context");
+                    assert!(!ambient.capabilities().spawn);
+                    assert!(ambient.blocking_pool_handle().is_none());
+                    assert!(matches!(
+                        ambient.spawn(|_| async {}),
+                        Err(crate::runtime::SpawnError::RuntimeUnavailable)
+                    ));
+                    let result = operation.as_mut().poll(task);
+                    assert_eq!(
+                        Cx::current().expect("unchanged restriction").capabilities(),
+                        ambient.capabilities()
+                    );
+                    drop(guard);
+                    assert_eq!(
+                        Cx::current().expect("restored parent").task_id(),
+                        parent.task_id()
+                    );
+                    result
+                })
+                .await;
+
+                if attached {
+                    assert_ne!(execution_thread, caller, "use the assigned blocking pool");
+                    assert!(
+                        worker_capabilities.is_none(),
+                        "do not fabricate a worker Cx"
+                    );
+                } else {
+                    assert_eq!(execution_thread, caller, "detached contexts stay inline");
+                    assert_eq!(worker_capabilities, Some(expected_ambient));
+                }
+                assert_eq!(
+                    Cx::current()
+                        .expect("native parent restored")
+                        .capabilities(),
+                    parent.capabilities()
+                );
+            }
+        });
+        pool.shutdown();
+        crate::test_complete!("spawn_blocking_preserves_restricted_context_pool_placement");
     }
 
     #[test]
