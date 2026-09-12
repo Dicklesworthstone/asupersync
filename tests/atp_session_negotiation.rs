@@ -1587,14 +1587,20 @@ mod extension_wire {
     }
 
     fn certificate() -> CertificateDer<'static> {
-        rustls_pemfile::certs(&mut &include_bytes!("fixtures/tls/server.crt")[..])
+        use rustls::pki_types::pem::PemObject;
+
+        CertificateDer::pem_reader_iter(&mut &include_bytes!("fixtures/tls/server.crt")[..])
             .next()
             .unwrap()
             .unwrap()
     }
 
     fn private_key() -> PrivateKeyDer<'static> {
-        rustls_pemfile::private_key(&mut &include_bytes!("fixtures/tls/server.key")[..])
+        use rustls::pki_types::pem::PemObject;
+
+        PrivateKeyDer::pem_reader_iter(&mut &include_bytes!("fixtures/tls/server.key")[..])
+            .next()
+            .transpose()
             .unwrap()
             .unwrap()
     }

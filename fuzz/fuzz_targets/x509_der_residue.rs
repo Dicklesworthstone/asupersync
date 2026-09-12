@@ -13,6 +13,7 @@ use der_min::{
     inspect_server_chain_metadata,
 };
 use libfuzzer_sys::fuzz_target;
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 use std::io::BufReader;
 
 const MAX_CERTIFICATE_DER_BYTES: u64 = 1_048_576;
@@ -58,7 +59,7 @@ fuzz_target!(|input: &[u8]| {
         && input.starts_with(b"-----BEGIN CERTIFICATE-----")
     {
         let mut reader = BufReader::new(input);
-        for certificate in rustls_pemfile::certs(&mut reader)
+        for certificate in CertificateDer::pem_reader_iter(&mut reader)
             .take(MAX_PEM_CERTIFICATES_PER_INPUT)
             .flatten()
         {

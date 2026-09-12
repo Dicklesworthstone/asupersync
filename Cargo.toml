@@ -232,7 +232,7 @@ io-uring = ["dep:io-uring"]
 # Enable TLS support via rustls. The rustls ring provider is selected here so
 # TLS remains fully functional out of the box; certificate pin hashing itself
 # uses the existing pure-Rust sha2 dependency and does not depend on ring.
-tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:rustls-pemfile", "dep:x509-parser"]
+tls = ["dep:rustls", "dep:rustls-pki-types", "rustls/ring", "dep:x509-parser"]
 # Enable native root certificates for TLS
 tls-native-roots = ["tls", "dep:rustls-native-certs"]
 # Enable webpki root certificates for TLS
@@ -479,8 +479,6 @@ rustls-pki-types = { version = "1.14.1", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 # Optional webpki root certificates
 webpki-roots = { version = "1.0", optional = true }
-# PEM file parsing for TLS certificates
-rustls-pemfile = { version = "2.2", optional = true }
 # Base64 encoding for WebSocket handshake and certificate pins.
 # default-features off: base64 0.23 default-enables an unsafe-SIMD engine
 # (`simd-unsafe`); we keep the safe scalar engine only.

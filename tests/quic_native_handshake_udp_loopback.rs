@@ -24,7 +24,7 @@ use asupersync::net::quic_native::{
 };
 use asupersync::time::{timeout, wall_now};
 use futures_lite::future::{block_on, zip};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -68,7 +68,7 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 
 fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
     let mut reader = std::io::BufReader::new(pem.as_bytes());
-    rustls_pemfile::certs(&mut reader)
+    CertificateDer::pem_reader_iter(&mut reader)
         .next()
         .expect("one cert")
         .expect("valid cert pem")
@@ -76,7 +76,9 @@ fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
 
 fn leaf_key() -> PrivateKeyDer<'static> {
     let mut reader = std::io::BufReader::new(LEAF_KEY_PEM.as_bytes());
-    rustls_pemfile::private_key(&mut reader)
+    PrivateKeyDer::pem_reader_iter(&mut reader)
+        .next()
+        .transpose()
         .expect("read key pem")
         .expect("one key")
 }

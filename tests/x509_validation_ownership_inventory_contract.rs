@@ -684,7 +684,7 @@ fn locked_versions_and_manifest_edges_match() {
 
     let manifest = read_repo_file("Cargo.toml");
     for marker in [
-        "tls = [\"dep:rustls\", \"dep:rustls-pki-types\", \"rustls/ring\", \"dep:rustls-pemfile\", \"dep:x509-parser\"]",
+        "tls = [\"dep:rustls\", \"dep:rustls-pki-types\", \"rustls/ring\", \"dep:x509-parser\"]",
         "atp-cli = [\"dep:clap\", \"tls\", \"dep:rustls-native-certs\"]",
         "rustls = { version = \"0.23.39\", default-features = false, features = [\"std\", \"tls12\"], optional = true }",
         "x509-parser = { version = \"0.18\", optional = true }",

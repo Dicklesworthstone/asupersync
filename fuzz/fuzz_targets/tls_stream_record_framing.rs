@@ -15,7 +15,7 @@ use asupersync::time::{Elapsed, timeout, wall_now};
 use asupersync::tls::{Certificate, TlsConnector, TlsConnectorBuilder};
 use libfuzzer_sys::fuzz_target;
 use rustls::crypto::ring::default_provider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject};
 use rustls::{ServerConfig, ServerConnection};
 use std::collections::VecDeque;
 use std::io::{self, Cursor, Write};
@@ -439,7 +439,7 @@ fn server_config() -> Option<Arc<ServerConfig>> {
 
 fn parse_fixture_cert() -> Option<CertificateDer<'static>> {
     let mut cursor = Cursor::new(TEST_CERT_PEM.as_bytes());
-    rustls_pemfile::certs(&mut cursor)
+    CertificateDer::pem_reader_iter(&mut cursor)
         .collect::<Result<Vec<_>, _>>()
         .ok()?
         .into_iter()
@@ -448,7 +448,7 @@ fn parse_fixture_cert() -> Option<CertificateDer<'static>> {
 
 fn parse_fixture_key() -> Option<PrivateKeyDer<'static>> {
     let mut cursor = Cursor::new(TEST_KEY_PEM.as_bytes());
-    rustls_pemfile::pkcs8_private_keys(&mut cursor)
+    PrivatePkcs8KeyDer::pem_reader_iter(&mut cursor)
         .collect::<Result<Vec<_>, _>>()
         .ok()?
         .into_iter()
