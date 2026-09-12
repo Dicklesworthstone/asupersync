@@ -114,14 +114,15 @@ Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
 
 ### Buffered I/O and protocol recovery
 
-- Buffered readers and files return their underlying stream at the logical
-  unread position. Failed buffer flushes preserve recoverable pending bytes.
+- `File::into_std` settles pending reads and rewinds unconsumed read-ahead before
+  returning the standard file. Failed buffer flushes preserve recoverable
+  pending bytes.
 - Framed writers reject an underlying writer's impossible byte count with
   `InvalidData`, preserving the unacknowledged suffix for a retry.
 - Child-process pipe reads park on the fallback I/O driver when no native
   runtime driver is installed.
-- HTTP/1 framing and idle response heads are bounded; HTTP/2 limits pending
-  response bodies. SQLite transactions refuse further statements after SQLite
+- HTTP/1 framing and idle request heads are bounded; HTTP/2 limits pending
+  request bodies. SQLite transactions refuse further statements after SQLite
   has ended the transaction.
 
 ### Networking and ATP transfers
