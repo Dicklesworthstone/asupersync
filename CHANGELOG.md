@@ -11,14 +11,16 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Organized by landed capabilities within each version, not by diff order.
 
 Scope window: current work through 2026-09-12, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. `v0.4.11` is published;
-`v0.5.0` is being prepared under `asupersync-v5fn1e`.
+beads, benchmark ledgers, and live repo artifacts. `v0.5.0` is published to
+crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 
 ## Version Timeline
 
-- **v0.5.0 candidate**: the approved capability-preserving context installation
+- **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
   retirement, QUIC connection reclamation, and buffered I/O recovery.
+  Published from `78b64636e` with nine crates and signed Linux, macOS, and
+  Windows assets through DSR without GitHub Actions.
 - **v0.4.11 Release**: runtime cancellation and teardown, root-region drain,
   non-blocking file traits, Kafka lifecycle fixes, and bounded QUIC receive
   reassembly. Published from `9b114c1f2` to crates.io and GitHub, with signed
@@ -75,7 +77,11 @@ beads, benchmark ledgers, and live repo artifacts. `v0.4.11` is published;
 
 ## [v0.5.0] - 2026-09-12
 
-Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
+[Published release](https://github.com/Dicklesworthstone/asupersync/releases/tag/v0.5.0)
+from `78b64636e99fea4ea2d868096576021dd3b8e519`, tracked in
+`asupersync-v5fn1e`. All nine crates.io archives and eleven GitHub assets were
+downloaded anonymously and matched the reviewed bytes; all four Minisign
+signatures verified against the public key at the release tag.
 
 ### Runtime capabilities and race history
 
@@ -97,6 +103,8 @@ Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
 - Synchronous spawn rejection no longer adds a nonexistent child termination to
   combinator and supervisor counters. Accepted children still count when they
   are cancelled before their first poll.
+- Contexts expose inherited blocking-pool handles only when their typed and
+  runtime capabilities allow spawning; retrieving a handle never creates a pool.
 - The API-v2 integration lane covers 18 native/lab lifecycle cells, 256 seeded
   spawn/cancel/close interleavings, capability denial and inheritance, composed
   macros, loser cleanup, and channel/stream ownership. The journey runner also
@@ -114,6 +122,8 @@ Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
   running user destructors, allowing shutdown callbacks to re-enter safely.
 - Browser microtask pumps drain spawn admissions and resume self-waking local
   futures across burst yields. Browser time uses a portable monotonic clock.
+- Native reactor-registration exports and UDP fallback test helpers remain
+  excluded from WebAssembly builds.
 
 ### Buffered I/O and protocol recovery
 
@@ -127,6 +137,8 @@ Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
   exhaustion with bounded delays while retaining permanent socket errors.
 - The opt-in HTTP cookie store preserves `Secure` attributes and suppresses
   those cookies on HTTP requests, including HTTPS-to-HTTP redirects.
+- TLS PEM loading uses the maintained parser in `rustls-pki-types`, preserving
+  certificate order, private-key selection, and error messages.
 - Framed writers reject an underlying writer's impossible byte count with
   `InvalidData`, preserving the unacknowledged suffix for a retry.
 - Child-process pipe reads park on the fallback I/O driver when no native
@@ -151,6 +163,18 @@ Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
   inspect an empty ancestor directory.
 - ATP delta chunk builders fill each chunk across short reads. This repairs
   delta re-sync failures introduced in `v0.4.11` for files larger than 128 KiB.
+
+### Release verification
+
+- RCH lanes passed formatting, all-target/all-feature checking and Clippy,
+  22,808 library tests, 158 integration tests, and 68 compatibility-bridge
+  tests. The library run used `test-internals,tls-webpki-roots` and retained
+  23 existing ignored tests. All nine package archive verifications and the
+  packaged default, TLS, and cancellation consumer checks passed.
+- Linux x86-64, macOS ARM64, and Windows x86-64 executables were built through
+  RCH and smoke-tested on their native platforms. Linux was built and tested
+  on glibc 2.43; older glibc environments have not been validated. Publication
+  used DSR with `--no-dispatch`, with GitHub Actions disabled.
 
 ## [v0.4.11] - 2026-09-09
 
