@@ -935,17 +935,61 @@ mod imp {
     const WAKE_USER_DATA: u64 = u64::MAX;
     const REMOVE_USER_DATA: u64 = u64::MAX - 1;
 
+    /// Identity of the file behind a descriptor, captured when the descriptor
+    /// enters the reactor (asupersync-ttg5bg).
+    ///
+    /// A re-arm compares a fresh `fstat` against this snapshot, which detects a
+    /// descriptor number that was closed and reused by another file with one
+    /// syscall instead of re-running the full SQE-injection validator.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FdIdentity {
+        dev: libc::dev_t,
+        ino: libc::ino_t,
+        mode: libc::mode_t,
+    }
+
+    impl FdIdentity {
+        /// Placeholder for synthetic registrations seeded by test harnesses;
+        /// those registrations are never re-armed.
+        #[cfg(any(test, feature = "test-internals"))]
+        const fn synthetic() -> Self {
+            Self {
+                dev: 0,
+                ino: 0,
+                mode: 0,
+            }
+        }
+    }
+
+    fn fd_identity(raw_fd: RawFd) -> io::Result<FdIdentity> {
+        // SAFETY: `stat` is plain old data; fstat fills it and reports an
+        // invalid descriptor through its return value.
+        let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(raw_fd, &raw mut stat_buf) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(FdIdentity {
+            dev: stat_buf.st_dev,
+            ino: stat_buf.st_ino,
+            mode: stat_buf.st_mode,
+        })
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct RegistrationInfo {
         raw_fd: RawFd,
         interest: Interest,
         active_poll_user_data: Option<u64>,
+        fd_identity: FdIdentity,
     }
 
     #[derive(Debug)]
     struct ReactorState {
         registrations: HashMap<Token, RegistrationInfo>,
         poll_ops: HashMap<u64, Token>,
+        /// asupersync-ttg5bg: descriptor-number uniqueness in O(1). `register`
+        /// used to scan every registration for a matching fd under this lock.
+        fds: HashMap<RawFd, Token>,
         next_poll_user_data: u64,
     }
 
@@ -954,8 +998,20 @@ mod imp {
             Self {
                 registrations: HashMap::new(),
                 poll_ops: HashMap::new(),
+                fds: HashMap::new(),
                 next_poll_user_data: 1,
             }
+        }
+
+        /// Drops a registration's bookkeeping, including its fd-uniqueness
+        /// entry when that entry still points at `token` (synthetic test seeds
+        /// share the wake fd and never populate the map).
+        fn forget_registration(&mut self, token: Token) -> Option<RegistrationInfo> {
+            let info = self.registrations.remove(&token)?;
+            if self.fds.get(&info.raw_fd) == Some(&token) {
+                self.fds.remove(&info.raw_fd);
+            }
+            Some(info)
         }
 
         fn allocate_poll_user_data(&mut self) -> io::Result<u64> {
@@ -1253,6 +1309,7 @@ mod imp {
                     raw_fd: self.wake_fd.as_raw_fd(),
                     interest,
                     active_poll_user_data: Some(active_poll_user_data),
+                    fd_identity: FdIdentity::synthetic(),
                 },
             );
         }
@@ -1539,28 +1596,28 @@ mod imp {
                     "token already registered",
                 ));
             }
-            if state
-                .registrations
-                .values()
-                .any(|info| info.raw_fd == raw_fd)
-            {
+            if state.fds.contains_key(&raw_fd) {
                 return Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     "fd already registered",
                 ));
             }
-            if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {
-                return Err(io::Error::last_os_error());
-            }
+            // asupersync-ttg5bg: the SQE-injection guard runs once, when the
+            // descriptor enters the reactor; re-arms compare the identity
+            // snapshot taken here instead of re-validating on every PollAdd.
+            validate_safe_fd(raw_fd)?;
+            let fd_identity = fd_identity(raw_fd)?;
             let poll_user_data = state.allocate_poll_user_data()?;
             self.submit_poll_add(raw_fd, interest, poll_user_data)?;
             state.poll_ops.insert(poll_user_data, token);
+            state.fds.insert(raw_fd, token);
             state.registrations.insert(
                 token,
                 RegistrationInfo {
                     raw_fd,
                     interest,
                     active_poll_user_data: Some(poll_user_data),
+                    fd_identity,
                 },
             );
             Ok(())
@@ -1572,10 +1629,21 @@ mod imp {
                 state.registrations.get(&token).copied().ok_or_else(|| {
                     io::Error::new(io::ErrorKind::NotFound, "token not registered")
                 })?;
-            if unsafe { libc::fcntl(info.raw_fd, libc::F_GETFD) } == -1 {
-                let err = io::Error::last_os_error();
+            // One fstat per re-arm: a closed descriptor reports EBADF, and a
+            // descriptor number reused by another file no longer matches the
+            // identity captured at registration (asupersync-ttg5bg). Either way
+            // the registration is stale and is pruned so the number can be
+            // registered afresh.
+            let stale = match fd_identity(info.raw_fd) {
+                Err(err) => Some(err),
+                Ok(identity) if identity != info.fd_identity => {
+                    Some(io::Error::from_raw_os_error(libc::EBADF))
+                }
+                Ok(_) => None,
+            };
+            if let Some(err) = stale {
                 let stale_user_data = remove_registration_poll_ops(&mut state, token);
-                state.registrations.remove(&token);
+                state.forget_registration(token);
                 for poll_user_data in stale_user_data {
                     let _ = self.submit_poll_remove(poll_user_data);
                 }
@@ -1604,8 +1672,7 @@ mod imp {
         fn deregister(&self, token: Token) -> io::Result<()> {
             let mut state = self.state.lock();
             state
-                .registrations
-                .remove(&token)
+                .forget_registration(token)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "token not registered"))?;
             let stale_user_data = remove_registration_poll_ops(&mut state, token);
             for poll_user_data in stale_user_data {
@@ -1796,9 +1863,6 @@ mod imp {
         interest: Interest,
         user_data: u64,
     ) -> io::Result<()> {
-        // Validate fd to prevent SQE injection attacks
-        validate_safe_fd(raw_fd)?;
-
         let mask = interest_to_poll_mask(interest);
         let entry = opcode::PollAdd::new(types::Fd(raw_fd), mask)
             .build()
@@ -1806,7 +1870,10 @@ mod imp {
 
         // SAFETY: PollAdd only uses the fd and interest mask; both remain valid
         // for the duration of the poll request (caller ensures fd lifetime).
-        // The fd has been validated above to ensure it's safe for polling.
+        // Descriptors reach this point only through `register`, which runs the
+        // SQE-injection validator once, through `modify`, which re-checks the
+        // registered identity, or as the reactor-owned wake eventfd
+        // (asupersync-ttg5bg).
         unsafe {
             ring.submission().push(&entry).map_err(push_error_to_io)?;
         }
@@ -1924,7 +1991,7 @@ mod imp {
                     // hanging forever on a registration that is silently gone.
                     emitted_events.push(Event::errored(token));
                     deferred_poll_removes.extend(remove_registration_poll_ops(state, token));
-                    state.registrations.remove(&token);
+                    state.forget_registration(token);
                 }
                 Some(_) => emitted_events.push(Event::errored(token)),
             }
@@ -2645,6 +2712,106 @@ mod imp {
 
             reactor.deregister(key).expect("deregister should succeed");
             assert_eq!(reactor.registration_count(), 0);
+        }
+
+        /// asupersync-ttg5bg: descriptor uniqueness is an O(1) map lookup and
+        /// the map is released on deregister, on the closed-fd prune in
+        /// `modify`, and on a terminal completion, so the number can be
+        /// registered afresh under a new token each time.
+        #[test]
+        fn test_register_duplicate_fd_rejected_until_bookkeeping_released() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (left, _right) = UnixStream::pair().expect("unix stream pair");
+            reactor
+                .register(&left, Token::new(21), Interest::READABLE)
+                .expect("first registration should succeed");
+            let err = reactor
+                .register(&left, Token::new(22), Interest::WRITABLE)
+                .expect_err("same fd under a second token must be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(reactor.registration_count(), 1);
+
+            reactor
+                .deregister(Token::new(21))
+                .expect("deregister should succeed");
+            reactor
+                .register(&left, Token::new(22), Interest::WRITABLE)
+                .expect("fd registers again once its bookkeeping is released");
+            assert_eq!(reactor.registration_count(), 1);
+
+            let terminal_token = Token::new(23);
+            reactor.bench_seed_registration(terminal_token, Interest::READABLE, 4_001);
+            let mut events = Events::with_capacity(4);
+            let count =
+                reactor.bench_process_completion_batch(&[(4_001, -libc::EBADF)], &mut events);
+            assert_eq!(count, 1, "terminal completion surfaces one error event");
+            assert_eq!(
+                reactor.registration_count(),
+                1,
+                "terminal cleanup drops only the dead registration"
+            );
+            reactor
+                .register(&_right, Token::new(24), Interest::READABLE)
+                .expect("an unrelated fd still registers after terminal cleanup");
+
+            reactor
+                .deregister(Token::new(22))
+                .expect("deregister should succeed");
+            reactor
+                .deregister(Token::new(24))
+                .expect("deregister should succeed");
+            assert_eq!(reactor.registration_count(), 0);
+        }
+
+        /// asupersync-ttg5bg: a re-arm no longer re-runs the SQE-injection
+        /// validator; it compares one `fstat` against the identity captured at
+        /// registration, so a descriptor number closed and reused by another
+        /// file is pruned exactly like a closed one.
+        #[test]
+        fn test_modify_detects_reused_fd_number_and_prunes() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let (old_sock, _old_peer) = UnixStream::pair().expect("unix stream pair");
+            let (new_sock, _new_peer) = UnixStream::pair().expect("second unix stream pair");
+            // SAFETY: dup creates a fresh descriptor number this test owns.
+            let stale_fd = unsafe { libc::dup(old_sock.as_raw_fd()) };
+            assert!(stale_fd >= 0, "dup should succeed");
+            let key = Token::new(606);
+            reactor
+                .register(&RawFdSource(stale_fd), key, Interest::READABLE)
+                .expect("register should succeed");
+
+            // SAFETY: `stale_fd` is owned by this test; closing it and mapping
+            // another open socket onto the same number reproduces fd reuse.
+            assert_eq!(unsafe { libc::close(stale_fd) }, 0, "close stale fd");
+            assert_eq!(
+                unsafe { libc::dup2(new_sock.as_raw_fd(), stale_fd) },
+                stale_fd,
+                "dup2 should reuse the stale fd number"
+            );
+
+            let err = reactor
+                .modify(key, Interest::WRITABLE)
+                .expect_err("re-arm on a reused fd number must fail");
+            assert_eq!(err.raw_os_error(), Some(libc::EBADF));
+            assert_eq!(
+                reactor.registration_count(),
+                0,
+                "reused fd number must be pruned from bookkeeping"
+            );
+            reactor
+                .register(&RawFdSource(stale_fd), Token::new(607), Interest::READABLE)
+                .expect("the reused number registers afresh after the prune");
+            reactor
+                .deregister(Token::new(607))
+                .expect("deregister should succeed");
+            // SAFETY: this test owns the duplicated descriptor number.
+            let _ = unsafe { libc::close(stale_fd) };
         }
 
         #[test]
