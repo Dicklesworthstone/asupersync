@@ -679,6 +679,27 @@ fn load_daemon_config(config_path: &PathBuf) -> Result<AtpdConfig> {
 }
 
 #[cfg(feature = "tls")]
+fn pem_error_message(error: rustls::pki_types::pem::Error) -> String {
+    use rustls::pki_types::pem::Error;
+
+    match error {
+        Error::MissingSectionEnd { end_marker } => format!(
+            "section end {:?} missing",
+            String::from_utf8_lossy(&end_marker)
+        ),
+        Error::IllegalSectionStart { line } => {
+            format!(
+                "illegal section start: {:?}",
+                String::from_utf8_lossy(&line)
+            )
+        }
+        Error::Base64Decode(message) => message,
+        Error::Io(error) => error.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+#[cfg(feature = "tls")]
 fn load_atpd_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
     use rustls::pki_types::{CertificateDer, pem::PemObject};
 
@@ -687,7 +708,13 @@ fn load_atpd_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::Certificat
     let mut reader = std::io::BufReader::new(pem.as_slice());
     let certs = CertificateDer::pem_reader_iter(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| cli_error(format!("parse certs in {}: {err}", path.display())))?;
+        .map_err(|err| {
+            cli_error(format!(
+                "parse certs in {}: {}",
+                path.display(),
+                pem_error_message(err)
+            ))
+        })?;
     if certs.is_empty() {
         return Err(cli_error(format!(
             "no certificates found in {}",
@@ -707,7 +734,13 @@ fn load_atpd_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer
     PrivateKeyDer::pem_reader_iter(&mut reader)
         .next()
         .transpose()
-        .map_err(|err| cli_error(format!("parse key in {}: {err}", path.display())))?
+        .map_err(|err| {
+            cli_error(format!(
+                "parse key in {}: {}",
+                path.display(),
+                pem_error_message(err)
+            ))
+        })?
         .ok_or_else(|| cli_error(format!("no private key found in {}", path.display())))
 }
 
@@ -2321,6 +2354,42 @@ mod tests {
                 .to_string()
                 .contains("parse certs")
         );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_file_loaders_preserve_legacy_error_messages() {
+        let directory = tempfile::tempdir().expect("PEM error test directory");
+        let path = directory.path().join("invalid.pem");
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"-----BEGIN PRIVATE KEY-----\nAQID\n",
+                "section end \"PRIVATE KEY\" missing",
+            ),
+            (
+                b"-----BEGIN \xff\n",
+                "illegal section start: \"-----BEGIN \u{fffd}\\n\"",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY----\r\n",
+                "illegal section start: \"-----BEGIN PRIVATE KEY----\\r\"",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY-----\n!\n-----END PRIVATE KEY-----\n",
+                "InvalidCharacter(33)",
+            ),
+        ];
+        for &(pem, expected) in cases {
+            std::fs::write(&path, pem).unwrap();
+            assert_eq!(
+                load_atpd_private_key(&path).unwrap_err().to_string(),
+                format!("parse key in {}: {expected}", path.display())
+            );
+            assert_eq!(
+                load_atpd_cert_chain(&path).unwrap_err().to_string(),
+                format!("parse certs in {}: {expected}", path.display())
+            );
+        }
     }
 
     fn loopback(port: u16) -> SocketAddr {

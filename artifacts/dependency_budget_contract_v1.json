@@ -1,4 +1,9 @@
 {
+  "direct_allowset_refresh": {
+    "source_commit": "0e02b215c006b52b906852aa46df0cc1a6b7c5aa",
+    "removed_edge": "normal:rustls-pemfile",
+    "scope": "The direct allowset matches the current root manifest. Direct-edge cells and all numeric ceilings retain their historical measured values. Current graph measurement has not run; the historical PEM edge in direct-edge cells remains an explicit verification gap."
+  },
   "allowed_direct_dependencies": [
     {
       "dependency_edge_kind": "dev",
@@ -556,15 +561,6 @@
       "manifest_table": "dependencies",
       "optional": true,
       "package_name": "rustls-native-certs",
-      "target_condition": null
-    },
-    {
-      "dependency_edge_kind": "normal",
-      "dependency_name": "rustls-pemfile",
-      "edge_id": "normal:rustls-pemfile",
-      "manifest_table": "dependencies",
-      "optional": true,
-      "package_name": "rustls-pemfile",
       "target_condition": null
     },
     {
@@ -4582,7 +4578,7 @@
     "bead_id": "asupersync-dep-p1-foundations-upksjk.2",
     "measurement_basis": "Cargo package IDs from synthesized out-of-workspace consumer resolution",
     "path": "artifacts/dependency_marginal_ledger_v1.json",
-    "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+    "sha256": "f8ef244ecdcadd03aaa94cd021e0d5399491b777b22832a4c68a78ef980c037c",
     "source_commit": "376c313540a58d2c8e6618cf40b4ac87ed36ec53"
   }
 }

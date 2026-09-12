@@ -5,6 +5,8 @@
 
 use super::error::TlsError;
 use super::stream::TlsStream;
+#[cfg(feature = "tls")]
+use super::types::pem_error_message;
 use super::types::{Certificate, CertificateChain, CertificatePinSet, PrivateKey, RootCertStore};
 use crate::io::{AsyncRead, AsyncWrite};
 
@@ -650,7 +652,7 @@ impl TlsConnectorBuilder {
                     #[cfg(feature = "tracing-integration")]
                     tracing::warn!(
                         path = %path.display(),
-                        error = %_e,
+                        error = %pem_error_message(_e),
                         "TLS: PEM bundle parse failed; skipping file (br-asupersync-0owoem)"
                     );
                     return Ok(TlsCertificateLoadCounts::default());
@@ -1129,7 +1131,10 @@ impl TlsConnectorBuilder {
                 let der_iter = CertificateRevocationListDer::pem_reader_iter(&mut reader);
                 for der in der_iter {
                     let der = der.map_err(|e| {
-                        TlsError::Configuration(format!("CRL PEM parse error: {e}"))
+                        TlsError::Configuration(format!(
+                            "CRL PEM parse error: {}",
+                            pem_error_message(e)
+                        ))
                     })?;
                     crl_ders.push(der);
                 }
@@ -1502,7 +1507,7 @@ DTko7rV5N+RGH2nW1ynLoZKCJQqqZcLilFMyKPui3jifJnQlMFi54jGVgg/D6UQn\n\
             .expect_err("a later malformed CRL must reject the whole configuration");
         assert!(matches!(
             error,
-            TlsError::Configuration(message) if message.starts_with("CRL PEM parse error:")
+            TlsError::Configuration(message) if message == "CRL PEM parse error: InvalidCharacter(33)"
         ));
     }
 

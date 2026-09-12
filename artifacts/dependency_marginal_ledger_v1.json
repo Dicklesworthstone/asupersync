@@ -4,6 +4,13 @@
   "bead_id": "asupersync-dep-p1-foundations-upksjk.2",
   "program_id": "asupersync-ir2uf0",
   "source_commit": "376c313540a58d2c8e6618cf40b4ac87ed36ec53",
+  "direct_inventory_refresh": {
+    "source_commit": "0e02b215c006b52b906852aa46df0cc1a6b7c5aa",
+    "removed_edge": "normal:rustls-pemfile",
+    "scope": "Only direct_dependency_inventory is refreshed from the current manifest. Graph records, package counts, counterfactual measurements, commands, fingerprints, forecasts, and the original measurement source commit remain historical and unchanged.",
+    "current_graph_measurement_status": "NOT_RUN",
+    "remaining_contract_gap": "Historical graph edge partitions still include the removed edge and cannot be claimed to describe the current manifest. Regenerate graph evidence before citing the full ledger or its direct-edge-cell projection as current."
+  },
   "generator_path": "src/bin/dependency_marginal_ledger.rs",
   "taxonomy_path": "artifacts/dependency_safety_taxonomy_v1.json",
   "contract_path": "tests/dependency_marginal_ledger_contract.rs",
@@ -671,15 +678,6 @@
       "edge_id": "normal:rustls-native-certs",
       "dependency_name": "rustls-native-certs",
       "package_name": "rustls-native-certs",
-      "dependency_edge_kind": "normal",
-      "target_condition": null,
-      "optional": true,
-      "manifest_table": "dependencies"
-    },
-    {
-      "edge_id": "normal:rustls-pemfile",
-      "dependency_name": "rustls-pemfile",
-      "package_name": "rustls-pemfile",
       "dependency_edge_kind": "normal",
       "target_condition": null,
       "optional": true,

@@ -19,6 +19,28 @@ use std::sync::Arc;
 
 use super::error::TlsError;
 
+/// Keep the shipped reader-based PEM diagnostics while using the maintained parser.
+#[cfg(feature = "tls")]
+pub(crate) fn pem_error_message(error: rustls_pki_types::pem::Error) -> String {
+    use rustls_pki_types::pem::Error;
+
+    match error {
+        Error::MissingSectionEnd { end_marker } => format!(
+            "section end {:?} missing",
+            String::from_utf8_lossy(&end_marker)
+        ),
+        Error::IllegalSectionStart { line } => {
+            format!(
+                "illegal section start: {:?}",
+                String::from_utf8_lossy(&line)
+            )
+        }
+        Error::Base64Decode(message) => message,
+        Error::Io(error) => error.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// A DER-encoded X.509 certificate.
 #[derive(Clone, Debug)]
 pub struct Certificate {
@@ -53,7 +75,7 @@ impl Certificate {
         let mut reader = BufReader::new(pem);
         let certs: Vec<_> = CertificateDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Certificate(e.to_string()))?;
+            .map_err(|e| TlsError::Certificate(pem_error_message(e)))?;
 
         if certs.is_empty() {
             return Err(TlsError::Certificate("no certificates found in PEM".into()));
@@ -199,7 +221,7 @@ impl PrivateKey {
         // Try PKCS#8 first
         let pkcs8_keys: Vec<_> = PrivatePkcs8KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Certificate(e.to_string()))?;
+            .map_err(|e| TlsError::Certificate(pem_error_message(e)))?;
 
         if let Some(key) = pkcs8_keys.into_iter().next() {
             return Ok(Self {
@@ -211,7 +233,7 @@ impl PrivateKey {
         let mut reader = BufReader::new(pem);
         let rsa_keys: Vec<_> = PrivatePkcs1KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Certificate(e.to_string()))?;
+            .map_err(|e| TlsError::Certificate(pem_error_message(e)))?;
 
         if let Some(key) = rsa_keys.into_iter().next() {
             return Ok(Self {
@@ -223,7 +245,7 @@ impl PrivateKey {
         let mut reader = BufReader::new(pem);
         let ec_keys: Vec<_> = PrivateSec1KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Certificate(e.to_string()))?;
+            .map_err(|e| TlsError::Certificate(pem_error_message(e)))?;
 
         if let Some(key) = ec_keys.into_iter().next() {
             return Ok(Self {
@@ -859,6 +881,50 @@ Lru15URJw9pE1Uae8IuzyzHiF1fnn45swnvW3Szb
                 Err(TlsError::Certificate(_))
             ));
         }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_errors_preserve_legacy_reader_messages() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"-----BEGIN CERTIFICATE-----\nAQID\n",
+                "section end \"CERTIFICATE\" missing",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY-----\nAQID\n",
+                "section end \"PRIVATE KEY\" missing",
+            ),
+            (
+                b"-----BEGIN \xff\n",
+                "illegal section start: \"-----BEGIN \u{fffd}\\n\"",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY----\r\n",
+                "illegal section start: \"-----BEGIN PRIVATE KEY----\\r\"",
+            ),
+            (
+                b"-----BEGIN CERTIFICATE-----\n!\n-----END CERTIFICATE-----\n",
+                "InvalidCharacter(33)",
+            ),
+        ];
+        for &(pem, expected) in cases {
+            for error in [
+                Certificate::from_pem(pem).unwrap_err(),
+                PrivateKey::from_pem(pem).unwrap_err(),
+            ] {
+                match error {
+                    TlsError::Certificate(message) => assert_eq!(message, expected),
+                    other => panic!("expected certificate error, got {other:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            pem_error_message(rustls_pki_types::pem::Error::Io(std::io::Error::other(
+                "read failed"
+            ))),
+            "read failed"
+        );
     }
 
     #[test]

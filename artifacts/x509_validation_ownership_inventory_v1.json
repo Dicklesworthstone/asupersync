@@ -69,13 +69,13 @@
     },
     {
       "path": "src/tls/types.rs",
-      "sha256": "da1161e25655d76904ec0ef244d2d05ab38b4f6993294b7bf144247b0d4718f6",
-      "line_count": 1188
+      "sha256": "3fc1ec09f01fc728e61916ab4c2e48bbecac5d1b3ac62f5221adb8e3574b5acd",
+      "line_count": 1254
     },
     {
       "path": "src/tls/connector.rs",
-      "sha256": "9f522a3ff7aa5f6bb5a5e35ea8f033f79f4de261dae1f5fd04c10716e2d2e7bb",
-      "line_count": 2087
+      "sha256": "ee58410629ba6dcff3449416fe6db183bcc3cc71d7a58ed72b086cf56ad7d639",
+      "line_count": 2092
     },
     {
       "path": "src/tls/acceptor.rs",
@@ -104,8 +104,8 @@
     },
     {
       "path": "src/bin/atp.rs",
-      "sha256": "f071ddf64eb151c70e59ab3462664af9702a23d1e5cada318e0e3308d6741e4e",
-      "line_count": 13624
+      "sha256": "f7efc06b1571a5a83df9665acffe10b8f04000274e425b70175127fccc5eb2a4",
+      "line_count": 13688
     },
     {
       "path": "artifacts/dependency_capability_registry_v1.json",
@@ -124,8 +124,8 @@
     },
     {
       "path": "artifacts/dependency_marginal_ledger_v1.json",
-      "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
-      "line_count": 187615
+      "sha256": "f8ef244ecdcadd03aaa94cd021e0d5399491b777b22832a4c68a78ef980c037c",
+      "line_count": 187613
     },
     {
       "path": "artifacts/api_surface_map_v1.json",
