@@ -1604,9 +1604,14 @@ fn map_tls_error(err: crate::net::quic_native::QuicTlsError) -> QuicTransportErr
 }
 
 /// Encode the simplified 1-RTT data-plane header for `packet_number`.
-fn encode_one_rtt_header(packet_number: u64) -> [u8; ONE_RTT_HEADER_LEN] {
+fn encode_one_rtt_header(packet_number: u64, key_phase: bool) -> [u8; ONE_RTT_HEADER_LEN] {
     let mut header = [0u8; ONE_RTT_HEADER_LEN];
-    header[0] = ONE_RTT_FIXED_BIT; // key_phase 0
+    header[0] = ONE_RTT_FIXED_BIT
+        | if key_phase {
+            ONE_RTT_KEY_PHASE_BIT
+        } else {
+            0
+        };
     header[1..].copy_from_slice(&packet_number.to_be_bytes());
     header
 }
@@ -3776,6 +3781,11 @@ impl QuicLink {
         let mut datagram_frames = 0usize;
         let mut max_datagram_frames_per_plain_packet = 0usize;
         let mut plaintext_payload_bytes = 0usize;
+        // asupersync-gsnci5: send every 1-RTT packet in this flush under the
+        // current local key phase (RFC 9001 §6.4). Until key rotation lands the
+        // local phase never leaves 0, but the header and the AEAD nonce/AAD now
+        // track it so a future rotation flips the wire bit consistently.
+        let send_key_phase = self.conn.tls().local_key_phase();
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let pending_datagrams = self.conn.pending_outbound_datagram_count();
@@ -4017,7 +4027,7 @@ impl QuicLink {
             max_datagram_frames_per_plain_packet =
                 max_datagram_frames_per_plain_packet.max(packet_datagram_frames);
             plaintext_payload_bytes = plaintext_payload_bytes.saturating_add(payload.len());
-            let header = encode_one_rtt_header(packet_number);
+            let header = encode_one_rtt_header(packet_number, send_key_phase);
             plain_packets.push(PlainOneRttPacket {
                 packet_number,
                 header,
@@ -4032,12 +4042,26 @@ impl QuicLink {
             .saturating_sub(pacer_wait_elapsed);
         let count = plain_packets.len();
         if !plain_packets.is_empty() {
+            // asupersync-gsnci5: RFC 9001 §6.6 forbids protecting more than the
+            // AEAD confidentiality limit of packets under one key. Key rotation
+            // (which would let the transfer continue under a fresh key) is a
+            // tracked follow-up; until then, fail closed rather than over-use
+            // the key. In practice this never fires below the 2^23 limit — the
+            // 5G matrix workload sits at ~4.4M packets.
+            if self
+                .protection
+                .confidentiality_limit_reached(PacketProtectionSpace::OneRtt)
+            {
+                return Err(QuicTransportError::Quic(
+                    "1-RTT AEAD confidentiality limit reached; key rotation required".to_string(),
+                ));
+            }
             let protect_started = Instant::now();
             let requests = plain_packets
                 .iter()
                 .map(|packet| PacketProtectionRequest {
                     space: PacketProtectionSpace::OneRtt,
-                    key_phase: false,
+                    key_phase: send_key_phase,
                     packet_number: packet.packet_number,
                     associated_data: packet.header.as_slice(),
                     payload: packet.payload.as_ref(),
@@ -5036,13 +5060,26 @@ impl QuicLink {
             return Ok(InboundPacketDecode::NotOneRtt);
         };
         let mut data = packet.data;
-        match self.protection.unprotect_one_rtt_in_place_now(
+        let outcome = self.protection.unprotect_one_rtt_in_place_now(
             cx,
             key_phase,
             packet_number,
             &mut data,
             ONE_RTT_HEADER_LEN,
-        ) {
+        );
+        // asupersync-gsnci5: RFC 9001 §6.6 — close the connection once too many
+        // packets have failed authentication under the current key (integrity
+        // limit). This never fires in normal operation; it bounds forgery
+        // attempts rather than tolerating them indefinitely.
+        if self
+            .protection
+            .integrity_limit_reached(PacketProtectionSpace::OneRtt)
+        {
+            return Err(QuicTransportError::Integrity(
+                "1-RTT AEAD integrity limit reached".to_string(),
+            ));
+        }
+        match outcome {
             Outcome::Ok(plaintext_len) => {
                 data.truncate(ONE_RTT_HEADER_LEN + plaintext_len);
                 let plaintext = Bytes::from(data).slice(ONE_RTT_HEADER_LEN..);
@@ -11518,6 +11555,71 @@ mod gh67_liveness_tests {
         let (mut server, early) = server.expect("server link");
         server.ingest_packets(cx, early).expect("early packets");
         (client, server)
+    }
+
+    // asupersync-gsnci5: RFC 9001 §6.6 — the send path must not protect beyond
+    // the AEAD confidentiality limit under one key. Key rotation (to continue
+    // under a fresh key) is a tracked follow-up; until then the flush fails
+    // closed at the limit rather than over-using the key.
+    #[test]
+    fn one_rtt_send_fails_closed_at_confidentiality_limit() {
+        use crate::net::atp::quic::packet_protection::AEAD_CONFIDENTIALITY_LIMIT;
+        use crate::net::quic_native::tls::PacketProtectionSpace;
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig::default();
+            let (mut client, _server) = established_loopback_links(&cx, &config).await;
+            client
+                .protection
+                .set_protected_packet_count_for_test(
+                    PacketProtectionSpace::OneRtt,
+                    AEAD_CONFIDENTIALITY_LIMIT,
+                );
+            // Queue a control-stream frame so the flush assembles a 1-RTT batch
+            // and reaches the confidentiality guard.
+            let mut client_control =
+                NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
+            let frame = Frame::empty(FrameType::KeepAlive).unwrap();
+            client_control.send(&cx, &mut client.conn, &frame).unwrap();
+            let result = client.flush(&cx).await;
+            assert!(
+                matches!(&result, Err(QuicTransportError::Quic(msg)) if msg.contains("confidentiality limit")),
+                "flush must fail closed at the confidentiality limit, got {result:?}"
+            );
+        });
+    }
+
+    // asupersync-gsnci5: RFC 9001 §6.6 — the receive path must close the
+    // connection once too many packets have failed authentication under one key
+    // (integrity limit). This bounds forgery attempts; it never fires normally.
+    #[test]
+    fn one_rtt_receive_fails_closed_at_integrity_limit() {
+        use crate::net::atp::quic::packet_protection::AEAD_INTEGRITY_LIMIT;
+        use crate::net::quic_native::endpoint::ReceivedPacket;
+        use crate::net::quic_native::tls::PacketProtectionSpace;
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig::default();
+            let (_client, mut server) = established_loopback_links(&cx, &config).await;
+            server
+                .protection
+                .set_auth_failure_count_for_test(PacketProtectionSpace::OneRtt, AEAD_INTEGRITY_LIMIT);
+            // A well-formed short-header 1-RTT packet with a high packet number
+            // (past the accepted window) and undecryptable body.
+            let mut data = encode_one_rtt_header(1_000_000, false).to_vec();
+            data.extend_from_slice(&[0u8; ONE_RTT_TAG_LEN + 8]);
+            let packet = ReceivedPacket {
+                src_addr: "127.0.0.1:0".parse().unwrap(),
+                data,
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+            let result = server.ingest_packets(&cx, vec![packet]);
+            assert!(
+                matches!(&result, Err(QuicTransportError::Integrity(_))),
+                "ingest must fail closed at the integrity limit, got {result:?}"
+            );
+        });
     }
 
     #[test]

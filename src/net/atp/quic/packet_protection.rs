@@ -18,6 +18,19 @@ const REPLAY_WINDOW_SPAN: u64 = REPLAY_WINDOW_CAPACITY as u64 - 1;
 const PARALLEL_UNPROTECT_MIN_PACKETS: usize = 4;
 const PARALLEL_UNPROTECT_TARGET_CHUNK_PACKETS: usize = 8;
 
+/// AEAD usage limits for the QUIC AES-128-GCM suite the rustls provider
+/// selects (RFC 9001 §6.6). An endpoint MUST initiate a key update before
+/// protecting more than `AEAD_CONFIDENTIALITY_LIMIT` packets under one key,
+/// and MUST close the connection once `AEAD_INTEGRITY_LIMIT` packets have
+/// failed authentication under one key.
+pub(crate) const AEAD_CONFIDENTIALITY_LIMIT: u64 = 1 << 23;
+pub(crate) const AEAD_INTEGRITY_LIMIT: u64 = 1 << 52;
+/// Default soft threshold at which the send path initiates a key update:
+/// seven-eighths of the confidentiality limit, leaving margin for the update
+/// to be committed and for in-flight packets still riding the old key.
+const DEFAULT_KEY_UPDATE_CONFIDENTIALITY_THRESHOLD: u64 =
+    AEAD_CONFIDENTIALITY_LIMIT - (AEAD_CONFIDENTIALITY_LIMIT >> 3);
+
 #[cfg(any(test, feature = "test-internals"))]
 use crate::net::quic_native::tls::DeterministicQuicCryptoProvider;
 
@@ -115,6 +128,18 @@ pub struct AtpPacketProtection {
     /// Bounded accepted-packet windows by packet-number space. QUIC packet
     /// numbers must not be reused inside a space, including across key phases.
     accepted_packets: BTreeMap<PacketProtectionSpace, PacketReplayWindow>,
+    /// Packets protected under the current local send key, per space (RFC 9001
+    /// §6.6 confidentiality accounting). Reset by [`Self::note_local_key_update`]
+    /// once the send key has rotated to the next generation.
+    protected_under_current_key: BTreeMap<PacketProtectionSpace, u64>,
+    /// Authentication failures observed under the current receive key, per
+    /// space (RFC 9001 §6.6 integrity accounting). Reset by
+    /// [`Self::note_peer_key_update`] once the receive key has rotated.
+    auth_failures_under_current_key: BTreeMap<PacketProtectionSpace, u64>,
+    /// Soft threshold of protected packets after which the send path should
+    /// initiate a key update. Defaults to
+    /// [`DEFAULT_KEY_UPDATE_CONFIDENTIALITY_THRESHOLD`].
+    key_update_confidentiality_threshold: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -269,6 +294,9 @@ impl AtpPacketProtection {
             provider_kind,
             provider_profile_traced: false,
             accepted_packets: BTreeMap::new(),
+            protected_under_current_key: BTreeMap::new(),
+            auth_failures_under_current_key: BTreeMap::new(),
+            key_update_confidentiality_threshold: DEFAULT_KEY_UPDATE_CONFIDENTIALITY_THRESHOLD,
         })
     }
 
@@ -331,6 +359,85 @@ impl AtpPacketProtection {
         self.accepted_packets
             .get(&space)
             .and_then(|window| window.highest_seen)
+    }
+
+    /// Packets protected under the current local send key in `space` (RFC 9001
+    /// §6.6 confidentiality accounting).
+    #[must_use]
+    pub fn protected_packet_count(&self, space: PacketProtectionSpace) -> u64 {
+        self.protected_under_current_key
+            .get(&space)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether the send path should initiate a key update in `space`: the
+    /// number of packets protected under the current key has reached the soft
+    /// confidentiality threshold (RFC 9001 §6.6). The threshold sits below the
+    /// hard [`Self::confidentiality_limit_reached`] limit so the rotation lands
+    /// with margin.
+    #[must_use]
+    pub fn confidentiality_key_update_due(&self, space: PacketProtectionSpace) -> bool {
+        self.protected_packet_count(space) >= self.key_update_confidentiality_threshold
+    }
+
+    /// Whether the hard confidentiality limit (RFC 9001 §6.6, `2^23` for
+    /// AES-128-GCM) has been reached in `space`. Protecting a further packet
+    /// under the same key is forbidden; a connection that cannot rotate MUST
+    /// close.
+    #[must_use]
+    pub fn confidentiality_limit_reached(&self, space: PacketProtectionSpace) -> bool {
+        self.protected_packet_count(space) >= AEAD_CONFIDENTIALITY_LIMIT
+    }
+
+    /// Authentication failures observed under the current receive key in
+    /// `space` (RFC 9001 §6.6 integrity accounting).
+    #[must_use]
+    pub fn auth_failure_count(&self, space: PacketProtectionSpace) -> u64 {
+        self.auth_failures_under_current_key
+            .get(&space)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether the integrity limit (RFC 9001 §6.6, `2^52` for AES-128-GCM) has
+    /// been reached in `space`. The connection MUST close.
+    #[must_use]
+    pub fn integrity_limit_reached(&self, space: PacketProtectionSpace) -> bool {
+        self.auth_failure_count(space) >= AEAD_INTEGRITY_LIMIT
+    }
+
+    /// Reset the confidentiality counter for `space` after the local send key
+    /// has rotated to the next generation.
+    pub fn note_local_key_update(&mut self, space: PacketProtectionSpace) {
+        self.protected_under_current_key.insert(space, 0);
+    }
+
+    /// Reset the integrity counter for `space` after the receive key has
+    /// rotated to the next generation.
+    pub fn note_peer_key_update(&mut self, space: PacketProtectionSpace) {
+        self.auth_failures_under_current_key.insert(space, 0);
+    }
+
+    /// Override the soft key-update threshold. Tests exercise rotation without
+    /// protecting millions of packets; production always uses the default.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn set_key_update_confidentiality_threshold(&mut self, threshold: u64) {
+        self.key_update_confidentiality_threshold = threshold;
+    }
+
+    /// Preload the confidentiality counter so a test can reach the hard limit
+    /// without protecting millions of packets.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn set_protected_packet_count_for_test(&mut self, space: PacketProtectionSpace, count: u64) {
+        self.protected_under_current_key.insert(space, count);
+    }
+
+    /// Preload the integrity counter so a test can reach the hard limit without
+    /// forging millions of packets.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn set_auth_failure_count_for_test(&mut self, space: PacketProtectionSpace, count: u64) {
+        self.auth_failures_under_current_key.insert(space, count);
     }
 
     /// Derive and install packet protection keys with ATP error handling.
@@ -413,6 +520,16 @@ impl AtpPacketProtection {
             .protect_packet(request)
             .map_err(|e| self.map_tls_error(e))
             .into();
+
+        // RFC 9001 §6.6: count packets protected under the current local key so
+        // the send path can rotate before the AEAD confidentiality limit.
+        if let Outcome::Ok(_) = &result {
+            let counter = self
+                .protected_under_current_key
+                .entry(request.space)
+                .or_default();
+            *counter = counter.saturating_add(1);
+        }
 
         if self.config.enable_proof_logging {
             match &result {
@@ -522,11 +639,24 @@ impl AtpPacketProtection {
             .map_err(|e| self.map_tls_error(e))
             .into();
 
-        if let Outcome::Ok(_) = &result {
-            self.accepted_packets
-                .entry(packet.space)
-                .or_default()
-                .accept(packet.packet_number);
+        match &result {
+            Outcome::Ok(_) => {
+                self.accepted_packets
+                    .entry(packet.space)
+                    .or_default()
+                    .accept(packet.packet_number);
+            }
+            // RFC 9001 §6.6 integrity accounting: a post-replay-screen
+            // authentication failure counts toward the integrity limit for the
+            // current receive key.
+            Outcome::Err(_) => {
+                let counter = self
+                    .auth_failures_under_current_key
+                    .entry(packet.space)
+                    .or_default();
+                *counter = counter.saturating_add(1);
+            }
+            Outcome::Cancelled(_) | Outcome::Panicked(_) => {}
         }
 
         if self.config.enable_proof_logging {
@@ -594,11 +724,22 @@ impl AtpPacketProtection {
             .map_err(|e| self.map_tls_error(e))
             .into();
 
-        if let Outcome::Ok(_) = &result {
-            self.accepted_packets
-                .entry(space)
-                .or_default()
-                .accept(packet_number);
+        match &result {
+            Outcome::Ok(_) => {
+                self.accepted_packets
+                    .entry(space)
+                    .or_default()
+                    .accept(packet_number);
+            }
+            // RFC 9001 §6.6 integrity accounting (see `unprotect_packet_now`).
+            Outcome::Err(_) => {
+                let counter = self
+                    .auth_failures_under_current_key
+                    .entry(space)
+                    .or_default();
+                *counter = counter.saturating_add(1);
+            }
+            Outcome::Cancelled(_) | Outcome::Panicked(_) => {}
         }
 
         if self.config.enable_proof_logging {
@@ -1002,6 +1143,9 @@ impl AtpPacketProtection {
             provider_kind,
             provider_profile_traced: false,
             accepted_packets: BTreeMap::new(),
+            protected_under_current_key: BTreeMap::new(),
+            auth_failures_under_current_key: BTreeMap::new(),
+            key_update_confidentiality_threshold: DEFAULT_KEY_UPDATE_CONFIDENTIALITY_THRESHOLD,
         }
     }
 }
@@ -1108,6 +1252,145 @@ mod tests {
         assert!(!config.use_deterministic);
         assert!(config.enable_transcript_verification);
         assert!(config.enable_proof_logging);
+    }
+
+    // asupersync-gsnci5: RFC 9001 §6.6 AEAD confidentiality accounting. Each
+    // protected packet increments a per-key counter; crossing the soft
+    // threshold marks a key update due, and rotating the key resets it.
+    #[test]
+    fn aead_confidentiality_counter_marks_key_update_due_and_resets_on_rotation() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection =
+                deterministic_one_rtt_protection(&cx, b"aead-confidentiality-seed").await;
+            // Exercise the threshold without protecting millions of packets.
+            protection.set_key_update_confidentiality_threshold(4);
+            let space = PacketProtectionSpace::OneRtt;
+            let payload = encoded_application_payload();
+            let aad = b"short-header confidentiality-counter";
+
+            assert_eq!(protection.protected_packet_count(space), 0);
+            assert!(!protection.confidentiality_key_update_due(space));
+
+            for pn in 0..3u64 {
+                protection
+                    .protect_packet_now(
+                        &cx,
+                        PacketProtectionRequest {
+                            space,
+                            key_phase: false,
+                            packet_number: pn,
+                            associated_data: aad,
+                            payload: &payload,
+                        },
+                    )
+                    .expect("protect below threshold");
+            }
+            assert_eq!(protection.protected_packet_count(space), 3);
+            assert!(
+                !protection.confidentiality_key_update_due(space),
+                "below the soft threshold no update is due"
+            );
+
+            protection
+                .protect_packet_now(
+                    &cx,
+                    PacketProtectionRequest {
+                        space,
+                        key_phase: false,
+                        packet_number: 3,
+                        associated_data: aad,
+                        payload: &payload,
+                    },
+                )
+                .expect("protect at threshold");
+            assert_eq!(protection.protected_packet_count(space), 4);
+            assert!(
+                protection.confidentiality_key_update_due(space),
+                "reaching the soft threshold marks a key update due"
+            );
+            assert!(
+                !protection.confidentiality_limit_reached(space),
+                "the soft threshold is far below the 2^23 hard limit"
+            );
+
+            protection.note_local_key_update(space);
+            assert_eq!(protection.protected_packet_count(space), 0);
+            assert!(!protection.confidentiality_key_update_due(space));
+        });
+    }
+
+    // asupersync-gsnci5: RFC 9001 §6.6 AEAD integrity accounting. A post-replay
+    // authentication failure counts toward the integrity limit; a genuine
+    // packet and a replay-window rejection do not.
+    #[test]
+    fn aead_integrity_counter_counts_authentication_failures_only() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection =
+                deterministic_one_rtt_protection(&cx, b"aead-integrity-seed").await;
+            let space = PacketProtectionSpace::OneRtt;
+            let payload = encoded_application_payload();
+            let aad = b"short-header integrity-counter";
+            assert_eq!(protection.auth_failure_count(space), 0);
+
+            let good = protection
+                .protect_packet_now(
+                    &cx,
+                    PacketProtectionRequest {
+                        space,
+                        key_phase: false,
+                        packet_number: 0,
+                        associated_data: aad,
+                        payload: &payload,
+                    },
+                )
+                .expect("protect pn=0");
+            let mut bad = protection
+                .protect_packet_now(
+                    &cx,
+                    PacketProtectionRequest {
+                        space,
+                        key_phase: false,
+                        packet_number: 1,
+                        associated_data: aad,
+                        payload: &payload,
+                    },
+                )
+                .expect("protect pn=1");
+            bad.ciphertext[0] ^= 0x5a;
+
+            protection
+                .unprotect_packet_now(&cx, &bad, aad)
+                .expect_err("tampered ciphertext fails authentication");
+            assert_eq!(
+                protection.auth_failure_count(space),
+                1,
+                "a failed authentication counts toward the integrity limit"
+            );
+            assert!(!protection.integrity_limit_reached(space));
+
+            protection
+                .unprotect_packet_now(&cx, &good, aad)
+                .expect("genuine packet authenticates");
+            assert_eq!(
+                protection.auth_failure_count(space),
+                1,
+                "a successful authentication does not increment the failure counter"
+            );
+
+            protection
+                .unprotect_packet_now(&cx, &good, aad)
+                .expect_err("accepted packet number is replay-rejected");
+            assert_eq!(
+                protection.auth_failure_count(space),
+                1,
+                "a replay-window rejection is screened before the AEAD and is not an integrity failure"
+            );
+
+            protection.note_peer_key_update(space);
+            assert_eq!(protection.auth_failure_count(space), 0);
+        });
     }
 
     #[test]
