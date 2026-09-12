@@ -196,6 +196,13 @@ enum PendingIo {
         bytes: Vec<u8>,
         consumed: usize,
     },
+    /// Combined reconciliation and owned cursor operation retained by the
+    /// file. Retain the bytes until the rewind succeeds.
+    Rewind {
+        future: PollIoFuture<()>,
+        bytes: Vec<u8>,
+        consumed: usize,
+    },
     Write {
         future: PollIoFuture<usize>,
     },
@@ -215,6 +222,7 @@ impl fmt::Debug for PendingIo {
                 .debug_struct("PendingIo::ReadAhead")
                 .field("remaining", &(bytes.len() - consumed))
                 .finish(),
+            Self::Rewind { .. } => f.write_str("PendingIo::Rewind"),
             Self::Write { .. } => f.write_str("PendingIo::Write"),
             Self::Flush { .. } => f.write_str("PendingIo::Flush"),
             Self::Seek { .. } => f.write_str("PendingIo::Seek"),
@@ -256,7 +264,7 @@ impl File {
         spawn_blocking_io(move || op(inner)).await
     }
 
-    async fn with_cursor_inner<R, F>(&self, op: F) -> io::Result<R>
+    async fn with_cursor_inner<R, F>(&mut self, op: F) -> io::Result<R>
     where
         R: Send + 'static,
         F: FnOnce(Arc<std::fs::File>) -> io::Result<R> + Send + 'static,
@@ -265,11 +273,78 @@ impl File {
         // bytes the caller never consumed; both move the OS cursor past where
         // the caller believes it is. Settle them first so this owned cursor
         // operation observes the caller's cursor.
-        let rewind = self.settle_trait_pending().await?;
+        self.settle_trait_pending().await?;
+        let read_ahead = {
+            let mut pending = self.pending.lock();
+            if let Some(PendingIo::ReadAhead { bytes, consumed }) = pending.as_mut() {
+                let rewind = i64::try_from(bytes.len() - *consumed)
+                    .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
+                let bytes = std::mem::take(bytes);
+                let consumed = *consumed;
+                *pending = None;
+                (rewind != 0).then_some((rewind, bytes, consumed))
+            } else {
+                None
+            }
+        };
         let inner = Arc::clone(&self.inner);
         let cursor_gate = Arc::clone(&self.cursor_gate);
         #[cfg(feature = "test-internals")]
         let cursor_probe = self.cursor_probe.clone();
+
+        if let Some((rewind, bytes, consumed)) = read_ahead {
+            // Cancelling the caller may discard an operation that has not
+            // acquired the cursor gate, but it must not discard the rewind.
+            struct CancelBeforeStart<T>(Arc<Mutex<Option<T>>>);
+            impl<T> Drop for CancelBeforeStart<T> {
+                fn drop(&mut self) {
+                    let operation = self.0.lock().take();
+                    drop(operation);
+                }
+            }
+
+            let operation = Arc::new(Mutex::new(Some(op)));
+            let _cancel_before_start = CancelBeforeStart(Arc::clone(&operation));
+            let result = Arc::new(Mutex::new(None));
+            let task_result = Arc::clone(&result);
+            let future = Box::pin(async move {
+                let completed = spawn_blocking_io(move || {
+                    #[cfg(feature = "test-internals")]
+                    if let Some(probe) = &cursor_probe {
+                        probe.before_gate();
+                    }
+
+                    let _cursor_guard = cursor_gate.lock();
+                    let operation = operation.lock().take();
+
+                    #[cfg(feature = "test-internals")]
+                    if let Some(probe) = &cursor_probe {
+                        probe.after_gate();
+                    }
+
+                    // Keep reconciliation and the requested operation under
+                    // one gate so cloned handles cannot interleave them.
+                    let mut file_ref: &std::fs::File = &inner;
+                    Seek::seek(&mut file_ref, SeekFrom::Current(-rewind))?;
+                    Ok(operation.map(|operation| operation(inner)))
+                })
+                .await?;
+                *task_result.lock() = completed;
+                Ok(())
+            });
+            *self.pending.lock() = Some(PendingIo::Rewind {
+                future,
+                bytes,
+                consumed,
+            });
+            self.settle_trait_pending().await?;
+            let completed = result.lock().take();
+            return completed.unwrap_or_else(|| {
+                Err(io::Error::other(
+                    "owned cursor operation completed without a result",
+                ))
+            });
+        }
 
         spawn_blocking_io(move || {
             #[cfg(feature = "test-internals")]
@@ -284,10 +359,6 @@ impl File {
                 probe.after_gate();
             }
 
-            if rewind != 0 {
-                let mut file_ref: &std::fs::File = &inner;
-                Seek::seek(&mut file_ref, SeekFrom::Current(-rewind))?;
-            }
             op(inner)
         })
         .await
@@ -395,6 +466,10 @@ impl File {
             Some(PendingIo::ReadAhead { bytes, consumed }) => bytes.len() - consumed,
             Some(PendingIo::Read { future }) => {
                 futures_lite::future::block_on(future).map_or(0, |bytes| bytes.len())
+            }
+            Some(PendingIo::Rewind { future, .. }) => {
+                futures_lite::future::block_on(future)?;
+                0
             }
             Some(PendingIo::Write { future }) => {
                 let _ = futures_lite::future::block_on(future);
@@ -595,6 +670,25 @@ impl File {
                     Poll::Ready(Ok(()))
                 }
             },
+            Some(PendingIo::Rewind {
+                mut future,
+                bytes,
+                consumed,
+            }) => match future.as_mut().poll(poll_cx) {
+                Poll::Pending => {
+                    *pending = Some(PendingIo::Rewind {
+                        future,
+                        bytes,
+                        consumed,
+                    });
+                    Poll::Pending
+                }
+                Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+                Poll::Ready(Err(error)) => {
+                    *pending = Some(PendingIo::ReadAhead { bytes, consumed });
+                    Poll::Ready(Err(error))
+                }
+            },
             Some(PendingIo::Write { mut future }) => match future.as_mut().poll(poll_cx) {
                 Poll::Pending => {
                     *pending = Some(PendingIo::Write { future });
@@ -631,25 +725,12 @@ impl File {
         }
     }
 
-    /// Waits for any in-flight poll-trait syscall, discards unconsumed
-    /// read-ahead, and returns how many bytes the OS cursor must be rewound
-    /// so the next owned cursor operation starts where the caller believes
-    /// the cursor is.
-    async fn settle_trait_pending(&self) -> io::Result<i64> {
+    /// Settles outstanding syscalls without discarding read-ahead. Internal
+    /// rewind futures remain owned by the file if the caller is dropped.
+    async fn settle_trait_pending(&self) -> io::Result<()> {
         std::future::poll_fn(|poll_cx| {
             let mut pending = self.pending.lock();
-            match Self::settle_foreign_pending(&mut pending, poll_cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
-                Poll::Ready(Ok(())) => {
-                    let unconsumed = Self::unconsumed_read_ahead(pending.as_ref());
-                    *pending = None;
-                    Poll::Ready(
-                        i64::try_from(unconsumed)
-                            .map_err(|_| io::Error::other("read-ahead exceeds seek range")),
-                    )
-                }
-            }
+            Self::settle_foreign_pending(&mut pending, poll_cx)
         })
         .await
     }
@@ -1228,6 +1309,221 @@ mod tests {
         let position = Seek::stream_position(&mut std_file).unwrap();
         crate::assert_with_log!(position == 0, "cursor after into_std", 0u64, position);
         crate::test_complete!("test_into_std_settles_in_flight_read");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum CancelledCursorOp {
+        Position,
+        Seek,
+        Read,
+    }
+
+    fn assert_queued_cursor_cancellation_preserves_bytes(
+        in_flight: bool,
+        cancelled_operation: CancelledCursorOp,
+    ) {
+        for resume in ["owned_read", "trait_read", "trait_seek", "into_std"] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("queued_cursor_cancel.txt");
+            std::fs::write(&path, b"0123456789").unwrap();
+            let mut file = File::from_std(std::fs::File::open(&path).unwrap());
+            let mut bytes = vec![0; 6];
+            Read::read_exact(&mut &*file.inner, &mut bytes).unwrap();
+            let consumed = if in_flight { 0 } else { 2 };
+            *file.pending.lock() = Some(if in_flight {
+                PendingIo::Read {
+                    future: Box::pin(std::future::ready(Ok(bytes))),
+                }
+            } else {
+                PendingIo::ReadAhead { bytes, consumed }
+            });
+
+            let pool = crate::runtime::BlockingPool::new(1, 1);
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            pool.spawn(move || {
+                started_tx.send(()).unwrap();
+                // Dropping the sender also releases the worker on test failure.
+                let _ = release_rx.recv();
+            });
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+            let _guard = crate::cx::Cx::set_current(Some(cx));
+
+            let mut operation: Pin<Box<dyn Future<Output = io::Result<()>> + '_>> =
+                match cancelled_operation {
+                    CancelledCursorOp::Position => {
+                        Box::pin(async { file.stream_position().await.map(|_| ()) })
+                    }
+                    CancelledCursorOp::Seek => {
+                        Box::pin(async { file.seek(SeekFrom::Start(9)).await.map(|_| ()) })
+                    }
+                    CancelledCursorOp::Read => {
+                        Box::pin(async { file.read_into_vec(vec![0; 1]).await.map(|_| ()) })
+                    }
+                };
+            let mut poll_cx = Context::from_waker(std::task::Waker::noop());
+            assert!(operation.as_mut().poll(&mut poll_cx).is_pending());
+            drop(operation);
+            release_tx.send(()).unwrap();
+
+            let mut remaining = Vec::new();
+            match resume {
+                "owned_read" => {
+                    let (bytes, count) =
+                        futures_lite::future::block_on(file.read_into_vec(vec![0; 10])).unwrap();
+                    remaining.extend_from_slice(&bytes[..count]);
+                }
+                "trait_read" => {
+                    futures_lite::future::block_on(file.read_to_end(&mut remaining)).unwrap();
+                }
+                "trait_seek" => {
+                    // An internal rewind must not masquerade as this seek's
+                    // completion: the requested extra byte still has to move.
+                    let position = futures_lite::future::block_on(crate::io::AsyncSeekExt::seek(
+                        &mut file,
+                        SeekFrom::Current(1),
+                    ))
+                    .unwrap();
+                    assert_eq!(position, consumed as u64 + 1);
+                    futures_lite::future::block_on(file.read_to_end(&mut remaining)).unwrap();
+                }
+                "into_std" => {
+                    let mut file = file.into_std().unwrap();
+                    assert_eq!(Seek::stream_position(&mut file).unwrap(), consumed as u64);
+                    Read::read_to_end(&mut file, &mut remaining).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let expected_start = consumed + usize::from(resume == "trait_seek");
+            assert_eq!(
+                remaining,
+                b"0123456789"[expected_start..],
+                "queued cancellation must retain the caller's unread bytes ({cancelled_operation:?}, {resume})"
+            );
+            assert!(pool.shutdown_and_wait(std::time::Duration::from_secs(5)));
+        }
+    }
+
+    #[test]
+    fn test_queued_owned_cursor_cancellation_preserves_read_ahead() {
+        init_test("test_queued_owned_cursor_cancellation_preserves_read_ahead");
+        for operation in [
+            CancelledCursorOp::Position,
+            CancelledCursorOp::Seek,
+            CancelledCursorOp::Read,
+        ] {
+            assert_queued_cursor_cancellation_preserves_bytes(false, operation);
+        }
+        crate::test_complete!("test_queued_owned_cursor_cancellation_preserves_read_ahead");
+    }
+
+    #[test]
+    fn test_queued_owned_cursor_cancellation_preserves_in_flight_read() {
+        init_test("test_queued_owned_cursor_cancellation_preserves_in_flight_read");
+        for operation in [
+            CancelledCursorOp::Position,
+            CancelledCursorOp::Seek,
+            CancelledCursorOp::Read,
+        ] {
+            assert_queued_cursor_cancellation_preserves_bytes(true, operation);
+        }
+        crate::test_complete!("test_queued_owned_cursor_cancellation_preserves_in_flight_read");
+    }
+
+    #[test]
+    fn test_owned_cursor_failed_seek_keeps_reconciled_position_inline() {
+        init_test("test_owned_cursor_failed_seek_keeps_reconciled_position_inline");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("reconciled_failed_seek.txt");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let mut file = File::from_std(std::fs::File::open(&path).unwrap());
+        let mut bytes = vec![0; 6];
+        Read::read_exact(&mut &*file.inner, &mut bytes).unwrap();
+        *file.pending.lock() = Some(PendingIo::ReadAhead { bytes, consumed: 2 });
+        let _guard = crate::cx::Cx::set_current(Some(crate::cx::Cx::for_testing()));
+        futures_lite::future::block_on(async {
+            assert!(file.seek(SeekFrom::Current(i64::MIN)).await.is_err());
+            assert_eq!(file.stream_position().await.unwrap(), 2);
+            let mut remaining = Vec::new();
+            file.read_to_end(&mut remaining).await.unwrap();
+            assert_eq!(remaining, b"23456789");
+        });
+        crate::test_complete!("test_owned_cursor_failed_seek_keeps_reconciled_position_inline");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_owned_cursor_failed_rewind_retains_read_ahead() {
+        init_test("test_owned_cursor_failed_rewind_retains_read_ahead");
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        Write::write_all(&mut writer, b"0123456789").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let fd: std::os::fd::OwnedFd = reader.into();
+        let mut file = File::from_std(std::fs::File::from(fd));
+        let mut bytes = vec![0; 6];
+        Read::read_exact(&mut &*file.inner, &mut bytes).unwrap();
+        *file.pending.lock() = Some(PendingIo::ReadAhead { bytes, consumed: 2 });
+        let _guard = crate::cx::Cx::set_current(Some(crate::cx::Cx::for_testing()));
+        futures_lite::future::block_on(async {
+            assert!(file.stream_position().await.is_err());
+            let mut remaining = Vec::new();
+            file.read_to_end(&mut remaining).await.unwrap();
+            assert_eq!(remaining, b"23456789");
+        });
+        crate::test_complete!("test_owned_cursor_failed_rewind_retains_read_ahead");
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn test_started_owned_cursor_rewind_and_operation_keep_clone_gate() {
+        init_test("test_started_owned_cursor_rewind_and_operation_keep_clone_gate");
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("started_rewind_clone_gate.txt");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let mut file = File::from_std(std::fs::File::open(&path).unwrap());
+        let mut bytes = vec![0; 6];
+        Read::read_exact(&mut &*file.inner, &mut bytes).unwrap();
+        *file.pending.lock() = Some(PendingIo::ReadAhead { bytes, consumed: 2 });
+        let probe = Arc::new(FileCursorOperationProbe::new());
+        file.install_cursor_operation_probe_for_test(Arc::clone(&probe));
+        let mut clone = File {
+            inner: Arc::clone(&file.inner),
+            cursor_gate: Arc::clone(&file.cursor_gate),
+            pending: Mutex::new(None),
+            cursor_probe: Some(Arc::clone(&probe)),
+        };
+        let pool = crate::runtime::BlockingPool::new(2, 2);
+        let cx = crate::cx::Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let _guard = crate::cx::Cx::set_current(Some(cx));
+        struct ReleaseProbe(Arc<FileCursorOperationProbe>);
+        impl Drop for ReleaseProbe {
+            fn drop(&mut self) {
+                self.0.release_first();
+            }
+        }
+        let _release = ReleaseProbe(Arc::clone(&probe));
+        let mut operation = Box::pin(file.seek(SeekFrom::Start(8)));
+        let mut poll_cx = Context::from_waker(std::task::Waker::noop());
+        assert!(operation.as_mut().poll(&mut poll_cx).is_pending());
+        assert!(probe.wait_until_first_blocked(Duration::from_secs(5)));
+        let mut following = Box::pin(clone.read_into_vec(vec![0; 1]));
+        assert!(following.as_mut().poll(&mut poll_cx).is_pending());
+        assert!(probe.wait_for_arrivals(2, Duration::from_secs(5)));
+        assert_eq!(probe.acquisition_count(), 1);
+        drop(operation);
+        probe.release_first();
+        let (bytes, count) = futures_lite::future::block_on(following).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(bytes, b"8");
+        assert_eq!(
+            futures_lite::future::block_on(file.stream_position()).unwrap(),
+            9
+        );
+        assert!(pool.shutdown_and_wait(Duration::from_secs(5)));
+        crate::test_complete!("test_started_owned_cursor_rewind_and_operation_keep_clone_gate");
     }
 
     #[test]
