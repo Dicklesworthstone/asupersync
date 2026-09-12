@@ -21,7 +21,7 @@ use super::error::TlsError;
 
 /// Keep the shipped reader-based PEM diagnostics while using the maintained parser.
 #[cfg(feature = "tls")]
-pub(crate) fn pem_error_message(error: rustls_pki_types::pem::Error) -> String {
+pub(super) fn pem_error_message(error: rustls_pki_types::pem::Error) -> String {
     use rustls_pki_types::pem::Error;
 
     match error {
