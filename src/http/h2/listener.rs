@@ -269,7 +269,7 @@ fn is_transient_accept_error(err: &io::Error) -> bool {
             | io::ErrorKind::ConnectionAborted
             | io::ErrorKind::ConnectionReset
             | io::ErrorKind::Interrupted
-    )
+    ) || crate::net::tcp::listener::is_accept_resource_exhaustion(err)
 }
 
 /// Exponential backoff delay for a streak of transient accept errors so a
@@ -4092,6 +4092,53 @@ impl<F: Future> Future for CatchUnwind<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accept_resource_exhaustion_retries_out_of_memory() {
+        assert!(is_transient_accept_error(&io::Error::from(
+            io::ErrorKind::OutOfMemory
+        )));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn accept_resource_exhaustion_retries_native_errors() {
+        #[cfg(unix)]
+        let codes = [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM];
+        #[cfg(windows)]
+        let codes = {
+            use windows_sys::Win32::Networking::WinSock::{WSAEMFILE, WSAENOBUFS};
+            [WSAEMFILE, WSAENOBUFS]
+        };
+
+        for code in codes {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                is_transient_accept_error(&error),
+                "resource exhaustion must reach accept backoff: {error:?}"
+            );
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn accept_resource_exhaustion_preserves_native_fatal_errors() {
+        #[cfg(unix)]
+        let codes = [libc::EBADF, libc::ENOTSOCK, libc::EINVAL, libc::EACCES];
+        #[cfg(windows)]
+        let codes = {
+            use windows_sys::Win32::Networking::WinSock::{WSAEACCES, WSAEINVAL, WSAENOTSOCK};
+            [WSAENOTSOCK, WSAEINVAL, WSAEACCES]
+        };
+
+        for code in codes {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                !is_transient_accept_error(&error),
+                "permanent accept errors must still terminate the listener: {error:?}"
+            );
+        }
+    }
 
     fn owned_hop_config() -> OwnedH2HopConfig {
         OwnedH2HopConfig {

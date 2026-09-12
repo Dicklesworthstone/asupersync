@@ -9073,6 +9073,7 @@ impl RemoteComputationService {
         let mut capacity_rejections = 0_u64;
         let mut connection_outcomes = RemoteConnectionOutcomeCounts::default();
         let mut fatal_error = None;
+        let mut accept_resource_error_streak = 0_u32;
 
         loop {
             if self.shutdown_signal.is_shutting_down() || cx.checkpoint().is_err() {
@@ -9094,7 +9095,10 @@ impl RemoteComputationService {
                 RemoteServiceAccept::Accepted(result) => result,
             };
             let (stream, peer_addr) = match accepted {
-                Ok(connection) => connection,
+                Ok(connection) => {
+                    accept_resource_error_streak = 0;
+                    connection
+                }
                 Err(error)
                     if error.kind() == io::ErrorKind::Interrupted
                         && (cx.is_cancel_requested()
@@ -9102,15 +9106,20 @@ impl RemoteComputationService {
                 {
                     break;
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::Interrupted
-                            | io::ErrorKind::ConnectionAborted
-                            | io::ErrorKind::ConnectionReset
-                    ) =>
-                {
+                Err(error) if remote_service_transient_accept_error(&error) => {
+                    if crate::net::tcp::listener::is_accept_resource_exhaustion(&error) {
+                        accept_resource_error_streak =
+                            accept_resource_error_streak.saturating_add(1);
+                        if !remote_service_accept_backoff(
+                            cx,
+                            &self.shutdown_signal,
+                            accept_resource_error_streak,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
                     continue;
                 }
                 Err(error) => {
@@ -9242,6 +9251,34 @@ impl RemoteComputationService {
         close_result?;
         Ok(report)
     }
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_service_transient_accept_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    ) || crate::net::tcp::listener::is_accept_resource_exhaustion(error)
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn remote_service_accept_backoff(
+    cx: &Cx,
+    shutdown_signal: &ShutdownSignal,
+    streak: u32,
+) -> bool {
+    // Match the HTTP listeners' 2ms base and 64ms cap. Only resource
+    // shortages take this delay; existing connection-level retries stay eager.
+    // Force-close/cancellation interrupts the wait. Graceful drain is checked
+    // at the next accept-loop turn, at most one capped delay later.
+    let exponent = (streak.saturating_sub(1) / 16).min(5);
+    let delay = Duration::from_millis(2_u64 << exponent);
+    race_remote_service_termination(cx, shutdown_signal, crate::time::sleep(cx.now(), delay))
+        .await
+        .is_some()
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -10067,6 +10104,135 @@ mod tests {
 
     fn test_request_fingerprint(name: &str) -> IdempotencyRequestFingerprint {
         IdempotencyRequestFingerprint::new(ComputationName::new(name), RemoteInput::empty())
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn accept_resource_exhaustion_retries_out_of_memory() {
+        assert!(remote_service_transient_accept_error(&io::Error::from(
+            io::ErrorKind::OutOfMemory
+        )));
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32"), any(unix, windows)))]
+    #[test]
+    fn accept_resource_exhaustion_retries_native_errors() {
+        #[cfg(unix)]
+        let codes = [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM];
+        #[cfg(windows)]
+        let codes = {
+            use windows_sys::Win32::Networking::WinSock::{WSAEMFILE, WSAENOBUFS};
+            [WSAEMFILE, WSAENOBUFS]
+        };
+
+        for code in codes {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                remote_service_transient_accept_error(&error),
+                "resource exhaustion must keep the remote listener alive: {error:?}"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32"), any(unix, windows)))]
+    #[test]
+    fn accept_resource_exhaustion_preserves_native_fatal_errors() {
+        #[cfg(unix)]
+        let codes = [libc::EBADF, libc::ENOTSOCK, libc::EINVAL, libc::EACCES];
+        #[cfg(windows)]
+        let codes = {
+            use windows_sys::Win32::Networking::WinSock::{WSAEACCES, WSAEINVAL, WSAENOTSOCK};
+            [WSAENOTSOCK, WSAEINVAL, WSAEACCES]
+        };
+
+        for code in codes {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                !remote_service_transient_accept_error(&error),
+                "permanent accept errors must still terminate the listener: {error:?}"
+            );
+        }
+        for kind in [io::ErrorKind::TimedOut, io::ErrorKind::ConnectionRefused] {
+            assert!(
+                !remote_service_transient_accept_error(&io::Error::from(kind)),
+                "preserve the remote listener's existing policy for {kind:?}"
+            );
+        }
+    }
+
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn accept_resource_exhaustion_backoff_uses_timer_and_allows_termination() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        #[derive(Clone, Copy)]
+        enum Finish {
+            Deadline,
+            ForceClose,
+            Cancel,
+        }
+
+        for (streak, delay_ms, finish) in [
+            (1, 2, Finish::Deadline),
+            (16, 2, Finish::Deadline),
+            (17, 4, Finish::Deadline),
+            (u32::MAX, 64, Finish::Deadline),
+            (u32::MAX, 64, Finish::ForceClose),
+            (u32::MAX, 64, Finish::Cancel),
+        ] {
+            let clock = Arc::new(VirtualClock::new());
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 1),
+                Budget::INFINITE,
+                None,
+                None,
+                None,
+                Some(timer.clone()),
+                None,
+            );
+            let _current = Cx::set_current(Some(cx.clone()));
+            let shutdown = ShutdownSignal::new();
+            let mut backoff = Box::pin(remote_service_accept_backoff(&cx, &shutdown, streak));
+            let mut task_cx = Context::from_waker(Waker::noop());
+            let deadline = Time::from_nanos(delay_ms * 1_000_000);
+
+            assert!(backoff.as_mut().poll(&mut task_cx).is_pending());
+            assert_eq!(timer.pending_count(), 1);
+            assert_eq!(timer.next_deadline(), Some(deadline));
+            for _ in 0..4 {
+                assert!(backoff.as_mut().poll(&mut task_cx).is_pending());
+            }
+            assert_eq!(timer.pending_count(), 1, "re-polling must retain one timer");
+
+            let expected = match finish {
+                Finish::Deadline => {
+                    clock.advance_to(Time::from_nanos(deadline.as_nanos() - 1));
+                    assert!(backoff.as_mut().poll(&mut task_cx).is_pending());
+                    clock.advance_to(deadline);
+                    assert_eq!(timer.process_timers(), 1);
+                    true
+                }
+                Finish::ForceClose => {
+                    assert!(shutdown.begin_drain(Duration::ZERO));
+                    assert!(shutdown.begin_force_close());
+                    false
+                }
+                Finish::Cancel => {
+                    cx.cancel_with(CancelKind::User, Some("accept backoff test"));
+                    false
+                }
+            };
+            assert_eq!(backoff.as_mut().poll(&mut task_cx), Poll::Ready(expected));
+            assert_eq!(
+                timer.pending_count(),
+                0,
+                "completed waits retire their timer"
+            );
+            drop(backoff);
+            assert_eq!(timer.pending_count(), 0);
+        }
     }
 
     #[cfg(feature = "tls")]

@@ -10,7 +10,7 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-09-11, reconstructed from git history,
+Scope window: current work through 2026-09-12, reconstructed from git history,
 beads, benchmark ledgers, and live repo artifacts. `v0.4.11` is published;
 `v0.5.0` is being prepared under `asupersync-v5fn1e`.
 
@@ -73,7 +73,7 @@ beads, benchmark ledgers, and live repo artifacts. `v0.4.11` is published;
 
 ## [Unreleased]
 
-## [v0.5.0] - 2026-09-11
+## [v0.5.0] - 2026-09-12
 
 Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
 
@@ -94,6 +94,9 @@ Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
 - Race and quorum histories retain the participant IDs captured when each race
   starts, even when mailbox admission replaces provisional task IDs. This
   prevents false loser-drain violations while retaining cancellation and cleanup.
+- Synchronous spawn rejection no longer adds a nonexistent child termination to
+  combinator and supervisor counters. Accepted children still count when they
+  are cancelled before their first poll.
 - The API-v2 integration lane covers 18 native/lab lifecycle cells, 256 seeded
   spawn/cancel/close interleavings, capability denial and inheritance, composed
   macros, loser cleanup, and channel/stream ownership. The journey runner also
@@ -117,6 +120,13 @@ Release preparation is tracked in `asupersync-v5fn1e`; publication is pending.
 - `File::into_std` settles pending reads and rewinds unconsumed read-ahead before
   returning the standard file. Failed buffer flushes preserve recoverable
   pending bytes.
+- Owned file cursor operations retain read-ahead reconciliation when cancelled
+  before starting. Reconciliation and a started operation share one cursor gate,
+  preserving ordering with cloned handles and unread bytes after rewind failure.
+- HTTP/1, HTTP/2, and remote-service listeners retry descriptor and buffer
+  exhaustion with bounded delays while retaining permanent socket errors.
+- The opt-in HTTP cookie store preserves `Secure` attributes and suppresses
+  those cookies on HTTP requests, including HTTPS-to-HTTP redirects.
 - Framed writers reject an underlying writer's impossible byte count with
   `InvalidData`, preserving the unacknowledged suffix for a retry.
 - Child-process pipe reads park on the fallback I/O driver when no native

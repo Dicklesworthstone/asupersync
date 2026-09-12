@@ -769,6 +769,10 @@ impl HttpClientBuilder {
     }
 
     /// Enables/disables automatic cookie persistence and attachment.
+    ///
+    /// The bounded in-memory store matches exact hosts and sends `Secure`
+    /// cookies only over HTTPS. Cookies live for this client's lifetime;
+    /// `Domain`, `Path`, expiry, and other attributes are not interpreted.
     #[must_use]
     pub fn cookie_store(mut self, enabled: bool) -> Self {
         self.config.cookie_store = enabled;
@@ -1921,7 +1925,7 @@ impl HttpClient {
 
         if self.config.cookie_store
             && !has_cookie_header
-            && let Some(cookie_header) = self.cookie_header_for_host(&parsed.host)
+            && let Some(cookie_header) = self.cookie_header_for_host(&parsed.host, parsed.scheme)
         {
             builder = builder.header("Cookie", cookie_header);
         }
@@ -1962,23 +1966,37 @@ impl HttpClient {
         let mut touched = false;
         {
             let entry = cookies.entry(host.clone()).or_default();
-            for (_, value) in headers
+            for (_, raw) in headers
                 .iter()
                 .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
             {
-                if let Some((name, value)) = parse_set_cookie_pair(value) {
+                if let Some((name, value)) = parse_set_cookie_pair(raw) {
                     touched = true;
                     if value.is_empty() {
                         entry.retain(|cookie| !cookie.name.eq_ignore_ascii_case(&name));
                         continue;
                     }
+                    // RFC 6265 section 5.2.5 matches the attribute name;
+                    // its value, if supplied, does not disable Secure.
+                    let secure = raw.split(';').skip(1).any(|attribute| {
+                        attribute
+                            .split_once('=')
+                            .map_or(attribute, |(name, _)| name)
+                            .trim()
+                            .eq_ignore_ascii_case("secure")
+                    });
                     if let Some(existing) = entry
                         .iter_mut()
                         .find(|cookie| cookie.name.eq_ignore_ascii_case(&name))
                     {
                         existing.value = value;
+                        existing.secure = secure;
                     } else if entry.len() < MAX_COOKIES_PER_HOST {
-                        entry.push(StoredCookie { name, value });
+                        entry.push(StoredCookie {
+                            name,
+                            value,
+                            secure,
+                        });
                     }
                 }
             }
@@ -1989,11 +2007,16 @@ impl HttpClient {
         }
     }
 
-    fn cookie_header_for_host(&self, host: &str) -> Option<String> {
+    fn cookie_header_for_host(&self, host: &str, scheme: Scheme) -> Option<String> {
         let host = canonical_cookie_host(host);
         let host_cookies = {
             let cookies = self.cookies.lock();
-            cookies.get(&host)?.clone()
+            cookies
+                .get(&host)?
+                .iter()
+                .filter(|cookie| !cookie.secure || scheme == Scheme::Https)
+                .cloned()
+                .collect::<Vec<_>>()
         };
         if host_cookies.is_empty() {
             return None;
@@ -2320,6 +2343,7 @@ struct ProxyConnection {
 struct StoredCookie {
     name: String,
     value: String,
+    secure: bool,
 }
 
 struct ConnectionGuard<'a> {
@@ -4227,7 +4251,7 @@ mod tests {
         );
 
         let cookie_header = client
-            .cookie_header_for_host("example.com")
+            .cookie_header_for_host("example.com", Scheme::Http)
             .expect("cookie header");
         assert_eq!(cookie_header, "session=abc123==");
     }
@@ -4249,6 +4273,115 @@ mod tests {
             get_header(&req.headers, "cookie"),
             Some("session=abc123".to_string())
         );
+    }
+
+    #[test]
+    fn cookie_store_secure_attributes_restrict_request_scheme() {
+        let http = ParsedUrl::parse("http://example.com/data").unwrap();
+        let https = ParsedUrl::parse("https://example.com/data").unwrap();
+        for attributes in [
+            "Secure",
+            "sEcUrE",
+            " Secure = ignored ",
+            "Path=/; Secure; HttpOnly",
+            "Secure; Secure",
+        ] {
+            let client = HttpClient::builder().cookie_store(true).build();
+            client.store_response_cookies(
+                "Example.COM",
+                &[(
+                    "Set-Cookie".to_owned(),
+                    format!("session=secret; {attributes}"),
+                )],
+            );
+            let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+            assert_eq!(
+                get_header(&request.headers, "cookie"),
+                Some("session=secret".to_owned()),
+                "secure cookie must remain available over HTTPS ({attributes})"
+            );
+            let request = client.build_request(&Method::Get, &http, &[], &[], None, None);
+            assert_eq!(
+                get_header(&request.headers, "cookie"),
+                None,
+                "secure cookie must not be attached over HTTP ({attributes})"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_store_secure_downgrade_keeps_only_plain_cookies() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            &[
+                ("Set-Cookie".to_owned(), "session=secret; Secure".to_owned()),
+                (
+                    "Set-Cookie".to_owned(),
+                    "theme=dark; SameSite=Secure".to_owned(),
+                ),
+                ("Set-Cookie".to_owned(), "display=wide; Securely".to_owned()),
+            ],
+        );
+        let from = ParsedUrl::parse("https://example.com/start").unwrap();
+        let to = ParsedUrl::parse("http://example.com/redirected").unwrap();
+        assert!(redirect_policy_allows_target(
+            &RedirectPolicy::Limited(10),
+            &from,
+            &to
+        ));
+        let headers = strip_sensitive_headers_on_redirect(
+            &from,
+            &to,
+            vec![("Cookie".to_owned(), "caller=secret".to_owned())],
+        );
+        assert!(headers.is_empty());
+        let request = client.build_request(&Method::Get, &to, &headers, &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie"),
+            Some("theme=dark; display=wide".to_owned())
+        );
+        let request = client.build_request(&Method::Get, &from, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie"),
+            Some("session=secret; theme=dark; display=wide".to_owned()),
+            "a downgrade must filter the outgoing header without deleting stored cookies"
+        );
+    }
+
+    #[test]
+    fn cookie_store_secure_replacement_updates_transport_restriction() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        let http = ParsedUrl::parse("http://example.com/").unwrap();
+        let https = ParsedUrl::parse("https://example.com/").unwrap();
+        for (value, expected_http, expected_https) in [
+            (
+                "session=plain",
+                Some("session=plain"),
+                Some("session=plain"),
+            ),
+            ("session=secret; Secure", None, Some("session=secret")),
+            (
+                "session=public",
+                Some("session=public"),
+                Some("session=public"),
+            ),
+            ("session=; Secure", None, None),
+        ] {
+            client.store_response_cookies(
+                "example.com",
+                &[("Set-Cookie".to_owned(), value.to_owned())],
+            );
+            for (parsed, expected) in [(&http, expected_http), (&https, expected_https)] {
+                let request = client.build_request(&Method::Get, parsed, &[], &[], None, None);
+                assert_eq!(
+                    get_header(&request.headers, "cookie").as_deref(),
+                    expected,
+                    "replacement must refresh the stored Secure flag ({value}, {:?})",
+                    parsed.scheme
+                );
+            }
+        }
     }
 
     #[test]
@@ -4468,7 +4601,7 @@ mod tests {
         );
 
         let cookie_header = client
-            .cookie_header_for_host("example.com")
+            .cookie_header_for_host("example.com", Scheme::Http)
             .expect("cookie header");
         assert!(cookie_header.contains("session=updated"));
         assert!(cookie_header.contains("theme=dark"));
@@ -4478,7 +4611,7 @@ mod tests {
             &[("Set-Cookie".to_string(), "session=".to_string())],
         );
         let cookie_header = client
-            .cookie_header_for_host("example.com")
+            .cookie_header_for_host("example.com", Scheme::Http)
             .expect("cookie header");
         assert!(!cookie_header.contains("session="));
         assert!(cookie_header.contains("theme=dark"));
