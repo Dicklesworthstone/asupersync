@@ -1620,7 +1620,7 @@ impl HttpClient {
             Ok((response, io, body_withheld)) => {
                 check_cx(cx)?;
                 guard.defused = true;
-                self.store_response_cookies(&parsed.host, &response.headers);
+                self.store_response_cookies(&parsed.host, parsed.scheme, &response.headers);
                 // A withheld `Expect: 100-continue` body leaves the connection in
                 // an indeterminate framing state (Content-Length advertised, body
                 // never written), so it must never re-enter the keep-alive pool
@@ -1685,7 +1685,7 @@ impl HttpClient {
             Ok((response, io, body_withheld)) => {
                 check_cx(cx)?;
                 guard.defused = true;
-                self.store_response_cookies(&parsed.host, &response.headers);
+                self.store_response_cookies(&parsed.host, parsed.scheme, &response.headers);
                 // A withheld `Expect: 100-continue` body leaves the connection in
                 // an indeterminate framing state (Content-Length advertised, body
                 // never written), so it must never re-enter the keep-alive pool
@@ -1737,7 +1737,7 @@ impl HttpClient {
             Http1Client::request_streaming(stream, req).await?
         };
         check_cx(cx)?;
-        self.store_response_cookies(&parsed.host, &resp.head.headers);
+        self.store_response_cookies(&parsed.host, parsed.scheme, &resp.head.headers);
         Ok(resp)
     }
 
@@ -1775,7 +1775,7 @@ impl HttpClient {
             Http1Client::request_with_io(proxy_conn.io, req).await?
         };
         check_cx(cx)?;
-        self.store_response_cookies(&parsed.host, &response.headers);
+        self.store_response_cookies(&parsed.host, parsed.scheme, &response.headers);
         Ok(response)
     }
 
@@ -1812,7 +1812,7 @@ impl HttpClient {
             Http1Client::request_streaming(proxy_conn.io, req).await?
         };
         check_cx(cx)?;
-        self.store_response_cookies(&parsed.host, &resp.head.headers);
+        self.store_response_cookies(&parsed.host, parsed.scheme, &resp.head.headers);
         Ok(resp)
     }
 
@@ -1963,10 +1963,21 @@ impl HttpClient {
             .build()
     }
 
-    fn store_response_cookies(&self, host: &str, headers: &[(String, String)]) {
+    /// Stores the `Set-Cookie` headers of a response received over `scheme`
+    /// for `host`.
+    ///
+    /// asupersync-kwvk89: RFC 6265bis section 5.6 makes the response scheme
+    /// part of the storage decision. A response that did not arrive over
+    /// HTTPS cannot create a cookie carrying the `Secure` attribute, and it
+    /// cannot replace or delete a stored cookie whose `Secure` flag is set
+    /// ("leave Secure cookies alone"), so an on-path attacker injecting
+    /// plain-HTTP responses can neither fix nor evict an HTTPS session
+    /// cookie. Plain cookies remain updatable over either scheme.
+    fn store_response_cookies(&self, host: &str, scheme: Scheme, headers: &[(String, String)]) {
         if !self.config.cookie_store {
             return;
         }
+        let secure_response = scheme == Scheme::Https;
 
         let host = canonical_cookie_host(host);
         let mut cookies = self.cookies.lock();
@@ -1983,10 +1994,6 @@ impl HttpClient {
             {
                 if let Some((name, value)) = parse_set_cookie_pair(raw) {
                     touched = true;
-                    if value.is_empty() {
-                        entry.retain(|cookie| !cookie.name.eq_ignore_ascii_case(&name));
-                        continue;
-                    }
                     // RFC 6265 section 5.2.5 matches the attribute name;
                     // its value, if supplied, does not disable Secure.
                     let secure = raw.split(';').skip(1).any(|attribute| {
@@ -1996,10 +2003,23 @@ impl HttpClient {
                             .trim()
                             .eq_ignore_ascii_case("secure")
                     });
-                    if let Some(existing) = entry
+                    if secure && !secure_response {
+                        // A non-secure response cannot set a Secure cookie.
+                        continue;
+                    }
+                    let existing = entry
                         .iter_mut()
-                        .find(|cookie| cookie.name.eq_ignore_ascii_case(&name))
-                    {
+                        .find(|cookie| cookie.name.eq_ignore_ascii_case(&name));
+                    if !secure_response && existing.as_ref().is_some_and(|cookie| cookie.secure) {
+                        // Leave Secure cookies alone: neither the replacement
+                        // nor the empty-value deletion form may touch them.
+                        continue;
+                    }
+                    if value.is_empty() {
+                        entry.retain(|cookie| !cookie.name.eq_ignore_ascii_case(&name));
+                        continue;
+                    }
+                    if let Some(existing) = existing {
                         existing.value = value;
                         existing.secure = secure;
                     } else if entry.len() < MAX_COOKIES_PER_HOST {
@@ -4308,6 +4328,7 @@ mod tests {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), raw.to_string())],
         );
 
@@ -4322,6 +4343,7 @@ mod tests {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "Example.COM",
+            Scheme::Https,
             &[(
                 "Set-Cookie".to_string(),
                 "session=abc123; Path=/".to_string(),
@@ -4350,6 +4372,7 @@ mod tests {
             let client = HttpClient::builder().cookie_store(true).build();
             client.store_response_cookies(
                 "Example.COM",
+                Scheme::Https,
                 &[(
                     "Set-Cookie".to_owned(),
                     format!("session=secret; {attributes}"),
@@ -4375,6 +4398,7 @@ mod tests {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[
                 ("Set-Cookie".to_owned(), "session=secret; Secure".to_owned()),
                 (
@@ -4431,6 +4455,7 @@ mod tests {
         ] {
             client.store_response_cookies(
                 "example.com",
+                Scheme::Https,
                 &[("Set-Cookie".to_owned(), value.to_owned())],
             );
             for (parsed, expected) in [(&http, expected_http), (&https, expected_https)] {
@@ -4445,11 +4470,122 @@ mod tests {
         }
     }
 
+    /// asupersync-kwvk89: RFC 6265bis section 5.6. A response that did not
+    /// arrive over HTTPS must not create a Secure cookie and must leave a
+    /// stored Secure cookie alone, whether it tries to replace or to delete
+    /// it; otherwise an on-path attacker injecting plain-HTTP responses could
+    /// fix or evict the HTTPS session cookie.
+    #[test]
+    fn cookie_store_plain_http_response_leaves_secure_cookies_alone() {
+        let http = ParsedUrl::parse("http://example.com/").unwrap();
+        let https = ParsedUrl::parse("https://example.com/").unwrap();
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[(
+                "Set-Cookie".to_owned(),
+                "session=genuine; Secure".to_owned(),
+            )],
+        );
+
+        for injected in [
+            "session=attacker",
+            "session=attacker; Secure",
+            "session=",
+            "session=; Secure",
+        ] {
+            client.store_response_cookies(
+                "example.com",
+                Scheme::Http,
+                &[("Set-Cookie".to_owned(), injected.to_owned())],
+            );
+            let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+            assert_eq!(
+                get_header(&request.headers, "cookie").as_deref(),
+                Some("session=genuine"),
+                "a plain-HTTP response must not touch a Secure cookie ({injected})"
+            );
+            let request = client.build_request(&Method::Get, &http, &[], &[], None, None);
+            assert_eq!(
+                get_header(&request.headers, "cookie"),
+                None,
+                "the Secure cookie must stay HTTPS-only ({injected})"
+            );
+        }
+
+        // A plain-HTTP response cannot create a Secure cookie either.
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Http,
+            &[("Set-Cookie".to_owned(), "token=abc; Secure".to_owned())],
+        );
+        let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie").as_deref(),
+            Some("session=genuine"),
+            "a plain-HTTP response must not create a Secure cookie"
+        );
+
+        // The genuine HTTPS origin can still rotate and delete its cookie.
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[(
+                "Set-Cookie".to_owned(),
+                "session=rotated; Secure".to_owned(),
+            )],
+        );
+        let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie").as_deref(),
+            Some("session=rotated")
+        );
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[("Set-Cookie".to_owned(), "session=".to_owned())],
+        );
+        let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+        assert_eq!(get_header(&request.headers, "cookie"), None);
+    }
+
+    /// asupersync-kwvk89: only Secure cookies are protected; plain cookies
+    /// stay updatable and deletable over plain HTTP.
+    #[test]
+    fn cookie_store_plain_http_response_still_updates_plain_cookies() {
+        let http = ParsedUrl::parse("http://example.com/").unwrap();
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[("Set-Cookie".to_owned(), "theme=dark".to_owned())],
+        );
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Http,
+            &[("Set-Cookie".to_owned(), "theme=light".to_owned())],
+        );
+        let request = client.build_request(&Method::Get, &http, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie").as_deref(),
+            Some("theme=light")
+        );
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Http,
+            &[("Set-Cookie".to_owned(), "theme=".to_owned())],
+        );
+        let request = client.build_request(&Method::Get, &http, &[], &[], None, None);
+        assert_eq!(get_header(&request.headers, "cookie"), None);
+    }
+
     #[test]
     fn cookie_store_respects_explicit_cookie_header() {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "session=abc123".to_string())],
         );
 
@@ -4592,6 +4728,7 @@ mod tests {
             .build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "stored=ignored".to_string())],
         );
 
@@ -4650,14 +4787,17 @@ mod tests {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "session=abc123".to_string())],
         );
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "theme=dark".to_string())],
         );
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "session=updated".to_string())],
         );
 
@@ -4669,6 +4809,7 @@ mod tests {
 
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "session=".to_string())],
         );
         let cookie_header = client
