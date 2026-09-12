@@ -266,16 +266,19 @@
       "summary": "An obligation was created in the root region.",
       "probable_causes": [
         "A test fixture used the root RegionId for obligation-bearing code.",
-        "Runtime setup skipped child-region allocation before creating a permit."
+        "Runtime setup skipped child-region allocation before creating a permit.",
+        "A GenServer call was issued from a root-region task (block_on, RuntimeHandle::spawn, or a LabRuntime task created directly under the root region); GenServerHandle::call and GenServerRef::call return CallError::Cancelled carrying this token instead of panicking."
       ],
       "remediation": [
         "Move the fixture or runtime path into a non-root region.",
+        "Issue GenServer calls from a child region (a Scope region or a task spawned inside one).",
         "Preserve the guard: root-region obligations hide leaks and break quiescence."
       ],
       "doc_path": "docs/error_codes/ASUP-E103.md",
       "since": "0.3.4",
       "source_refs": [
-        "src/obligation/graded.rs"
+        "src/obligation/graded.rs",
+        "src/gen_server.rs"
       ]
     },
     {

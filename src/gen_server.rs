@@ -13,6 +13,20 @@
 //! runtime. They build on the same two-phase mailbox and supervision infrastructure
 //! as plain actors.
 //!
+//! # Callers must run in a non-root region
+//!
+//! A call reserves its reply permit as an obligation token scoped to the
+//! caller's region, and obligations cannot live in the root region
+//! (`[ASUP-E103]`: they would hide leaks and break quiescence). `block_on`'s
+//! root task and every `RuntimeHandle::spawn` task run in the root region, as
+//! does a `LabRuntime` task created directly under `create_root_region`.
+//! [`GenServerHandle::call`] and [`GenServerRef::call`] therefore refuse such
+//! callers with [`CallError::Cancelled`] whose reason message starts with
+//! `[ASUP-E103]`, instead of panicking inside the token layer
+//! (asupersync-0ex6x0); issue calls from a child region (a `Scope` region or
+//! a task spawned inside one). Casts carry no reply obligation and are
+//! unaffected.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -822,7 +836,12 @@ pub enum CallError {
     ServerStopped,
     /// The server did not reply (oneshot dropped).
     NoReply,
-    /// The call was cancelled.
+    /// The call was cancelled, or refused before it was enqueued: a caller
+    /// running in the root region receives this variant with a
+    /// [`CancelReason::user`] message starting with `[ASUP-E103]`, because
+    /// its reply obligation cannot be scoped to the root region (see the
+    /// module docs). The enum is exhaustively matchable, so the rejection
+    /// rides on this variant rather than a new one.
     Cancelled(CancelReason),
 }
 
@@ -837,6 +856,30 @@ impl std::fmt::Display for CallError {
 }
 
 impl std::error::Error for CallError {}
+
+/// asupersync-0ex6x0: reason message carried by the [`CallError::Cancelled`]
+/// a root-region caller receives.
+const ROOT_REGION_CALL_REJECTED: &str = "[ASUP-E103] GenServer call issued from a root-region task: the reply obligation must be \
+     scoped to a non-root region; call from a child region (a Scope region or a task spawned \
+     inside one) instead";
+
+/// Refuses a call whose caller runs in the root region (asupersync-0ex6x0).
+///
+/// The reply permit is an obligation token minted from the caller's region,
+/// and [`ObligationToken::reserve`](crate::obligation::graded::ObligationToken::reserve)
+/// panics with `[ASUP-E103]` for the root region. `block_on` and
+/// `RuntimeHandle::spawn` tasks live there, so without this check such a
+/// caller would panic instead of seeing a typed error. It runs before the
+/// mailbox slot is reserved, so a refused call takes nothing from the server.
+fn reject_root_region_caller(cx: &Cx) -> Option<CallError> {
+    if cx.region_id().as_u64() != 0 {
+        return None;
+    }
+    cx.trace("gen_server::call_rejected_root_region");
+    Some(CallError::Cancelled(CancelReason::user(
+        ROOT_REGION_CALL_REJECTED,
+    )))
+}
 
 /// Error returned when a cast fails.
 #[derive(Debug)]
@@ -906,6 +949,14 @@ impl<S: GenServer> GenServerHandle<S> {
     /// uses obligation-tracked oneshot from `channel::session`, ensuring that
     /// if the server drops the reply without sending, the obligation token
     /// panics rather than silently losing the reply.
+    ///
+    /// # Errors
+    ///
+    /// [`CallError::ServerStopped`] when the server is stopping or its
+    /// mailbox is gone, [`CallError::NoReply`] when the server dropped the
+    /// reply, and [`CallError::Cancelled`] when `cx` is cancelled or when the
+    /// caller runs in the root region (the reason message starts with
+    /// `[ASUP-E103]`; see the module docs).
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
         if cx.checkpoint().is_err() {
             cx.trace("gen_server::call_rejected_cancelled");
@@ -921,6 +972,10 @@ impl<S: GenServer> GenServerHandle<S> {
         ) {
             cx.trace("gen_server::call_rejected_stopped");
             return Err(CallError::ServerStopped);
+        }
+
+        if let Some(rejected) = reject_root_region_caller(cx) {
+            return Err(rejected);
         }
 
         let send_permit = match self.sender.reserve(cx).await {
@@ -1336,6 +1391,12 @@ impl<S: GenServer> GenServerRef<S> {
     }
 
     /// Send a call to the server.
+    ///
+    /// # Errors
+    ///
+    /// Same contract as [`GenServerHandle::call`]: a caller running in the
+    /// root region is refused with [`CallError::Cancelled`] whose reason
+    /// message starts with `[ASUP-E103]` (see the module docs).
     pub async fn call(&self, cx: &Cx, request: S::Call) -> Result<S::Reply, CallError> {
         if cx.checkpoint().is_err() {
             cx.trace("gen_server::call_rejected_cancelled");
@@ -1351,6 +1412,10 @@ impl<S: GenServer> GenServerRef<S> {
         ) {
             cx.trace("gen_server::call_rejected_stopped");
             return Err(CallError::ServerStopped);
+        }
+
+        if let Some(rejected) = reject_root_region_caller(cx) {
+            return Err(rejected);
         }
 
         let send_permit = match self.sender.reserve(cx).await {
@@ -2334,13 +2399,31 @@ mod tests {
         Waker::from(Arc::new(TerminalStateWaker { state, counter }))
     }
 
-    fn lab_spawn_cx(runtime: &crate::lab::LabRuntime, region: RegionId, budget: Budget) -> Cx {
-        Cx::new(region, TaskId::testing_default(), budget)
+    /// Allocates a child region of `region` for a lab client task
+    /// (asupersync-0ex6x0): `call` refuses root-region callers, and a child
+    /// region also exercises the production graded reply-token path instead
+    /// of the region-0 test fallback in `channel::session`.
+    fn lab_client_region(
+        runtime: &mut crate::lab::LabRuntime,
+        region: RegionId,
+        budget: Budget,
+    ) -> RegionId {
+        runtime
+            .state
+            .create_child_region(region, budget)
+            .expect("create lab client child region")
+    }
+
+    /// Builds the caller `Cx` for lab tests in a fresh child region of
+    /// `region` (see [`lab_client_region`]).
+    fn lab_spawn_cx(runtime: &mut crate::lab::LabRuntime, region: RegionId, budget: Budget) -> Cx {
+        let caller_region = lab_client_region(runtime, region, budget);
+        Cx::new(caller_region, TaskId::testing_default(), budget)
             .with_spawn_gateway(runtime.state.spawn_gateway())
             .with_pending_spawn_counter(
                 runtime
                     .state
-                    .region(region)
+                    .region(caller_region)
                     .map(crate::record::RegionRecord::pending_spawn_handle),
             )
     }
@@ -2633,7 +2716,7 @@ mod tests {
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
+        let cx = lab_spawn_cx(&mut runtime, region, Budget::INFINITE);
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
         let (handle, stored) = scope
@@ -2664,13 +2747,83 @@ mod tests {
         crate::test_complete!("gen_server_spawn_and_call");
     }
 
+    /// asupersync-0ex6x0: a caller task in the root region used to panic with
+    /// `[ASUP-E103]` inside the graded-token layer in production builds, while
+    /// the `cfg(test)` region-0 fallback in `channel::session` let every
+    /// in-tree test succeed. The call is now refused with a typed error before
+    /// any mailbox slot is taken, on the test and production paths alike.
+    #[test]
+    fn call_from_root_region_task_is_rejected_with_asup_e103() {
+        init_test("call_from_root_region_task_is_rejected_with_asup_e103");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        assert_eq!(
+            root.as_u64(),
+            0,
+            "the lab root region must encode to zero for this reproducer"
+        );
+        let cx = lab_spawn_cx(&mut runtime, root, Budget::INFINITE);
+        let scope = crate::cx::Scope::<FailFast>::new(root, Budget::INFINITE);
+
+        let (handle, stored) = scope
+            .spawn_gen_server(&mut runtime.state, &cx, Counter { count: 0 }, 32)
+            .expect("should spawn counter gen_server");
+        let server_task_id = handle.task_id();
+        runtime.state.store_spawned_task(server_task_id, stored);
+        let server_ref = handle.server_ref();
+
+        // The client task runs in the ROOT region itself, like `block_on` and
+        // `RuntimeHandle::spawn` tasks on the native runtime or a downstream
+        // `LabRuntime` task created directly under `create_root_region`.
+        let root_cx = Cx::new(root, TaskId::testing_default(), Budget::INFINITE)
+            .with_spawn_gateway(runtime.state.spawn_gateway())
+            .with_pending_spawn_counter(
+                runtime
+                    .state
+                    .region(root)
+                    .map(crate::record::RegionRecord::pending_spawn_handle),
+            );
+        let mut client_handle = root_cx
+            .spawn(move |cx| async move {
+                assert_eq!(
+                    cx.region_id().as_u64(),
+                    0,
+                    "the client task must run in the root region"
+                );
+                server_ref.call(&cx, CounterCall::Add(5)).await
+            })
+            .expect("should spawn root-region client task");
+
+        {
+            runtime.scheduler.lock().schedule(server_task_id, 0);
+        }
+        runtime.run_until_idle();
+
+        let result =
+            futures_lite::future::block_on(client_handle.join(&root_cx)).expect("client join ok");
+        let Err(CallError::Cancelled(reason)) = result else {
+            panic!(
+                "a root-region caller must be refused with CallError::Cancelled, got {result:?}"
+            );
+        };
+        assert!(
+            reason
+                .message()
+                .is_some_and(|message| message.starts_with("[ASUP-E103]")),
+            "the rejection must carry the ASUP-E103 token: {reason}"
+        );
+
+        crate::test_complete!("call_from_root_region_task_is_rejected_with_asup_e103");
+    }
+
     #[test]
     fn gen_server_init_runs_before_queued_call_under_lab_runtime() {
         init_test("gen_server_init_runs_before_queued_call_under_lab_runtime");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x6E57_1001));
         let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
+        let cx = lab_spawn_cx(&mut runtime, region, Budget::INFINITE);
         let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
         let started = Arc::new(AtomicU8::new(0));
         let checkpoints = Arc::new(Mutex::new(Vec::new()));
@@ -2940,12 +3093,13 @@ mod tests {
         let client_cx_cell: Arc<Mutex<Option<Cx>>> = Arc::new(Mutex::new(None));
         let client_cx_cell_for_task = Arc::clone(&client_cx_cell);
 
+        let client_region = lab_client_region(&mut runtime, region, Budget::INFINITE);
         let system_cx = runtime.state.create_system_cx();
         let (client_task_id, mut client_handle, child_cx, result_tx, spawn_effects) = runtime
             .state
             .create_task_infrastructure::<Result<u64, CallError>>(
                 &system_cx,
-                region,
+                client_region,
                 Budget::INFINITE,
                 false,
             )
@@ -4104,7 +4258,7 @@ mod tests {
             let config = crate::lab::LabConfig::new(seed);
             let mut runtime = crate::lab::LabRuntime::new(config);
             let region = runtime.state.create_root_region(Budget::INFINITE);
-            let cx = lab_spawn_cx(&runtime, region, Budget::INFINITE);
+            let cx = lab_spawn_cx(&mut runtime, region, Budget::INFINITE);
             let scope = crate::cx::Scope::<FailFast>::new(region, Budget::INFINITE);
 
             let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4558,7 +4712,7 @@ mod tests {
         let budget = Budget::new().with_poll_quota(100_000).with_priority(10);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
-        let cx = lab_spawn_cx(&runtime, region, budget);
+        let cx = lab_spawn_cx(&mut runtime, region, budget);
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
 
         let started_priority = Arc::new(AtomicU8::new(0));
@@ -4917,7 +5071,7 @@ mod tests {
             .with_priority(10);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
-        let cx = lab_spawn_cx(&runtime, region, budget);
+        let cx = lab_spawn_cx(&mut runtime, region, budget);
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
 
         let loop_quota = Arc::new(AtomicU64::new(0));
@@ -5254,10 +5408,11 @@ mod tests {
         // Client 1: sends a call that the server will process.
         let result_1: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let result_1_clone = Arc::clone(&result_1);
+        let client_region = lab_client_region(&mut runtime, region, budget);
         let system_cx = runtime.state.create_system_cx();
         let (c1_id, _c1_handle, c1_child_cx, c1_result_tx, c1_spawn_effects) = runtime
             .state
-            .create_task_infrastructure::<()>(&system_cx, region, budget, false)
+            .create_task_infrastructure::<()>(&system_cx, client_region, budget, false)
             .unwrap();
         let c1_fut = {
             let cx = c1_child_cx.clone();
@@ -5300,7 +5455,7 @@ mod tests {
         let result_2_clone = Arc::clone(&result_2);
         let (c2_id, _c2_handle, c2_child_cx, c2_result_tx, c2_spawn_effects) = runtime
             .state
-            .create_task_infrastructure::<()>(&system_cx, region, budget, false)
+            .create_task_infrastructure::<()>(&system_cx, client_region, budget, false)
             .unwrap();
         let c2_fut = {
             let cx = c2_child_cx.clone();
@@ -5431,10 +5586,11 @@ mod tests {
         let call_result: Arc<Mutex<Option<Result<u64, CallError>>>> = Arc::new(Mutex::new(None));
         let call_result_clone = Arc::clone(&call_result);
         let server_ref_for_call = handle.server_ref();
+        let client_region = lab_client_region(&mut runtime, region, budget);
         let system_cx = runtime.state.create_system_cx();
         let (client_id, _client, child_cx, result_tx, spawn_effects) = runtime
             .state
-            .create_task_infrastructure::<()>(&system_cx, region, budget, false)
+            .create_task_infrastructure::<()>(&system_cx, client_region, budget, false)
             .unwrap();
         let client_fut = {
             let cx = child_cx.clone();
@@ -5538,10 +5694,11 @@ mod tests {
             for i in 1..=3u64 {
                 let server_ref = handle.server_ref();
                 let results_clone = Arc::clone(&results);
+                let client_region = lab_client_region(&mut runtime, region, budget);
                 let system_cx = runtime.state.create_system_cx();
                 let (cid, _ch, child_cx, result_tx, spawn_effects) = runtime
                     .state
-                    .create_task_infrastructure::<()>(&system_cx, region, budget, false)
+                    .create_task_infrastructure::<()>(&system_cx, client_region, budget, false)
                     .unwrap();
                 let client_fut = {
                     let cx = child_cx.clone();
@@ -5744,7 +5901,7 @@ mod tests {
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
-        let cx = lab_spawn_cx(&runtime, region, budget);
+        let cx = lab_spawn_cx(&mut runtime, region, budget);
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
 
         let (handle, stored) = scope
@@ -5911,7 +6068,7 @@ mod tests {
         let budget = Budget::new().with_poll_quota(100_000);
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime.state.create_root_region(budget);
-        let cx = lab_spawn_cx(&runtime, region, budget);
+        let cx = lab_spawn_cx(&mut runtime, region, budget);
         let scope = crate::cx::Scope::<FailFast>::new(region, budget);
 
         let aborted = Arc::new(AtomicU8::new(0));
