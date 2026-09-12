@@ -1132,14 +1132,41 @@ impl<Caps> Cx<Caps> {
     /// This accessor only clones an attached handle; it never creates a pool.
     /// Contexts without a pool, including those explicitly detached with
     /// [`Cx::with_blocking_pool_handle`], return `None`.
+    /// A runtime restriction that removes spawn authority also returns `None`.
     ///
     /// The handle can outlive this context borrow, but the originating runtime
     /// or caller-owned [`BlockingPool`](crate::runtime::BlockingPool) controls
     /// the pool's lifetime. Retaining a handle does not prevent owner shutdown;
     /// the owner must remain alive and accepting work while the handle is used.
+    ///
+    /// A context without spawn capability cannot retrieve a submission handle:
+    ///
+    /// ```compile_fail
+    /// use asupersync::{Cx, cx::cap};
+    ///
+    /// fn retrieve_without_spawn(cx: &Cx<cap::None>) {
+    ///     let _ = cx.blocking_pool_handle();
+    /// }
+    /// ```
     #[inline]
     #[must_use]
-    pub fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle> {
+    pub fn blocking_pool_handle(&self) -> Option<BlockingPoolHandle>
+    where
+        Caps: cap::HasSpawn,
+    {
+        if !self.runtime_mask.has(cap::CapMask::SPAWN) {
+            return None;
+        }
+        self.blocking_pool_handle_for_inheritance()
+    }
+
+    /// Copies the stored pool during internal context inheritance.
+    ///
+    /// Generic child construction preserves handles independently of its typed
+    /// capabilities; public retrieval still enforces both spawn restrictions.
+    #[inline]
+    #[must_use]
+    pub(crate) fn blocking_pool_handle_for_inheritance(&self) -> Option<BlockingPoolHandle> {
         self.handles.blocking_pool.clone()
     }
 
@@ -5119,7 +5146,7 @@ where
             handles.io_cap = parent.io_cap_handle();
             handles.registry = parent.registry_handle();
             handles.remote_cap = parent.remote_cap_handle();
-            handles.blocking_pool = parent.blocking_pool_handle();
+            handles.blocking_pool = parent.blocking_pool_handle_for_inheritance();
             handles.evidence_sink = parent.evidence_sink_handle();
             handles.macaroon = parent.macaroon_handle();
             handles.default_http_client = parent.handles.default_http_client.clone();

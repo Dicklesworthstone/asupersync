@@ -450,6 +450,17 @@ mod tests {
         assert!(detached.blocking_pool_handle().is_none());
         assert!(cx.blocking_pool_handle().is_some());
 
+        {
+            let _restricted = cx
+                .restrict::<crate::cx::cap::None>()
+                .set_current_restricted();
+            // Ambient lookup retypes to All, so only the runtime mask prevents
+            // a less-privileged caller from extracting submission authority.
+            let ambient = Cx::current().expect("restricted ambient context");
+            assert!(ambient.blocking_pool_handle().is_none());
+        }
+        assert!(cx.blocking_pool_handle().is_some());
+
         // The returned handle dispatches actual work through the same pool;
         // detaching a context clone must not detach or shut down its parent.
         let executed = Arc::new(AtomicU32::new(0));

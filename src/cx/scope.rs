@@ -1387,7 +1387,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         let io_cap = parent_cx.io_cap_handle();
         let registry = parent_cx.registry_handle();
         let remote_cap = parent_cx.remote_cap_handle();
-        let blocking_pool = parent_cx.blocking_pool_handle();
+        let blocking_pool = parent_cx.blocking_pool_handle_for_inheritance();
         let evidence_sink = parent_cx.evidence_sink_handle();
         let macaroon = parent_cx.macaroon_handle();
         let pressure_opt = parent_cx.pressure_handle();
