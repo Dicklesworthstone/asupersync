@@ -643,6 +643,15 @@ impl BrowserWorkerPump {
         }
         let _guard = ReentrancyGuard(&self.in_pump);
 
+        let outcome = self.drain_batch_inner(max_steps);
+        // The last runtime owner can be dropped by a task's poll. Wait until
+        // that poll has returned its storage and released the pump lock before
+        // retiring the worker and any newly parked local future.
+        self.retire_stopped_worker();
+        outcome
+    }
+
+    fn drain_batch_inner(&self, max_steps: usize) -> PumpDrainOutcome {
         let mut worker_guard = match self.worker.try_lock() {
             Some(g) => g,
             None => return PumpDrainOutcome::WorkerUnavailable,
@@ -663,6 +672,30 @@ impl BrowserWorkerPump {
         }
 
         PumpDrainOutcome::BurstLimitReached(executed)
+    }
+
+    fn retire_stopped_worker(&self) {
+        let retired = {
+            // Runtime drop can occur inside this pump's active poll. That turn
+            // will retire the worker after it releases the lock above.
+            let Some(mut worker) = self.worker.try_lock() else {
+                return;
+            };
+            if worker
+                .as_ref()
+                .is_some_and(|worker| worker.shutdown.load(Ordering::Acquire))
+            {
+                worker.take()
+            } else {
+                None
+            }
+        };
+        if let Some(worker) = retired {
+            crate::runtime::local::retire_local_store(worker.local_store_key());
+            // Worker/state destructors and completion callbacks must run after
+            // the pump mutex is released, just like local-store destructors.
+            drop(worker);
+        }
     }
 
     /// Executes a single pump step.
@@ -5705,7 +5738,10 @@ impl RuntimeInner {
             admitted_slot: None,
         };
 
-        crate::runtime::spawn_mailbox::enqueue_local_spawn(request);
+        crate::runtime::spawn_mailbox::enqueue_local_spawn_for_mailbox(
+            request,
+            &self.local_lane_mailbox,
+        );
 
         if let Some(pump) = self.browser_pump.get() {
             pump.schedule_pump();
@@ -5971,7 +6007,20 @@ impl Drop for RuntimeInner {
         if let Some(driver) = self.current_thread_driver.get() {
             driver.shutdown();
         }
-        crate::runtime::local::publish_retired_local_store_key(self.scheduler.local_store_key());
+        if let Some(pump) = self.browser_pump.get() {
+            // Threadless hosts have no worker exit loop to retire pending
+            // admissions or parked local futures. Leave other runtimes' local
+            // lanes intact, and run captured destructors outside their locks.
+            crate::runtime::spawn_mailbox::cancel_local_spawns_for_mailbox(
+                &self.local_lane_mailbox,
+            );
+            pump.retire_stopped_worker();
+            crate::runtime::local::retire_local_store(self.scheduler.local_store_key());
+        } else {
+            crate::runtime::local::publish_retired_local_store_key(
+                self.scheduler.local_store_key(),
+            );
+        }
         let handles = std::mem::take(self.worker_threads.get_mut());
         let current_thread = std::thread::current().id();
         let on_worker = handles
