@@ -711,8 +711,14 @@ where
     /// responses, retain the same handler contract as [`Self::run`].
     ///
     /// The TCP connection is registered before its handshake begins, so the
-    /// normal connection limit and drain accounting cover slow or silent TLS
-    /// peers. Force-close interrupts an in-progress handshake by dropping its
+    /// normal connection limit and drain accounting cover TLS peers. The
+    /// handshake itself is bounded: by the acceptor's
+    /// [`handshake_timeout`](TlsAcceptor::handshake_timeout) when one is set,
+    /// otherwise by [`Http1Config::idle_timeout`], the same bound the plain-TCP
+    /// path applies to reading the first request. A peer that has not
+    /// completed TLS within that bound is dropped and its connection slot is
+    /// released, so half-open handshakes cannot exhaust `max_connections`.
+    /// Force-close interrupts an in-progress handshake by dropping its
     /// transport.
     #[cfg(feature = "tls")]
     pub async fn run_tls(
@@ -1068,7 +1074,28 @@ where
     let handle = runtime.try_spawn(async move {
         let _guard = guard;
         let peer_addr = stream.peer_addr().ok();
-        let mut handshake = core::pin::pin!(acceptor.accept(stream));
+        // asupersync-hylbr1: `TlsAcceptor` defaults to no handshake timeout, so
+        // a peer that never finishes TLS would pin this registered connection
+        // slot until listener shutdown. Bound the handshake by the acceptor's
+        // own timeout when it has one (the acceptor enforces it internally),
+        // otherwise by the connection idle timeout, the same bound the
+        // plain-TCP path applies to reading the first request.
+        let handshake_bound = match acceptor.handshake_timeout() {
+            Some(_) => None,
+            None => config.idle_timeout,
+        };
+        let handshake = acceptor.accept(stream);
+        let mut handshake = core::pin::pin!(async move {
+            match handshake_bound {
+                Some(bound) => {
+                    match crate::time::timeout(transient_accept_now(), bound, handshake).await {
+                        Ok(result) => result,
+                        Err(_elapsed) => Err(crate::tls::TlsError::Timeout(bound)),
+                    }
+                }
+                None => handshake.await,
+            }
+        });
         let mut force_closing =
             core::pin::pin!(shutdown_signal.wait_for_phase(ShutdownPhase::ForceClosing));
 
@@ -1081,8 +1108,18 @@ where
             handshake.as_mut().poll(task_cx).map(Some)
         })
         .await;
-        let Some(Ok(mut tls_stream)) = tls_stream else {
-            return;
+        let mut tls_stream = match tls_stream {
+            Some(Ok(tls_stream)) => tls_stream,
+            Some(Err(crate::tls::TlsError::Timeout(bound))) => {
+                crate::tracing_compat::warn!(
+                    peer = ?peer_addr,
+                    bound = ?bound,
+                    "TLS handshake did not complete within its bound; dropping the connection"
+                );
+                let _ = bound; // Suppress unused warning when tracing is disabled
+                return;
+            }
+            Some(Err(_)) | None => return,
         };
 
         if !matches!(tls_stream.alpn_protocol(), None | Some(b"http/1.1")) {
