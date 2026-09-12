@@ -54,6 +54,7 @@ TARGET_DIR="${API_V2_E2E_TARGET_DIR:-}"
 RCH_BIN="${RCH_BIN:-rch}"
 REHEARSE_FAILURE=0
 SKIP_CARGO=0
+BLOCKING_POOL_ONLY=0
 
 # The DX budgets, counted in code lines (see dx_line_count).
 #
@@ -105,6 +106,8 @@ Options:
   --skip-cargo          Run only the stages that need no compiler (DX budget +
                         artifact contract). For fast local iteration; NOT a
                         substitute for a full run.
+  --blocking-pool-only  Run the native blocking-pool regression and boundary
+                        census only. The full journey runs this gate first.
   -h, --help            Show this help.
 USAGE
 }
@@ -118,10 +121,16 @@ while [[ $# -gt 0 ]]; do
         --rch-bin)          RCH_BIN="${2:-}"; shift 2 ;;
         --rehearse-failure) REHEARSE_FAILURE=1; shift ;;
         --skip-cargo)       SKIP_CARGO=1; shift ;;
+        --blocking-pool-only) BLOCKING_POOL_ONLY=1; shift ;;
         -h|--help)          usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+if (( BLOCKING_POOL_ONLY == 1 && (SKIP_CARGO == 1 || REHEARSE_FAILURE == 1) )); then
+    echo "--blocking-pool-only cannot be combined with --skip-cargo or --rehearse-failure" >&2
+    exit 2
+fi
 
 RUN_DIR="${OUTPUT_ROOT}/run_${RUN_ID}"
 EVENTS="${RUN_DIR}/events.ndjson"
@@ -254,6 +263,12 @@ rch_cargo() {
     if [[ -n "${TARGET_DIR}" ]]; then
         env_prefix+=("CARGO_TARGET_DIR=${TARGET_DIR}")
     fi
+    local build_env
+    for build_env in CARGO_INCREMENTAL CARGO_PROFILE_TEST_DEBUG RUSTFLAGS; do
+        if [[ -v "${build_env}" ]]; then
+            env_prefix+=("${build_env}=${!build_env}")
+        fi
+    done
 
     start="$(now_ms)"
     set +e
@@ -273,6 +288,7 @@ rch_cargo() {
         --base HEAD --clean-overlay \
         -o examples/hello.rs -o examples/spawn_fanout.rs \
         -o examples/deterministic_test.rs -o tests/api_v2_integration.rs \
+        -o src/runtime/spawn_blocking.rs -o tests/blocking_pool_toctou.rs \
         -o tests/compile_fail/spawn_without_capability.rs \
         -o tests/compile_fail/spawn_without_capability.stderr -- \
         "${env_prefix[@]}" "$@" > "${out_file}" 2> "${rch_log}"
@@ -354,6 +370,57 @@ run_example() {
     return 0
 }
 
+run_blocking_pool_regression() {
+    local repro="RCH_REQUIRE_REMOTE=1 CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} bash scripts/run_api_v2_e2e.sh --blocking-pool-only"
+    rch_cargo "blocking_pool_regression" "blocking_pool_regression.log" \
+        cargo test --locked -j "${CARGO_BUILD_JOBS:-4}" -p asupersync \
+        --test blocking_pool_toctou -- --nocapture --test-threads=1
+    offload_ok "blocking_pool_regression" "${repro}" || return 1
+    if (( RCH_STATUS != 0 )); then
+        emit_event "blocking_pool_regression" "fail" "${RCH_MS}" "${repro}" \
+            "exit status ${RCH_STATUS}; see rch_blocking_pool_regression.log"
+        return 1
+    fi
+    local verified
+    if ! verified="$(python3 - "${RCH_OUT}" "${RCH_LOG}" <<'PY_BLOCKING_POOL'
+import pathlib, re, sys
+
+text = "\n".join(pathlib.Path(path).read_text() for path in sys.argv[1:])
+text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+required = {
+    "blocking_helper_boundary_census_requires_classification",
+    "native_restricted_context_preserves_queued_blocking_io_and_cleanup",
+    "pool_spawn_shutdown_race_completes_or_cancels",
+    "handle_spawn_shutdown_race_completes_or_cancels",
+}
+passed = re.findall(r"^test ([\w:]+) \.\.\. ok$", text, re.MULTILINE)
+summaries = re.findall(
+    r"^test result: ok\. ([1-9][0-9]*) passed; 0 failed; 0 ignored; "
+    r"0 measured; 0 filtered out; finished in [0-9.]+s$", text, re.MULTILINE,
+)
+local = re.search(r"\[RCH\]\s+local\b|(?:executing|running|falling back) locally", text, re.I)
+terminal = re.search(r"Remote command finished: exit=0\b", text)
+missing = sorted(required - set(passed))
+valid = (
+    not missing and not local and terminal is not None
+    and len(summaries) == 1 and int(summaries[0]) == len(passed)
+    and len(passed) == len(set(passed))
+    and not re.search(r"^test result: (?!ok\.)", text, re.MULTILINE)
+)
+if not valid:
+    print(f"missing={missing}; summaries={summaries}; named passes={len(passed)}; "
+          f"local execution={bool(local)}; terminal remote success={bool(terminal)}")
+    sys.exit(1)
+print(f"{len(passed)} unfiltered tests passed, including native queue/I/O/cleanup, "
+      "both shutdown races, and the blocking-helper boundary census")
+PY_BLOCKING_POOL
+)"; then
+        emit_event "blocking_pool_regression" "fail" "${RCH_MS}" "${repro}" "${verified}"
+        return 1
+    fi
+    emit_event "blocking_pool_regression" "pass" "${RCH_MS}" "${repro}" "${verified}"
+}
+
 run_integration_lane() {
     local repro="RCH_REQUIRE_REMOTE=1 ${RCH_BIN} exec --base HEAD --clean-overlay -o tests/api_v2_integration.rs -- cargo test --locked -j ${CARGO_BUILD_JOBS:-4} -p asupersync --test api_v2_integration --features test-internals"
     rch_cargo "integration_lane" "integration_lane.log" \
@@ -430,6 +497,11 @@ run_spawn_caps() {
 
 run_cargo_stages() {
     local rc=0 example
+    # An escaped native-boundary regression must pass before broader gates.
+    run_blocking_pool_regression || return 1
+    if (( BLOCKING_POOL_ONLY == 1 )); then
+        return 0
+    fi
     for example in "${EXAMPLES[@]}"; do
         run_example "${example}" || rc=1
     done
@@ -495,7 +567,9 @@ rehearse_failure() {
 # ---------------------------------------------------------------------------
 OVERALL=0
 
-check_line_budget "${REPO_ROOT}/examples" || OVERALL=1
+if (( BLOCKING_POOL_ONLY == 0 )); then
+    check_line_budget "${REPO_ROOT}/examples" || OVERALL=1
+fi
 
 if (( SKIP_CARGO == 0 )); then
     require_rch
@@ -525,11 +599,12 @@ if (( REAL_FAILURES < 0 )); then REAL_FAILURES=0; fi
 if (( REAL_FAILURES > 0 )); then OVERALL=1; else OVERALL=${OVERALL}; fi
 
 python3 - "${RUN_DIR}" "${RUN_ID}" "${DURATION_MS}" "${STAGES_TOTAL}" "${REAL_FAILURES}" \
-    "${REHEARSED_FAILURES}" "${REHEARSED}" "${SKIP_CARGO}" "${STAGES_BLOCKED}" <<'PY'
+    "${REHEARSED_FAILURES}" "${REHEARSED}" "${SKIP_CARGO}" "${STAGES_BLOCKED}" "${BLOCKING_POOL_ONLY}" <<'PY'
 import json, sys, pathlib
 
 run_dir = pathlib.Path(sys.argv[1])
 run_id, duration_ms, total, real_failed, rehearsed_failed, rehearsed, skip_cargo, blocked = sys.argv[2:10]
+blocking_pool_only = sys.argv[10] == "1"
 
 events = []
 for i, line in enumerate((run_dir / "events.ndjson").read_text().splitlines(), start=1):
@@ -565,6 +640,7 @@ summary = {
     "rehearsed_failures": int(rehearsed_failed),
     "failure_rehearsed": rehearsed == "1",
     "cargo_stages_skipped": skip_cargo == "1",
+    "blocking_pool_only": blocking_pool_only,
     "status": (
         "fail"
         if int(real_failed) > 0 or errors
@@ -574,7 +650,12 @@ summary = {
     "artifact_contract_errors": errors,
     "no_claim": (
         (
-            "DX line budget checked ONLY. The example programs were not compiled or run and "
+            "This run failed or was blocked; it does not establish the requested journey."
+            if int(real_failed) > 0 or int(blocked) > 0 or errors
+            else "Only the native blocking-pool regression, shutdown races and source-boundary "
+            "census passed. The broader API-v2 journey was not run."
+            if blocking_pool_only
+            else "DX line budget checked ONLY. The example programs were not compiled or run and "
             "the api_v2_integration lane did not execute, so this run is not journey evidence."
             if skip_cargo == "1"
             else "Proves the on-ramp programs run, stay within their DX line budget, and that "

@@ -116,6 +116,68 @@ fn handle_spawn_shutdown_race_completes_or_cancels() -> Result<(), String> {
     run_spawn_shutdown_race(SpawnApi::Handle)
 }
 
+#[test]
+fn blocking_helper_boundary_census_requires_classification() {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    fn visit(root: &Path, directory: &Path, found: &mut BTreeMap<(PathBuf, String), usize>) {
+        for entry in std::fs::read_dir(directory).expect("read runtime source boundary") {
+            let entry = entry.expect("source entry");
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                visit(root, &path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let source = std::fs::read_to_string(&path).expect("read Rust boundary source");
+                for line in source.lines().map(str::trim_start) {
+                    let declaration = [
+                        "pub async fn ",
+                        "pub fn ",
+                        "pub(crate) async fn ",
+                        "pub(crate) fn ",
+                    ]
+                    .into_iter()
+                    .find_map(|prefix| line.strip_prefix(prefix));
+                    let Some(declaration) = declaration else {
+                        continue;
+                    };
+                    let name = declaration.split(['<', '(']).next().unwrap();
+                    if name.starts_with("spawn_blocking") {
+                        let relative = path.strip_prefix(root).unwrap().to_path_buf();
+                        *found.entry((relative, name.to_owned())).or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Free helpers preserve the assigned placement independently of SPAWN.
+    // Cx methods admit region-owned tasks through a SPAWN-checked gateway.
+    // Runtime/RuntimeHandle methods use explicitly held pool ownership.
+    // The two private free-helper dispatchers preserve pool/thread fallbacks.
+    let expected = [
+        ("runtime/spawn_blocking.rs", "spawn_blocking", 1),
+        ("runtime/spawn_blocking.rs", "spawn_blocking_io", 1),
+        ("runtime/spawn_blocking.rs", "spawn_blocking_on_pool", 1),
+        ("runtime/spawn_blocking.rs", "spawn_blocking_on_thread", 1),
+        ("cx/cx.rs", "spawn_blocking", 1),
+        ("cx/cx.rs", "spawn_blocking_in", 1),
+        ("runtime/builder.rs", "spawn_blocking", 2),
+        ("runtime/builder.rs", "spawn_blocking_on_cohort", 2),
+    ]
+    .into_iter()
+    .map(|(path, name, count)| ((PathBuf::from(path), name.to_owned()), count))
+    .collect::<BTreeMap<_, _>>();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = BTreeMap::new();
+    visit(&root, &root.join("runtime"), &mut found);
+    visit(&root, &root.join("cx"), &mut found);
+    assert_eq!(
+        found, expected,
+        "classify new blocking helpers before admitting the release lane"
+    );
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn native_restricted_context_preserves_queued_blocking_io_and_cleanup() {

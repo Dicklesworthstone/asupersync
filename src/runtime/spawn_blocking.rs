@@ -232,7 +232,7 @@ where
         // Preserve its assigned execution location even when the public pool
         // getter is restricted; hiding the handle must not move blocking work
         // onto the caller's runtime thread.
-        if let Some(pool) = cx.blocking_pool_handle() {
+        if let Some(pool) = cx.blocking_pool_handle_for_inheritance() {
             return spawn_blocking_on_pool(pool, f).await;
         }
         // Deterministic fallback when running inside a runtime without a pool.
