@@ -54,6 +54,7 @@ mod udp;
 pub(crate) use udp::Armed;
 /// Fallback-aware reactor registration shared by every fd-backed async handle
 /// in the crate (sockets here, child-process pipes in `crate::process`).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use udp::ReactorRegistration;
 /// Unix domain socket networking primitives (includes `UnixListener`, `UnixStream`).
 #[cfg(unix)]
