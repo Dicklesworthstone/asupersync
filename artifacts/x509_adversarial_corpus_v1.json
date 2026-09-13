@@ -285,13 +285,13 @@
     },
     {
       "path": "fuzz/Cargo.toml",
-      "sha256": "e27d7e616b079f2102a2d179907709a7e484fad4f77ea13ccb8a9e9ab56b9385",
-      "line_count": 6234
+      "sha256": "510bed856a88f64b3d3e97ee36a7c783cbd9b4b57642b37ec1e4b92817bb444b",
+      "line_count": 6233
     },
     {
       "path": "fuzz/fuzz_targets/x509_der_residue.rs",
-      "sha256": "5348028bd20bb5760dbea547b60a5eeee1eba46346d7ce81d69116cf6463cab4",
-      "line_count": 68
+      "sha256": "ca4f8dbeb4da21303f42f911db0180a9ff4f52e1cceb7d66cc9f4e63c7f9f293",
+      "line_count": 69
     },
     {
       "path": "tests/fixtures/tls/server.crt",

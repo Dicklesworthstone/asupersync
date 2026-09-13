@@ -679,13 +679,42 @@ fn load_daemon_config(config_path: &PathBuf) -> Result<AtpdConfig> {
 }
 
 #[cfg(feature = "tls")]
+fn pem_error_message(error: rustls::pki_types::pem::Error) -> String {
+    use rustls::pki_types::pem::Error;
+
+    match error {
+        Error::MissingSectionEnd { end_marker } => format!(
+            "section end {:?} missing",
+            String::from_utf8_lossy(&end_marker)
+        ),
+        Error::IllegalSectionStart { line } => {
+            format!(
+                "illegal section start: {:?}",
+                String::from_utf8_lossy(&line)
+            )
+        }
+        Error::Base64Decode(message) => message,
+        Error::Io(error) => error.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+#[cfg(feature = "tls")]
 fn load_atpd_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
     let pem = std::fs::read(path)
         .map_err(|err| cli_error(format!("read cert {}: {err}", path.display())))?;
     let mut reader = std::io::BufReader::new(pem.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_reader_iter(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|err| cli_error(format!("parse certs in {}: {err}", path.display())))?;
+        .map_err(|err| {
+            cli_error(format!(
+                "parse certs in {}: {}",
+                path.display(),
+                pem_error_message(err)
+            ))
+        })?;
     if certs.is_empty() {
         return Err(cli_error(format!(
             "no certificates found in {}",
@@ -697,11 +726,21 @@ fn load_atpd_cert_chain(path: &Path) -> Result<Vec<rustls::pki_types::Certificat
 
 #[cfg(feature = "tls")]
 fn load_atpd_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
+
     let pem = std::fs::read(path)
         .map_err(|err| cli_error(format!("read key {}: {err}", path.display())))?;
     let mut reader = std::io::BufReader::new(pem.as_slice());
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|err| cli_error(format!("parse key in {}: {err}", path.display())))?
+    PrivateKeyDer::pem_reader_iter(&mut reader)
+        .next()
+        .transpose()
+        .map_err(|err| {
+            cli_error(format!(
+                "parse key in {}: {}",
+                path.display(),
+                pem_error_message(err)
+            ))
+        })?
         .ok_or_else(|| cli_error(format!("no private key found in {}", path.display())))
 }
 
@@ -2269,6 +2308,89 @@ fn manage_identity(cli: AtpdCli, args: IdentityArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_file_loaders_preserve_chain_and_first_key_selection() {
+        let directory = tempfile::tempdir().expect("PEM test directory");
+        let cert_path = directory.path().join("chain.pem");
+        let key_path = directory.path().join("key.pem");
+        let cert = include_bytes!("../../tests/fixtures/tls/server.crt");
+        std::fs::write(
+            &cert_path,
+            [cert.as_slice(), b"\n", cert.as_slice()].concat(),
+        )
+        .unwrap();
+        let chain = load_atpd_cert_chain(&cert_path).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0], chain[1]);
+
+        let first = b"-----BEGIN RSA PRIVATE KEY-----\nAQID\n-----END RSA PRIVATE KEY-----\n";
+        let second = b"-----BEGIN PRIVATE KEY-----\nBAUG\n-----END PRIVATE KEY-----\n";
+        std::fs::write(&key_path, [first.as_slice(), second.as_slice()].concat()).unwrap();
+        let key = load_atpd_private_key(&key_path).unwrap();
+        assert!(matches!(key, rustls::pki_types::PrivateKeyDer::Pkcs1(_)));
+        assert_eq!(key.secret_der(), &[1, 2, 3]);
+
+        std::fs::write(&key_path, cert).unwrap();
+        assert!(
+            load_atpd_private_key(&key_path)
+                .unwrap_err()
+                .to_string()
+                .contains("no private key")
+        );
+        let malformed = b"-----BEGIN PRIVATE KEY-----\n!invalid!\n-----END PRIVATE KEY-----\n";
+        std::fs::write(&key_path, malformed).unwrap();
+        assert!(
+            load_atpd_private_key(&key_path)
+                .unwrap_err()
+                .to_string()
+                .contains("parse key")
+        );
+        std::fs::write(&cert_path, malformed).unwrap();
+        assert!(
+            load_atpd_cert_chain(&cert_path)
+                .unwrap_err()
+                .to_string()
+                .contains("parse certs")
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_file_loaders_preserve_legacy_error_messages() {
+        let directory = tempfile::tempdir().expect("PEM error test directory");
+        let path = directory.path().join("invalid.pem");
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"-----BEGIN PRIVATE KEY-----\nAQID\n",
+                "section end \"PRIVATE KEY\" missing",
+            ),
+            (
+                b"-----BEGIN \xff\n",
+                "illegal section start: \"-----BEGIN \u{fffd}\\n\"",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY----\r\n",
+                "illegal section start: \"-----BEGIN PRIVATE KEY----\\r\"",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY-----\n!\n-----END PRIVATE KEY-----\n",
+                "InvalidCharacter(33)",
+            ),
+        ];
+        for &(pem, expected) in cases {
+            std::fs::write(&path, pem).unwrap();
+            assert_eq!(
+                load_atpd_private_key(&path).unwrap_err().to_string(),
+                format!("parse key in {}: {expected}", path.display())
+            );
+            assert_eq!(
+                load_atpd_cert_chain(&path).unwrap_err().to_string(),
+                format!("parse certs in {}: {expected}", path.display())
+            );
+        }
+    }
 
     fn loopback(port: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], port))

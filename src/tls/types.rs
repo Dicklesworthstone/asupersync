@@ -4,7 +4,11 @@
 //! and decouple the public interface from rustls internals.
 
 #[cfg(feature = "tls")]
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer};
+use rustls_pki_types::pem::PemObject;
+#[cfg(feature = "tls")]
+use rustls_pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+};
 
 use std::collections::BTreeSet;
 #[cfg(feature = "tls")]
@@ -14,6 +18,28 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::error::TlsError;
+
+/// Keep the shipped reader-based PEM diagnostics while using the maintained parser.
+#[cfg(feature = "tls")]
+pub(super) fn pem_error_message(error: rustls_pki_types::pem::Error) -> String {
+    use rustls_pki_types::pem::Error;
+
+    match error {
+        Error::MissingSectionEnd { end_marker } => format!(
+            "section end {:?} missing",
+            String::from_utf8_lossy(&end_marker)
+        ),
+        Error::IllegalSectionStart { line } => {
+            format!(
+                "illegal section start: {:?}",
+                String::from_utf8_lossy(&line)
+            )
+        }
+        Error::Base64Decode(message) => message,
+        Error::Io(error) => error.to_string(),
+        other => format!("{other:?}"),
+    }
+}
 
 /// A DER-encoded X.509 certificate.
 #[derive(Clone, Debug)]
@@ -47,9 +73,9 @@ impl Certificate {
     #[cfg(feature = "tls")]
     pub fn from_pem(pem: &[u8]) -> Result<Vec<Self>, TlsError> {
         let mut reader = BufReader::new(pem);
-        let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+        let certs: Vec<_> = CertificateDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Certificate(e.to_string()))?;
+            .map_err(|e| TlsError::Certificate(pem_error_message(e)))?;
 
         if certs.is_empty() {
             return Err(TlsError::Certificate("no certificates found in PEM".into()));
@@ -193,9 +219,9 @@ impl PrivateKey {
         let mut reader = BufReader::new(pem);
 
         // Try PKCS#8 first
-        let pkcs8_keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut reader)
+        let pkcs8_keys: Vec<_> = PrivatePkcs8KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Certificate(e.to_string()))?;
+            .map_err(|e| TlsError::Certificate(pem_error_message(e)))?;
 
         if let Some(key) = pkcs8_keys.into_iter().next() {
             return Ok(Self {
@@ -205,9 +231,9 @@ impl PrivateKey {
 
         // Try RSA (PKCS#1)
         let mut reader = BufReader::new(pem);
-        let rsa_keys: Vec<_> = rustls_pemfile::rsa_private_keys(&mut reader)
+        let rsa_keys: Vec<_> = PrivatePkcs1KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Certificate(e.to_string()))?;
+            .map_err(|e| TlsError::Certificate(pem_error_message(e)))?;
 
         if let Some(key) = rsa_keys.into_iter().next() {
             return Ok(Self {
@@ -217,9 +243,9 @@ impl PrivateKey {
 
         // Try EC (SEC1)
         let mut reader = BufReader::new(pem);
-        let ec_keys: Vec<_> = rustls_pemfile::ec_private_keys(&mut reader)
+        let ec_keys: Vec<_> = PrivateSec1KeyDer::pem_reader_iter(&mut reader)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| TlsError::Certificate(e.to_string()))?;
+            .map_err(|e| TlsError::Certificate(pem_error_message(e)))?;
 
         if let Some(key) = ec_keys.into_iter().next() {
             return Ok(Self {
@@ -778,6 +804,127 @@ Lru15URJw9pE1Uae8IuzyzHiF1fnn45swnvW3Szb
         // Minimal self-signed certificate DER (just test parsing doesn't panic)
         let cert = Certificate::from_der(vec![0x30, 0x00]);
         assert_eq!(cert.as_der().len(), 2);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_certificate_chain_keeps_order_and_rejects_malformed_tail() {
+        let leaf_pem = include_bytes!("../../tests/fixtures/x509_adversarial/allowed.crt");
+        let ca_pem = include_bytes!("../../tests/fixtures/x509_adversarial/ca.crt");
+        let leaf = Certificate::from_pem(leaf_pem).unwrap().remove(0);
+        let ca = Certificate::from_pem(ca_pem).unwrap().remove(0);
+        let bundle = [leaf_pem.as_slice(), b"\n", ca_pem.as_slice()].concat();
+        let chain = CertificateChain::from_pem(&bundle).unwrap();
+        let parsed: Vec<_> = chain.into_iter().collect();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].as_der(), leaf.as_der());
+        assert_eq!(parsed[1].as_der(), ca.as_der());
+
+        let malformed = b"\n-----BEGIN CERTIFICATE-----\n!invalid!\n-----END CERTIFICATE-----\n";
+        assert!(matches!(
+            Certificate::from_pem(&[bundle.as_slice(), malformed].concat()),
+            Err(TlsError::Certificate(_))
+        ));
+        assert!(matches!(
+            Certificate::from_pem(b"no certificate blocks"),
+            Err(TlsError::Certificate(message)) if message == "no certificates found in PEM"
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_private_keys_preserve_format_precedence_and_first_key() {
+        // These distinct byte payloads test PEM decoding and selection only;
+        // rustls validates the decoded signing key when building TLS configs.
+        let sec1 = b"-----BEGIN EC PRIVATE KEY-----\nAQID\n-----END EC PRIVATE KEY-----\n";
+        let pkcs1 = b"-----BEGIN RSA PRIVATE KEY-----\nBAUG\n-----END RSA PRIVATE KEY-----\n";
+        let pkcs8 = b"-----BEGIN PRIVATE KEY-----\nBwgJ\n-----END PRIVATE KEY-----\n";
+        let later_pkcs8 = b"-----BEGIN PRIVATE KEY-----\nCgsM\n-----END PRIVATE KEY-----\n";
+
+        let key = PrivateKey::from_pem(sec1).unwrap().clone_inner();
+        assert!(matches!(key, PrivateKeyDer::Sec1(_)));
+        assert_eq!(key.secret_der(), &[1, 2, 3]);
+
+        let key = PrivateKey::from_pem(&[sec1.as_slice(), pkcs1.as_slice()].concat())
+            .unwrap()
+            .clone_inner();
+        assert!(matches!(key, PrivateKeyDer::Pkcs1(_)));
+        assert_eq!(key.secret_der(), &[4, 5, 6]);
+
+        let bundle = [
+            sec1.as_slice(),
+            pkcs1.as_slice(),
+            pkcs8.as_slice(),
+            later_pkcs8.as_slice(),
+        ]
+        .concat();
+        let key = PrivateKey::from_pem(&bundle).unwrap().clone_inner();
+        assert!(matches!(key, PrivateKeyDer::Pkcs8(_)));
+        assert_eq!(key.secret_der(), &[7, 8, 9]);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_private_keys_reject_missing_keys_and_malformed_sections() {
+        assert!(matches!(
+            PrivateKey::from_pem(TEST_CERT_PEM),
+            Err(TlsError::Certificate(message)) if message == "no private key found in PEM"
+        ));
+
+        let key = include_bytes!("../../tests/fixtures/tls/server.key");
+        let malformed = b"\n-----BEGIN PRIVATE KEY-----\n!invalid!\n-----END PRIVATE KEY-----\n";
+        let unterminated = b"\n-----BEGIN CERTIFICATE-----\nAQID\n";
+        for tail in [malformed.as_slice(), unterminated.as_slice()] {
+            // The existing API reads the full input even after finding a key.
+            assert!(matches!(
+                PrivateKey::from_pem(&[key.as_slice(), tail].concat()),
+                Err(TlsError::Certificate(_))
+            ));
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_errors_preserve_legacy_reader_messages() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"-----BEGIN CERTIFICATE-----\nAQID\n",
+                "section end \"CERTIFICATE\" missing",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY-----\nAQID\n",
+                "section end \"PRIVATE KEY\" missing",
+            ),
+            (
+                b"-----BEGIN \xff\n",
+                "illegal section start: \"-----BEGIN \u{fffd}\\n\"",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY----\r\n",
+                "illegal section start: \"-----BEGIN PRIVATE KEY----\\r\"",
+            ),
+            (
+                b"-----BEGIN CERTIFICATE-----\n!\n-----END CERTIFICATE-----\n",
+                "InvalidCharacter(33)",
+            ),
+        ];
+        for &(pem, expected) in cases {
+            for error in [
+                Certificate::from_pem(pem).unwrap_err(),
+                PrivateKey::from_pem(pem).unwrap_err(),
+            ] {
+                match error {
+                    TlsError::Certificate(message) => assert_eq!(message, expected),
+                    other => panic!("expected certificate error, got {other:?}"),
+                }
+            }
+        }
+        assert_eq!(
+            pem_error_message(rustls_pki_types::pem::Error::Io(std::io::Error::other(
+                "read failed"
+            ))),
+            "read failed"
+        );
     }
 
     #[test]

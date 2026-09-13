@@ -56,7 +56,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Self-signed leaf for `localhost` / `127.0.0.1` (shared with `tests/e2e_web.rs`).
 const SERVER_CERT_PEM: &[u8] = include_bytes!("fixtures/tls/server.crt");
@@ -112,6 +112,25 @@ where
     F: FnOnce(SocketAddr, Arc<AtomicUsize>) -> Fut,
     Fut: Future<Output = ()>,
 {
+    run_with_https_listener_config(
+        Http1ListenerConfig::default()
+            .http_config(Http1Config {
+                allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                ..Http1Config::default()
+            })
+            .drain_timeout(Duration::from_millis(200))
+            .hard_drain_timeout(Duration::from_secs(2)),
+        test,
+    );
+}
+
+/// [`run_with_https_listener`] with an explicit listener configuration, for
+/// tests that need a connection cap or a specific idle timeout.
+fn run_with_https_listener_config<F, Fut>(config: Http1ListenerConfig, test: F)
+where
+    F: FnOnce(SocketAddr, Arc<AtomicUsize>) -> Fut,
+    Fut: Future<Output = ()>,
+{
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
         .build()
@@ -131,13 +150,7 @@ where
         let listener = Http1Listener::bind_upgradeable_with_config(
             "127.0.0.1:0",
             router.into_http1_handler(),
-            Http1ListenerConfig::default()
-                .http_config(Http1Config {
-                    allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
-                    ..Http1Config::default()
-                })
-                .drain_timeout(Duration::from_millis(200))
-                .hard_drain_timeout(Duration::from_secs(2)),
+            config,
         )
         .await
         .expect("bind HTTPS/1.1 listener on 127.0.0.1:0");
@@ -201,6 +214,72 @@ fn https_get_via_tls_connector_with_local_root_and_http1_client_returns_200_and_
         );
         assert_eq!(handler_calls.load(Ordering::Acquire), 1);
     });
+}
+
+/// asupersync-hylbr1: a peer that opens TCP and never starts its TLS handshake
+/// used to pin a registered connection slot until listener shutdown, because
+/// `TlsAcceptor` has no handshake timeout by default and `run_tls` awaited the
+/// handshake unbounded. With `max_connections` at one, a second client could
+/// never be served. The handshake is now bounded by `Http1Config::idle_timeout`,
+/// after which the silent peer is dropped and its slot released.
+#[test]
+fn tls_listener_drops_silent_handshake_and_frees_the_connection_slot() {
+    common::init_test_logging();
+    const HANDSHAKE_BOUND: Duration = Duration::from_millis(300);
+    run_with_https_listener_config(
+        Http1ListenerConfig::default()
+            .max_connections(Some(1))
+            .http_config(Http1Config {
+                allowed_hosts: HostPolicy::allow_list(vec!["localhost".to_owned()]),
+                idle_timeout: Some(HANDSHAKE_BOUND),
+                ..Http1Config::default()
+            })
+            .drain_timeout(Duration::from_millis(200))
+            .hard_drain_timeout(Duration::from_secs(2)),
+        |addr, handler_calls| async move {
+            // The silent peer is accepted first (FIFO accept queue), takes the
+            // only slot, and never sends a ClientHello. `started` precedes the
+            // connect so the listener's handshake clock cannot start before it.
+            let started = Instant::now();
+            let silent = std::net::TcpStream::connect(addr).expect("connect silent peer");
+
+            // A real client retries until the listener has a slot for it.
+            // While the silent handshake holds the slot, the listener drops
+            // this client's socket before TLS, so each attempt fails fast.
+            let mut served = None;
+            for _ in 0..40 {
+                let attempt = async {
+                    let tcp = TcpStream::connect(addr).await.ok()?;
+                    let tls = connector_trusting(&server_root())
+                        .connect("localhost", tcp)
+                        .await
+                        .ok()?;
+                    let request = H1Request::get(PATH)
+                        .header("Host", "localhost")
+                        .header("Connection", "close")
+                        .build();
+                    Http1Client::request(tls, request).await.ok()
+                };
+                if let Some(response) = attempt.await {
+                    served = Some(response);
+                    break;
+                }
+                asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(100))
+                    .await;
+            }
+            let response = served
+                .expect("a second client must be served once the silent handshake is dropped");
+            assert_eq!(response.status, 200, "{response:?}");
+            assert_eq!(response.body, BODY.as_bytes());
+            assert!(
+                started.elapsed() >= HANDSHAKE_BOUND,
+                "the slot must be released by the handshake bound, not earlier: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(handler_calls.load(Ordering::Acquire), 1);
+            drop(silent);
+        },
+    );
 }
 
 /// Expected failure text for the public pooled client, by feature set.

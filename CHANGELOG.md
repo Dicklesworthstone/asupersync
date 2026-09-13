@@ -10,12 +10,17 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-09-10, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. `v0.4.11` is published;
-changes made afterward appear under Unreleased.
+Scope window: current work through 2026-09-12, reconstructed from git history,
+beads, benchmark ledgers, and live repo artifacts. `v0.5.0` is published to
+crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 
 ## Version Timeline
 
+- **v0.5.0 Release**: the approved capability-preserving context installation
+  boundary, browser local-task isolation and shutdown, reentrant worker
+  retirement, QUIC connection reclamation, and buffered I/O recovery.
+  Published from `78b64636e` with nine crates and signed Linux, macOS, and
+  Windows assets through DSR without GitHub Actions.
 - **v0.4.11 Release**: runtime cancellation and teardown, root-region drain,
   non-blocking file traits, Kafka lifecycle fixes, and bounded QUIC receive
   reassembly. Published from `9b114c1f2` to crates.io and GitHub, with signed
@@ -70,6 +75,14 @@ changes made afterward appear under Unreleased.
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-09-12
+
+[Published release](https://github.com/Dicklesworthstone/asupersync/releases/tag/v0.5.0)
+from `78b64636e99fea4ea2d868096576021dd3b8e519`, tracked in
+`asupersync-v5fn1e`. All nine crates.io archives and eleven GitHub assets were
+downloaded anonymously and matched the reviewed bytes; all four Minisign
+signatures verified against the public key at the release tag.
+
 ### Runtime capabilities and race history
 
 - Spawn APIs reject a context whose runtime capability mask excludes spawning,
@@ -83,17 +96,62 @@ changes made afterward appear under Unreleased.
   explicitly install its original privileged `Cx`; a narrowed copy no longer
   recovers that authority. Full-authority contexts keep their existing behavior.
   The owner approved this documented behavior correction on 2026-09-10 for
-  the next `0.5` release boundary; it is not a `0.4.x` patch change.
+  the `0.5` release boundary. It is the intentional migration from `0.4.x`.
 - Race and quorum histories retain the participant IDs captured when each race
   starts, even when mailbox admission replaces provisional task IDs. This
   prevents false loser-drain violations while retaining cancellation and cleanup.
+- Synchronous spawn rejection no longer adds a nonexistent child termination to
+  combinator and supervisor counters. Accepted children still count when they
+  are cancelled before their first poll.
+- Contexts expose inherited blocking-pool handles only when their typed and
+  runtime capabilities allow spawning; retrieving a handle never creates a pool.
 - The API-v2 integration lane covers 18 native/lab lifecycle cells, 256 seeded
   spawn/cancel/close interleavings, capability denial and inheritance, composed
   macros, loser cleanup, and channel/stream ownership. The journey runner also
   checks that both PureCaps and WebCaps fail to compile when used to spawn.
 
+### Runtime lifetime and browser execution
+
+- Browser runtimes admit only their own local tasks, preserve admission order
+  across nested native drives, and cancel queued or parked local tasks on
+  shutdown. A retained browser pump no longer keeps stopped tasks alive.
+- Native current-thread handoff keeps the local admission owner installed while
+  checking for queued work. Local tasks cannot be stranded by lending their
+  owning worker to another thread.
+- Worker retirement and wake-notifier replacement release their mutexes before
+  running user destructors, allowing shutdown callbacks to re-enter safely.
+- Browser microtask pumps drain spawn admissions and resume self-waking local
+  futures across burst yields. Browser time uses a portable monotonic clock.
+- Native reactor-registration exports and UDP fallback test helpers remain
+  excluded from WebAssembly builds.
+
+### Buffered I/O and protocol recovery
+
+- `File::into_std` settles pending reads and rewinds unconsumed read-ahead before
+  returning the standard file. Failed buffer flushes preserve recoverable
+  pending bytes.
+- Owned file cursor operations retain read-ahead reconciliation when cancelled
+  before starting. Reconciliation and a started operation share one cursor gate,
+  preserving ordering with cloned handles and unread bytes after rewind failure.
+- HTTP/1, HTTP/2, and remote-service listeners retry descriptor and buffer
+  exhaustion with bounded delays while retaining permanent socket errors.
+- The opt-in HTTP cookie store preserves `Secure` attributes and suppresses
+  those cookies on HTTP requests, including HTTPS-to-HTTP redirects.
+- TLS PEM loading uses the maintained parser in `rustls-pki-types`, preserving
+  certificate order, private-key selection, and error messages.
+- Framed writers reject an underlying writer's impossible byte count with
+  `InvalidData`, preserving the unacknowledged suffix for a retry.
+- Child-process pipe reads park on the fallback I/O driver when no native
+  runtime driver is installed.
+- HTTP/1 framing and idle request heads are bounded; HTTP/2 limits pending
+  request bodies. SQLite transactions refuse further statements after SQLite
+  has ended the transaction.
+
 ### Networking and ATP transfers
 
+- Native QUIC reclaims idle and closed connections, so vanished peers cannot
+  retain every connection slot indefinitely. Unauthenticated packets and stream
+  data received after reset are discarded.
 - Driverless TCP listener accepts and owned TCP/Unix split halves park on the
   fallback I/O driver instead of repeatedly waking their executor. Split-half
   registrations move to the ambient driver when one becomes available.
@@ -105,6 +163,18 @@ changes made afterward appear under Unreleased.
   inspect an empty ancestor directory.
 - ATP delta chunk builders fill each chunk across short reads. This repairs
   delta re-sync failures introduced in `v0.4.11` for files larger than 128 KiB.
+
+### Release verification
+
+- RCH lanes passed formatting, all-target/all-feature checking and Clippy,
+  22,808 library tests, 158 integration tests, and 68 compatibility-bridge
+  tests. The library run used `test-internals,tls-webpki-roots` and retained
+  23 existing ignored tests. All nine package archive verifications and the
+  packaged default, TLS, and cancellation consumer checks passed.
+- Linux x86-64, macOS ARM64, and Windows x86-64 executables were built through
+  RCH and smoke-tested on their native platforms. Linux was built and tested
+  on glibc 2.43; older glibc environments have not been validated. Publication
+  used DSR with `--no-dispatch`, with GitHub Actions disabled.
 
 ## [v0.4.11] - 2026-09-09
 

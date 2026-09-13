@@ -2439,10 +2439,8 @@ mod managed {
             let region_id = region.region_id();
             // Moved into the future at spawn so it fires on every terminal
             // path, including cancellation before the first poll.
-            let tally = crate::combinator::TerminationTally(Arc::clone(&self.terminated));
-            let handle = region
-                .cx()
-                .spawn(move |cx| async move {
+            let spawn = |tally| {
+                region.cx().spawn(move |cx| async move {
                     let _tally = tally;
                     let identity = ManagedGeneration {
                         number,
@@ -2491,6 +2489,8 @@ mod managed {
                     let shutdown_requested = publication.shutdown_requested;
                     publication.terminal = Some((completed_at, outcome, shutdown_requested));
                 })
+            };
+            let handle = crate::combinator::TerminationTally::track_spawn(&self.terminated, spawn)
                 .map_err(ManagedSupervisorError::Spawn)?;
             self.numbers[index] = number;
             self.running[index] = Some(RunningChild {

@@ -88,7 +88,13 @@ pub struct Http1Config {
     /// Maximum requests allowed on a single keep-alive connection.
     /// `None` means unlimited.
     pub max_requests_per_connection: Option<u64>,
-    /// Idle timeout between requests on a keep-alive connection.
+    /// Idle timeout between requests on a keep-alive connection, and the
+    /// bound on how long one request may keep the server waiting on the
+    /// socket: the buffered server reads a whole request (head and body)
+    /// under it, and the streaming server applies it to the head and then to
+    /// the body's accumulated socket waits (asupersync-1to1qw). It also
+    /// bounds the TLS handshake on [`crate::http::h1::listener::Http1Listener::run_tls`]
+    /// when the acceptor sets no handshake timeout of its own.
     /// `None` means no timeout (wait forever).
     pub idle_timeout: Option<Duration>,
     /// br-asupersync-t9yqht, br-asupersync-scxixg: Host header validation policy.
@@ -2554,6 +2560,17 @@ async fn drive_incoming_body<T>(
 where
     T: AsyncRead + Unpin,
 {
+    // asupersync-1to1qw: the socket-wait budget for this whole body. A bound
+    // applied per read let a peer trickle one byte per idle window and hold
+    // the connection, its in-flight slot, the body queues and a handler parked
+    // on the body for `max_body_size` windows. The buffered server bounds the
+    // entire request read by `idle_timeout` and the streaming head reader
+    // bounds the head the same way; the body now spends at most one
+    // `idle_timeout` waiting on the socket in total. Time spent applying
+    // backpressure to the handler (`push_bytes`) is not charged, so a slow
+    // consumer of a fast client is unaffected. The driver runs outside the
+    // request region, so the request budget does not cover it.
+    let mut read_budget = config.idle_timeout;
     loop {
         if writer.is_done() {
             let remainder = writer.take_remainder();
@@ -2579,15 +2596,19 @@ where
         }
 
         let mut chunk = [0_u8; 8192];
-        // The body read carries the same idle bound as the connection: a peer
-        // that sends a head and then goes silent (or trickles) must not hold
-        // the connection, its in-flight slot and a handler parked on the
-        // body forever. The body driver runs outside the request region, so
-        // the request budget does not cover it.
         let read = io.read(&mut chunk);
-        let read_result = if let Some(idle_timeout) = config.idle_timeout {
-            match timeout(connection_now(cx), idle_timeout, read).await {
-                Ok(result) => result,
+        let read_result = if let Some(remaining) = read_budget {
+            let started = connection_now(cx);
+            match timeout(started, remaining, read).await {
+                Ok(result) => {
+                    let waited = Duration::from_nanos(
+                        connection_now(cx)
+                            .as_nanos()
+                            .saturating_sub(started.as_nanos()),
+                    );
+                    read_budget = Some(remaining.saturating_sub(waited));
+                    result
+                }
                 Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
             }
         } else {
@@ -5916,6 +5937,94 @@ mod tests {
         assert_eq!(state.requests_served, 1);
         assert!(head_published.load(Ordering::SeqCst));
         assert!(String::from_utf8_lossy(&written.lock().unwrap()).contains("200 OK"));
+    }
+
+    /// asupersync-1to1qw: a client that trickles its body one byte per idle
+    /// window used to hold the connection, its in-flight slot and the parked
+    /// handler for `Content-Length` windows, because the body driver bounded
+    /// each read by `idle_timeout` separately. The whole body now shares one
+    /// `idle_timeout` of socket waiting, like the buffered server's request
+    /// read and the streaming head reader. Each trickle step here stays under
+    /// the window, so the old per-read bound served the request with a 200;
+    /// the shared budget ends the connection before the body completes.
+    #[test]
+    fn streaming_server_trickled_body_is_bounded_by_one_idle_window() {
+        const IDLE: Duration = Duration::from_millis(300);
+        const STEP: Duration = Duration::from_millis(200);
+        let server = Http1StreamingServer::with_config(
+            move |_cx, mut request| async move {
+                let mut body = Vec::new();
+                while let Some(frame) =
+                    poll_fn(|task_cx| Pin::new(&mut request.body).poll_frame(task_cx)).await
+                {
+                    match frame {
+                        Ok(frame) => {
+                            if let Some(data) = frame.into_data() {
+                                body.extend_from_slice(data.into_inner().as_ref());
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                Response::new(200, "OK", b"done")
+            },
+            localhost_server_config().idle_timeout(Some(IDLE)),
+        );
+
+        let raw_listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let address = raw_listener
+            .local_addr()
+            .expect("loopback listener address");
+        let client = std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+
+            let mut client =
+                std::net::TcpStream::connect(address).expect("connect loopback client");
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set client read timeout");
+            client
+                .write_all(
+                    b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write request head");
+            // One byte per STEP: every individual read wait is shorter than
+            // IDLE, but the body's total socket waiting is four STEPs.
+            for byte in b"abcd" {
+                std::thread::sleep(STEP);
+                if client.write_all(&[*byte]).is_err() {
+                    break;
+                }
+            }
+            let mut received = Vec::new();
+            let _ = client.read_to_end(&mut received);
+            received
+        });
+        let (server_raw, _) = raw_listener.accept().expect("accept loopback client");
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                let stream = crate::net::tcp::stream::TcpStream::from_std(server_raw)
+                    .expect("wrap loopback server stream");
+                server.serve_with_peer_addr(&cx, stream, None).await
+            })
+            .expect("a trickled body ends the connection without an io error");
+        let received = client.join().expect("join loopback client");
+
+        assert_eq!(
+            state.requests_served, 0,
+            "the aborted request must not count as served"
+        );
+        assert!(
+            received.is_empty(),
+            "no response may be written for a body that never arrived within one idle window: {:?}",
+            String::from_utf8_lossy(&received)
+        );
     }
 
     #[test]

@@ -122,7 +122,7 @@ mod tests {
                     for frame in frames {
                         frame.encode(&mut payload).unwrap();
                     }
-                    let header = encode_one_rtt_header(number);
+                    let header = encode_one_rtt_header(number, false);
                     let request = PacketProtectionRequest {
                         space: PacketProtectionSpace::OneRtt,
                         key_phase: false,
@@ -1953,19 +1953,23 @@ mod tests {
 
     #[test]
     fn one_rtt_header_round_trips() {
-        for pn in [0u64, 1, 41, 255, 65_536, u64::from(u32::MAX), u64::MAX] {
-            let header = encode_one_rtt_header(pn);
-            // Build a minimal packet: header + 1 ciphertext byte + tag.
-            let mut packet = header.to_vec();
-            packet.push(0xAB);
-            packet.extend_from_slice(&[0u8; ONE_RTT_TAG_LEN]);
-            let (key_phase, decoded_pn, decoded_header, ciphertext, tag) =
-                decode_one_rtt_packet(&packet).expect("decodes");
-            assert!(!key_phase);
-            assert_eq!(decoded_pn, pn);
-            assert_eq!(decoded_header, &header);
-            assert_eq!(ciphertext, &[0xAB]);
-            assert_eq!(tag, [0u8; ONE_RTT_TAG_LEN]);
+        // asupersync-gsnci5: the header now carries the key-phase bit, so
+        // round-trip both phases.
+        for key_phase in [false, true] {
+            for pn in [0u64, 1, 41, 255, 65_536, u64::from(u32::MAX), u64::MAX] {
+                let header = encode_one_rtt_header(pn, key_phase);
+                // Build a minimal packet: header + 1 ciphertext byte + tag.
+                let mut packet = header.to_vec();
+                packet.push(0xAB);
+                packet.extend_from_slice(&[0u8; ONE_RTT_TAG_LEN]);
+                let (decoded_key_phase, decoded_pn, decoded_header, ciphertext, tag) =
+                    decode_one_rtt_packet(&packet).expect("decodes");
+                assert_eq!(decoded_key_phase, key_phase);
+                assert_eq!(decoded_pn, pn);
+                assert_eq!(decoded_header, &header);
+                assert_eq!(ciphertext, &[0xAB]);
+                assert_eq!(tag, [0u8; ONE_RTT_TAG_LEN]);
+            }
         }
     }
 

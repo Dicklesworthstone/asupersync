@@ -9,6 +9,17 @@
 //!
 //! The receiver side is unchanged — obligation tracking only affects the sender.
 //!
+//! # Callers must run in a non-root region
+//!
+//! Every tracked reservation mints a graded obligation token scoped to the
+//! caller's region, and obligations cannot live in the root region
+//! (`[ASUP-E103]`: they would hide leaks and break quiescence). `block_on`'s
+//! root task and `RuntimeHandle::spawn` tasks run in the root region, as does
+//! a `LabRuntime` task created directly under `create_root_region`; reserving
+//! from such a `Cx` panics with `[ASUP-E103]` in every build (the former
+//! test-only fallback that masked this is gone, asupersync-a2hoy1). Reserve
+//! from a child region (a `Scope` region or a task spawned inside one).
+//!
 //! The additive `*_checked` sender methods obtain runtime admission through the
 //! underlying channel before creating a graded permit. They return the channel's
 //! checked error on denial and retain the same explicit commit/abort requirement
@@ -61,15 +72,23 @@ use crate::cx::Cx;
 use crate::obligation::graded::{AbortedProof, CommittedProof, ObligationToken, SendPermit};
 use crate::types::RegionId;
 
+/// Mints the graded send obligation for a tracked permit, scoped to the
+/// caller's region.
+///
+/// asupersync-a2hoy1: this used to route the root region (id zero) to the
+/// test-only `ObligationToken::reserve_test` under `cfg(test)` and the
+/// `test-internals` feature, so every in-tree test of a root-region caller
+/// succeeded while production builds panicked with `[ASUP-E103]`. The
+/// fallback is gone: tests and production now share one path, and the
+/// `[ASUP-E103]` guard in [`ObligationToken::reserve`] is the single source
+/// of the non-root requirement (root-region obligations would hide leaks and
+/// break quiescence). Callers that must run in the root region, such as
+/// `block_on`'s task, need a child region before reserving; the gen_server
+/// call path refuses such callers with a typed error instead.
 fn reserve_tracked_send_obligation_for_region(
     description: &'static str,
     region: RegionId,
 ) -> ObligationToken<SendPermit> {
-    #[cfg(any(test, feature = "test-internals"))]
-    if region.as_u64() == 0 {
-        return ObligationToken::<SendPermit>::reserve_test(description);
-    }
-
     ObligationToken::<SendPermit>::reserve(description, region)
 }
 
@@ -213,6 +232,11 @@ impl<T> TrackedSender<T> {
     ///
     /// The returned permit carries an [`ObligationToken<SendPermit>`] that
     /// panics on drop if not committed or aborted.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `[ASUP-E103]` when `cx` belongs to the root region; see
+    /// the module docs.
     pub async fn reserve<'a>(
         &'a self,
         cx: &'a Cx,
@@ -228,6 +252,11 @@ impl<T> TrackedSender<T> {
     /// Cancellation is checked before channel capacity is acquired. This
     /// method never consults ambient task context, so synchronous production
     /// code can use it with an explicit, non-root task [`Cx`].
+    ///
+    /// # Panics
+    ///
+    /// Panics with `[ASUP-E103]` when `cx` belongs to the root region; see
+    /// the module docs.
     pub fn try_reserve(&self, cx: &Cx) -> Result<TrackedPermit<'_, T>, mpsc::SendError<()>> {
         if cx.checkpoint().is_err() {
             return Err(mpsc::SendError::Cancelled(()));
@@ -248,8 +277,8 @@ impl<T> TrackedSender<T> {
     ///
     /// # Panics
     ///
-    /// Like the legacy session reservation, requires a non-root region for
-    /// graded tracking outside test-internal builds.
+    /// Like the legacy session reservation, panics with `[ASUP-E103]` when
+    /// `cx` belongs to the root region; see the module docs.
     pub async fn reserve_checked<'a>(
         &'a self,
         cx: &'a Cx,
@@ -473,6 +502,11 @@ impl<T> TrackedOneshotSender<T> {
     /// Returns `Err(oneshot::SendError::Cancelled(()))` if the supplied `Cx`
     /// is already cancelled — propagated from `oneshot::Sender::reserve`
     /// (br-asupersync-4taf1b).
+    ///
+    /// # Panics
+    ///
+    /// Panics with `[ASUP-E103]` when `cx` belongs to the root region; see
+    /// the module docs.
     pub fn reserve(self, cx: &Cx) -> Result<TrackedOneshotPermit<T>, oneshot::SendError<()>> {
         let permit = self.inner.reserve(cx)?;
         let obligation =
@@ -488,8 +522,8 @@ impl<T> TrackedOneshotSender<T> {
     ///
     /// # Panics
     ///
-    /// Like the legacy session reservation, requires a non-root region for
-    /// graded tracking outside test-internal builds.
+    /// Like the legacy session reservation, panics with `[ASUP-E103]` when
+    /// `cx` belongs to the root region; see the module docs.
     pub fn reserve_checked(
         self,
         cx: &Cx,
@@ -673,6 +707,44 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    /// asupersync-a2hoy1: the root region (id zero) used to be routed to the
+    /// test-only `reserve_test` token under `cfg(test)`, so this reservation
+    /// succeeded in every in-tree test while production builds panicked with
+    /// `[ASUP-E103]`. Tests now see the production path: a root-region caller
+    /// panics here exactly as it does in a shipped binary.
+    #[test]
+    #[should_panic(expected = "[ASUP-E103]")]
+    fn tracked_mpsc_reserve_from_root_region_panics_like_production() {
+        init_test("tracked_mpsc_reserve_from_root_region_panics_like_production");
+        let root_cx = Cx::new(
+            RegionId::testing_default(),
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+        assert_eq!(
+            root_cx.region_id().as_u64(),
+            0,
+            "the reproducer must reserve from the root region"
+        );
+        let (tx, _rx) = tracked_channel::<i32>(1);
+        let _permit = tx.try_reserve(&root_cx);
+    }
+
+    /// asupersync-a2hoy1: same production-path guarantee for the tracked
+    /// oneshot reservation.
+    #[test]
+    #[should_panic(expected = "[ASUP-E103]")]
+    fn tracked_oneshot_reserve_from_root_region_panics_like_production() {
+        init_test("tracked_oneshot_reserve_from_root_region_panics_like_production");
+        let root_cx = Cx::new(
+            RegionId::testing_default(),
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
+        let (tx, _rx) = tracked_oneshot::<i32>();
+        let _permit = tx.reserve(&root_cx);
     }
 
     // 1. Reserve + send, verify receiver gets value and CommittedProof returned
@@ -1761,26 +1833,39 @@ mod tests {
         let (received, proof_kind, checkpoints) =
             LabRuntimeTarget::block_on(&mut runtime, async move {
                 let cx = Cx::current().expect("lab runtime should install a current Cx");
-                let sender_cx = cx.clone();
-                let receiver_cx = cx.clone();
+                // asupersync-a2hoy1: a tracked reservation mints a graded
+                // obligation scoped to the caller's region, and the root
+                // region (the `block_on` task's) may not hold obligations
+                // ([ASUP-E103]). Run the sender and receiver in a child region,
+                // which is also what the production path requires; the
+                // former test-only fallback used to hide this.
+                let region = LabRuntimeTarget::create_region(&cx, Budget::INFINITE);
                 let (tx, mut rx) = tracked_channel::<i32>(1);
 
-                let sender_task_cx = sender_cx.clone();
-                let sender = LabRuntimeTarget::spawn(&sender_cx, Budget::INFINITE, async move {
-                    let permit = tx.reserve(&sender_task_cx).await.expect("reserve failed");
-                    tracing::info!(
-                        event = %serde_json::json!({
-                            "phase": "reserved",
-                            "capacity": 1,
-                        }),
-                        "session_lab_checkpoint"
-                    );
-                    permit.send(42).expect("send failed").kind()
-                });
+                let sender =
+                    LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async move {
+                        let sender_task_cx =
+                            Cx::current().expect("region task should run with a current Cx");
+                        assert_ne!(
+                            sender_task_cx.region_id().as_u64(),
+                            0,
+                            "the sender must reserve from a non-root region"
+                        );
+                        let permit = tx.reserve(&sender_task_cx).await.expect("reserve failed");
+                        tracing::info!(
+                            event = %serde_json::json!({
+                                "phase": "reserved",
+                                "capacity": 1,
+                            }),
+                            "session_lab_checkpoint"
+                        );
+                        permit.send(42).expect("send failed").kind()
+                    });
 
-                let receiver_task_cx = receiver_cx.clone();
                 let receiver =
-                    LabRuntimeTarget::spawn(&receiver_cx, Budget::INFINITE, async move {
+                    LabRuntimeTarget::spawn_in_region(&cx, &region, Budget::INFINITE, async move {
+                        let receiver_task_cx =
+                            Cx::current().expect("region task should run with a current Cx");
                         let value = rx.recv(&receiver_task_cx).await.expect("recv failed");
                         tracing::info!(
                             event = %serde_json::json!({
@@ -1830,6 +1915,10 @@ mod tests {
                 for checkpoint in &checkpoints {
                     tracing::info!(event = %checkpoint, "session_lab_checkpoint");
                 }
+
+                // Both region tasks have completed; close the child region so
+                // the lab run ends quiescent with no open region left behind.
+                region.await;
 
                 (received, proof_kind, checkpoints)
             });

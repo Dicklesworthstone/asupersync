@@ -91,7 +91,7 @@ under `CRITERION_HOME` (or the usual target Criterion directory). Its exact
 path is printed as `[PHASE6] measurement directory: ...`. Archive that
 directory with the run log. For `scripts/capture_baseline.sh`, set
 `CRITERION_DIR` to that printed directory; the exporter refuses a parent
-containing multiple retained invocations. The comparator reads only that invocation's
+containing retained invocations. The comparator reads only that invocation's
 estimates: filtered, list-only, or test-only runs cannot reuse prior passing
 measurements for omitted rows. Ungated runs keep Criterion's normal output
 and saved-baseline behavior. No previous result directories are removed.

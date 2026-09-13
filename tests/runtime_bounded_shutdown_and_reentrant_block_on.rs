@@ -26,6 +26,278 @@ use std::future::Future;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[test]
+fn browser_runtime_drop_cancels_queued_and_parked_local_tasks() {
+    use asupersync::runtime::{BrowserHostServices, JoinError};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    struct Capture(Rc<Cell<usize>>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .browser_host_services(Arc::new(BrowserHostServices::new()))
+        .build()
+        .expect("browser runtime");
+    let pump = runtime.browser_pump().expect("browser pump");
+    let drops = Rc::new(Cell::new(0));
+    let polls = Rc::new(Cell::new(0));
+    let capture = Capture(Rc::clone(&drops));
+    let polled = Rc::clone(&polls);
+    let parked = runtime.spawn_local(async move {
+        let _capture = capture;
+        polled.set(polled.get() + 1);
+        std::future::pending::<u8>().await
+    });
+    assert!(pump.step());
+    assert_eq!(polls.get(), 1, "first task reached its Pending boundary");
+    assert!(!parked.is_finished());
+
+    let capture = Capture(Rc::clone(&drops));
+    let polled = Rc::clone(&polls);
+    let queued = runtime.spawn_local(async move {
+        let _capture = capture;
+        polled.set(polled.get() + 1);
+        std::future::pending::<u8>().await
+    });
+    assert!(!queued.is_finished());
+    assert_eq!(drops.get(), 0);
+    let native = RuntimeBuilder::current_thread()
+        .build()
+        .expect("nested native runtime");
+    native.block_on(async {
+        drop(runtime);
+        assert!(
+            queued.is_finished(),
+            "nested drive must not hide the browser queue"
+        );
+        assert!(
+            parked.is_finished(),
+            "nested drive must not retain the browser store"
+        );
+    });
+
+    assert_eq!(polls.get(), 1, "shutdown must not invoke the queued future");
+    assert_eq!(drops.get(), 2, "both local captures must be released");
+    let mut context = Context::from_waker(Waker::noop());
+    for mut handle in [parked, queued] {
+        assert!(handle.is_finished(), "shutdown must publish the local join");
+        assert!(matches!(
+            std::pin::Pin::new(&mut handle).poll(&mut context),
+            Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.is_shutdown()
+        ));
+        assert_eq!(
+            std::pin::Pin::new(&mut handle).poll(&mut context),
+            Poll::Ready(Err(JoinError::PolledAfterCompletion))
+        );
+    }
+    assert_eq!(pump.run_until_idle(), 0);
+}
+
+#[test]
+fn browser_pumps_preserve_local_admission_and_shutdown_ownership() {
+    use asupersync::runtime::{BrowserHostServices, JoinError};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    let build = || {
+        RuntimeBuilder::new()
+            .worker_threads(1)
+            .browser_host_services(Arc::new(BrowserHostServices::new()))
+            .build()
+            .expect("browser runtime")
+    };
+    let first = build();
+    let second = build();
+    let first_polls = Rc::new(Cell::new(0));
+    let polled = Rc::clone(&first_polls);
+    let mut first_join = first.spawn_local(async move {
+        polled.set(polled.get() + 1);
+        1_u8
+    });
+    let mut second_join = second.spawn_local(async { 2_u8 });
+
+    // A native current-thread drive must leave these requests available only
+    // to their respective browser runtimes.
+    let native = RuntimeBuilder::current_thread()
+        .build()
+        .expect("native runtime");
+    native.block_on(async {});
+    drop(native);
+
+    let pump = second.browser_pump().expect("second pump");
+    assert_eq!(pump.run_until_idle(), 1, "only the second runtime may run");
+    assert_eq!(first_polls.get(), 0);
+    assert!(!first_join.is_finished());
+    let mut context = Context::from_waker(Waker::noop());
+    assert_eq!(
+        std::pin::Pin::new(&mut second_join).poll(&mut context),
+        Poll::Ready(Ok(2))
+    );
+
+    let mut survivor = second.spawn_local(async { 3_u8 });
+    drop(first);
+    assert_eq!(first_polls.get(), 0);
+    assert!(matches!(
+        std::pin::Pin::new(&mut first_join).poll(&mut context),
+        Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.is_shutdown()
+    ));
+    assert!(
+        !survivor.is_finished(),
+        "the other runtime retains its request"
+    );
+    assert_eq!(pump.run_until_idle(), 1);
+    assert_eq!(
+        std::pin::Pin::new(&mut survivor).poll(&mut context),
+        Poll::Ready(Ok(3))
+    );
+}
+
+#[test]
+fn browser_local_requests_keep_fifo_across_nested_native_drive() {
+    use asupersync::runtime::BrowserHostServices;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    let browser = RuntimeBuilder::new()
+        .worker_threads(1)
+        .browser_host_services(Arc::new(BrowserHostServices::new()))
+        .build()
+        .expect("browser runtime");
+    let order = Rc::new(RefCell::new(Vec::new()));
+    let recorded = Rc::clone(&order);
+    let first = browser.spawn_local(async move { recorded.borrow_mut().push(1) });
+    let native = RuntimeBuilder::current_thread()
+        .build()
+        .expect("native runtime");
+    let recorded = Rc::clone(&order);
+    let mut second = None;
+    native.block_on(async {
+        second = Some(browser.spawn_local(async move { recorded.borrow_mut().push(2) }));
+    });
+    let second = second.expect("browser request queued during the native drive");
+    assert!(!first.is_finished());
+    assert!(!second.is_finished());
+    let pump = browser.browser_pump().expect("browser pump");
+    assert_eq!(pump.run_until_idle(), 2);
+    assert_eq!(*order.borrow(), vec![1, 2]);
+    assert!(first.is_finished());
+    assert!(second.is_finished());
+}
+
+#[test]
+fn browser_shutdown_retires_a_parked_send_task_with_a_retained_pump() {
+    use asupersync::runtime::{BrowserHostServices, JoinError};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Waker};
+
+    struct Capture(Arc<AtomicUsize>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .browser_host_services(Arc::new(BrowserHostServices::new()))
+        .build()
+        .expect("browser runtime");
+    let pump = runtime.browser_pump().expect("browser pump");
+    let drops = Arc::new(AtomicUsize::new(0));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let capture = Capture(Arc::clone(&drops));
+    let polled = Arc::clone(&polls);
+    let mut handle = runtime.handle().spawn_checked(async move {
+        let _capture = capture;
+        polled.fetch_add(1, Ordering::SeqCst);
+        std::future::pending::<u8>().await
+    });
+    assert!(pump.step());
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    assert!(!handle.is_finished());
+
+    drop(runtime);
+
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(handle.is_finished());
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        std::pin::Pin::new(&mut handle).poll(&mut context),
+        Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.is_shutdown()
+    ));
+    assert_eq!(pump.run_until_idle(), 0);
+}
+
+#[test]
+fn browser_shutdown_during_local_poll_retires_the_returned_pending_future() {
+    use asupersync::runtime::{BrowserHostServices, JoinError};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Waker};
+
+    struct Capture(Rc<Cell<usize>>);
+    impl Drop for Capture {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .browser_host_services(Arc::new(BrowserHostServices::new()))
+        .build()
+        .expect("browser runtime");
+    let pump = runtime.browser_pump().expect("browser pump");
+    let drops = Rc::new(Cell::new(0));
+    let polls = Rc::new(Cell::new(0));
+    let capture = Capture(Rc::clone(&drops));
+    let polled = Rc::clone(&polls);
+    let last_owner = runtime.clone();
+    let mut handle = runtime.spawn_local(async move {
+        let _capture = capture;
+        polled.set(polled.get() + 1);
+        drop(last_owner);
+        std::future::pending::<u8>().await
+    });
+    drop(runtime);
+    assert_eq!(polls.get(), 0);
+    assert_eq!(drops.get(), 0);
+    assert!(!handle.is_finished());
+
+    assert!(
+        pump.step(),
+        "the task ran the runtime destructor during its poll"
+    );
+
+    assert_eq!(polls.get(), 1);
+    assert_eq!(
+        drops.get(),
+        1,
+        "the returned Pending future must be retired"
+    );
+    assert!(handle.is_finished());
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        std::pin::Pin::new(&mut handle).poll(&mut context),
+        Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.is_shutdown()
+    ));
+    assert_eq!(pump.run_until_idle(), 0);
+}
+
 /// A teardown regression must not strand the test harness if destruction
 /// deadlocks. This guard owns only the subprocess created by this test.
 struct TeardownChild(Option<std::process::Child>);

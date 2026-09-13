@@ -27,7 +27,6 @@ prost = "0.14"
 futures = "0.3"
 futures-util = "0.3"
 rustls = { version = "0.23.38", default-features = false, features = ["std", "ring", "tls12"] }
-rustls-pemfile = "2.2"
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
 
 # For SCRAM-SHA-256 parsing

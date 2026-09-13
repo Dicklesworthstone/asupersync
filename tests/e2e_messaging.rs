@@ -218,6 +218,13 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
             .trace_capacity(16 * 1024),
     );
     let root = runtime.state.create_root_region(Budget::INFINITE);
+    // asupersync-a2hoy1: tracked permits mint a graded obligation scoped to
+    // the caller's region, and the root region may not hold obligations
+    // ([ASUP-E103]); the tasks run in a child region, as production must.
+    let region = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("create child region");
 
     let (tx, mut rx) = tracked_channel::<u64>(2);
     let received = Arc::new(Mutex::new(Vec::new()));
@@ -226,7 +233,7 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
     test_section!("spawn_receiver");
     let (recv_task, _) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let Some(cx) = Cx::current() else {
                 return;
             };
@@ -239,7 +246,7 @@ fn e2e_tracked_mpsc_commit_with_lab_replay() {
     test_section!("spawn_sender");
     let (send_task, _) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let Some(cx) = Cx::current() else {
                 return;
             };
@@ -276,6 +283,12 @@ fn e2e_tracked_mpsc_abort_with_lab_replay() {
             .trace_capacity(16 * 1024),
     );
     let root = runtime.state.create_root_region(Budget::INFINITE);
+    // asupersync-a2hoy1: see the commit test above; the aborting task must
+    // also hold its graded obligation in a non-root region.
+    let region = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("create child region");
 
     let (tx, mut rx) = tracked_channel::<u64>(1);
     let result = Arc::new(Mutex::new(None));
@@ -284,7 +297,7 @@ fn e2e_tracked_mpsc_abort_with_lab_replay() {
     test_section!("spawn_receiver");
     let (recv_task, _) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let Some(cx) = Cx::current() else {
                 return;
             };
@@ -297,7 +310,7 @@ fn e2e_tracked_mpsc_abort_with_lab_replay() {
     test_section!("spawn_sender_abort");
     let (send_task, _) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let Some(cx) = Cx::current() else {
                 return;
             };
@@ -333,6 +346,12 @@ fn e2e_tracked_mpsc_cancel_mid_reserve() {
             .trace_capacity(16 * 1024),
     );
     let root = runtime.state.create_root_region(Budget::INFINITE);
+    // Plain mpsc permits carry no graded token, but the task runs in a child
+    // region like its tracked siblings so the three tests share one shape.
+    let region = runtime
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .expect("create child region");
 
     let (tx, _rx) = mpsc::channel::<u64>(1);
     let outcome = Arc::new(Mutex::new(None));
@@ -340,7 +359,7 @@ fn e2e_tracked_mpsc_cancel_mid_reserve() {
 
     let (task_id, _) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let Some(cx) = Cx::current() else {
                 return;
             };

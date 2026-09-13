@@ -29,6 +29,34 @@ const REARMED_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 const REARMED_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(32);
 const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(50);
 
+/// Resource shortages that can recover while a listener remains open.
+///
+/// Inspect native codes because descriptor exhaustion has no stable
+/// `ErrorKind` variant. Callers must delay retries to avoid busy-spinning.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn is_accept_resource_exhaustion(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::OutOfMemory {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+        )
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Networking::WinSock::{WSAEMFILE, WSAENOBUFS};
+        matches!(error.raw_os_error(), Some(WSAEMFILE | WSAENOBUFS))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn listener_now() -> Time {
     Cx::current()

@@ -1039,11 +1039,12 @@ where
             let child_returned = Arc::clone(&returned);
             // Moved into the future at spawn so it fires on every terminal
             // path, including cancellation before the first poll.
-            let tally = super::TerminationTally(Arc::clone(&terminated));
-            match cx.spawn_in_cancellation_dominant(scope, move |child| async move {
-                let _tally = tally;
-                let outcome = mapper(child, item).await;
-                *child_returned.lock() = Some(outcome);
+            match super::TerminationTally::track_spawn(&terminated, |tally| {
+                cx.spawn_in_cancellation_dominant(scope, move |child| async move {
+                    let _tally = tally;
+                    let outcome = mapper(child, item).await;
+                    *child_returned.lock() = Some(outcome);
+                })
             }) {
                 Ok(handle) => {
                     owner.slots.push_back(ExecutingMapSlot {

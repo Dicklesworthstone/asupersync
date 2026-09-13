@@ -1585,8 +1585,10 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 -----END CERTIFICATE-----\n";
 
     pub fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
+        use rustls::pki_types::pem::PemObject;
+
         let mut reader = std::io::BufReader::new(pem.as_bytes());
-        rustls_pemfile::certs(&mut reader)
+        CertificateDer::pem_reader_iter(&mut reader)
             .next()
             .expect("one cert")
             .expect("valid cert pem")
@@ -1601,10 +1603,12 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
     }
 
     fn cert_without_eku() -> CertificateDer<'static> {
+        use rustls::pki_types::pem::PemObject;
+
         let mut reader = std::io::BufReader::new(
             include_bytes!("../../../tests/fixtures/tls/server.crt").as_slice(),
         );
-        rustls_pemfile::certs(&mut reader)
+        CertificateDer::pem_reader_iter(&mut reader)
             .next()
             .expect("one cert")
             .expect("valid cert pem")
@@ -1658,8 +1662,12 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
     }
 
     pub fn leaf_key() -> PrivateKeyDer<'static> {
+        use rustls::pki_types::pem::PemObject;
+
         let mut reader = std::io::BufReader::new(LEAF_KEY_PEM.as_bytes());
-        rustls_pemfile::private_key(&mut reader)
+        PrivateKeyDer::pem_reader_iter(&mut reader)
+            .next()
+            .transpose()
             .expect("read key pem")
             .expect("one key")
     }

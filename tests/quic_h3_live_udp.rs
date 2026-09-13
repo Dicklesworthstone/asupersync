@@ -35,7 +35,7 @@ use asupersync::web::{
     StatusCode, post,
 };
 use futures_lite::future::{block_on, zip};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject};
 
 const H3_ALPN: &[u8] = b"h3";
 const OTHER_ALPN: &[u8] = b"hq-29";
@@ -76,14 +76,16 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 -----END CERTIFICATE-----\n";
 
 fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
-    rustls_pemfile::certs(&mut BufReader::new(pem.as_bytes()))
+    CertificateDer::pem_reader_iter(&mut BufReader::new(pem.as_bytes()))
         .next()
         .expect("one certificate")
         .expect("valid certificate PEM")
 }
 
 fn leaf_key() -> PrivateKeyDer<'static> {
-    rustls_pemfile::private_key(&mut BufReader::new(LEAF_KEY_PEM.as_bytes()))
+    PrivateKeyDer::pem_reader_iter(&mut BufReader::new(LEAF_KEY_PEM.as_bytes()))
+        .next()
+        .transpose()
         .expect("read private key PEM")
         .expect("one private key")
 }
@@ -2902,7 +2904,9 @@ t1Xfx0NGxOzzDaZCSlrAJXuk+K+UxhmqfWmwVkzvjWfZzQEwi/qmDZFH
     }
 
     fn key(pem: &str) -> PrivateKeyDer<'static> {
-        rustls_pemfile::private_key(&mut pem.as_bytes())
+        PrivateKeyDer::pem_reader_iter(&mut pem.as_bytes())
+            .next()
+            .transpose()
             .unwrap()
             .unwrap()
     }

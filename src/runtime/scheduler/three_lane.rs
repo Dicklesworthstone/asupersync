@@ -1030,10 +1030,13 @@ impl WorkerCoordinator {
     }
 
     pub(crate) fn set_wake_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) {
-        *self.wake_notifier.slot.lock() = Some(notifier);
+        let previous = self.wake_notifier.slot.lock().replace(notifier);
         self.wake_notifier
             .armed
             .store(true, std::sync::atomic::Ordering::Release);
+        // Captured destructors may wake tasks and reenter the notifier. Publish
+        // the replacement first, then retire the old callback outside its lock.
+        drop(previous);
     }
 
     #[inline]

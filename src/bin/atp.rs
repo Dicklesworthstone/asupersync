@@ -1081,16 +1081,46 @@ fn validate_requested_bwlimit_transport(
 
 // ─── QUIC (`--transport quic`) TLS material + config ─────────────────────────
 
+// This binary keeps its existing PEM diagnostics without expanding the library API.
+#[cfg(feature = "tls")]
+fn pem_error_message(error: rustls::pki_types::pem::Error) -> String {
+    use rustls::pki_types::pem::Error;
+
+    match error {
+        Error::MissingSectionEnd { end_marker } => format!(
+            "section end {:?} missing",
+            String::from_utf8_lossy(&end_marker)
+        ),
+        Error::IllegalSectionStart { line } => {
+            format!(
+                "illegal section start: {:?}",
+                String::from_utf8_lossy(&line)
+            )
+        }
+        Error::Base64Decode(message) => message,
+        Error::Io(error) => error.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 /// Load a PEM certificate chain (one or more certificates) from `path`.
 #[cfg(feature = "tls")]
 fn load_cert_chain(
     path: &std::path::Path,
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
     let pem = std::fs::read(path).map_err(|e| format!("read cert {}: {e}", path.display()))?;
     let mut reader = std::io::BufReader::new(pem.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_reader_iter(&mut reader)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("parse certs in {}: {e}", path.display()))?;
+        .map_err(|e| {
+            format!(
+                "parse certs in {}: {}",
+                path.display(),
+                pem_error_message(e)
+            )
+        })?;
     if certs.is_empty() {
         return Err(format!("no certificates found in {}", path.display()));
     }
@@ -1150,10 +1180,14 @@ fn load_native_root_certs() -> Result<Vec<rustls::pki_types::CertificateDer<'sta
 fn load_private_key(
     path: &std::path::Path,
 ) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
+    use rustls::pki_types::{PrivateKeyDer, pem::PemObject};
+
     let pem = std::fs::read(path).map_err(|e| format!("read key {}: {e}", path.display()))?;
     let mut reader = std::io::BufReader::new(pem.as_slice());
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| format!("parse key in {}: {e}", path.display()))?
+    PrivateKeyDer::pem_reader_iter(&mut reader)
+        .next()
+        .transpose()
+        .map_err(|e| format!("parse key in {}: {}", path.display(), pem_error_message(e)))?
         .ok_or_else(|| format!("no private key found in {}", path.display()))
 }
 
@@ -10244,6 +10278,94 @@ mod tests {
     }
 
     const VALID_KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_file_loaders_keep_first_key_and_reject_bad_input() {
+        let directory = tempfile::tempdir().expect("PEM test directory");
+        let cert_path = directory.path().join("chain.pem");
+        let key_path = directory.path().join("key.pem");
+        let cert = include_bytes!("../../tests/fixtures/tls/server.crt");
+        fs::write(
+            &cert_path,
+            [cert.as_slice(), b"\n", cert.as_slice()].concat(),
+        )
+        .unwrap();
+        let chain = load_cert_chain(&cert_path).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0], chain[1]);
+
+        // The file loader selects the first format encountered, unlike
+        // tls::PrivateKey::from_pem's PKCS#8-first policy.
+        let first = b"-----BEGIN EC PRIVATE KEY-----\nAQID\n-----END EC PRIVATE KEY-----\n";
+        let second = b"-----BEGIN PRIVATE KEY-----\nBAUG\n-----END PRIVATE KEY-----\n";
+        fs::write(&key_path, [first.as_slice(), second.as_slice()].concat()).unwrap();
+        let key = load_private_key(&key_path).unwrap();
+        assert!(matches!(key, rustls::pki_types::PrivateKeyDer::Sec1(_)));
+        assert_eq!(key.secret_der(), &[1, 2, 3]);
+
+        let malformed = b"-----BEGIN PRIVATE KEY-----\n!invalid!\n-----END PRIVATE KEY-----\n";
+        fs::write(&key_path, [first.as_slice(), malformed.as_slice()].concat()).unwrap();
+        assert_eq!(
+            load_private_key(&key_path).unwrap().secret_der(),
+            &[1, 2, 3]
+        );
+        fs::write(&key_path, malformed).unwrap();
+        assert!(
+            load_private_key(&key_path)
+                .unwrap_err()
+                .contains("parse key")
+        );
+        fs::write(&key_path, cert).unwrap();
+        assert!(
+            load_private_key(&key_path)
+                .unwrap_err()
+                .contains("no private key")
+        );
+        fs::write(&cert_path, malformed).unwrap();
+        assert!(
+            load_cert_chain(&cert_path)
+                .unwrap_err()
+                .contains("parse certs")
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pem_file_loaders_preserve_legacy_error_messages() {
+        let directory = tempfile::tempdir().expect("PEM error test directory");
+        let path = directory.path().join("invalid.pem");
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"-----BEGIN PRIVATE KEY-----\nAQID\n",
+                "section end \"PRIVATE KEY\" missing",
+            ),
+            (
+                b"-----BEGIN \xff\n",
+                "illegal section start: \"-----BEGIN \u{fffd}\\n\"",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY----\r\n",
+                "illegal section start: \"-----BEGIN PRIVATE KEY----\\r\"",
+            ),
+            (
+                b"-----BEGIN PRIVATE KEY-----\n!\n-----END PRIVATE KEY-----\n",
+                "InvalidCharacter(33)",
+            ),
+        ];
+        for &(pem, expected) in cases {
+            fs::write(&path, pem).unwrap();
+            assert_eq!(
+                load_private_key(&path).unwrap_err(),
+                format!("parse key in {}: {expected}", path.display())
+            );
+            assert_eq!(
+                load_cert_chain(&path).unwrap_err(),
+                format!("parse certs in {}: {expected}", path.display())
+            );
+        }
+    }
+
     #[cfg(feature = "tls")]
     const QUIC_PINNED_LEAF_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
 MIIBwTCCAWigAwIBAgIUTQyiZ96ufyKHVqRYRZBXpRQABGMwCgYIKoZIzj0EAwIw\n\
@@ -10260,8 +10382,10 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
 
     #[cfg(feature = "tls")]
     fn parse_quic_pinned_leaf_cert() -> rustls::pki_types::CertificateDer<'static> {
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+
         let mut reader = std::io::BufReader::new(QUIC_PINNED_LEAF_CERT_PEM.as_bytes());
-        rustls_pemfile::certs(&mut reader)
+        CertificateDer::pem_reader_iter(&mut reader)
             .next()
             .expect("one cert")
             .expect("valid cert pem")

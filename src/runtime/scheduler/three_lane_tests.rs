@@ -3142,6 +3142,72 @@ fn test_coordinator_zero_workers_is_noop() {
     coordinator.wake_all();
 }
 
+#[test]
+fn wake_notifier_replacement_retires_capture_outside_slot_lock() {
+    struct WakeOnDrop {
+        coordinator: Weak<WorkerCoordinator>,
+        drops: Arc<AtomicUsize>,
+        locked_drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for WakeOnDrop {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+            let coordinator = self
+                .coordinator
+                .upgrade()
+                .expect("coordinator remains live");
+            // Witness the pre-fix lock hazard without blocking the test thread.
+            // Release the probe guard before exercising the real wake path.
+            let slot_available = coordinator.wake_notifier.slot.try_lock().is_some();
+            if !slot_available {
+                self.locked_drops.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            coordinator.wake_one();
+        }
+    }
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    let worker = scheduler.take_workers().pop().expect("one worker");
+    let drops = Arc::new(AtomicUsize::new(0));
+    let locked_drops = Arc::new(AtomicUsize::new(0));
+    let old_calls = Arc::new(AtomicUsize::new(0));
+    let new_calls = Arc::new(AtomicUsize::new(0));
+    let on_drop = WakeOnDrop {
+        coordinator: Arc::downgrade(&worker.coordinator),
+        drops: Arc::clone(&drops),
+        locked_drops: Arc::clone(&locked_drops),
+    };
+    let old_calls_for_callback = Arc::clone(&old_calls);
+    worker.set_wake_notifier(Arc::new(move || {
+        let _keep_alive = &on_drop;
+        old_calls_for_callback.fetch_add(1, Ordering::Relaxed);
+    }));
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+    let new_calls_for_callback = Arc::clone(&new_calls);
+    worker.set_wake_notifier(Arc::new(move || {
+        new_calls_for_callback.fetch_add(1, Ordering::Relaxed);
+    }));
+
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        locked_drops.load(Ordering::Relaxed),
+        0,
+        "captured destructor must run after the notifier slot is unlocked"
+    );
+    assert_eq!(old_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        new_calls.load(Ordering::Relaxed),
+        1,
+        "a reentrant wake must observe the replacement callback"
+    );
+    worker.coordinator.wake_one();
+    assert_eq!(new_calls.load(Ordering::Relaxed), 2);
+}
+
 // ========== Default cancel_streak_limit=16 fairness (br-3narc.2.1) ==========
 
 #[test]

@@ -267,7 +267,7 @@ fn fuzz_target_is_exact_source_bounded_and_oracle_free() {
         "MAX_PEM_CERTIFICATES_PER_INPUT",
         "assert_eq!(spki_first, spki_second)",
         "assert_error_is_bounded",
-        "rustls_pemfile::certs",
+        "CertificateDer::pem_reader_iter",
     ] {
         assert!(target.contains(marker), "fuzz target missing {marker:?}");
     }

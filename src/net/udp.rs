@@ -1820,7 +1820,8 @@ pub fn ambient_io_driver_present() -> bool {
 /// an ordinary test process, which would otherwise leave that path untested.
 /// Unit tests only: nothing outside this crate needs it, and compiling it into
 /// a `test-internals` library build would leave it unconstructed (dead code).
-#[cfg(test)]
+/// Native tests only: the Cell hooks are not valid on wasm32.
+#[cfg(all(not(target_arch = "wasm32"), test))]
 pub(super) mod fallback_io_test_hooks {
     use std::cell::Cell;
 
@@ -1925,12 +1926,12 @@ pub(super) mod fallback_io_test_hooks {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(not(target_arch = "wasm32"), test))]
 fn fallback_driver_withheld() -> bool {
     fallback_io_test_hooks::withheld()
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
 const fn fallback_driver_withheld() -> bool {
     false
 }

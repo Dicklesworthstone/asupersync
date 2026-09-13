@@ -427,13 +427,14 @@ where
                     // Moved into the future at spawn so it fires on every
                     // terminal path, including cancellation before the
                     // first poll.
-                    let tally = super::TerminationTally(std::sync::Arc::clone(&owner.terminated));
-                    match cx.spawn_in_cancellation_dominant(&scope, move |worker_cx| async move {
-                        let _tally = tally;
-                        let outcome = worker(worker_cx).await;
-                        *worker_terminal
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+                    match super::TerminationTally::track_spawn(&owner.terminated, |tally| {
+                        cx.spawn_in_cancellation_dominant(&scope, move |worker_cx| async move {
+                            let _tally = tally;
+                            let outcome = worker(worker_cx).await;
+                            *worker_terminal
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(outcome);
+                        })
                     }) {
                         Ok(handle) => owner.handles.push(Some(PipelineChild { handle, terminal })),
                         Err(error) => {

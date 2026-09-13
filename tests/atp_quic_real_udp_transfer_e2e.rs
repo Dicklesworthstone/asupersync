@@ -43,7 +43,7 @@ use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_confi
 use asupersync::observability::{LogCollector, LogLevel};
 use asupersync::security::SecurityContext;
 use futures_lite::future::{block_on, zip};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime, pem::PemObject};
 use rustls::time_provider::TimeProvider;
 use rustls::{ClientConfig, RootCertStore};
 
@@ -98,7 +98,7 @@ impl TimeProvider for FixedTimeProvider {
 
 fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
     let mut reader = std::io::BufReader::new(pem.as_bytes());
-    rustls_pemfile::certs(&mut reader)
+    CertificateDer::pem_reader_iter(&mut reader)
         .next()
         .expect("one cert")
         .expect("valid cert pem")
@@ -106,7 +106,9 @@ fn parse_one_cert(pem: &str) -> CertificateDer<'static> {
 
 fn leaf_key() -> PrivateKeyDer<'static> {
     let mut reader = std::io::BufReader::new(LEAF_KEY_PEM.as_bytes());
-    rustls_pemfile::private_key(&mut reader)
+    PrivateKeyDer::pem_reader_iter(&mut reader)
+        .next()
+        .transpose()
         .expect("read key pem")
         .expect("one key")
 }

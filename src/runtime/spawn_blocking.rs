@@ -148,7 +148,8 @@ impl<T> BlockingOneshotReceiver<T> {
 
 impl<T> Drop for BlockingOneshotReceiver<T> {
     fn drop(&mut self) {
-        self.state.lock().waker = None;
+        let waker = self.state.lock().waker.take();
+        drop(waker);
     }
 }
 
@@ -165,47 +166,63 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
             "blocking operation polled after completion"
         );
 
-        let mut guard = this.state.lock();
-        if guard.done {
-            this.completed = true;
-            let result = guard.result.take();
-            let closed_without_result = guard.closed_without_result;
-            drop(guard);
+        let mut incoming_waker = None;
+        loop {
+            let mut guard = this.state.lock();
+            if guard.done {
+                this.completed = true;
+                let result = guard.result.take();
+                let closed_without_result = guard.closed_without_result;
+                drop(guard);
+                drop(incoming_waker);
 
-            result.map_or_else(
-                || {
-                    if closed_without_result {
-                        if let Some(fallback) = this.closed_fallback.take() {
-                            return std::task::Poll::Ready(fallback());
+                return result.map_or_else(
+                    || {
+                        if closed_without_result {
+                            if let Some(fallback) = this.closed_fallback.take() {
+                                return std::task::Poll::Ready(fallback());
+                            }
+                            panic!("blocking operation ended without producing a result"); // ubs:ignore - invariant violation
+                        } else {
+                            panic!("blocking operation polled after completion"); // ubs:ignore - invariant violation
                         }
-                        panic!("blocking operation ended without producing a result"); // ubs:ignore - invariant violation
-                    } else {
-                        panic!("blocking operation polled after completion"); // ubs:ignore - invariant violation
-                    }
-                },
-                |result| match result {
-                    Ok(val) => std::task::Poll::Ready(val),
-                    Err(payload) => std::panic::resume_unwind(payload),
-                },
-            )
-        } else {
-            if !guard
+                    },
+                    |result| match result {
+                        Ok(val) => std::task::Poll::Ready(val),
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    },
+                );
+            }
+            if guard
                 .waker
                 .as_ref()
                 .is_some_and(|w| w.will_wake(cx.waker()))
             {
-                guard.waker = Some(cx.waker().clone());
+                drop(guard);
+                return std::task::Poll::Pending;
             }
-            std::task::Poll::Pending
+            if let Some(waker) = incoming_waker.take() {
+                let retired_waker = guard.waker.replace(waker);
+                drop(guard);
+                drop(retired_waker);
+                return std::task::Poll::Pending;
+            }
+
+            // Both clone and drop may invoke custom Waker callbacks. Prepare
+            // ownership outside the mutex, then recheck completion so a sender
+            // racing this unlocked interval cannot leave an unwoken waiter.
+            drop(guard);
+            incoming_waker = Some(cx.waker().clone());
         }
     }
 }
 
 /// Spawns a blocking operation and returns a Future that yields until completion.
 ///
-/// This function runs the provided closure on the runtime blocking pool when
-/// a current `Cx` is available, and falls back to a dedicated thread when
-/// no runtime context is set.
+/// This function runs the provided closure on the current context's assigned
+/// blocking pool, including when the context has restricted capabilities.
+/// A context without a pool runs the closure inline; without a current context,
+/// the closure runs on a dedicated thread. Pool workers do not inherit a `Cx`.
 ///
 /// # Type Bounds
 ///
@@ -227,7 +244,11 @@ where
     T: Send + 'static,
 {
     if let Some(cx) = Cx::current() {
-        if let Some(pool) = cx.blocking_pool_handle() {
+        // This helper already accepts the work without a SPAWN capability.
+        // Preserve its assigned execution location even when the public pool
+        // getter is restricted; hiding the handle must not move blocking work
+        // onto the caller's runtime thread.
+        if let Some(pool) = cx.blocking_pool_handle_for_inheritance() {
             return spawn_blocking_on_pool(pool, f).await;
         }
         // Deterministic fallback when running inside a runtime without a pool.
@@ -442,8 +463,34 @@ mod tests {
             None,
             None,
             None,
-        )
-        .with_blocking_pool_handle(Some(pool.handle()));
+        );
+        assert!(cx.blocking_pool_handle().is_none());
+        let cx = cx.with_blocking_pool_handle(Some(pool.handle()));
+        let inherited = cx.blocking_pool_handle().expect("attached pool handle");
+        let detached = cx.clone().with_blocking_pool_handle(None);
+        assert!(detached.blocking_pool_handle().is_none());
+        assert!(cx.blocking_pool_handle().is_some());
+
+        {
+            let _restricted = cx
+                .restrict::<crate::cx::cap::None>()
+                .set_current_restricted();
+            // Ambient lookup retypes to All, so only the runtime mask prevents
+            // a less-privileged caller from extracting submission authority.
+            let ambient = Cx::current().expect("restricted ambient context");
+            assert!(ambient.blocking_pool_handle().is_none());
+        }
+        assert!(cx.blocking_pool_handle().is_some());
+
+        // The returned handle dispatches actual work through the same pool;
+        // detaching a context clone must not detach or shut down its parent.
+        let executed = Arc::new(AtomicU32::new(0));
+        let executed_in_pool = Arc::clone(&executed);
+        let task = inherited.spawn(move || {
+            executed_in_pool.fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(task.wait_timeout(std::time::Duration::from_secs(5)));
+        assert_eq!(executed.load(Ordering::Relaxed), 1);
 
         let _guard = Cx::set_current(Some(cx));
 
@@ -483,6 +530,88 @@ mod tests {
             thread_id
         );
         crate::test_complete!("spawn_blocking_inline_when_no_pool");
+    }
+
+    #[test]
+    fn spawn_blocking_preserves_restricted_context_pool_placement() {
+        use std::future::Future;
+
+        init_test("spawn_blocking_preserves_restricted_context_pool_placement");
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime");
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        runtime.block_on(async {
+            let parent = Cx::current().expect("native parent context");
+            let restricted = parent
+                .clone()
+                .with_blocking_pool_handle(Some(pool.handle()))
+                .restrict::<crate::cx::cap::None>();
+            let caller = std::thread::current().id();
+
+            for attached in [true, false] {
+                let installed = if attached {
+                    restricted.clone()
+                } else {
+                    restricted.clone().with_blocking_pool_handle(None)
+                };
+                let expected_ambient = {
+                    let _guard = installed.clone().set_current_restricted();
+                    Cx::current().expect("ambient restriction").capabilities()
+                };
+                assert_eq!(
+                    expected_ambient.effective,
+                    restricted.capabilities().effective
+                );
+                let mut operation = std::pin::pin!(spawn_blocking(|| {
+                    (
+                        std::thread::current().id(),
+                        Cx::current().map(|cx| cx.capabilities()),
+                    )
+                }));
+                let (execution_thread, worker_capabilities) = std::future::poll_fn(|task| {
+                    let guard = installed.clone().set_current_restricted();
+                    let ambient = Cx::current().expect("restricted ambient context");
+                    assert!(!ambient.capabilities().spawn);
+                    assert!(ambient.blocking_pool_handle().is_none());
+                    assert!(matches!(
+                        ambient.spawn(|_| async {}),
+                        Err(crate::runtime::SpawnError::RuntimeUnavailable)
+                    ));
+                    let result = operation.as_mut().poll(task);
+                    assert_eq!(
+                        Cx::current().expect("unchanged restriction").capabilities(),
+                        ambient.capabilities()
+                    );
+                    drop(guard);
+                    assert_eq!(
+                        Cx::current().expect("restored parent").task_id(),
+                        parent.task_id()
+                    );
+                    result
+                })
+                .await;
+
+                if attached {
+                    assert_ne!(execution_thread, caller, "use the assigned blocking pool");
+                    assert!(
+                        worker_capabilities.is_none(),
+                        "do not fabricate a worker Cx"
+                    );
+                } else {
+                    assert_eq!(execution_thread, caller, "detached contexts stay inline");
+                    assert_eq!(worker_capabilities, Some(expected_ambient));
+                }
+                assert_eq!(
+                    Cx::current()
+                        .expect("native parent restored")
+                        .capabilities(),
+                    parent.capabilities()
+                );
+            }
+        });
+        pool.shutdown();
+        crate::test_complete!("spawn_blocking_preserves_restricted_context_pool_placement");
     }
 
     #[test]
@@ -721,6 +850,130 @@ mod tests {
             pool.shutdown_and_wait(Duration::from_secs(1)),
             "blocking pool should shut down cleanly after the test"
         );
+    }
+
+    #[test]
+    fn blocking_oneshot_receiver_drop_retires_waker_after_unlock() {
+        struct DropProbe {
+            state: std::sync::Weak<Mutex<BlockingOneshotState<u32>>>,
+            observed: Arc<Mutex<Vec<Option<bool>>>>,
+        }
+
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let detached = self
+                    .state
+                    .upgrade()
+                    .and_then(|state| state.try_lock().map(|guard| guard.waker.is_none()));
+                self.observed.lock().push(detached);
+            }
+        }
+
+        init_test("blocking_oneshot_receiver_drop_retires_waker_after_unlock");
+        let (tx, mut rx) = BlockingOneshot::<u32>::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let waker = Waker::from(Arc::new(DropProbe {
+            state: Arc::downgrade(&tx.state),
+            observed: Arc::clone(&observed),
+        }));
+        assert!(
+            std::pin::Pin::new(&mut rx)
+                .poll(&mut std::task::Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert!(tx.state.lock().waker.is_some(), "waiter was registered");
+        drop(waker);
+        assert!(observed.lock().is_empty(), "receiver owns the last waker");
+
+        drop(rx);
+
+        assert_eq!(*observed.lock(), vec![Some(true)]);
+        tx.send(Ok(42));
+        crate::test_complete!("blocking_oneshot_receiver_drop_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn blocking_oneshot_waker_replacement_can_complete_sender() {
+        struct DropProbe {
+            sender: Arc<Mutex<Option<BlockingOneshot<u32>>>>,
+            state: std::sync::Weak<Mutex<BlockingOneshotState<u32>>>,
+            unlocked: Arc<Mutex<Vec<bool>>>,
+        }
+
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let unlocked = self
+                    .state
+                    .upgrade()
+                    .is_some_and(|state| state.try_lock().is_some());
+                self.unlocked.lock().push(unlocked);
+                // A failed try_lock records the old defect without hanging the
+                // test. The external owner retains the sender in that case.
+                if unlocked {
+                    let sender = self.sender.lock().take();
+                    if let Some(sender) = sender {
+                        sender.send(Ok(42));
+                    }
+                }
+            }
+        }
+
+        struct WakeCount(AtomicU32);
+
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        init_test("blocking_oneshot_waker_replacement_can_complete_sender");
+        let (tx, mut rx) = BlockingOneshot::<u32>::new();
+        let state = Arc::clone(&tx.state);
+        let sender = Arc::new(Mutex::new(Some(tx)));
+        let unlocked = Arc::new(Mutex::new(Vec::new()));
+        let old_waker = Waker::from(Arc::new(DropProbe {
+            sender: Arc::clone(&sender),
+            state: Arc::downgrade(&state),
+            unlocked: Arc::clone(&unlocked),
+        }));
+        assert!(
+            std::pin::Pin::new(&mut rx)
+                .poll(&mut std::task::Context::from_waker(&old_waker))
+                .is_pending()
+        );
+        drop(old_waker);
+        assert!(
+            unlocked.lock().is_empty(),
+            "receiver owns the last old waker"
+        );
+
+        let wakes = Arc::new(WakeCount(AtomicU32::new(0)));
+        let new_waker = Waker::from(Arc::clone(&wakes));
+        let mut context = std::task::Context::from_waker(&new_waker);
+        assert!(std::pin::Pin::new(&mut rx).poll(&mut context).is_pending());
+
+        assert_eq!(*unlocked.lock(), vec![true]);
+        assert!(
+            sender.lock().is_none(),
+            "drop callback completed the sender"
+        );
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "new waiter was woken");
+        assert_eq!(
+            std::pin::Pin::new(&mut rx).poll(&mut context),
+            std::task::Poll::Ready(42)
+        );
+        assert!(state.lock().waker.is_none());
+        crate::test_complete!("blocking_oneshot_waker_replacement_can_complete_sender");
     }
 
     #[test]

@@ -47,7 +47,7 @@ use crate::http::pool::{Pool, PoolConfig, PoolKey};
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::tcp::stream::TcpStream;
 #[cfg(feature = "tls")]
-use crate::tls::{TlsConnectorBuilder, TlsStream};
+use crate::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
 use crate::types::Time;
 use base64::Engine;
 use memchr::memmem;
@@ -769,6 +769,10 @@ impl HttpClientBuilder {
     }
 
     /// Enables/disables automatic cookie persistence and attachment.
+    ///
+    /// The bounded in-memory store matches exact hosts and sends `Secure`
+    /// cookies only over HTTPS. Cookies live for this client's lifetime;
+    /// `Domain`, `Path`, expiry, and other attributes are not interpreted.
     #[must_use]
     pub fn cookie_store(mut self, enabled: bool) -> Self {
         self.config.cookie_store = enabled;
@@ -1129,6 +1133,15 @@ pub struct HttpClient {
     pool: Arc<Mutex<Pool>>,
     idle_connections: Arc<Mutex<HashMap<PoolKey, Vec<(u64, ClientIo)>>>>,
     cookies: Arc<Mutex<HashMap<String, Vec<StoredCookie>>>>,
+    /// asupersync-bo2caw: the TLS connector, built once per client (shared by
+    /// clones) on first HTTPS use. Building it loads and parses the root
+    /// store and constructs a rustls `ClientConfig`, which used to happen on
+    /// every fresh HTTPS connection; `TlsConnector` clones share the
+    /// `Arc<ClientConfig>`, so each connection now takes a cheap clone. A
+    /// build failure is cached as its message: it is configuration-level (no
+    /// trust anchors installed) and must read the same on every request.
+    #[cfg(feature = "tls")]
+    tls_connector: Arc<std::sync::OnceLock<Result<TlsConnector, String>>>,
 }
 
 impl HttpClient {
@@ -1153,6 +1166,8 @@ impl HttpClient {
             pool: Arc::new(Mutex::new(Pool::with_config(pool_config))),
             idle_connections: Arc::new(Mutex::new(HashMap::new())),
             cookies: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(feature = "tls")]
+            tls_connector: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -1605,7 +1620,7 @@ impl HttpClient {
             Ok((response, io, body_withheld)) => {
                 check_cx(cx)?;
                 guard.defused = true;
-                self.store_response_cookies(&parsed.host, &response.headers);
+                self.store_response_cookies(&parsed.host, parsed.scheme, &response.headers);
                 // A withheld `Expect: 100-continue` body leaves the connection in
                 // an indeterminate framing state (Content-Length advertised, body
                 // never written), so it must never re-enter the keep-alive pool
@@ -1670,7 +1685,7 @@ impl HttpClient {
             Ok((response, io, body_withheld)) => {
                 check_cx(cx)?;
                 guard.defused = true;
-                self.store_response_cookies(&parsed.host, &response.headers);
+                self.store_response_cookies(&parsed.host, parsed.scheme, &response.headers);
                 // A withheld `Expect: 100-continue` body leaves the connection in
                 // an indeterminate framing state (Content-Length advertised, body
                 // never written), so it must never re-enter the keep-alive pool
@@ -1722,7 +1737,7 @@ impl HttpClient {
             Http1Client::request_streaming(stream, req).await?
         };
         check_cx(cx)?;
-        self.store_response_cookies(&parsed.host, &resp.head.headers);
+        self.store_response_cookies(&parsed.host, parsed.scheme, &resp.head.headers);
         Ok(resp)
     }
 
@@ -1760,7 +1775,7 @@ impl HttpClient {
             Http1Client::request_with_io(proxy_conn.io, req).await?
         };
         check_cx(cx)?;
-        self.store_response_cookies(&parsed.host, &response.headers);
+        self.store_response_cookies(&parsed.host, parsed.scheme, &response.headers);
         Ok(response)
     }
 
@@ -1797,7 +1812,7 @@ impl HttpClient {
             Http1Client::request_streaming(proxy_conn.io, req).await?
         };
         check_cx(cx)?;
-        self.store_response_cookies(&parsed.host, &resp.head.headers);
+        self.store_response_cookies(&parsed.host, parsed.scheme, &resp.head.headers);
         Ok(resp)
     }
 
@@ -1921,7 +1936,7 @@ impl HttpClient {
 
         if self.config.cookie_store
             && !has_cookie_header
-            && let Some(cookie_header) = self.cookie_header_for_host(&parsed.host)
+            && let Some(cookie_header) = self.cookie_header_for_host(&parsed.host, parsed.scheme)
         {
             builder = builder.header("Cookie", cookie_header);
         }
@@ -1948,10 +1963,21 @@ impl HttpClient {
             .build()
     }
 
-    fn store_response_cookies(&self, host: &str, headers: &[(String, String)]) {
+    /// Stores the `Set-Cookie` headers of a response received over `scheme`
+    /// for `host`.
+    ///
+    /// asupersync-kwvk89: RFC 6265bis section 5.6 makes the response scheme
+    /// part of the storage decision. A response that did not arrive over
+    /// HTTPS cannot create a cookie carrying the `Secure` attribute, and it
+    /// cannot replace or delete a stored cookie whose `Secure` flag is set
+    /// ("leave Secure cookies alone"), so an on-path attacker injecting
+    /// plain-HTTP responses can neither fix nor evict an HTTPS session
+    /// cookie. Plain cookies remain updatable over either scheme.
+    fn store_response_cookies(&self, host: &str, scheme: Scheme, headers: &[(String, String)]) {
         if !self.config.cookie_store {
             return;
         }
+        let secure_response = scheme == Scheme::Https;
 
         let host = canonical_cookie_host(host);
         let mut cookies = self.cookies.lock();
@@ -1962,23 +1988,46 @@ impl HttpClient {
         let mut touched = false;
         {
             let entry = cookies.entry(host.clone()).or_default();
-            for (_, value) in headers
+            for (_, raw) in headers
                 .iter()
                 .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
             {
-                if let Some((name, value)) = parse_set_cookie_pair(value) {
+                if let Some((name, value)) = parse_set_cookie_pair(raw) {
                     touched = true;
+                    // RFC 6265 section 5.2.5 matches the attribute name;
+                    // its value, if supplied, does not disable Secure.
+                    let secure = raw.split(';').skip(1).any(|attribute| {
+                        attribute
+                            .split_once('=')
+                            .map_or(attribute, |(name, _)| name)
+                            .trim()
+                            .eq_ignore_ascii_case("secure")
+                    });
+                    if secure && !secure_response {
+                        // A non-secure response cannot set a Secure cookie.
+                        continue;
+                    }
+                    let existing = entry
+                        .iter_mut()
+                        .find(|cookie| cookie.name.eq_ignore_ascii_case(&name));
+                    if !secure_response && existing.as_ref().is_some_and(|cookie| cookie.secure) {
+                        // Leave Secure cookies alone: neither the replacement
+                        // nor the empty-value deletion form may touch them.
+                        continue;
+                    }
                     if value.is_empty() {
                         entry.retain(|cookie| !cookie.name.eq_ignore_ascii_case(&name));
                         continue;
                     }
-                    if let Some(existing) = entry
-                        .iter_mut()
-                        .find(|cookie| cookie.name.eq_ignore_ascii_case(&name))
-                    {
+                    if let Some(existing) = existing {
                         existing.value = value;
+                        existing.secure = secure;
                     } else if entry.len() < MAX_COOKIES_PER_HOST {
-                        entry.push(StoredCookie { name, value });
+                        entry.push(StoredCookie {
+                            name,
+                            value,
+                            secure,
+                        });
                     }
                 }
             }
@@ -1989,11 +2038,16 @@ impl HttpClient {
         }
     }
 
-    fn cookie_header_for_host(&self, host: &str) -> Option<String> {
+    fn cookie_header_for_host(&self, host: &str, scheme: Scheme) -> Option<String> {
         let host = canonical_cookie_host(host);
         let host_cookies = {
             let cookies = self.cookies.lock();
-            cookies.get(&host)?.clone()
+            cookies
+                .get(&host)?
+                .iter()
+                .filter(|cookie| !cookie.secure || scheme == Scheme::Https)
+                .cloned()
+                .collect::<Vec<_>>()
         };
         if host_cookies.is_empty() {
             return None;
@@ -2007,6 +2061,43 @@ impl HttpClient {
         )
     }
 
+    /// Returns the client's TLS connector, building it on first use
+    /// (asupersync-bo2caw). Every HTTPS connection of this client and of its
+    /// clones shares the one connector; a build failure is reported with the
+    /// same message on every call.
+    #[cfg(feature = "tls")]
+    fn tls_connector(&self) -> Result<TlsConnector, ClientError> {
+        self.tls_connector
+            .get_or_init(|| Self::build_tls_connector(&self.config))
+            .clone()
+            .map_err(ClientError::TlsError)
+    }
+
+    /// Builds the TLS connector from the client configuration: `http/1.1`
+    /// ALPN, the feature-selected public roots, then every explicitly
+    /// installed root certificate.
+    #[cfg(feature = "tls")]
+    fn build_tls_connector(config: &HttpClientConfig) -> Result<TlsConnector, String> {
+        let builder = TlsConnectorBuilder::new().alpn_protocols(vec![b"http/1.1".to_vec()]);
+
+        #[cfg(feature = "tls-native-roots")]
+        let builder = builder.with_native_roots().map_err(|e| e.to_string())?;
+
+        #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
+        let builder = builder.with_webpki_roots();
+
+        // Explicitly installed roots (private CAs, self-signed test servers)
+        // extend whatever the feature roots provided.
+        let builder = config
+            .tls_root_certificates
+            .iter()
+            .fold(builder, |builder, certificate| {
+                builder.add_root_certificate(certificate)
+            });
+
+        builder.build().map_err(|e| e.to_string())
+    }
+
     #[cfg(feature = "tls")]
     async fn tls_connect_stream<T>(
         &self,
@@ -2016,30 +2107,7 @@ impl HttpClient {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let builder = TlsConnectorBuilder::new().alpn_protocols(vec![b"http/1.1".to_vec()]);
-
-        #[cfg(feature = "tls-native-roots")]
-        let builder = builder
-            .with_native_roots()
-            .map_err(|e| ClientError::TlsError(e.to_string()))?;
-
-        #[cfg(all(not(feature = "tls-native-roots"), feature = "tls-webpki-roots"))]
-        let builder = builder.with_webpki_roots();
-
-        // Explicitly installed roots (private CAs, self-signed test servers)
-        // extend whatever the feature roots provided.
-        let builder = self
-            .config
-            .tls_root_certificates
-            .iter()
-            .fold(builder, |builder, certificate| {
-                builder.add_root_certificate(certificate)
-            });
-
-        let connector = builder
-            .build()
-            .map_err(|e| ClientError::TlsError(e.to_string()))?;
-
+        let connector = self.tls_connector()?;
         connector
             .connect(domain, stream)
             .await
@@ -2320,6 +2388,7 @@ struct ProxyConnection {
 struct StoredCookie {
     name: String,
     value: String,
+    secure: bool,
 }
 
 struct ConnectionGuard<'a> {
@@ -3188,6 +3257,42 @@ mod tests {
     use std::cell::Cell;
     use std::future::poll_fn;
     use std::net::TcpListener;
+
+    /// asupersync-bo2caw: the TLS connector is built on the first HTTPS use
+    /// and shared by every later connection and by clones of the client,
+    /// instead of loading the root store and building a rustls config per
+    /// connection. The build outcome, success or the configuration-level
+    /// failure text, is what every request observes.
+    #[test]
+    #[cfg(feature = "tls")]
+    fn tls_connector_is_built_once_per_client_and_shared_by_clones() {
+        let client = HttpClient::new();
+        assert!(
+            client.tls_connector.get().is_none(),
+            "no connector may exist before the first HTTPS use"
+        );
+
+        let first = client.tls_connector().map(|_connector| ());
+        let cached = client
+            .tls_connector
+            .get()
+            .expect("the first use populates the cache");
+        assert_eq!(first.is_ok(), cached.is_ok());
+
+        let clone = client.clone();
+        assert!(
+            Arc::ptr_eq(&client.tls_connector, &clone.tls_connector),
+            "clones must share the connector cache"
+        );
+        let second = clone.tls_connector().map(|_connector| ());
+        assert_eq!(first.is_ok(), second.is_ok());
+
+        // Without a roots feature the default client has no trust anchors and
+        // the build fails closed; the cached text is what every request reports.
+        if let Err(ClientError::TlsError(message)) = &first {
+            assert_eq!(cached.as_ref().err(), Some(message));
+        }
+    }
 
     thread_local! {
         static HTTP_CLIENT_TEST_TIME_NANOS: Cell<u64> = const { Cell::new(0) };
@@ -4223,11 +4328,12 @@ mod tests {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), raw.to_string())],
         );
 
         let cookie_header = client
-            .cookie_header_for_host("example.com")
+            .cookie_header_for_host("example.com", Scheme::Http)
             .expect("cookie header");
         assert_eq!(cookie_header, "session=abc123==");
     }
@@ -4237,6 +4343,7 @@ mod tests {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "Example.COM",
+            Scheme::Https,
             &[(
                 "Set-Cookie".to_string(),
                 "session=abc123; Path=/".to_string(),
@@ -4252,10 +4359,233 @@ mod tests {
     }
 
     #[test]
+    fn cookie_store_secure_attributes_restrict_request_scheme() {
+        let http = ParsedUrl::parse("http://example.com/data").unwrap();
+        let https = ParsedUrl::parse("https://example.com/data").unwrap();
+        for attributes in [
+            "Secure",
+            "sEcUrE",
+            " Secure = ignored ",
+            "Path=/; Secure; HttpOnly",
+            "Secure; Secure",
+        ] {
+            let client = HttpClient::builder().cookie_store(true).build();
+            client.store_response_cookies(
+                "Example.COM",
+                Scheme::Https,
+                &[(
+                    "Set-Cookie".to_owned(),
+                    format!("session=secret; {attributes}"),
+                )],
+            );
+            let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+            assert_eq!(
+                get_header(&request.headers, "cookie"),
+                Some("session=secret".to_owned()),
+                "secure cookie must remain available over HTTPS ({attributes})"
+            );
+            let request = client.build_request(&Method::Get, &http, &[], &[], None, None);
+            assert_eq!(
+                get_header(&request.headers, "cookie"),
+                None,
+                "secure cookie must not be attached over HTTP ({attributes})"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_store_secure_downgrade_keeps_only_plain_cookies() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[
+                ("Set-Cookie".to_owned(), "session=secret; Secure".to_owned()),
+                (
+                    "Set-Cookie".to_owned(),
+                    "theme=dark; SameSite=Secure".to_owned(),
+                ),
+                ("Set-Cookie".to_owned(), "display=wide; Securely".to_owned()),
+            ],
+        );
+        let from = ParsedUrl::parse("https://example.com/start").unwrap();
+        let to = ParsedUrl::parse("http://example.com/redirected").unwrap();
+        assert!(redirect_policy_allows_target(
+            &RedirectPolicy::Limited(10),
+            &from,
+            &to
+        ));
+        let headers = strip_sensitive_headers_on_redirect(
+            &from,
+            &to,
+            vec![("Cookie".to_owned(), "caller=secret".to_owned())],
+        );
+        assert!(headers.is_empty());
+        let request = client.build_request(&Method::Get, &to, &headers, &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie"),
+            Some("theme=dark; display=wide".to_owned())
+        );
+        let request = client.build_request(&Method::Get, &from, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie"),
+            Some("session=secret; theme=dark; display=wide".to_owned()),
+            "a downgrade must filter the outgoing header without deleting stored cookies"
+        );
+    }
+
+    #[test]
+    fn cookie_store_secure_replacement_updates_transport_restriction() {
+        let client = HttpClient::builder().cookie_store(true).build();
+        let http = ParsedUrl::parse("http://example.com/").unwrap();
+        let https = ParsedUrl::parse("https://example.com/").unwrap();
+        for (value, expected_http, expected_https) in [
+            (
+                "session=plain",
+                Some("session=plain"),
+                Some("session=plain"),
+            ),
+            ("session=secret; Secure", None, Some("session=secret")),
+            (
+                "session=public",
+                Some("session=public"),
+                Some("session=public"),
+            ),
+            ("session=; Secure", None, None),
+        ] {
+            client.store_response_cookies(
+                "example.com",
+                Scheme::Https,
+                &[("Set-Cookie".to_owned(), value.to_owned())],
+            );
+            for (parsed, expected) in [(&http, expected_http), (&https, expected_https)] {
+                let request = client.build_request(&Method::Get, parsed, &[], &[], None, None);
+                assert_eq!(
+                    get_header(&request.headers, "cookie").as_deref(),
+                    expected,
+                    "replacement must refresh the stored Secure flag ({value}, {:?})",
+                    parsed.scheme
+                );
+            }
+        }
+    }
+
+    /// asupersync-kwvk89: RFC 6265bis section 5.6. A response that did not
+    /// arrive over HTTPS must not create a Secure cookie and must leave a
+    /// stored Secure cookie alone, whether it tries to replace or to delete
+    /// it; otherwise an on-path attacker injecting plain-HTTP responses could
+    /// fix or evict the HTTPS session cookie.
+    #[test]
+    fn cookie_store_plain_http_response_leaves_secure_cookies_alone() {
+        let http = ParsedUrl::parse("http://example.com/").unwrap();
+        let https = ParsedUrl::parse("https://example.com/").unwrap();
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[(
+                "Set-Cookie".to_owned(),
+                "session=genuine; Secure".to_owned(),
+            )],
+        );
+
+        for injected in [
+            "session=attacker",
+            "session=attacker; Secure",
+            "session=",
+            "session=; Secure",
+        ] {
+            client.store_response_cookies(
+                "example.com",
+                Scheme::Http,
+                &[("Set-Cookie".to_owned(), injected.to_owned())],
+            );
+            let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+            assert_eq!(
+                get_header(&request.headers, "cookie").as_deref(),
+                Some("session=genuine"),
+                "a plain-HTTP response must not touch a Secure cookie ({injected})"
+            );
+            let request = client.build_request(&Method::Get, &http, &[], &[], None, None);
+            assert_eq!(
+                get_header(&request.headers, "cookie"),
+                None,
+                "the Secure cookie must stay HTTPS-only ({injected})"
+            );
+        }
+
+        // A plain-HTTP response cannot create a Secure cookie either.
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Http,
+            &[("Set-Cookie".to_owned(), "token=abc; Secure".to_owned())],
+        );
+        let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie").as_deref(),
+            Some("session=genuine"),
+            "a plain-HTTP response must not create a Secure cookie"
+        );
+
+        // The genuine HTTPS origin can still rotate and delete its cookie.
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[(
+                "Set-Cookie".to_owned(),
+                "session=rotated; Secure".to_owned(),
+            )],
+        );
+        let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie").as_deref(),
+            Some("session=rotated")
+        );
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[("Set-Cookie".to_owned(), "session=".to_owned())],
+        );
+        let request = client.build_request(&Method::Get, &https, &[], &[], None, None);
+        assert_eq!(get_header(&request.headers, "cookie"), None);
+    }
+
+    /// asupersync-kwvk89: only Secure cookies are protected; plain cookies
+    /// stay updatable and deletable over plain HTTP.
+    #[test]
+    fn cookie_store_plain_http_response_still_updates_plain_cookies() {
+        let http = ParsedUrl::parse("http://example.com/").unwrap();
+        let client = HttpClient::builder().cookie_store(true).build();
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Https,
+            &[("Set-Cookie".to_owned(), "theme=dark".to_owned())],
+        );
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Http,
+            &[("Set-Cookie".to_owned(), "theme=light".to_owned())],
+        );
+        let request = client.build_request(&Method::Get, &http, &[], &[], None, None);
+        assert_eq!(
+            get_header(&request.headers, "cookie").as_deref(),
+            Some("theme=light")
+        );
+        client.store_response_cookies(
+            "example.com",
+            Scheme::Http,
+            &[("Set-Cookie".to_owned(), "theme=".to_owned())],
+        );
+        let request = client.build_request(&Method::Get, &http, &[], &[], None, None);
+        assert_eq!(get_header(&request.headers, "cookie"), None);
+    }
+
+    #[test]
     fn cookie_store_respects_explicit_cookie_header() {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "session=abc123".to_string())],
         );
 
@@ -4398,6 +4728,7 @@ mod tests {
             .build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "stored=ignored".to_string())],
         );
 
@@ -4456,29 +4787,33 @@ mod tests {
         let client = HttpClient::builder().cookie_store(true).build();
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "session=abc123".to_string())],
         );
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "theme=dark".to_string())],
         );
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "session=updated".to_string())],
         );
 
         let cookie_header = client
-            .cookie_header_for_host("example.com")
+            .cookie_header_for_host("example.com", Scheme::Http)
             .expect("cookie header");
         assert!(cookie_header.contains("session=updated"));
         assert!(cookie_header.contains("theme=dark"));
 
         client.store_response_cookies(
             "example.com",
+            Scheme::Https,
             &[("Set-Cookie".to_string(), "session=".to_string())],
         );
         let cookie_header = client
-            .cookie_header_for_host("example.com")
+            .cookie_header_for_host("example.com", Scheme::Http)
             .expect("cookie header");
         assert!(!cookie_header.contains("session="));
         assert!(cookie_header.contains("theme=dark"));

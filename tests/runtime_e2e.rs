@@ -1747,6 +1747,10 @@ fn e2e_obligation_tracked_channel_commit() {
         .max_steps(10_000);
     let mut runtime = LabRuntime::new(config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
+    // asupersync-a2hoy1: tracked permits mint a graded obligation scoped to the
+    // caller's region, and the root region may not hold obligations
+    // ([ASUP-E103]); spawn the tasks in a child region, as production must.
+    let region = create_child_region(&mut runtime.state, root);
 
     let (tx, mut rx) = tracked_channel::<u32>(1);
     let recv_value = Arc::new(Mutex::new(None));
@@ -1757,7 +1761,7 @@ fn e2e_obligation_tracked_channel_commit() {
     harness.enter_phase("spawn");
     let (send_task, _handle) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let cx = Cx::current().expect("cx");
             let permit = tx.reserve(&cx).await.expect("reserve");
             let proof = permit.send(7).expect("send");
@@ -1768,7 +1772,7 @@ fn e2e_obligation_tracked_channel_commit() {
 
     let (recv_task, _handle) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let cx = Cx::current().expect("cx");
             let value = rx.recv(&cx).await.expect("recv");
             *recv_value_clone.lock() = Some(value);
@@ -1825,6 +1829,9 @@ fn e2e_obligation_tracked_oneshot_abort() {
         .max_steps(10_000);
     let mut runtime = LabRuntime::new(config);
     let root = runtime.state.create_root_region(Budget::INFINITE);
+    // asupersync-a2hoy1: the aborting task also mints its graded obligation, so
+    // it must hold it in a non-root region ([ASUP-E103]); see the commit test.
+    let region = create_child_region(&mut runtime.state, root);
 
     let (tx, mut rx) = tracked_oneshot::<u32>();
     let recv_closed = Arc::new(Mutex::new(None));
@@ -1835,7 +1842,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
     harness.enter_phase("spawn");
     let (send_task, _handle) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let cx = Cx::current().expect("cx");
             let permit = tx.reserve(&cx).expect("reserve");
             let proof = permit.abort();
@@ -1846,7 +1853,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
 
     let (recv_task, _handle) = runtime
         .state
-        .create_task(root, Budget::INFINITE, async move {
+        .create_task(region, Budget::INFINITE, async move {
             let cx = Cx::current().expect("cx");
             let result = rx.recv(&cx).await;
             let closed = matches!(result, Err(asupersync::channel::oneshot::RecvError::Closed));

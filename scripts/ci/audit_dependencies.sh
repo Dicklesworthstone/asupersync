@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Canonical dependency supply-chain gate for asupersync.
 #
-# This runner never updates a lockfile or build tree. It emits raw scanner
+# This runner never updates repository lockfiles or build output. It emits raw scanner
 # output plus a machine-readable summary and fails closed when a required tool
 # or advisory database receipt cannot be verified.
 
@@ -392,27 +392,52 @@ self_test() {
     local source_rc=0
     local duplicate_count
 
-    fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/asupersync-dependency-fixtures.XXXXXX")"
+    # Keep the isolated fixture and raw diagnostics with the uploaded receipts.
+    fixture_dir="$(mktemp -d "${OUTPUT_DIR}/negative-fixtures.XXXXXX")"
     sed '/RUSTSEC-2025-0134/d' deny.toml >"${fixture_dir}/deny-advisory.toml"
     sed '/^[[:space:]]*"ISC",$/d' deny.toml >"${fixture_dir}/deny-license.toml"
     sed '/^[[:space:]]*"NCSA",$/d' deny.toml >"${fixture_dir}/deny-fuzz-license.toml"
 
-    cargo-deny --locked --workspace --log-level error --format json \
+    # The production graph no longer needs rustls-pemfile. Resolve the known
+    # advisory package in its own workspace so this negative still exercises
+    # the real scanner, independently of production dependency removals.
+    mkdir -p -- "${fixture_dir}/advisory/src"
+    cat >"${fixture_dir}/advisory/Cargo.toml" <<'EOF'
+[package]
+name = "asupersync-advisory-negative-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+rustls-pemfile = "=2.2.0"
+EOF
+    printf '%s\n' '// Dependency metadata fixture; never compiled or executed.' \
+        >"${fixture_dir}/advisory/src/lib.rs"
+    cargo generate-lockfile --manifest-path "${fixture_dir}/advisory/Cargo.toml"
+
+    # Positive control: the same fixture and lock must pass with the existing
+    # advisory exception before removing only that exception for the negative.
+    cargo-deny --manifest-path "${fixture_dir}/advisory/Cargo.toml" \
+        --locked --workspace --log-level error --format json \
         check --config deny.toml advisories \
         >"${fixture_dir}/bootstrap-advisories.jsonl" 2>&1
     db_repo="$(database_receipt)"
 
-    cargo-deny --locked --workspace --log-level error --format json \
+    cargo-deny --manifest-path "${fixture_dir}/advisory/Cargo.toml" \
+        --locked --workspace --log-level error --format json \
         check --config "${fixture_dir}/deny-advisory.toml" --disable-fetch advisories \
         >"${fixture_dir}/advisory-ignore-removed.jsonl" 2>&1 || advisory_rc=$?
     if ((advisory_rc == 0)) ||
         ! grep -q 'RUSTSEC-2025-0134' "${fixture_dir}/advisory-ignore-removed.jsonl"; then
         emit_event "fixture-advisory-ignore-removed" "fail" \
-            "expected a named RUSTSEC-2025-0134 rejection"
+            "expected a named RUSTSEC-2025-0134 rejection from the isolated rustls-pemfile 2.2.0 fixture"
         fixture_failures=$((fixture_failures + 1))
     else
         emit_event "fixture-advisory-ignore-removed" "pass" \
-            "temporary config rejected RUSTSEC-2025-0134"
+            "temporary config rejected RUSTSEC-2025-0134 in the isolated rustls-pemfile 2.2.0 fixture"
     fi
 
     cargo-deny --locked --workspace --log-level error --format json \
@@ -506,7 +531,8 @@ self_test() {
             outcome: (if $failures == 0 then "PASS" else "FAIL" end),
             fixture_failures: $failures,
             fixture_evidence_directory: $fixture_dir,
-            advisory_database_path: $db_repo
+            advisory_database_path: $db_repo,
+            no_claim: "Fixture results exercise policy rejection and are not a live dependency-graph audit or proof that fixture packages are safe."
         }' >"${OUTPUT_DIR}/self-test-summary.json"
     jq . "${OUTPUT_DIR}/self-test-summary.json"
 

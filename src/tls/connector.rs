@@ -5,6 +5,8 @@
 
 use super::error::TlsError;
 use super::stream::TlsStream;
+#[cfg(feature = "tls")]
+use super::types::pem_error_message;
 use super::types::{Certificate, CertificateChain, CertificatePinSet, PrivateKey, RootCertStore};
 use crate::io::{AsyncRead, AsyncWrite};
 
@@ -13,7 +15,7 @@ use rustls::ClientConfig;
 #[cfg(feature = "tls")]
 use rustls::ClientConnection;
 #[cfg(feature = "tls")]
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{CertificateDer, CertificateRevocationListDer, ServerName, pem::PemObject};
 
 #[cfg(feature = "tls")]
 use std::future::poll_fn;
@@ -627,7 +629,7 @@ impl TlsConnectorBuilder {
     /// validation. Worse, a non-CA leaf certificate would be accepted
     /// as a trust anchor (any cert it had "signed" would then
     /// validate). The implementation below now (a) parses via
-    /// `rustls_pemfile::certs`, the same path used by
+    /// `CertificateDer::pem_reader_iter`, the same path used by
     /// `Certificate::from_pem`, and (b) gates each candidate on the
     /// `BasicConstraints CA:TRUE` extension via `x509-parser`. Certs
     /// that lack the extension or carry `cA=false` are rejected and
@@ -644,13 +646,13 @@ impl TlsConnectorBuilder {
 
         let mut reader = std::io::BufReader::new(&pem_data[..]);
         let der_certs: Vec<Vec<u8>> =
-            match rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>() {
+            match CertificateDer::pem_reader_iter(&mut reader).collect::<Result<Vec<_>, _>>() {
                 Ok(certs) => certs.into_iter().map(|c| c.to_vec()).collect(),
                 Err(_e) => {
                     #[cfg(feature = "tracing-integration")]
                     tracing::warn!(
                         path = %path.display(),
-                        error = %_e,
+                        error = %pem_error_message(_e),
                         "TLS: PEM bundle parse failed; skipping file (br-asupersync-0owoem)"
                     );
                     return Ok(TlsCertificateLoadCounts::default());
@@ -1126,10 +1128,13 @@ impl TlsConnectorBuilder {
                 Vec::new();
             for pem in &self.crl_pems {
                 let mut reader = std::io::BufReader::new(&pem[..]);
-                let der_iter = rustls_pemfile::crls(&mut reader);
+                let der_iter = CertificateRevocationListDer::pem_reader_iter(&mut reader);
                 for der in der_iter {
                     let der = der.map_err(|e| {
-                        TlsError::Configuration(format!("CRL PEM parse error: {e}"))
+                        TlsError::Configuration(format!(
+                            "CRL PEM parse error: {}",
+                            pem_error_message(e)
+                        ))
                     })?;
                     crl_ders.push(der);
                 }
@@ -1467,6 +1472,44 @@ mod tests {
     }
 
     // --- br-asupersync-p7369s: CRL configuration -------------------
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_with_crl_pem_accepts_crl_and_rejects_malformed_tail() {
+        // Public parser fixture from rustls-pemfile 2.2.0 tests/data/crl.pem
+        // (Apache-2.0 / ISC / MIT). This proves CRL configuration, not
+        // revocation enforcement or current validity of this historical CRL.
+        let crl = b"-----BEGIN X509 CRL-----\n\
+MIICiTBzAgEBMA0GCSqGSIb3DQEBCwUAMBoxGDAWBgNVBAMMD3Bvbnl0b3duIFJT\n\
+QSBDQRcNMjMwNjI3MDgyODEyWhcNMjMwNzI3MDgyODEyWjAVMBMCAgHIFw0yMzA2\n\
+MjcwODI3NTlaoA4wDDAKBgNVHRQEAwIBAjANBgkqhkiG9w0BAQsFAAOCAgEAP6EX\n\
+9+hxjx/AqdBpynZXjGkEqigBcLcJ2PADOXngdQI1jC0WuYnZymUimemeULtt8X+1\n\
+ai2KxAuF1m4NEKZsrGKvO+/9s/X1xbGroyHSAMKtZafFopFpoB2aNbYlx7yIyLtD\n\
+BBIZIF50g20U+3izqpHutTD10itdk9TLsSceJHpwTkNJtaWMkOfBV28nKzEzVutV\n\
+f6WzRpURGzui6nQy7aIqImeanpoBoz323psMfC32U0uMBCZltyHNqsX58/2Uhucx\n\
+0IPnitNuhv4scCPf/jeRfGIWDrTf1/25LDzRxyg1S4z9aa+3GM4O3dqy4igZEhgT\n\
+q3pjlJ2hUL5E0oqbZDIQD1SN8UUUv5N2AjwZcxVBNnYeGyuO7YpTBYiu62o73iL2\n\
+CjgElfaMq/9hEr9GR9kJozh7VTxtQPbnr4DiucQvhv8o/A1z+zkC0gj8iCLFtDbO\n\
+8bvDowcdle9LKkrLaBe6sO+fSH/I9Wj8vrEJKsuwaEraIdEaq2VrIMUPEWN0/MH9\n\
+vTwHyadGSMK4CWtrn9fCAgSLw6NX74D7Cx1IaS8vstMjpeUqOS0dk5ThiW47HceB\n\
+DTko7rV5N+RGH2nW1ynLoZKCJQqqZcLilFMyKPui3jifJnQlMFi54jGVgg/D6UQn\n\
+7dA7wb2ux/1hSiaarp+mi7ncVOyByz6/WQP8mfc=\n\
+-----END X509 CRL-----\n";
+        builder_with_test_root()
+            .with_crl_pem([TEST_CERT_PEM, b"\n", crl.as_slice()].concat())
+            .build()
+            .expect("a valid CRL can be configured in a mixed PEM bundle");
+
+        let malformed = b"-----BEGIN X509 CRL-----\n!invalid!\n-----END X509 CRL-----\n";
+        let error = builder_with_test_root()
+            .with_crl_pem([crl.as_slice(), malformed.as_slice()].concat())
+            .build()
+            .expect_err("a later malformed CRL must reject the whole configuration");
+        assert!(matches!(
+            error,
+            TlsError::Configuration(message) if message == "CRL PEM parse error: InvalidCharacter(33)"
+        ));
+    }
 
     #[cfg(feature = "tls")]
     #[test]
