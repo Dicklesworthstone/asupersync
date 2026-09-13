@@ -97,6 +97,7 @@ fn foreign_call_completion_survives_cancelled_result_delivery() {
     let completion_for_observer = completion.clone();
     let release = Arc::new(AtomicBool::new(false));
     let release_for_call = Arc::clone(&release);
+    let release_for_join = Arc::clone(&release);
     let (result, before_release) = runtime.block_on(async move {
         let cx = asupersync::Cx::current().expect("runtime entry installs Cx");
         let (started_tx, mut started_rx) = channel::oneshot::channel();
@@ -120,11 +121,15 @@ fn foreign_call_completion_survives_cancelled_result_delivery() {
             .expect("foreign call reaches the blocking boundary");
         let before_release = completion_for_observer.is_complete();
         task.abort();
+        // Cancellation discards result delivery, not an already-running
+        // foreign call. Let that call reach its terminal point before joining
+        // the wrapper; otherwise the join correctly waits forever for the
+        // intentionally-held operation to complete.
+        release_for_join.store(true, Ordering::Release);
         (task.join(&cx).await, before_release)
     });
 
     assert!(!before_release);
-    release.store(true, Ordering::Release);
     assert!(matches!(result, Err(asupersync::runtime::JoinError::Cancelled(_))));
 
     // The wrapper's task has drained, but the foreign closure may still be
