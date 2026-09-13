@@ -6,9 +6,13 @@
 //! configuration boundary instead of inheriting the runtime's unbounded queue
 //! default or an accidentally unlimited root region.
 
-use crate::runtime::RuntimeConfig;
+use crate::runtime::{Runtime, RuntimeConfig, RuntimeHandle};
 use crate::record::RegionLimits;
 use std::fmt;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Stable name for the first bounded desktop profile.
 pub const DESKTOP_RUNTIME_PROFILE_NAME: &str = "desktop-bounded-v1";
@@ -136,6 +140,23 @@ impl DesktopRuntimeProfile {
         });
         Ok(config)
     }
+
+    /// Start a runtime owned by the desktop host.
+    ///
+    /// Validation and construction are intentionally separate from
+    /// [`Self::standard`]: selecting a profile is inert, while this explicit
+    /// operation starts the runtime's workers and blocking pool. The returned
+    /// owner contains only Asupersync resources; the host's event loop,
+    /// windows, and devices remain caller-owned.
+    #[allow(clippy::result_large_err)]
+    pub fn start(&self) -> Result<DesktopRuntime, DesktopRuntimeStartError> {
+        let config = self
+            .runtime_config()
+            .map_err(DesktopRuntimeStartError::InvalidProfile)?;
+        Runtime::with_config(config)
+            .map(|runtime| DesktopRuntime { runtime })
+            .map_err(DesktopRuntimeStartError::Runtime)
+    }
 }
 
 impl Default for DesktopRuntimeProfile {
@@ -192,6 +213,119 @@ impl fmt::Display for DesktopRuntimeProfileError {
 }
 
 impl std::error::Error for DesktopRuntimeProfileError {}
+
+/// A runtime explicitly owned by one desktop host instance.
+///
+/// This wrapper makes the lifecycle boundary visible to an embedding host:
+/// [`Self::close`] shuts down only this runtime. It does not own or stop the
+/// host event loop, window system, or rendering device.
+pub struct DesktopRuntime {
+    runtime: Runtime,
+}
+
+impl DesktopRuntime {
+    /// Run a future using this runtime's caller-driven entry point.
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.runtime.block_on(future)
+    }
+
+    /// Return a strong handle for host-owned task admission.
+    ///
+    /// The host must release this handle before expecting [`Self::close`] to
+    /// report completed teardown, because a strong handle keeps the runtime
+    /// alive by design.
+    #[must_use]
+    pub fn handle(&self) -> RuntimeHandle {
+        self.runtime.handle()
+    }
+
+    /// Close this runtime within the host's teardown bound.
+    ///
+    /// A `true` result means the runtime's workers and drivers completed
+    /// teardown within `timeout`; `false` means teardown continues on the
+    /// runtime's bounded reaper path. No host-owned resource is touched.
+    #[must_use]
+    pub fn close(self, timeout: Duration) -> bool {
+        self.runtime.shutdown_timeout(timeout)
+    }
+}
+
+/// Failure while starting a validated desktop runtime profile.
+#[derive(Debug)]
+pub enum DesktopRuntimeStartError {
+    /// The profile contains an invalid or unbounded limit.
+    InvalidProfile(DesktopRuntimeProfileError),
+    /// The runtime could not start its configured host-side workers/drivers.
+    Runtime(crate::error::Error),
+}
+
+impl fmt::Display for DesktopRuntimeStartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidProfile(error) => write!(f, "invalid desktop runtime profile: {error}"),
+            Self::Runtime(error) => write!(f, "desktop runtime start failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DesktopRuntimeStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidProfile(error) => Some(error),
+            Self::Runtime(error) => Some(error),
+        }
+    }
+}
+
+/// Completion receipt for an operation delegated to a foreign blocking call.
+///
+/// Cancellation may discard the wrapper's returned value, but it must not
+/// pretend that the foreign call stopped. The operation owns this receipt and
+/// marks it at the actual terminal point, including panic unwinding.
+#[derive(Clone, Debug, Default)]
+pub struct ForeignCallCompletion {
+    completed: Arc<AtomicBool>,
+}
+
+impl ForeignCallCompletion {
+    /// Create a receipt in the not-yet-complete state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return whether the foreign operation reached its terminal point.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.completed.load(Ordering::Acquire)
+    }
+
+    fn mark_complete(&self) {
+        self.completed.store(true, Ordering::Release);
+    }
+}
+
+/// Run a foreign blocking operation while conserving its terminal receipt.
+///
+/// The returned future follows Asupersync's soft-cancellation policy: dropping
+/// the wrapper cancels result delivery, while the already-running foreign call
+/// continues to its terminal point. `completion` becomes observable only when
+/// that point is reached.
+pub async fn run_foreign_call<F, T>(completion: ForeignCallCompletion, operation: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    crate::runtime::spawn_blocking::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+        completion.mark_complete();
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
+    .await
+}
 
 #[cfg(test)]
 mod tests {
