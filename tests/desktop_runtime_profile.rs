@@ -135,6 +135,19 @@ fn foreign_call_completion_survives_cancelled_result_delivery() {
 }
 
 #[test]
+fn desktop_profile_selects_injected_first_party_no_io_reactor() {
+    let runtime = DesktopRuntimeProfile::standard()
+        .start()
+        .expect("standard profile starts without native I/O authority");
+
+    assert_eq!(
+        runtime.io_reactor_capability_snapshot().backend(),
+        asupersync::runtime::reactor::IoReactorBackend::Injected
+    );
+    assert!(runtime.close(Duration::from_secs(1)));
+}
+
+#[test]
 fn own_runtime_close_does_not_close_host_owned_state() {
     let host_alive = Arc::new(AtomicBool::new(true));
     let runtime = DesktopRuntimeProfile::standard()

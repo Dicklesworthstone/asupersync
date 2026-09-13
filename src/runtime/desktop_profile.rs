@@ -6,6 +6,7 @@
 //! configuration boundary instead of inheriting the runtime's unbounded queue
 //! default or an accidentally unlimited root region.
 
+use crate::runtime::reactor::BrowserReactor;
 use crate::runtime::{Runtime, RuntimeConfig, RuntimeHandle};
 use crate::record::RegionLimits;
 use std::fmt;
@@ -153,7 +154,11 @@ impl DesktopRuntimeProfile {
         let config = self
             .runtime_config()
             .map_err(DesktopRuntimeStartError::InvalidProfile)?;
-        Runtime::with_config(config)
+        // The desktop profile is the dependency-clean structured-runtime
+        // slice: it deliberately has no host-I/O authority. Native socket and
+        // polling adapters stay behind `native-runtime`; a later host adapter
+        // may inject one explicitly when the product actually needs it.
+        Runtime::with_config_and_reactor(config, Some(Arc::new(BrowserReactor::default())))
             .map(|runtime| DesktopRuntime { runtime })
             .map_err(DesktopRuntimeStartError::Runtime)
     }
@@ -237,6 +242,18 @@ impl DesktopRuntime {
     #[must_use]
     pub fn handle(&self) -> RuntimeHandle {
         self.runtime.handle()
+    }
+
+    /// Return the immutable reactor receipt selected for this profile.
+    ///
+    /// The bounded profile must remain usable for structured concurrency and
+    /// channels without acquiring a native socket/poller. Hosts that need
+    /// I/O use the separately qualified runtime builder injection seam.
+    #[must_use]
+    pub fn io_reactor_capability_snapshot(
+        &self,
+    ) -> crate::runtime::reactor::IoReactorCapabilitySnapshot {
+        self.runtime.io_reactor_capability_snapshot()
     }
 
     /// Close this runtime within the host's teardown bound.
