@@ -148,7 +148,8 @@ impl<T> BlockingOneshotReceiver<T> {
 
 impl<T> Drop for BlockingOneshotReceiver<T> {
     fn drop(&mut self) {
-        self.state.lock().waker = None;
+        let waker = self.state.lock().waker.take();
+        drop(waker);
     }
 }
 
@@ -165,38 +166,53 @@ impl<T> std::future::Future for BlockingOneshotReceiver<T> {
             "blocking operation polled after completion"
         );
 
-        let mut guard = this.state.lock();
-        if guard.done {
-            this.completed = true;
-            let result = guard.result.take();
-            let closed_without_result = guard.closed_without_result;
-            drop(guard);
+        let mut incoming_waker = None;
+        loop {
+            let mut guard = this.state.lock();
+            if guard.done {
+                this.completed = true;
+                let result = guard.result.take();
+                let closed_without_result = guard.closed_without_result;
+                drop(guard);
+                drop(incoming_waker);
 
-            result.map_or_else(
-                || {
-                    if closed_without_result {
-                        if let Some(fallback) = this.closed_fallback.take() {
-                            return std::task::Poll::Ready(fallback());
+                return result.map_or_else(
+                    || {
+                        if closed_without_result {
+                            if let Some(fallback) = this.closed_fallback.take() {
+                                return std::task::Poll::Ready(fallback());
+                            }
+                            panic!("blocking operation ended without producing a result"); // ubs:ignore - invariant violation
+                        } else {
+                            panic!("blocking operation polled after completion"); // ubs:ignore - invariant violation
                         }
-                        panic!("blocking operation ended without producing a result"); // ubs:ignore - invariant violation
-                    } else {
-                        panic!("blocking operation polled after completion"); // ubs:ignore - invariant violation
-                    }
-                },
-                |result| match result {
-                    Ok(val) => std::task::Poll::Ready(val),
-                    Err(payload) => std::panic::resume_unwind(payload),
-                },
-            )
-        } else {
-            if !guard
+                    },
+                    |result| match result {
+                        Ok(val) => std::task::Poll::Ready(val),
+                        Err(payload) => std::panic::resume_unwind(payload),
+                    },
+                );
+            }
+            if guard
                 .waker
                 .as_ref()
                 .is_some_and(|w| w.will_wake(cx.waker()))
             {
-                guard.waker = Some(cx.waker().clone());
+                drop(guard);
+                return std::task::Poll::Pending;
             }
-            std::task::Poll::Pending
+            if let Some(waker) = incoming_waker.take() {
+                let retired_waker = guard.waker.replace(waker);
+                drop(guard);
+                drop(retired_waker);
+                return std::task::Poll::Pending;
+            }
+
+            // Both clone and drop may invoke custom Waker callbacks. Prepare
+            // ownership outside the mutex, then recheck completion so a sender
+            // racing this unlocked interval cannot leave an unwoken waiter.
+            drop(guard);
+            incoming_waker = Some(cx.waker().clone());
         }
     }
 }
@@ -834,6 +850,130 @@ mod tests {
             pool.shutdown_and_wait(Duration::from_secs(1)),
             "blocking pool should shut down cleanly after the test"
         );
+    }
+
+    #[test]
+    fn blocking_oneshot_receiver_drop_retires_waker_after_unlock() {
+        struct DropProbe {
+            state: std::sync::Weak<Mutex<BlockingOneshotState<u32>>>,
+            observed: Arc<Mutex<Vec<Option<bool>>>>,
+        }
+
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let detached = self
+                    .state
+                    .upgrade()
+                    .and_then(|state| state.try_lock().map(|guard| guard.waker.is_none()));
+                self.observed.lock().push(detached);
+            }
+        }
+
+        init_test("blocking_oneshot_receiver_drop_retires_waker_after_unlock");
+        let (tx, mut rx) = BlockingOneshot::<u32>::new();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let waker = Waker::from(Arc::new(DropProbe {
+            state: Arc::downgrade(&tx.state),
+            observed: Arc::clone(&observed),
+        }));
+        assert!(
+            std::pin::Pin::new(&mut rx)
+                .poll(&mut std::task::Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert!(tx.state.lock().waker.is_some(), "waiter was registered");
+        drop(waker);
+        assert!(observed.lock().is_empty(), "receiver owns the last waker");
+
+        drop(rx);
+
+        assert_eq!(*observed.lock(), vec![Some(true)]);
+        tx.send(Ok(42));
+        crate::test_complete!("blocking_oneshot_receiver_drop_retires_waker_after_unlock");
+    }
+
+    #[test]
+    fn blocking_oneshot_waker_replacement_can_complete_sender() {
+        struct DropProbe {
+            sender: Arc<Mutex<Option<BlockingOneshot<u32>>>>,
+            state: std::sync::Weak<Mutex<BlockingOneshotState<u32>>>,
+            unlocked: Arc<Mutex<Vec<bool>>>,
+        }
+
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for DropProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                let unlocked = self
+                    .state
+                    .upgrade()
+                    .is_some_and(|state| state.try_lock().is_some());
+                self.unlocked.lock().push(unlocked);
+                // A failed try_lock records the old defect without hanging the
+                // test. The external owner retains the sender in that case.
+                if unlocked {
+                    let sender = self.sender.lock().take();
+                    if let Some(sender) = sender {
+                        sender.send(Ok(42));
+                    }
+                }
+            }
+        }
+
+        struct WakeCount(AtomicU32);
+
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        init_test("blocking_oneshot_waker_replacement_can_complete_sender");
+        let (tx, mut rx) = BlockingOneshot::<u32>::new();
+        let state = Arc::clone(&tx.state);
+        let sender = Arc::new(Mutex::new(Some(tx)));
+        let unlocked = Arc::new(Mutex::new(Vec::new()));
+        let old_waker = Waker::from(Arc::new(DropProbe {
+            sender: Arc::clone(&sender),
+            state: Arc::downgrade(&state),
+            unlocked: Arc::clone(&unlocked),
+        }));
+        assert!(
+            std::pin::Pin::new(&mut rx)
+                .poll(&mut std::task::Context::from_waker(&old_waker))
+                .is_pending()
+        );
+        drop(old_waker);
+        assert!(
+            unlocked.lock().is_empty(),
+            "receiver owns the last old waker"
+        );
+
+        let wakes = Arc::new(WakeCount(AtomicU32::new(0)));
+        let new_waker = Waker::from(Arc::clone(&wakes));
+        let mut context = std::task::Context::from_waker(&new_waker);
+        assert!(std::pin::Pin::new(&mut rx).poll(&mut context).is_pending());
+
+        assert_eq!(*unlocked.lock(), vec![true]);
+        assert!(
+            sender.lock().is_none(),
+            "drop callback completed the sender"
+        );
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "new waiter was woken");
+        assert_eq!(
+            std::pin::Pin::new(&mut rx).poll(&mut context),
+            std::task::Poll::Ready(42)
+        );
+        assert!(state.lock().waker.is_none());
+        crate::test_complete!("blocking_oneshot_waker_replacement_can_complete_sender");
     }
 
     #[test]
