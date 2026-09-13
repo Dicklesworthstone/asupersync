@@ -94,6 +94,7 @@ fn foreign_call_completion_survives_cancelled_result_delivery() {
         .expect("standard profile starts a bounded runtime");
     let completion = ForeignCallCompletion::new();
     let completion_for_task = completion.clone();
+    let completion_for_observer = completion.clone();
     let release = Arc::new(AtomicBool::new(false));
     let release_for_call = Arc::clone(&release);
     let (result, before_release) = runtime.block_on(async move {
@@ -117,7 +118,7 @@ fn foreign_call_completion_survives_cancelled_result_delivery() {
             .recv(&cx)
             .await
             .expect("foreign call reaches the blocking boundary");
-        let before_release = completion.is_complete();
+        let before_release = completion_for_observer.is_complete();
         task.abort();
         (task.join(&cx).await, before_release)
     });
