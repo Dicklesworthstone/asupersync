@@ -528,16 +528,28 @@ impl AtpSession {
         hasher.update(&file_contents);
         let computed_hash: [u8; 32] = hasher.finalize().into();
 
-        // Integrity is the hash comparison alone. Content heuristics (a
-        // zero-length file whose path does not mention "empty", a
-        // block-aligned file ending in zero bytes) previously overrode it in
-        // both directions and were removed: they failed a valid zero-padded
-        // image with a matching hash and passed an empty file by its name.
         let mut integrity_check_passed = true;
+
+        // Compare with expected hash if provided
         if let Some(expected) = expected_hash {
             use subtle::ConstantTimeEq;
             if !bool::from(computed_hash.ct_eq(expected)) {
                 // ubs:ignore - using constant time eq
+                integrity_check_passed = false;
+            }
+        }
+
+        // Additional integrity checks
+        // Check for zero-length files (might indicate corruption)
+        if size_bytes == 0 && !object_path.to_string_lossy().contains("empty") {
+            integrity_check_passed = false;
+        }
+
+        // Basic corruption detection: check for patterns that suggest truncation
+        if file_contents.len() > 100 {
+            let last_bytes = &file_contents[file_contents.len() - 10..];
+            if last_bytes.iter().all(|&b| b == 0) && file_contents.len() % 512 == 0 {
+                // Suspicious: ends with zeros and is block-aligned
                 integrity_check_passed = false;
             }
         }
@@ -645,7 +657,7 @@ impl AtpSession {
         if cx.checkpoint().is_err() {
             return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
         }
-        if daemon_endpoint_is_reachable(&self.mode).await.is_err() {
+        if daemon_endpoint_is_reachable(&self.mode).is_err() {
             return AtpOutcome::Err(AtpError::Daemon(
                 crate::net::atp::protocol::DaemonError::DaemonOffline,
             ));
@@ -671,7 +683,7 @@ impl AtpSession {
         if cx.checkpoint().is_err() {
             return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
         }
-        if daemon_endpoint_is_reachable(&self.mode).await.is_err() {
+        if daemon_endpoint_is_reachable(&self.mode).is_err() {
             return AtpOutcome::Err(AtpError::Daemon(
                 crate::net::atp::protocol::DaemonError::DaemonOffline,
             ));
@@ -687,7 +699,7 @@ impl AtpSession {
         if cx.checkpoint().is_err() {
             return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
         }
-        if daemon_endpoint_is_reachable(&self.mode).await.is_err() {
+        if daemon_endpoint_is_reachable(&self.mode).is_err() {
             return AtpOutcome::Err(AtpError::Daemon(
                 crate::net::atp::protocol::DaemonError::DaemonOffline,
             ));
@@ -795,10 +807,7 @@ impl AtpSession {
     }
 }
 
-/// Probes the daemon endpoint with a bounded connect on the blocking pool;
-/// the std connect must not run on a runtime worker (it stalled the whole
-/// `current_thread` runtime for up to 250 ms per unreachable probe).
-async fn daemon_endpoint_is_reachable(mode: &SdkMode) -> std::io::Result<()> {
+fn daemon_endpoint_is_reachable(mode: &SdkMode) -> std::io::Result<()> {
     let SdkMode::DaemonDelegated {
         daemon_endpoint, ..
     } = mode
@@ -818,11 +827,7 @@ async fn daemon_endpoint_is_reachable(mode: &SdkMode) -> std::io::Result<()> {
         )
     })?;
 
-    crate::runtime::spawn_blocking_io(move || {
-        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250))
-            .map(|_| ())
-    })
-    .await
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
 }
 
 #[derive(Debug, Clone, Deserialize)]
