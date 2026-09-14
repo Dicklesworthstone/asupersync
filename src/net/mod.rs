@@ -50,11 +50,17 @@ pub mod sys;
 /// but native socket entry points fail fast with `io::ErrorKind::Unsupported`.
 pub mod tcp;
 mod udp;
+// The io_uring reactor path does not consume these fallback-poll re-exports,
+// so they read as unused under `--features io-uring` even though the default
+// (epoll/polling) reactor uses them; allow that rather than removing a
+// re-export the non-io_uring build needs.
 #[cfg(all(unix, not(target_arch = "wasm32")))]
+#[cfg_attr(feature = "io-uring", allow(unused_imports))]
 pub(crate) use udp::Armed;
 /// Fallback-aware reactor registration shared by every fd-backed async handle
 /// in the crate (sockets here, child-process pipes in `crate::process`).
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(feature = "io-uring", allow(unused_imports))]
 pub(crate) use udp::ReactorRegistration;
 /// Unix domain socket networking primitives (includes `UnixListener`, `UnixStream`).
 #[cfg(unix)]
