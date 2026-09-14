@@ -212,6 +212,12 @@ pub mod raptorq;
 pub mod record;
 pub mod remote;
 pub mod runtime;
+#[cfg(feature = "desktop-runtime-profile")]
+#[path = "runtime/desktop_profile.rs"]
+pub mod desktop_profile;
+#[cfg(feature = "desktop-runtime-profile")]
+#[path = "runtime/desktop_samples.rs"]
+pub mod desktop_samples;
 pub mod security;
 pub mod service;
 pub mod session;
