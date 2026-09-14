@@ -1728,6 +1728,10 @@ pub struct QuicTlsMachine {
     local: KeyEpoch,
     remote: KeyEpoch,
     pending_local_update: bool,
+    /// Lowest packet number attributed to the current remote key generation.
+    /// A phase flip carrying a lower number is a reordered packet of a previous
+    /// key phase (RFC 9001 §6.3), not a new peer key update.
+    remote_gen_floor_pn: u64,
 }
 
 impl Default for QuicTlsMachine {
@@ -1739,6 +1743,7 @@ impl Default for QuicTlsMachine {
             local: KeyEpoch::default(),
             remote: KeyEpoch::default(),
             pending_local_update: false,
+            remote_gen_floor_pn: 0,
         }
     }
 }
@@ -1854,22 +1859,50 @@ impl QuicTlsMachine {
     }
 
     /// Process peer key-phase bit from a protected packet.
-    pub fn on_peer_key_phase(&mut self, phase: bool) -> Result<KeyUpdateEvent, QuicTlsError> {
+    /// Process a peer key-phase bit observed on an authenticated 1-RTT packet,
+    /// using the packet number to disambiguate a genuine key update from a
+    /// delayed packet of the previous key phase (RFC 9001 §6.3).
+    ///
+    /// A phase flip is accepted as a new peer key update when `packet_number`
+    /// is at least the lowest packet number attributed to the current remote
+    /// generation; a lower number is a reordered packet from an earlier phase
+    /// and yields [`QuicTlsError::StalePeerKeyPhase`]. Because QUIC key phases
+    /// alternate, this accepts repeated bidirectional updates rather than only
+    /// the first one. The live receive path invokes this only after the packet
+    /// has decrypted under the new keys, so an accepted update is confirmed.
+    pub fn on_peer_key_phase_pn(
+        &mut self,
+        phase: bool,
+        packet_number: u64,
+    ) -> Result<KeyUpdateEvent, QuicTlsError> {
         if !self.handshake_confirmed {
             return Err(QuicTlsError::HandshakeNotConfirmed);
         }
         if phase == self.remote.phase {
             return Ok(KeyUpdateEvent::NoChange);
         }
-        if self.remote.generation > 0 && !phase {
+        if self.remote.generation > 0 && packet_number < self.remote_gen_floor_pn {
             return Err(QuicTlsError::StalePeerKeyPhase(phase));
         }
         self.remote.phase = phase;
         self.remote.generation += 1;
+        self.remote_gen_floor_pn = packet_number;
         Ok(KeyUpdateEvent::RemoteUpdateAccepted {
             new_phase: self.remote.phase,
             generation: self.remote.generation,
         })
+    }
+
+    /// Process a peer key-phase bit without packet-number context.
+    ///
+    /// Equivalent to [`Self::on_peer_key_phase_pn`] evaluated at the current
+    /// generation floor, so it accepts an alternating peer key update
+    /// (RFC 9001 §6.3) without rejecting it as stale. The packet-number-aware
+    /// form is preferred on the live receive path, where a delayed packet from
+    /// the previous phase must be rejected as
+    /// [`QuicTlsError::StalePeerKeyPhase`] instead of rotating backwards.
+    pub fn on_peer_key_phase(&mut self, phase: bool) -> Result<KeyUpdateEvent, QuicTlsError> {
+        self.on_peer_key_phase_pn(phase, self.remote_gen_floor_pn)
     }
 
     fn advance_to(&mut self, target: CryptoLevel) -> Result<(), QuicTlsError> {
@@ -2063,12 +2096,18 @@ mod tests {
 
     #[test]
     fn stale_peer_key_phase_rollback_is_rejected() {
+        // asupersync-1bheeo (RFC 9001 §6.3, user-approved documented-behaviour
+        // change): a phase flip is stale only when its packet number predates
+        // the current generation's floor — a reordered packet of the previous
+        // phase — not merely because it flips back to phase 0.
         let mut m = QuicTlsMachine::new();
         m.on_handshake_keys_available().expect("handshake");
         m.on_1rtt_keys_available().expect("1rtt");
         m.on_handshake_confirmed().expect("confirmed");
 
-        let evt = m.on_peer_key_phase(true).expect("first update");
+        // Peer rotates to phase 1 at packet number 100 (sets the generation
+        // floor to 100).
+        let evt = m.on_peer_key_phase_pn(true, 100).expect("first update");
         assert_eq!(
             evt,
             KeyUpdateEvent::RemoteUpdateAccepted {
@@ -2077,10 +2116,59 @@ mod tests {
             }
         );
 
-        let err = m.on_peer_key_phase(false).expect_err("rollback must fail");
+        // A phase-0 packet numbered BELOW the floor is a delayed old-phase
+        // packet, rejected as stale rather than rotating backwards.
+        let err = m
+            .on_peer_key_phase_pn(false, 50)
+            .expect_err("stale rollback must fail");
         assert_eq!(err, QuicTlsError::StalePeerKeyPhase(false));
         assert!(m.remote_key_phase());
         assert_eq!(m.remote.generation, 1);
+    }
+
+    #[test]
+    fn alternating_peer_key_updates_are_accepted() {
+        // asupersync-1bheeo (RFC 9001 §6.3): key phases alternate, so a
+        // long-lived connection processes repeated peer key updates,
+        // disambiguated by increasing packet numbers.
+        let mut m = QuicTlsMachine::new();
+        m.on_handshake_keys_available().expect("handshake");
+        m.on_1rtt_keys_available().expect("1rtt");
+        m.on_handshake_confirmed().expect("confirmed");
+
+        let e1 = m.on_peer_key_phase_pn(true, 100).expect("update 1 (0->1)");
+        assert_eq!(
+            e1,
+            KeyUpdateEvent::RemoteUpdateAccepted {
+                new_phase: true,
+                generation: 1,
+            }
+        );
+        // The second update (1->0) — previously rejected by the one-update rule.
+        let e2 = m.on_peer_key_phase_pn(false, 200).expect("update 2 (1->0)");
+        assert_eq!(
+            e2,
+            KeyUpdateEvent::RemoteUpdateAccepted {
+                new_phase: false,
+                generation: 2,
+            }
+        );
+        assert!(!m.remote_key_phase());
+        let e3 = m.on_peer_key_phase_pn(true, 300).expect("update 3 (0->1)");
+        assert_eq!(
+            e3,
+            KeyUpdateEvent::RemoteUpdateAccepted {
+                new_phase: true,
+                generation: 3,
+            }
+        );
+        assert!(m.remote_key_phase());
+        // A delayed phase-0 packet numbered below the gen-3 floor is stale.
+        let err = m
+            .on_peer_key_phase_pn(false, 250)
+            .expect_err("delayed old-phase packet is stale");
+        assert_eq!(err, QuicTlsError::StalePeerKeyPhase(false));
+        assert_eq!(m.remote.generation, 3);
     }
 
     #[test]

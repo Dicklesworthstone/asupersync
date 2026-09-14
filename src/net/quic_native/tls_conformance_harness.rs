@@ -136,10 +136,13 @@ impl RefKeyUpdateMachine {
         if phase == self.remote_key_phase {
             return Ok(KeyUpdateEvent::NoChange);
         }
-        if self.remote_generation > 0 && !phase {
-            return Err(QuicTlsError::StalePeerKeyPhase(phase));
-        }
 
+        // asupersync-1bheeo (RFC 9001 §6.3): key phases alternate, so a phase
+        // flip is a legitimate peer key update. This reference (like
+        // `QuicTlsMachine::on_peer_key_phase`) does not model packet numbers and
+        // so cannot detect a delayed old-phase packet; the stale-by-packet-
+        // number rejection is exercised by the packet-number-aware
+        // `QuicTlsMachine::on_peer_key_phase_pn` unit tests in tls.rs.
         self.remote_key_phase = phase;
         self.remote_generation += 1;
 
