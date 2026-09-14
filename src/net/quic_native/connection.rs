@@ -2059,6 +2059,20 @@ impl NativeQuicConnection {
         Ok(evt)
     }
 
+    /// Process a peer key phase observed on an authenticated 1-RTT packet,
+    /// using the packet number to disambiguate a genuine key update from a
+    /// delayed previous-phase packet (RFC 9001 §6.3, asupersync-1bheeo).
+    pub fn on_peer_key_phase_pn(
+        &mut self,
+        cx: &Cx,
+        phase: bool,
+        packet_number: u64,
+    ) -> Result<KeyUpdateEvent, NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        let evt = self.tls.on_peer_key_phase_pn(phase, packet_number)?;
+        Ok(evt)
+    }
+
     /// Next locally initiated stream eligible for write scheduling.
     pub fn next_writable_stream(
         &mut self,

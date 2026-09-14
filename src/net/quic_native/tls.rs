@@ -1893,6 +1893,25 @@ impl QuicTlsMachine {
         })
     }
 
+    /// Whether a key-phase-flip packet would be accepted as a genuine new peer
+    /// key update, without mutating any machine state.
+    ///
+    /// This is the non-committing predicate the live 1-RTT receive path uses to
+    /// decide whether to install next-generation receive keys *before* running
+    /// AEAD (the replay window permits decrypting a packet only once). It is
+    /// `true` exactly when [`Self::on_peer_key_phase_pn`] would return
+    /// [`KeyUpdateEvent::RemoteUpdateAccepted`]: the handshake is confirmed, the
+    /// phase differs from the current remote phase, and `packet_number` is not
+    /// below the floor of the current remote generation (a delayed
+    /// previous-phase packet, which must be decrypted with the retained old keys
+    /// rather than triggering a rotation) (RFC 9001 §6.3, asupersync-1bheeo).
+    #[must_use]
+    pub fn peer_key_phase_is_new_update(&self, phase: bool, packet_number: u64) -> bool {
+        self.handshake_confirmed
+            && phase != self.remote.phase
+            && !(self.remote.generation > 0 && packet_number < self.remote_gen_floor_pn)
+    }
+
     /// Process a peer key-phase bit without packet-number context.
     ///
     /// Equivalent to [`Self::on_peer_key_phase_pn`] evaluated at the current
@@ -2169,6 +2188,38 @@ mod tests {
             .expect_err("delayed old-phase packet is stale");
         assert_eq!(err, QuicTlsError::StalePeerKeyPhase(false));
         assert_eq!(m.remote.generation, 3);
+    }
+
+    // asupersync-1bheeo: the live receive path must decide whether to install
+    // next-generation keys BEFORE running AEAD (the replay window permits
+    // decrypting once), so it needs a non-committing predicate that agrees
+    // exactly with `on_peer_key_phase_pn`'s accept condition.
+    #[test]
+    fn peer_key_phase_is_new_update_matches_the_commit_condition() {
+        let mut m = QuicTlsMachine::new();
+        // Before the handshake is confirmed, no key update is possible.
+        assert!(!m.peer_key_phase_is_new_update(true, 100));
+        m.on_handshake_keys_available().expect("handshake");
+        m.on_1rtt_keys_available().expect("1rtt");
+        m.on_handshake_confirmed().expect("confirmed");
+
+        // A flip to the other phase at the first generation is always genuine.
+        assert!(m.peer_key_phase_is_new_update(true, 100));
+        // The current phase is not an update (would be NoChange).
+        assert!(!m.peer_key_phase_is_new_update(false, 100));
+
+        // Predicate agrees with the committing call: accept the phase-1 update.
+        assert!(m.peer_key_phase_is_new_update(true, 100));
+        m.on_peer_key_phase_pn(true, 100).expect("commit update");
+
+        // A phase-0 flip above the gen-1 floor is a genuine next update.
+        assert!(m.peer_key_phase_is_new_update(false, 150));
+        // A phase-0 flip BELOW the floor is a delayed old-phase packet, not an
+        // update — it must be decrypted with the retained previous keys.
+        assert!(!m.peer_key_phase_is_new_update(false, 50));
+        // The predicate has not mutated any state.
+        assert!(m.remote_key_phase());
+        assert_eq!(m.remote.generation, 1);
     }
 
     #[test]

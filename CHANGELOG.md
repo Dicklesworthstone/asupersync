@@ -75,6 +75,29 @@ crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 
 ## [Unreleased]
 
+### Native QUIC key updates (RFC 9001 §6.3/§6.5/§6.6)
+
+- The ATP native QUIC 1-RTT data plane now rotates packet-protection keys
+  instead of only failing closed at the AEAD confidentiality limit
+  (`asupersync-1bheeo`, building on the `asupersync-gsnci5` usage accounting).
+  The flush path initiates a local key update before the confidentiality
+  threshold and only when no update is already in flight (both key phases
+  agree), honoring the RFC 9001 §6.5 one-update-at-a-time rule; the
+  `gsnci5` hard-limit fail-closed remains as a backstop.
+- The receive path installs the peer's next-generation keys and decrypts
+  rotated traffic. It uses the packet number to distinguish a genuine key
+  update from a delayed previous-phase packet, and installs next-generation
+  keys idempotently so a forged or duplicated key-phase-flip packet cannot
+  advance the (single-shot, bidirectional) key ratchet twice and desynchronize
+  the connection.
+- **Documented-behavior correction (owner-approved 2026-09-13):**
+  `QuicTlsMachine::on_peer_key_phase` now accepts repeated alternating peer key
+  updates (RFC 9001 §6.3), where it previously rejected the second update. The
+  public `QuicTlsError::StalePeerKeyPhase` variant and every method signature
+  are preserved; `StalePeerKeyPhase` now fires only for a genuinely stale
+  packet whose packet number predates the current generation's floor, via the
+  new packet-number-aware `on_peer_key_phase_pn`.
+
 ## [v0.5.0] - 2026-09-12
 
 [Published release](https://github.com/Dicklesworthstone/asupersync/releases/tag/v0.5.0)

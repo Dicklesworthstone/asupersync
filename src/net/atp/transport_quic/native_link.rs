@@ -84,7 +84,7 @@ use crate::net::quic_native::handshake_driver::{
     is_stale_handshake_packet_error,
 };
 use crate::net::quic_native::tls::{
-    PacketProtectionRequest, PacketProtectionSpace, RustlsQuicCryptoProvider,
+    KeyUpdateEvent, PacketProtectionRequest, PacketProtectionSpace, RustlsQuicCryptoProvider,
 };
 use crate::net::quic_native::{
     AckRange as NativeAckRange, NativeQuicConnection, NativeQuicConnectionConfig,
@@ -3776,10 +3776,35 @@ impl QuicLink {
         let mut datagram_frames = 0usize;
         let mut max_datagram_frames_per_plain_packet = 0usize;
         let mut plaintext_payload_bytes = 0usize;
+        // asupersync-1bheeo: RFC 9001 §6.5 — rotate the local send key before
+        // the AEAD confidentiality limit so the connection continues past it
+        // instead of closing. Only initiate when no key update is already in
+        // flight (local and remote phases agree), honoring the RFC's rule
+        // against starting a new update before the current one is acknowledged;
+        // the gsnci5 `confidentiality_limit_reached` fail-closed net below is the
+        // backstop if the peer never confirms.
+        if self.conn.can_send_1rtt()
+            && self
+                .protection
+                .confidentiality_key_update_due(PacketProtectionSpace::OneRtt)
+            && self.conn.tls().local_key_phase() == self.conn.tls().remote_key_phase()
+        {
+            if let Ok(KeyUpdateEvent::LocalUpdateScheduled { next_phase, .. }) =
+                self.conn.request_local_key_update(cx)
+                && self
+                    .protection
+                    .ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, next_phase)
+                    .is_ok()
+            {
+                self.conn.commit_local_key_update(cx)?;
+                self.protection
+                    .note_local_key_update(PacketProtectionSpace::OneRtt);
+            }
+        }
         // asupersync-gsnci5: send every 1-RTT packet in this flush under the
-        // current local key phase (RFC 9001 §6.4). Until key rotation lands the
-        // local phase never leaves 0, but the header and the AEAD nonce/AAD now
-        // track it so a future rotation flips the wire bit consistently.
+        // current local key phase (RFC 9001 §6.4). asupersync-1bheeo makes the
+        // local phase actually rotate (above); the header and the AEAD nonce/AAD
+        // track it so the wire key-phase bit flips consistently.
         let send_key_phase = self.conn.tls().local_key_phase();
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -5055,6 +5080,34 @@ impl QuicLink {
             return Ok(InboundPacketDecode::NotOneRtt);
         };
         let mut data = packet.data;
+        // asupersync-1bheeo: RFC 9001 §6.3 peer-initiated key update. A 1-RTT
+        // packet whose key-phase bit differs from the current remote phase is
+        // either a genuine key update or a delayed packet from the previous
+        // phase; the packet number disambiguates (a number below the current
+        // generation floor is a reordered old packet). For a genuine update we
+        // install next-generation receive keys *before* AEAD, because the replay
+        // window permits decrypting a packet only once. The install is
+        // idempotent: the rustls key ratchet is single-shot and drives both
+        // directions, so a forged or duplicated flip must not advance it twice
+        // and desynchronize us from the peer. A stale flip installs nothing and
+        // is decrypted with the retained previous-generation keys.
+        let peer_key_update = key_phase != self.conn.tls().remote_key_phase()
+            && self.conn.can_send_1rtt()
+            && self
+                .conn
+                .tls()
+                .peer_key_phase_is_new_update(key_phase, packet_number);
+        if peer_key_update
+            && !matches!(
+                self.protection
+                    .ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, key_phase,),
+                Outcome::Ok(())
+            )
+        {
+            // Could not install next-generation receive keys; drop the packet
+            // without advancing any key-update state.
+            return Ok(InboundPacketDecode::Dropped);
+        }
         let outcome = self.protection.unprotect_one_rtt_in_place_now(
             cx,
             key_phase,
@@ -5076,6 +5129,24 @@ impl QuicLink {
         }
         match outcome {
             Outcome::Ok(plaintext_len) => {
+                if peer_key_update {
+                    // The packet authenticated under the next-generation keys:
+                    // the peer key update is confirmed. Advance the remote key
+                    // phase (RFC 9001 §6.3) and reset the integrity counter, then
+                    // rotate our own send keys to the same phase so subsequent
+                    // packets we send use the new keys (the ratchet already
+                    // installed them above, so no further key derivation runs).
+                    self.conn
+                        .on_peer_key_phase_pn(cx, key_phase, packet_number)?;
+                    self.protection
+                        .note_peer_key_update(PacketProtectionSpace::OneRtt);
+                    if self.conn.tls().local_key_phase() != key_phase {
+                        self.conn.request_local_key_update(cx)?;
+                        self.conn.commit_local_key_update(cx)?;
+                        self.protection
+                            .note_local_key_update(PacketProtectionSpace::OneRtt);
+                    }
+                }
                 data.truncate(ONE_RTT_HEADER_LEN + plaintext_len);
                 let plaintext = Bytes::from(data).slice(ONE_RTT_HEADER_LEN..);
                 let frames = NativeQuicConnection::decode_frames_bytes(&plaintext)?;
@@ -11611,6 +11682,147 @@ mod gh67_liveness_tests {
             assert!(
                 matches!(&result, Err(QuicTransportError::Integrity(_))),
                 "ingest must fail closed at the integrity limit, got {result:?}"
+            );
+        });
+    }
+
+    // asupersync-1bheeo (RFC 9001 §6.3/§6.5): with a lowered soft key-update
+    // threshold, a long-lived bidirectional 1-RTT exchange crosses the
+    // confidentiality threshold repeatedly, so BOTH endpoints rotate their keys
+    // several times (alternating phases). Each endpoint's flush initiates a
+    // local update (Part 1) and each receive path installs the peer's
+    // next-generation keys and decrypts the rotated traffic (Part 2). Every
+    // control frame must survive intact — its AEAD tag verifies only under the
+    // correct rotated keys — and neither side may fall back to the hard
+    // confidentiality-limit fail-closed. The `>= 3` rotation asserts make this
+    // non-vacuous: without the rotation wiring the remote key phase never moves
+    // and the test fails.
+    #[test]
+    fn bidirectional_key_rotation_over_real_udp() {
+        use crate::net::quic_native::tls::PacketProtectionSpace;
+
+        // Deliver `frame` over the control stream, rotating keys as the soft
+        // threshold trips, pumping until it authenticates and decodes. Returns
+        // the received frame type so the caller can assert byte-intactness.
+        async fn ping(
+            cx: &Cx,
+            from: &mut QuicLink,
+            from_control: &mut NativeQuicFrameTransport,
+            to: &mut QuicLink,
+            to_control: &mut NativeQuicFrameTransport,
+            frame: &Frame,
+        ) -> FrameType {
+            from_control.send(cx, &mut from.conn, frame).unwrap();
+            from.flush(cx).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                to.pump_inbound_for(cx, Duration::from_secs(2))
+                    .await
+                    .unwrap();
+                if let Some(received) = to_control.try_recv(cx, &mut to.conn).unwrap() {
+                    return received.frame_type();
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "rotated control frame never arrived"
+                );
+            }
+        }
+
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig::default();
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+
+            // A tiny soft threshold forces a key update every few sent packets;
+            // production uses the RFC 9001 §6.6 default (millions of packets).
+            client
+                .protection
+                .set_key_update_confidentiality_threshold(2);
+            server
+                .protection
+                .set_key_update_confidentiality_threshold(2);
+
+            let (mut client_control, mut server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+
+            let mut client_remote_phases = vec![client.conn.tls().remote_key_phase()];
+            let mut server_remote_phases = vec![server.conn.tls().remote_key_phase()];
+
+            for round in 0..14u32 {
+                // Alternate frame types so a decrypt under the wrong key would
+                // surface as a wrong or absent frame, not a silent pass.
+                let c2s = if round % 2 == 0 {
+                    Frame::empty(FrameType::KeepAlive).unwrap()
+                } else {
+                    Frame::empty(FrameType::Proof).unwrap()
+                };
+                let got = ping(
+                    &cx,
+                    &mut client,
+                    &mut client_control,
+                    &mut server,
+                    &mut server_control,
+                    &c2s,
+                )
+                .await;
+                assert_eq!(
+                    got,
+                    c2s.frame_type(),
+                    "client->server frame corrupted in round {round}"
+                );
+                server_remote_phases.push(server.conn.tls().remote_key_phase());
+
+                let s2c = if round % 2 == 0 {
+                    Frame::empty(FrameType::Proof).unwrap()
+                } else {
+                    Frame::empty(FrameType::KeepAlive).unwrap()
+                };
+                let got = ping(
+                    &cx,
+                    &mut server,
+                    &mut server_control,
+                    &mut client,
+                    &mut client_control,
+                    &s2c,
+                )
+                .await;
+                assert_eq!(
+                    got,
+                    s2c.frame_type(),
+                    "server->client frame corrupted in round {round}"
+                );
+                client_remote_phases.push(client.conn.tls().remote_key_phase());
+
+                // Rotation must keep each key's packet count below the hard
+                // limit; a fail-closed here means Part 1 never rotated.
+                assert!(
+                    !client
+                        .protection
+                        .confidentiality_limit_reached(PacketProtectionSpace::OneRtt),
+                    "client hit the hard confidentiality limit instead of rotating",
+                );
+                assert!(
+                    !server
+                        .protection
+                        .confidentiality_limit_reached(PacketProtectionSpace::OneRtt),
+                    "server hit the hard confidentiality limit instead of rotating",
+                );
+            }
+
+            // Count accepted peer rotations on each side (adjacent phase flips of
+            // the remote key phase). Both receive paths must have installed and
+            // committed several peer key updates.
+            let count_flips = |phases: &[bool]| phases.windows(2).filter(|w| w[0] != w[1]).count();
+            let client_rotations = count_flips(&client_remote_phases);
+            let server_rotations = count_flips(&server_remote_phases);
+            assert!(
+                client_rotations >= 3,
+                "client should accept several peer key updates, saw {client_rotations}: {client_remote_phases:?}",
+            );
+            assert!(
+                server_rotations >= 3,
+                "server should accept several peer key updates, saw {server_rotations}: {server_remote_phases:?}",
             );
         });
     }

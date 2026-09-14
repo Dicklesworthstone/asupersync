@@ -419,6 +419,115 @@ impl AtpPacketProtection {
         self.auth_failures_under_current_key.insert(space, 0);
     }
 
+    /// Advance the packet protection provider to the next key generation for
+    /// `space`/`next_phase` on the current task.
+    ///
+    /// This is the synchronous counterpart to [`update_key`](Self::update_key):
+    /// the QUIC 1-RTT flush and receive hot paths are synchronous and cannot
+    /// await, so they install next-generation keys through this primitive. It
+    /// performs no RFC 9001 §6.6 counter bookkeeping — callers reset the
+    /// confidentiality counter with
+    /// [`note_local_key_update`](Self::note_local_key_update) once they begin
+    /// sending under the new key, and the integrity counter with
+    /// [`note_peer_key_update`](Self::note_peer_key_update) once a received
+    /// packet has authenticated under it (asupersync-1bheeo).
+    pub(crate) fn update_key_now(
+        &mut self,
+        cx: &Cx,
+        space: PacketProtectionSpace,
+        next_phase: bool,
+    ) -> AtpOutcome<ProtectionKeySnapshot> {
+        if cx.trace_buffer().is_some() {
+            cx.trace_with_fields(
+                "atp_packet_protection_update_key_now",
+                &[
+                    ("space", &format!("{:?}", space)),
+                    ("phase", &next_phase.to_string()),
+                ],
+            );
+        }
+
+        let result: AtpOutcome<ProtectionKeySnapshot> = self
+            .provider
+            .update_key(space, next_phase)
+            .map_err(|e| self.map_tls_error(e))
+            .into();
+
+        if self.config.enable_proof_logging {
+            if let Outcome::Ok(snapshot) = &result {
+                cx.trace(&format!(
+                    "key updated (sync): space={:?} phase={} gen={}",
+                    snapshot.space, snapshot.key_phase, snapshot.generation
+                ));
+            }
+        }
+
+        result
+    }
+
+    /// Whether the next-generation keys for `space`/`key_phase` are already
+    /// installed, derived purely from provider state so it can never fall out of
+    /// sync with the send- and receive-side rotation paths.
+    ///
+    /// QUIC key phases alternate (`0 → 1 → 0 → …`) while the generation counter
+    /// only increases, and each phase owns a single provider key slot. The
+    /// next-generation keys for `key_phase` are therefore installed exactly when
+    /// that phase's slot holds a strictly newer generation than the opposite
+    /// phase's slot. This keeps [`ensure_next_gen_keys`](Self::ensure_next_gen_keys)
+    /// idempotent across a rotation: a forged or duplicated key-phase-flip packet
+    /// observes the already-newer generation and does not advance the
+    /// bidirectional, single-shot rustls key ratchet a second time (which would
+    /// desynchronize us from the peer) (RFC 9001 §6.3, asupersync-1bheeo).
+    #[must_use]
+    pub(crate) fn next_gen_keys_installed(
+        &self,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+    ) -> bool {
+        let Some(this_gen) = self
+            .provider
+            .key_snapshot(space, key_phase)
+            .ok()
+            .map(|snapshot| snapshot.generation)
+        else {
+            // The target phase has no keys yet: the next generation is not
+            // installed.
+            return false;
+        };
+        match self
+            .provider
+            .key_snapshot(space, !key_phase)
+            .ok()
+            .map(|snapshot| snapshot.generation)
+        {
+            Some(other_gen) => this_gen > other_gen,
+            // The opposite (current) phase is absent: any keys under the target
+            // phase are already the newest generation.
+            None => true,
+        }
+    }
+
+    /// Idempotently install next-generation keys for `space`/`key_phase`.
+    ///
+    /// Called by both the flush path (local-initiated update) and the receive
+    /// path (peer-initiated update). Because the rustls key ratchet advances on
+    /// every `update_key` call and drives both directions at once, this must run
+    /// at most once per rotation;
+    /// [`next_gen_keys_installed`](Self::next_gen_keys_installed) gates the
+    /// ratchet so repeated candidate packets reuse the installed keys rather than
+    /// desynchronizing from the peer (RFC 9001 §6.3, asupersync-1bheeo).
+    pub(crate) fn ensure_next_gen_keys(
+        &mut self,
+        cx: &Cx,
+        space: PacketProtectionSpace,
+        key_phase: bool,
+    ) -> AtpOutcome<()> {
+        if self.next_gen_keys_installed(space, key_phase) {
+            return Outcome::ok(());
+        }
+        self.update_key_now(cx, space, key_phase).map(|_| ())
+    }
+
     /// Override the soft key-update threshold. Tests exercise rotation without
     /// protecting millions of packets; production always uses the default.
     #[cfg(any(test, feature = "test-internals"))]
@@ -2002,6 +2111,70 @@ mod tests {
             assert_eq!(unprotected.plaintext, payload);
             assert!(unprotected.proof.key_phase);
             assert_eq!(unprotected.proof.generation, 1);
+        });
+    }
+
+    // asupersync-1bheeo: the receive and flush paths install next-generation
+    // keys through `ensure_next_gen_keys`, which must advance the (single-shot,
+    // bidirectional) rustls key ratchet at most once per rotation. A forged or
+    // duplicated key-phase-flip packet that re-derived keys would put us at a
+    // generation the peer never reaches and wedge the connection.
+    #[test]
+    fn ensure_next_gen_keys_is_idempotent_within_a_rotation() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let mut protection =
+                deterministic_one_rtt_protection(&cx, b"key-update-idempotency-seed").await;
+            let space = PacketProtectionSpace::OneRtt;
+
+            // Initial keys are generation 0 under phase 0; the next generation
+            // (phase 1) is not installed yet.
+            assert!(!protection.next_gen_keys_installed(space, true));
+
+            // First install advances the ratchet exactly once to generation 1.
+            protection
+                .ensure_next_gen_keys(&cx, space, true)
+                .expect("install next-gen keys");
+            assert!(protection.next_gen_keys_installed(space, true));
+            assert_eq!(
+                protection
+                    .provider
+                    .key_snapshot(space, true)
+                    .expect("phase-1 keys installed")
+                    .generation,
+                1,
+            );
+
+            // A duplicated or forged same-phase flip must reuse the installed
+            // keys, not advance the ratchet to generation 2.
+            protection
+                .ensure_next_gen_keys(&cx, space, true)
+                .expect("idempotent re-install");
+            assert_eq!(
+                protection
+                    .provider
+                    .key_snapshot(space, true)
+                    .expect("phase-1 keys still installed")
+                    .generation,
+                1,
+                "ensure_next_gen_keys must be idempotent within a rotation",
+            );
+
+            // The next rotation (back to phase 0) is a distinct generation and
+            // does advance the ratchet, to generation 2.
+            assert!(!protection.next_gen_keys_installed(space, false));
+            protection
+                .ensure_next_gen_keys(&cx, space, false)
+                .expect("install generation 2");
+            assert_eq!(
+                protection
+                    .provider
+                    .key_snapshot(space, false)
+                    .expect("phase-0 keys re-installed")
+                    .generation,
+                2,
+            );
+            assert!(protection.next_gen_keys_installed(space, false));
         });
     }
 
