@@ -479,6 +479,10 @@ impl AtpPacketProtection {
     /// observes the already-newer generation and does not advance the
     /// bidirectional, single-shot rustls key ratchet a second time (which would
     /// desynchronize us from the peer) (RFC 9001 §6.3, asupersync-1bheeo).
+    ///
+    /// `key_phase` is the rotation **target** — the phase opposite the current
+    /// one. Passing the current phase is meaningless (a rotation never targets
+    /// the phase already in use) and the result is not defined for that misuse.
     #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     #[must_use]
     pub(crate) fn next_gen_keys_installed(

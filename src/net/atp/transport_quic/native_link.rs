@@ -84,7 +84,7 @@ use crate::net::quic_native::handshake_driver::{
     is_stale_handshake_packet_error,
 };
 use crate::net::quic_native::tls::{
-    KeyUpdateEvent, PacketProtectionRequest, PacketProtectionSpace, RustlsQuicCryptoProvider,
+    PacketProtectionRequest, PacketProtectionSpace, RustlsQuicCryptoProvider,
 };
 use crate::net::quic_native::{
     AckRange as NativeAckRange, NativeQuicConnection, NativeQuicConnectionConfig,
@@ -3789,13 +3789,21 @@ impl QuicLink {
                 .confidentiality_key_update_due(PacketProtectionSpace::OneRtt)
             && self.conn.tls().local_key_phase() == self.conn.tls().remote_key_phase()
         {
-            if let Ok(KeyUpdateEvent::LocalUpdateScheduled { next_phase, .. }) =
-                self.conn.request_local_key_update(cx)
-                && self
-                    .protection
-                    .ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, next_phase)
-                    .is_ok()
+            // Install next-generation keys BEFORE scheduling the machine update.
+            // Ordering the (idempotent) key install first means a failed install
+            // never strands a pending local update — which would otherwise make
+            // every later `request_local_key_update` return `NoChange` and stall
+            // rotation until the confidentiality fail-closed. The request+commit
+            // pair then flips the local phase to `next_phase` (and recovers any
+            // pending update left by an earlier interrupted attempt); both are
+            // machine-only and never re-derive keys.
+            let next_phase = !self.conn.tls().local_key_phase();
+            if self
+                .protection
+                .ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, next_phase)
+                .is_ok()
             {
+                self.conn.request_local_key_update(cx)?;
                 self.conn.commit_local_key_update(cx)?;
                 self.protection
                     .note_local_key_update(PacketProtectionSpace::OneRtt);
