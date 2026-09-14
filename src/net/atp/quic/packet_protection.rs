@@ -431,6 +431,7 @@ impl AtpPacketProtection {
     /// sending under the new key, and the integrity counter with
     /// [`note_peer_key_update`](Self::note_peer_key_update) once a received
     /// packet has authenticated under it (asupersync-1bheeo).
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     pub(crate) fn update_key_now(
         &mut self,
         cx: &Cx,
@@ -478,6 +479,7 @@ impl AtpPacketProtection {
     /// observes the already-newer generation and does not advance the
     /// bidirectional, single-shot rustls key ratchet a second time (which would
     /// desynchronize us from the peer) (RFC 9001 §6.3, asupersync-1bheeo).
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     #[must_use]
     pub(crate) fn next_gen_keys_installed(
         &self,
@@ -516,6 +518,7 @@ impl AtpPacketProtection {
     /// [`next_gen_keys_installed`](Self::next_gen_keys_installed) gates the
     /// ratchet so repeated candidate packets reuse the installed keys rather than
     /// desynchronizing from the peer (RFC 9001 §6.3, asupersync-1bheeo).
+    #[cfg_attr(not(feature = "tls"), allow(dead_code))]
     pub(crate) fn ensure_next_gen_keys(
         &mut self,
         cx: &Cx,
