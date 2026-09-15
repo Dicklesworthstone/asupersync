@@ -3851,6 +3851,8 @@ mod tests {
             for code in [
                 rusqlite::ffi::SQLITE_BUSY,
                 rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+                rusqlite::ffi::SQLITE_LOCKED,
+                rusqlite::ffi::SQLITE_SCHEMA,
             ] {
                 let error = SqliteOperationError::from_rusqlite(
                     operation,
@@ -3868,7 +3870,14 @@ mod tests {
                 );
                 assert_eq!(error.diagnostic().is_retryable(), !must_restart);
                 assert_eq!(error.diagnostic().extended_code(), Some(code));
-                assert_eq!(error.diagnostic().category(), SqliteErrorCategory::Busy);
+                assert_eq!(
+                    error.diagnostic().category(),
+                    match code {
+                        rusqlite::ffi::SQLITE_LOCKED => SqliteErrorCategory::Locked,
+                        rusqlite::ffi::SQLITE_SCHEMA => SqliteErrorCategory::Internal,
+                        _ => SqliteErrorCategory::Busy,
+                    }
+                );
             }
         }
     }
@@ -3906,7 +3915,7 @@ mod tests {
                 *conn.transaction_state.lock() = TransactionState::NeedsRollback;
             }
             let generation = conn.transaction_generation.load(Ordering::Acquire);
-            for operation in 0..6 {
+            for operation in 0..8 {
                 let outcome = match operation {
                     0 => conn
                         .execute_diagnosed(&cx, "INSERT INTO t VALUES (2)", &[])
@@ -3925,7 +3934,9 @@ mod tests {
                         .await
                         .map(|_| ()),
                     4 => conn.begin_diagnosed(&cx).await.map(|_| ()),
-                    _ => conn.set_busy_timeout_diagnosed(&cx, Duration::ZERO).await,
+                    5 => conn.set_busy_timeout_diagnosed(&cx, Duration::ZERO).await,
+                    6 => Outcome::from(conn.close_diagnosed()),
+                    _ => conn.close_async_diagnosed(&cx).await,
                 };
                 let Outcome::Err(error) = outcome else {
                     panic!("operation {operation} must stop at failed rollback: {outcome:?}");
@@ -3945,6 +3956,10 @@ mod tests {
                 );
                 assert!(error.engine_source().is_some());
                 assert!(matches!(error.legacy_error(), SqliteError::Sqlite(_)));
+                assert!(
+                    conn.is_open(),
+                    "failed cleanup must preserve the connection"
+                );
                 assert_eq!(
                     *conn.transaction_state.lock(),
                     TransactionState::NeedsRollback

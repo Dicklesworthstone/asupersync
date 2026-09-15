@@ -1642,9 +1642,7 @@ impl SqliteErrorDiagnostic {
             Some(rusqlite::ffi::ErrorCode::DatabaseBusy) => (
                 SqliteErrorCategory::Busy,
                 Some("SQLITE_BUSY"),
-                if operation == SqliteOperation::TransactionCommit
-                    || extended_code == Some(rusqlite::ffi::SQLITE_BUSY_SNAPSHOT)
-                {
+                if extended_code == Some(rusqlite::ffi::SQLITE_BUSY_SNAPSHOT) {
                     SqliteRetryDisposition::RestartTransaction
                 } else {
                     SqliteRetryDisposition::RetryOperation
@@ -1821,6 +1819,15 @@ impl SqliteErrorDiagnostic {
                 SqliteRetryDisposition::Never,
                 false,
             ),
+        };
+        // COMMIT consumes its handle even on an engine failure. This applies
+        // to every otherwise retryable code, not just SQLITE_BUSY.
+        let retry = if operation == SqliteOperation::TransactionCommit
+            && retry == SqliteRetryDisposition::RetryOperation
+        {
+            SqliteRetryDisposition::RestartTransaction
+        } else {
+            retry
         };
         Self {
             operation,
@@ -4379,6 +4386,16 @@ impl SqliteConnection {
     /// Closes the connection and classifies cleanup failures without changing
     /// [`Self::close`].
     pub fn close_diagnosed(&self) -> Result<(), SqliteOperationError> {
+        {
+            let guard = self.inner.lock();
+            if let Some(conn) = guard.conn.as_ref() {
+                rollback_orphaned_transaction_generation_guarded::<SqliteOperationError>(
+                    conn,
+                    self.transaction_state.as_ref(),
+                    self.transaction_generation.as_ref(),
+                )?;
+            }
+        }
         self.close()
             .map_err(|error| SqliteOperationError::from_legacy(SqliteOperation::Close, error))
     }
@@ -4424,6 +4441,15 @@ impl SqliteConnection {
     /// Closes the connection asynchronously with structured cleanup
     /// diagnostics.
     pub async fn close_async_diagnosed(&self, cx: &Cx) -> Outcome<(), SqliteOperationError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(sqlite_cancelled_reason(cx));
+        }
+        match self.drain_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
         diagnose_legacy_outcome(SqliteOperation::Close, self.close_async(cx).await)
     }
 
