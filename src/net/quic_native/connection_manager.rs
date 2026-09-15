@@ -1780,6 +1780,7 @@ async fn drain_connection_frames_inner(
     }])
 }
 
+#[cfg(test)]
 pub(crate) async fn assemble_protected_1rtt_packet(
     cx: &Cx,
     connection_id: ConnectionId,
@@ -1804,7 +1805,7 @@ pub(crate) async fn assemble_protected_1rtt_packet(
     .await
 }
 
-async fn assemble_protected_1rtt_packet_inner(
+pub(crate) async fn assemble_protected_1rtt_packet_inner(
     cx: &Cx,
     connection_id: ConnectionId,
     connection: &mut NativeQuicConnection,

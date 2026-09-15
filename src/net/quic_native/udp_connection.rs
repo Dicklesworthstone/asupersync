@@ -32,7 +32,7 @@ use crate::time::timeout;
 
 use super::connection::{NativeQuicConnectionConfig, NativeQuicConnectionError};
 use super::connection_manager::{
-    ConnectionRouterError, PROTECTED_1RTT_MAX_PACKET_BYTES, assemble_protected_1rtt_packet,
+    ConnectionRouterError, PROTECTED_1RTT_MAX_PACKET_BYTES, assemble_protected_1rtt_packet_inner,
     generate_congestion_admitted_1rtt_frames, is_ack_eliciting, protected_1rtt_packet_len,
     unprotect_1rtt_packet,
 };
@@ -643,17 +643,28 @@ impl NativeQuicUdpConnection {
         let mut packets = Vec::new();
 
         for _ in 0..MAX_PACKETS_PER_FLUSH {
-            let frames = generate_congestion_admitted_1rtt_frames(
-                cx,
-                self.connection.inner_mut(),
-                max_frame_bytes,
-            )?;
+            // A due PTO permits one PING even when the original flight fills
+            // cwnd. It must not drain application frames or declare them lost.
+            let probe_frames = self
+                .connection
+                .inner_mut()
+                .generate_pto_probe_frames(cx, max_frame_bytes)?;
+            let pto_probe = !probe_frames.is_empty();
+            let frames = if pto_probe {
+                probe_frames
+            } else {
+                generate_congestion_admitted_1rtt_frames(
+                    cx,
+                    self.connection.inner_mut(),
+                    max_frame_bytes,
+                )?
+            };
             if frames.is_empty() {
                 break;
             }
             let mut payload = BytesMut::new();
             super::connection::NativeQuicConnection::encode_frames(&frames, &mut payload)?;
-            let assembled = assemble_protected_1rtt_packet(
+            let assembled = assemble_protected_1rtt_packet_inner(
                 cx,
                 self.peer_cid,
                 self.connection.inner_mut(),
@@ -662,14 +673,17 @@ impl NativeQuicUdpConnection {
                 payload.as_ref(),
                 now_micros,
                 frames.iter().any(is_ack_eliciting),
+                pto_probe,
             )
             .await;
             let data = match assembled {
                 Ok(data) => data,
                 Err(error) => {
-                    self.connection
-                        .inner_mut()
-                        .on_generated_frames_dropped(&frames)?;
+                    if !pto_probe {
+                        self.connection
+                            .inner_mut()
+                            .on_generated_frames_dropped(&frames)?;
+                    }
                     return Err(error.into());
                 }
             };
@@ -867,11 +881,9 @@ impl NativeQuicUdpConnection {
             return Ok(());
         };
         if deadline <= now_micros {
-            self.connection.inner_mut().on_loss_timeout_expired(
-                cx,
-                PacketNumberSpace::ApplicationData,
-                now_micros,
-            )?;
+            self.connection
+                .inner_mut()
+                .on_managed_probe_timeout(cx, now_micros)?;
         }
         Ok(())
     }
@@ -952,7 +964,9 @@ mod tests {
     use crate::net::atp::protocol::quic_frames::QuicFrame;
     use crate::net::atp::protocol::varint::VarInt;
     use crate::net::quic_native::connection::NativeQuicConnection;
-    use crate::net::quic_native::connection_manager::{ConnectionRouter, RoutingResult};
+    use crate::net::quic_native::connection_manager::{
+        ConnectionRouter, RoutingResult, assemble_protected_1rtt_packet,
+    };
     use crate::net::quic_native::handshake_driver::tests::{
         CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert,
     };
@@ -1079,6 +1093,135 @@ mod tests {
                 .recv_offset,
             2
         );
+    }
+
+    #[test]
+    fn udp_pto_preserves_full_flight_and_sends_one_probe() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = NativeQuicConnectionConfig::default();
+            let parameters = TransportParameters {
+                initial_max_data: Some(config.connection_recv_limit),
+                initial_max_stream_data_bidi_local: Some(config.recv_window),
+                initial_max_stream_data_bidi_remote: Some(config.recv_window),
+                initial_max_streams_bidi: Some(config.max_local_bidi),
+                ..TransportParameters::default()
+            };
+            let mut encoded = Vec::new();
+            parameters.encode(&mut encoded).unwrap();
+            let client_socket = QuicUdpEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                QuicUdpEndpointConfig::default(),
+            )
+            .await
+            .unwrap();
+            let server_socket = QuicUdpEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                QuicUdpEndpointConfig::default(),
+            )
+            .await
+            .unwrap();
+            let address = server_socket.local_addr();
+            let alpn = b"pto-test";
+            let client_tls =
+                client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![alpn.to_vec()]).unwrap();
+            let server_tls = server_config(
+                vec![parse_one_cert(LEAF_CERT_PEM)],
+                leaf_key(),
+                vec![alpn.to_vec()],
+            )
+            .unwrap();
+            let initial_cid = ConnectionId::new(b"initial").unwrap();
+            let (client, server) = zip(
+                NativeQuicUdpConnection::connect(
+                    &cx,
+                    client_socket,
+                    address,
+                    QuicHandshakeDriver::client(
+                        client_tls,
+                        ServerName::try_from("localhost").unwrap(),
+                        encoded.clone(),
+                    )
+                    .unwrap(),
+                    initial_cid,
+                    ConnectionId::new(b"client").unwrap(),
+                    config,
+                    alpn,
+                ),
+                NativeQuicUdpConnection::accept(
+                    &cx,
+                    server_socket,
+                    QuicHandshakeDriver::server(server_tls, encoded).unwrap(),
+                    initial_cid,
+                    ConnectionId::new(b"server").unwrap(),
+                    config,
+                    alpn,
+                ),
+            )
+            .await;
+            let mut client = client.unwrap();
+            let _server = server.unwrap();
+            // Seed a full flight without sleeping for a real network timeout.
+            // Handshake, packet protection, and probe transmission use real UDP.
+            let connection = client.connection.inner_mut();
+            let window = connection.transport().congestion_window_bytes();
+            let mut original = Vec::new();
+            let mut remaining = window;
+            while remaining > 0 {
+                let bytes = remaining.min(1200);
+                original.push(
+                    connection
+                        .on_packet_sent(
+                            &cx,
+                            PacketNumberSpace::ApplicationData,
+                            bytes,
+                            true,
+                            true,
+                            0,
+                        )
+                        .unwrap(),
+                );
+                remaining -= bytes;
+            }
+            let stream = connection.open_local_bidi(&cx).unwrap();
+            connection
+                .write_stream_bytes(&cx, stream, Bytes::from_static(b"still queued"), false)
+                .unwrap();
+            let queued = connection.pending_stream_data_bytes();
+            let deadline = connection.pto_deadline_micros(&cx, 0).unwrap().unwrap();
+            client.clock_origin = Instant::now()
+                .checked_sub(Duration::from_micros(deadline + 1))
+                .unwrap();
+            client.service_due_loss_timer(&cx).unwrap();
+            let transport = client.connection.inner_mut().transport();
+            assert_eq!(transport.bytes_in_flight(), window);
+            assert_eq!(transport.congestion_window_bytes(), window);
+            assert_eq!(transport.packets_lost_total(), 0);
+            assert_eq!(transport.pto_count(), 1);
+            assert_eq!(client.flush(&cx).await.unwrap(), 1);
+            assert_eq!(client.flush(&cx).await.unwrap(), 0, "permit consumed once");
+            let connection = client.connection.inner_mut();
+            assert_eq!(connection.transport().congestion_window_bytes(), window);
+            assert_eq!(connection.pending_stream_data_bytes(), queued);
+            let after_probe = connection.transport().bytes_in_flight();
+            assert!(after_probe > window && after_probe <= window + 1200);
+            connection
+                .on_ack_received(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    &original,
+                    0,
+                    deadline + 2,
+                )
+                .unwrap();
+            assert_eq!(
+                connection.transport().bytes_in_flight(),
+                after_probe - window
+            );
+            assert_eq!(connection.transport().packets_lost_total(), 0);
+        });
     }
 
     #[test]
