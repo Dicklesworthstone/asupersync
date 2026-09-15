@@ -2759,6 +2759,50 @@ mod tests {
     }
 
     #[test]
+    fn executing_pipeline_downstream_failure_retains_error_and_drains_bounded_channels() {
+        for seed in 700..708 {
+            let mut lab = execution_lab(seed);
+            let region = lab.state.create_root_region(Budget::INFINITE);
+            let (task, mut handle) = lab
+                .state
+                .create_task(region, Budget::INFINITE, async move {
+                    let cx = Cx::current().unwrap();
+                    cx.scope()
+                        .pipeline::<_, &'static str>(&cx, execution_config(8), 0..64_u32)
+                        .then(NonZeroUsize::new(1).unwrap(), |_, value| async move {
+                            Outcome::Ok(value)
+                        })
+                        .then(NonZeroUsize::new(1).unwrap(), |_, _: u32| async {
+                            Outcome::<u32, _>::Err("downstream failed")
+                        })
+                        .run(|_, _: u32| async {
+                            panic!("the failing transform must not publish to the sink")
+                        })
+                        .await
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            lab.run_until_quiescent();
+            let report = handle.try_join().unwrap().expect("pipeline drained");
+            assert!(
+                matches!(
+                    report.error(),
+                    Some(PipelineExecutionError::Stage {
+                        stage: 1,
+                        input: 0,
+                        error: "downstream failed",
+                    })
+                ),
+                "seed={seed}: {report:?}"
+            );
+            assert_eq!(report.summary.consumed, 0);
+            assert!(report.summary.admitted > 0);
+            assert!(report.summary.max_in_flight <= 8);
+            execution_cleanup(&mut lab, region);
+        }
+    }
+
+    #[test]
     fn executing_pipeline_failed_sink_keeps_same_poll_acknowledged_prefix() {
         let mut lab = execution_lab(690);
         let region = lab.state.create_root_region(Budget::INFINITE);
