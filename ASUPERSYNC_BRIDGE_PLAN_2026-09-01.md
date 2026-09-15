@@ -1,4 +1,144 @@
-# Asupersync Bridge Plan — reality check refreshed 2026-09-04
+# Asupersync Bridge Plan — reality check refreshed 2026-09-15
+
+## September 15 assessment: implementation ahead of validated delivery
+
+**Verdict: substantial runtime implementation and a published 0.5.0 release;
+the complete native, distributed, browser, and performance vision remains
+partial. Current main is not established as release-ready by this assessment.**
+The September 4 work packages below remain the implementation map, except where
+this update corrects current state or execution policy. No GitHub Actions are
+authorized: all release validation uses the user-required RCH/DSR route. Preserve
+public APIs and behavior; neither pre-1.0 status nor an old plan authorizes breaks.
+
+### Assessment basis and limits
+
+- Read AGENTS.md (1,393 lines) and README.md (2,545 lines) completely, plus the
+  complete core v4 plan. Revisited the existing bridge plan, formal posture,
+  testing guidance, proof artifacts, selected implementation paths and existing
+  task descriptions. This refresh is not a new exhaustive line-by-line audit of
+  every auxiliary plan/specification or every runtime module. The broader
+  September 4 archaeology is historical context, not fresh execution evidence.
+- Source checkpoint: `c506c04d6b37c861fb794fa6ef44cdb49d60efbb`. Shared main also
+  had uncommitted QUIC transport/UDP and audit-index changes. This is a moving
+  shared tree, not an immutable tested candidate.
+- Fresh anonymous GitHub/crates.io API checks: v0.5.0 is the latest release,
+  published September 12; GitHub points at
+  `78b64636e99fea4ea2d868096576021dd3b8e519` with 11 assets. crates.io reports
+  0.5.0 unyanked. No open GitHub issues/PRs were returned. These metadata checks
+  do not revalidate downloaded binaries, signatures, platform execution or all
+  nine published crates. Recent fixes on main are not thereby shipped.
+- Initial export census, corroborated by BV: 434 open, 153 in progress, 31
+  blocked = 618 unfinished; 11,186 closed and 906 tombstones. There were 57
+  non-closed bugs, including three P0s. Counts are not progress percentages.
+  This refresh adds one bug and one prerequisite task, so those initial counts
+  are intentionally not a claim about the final live tracker.
+- CASS release search timed out after 20 seconds. Current source, tracker,
+  existing bridge history and fresh registry metadata supply the assessment;
+  no successful CASS retrieval is claimed.
+- **No fresh Rust build, native test, application E2E, benchmark or Lean build
+  ran in this refresh.** Installed RCH 2.0.0 (`3289f5e4e977`) still generates
+  automatic scratch/cache deletion in `rch/src/transfer.rs:247` of the RCH
+  project. That conflicts with the explicit no-deletion rule. This is an
+  execution-policy blocker, not evidence that Asupersync failed compilation.
+  No local Cargo fallback is authorized.
+
+### Current vision-to-delivery crosswalk
+
+Here IMPLEMENTED/UNPROVEN means real source exists but this refresh did not
+execute the required current-source proof. PARTIAL means the promised workflow
+still has a concrete implementation or integration gap. A narrower documented
+boundary is not automatically a defect or completion of the broader goal.
+
+| Goal | Current reality and remaining acceptance | Existing work |
+|---|---|---|
+| Owned tasks, cancellation, region drain | IMPLEMENTED/UNPROVEN at current main. Keep native parked cancellation, exact outcome, callback reentrancy, finalizer and obligation accounting tests first. Three P0 bug tasks remain nonterminal. | `909482`, `runtime-cancel-waker-outer-lock-118ayd`, `bi2462.28/.29`, bug campaign |
+| Cancel-correct composition | Scoped pipeline and executing map-reduce now exist; the old "folds only" diagnosis is obsolete. Error attribution fixes and native/public journey proof remain. | `bi2462.32/.33`, `04jqgn` |
+| Supervision | `ManagedSupervisor::run/spawn` executes a real region-owned controller; it is no longer correct to say no live controller exists. Native generation/finalizer/signal proof and broader dynamic integration remain separate. | `bi2462.34/.35`, OTP completeness |
+| Region allocation | Generation-safe heap machinery is real; runtime-owned placement and workload benefit still require the existing design/implementation/test sequence. | `bi2462.39/.40/.41` |
+| Production-to-lab replay | PARTIAL. Seed replay and trace tooling exist; full production capture, fail-closed replay exhaustion and exact alternative prefixes remain open. Default production adaptation versus fixed lab policy needs explicit trace coverage. | `bi2462.8/.9/.44/.45`, `ro6zzy`, `vemwug` |
+| Formal guarantees | Six abstract core invariants are represented in Lean; this is not proof of all production Rust, adapters, protocols or arbitrary-future termination. | Existing formal/refinement lanes; `bi2462.37/.38` |
+| Native network/server stack | Real reactor, HTTP and QUIC code exists. External H2 conformance, QUIC close/handshake/partial-send behavior and non-Linux execution are still material gates. | `bi2462.36/.76`, `kixe4i`, `nys7lr`, `x2r9zf`, `y1jsbw` |
+| Data clients and telemetry | Real clients exist, but current service integration and sparse-feature consumer proof are not supplied by metadata contracts. Preserve typed SQLite diagnostics and bounded resource/cancellation behavior. | `bi2462.19`, `if3ji9`, `p1aa7g`, existing service tasks |
+| Distributed ownership and recovery | mTLS named computation transport is a real scoped capability. Snapshot transport, membership generations, region-owned remote leases, per-peer admission and supported continuation restore remain separate unfinished work. | `bi2462.10/.11/.12/.16/.48-.50/.77/.78` |
+| ATP native transfer | Real data plane; complete RQ control authentication, resync reliability, incremental efficiency and comparable encrypted/WAN benchmarks remain. Symbol authentication is not transcript authentication. | `e880xo`, `2qas9c`, `sizeku`, `bi2462.5` |
+| ATP SDK/CLI | PARTIAL. SDK `send_object` constructs a local actor/handle without sending to a peer; `sync_tree` explicitly refuses. Native CLI transfer capability cannot establish SDK completion. | `bi2462.51-.74` |
+| Browser Edition | JS/host-backed boundary and handle ledger exist. Package-integrity status does not establish a Rust-future executor, fresh browser-engine acceptance or npm delivery. Retained `asupersync-wasm` is explicitly a scaffold. | `94g51y`, `yxwno1`, browser storage/stream bugs |
+| Platform/default/stable profiles | UNPROVEN as an aggregate. Workspace integration feature unification cannot stand in for independently resolved default production consumers; non-Linux failures require current reproduction. | `z2kt29`, `bi2462.19-.21`, `gxv3dy`, stable lane |
+| Performance | UNPROVEN for recent fixes. Dated ATP comparisons include both wins and losses; new congestion/waker changes need paired measurements, not extrapolation. | `8ykza1`, scheduler performance work, `nys7lr`, `bi2462.5` |
+| Shipped consumer compatibility | v0.5.0 is publicly listed. Main-only fixes, updated dependency versions and successful metadata checks do not prove downstream applications or a new release. | `nmg80j` consumer migration, `yqlhh7` release gate |
+
+### Concrete new findings and coverage
+
+1. **Expired evidence and an obstructed demotion path:** the snapshot has 37
+   claim rows: 27 rerun-required, seven blocked, three labelled fresh. Its native
+   cancellation row is dated August 12: 34 days old against a 30-day limit.
+   `fresh_claim_evidence_has_a_bounded_structured_date` rejects that date, while
+   `native_cancellation_receipt_is_attributed_only_to_its_focused_claim` requires
+   the old fresh status and exact old job/count/durations. This is a static
+   diagnosis of a deterministic stale-date failure, not an executed Rust RED.
+   New bug `bi2462.80` separates historical provenance from current freshness;
+   it must not fabricate a rerun, change the clock or discard the old receipt.
+2. **Executable validation prerequisite lacked a bounded owner task:** the bug
+   campaign already named the no-deletion-safe RCH requirement, but it was only
+   a checklist item. New P0 task `bi2462.81` supplies installed-capability,
+   lifecycle-retention and native-canary acceptance. It does not duplicate the
+   runtime bugs or authorize changes to another agent's work.
+3. **Older acceptance text points at forbidden Actions:** `yqlhh7` still names
+   publish.yml/workflow_dispatch as the enforcement route. Its source/package/
+   lock/profile/terminal-result predicate remains valuable, but must be executed
+   by the authorized DSR/RCH release path. Correct this in the existing bead.
+4. **Existing tasks cover the major product gaps:** preserve the SDK, replay,
+   distributed, browser, heap and platform implementation/proof pairs. No new
+   umbrella program is needed. This sampled crosswalk does not prove that every
+   auxiliary aspiration has a bead; do not claim complete corpus coverage.
+
+### Bridge order and review refinements
+
+**First: restore trustworthy execution.** Resolve `bi2462.81`; repair honest
+freshness handling under `.80`; rerun the native cancellation canary and smallest
+prepared regressions on identified source. Code diagnosis can continue while
+blocked, but another source-only fix is not a validation milestone. Keep one
+coordinated remote build lane and retained first-failure logs.
+
+**Second: close safety defects and consumer regressions.** Prioritize the three
+P0s, callback-under-lock/panic fanout, admission bypass, unsent QUIC ownership and
+database/browser cancellation or quota bugs. Lift compiler blockers needed to
+test those repairs. Every hot-path change gets comparable pre/post measurements;
+every affected public API gets an independent downstream canary. Do not close
+the 52-consumer migration merely because manifests and lockfiles were updated.
+
+**Third: complete integrated user journeys.** Reuse existing pairs to demonstrate
+native root/supervisor drain; production failure capture and lab reproduction;
+authenticated ATP SDK two-process transfer, interruption and resume; remote
+region ownership under partition and lease expiry; then platform/browser lanes.
+An absent-peer SDK test must not pass because a local handle was constructed.
+Each journey records admitted work, terminal outcomes, byte/resource bounds and
+cleanup, with deliberate negative controls and secrets redacted.
+
+**Fourth: promote an exact candidate.** DSR and RCH only; bind source, lockfile,
+toolchain, targets/features, actual package bytes, required native/service/
+platform tests, compatibility and performance evidence before publication.
+Reject missing, stale, skipped, zero-test, failed and mismatched evidence.
+Published download/signature/checksum and consumer smoke checks follow upload.
+A focused bug-fix release need not wait for every research extension, but cannot
+claim unsupported capabilities or bypass required release gates.
+
+Two deepening passes improved the plan: (1) replace isolated feature completion
+with causal public-user journeys; (2) add fault composition at cancellation,
+backpressure, authentication, generation replacement and lease boundaries.
+Four refinement checks retained distinct concerns: implementation versus proof
+coverage; API/wire and ownership preservation; unit/native/process negative
+controls and performance comparability; acyclic dependencies and publication
+provenance. These checks do not constitute an exhaustive review of all 618
+unfinished tasks. Existing implementation/proof pairs remain intact; no feature
+is closed by relabelling it, no arbitrary schedule/size target is invented, and
+no document/test-count reduction substitutes for product progress.
+
+The pre-update graph check reported zero active cycles; BV found 225 actionable
+items and ranked scheduler sharding, SDK admission and production replay highest.
+Those graph scores do not override the safety and validation prerequisites above.
+The assessment/plan phase can be delivered now; the skill's fresh execution and
+whole-project acceptance phases remain blocked or unfinished as stated.
 
 ## Current assessment and execution plan
 
