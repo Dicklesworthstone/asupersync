@@ -721,6 +721,19 @@ impl NativeQuicUdpConnection {
             });
         }
 
+        // Preserve the public endpoint error classification used by send_batch.
+        let packet_limit = self.endpoint.config().max_packet_size;
+        if let Some(packet) = self
+            .pending_outgoing
+            .iter()
+            .find(|packet| packet.packet.data.len() > packet_limit)
+        {
+            return Err(QuicUdpEndpointError::PacketTooLarge {
+                size: packet.packet.data.len(),
+                limit: packet_limit,
+            }
+            .into());
+        }
         let mut sent = 0;
         std::future::poll_fn(|task_cx| {
             while !self.pending_outgoing.is_empty() {
