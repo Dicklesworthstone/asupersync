@@ -403,6 +403,8 @@ pub enum RestartPolicy {
 /// Escalation policy when max_restarts is exceeded.
 ///
 /// Determines what happens when the restart budget is exhausted.
+/// This policy does not govern managed-supervisor cleanup failures: those
+/// stop replacement and escalate to the caller's region under every policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EscalationPolicy {
     /// Stop the failing actor permanently.
@@ -3059,6 +3061,12 @@ mod managed {
         /// region quiescence (including finalizers). Cancellation during start
         /// or backoff stops admission and drains all generations. Dropping this
         /// future requests cancellation/close; it cannot synchronously drain.
+        ///
+        /// A child or supervisor-region cleanup failure stops replacement,
+        /// drains the remaining generations, and requests parent-region
+        /// escalation even under [`EscalationPolicy::Stop`] or
+        /// [`EscalationPolicy::ResetCounter`]. Those policies govern restart
+        /// budget exhaustion, not failure to clean up a retired generation.
         pub async fn run(self, cx: &Cx) -> ManagedSupervisorReport<E> {
             let mut controller = Controller::new(self, cx);
             controller.execute().await;
@@ -3796,12 +3804,25 @@ mod managed {
 
         #[test]
         fn managed_actual_finalizer_panic_forbids_replacement_and_escalates_once() {
+            for policy in [
+                EscalationPolicy::Stop,
+                EscalationPolicy::Escalate,
+                EscalationPolicy::ResetCounter,
+            ] {
+                assert_finalizer_panic_escalates(policy);
+            }
+        }
+
+        fn assert_finalizer_panic_escalates(policy: EscalationPolicy) {
             let mut lab = LabRuntime::new(LabConfig::new(0x34_0007).max_steps(8192));
             let root = lab.state.create_root_region(Budget::INFINITE);
             let log: StartedLog = Arc::new(Mutex::new(Vec::new()));
             let binding = parked_binding("child", Arc::clone(&log));
             let managed = topology(&["child"], RestartPolicy::OneForOne)
-                .bind_managed(vec![binding], config(RestartPolicy::OneForOne, 8))
+                .bind_managed(
+                    vec![binding],
+                    config(RestartPolicy::OneForOne, 8).with_escalation(policy),
+                )
                 .unwrap();
             let output = Arc::new(Mutex::new(None));
             let published = Arc::clone(&output);
