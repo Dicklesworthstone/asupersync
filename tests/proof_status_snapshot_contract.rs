@@ -877,15 +877,9 @@ fn fresh_claim_evidence_has_a_bounded_structured_date() {
     let as_of_epoch_day = freshness_as_of_epoch_day(policy)
         .unwrap_or_else(|error| panic!("resolve freshness as-of date: {error}"));
 
-    let fresh_rows = array(&snapshot, "claim_categories")
-        .iter()
-        .filter(|row| string(row, "proof_evidence_status") == fresh_status)
-        .collect::<Vec<_>>();
-    assert!(
-        !fresh_rows.is_empty(),
-        "snapshot needs at least one fresh row"
-    );
-    for row in fresh_rows {
+    // A truthful snapshot may have no current passes. Validate every claimed
+    // pass without requiring an operator to preserve an expired green row.
+    for row in array(&snapshot, "claim_categories") {
         validate_claim_freshness(
             row,
             fresh_status,
@@ -958,7 +952,8 @@ fn native_cancellation_receipt_is_attributed_only_to_its_focused_claim() {
         .get("native-parked-task-cancellation-contract")
         .expect("native cancellation claim row");
     assert_eq!(string(native, "status"), "green");
-    assert_eq!(string(native, "proof_evidence_status"), "fresh-rch-pass");
+    // This test preserves historical attribution, not perpetual freshness.
+    // Status catalog and dated freshness are checked separately above.
     assert!(
         string(native, "notes").contains("31 passed")
             && string(native, "notes").contains("literal spawned guard-holder")
@@ -975,6 +970,35 @@ fn native_cancellation_receipt_is_attributed_only_to_its_focused_claim() {
         .expect("broad cancellation/oracle claim row");
     assert_eq!(string(broad, "status"), "yellow_frontier");
     assert_eq!(string(broad, "proof_evidence_status"), "rerun-required");
+}
+
+#[test]
+fn expired_native_receipt_can_be_demoted_without_losing_history() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let native = array(&snapshot, "claim_categories")
+        .iter()
+        .find(|row| string(row, "claim_id") == "native-parked-task-cancellation-contract")
+        .expect("native cancellation claim row");
+    let as_of = parse_iso_date_epoch_day("2026-09-15").expect("fixed regression date");
+    let mut historical = native.clone();
+    // Pin the old receipt's date independently of future dashboard refreshes.
+    historical["evidence_date"] = Value::String("2026-08-12".to_string());
+    historical["proof_evidence_status"] = Value::String("fresh-rch-pass".to_string());
+    assert!(
+        validate_claim_freshness(&historical, "fresh-rch-pass", "evidence_date", 30, as_of)
+            .unwrap_err()
+            .contains("34 days old")
+    );
+
+    for status in ["rerun-required", "stale-evidence", "blocked"] {
+        let mut demoted = historical.clone();
+        demoted["proof_evidence_status"] = Value::String(status.to_string());
+        validate_claim_freshness(&demoted, "fresh-rch-pass", "evidence_date", 30, as_of)
+            .expect("historical evidence may remain after truthful demotion");
+        assert_eq!(demoted["evidence_date"], historical["evidence_date"]);
+        assert_eq!(demoted["notes"], historical["notes"]);
+        assert_eq!(demoted["proof_commands"], historical["proof_commands"]);
+    }
 }
 
 #[test]

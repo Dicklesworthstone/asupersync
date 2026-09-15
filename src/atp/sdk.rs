@@ -904,11 +904,21 @@ impl TransferHandle {
             })
             .unwrap_or_default();
 
+        // offered_bytes is the total the sender offered (the denominator);
+        // verified_bytes are the received-and-verified bytes that have actually
+        // transferred, and committed_bytes (bytes exposed to output) is a subset
+        // of those. Never count offered_bytes as transferred: doing so reported
+        // 100% the instant a transfer was offered — before any byte moved —
+        // which becomes a live fail-open bug once the transfer actor is driven
+        // (br-asupersync-bi2462.53). `max(committed)` only guards against the
+        // counters being reported out of their documented
+        // offered >= verified >= committed order; `min(total_bytes)` keeps the
+        // reported ratio at or below 100%.
+        let total_bytes = progress.offered_bytes;
         let bytes_transferred = progress
-            .committed_bytes
-            .max(progress.verified_bytes)
-            .max(progress.offered_bytes);
-        let total_bytes = progress.offered_bytes.max(bytes_transferred);
+            .verified_bytes
+            .max(progress.committed_bytes)
+            .min(total_bytes);
 
         let progress_percent = if total_bytes > 0 {
             (bytes_transferred as f64 / total_bytes as f64) * 100.0
@@ -1448,6 +1458,76 @@ mod tests {
         assert_eq!(handle.session_id, "test-session");
         assert_eq!(handle.direction, TransferDirection::Send);
         assert_eq!(handle.state(), TransferState::Offered);
+    }
+
+    #[test]
+    fn transfer_handle_progress_measures_verified_against_offered() {
+        // Regression (br-asupersync-bi2462.53): progress() previously computed
+        // bytes_transferred as max(committed, verified, offered). The actor
+        // reports offered >= verified >= committed, so that always collapsed to
+        // offered_bytes — every transfer reported 100% the instant it offered
+        // bytes, before a single byte was verified or committed.
+        let transfer_id = TransferId::derive([1; 32], [2; 32], [3; 32], [4; 32]);
+        let handle = TransferHandle {
+            transfer_id,
+            session_id: "test-session".to_string(),
+            direction: TransferDirection::Send,
+            actor: Some(registry_actor(transfer_id)),
+        };
+        {
+            let actor = handle.actor.as_ref().unwrap();
+            actor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .progress = crate::atp::transfer::TransferProgress {
+                offered_bytes: 1_000,
+                verified_bytes: 400,
+                committed_bytes: 200,
+                ..Default::default()
+            };
+        }
+
+        let progress = handle.progress();
+        assert_eq!(
+            progress.total_bytes, 1_000,
+            "total is the offered denominator"
+        );
+        assert_eq!(
+            progress.bytes_transferred, 400,
+            "verified bytes are transferred; offered bytes are not"
+        );
+        assert!(
+            (progress.progress_percent - 40.0).abs() < 1e-9,
+            "expected 40% verified of the offered total, got {}",
+            progress.progress_percent
+        );
+    }
+
+    #[test]
+    fn transfer_handle_progress_reaches_full_only_when_verified() {
+        let transfer_id = TransferId::derive([5; 32], [6; 32], [7; 32], [8; 32]);
+        let handle = TransferHandle {
+            transfer_id,
+            session_id: "s".to_string(),
+            direction: TransferDirection::Receive,
+            actor: Some(registry_actor(transfer_id)),
+        };
+        {
+            let actor = handle.actor.as_ref().unwrap();
+            actor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .progress = crate::atp::transfer::TransferProgress {
+                offered_bytes: 1_000,
+                verified_bytes: 1_000,
+                committed_bytes: 1_000,
+                ..Default::default()
+            };
+        }
+        let progress = handle.progress();
+        assert_eq!(progress.bytes_transferred, 1_000);
+        assert_eq!(progress.total_bytes, 1_000);
+        assert!((progress.progress_percent - 100.0).abs() < 1e-9);
     }
 
     #[test]
