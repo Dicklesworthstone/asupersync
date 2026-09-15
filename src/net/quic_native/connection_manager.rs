@@ -412,8 +412,10 @@ impl ConnectionRouter {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            pending_outgoing,
         } = parts;
         let mut router = Self::with_max_connections(config_template, max_connections);
+        router.pending_deferred_packets = pending_outgoing;
         router.connections.insert(
             local_cid,
             ConnectionHandle {

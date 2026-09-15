@@ -32,9 +32,9 @@ use crate::time::timeout;
 
 use super::connection::{NativeQuicConnectionConfig, NativeQuicConnectionError};
 use super::connection_manager::{
-    ConnectionRouterError, PROTECTED_1RTT_MAX_PACKET_BYTES, assemble_protected_1rtt_packet_inner,
-    generate_congestion_admitted_1rtt_frames, is_ack_eliciting, protected_1rtt_packet_len,
-    unprotect_1rtt_packet,
+    ConnectionRouterError, PROTECTED_1RTT_MAX_PACKET_BYTES, RoutedOutgoingPacket,
+    assemble_protected_1rtt_packet_inner, generate_congestion_admitted_1rtt_frames,
+    is_ack_eliciting, protected_1rtt_packet_len, unprotect_1rtt_packet,
 };
 use super::endpoint::{
     OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig, QuicUdpEndpointError, ReceivedPacket,
@@ -175,6 +175,8 @@ pub struct NativeQuicUdpConnection {
     early_one_rtt_packets: Vec<ReceivedPacket>,
     last_final_flight_retransmit: Option<Instant>,
     clock_origin: Instant,
+    // Already protected/accounted packets remain owned across a dropped flush.
+    pending_outgoing: Vec<RoutedOutgoingPacket>,
 }
 
 /// Crate-private ownership transfer after the managed endpoint's preflight.
@@ -194,6 +196,7 @@ pub(crate) struct NativeQuicUdpHandoffParts {
     pub(crate) early_one_rtt_packets: Vec<ReceivedPacket>,
     pub(crate) last_final_flight_retransmit: Option<Instant>,
     pub(crate) clock_origin: Instant,
+    pub(crate) pending_outgoing: Vec<RoutedOutgoingPacket>,
 }
 
 /// TLS-derived application ownership independent of the socket that drove it.
@@ -324,6 +327,7 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            pending_outgoing,
         } = self;
         NativeQuicUdpHandoffParts {
             connection,
@@ -337,6 +341,7 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            pending_outgoing,
         }
     }
 
@@ -353,6 +358,7 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            pending_outgoing,
         } = parts;
         Self {
             connection,
@@ -366,6 +372,7 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            pending_outgoing,
         }
     }
 
@@ -494,6 +501,7 @@ impl NativeQuicUdpConnection {
             early_one_rtt_packets,
             last_final_flight_retransmit: None,
             clock_origin: Instant::now(),
+            pending_outgoing: Vec::new(),
         })
     }
 
@@ -629,9 +637,19 @@ impl NativeQuicUdpConnection {
     }
 
     /// Protect and send a bounded batch of queued application frames.
+    /// Unsent protected packets stay in this owner across errors or a dropped
+    /// flush future and are retried before new application frames are admitted.
     pub async fn flush(&mut self, cx: &Cx) -> Result<usize, NativeQuicUdpConnectionError> {
         if cx.checkpoint().is_err() {
             return Err(NativeQuicUdpConnectionError::Cancelled);
+        }
+        if matches!(
+            self.connection.inner_mut().state(),
+            super::transport::QuicConnectionState::Closed
+                | super::transport::QuicConnectionState::Draining
+        ) {
+            self.pending_outgoing.clear();
+            return Ok(0);
         }
         let now = Instant::now();
         let now_micros = self.instant_micros(now);
@@ -640,9 +658,13 @@ impl NativeQuicUdpConnection {
         self.connection
             .inner_mut()
             .set_one_rtt_frame_budget(max_frame_bytes);
-        let mut packets = Vec::new();
-
-        for _ in 0..MAX_PACKETS_PER_FLUSH {
+        // Retry retained output before admitting more application work.
+        let packet_budget = if self.pending_outgoing.is_empty() {
+            MAX_PACKETS_PER_FLUSH
+        } else {
+            0
+        };
+        for _ in 0..packet_budget {
             // A due PTO permits one PING even when the original flight fills
             // cwnd. It must not drain application frames or declare them lost.
             let probe_frames = self
@@ -687,29 +709,56 @@ impl NativeQuicUdpConnection {
                     return Err(error.into());
                 }
             };
-            packets.push(OutgoingPacket {
-                dst_addr: self.peer_addr,
-                data,
-                send_time: Some(now),
+            self.pending_outgoing.push(RoutedOutgoingPacket {
+                connection_id: self.local_cid,
+                packet: OutgoingPacket {
+                    dst_addr: self.peer_addr,
+                    data,
+                    send_time: Some(now),
+                },
+                final_handshake_flight: false,
+                ack_eliciting: frames.iter().any(is_ack_eliciting),
             });
         }
 
-        if packets.is_empty() {
-            return Ok(0);
-        }
-        let expected = packets.len();
-        let report = self.endpoint.send_batch(cx, &packets).await?;
-        if report.packets_processed != expected || report.error.is_some() {
-            return Err(NativeQuicUdpConnectionError::BatchSend(
-                report.error.unwrap_or_else(|| {
-                    format!(
-                        "sent {} of {expected} protected packets",
-                        report.packets_processed
-                    )
-                }),
-            ));
-        }
-        Ok(expected)
+        let mut sent = 0;
+        std::future::poll_fn(|task_cx| {
+            while !self.pending_outgoing.is_empty() {
+                let report = match self.endpoint.poll_send_batch(
+                    cx,
+                    task_cx,
+                    self.pending_outgoing.iter().map(|packet| &packet.packet),
+                ) {
+                    std::task::Poll::Pending => return std::task::Poll::Pending,
+                    std::task::Poll::Ready(Ok(report)) => report,
+                    std::task::Poll::Ready(Err(error)) => {
+                        return std::task::Poll::Ready(Err(
+                            if error.kind() == std::io::ErrorKind::Interrupted {
+                                NativeQuicUdpConnectionError::Cancelled
+                            } else {
+                                NativeQuicUdpConnectionError::Endpoint(error.into())
+                            },
+                        ));
+                    }
+                };
+                // Publish every acknowledged prefix before returning Pending
+                // or an error. The future owns no unsent wire bytes.
+                drop(self.pending_outgoing.drain(..report.packets_processed));
+                sent += report.packets_processed;
+                if let Some(error) = report.error {
+                    return std::task::Poll::Ready(Err(NativeQuicUdpConnectionError::BatchSend(
+                        error,
+                    )));
+                }
+                if report.packets_processed == 0 {
+                    return std::task::Poll::Ready(Err(NativeQuicUdpConnectionError::BatchSend(
+                        "UDP send made no progress".to_owned(),
+                    )));
+                }
+            }
+            std::task::Poll::Ready(Ok(sent))
+        })
+        .await
     }
 
     /// Receive at most one bounded UDP batch, deliver authenticated 1-RTT
@@ -1211,7 +1260,41 @@ mod tests {
                 window,
                 "cancelled admission must not consume the probe permit"
             );
+            // Refuse an already-protected packet at the real endpoint boundary.
+            // Keep the original socket alive so retry uses the same peer tuple.
+            let small_endpoint = QuicUdpEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                QuicUdpEndpointConfig {
+                    max_packet_size: 1,
+                    ..QuicUdpEndpointConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            let original_endpoint = std::mem::replace(&mut client.endpoint, small_endpoint);
+            assert!(matches!(
+                client.flush(&cx).await,
+                Err(NativeQuicUdpConnectionError::Endpoint(_))
+            ));
+            assert_eq!(client.pending_outgoing.len(), 1);
+            let protected_probe = client.pending_outgoing[0].packet.data.clone();
+            let accounted = client.connection.inner_mut().transport().bytes_in_flight();
+            assert!(matches!(
+                client.flush(&cancelled).await,
+                Err(NativeQuicUdpConnectionError::Cancelled)
+            ));
+            client = NativeQuicUdpConnection::from_managed_parts(client.into_managed_parts());
+            assert_eq!(client.pending_outgoing.len(), 1);
+            assert_eq!(client.pending_outgoing[0].packet.data, protected_probe);
+            client.endpoint = original_endpoint;
             assert_eq!(client.flush(&cx).await.unwrap(), 1);
+            assert!(client.pending_outgoing.is_empty());
+            assert_eq!(
+                client.connection.inner_mut().transport().bytes_in_flight(),
+                accounted,
+                "retry must not allocate another packet number or account twice"
+            );
             assert_eq!(client.flush(&cx).await.unwrap(), 0, "permit consumed once");
             let mut received_probe = false;
             for _ in 0..4 {
