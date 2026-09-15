@@ -7,6 +7,7 @@
 //! - RuntimeState operations (region create, cancel request)
 //! - Combinator operations (join, race, timeout)
 //! - Lab runtime operations
+//! - OnceCell initialization and waiter notification
 //!
 //! Benchmarks use deterministic inputs (fixed seeds) to ensure reproducibility.
 //!
@@ -34,6 +35,7 @@ use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::raptorq::{RaptorQReceiverBuilder, RaptorQSenderBuilder};
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::RuntimeState;
+use asupersync::sync::OnceCell;
 #[cfg(feature = "test-internals")]
 use asupersync::transport::deterministic::{SimTransportConfig, sim_channel};
 use asupersync::types::{Budget, CancelKind, CancelReason, Outcome, TaskId, Time};
@@ -493,6 +495,81 @@ fn bench_time_operations(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_once_cell(c: &mut Criterion) {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+    use std::time::{Duration, Instant};
+
+    struct CountWake(AtomicUsize);
+
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+
+        // Deliberately use Wake's default wake_by_ref implementation: its
+        // extra Arc traffic must be visible when comparing panic isolation.
+    }
+
+    let mut group = c.benchmark_group("once_cell");
+    let initialized = OnceCell::with_value(42_u64);
+    group.bench_function("get_initialized", |b| {
+        b.iter(|| black_box(black_box(&initialized).get()))
+    });
+    group.bench_function("initialize_without_waiters", |b| {
+        b.iter_batched(
+            OnceCell::new,
+            |cell| black_box(cell.set(black_box(42_u64))),
+            BatchSize::SmallInput,
+        )
+    });
+
+    for waiter_count in [1_usize, 4, 8, 64] {
+        group.bench_with_input(
+            BenchmarkId::new("notify_waiters", waiter_count),
+            &waiter_count,
+            |b, &waiter_count| {
+                b.iter_custom(|iterations| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iterations {
+                        let cell = OnceCell::new();
+                        let cx: Cx = Cx::for_testing();
+                        let wakes = Arc::new(CountWake(AtomicUsize::new(0)));
+                        let waker = Waker::from(Arc::clone(&wakes));
+                        let mut task_cx = Context::from_waker(&waker);
+                        let mut waiters: Vec<_> = (0..waiter_count)
+                            .map(|_| Box::pin(cell.wait(&cx)))
+                            .collect();
+                        for waiter in &mut waiters {
+                            assert!(waiter.as_mut().poll(&mut task_cx).is_pending());
+                        }
+                        assert_eq!(cell.telemetry_snapshot(0).waiter_count, waiter_count);
+
+                        // Time only the committed transition and its wake
+                        // fanout, excluding registration, allocation and drain.
+                        let started = Instant::now();
+                        let result = black_box(&cell).set(black_box(42_u64));
+                        total += started.elapsed();
+                        assert_eq!(result, Ok(()));
+                        assert_eq!(wakes.0.load(Ordering::Relaxed), waiter_count);
+                        for waiter in &mut waiters {
+                            assert_eq!(
+                                waiter.as_mut().poll(&mut task_cx),
+                                std::task::Poll::Ready(Ok(()))
+                            );
+                        }
+                        assert_eq!(cell.telemetry_snapshot(0).waiter_count, 0);
+                    }
+                    total
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 // =============================================================================
 // RAPTORQ PIPELINE BENCHMARKS
 // =============================================================================
@@ -599,6 +676,7 @@ criterion_group!(
     bench_lab_runtime_operations,
     bench_throughput,
     bench_time_operations,
+    bench_once_cell,
     bench_raptorq_pipeline,
 );
 
