@@ -215,6 +215,12 @@ struct LossRecovery {
     /// RFC 9002 Appendix B.6: Tracks start of the current congestion recovery
     /// epoch so that cwnd is reduced at most once per round-trip.
     congestion_recovery_start_time: Option<u64>,
+    /// RFC 9002 Appendix B.8 / §7.6: wall-clock time (micros) at which the
+    /// first RTT sample was obtained. Persistent-congestion detection only
+    /// considers packets sent strictly after this instant, so losses of
+    /// packets sent before any RTT estimate existed (e.g. early handshake
+    /// flights) can never collapse the window. `None` until the first sample.
+    first_rtt_sample_micros: Option<u64>,
 }
 
 impl Default for LossRecovery {
@@ -235,6 +241,7 @@ impl Default for LossRecovery {
             ssthresh_bytes: u64::MAX,
             max_datagram_size: 1_200,
             congestion_recovery_start_time: None,
+            first_rtt_sample_micros: None,
         }
     }
 }
@@ -253,6 +260,7 @@ impl LossRecovery {
         self.latest_ack_eliciting_sent_micros = [None; 3];
         self.pto_rearmed_at_micros = None;
         self.congestion_recovery_start_time = None;
+        self.first_rtt_sample_micros = None;
     }
 
     pub fn discard_space(&mut self, space: PacketNumberSpace) {
@@ -317,6 +325,10 @@ impl LossRecovery {
         let mut largest_newly_acked_pn: Option<u64> = None;
         let mut largest_acked_time: Option<u64> = None;
         let mut newly_acked_ack_eliciting = false;
+        // RFC 9002 §7.6.2: any packet acknowledged in the interval between two
+        // lost ack-eliciting packets breaks a persistent-congestion run, so
+        // record every newly-acknowledged send time in this space.
+        let mut acked_sent_times: Vec<u64> = Vec::new();
 
         let mut retained = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
@@ -327,6 +339,7 @@ impl LossRecovery {
                     .any(|range| range.contains(pkt.packet_number));
             if acked {
                 event.acked_packets += 1;
+                acked_sent_times.push(pkt.time_sent_micros);
                 if pkt.in_flight {
                     event.acked_bytes = event.acked_bytes.saturating_add(pkt.bytes);
                     self.bytes_in_flight = self.bytes_in_flight.saturating_sub(pkt.bytes);
@@ -372,6 +385,14 @@ impl LossRecovery {
                 0
             };
             self.rtt.update(sample, effective_ack_delay);
+            // RFC 9002 Appendix B.8: remember when the first genuine RTT sample
+            // landed. `update` ignores a zero sample (leaving smoothed_rtt
+            // `None`), so a non-`None` smoothed RTT here means a real sample was
+            // just recorded; the first one fixes the persistent-congestion
+            // exclusion boundary.
+            if self.first_rtt_sample_micros.is_none() && self.rtt.smoothed_rtt_micros().is_some() {
+                self.first_rtt_sample_micros = Some(now_micros);
+            }
         }
 
         // RFC 9002 Appendix A.7 updates RTT before detecting losses from the
@@ -384,6 +405,9 @@ impl LossRecovery {
         let time_threshold = now_micros.checked_sub(loss_delay);
 
         // Packet-threshold loss detection (kPacketThreshold = 3)
+        // RFC 9002 §7.6.2: persistent congestion is bounded by two *ack-eliciting*
+        // lost packets, so collect their send times as they are declared lost.
+        let mut lost_ae_sent_times: Vec<u64> = Vec::new();
         let mut survivors = VecDeque::with_capacity(self.sent_packets.len());
         while let Some(pkt) = self.sent_packets.pop_front() {
             let packet_threshold_lost =
@@ -410,6 +434,9 @@ impl LossRecovery {
             }
             event.lost_packets += 1;
             self.newly_lost_packet_numbers[space.idx()].push(pkt.packet_number);
+            if pkt.ack_eliciting {
+                lost_ae_sent_times.push(pkt.time_sent_micros);
+            }
             newest_lost_packet_sent_micros = Some(
                 newest_lost_packet_sent_micros
                     .map_or(pkt.time_sent_micros, |seen| seen.max(pkt.time_sent_micros)),
@@ -429,6 +456,26 @@ impl LossRecovery {
         let mut loss_reduced_cwnd = false;
         if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
             loss_reduced_cwnd = self.on_loss_congestion(lost_packet_sent_time, now_micros);
+        }
+        // RFC 9002 §7.6 / Appendix B.8: after the ordinary congestion event,
+        // check whether this loss run establishes persistent congestion — a
+        // full-outage window in which every ack-eliciting packet spanning more
+        // than the persistent-congestion duration was lost. If so, collapse
+        // cwnd to the minimum window (kMinimumWindow = 2 * max_datagram_size)
+        // and clear the recovery epoch so the next loss opens a fresh one. This
+        // overrides any same-ACK growth for the acknowledged packets.
+        if let Some(first_rtt_sample) = self.first_rtt_sample_micros {
+            let duration = self.persistent_congestion_duration_micros();
+            if Self::is_persistent_congestion(
+                &lost_ae_sent_times,
+                &acked_sent_times,
+                first_rtt_sample,
+                duration,
+            ) {
+                self.congestion_window_bytes = self.max_datagram_size.saturating_mul(2);
+                self.congestion_recovery_start_time = None;
+                loss_reduced_cwnd = true;
+            }
         }
         if event.acked_packets > 0 {
             self.pto_count = 0;
@@ -495,6 +542,69 @@ impl LossRecovery {
         let srtt = self.rtt.smoothed_rtt_micros().unwrap_or(333_000);
         let rttvar = self.rtt.rttvar_micros().unwrap_or(srtt / 2);
         srtt.saturating_add(4u64.saturating_mul(rttvar).max(1_000))
+    }
+
+    /// RFC 9002 §7.6.1: persistent-congestion duration.
+    ///
+    /// `(smoothed_rtt + max(4 * rttvar, kGranularity) + max_ack_delay) *
+    /// kPersistentCongestionThreshold`, with `kGranularity = 1 ms` and
+    /// `kPersistentCongestionThreshold = 3`. Unlike the PTO in Section 6.2,
+    /// this duration always includes `max_ack_delay` regardless of the packet
+    /// number space the losses were established in.
+    fn persistent_congestion_duration_micros(&self) -> u64 {
+        let srtt = self.rtt.smoothed_rtt_micros().unwrap_or(333_000);
+        let rttvar = self.rtt.rttvar_micros().unwrap_or(srtt / 2);
+        let pto = srtt
+            .saturating_add(4u64.saturating_mul(rttvar).max(1_000))
+            .saturating_add(self.max_ack_delay_micros);
+        pto.saturating_mul(3)
+    }
+
+    /// RFC 9002 §7.6.2 `AreAllPacketsLost`: decide whether the newly-lost
+    /// ack-eliciting packets establish persistent congestion.
+    ///
+    /// Persistent congestion requires two ack-eliciting packets, both sent
+    /// strictly after the first RTT sample, whose send times are separated by
+    /// more than `duration`, with no packet acknowledged anywhere in that
+    /// interval (an acknowledgement proves the path was not fully out). A
+    /// single acknowledgement inside the span breaks the run; a later unbroken
+    /// sub-run can still qualify.
+    ///
+    /// `lost_ae_sent` are the send times of newly-lost ack-eliciting packets;
+    /// `acked_sent` are the send times of every packet acknowledged by the same
+    /// ACK. Both are confined to the acknowledged packet number space, matching
+    /// the per-space conservative approach RFC 9002 §7.6.2 permits.
+    fn is_persistent_congestion(
+        lost_ae_sent: &[u64],
+        acked_sent: &[u64],
+        first_rtt_sample: u64,
+        duration: u64,
+    ) -> bool {
+        // Only packets sent after the first RTT sample count (RFC 9002 B.8).
+        let mut lost: Vec<u64> = lost_ae_sent
+            .iter()
+            .copied()
+            .filter(|&t| t > first_rtt_sample)
+            .collect();
+        if lost.len() < 2 {
+            return false;
+        }
+        lost.sort_unstable();
+        // Walk lost packets oldest-to-newest. A run is broken when a packet was
+        // acknowledged strictly between two consecutive lost send times; then a
+        // fresh run starts at the later packet.
+        let mut run_start = lost[0];
+        let mut prev = lost[0];
+        for &t in &lost[1..] {
+            let broken = acked_sent.iter().any(|&a| a > prev && a < t);
+            if broken {
+                run_start = t;
+            } else if t.saturating_sub(run_start) > duration {
+                return true;
+            }
+            prev = t;
+        }
+        false
     }
 
     fn pto_deadline_micros(&self, _now_micros: u64) -> Option<u64> {
@@ -1263,6 +1373,147 @@ mod tests {
         assert!(
             t.congestion_window_bytes() < cwnd_after_first_loss,
             "newer lost packets should trigger the next recovery reduction"
+        );
+    }
+
+    #[test]
+    fn persistent_congestion_predicate_matches_rfc_9002_7_6() {
+        // RFC 9002 §7.6.2 AreAllPacketsLost, exercised directly so the run
+        // logic is pinned without any RTT arithmetic.
+
+        // Two ack-eliciting losses spanning > duration, nothing acked between.
+        assert!(LossRecovery::is_persistent_congestion(
+            &[100, 300],
+            &[],
+            0,
+            150
+        ));
+        // Span exactly equal to duration is NOT persistent congestion (>, not >=).
+        assert!(!LossRecovery::is_persistent_congestion(
+            &[100, 300],
+            &[],
+            0,
+            200
+        ));
+        // Span below duration.
+        assert!(!LossRecovery::is_persistent_congestion(
+            &[100, 250],
+            &[],
+            0,
+            200
+        ));
+        // A single loss can never establish persistent congestion.
+        assert!(!LossRecovery::is_persistent_congestion(&[100], &[], 0, 10));
+        // An acknowledgement inside the span breaks the run.
+        assert!(!LossRecovery::is_persistent_congestion(
+            &[100, 800],
+            &[400],
+            0,
+            150
+        ));
+        // A break resets the run, but a later unbroken sub-run still qualifies.
+        assert!(LossRecovery::is_persistent_congestion(
+            &[100, 200, 700],
+            &[150],
+            0,
+            150
+        ));
+        // Packets sent at or before the first RTT sample are excluded; only one
+        // qualifying packet remains, so persistent congestion cannot be declared.
+        assert!(!LossRecovery::is_persistent_congestion(
+            &[100, 800],
+            &[],
+            250,
+            150
+        ));
+    }
+
+    #[test]
+    fn persistent_congestion_duration_follows_rfc_9002_7_6_1() {
+        let mut t = QuicTransportMachine::new();
+        // (srtt + max(4*rttvar, kGranularity) + max_ack_delay) * 3.
+        t.recovery.rtt.smoothed_rtt_micros = Some(10_000);
+        t.recovery.rtt.rttvar_micros = Some(5_000);
+        t.recovery.max_ack_delay_micros = 25_000;
+        // (10_000 + max(20_000, 1_000) + 25_000) * 3 = 55_000 * 3 = 165_000.
+        assert_eq!(t.recovery.persistent_congestion_duration_micros(), 165_000);
+
+        // kGranularity floors the rttvar term.
+        t.recovery.rtt.rttvar_micros = Some(100);
+        // (10_000 + max(400, 1_000) + 25_000) * 3 = 36_000 * 3 = 108_000.
+        assert_eq!(t.recovery.persistent_congestion_duration_micros(), 108_000);
+    }
+
+    #[test]
+    fn persistent_congestion_collapses_cwnd_to_min_window() {
+        // RFC 9002 §7.6.2: a full-outage window collapses cwnd to kMinimumWindow
+        // (2 * max_datagram_size = 2_400), not merely cwnd/2.
+        let mut t = QuicTransportMachine::new();
+        // Seed a deterministic RTT estimate and first-sample instant so the
+        // duration is fixed (165_000 us) and independent of ACK timing.
+        t.recovery.rtt.min_rtt_micros = Some(10_000);
+        t.recovery.rtt.smoothed_rtt_micros = Some(10_000);
+        t.recovery.rtt.rttvar_micros = Some(5_000);
+        t.recovery.first_rtt_sample_micros = Some(1_000);
+
+        // pn 1 and pn 2 are ack-eliciting, both sent after the first RTT sample,
+        // and their send times span ~1 s — far beyond the 165 ms duration.
+        for (pn, ts) in [
+            (1u64, 2_000u64),
+            (2, 1_000_000),
+            (3, 1_000_010),
+            (4, 1_000_020),
+            (5, 1_000_030),
+        ] {
+            t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, pn, ts));
+        }
+        // ACK pn 5: pn 1 (1+3<=5) and pn 2 (2+3<=5) fall to the packet threshold;
+        // pn 3, 4 survive. Nothing is acknowledged inside the 2_000..1_000_000
+        // interval, so the lost run is unbroken.
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 1_000_040);
+        assert!(
+            event.lost_packets >= 2,
+            "pn 1 and pn 2 must be declared lost, saw {}",
+            event.lost_packets
+        );
+        assert_eq!(
+            t.congestion_window_bytes(),
+            2_400,
+            "persistent congestion must collapse cwnd to the minimum window"
+        );
+        assert_eq!(
+            t.ssthresh_bytes(),
+            6_000,
+            "ssthresh keeps the ordinary cwnd/2 congestion-event value"
+        );
+    }
+
+    #[test]
+    fn loss_below_persistent_congestion_duration_only_halves_cwnd() {
+        // A loss run that does NOT exceed the persistent-congestion duration is
+        // an ordinary congestion event: cwnd is halved, never collapsed.
+        let mut t = QuicTransportMachine::new();
+        t.recovery.rtt.min_rtt_micros = Some(10_000);
+        t.recovery.rtt.smoothed_rtt_micros = Some(10_000);
+        t.recovery.rtt.rttvar_micros = Some(5_000);
+        t.recovery.first_rtt_sample_micros = Some(1_000);
+
+        // pn 1 and pn 2 span only 20_000 us, well under the 165_000 us duration.
+        for (pn, ts) in [
+            (1u64, 2_000u64),
+            (2, 22_000),
+            (3, 22_010),
+            (4, 22_020),
+            (5, 22_030),
+        ] {
+            t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, pn, ts));
+        }
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 40_000);
+        assert!(event.lost_packets >= 2, "pn 1 and pn 2 must be lost");
+        assert_eq!(
+            t.congestion_window_bytes(),
+            6_000,
+            "a short loss run halves cwnd rather than collapsing it"
         );
     }
 
