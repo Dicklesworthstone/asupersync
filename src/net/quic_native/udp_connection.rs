@@ -1300,7 +1300,7 @@ mod tests {
             client = NativeQuicUdpConnection::from_managed_parts(client.into_managed_parts());
             assert_eq!(client.pending_outgoing.len(), 1);
             assert_eq!(client.pending_outgoing[0].packet.data, protected_probe);
-            client.endpoint = original_endpoint;
+            let small_endpoint = std::mem::replace(&mut client.endpoint, original_endpoint);
             assert_eq!(client.flush(&cx).await.unwrap(), 1);
             assert!(client.pending_outgoing.is_empty());
             assert_eq!(
@@ -1366,6 +1366,56 @@ mod tests {
                 after_probe - window
             );
             assert_eq!(connection.transport().packets_lost_total(), 0);
+            // Import a genuinely unsent multi-packet flight into the router.
+            // Its bounded drain must preserve the suffix until delivery or close.
+            connection
+                .write_stream_bytes(&cx, stream, Bytes::from(vec![7; 2400]), true)
+                .unwrap();
+            let original_endpoint = std::mem::replace(&mut client.endpoint, small_endpoint);
+            assert!(matches!(
+                client.flush(&cx).await,
+                Err(NativeQuicUdpConnectionError::Endpoint(
+                    QuicUdpEndpointError::PacketTooLarge { limit: 1, .. }
+                ))
+            ));
+            assert!(client.pending_outgoing.len() >= 2);
+            let expected_first = client.pending_outgoing[0].packet.data.clone();
+            let local_cid = client.local_cid;
+            client.endpoint = original_endpoint;
+            let now = Instant::now();
+            let (mut router, _endpoint, incoming) = ConnectionRouter::from_authenticated_parts(
+                client.into_managed_parts(),
+                config,
+                1,
+                None,
+                now,
+            );
+            assert!(incoming.is_empty());
+            assert!(
+                router
+                    .drain_deferred_output(&cx, now, 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                router.drain_deferred_output(&cancelled, now, 1).await,
+                Err(ConnectionRouterError::Cancelled)
+            ));
+            let prefix = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+            assert_eq!(prefix.len(), 1);
+            assert_eq!(prefix[0].connection_id, local_cid);
+            assert_eq!(prefix[0].packet.data, expected_first);
+            assert!(prefix[0].ack_eliciting);
+            assert!(!prefix[0].final_handshake_flight);
+            assert_eq!(router.close_all(&cx, now, 0).unwrap(), 1);
+            assert!(
+                router
+                    .drain_deferred_output(&cx, now, MAX_PACKETS_PER_FLUSH)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         });
     }
 
