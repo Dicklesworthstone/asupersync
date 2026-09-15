@@ -123,6 +123,7 @@ pub struct PipelineExecutionReport<E> {
     /// Counters also available on partial/failing execution.
     pub summary: PipelineExecutionSummary,
     /// First observed typed error displaced by stage ordering or a stronger outcome.
+    /// A concrete failure takes precedence over a channel disconnection.
     pub suppressed_error: Option<PipelineExecutionError<E>>,
 }
 
@@ -601,7 +602,24 @@ impl<E> PipelineOwner<E> {
         }
         if self.failure.as_ref().is_none_or(|(old_index, old)| {
             outcome.severity() > old.severity()
-                || (outcome.severity() == old.severity() && index < *old_index)
+                || (outcome.severity() == old.severity()
+                    && match (&outcome, old) {
+                        (Outcome::Err(new), Outcome::Err(previous)) => {
+                            // A worker dropping its receiver can make an upstream
+                            // send fail before either worker is joined. Preserve
+                            // the concrete failure regardless of join order.
+                            let new_disconnected =
+                                matches!(new, PipelineExecutionError::Disconnected);
+                            let old_disconnected =
+                                matches!(previous, PipelineExecutionError::Disconnected);
+                            if new_disconnected == old_disconnected {
+                                index < *old_index
+                            } else {
+                                old_disconnected
+                            }
+                        }
+                        _ => index < *old_index,
+                    })
         }) {
             if let Some((_, old)) = self.failure.replace((index, outcome)) {
                 self.retain_suppressed(old, true);
@@ -618,12 +636,18 @@ impl<E> PipelineOwner<E> {
     ) {
         let outcome = match outcome {
             Outcome::Err(error)
-                if self.suppressed_error.is_none()
+                if (self.suppressed_error.is_none()
+                    || (matches!(
+                        self.suppressed_error.as_ref(),
+                        Some(PipelineExecutionError::Disconnected)
+                    ) && !matches!(&error, PipelineExecutionError::Disconnected)))
                     && (was_current
                         || self.failure.as_ref().is_some_and(|(_, current)| {
                             current.severity() > crate::types::outcome::Severity::Err
                         })) =>
             {
+                // The only replaced value is Disconnected, which owns no user
+                // data. Concrete error destructors still use the guarded path.
                 self.suppressed_error = Some(error);
                 return;
             }
@@ -1744,6 +1768,59 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Waker;
+
+    #[test]
+    fn executing_pipeline_concrete_error_survives_disconnect_in_every_join_order() {
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            for stronger in 0..3 {
+                let cx = Cx::for_testing();
+                let mut owner = PipelineOwner::new(cx.clone(), 2);
+                for event in order {
+                    match event {
+                        0 => owner.record(0, Outcome::Err(PipelineExecutionError::Disconnected)),
+                        1 => owner.record(
+                            1,
+                            Outcome::Err(PipelineExecutionError::Stage {
+                                stage: 1,
+                                input: 0,
+                                error: "initiating failure",
+                            }),
+                        ),
+                        _ => match stronger {
+                            0 => {}
+                            1 => owner.record(2, pipeline_cancelled(&cx)),
+                            _ => owner
+                                .record(2, Outcome::Panicked(PanicPayload::new("cleanup panic"))),
+                        },
+                    }
+                }
+                let report = owner.finish();
+                assert!(
+                    matches!(
+                        report.error(),
+                        Some(PipelineExecutionError::Stage {
+                            stage: 1,
+                            input: 0,
+                            error: "initiating failure",
+                        })
+                    ),
+                    "order={order:?}, stronger={stronger}: {report:?}"
+                );
+                match stronger {
+                    0 => assert!(report.outcome.is_err()),
+                    1 => assert!(report.outcome.is_cancelled()),
+                    _ => assert!(report.outcome.is_panicked()),
+                }
+            }
+        }
+    }
 
     #[derive(Default)]
     struct ExecutionGate {
