@@ -605,8 +605,36 @@ impl<T> OnceCell<T> {
             std::mem::take(&mut guard.waiters)
         };
         self.cvar.notify_all();
+        if waiters.is_empty() {
+            return;
+        }
+
+        // The state transition and queue drain have committed. One callback
+        // must not prevent later detached waiters from observing that state.
+        // InitGuard also calls this while an initializer is unwinding; keep
+        // that original panic authoritative instead of starting a second one.
+        let already_unwinding = std::thread::panicking();
+        let mut first_panic = None;
         for waiter in waiters {
-            waiter.waker.wake();
+            let waker = waiter.waker;
+            // Retain the owner across wake_by_ref so a safe Wake callback and
+            // its final-owner destructor cannot panic in the same unwind.
+            let notified =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake_by_ref()));
+            let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)));
+            for payload in [notified, retired].into_iter().filter_map(Result::err) {
+                if !already_unwinding && first_panic.is_none() {
+                    first_panic = Some(payload);
+                } else {
+                    // An opaque panic payload can itself panic on drop.
+                    // Leak only secondary payloads to preserve fanout and
+                    // the original failure, as in semaphore wake cleanup.
+                    std::mem::forget(payload);
+                }
+            }
+        }
+        if let Some(payload) = first_panic {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -1024,6 +1052,294 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.wakes.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    struct TransitionPanicPayload;
+
+    impl Drop for TransitionPanicPayload {
+        fn drop(&mut self) {
+            panic!("secondary panic payload must not be dropped");
+        }
+    }
+
+    struct TransitionWakerProbe {
+        cell: Weak<OnceCell<u32>>,
+        wakes: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        panic_on_wake: bool,
+        panic_on_drop: bool,
+        opaque_payload: bool,
+    }
+
+    impl Wake for TransitionWakerProbe {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            let cell = self.cell.upgrade().expect("cell remains alive");
+            assert!(cell.waiters.try_lock().is_ok(), "wake must run unlocked");
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            if self.panic_on_wake {
+                if self.opaque_payload {
+                    std::panic::panic_any(TransitionPanicPayload);
+                }
+                panic!("first wake failure");
+            }
+        }
+    }
+
+    impl Drop for TransitionWakerProbe {
+        fn drop(&mut self) {
+            let cell = self.cell.upgrade().expect("cell remains alive");
+            assert!(
+                cell.waiters.try_lock().is_ok(),
+                "retirement must run unlocked"
+            );
+            self.drops.fetch_add(1, Ordering::SeqCst);
+            if self.panic_on_drop {
+                if self.opaque_payload {
+                    std::panic::panic_any(TransitionPanicPayload);
+                }
+                panic!("first retirement failure");
+            }
+        }
+    }
+
+    fn transition_waker_probe(
+        cell: &Arc<OnceCell<u32>>,
+        panic_on_wake: bool,
+        panic_on_drop: bool,
+        opaque_payload: bool,
+    ) -> (Waker, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(TransitionWakerProbe {
+            cell: Arc::downgrade(cell),
+            wakes: Arc::clone(&wakes),
+            drops: Arc::clone(&drops),
+            panic_on_wake,
+            panic_on_drop,
+            opaque_payload,
+        }));
+        (waker, wakes, drops)
+    }
+
+    // The pre-fix implementation can abort on a double panic. Keep that RED
+    // result inside a child process rather than taking down the whole suite.
+    fn transition_panic_test_child(test_name: &str) -> bool {
+        const CHILD_ENV: &str = "ASUPERSYNC_ONCE_CELL_TRANSITION_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).as_deref() == Some(std::ffi::OsStr::new(test_name)) {
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                &format!("sync::once_cell::tests::{test_name}"),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ENV, test_name)
+            .output()
+            .expect("run isolated OnceCell regression");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed"),
+            "OnceCell regression child failed: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+        false
+    }
+
+    #[test]
+    fn transition_wake_panics_preserve_fanout_and_first_failure() {
+        let name = "transition_wake_panics_preserve_fanout_and_first_failure";
+        if !transition_panic_test_child(name) {
+            return;
+        }
+        init_test(name);
+        for (panic_on_wake, panic_on_drop) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let cell = Arc::new(OnceCell::new());
+            let release = AtomicBool::new(false);
+            let mut initializer = Box::pin(cell.get_or_init(|| {
+                let release = &release;
+                poll_fn(move |_| {
+                    if release.load(Ordering::SeqCst) {
+                        Poll::Ready(41)
+                    } else {
+                        Poll::Pending
+                    }
+                })
+            }));
+            let mut task_cx = Context::from_waker(Waker::noop());
+            assert!(initializer.as_mut().poll(&mut task_cx).is_pending());
+
+            let mut first = Box::pin(cell.get_or_init(|| async { 99 }));
+            let mut second = Box::pin(cell.get_or_init(|| async { 99 }));
+            let mut last = Box::pin(cell.get_or_init(|| async { 99 }));
+            let (first_waker, first_wakes, first_drops) =
+                transition_waker_probe(&cell, panic_on_wake, panic_on_drop, false);
+            let has_failure = panic_on_wake || panic_on_drop;
+            let (second_waker, second_wakes, second_drops) =
+                transition_waker_probe(&cell, has_failure, has_failure, true);
+            let last_wakes = Arc::new(CountWaker::default());
+            let last_waker = Waker::from(Arc::clone(&last_wakes));
+            assert!(
+                first
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&first_waker))
+                    .is_pending()
+            );
+            assert!(
+                second
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&second_waker))
+                    .is_pending()
+            );
+            assert!(
+                last.as_mut()
+                    .poll(&mut Context::from_waker(&last_waker))
+                    .is_pending()
+            );
+            // The queue now owns the last strong reference to each probe.
+            drop(first_waker);
+            drop(second_waker);
+            assert_eq!(cell.telemetry_snapshot(1).waiter_count, 3);
+
+            release.store(true, Ordering::SeqCst);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                initializer.as_mut().poll(&mut task_cx)
+            }));
+            if has_failure {
+                let payload = result.expect_err("first callback panic must propagate");
+                let expected = if panic_on_wake {
+                    "first wake failure"
+                } else {
+                    "first retirement failure"
+                };
+                assert_eq!(payload.downcast_ref::<&str>(), Some(&expected));
+            } else {
+                assert_eq!(
+                    result.expect("ordinary callbacks succeed"),
+                    Poll::Ready(&41)
+                );
+            }
+            assert_eq!(cell.get(), Some(&41));
+            assert_eq!(cell.telemetry_snapshot(1).waiter_count, 0);
+            assert_eq!(first_wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(second_wakes.load(Ordering::SeqCst), 1);
+            assert_eq!(second_drops.load(Ordering::SeqCst), 1);
+            assert_eq!(last_wakes.count(), 1);
+            assert_eq!(first.as_mut().poll(&mut task_cx), Poll::Ready(&41));
+            assert_eq!(second.as_mut().poll(&mut task_cx), Poll::Ready(&41));
+            assert_eq!(last.as_mut().poll(&mut task_cx), Poll::Ready(&41));
+            assert_eq!(cell.telemetry_snapshot(1).cancellation_count, 0);
+        }
+        crate::test_complete!("transition_wake_panics_preserve_fanout_and_first_failure");
+    }
+
+    #[test]
+    fn transition_initializer_unwind_preserves_original_and_retry() {
+        let name = "transition_initializer_unwind_preserves_original_and_retry";
+        if !transition_panic_test_child(name) {
+            return;
+        }
+        init_test(name);
+        let cell = Arc::new(OnceCell::new());
+        let release = AtomicBool::new(false);
+        let mut initializer = Box::pin(cell.get_or_init(|| {
+            let release = &release;
+            poll_fn(move |_| {
+                if release.load(Ordering::SeqCst) {
+                    std::panic::panic_any(77usize);
+                }
+                Poll::<u32>::Pending
+            })
+        }));
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(initializer.as_mut().poll(&mut task_cx).is_pending());
+        let mut first = Box::pin(cell.get_or_init(|| async { 99 }));
+        let mut last = Box::pin(cell.get_or_init(|| async { 42 }));
+        let (first_waker, wakes, drops) = transition_waker_probe(&cell, true, true, true);
+        let last_wakes = Arc::new(CountWaker::default());
+        let last_waker = Waker::from(Arc::clone(&last_wakes));
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&first_waker))
+                .is_pending()
+        );
+        assert!(
+            last.as_mut()
+                .poll(&mut Context::from_waker(&last_waker))
+                .is_pending()
+        );
+        drop(first_waker);
+
+        release.store(true, Ordering::SeqCst);
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            initializer.as_mut().poll(&mut task_cx)
+        }))
+        .expect_err("original initializer panic must propagate");
+        assert_eq!(payload.downcast_ref::<usize>(), Some(&77));
+        assert_eq!(cell.get(), None);
+        assert_eq!(cell.state.load(Ordering::Acquire), UNINIT);
+        assert_eq!(cell.telemetry_snapshot(2).waiter_count, 0);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(last_wakes.count(), 1);
+        assert_eq!(last.as_mut().poll(&mut task_cx), Poll::Ready(&42));
+        assert_eq!(first.as_mut().poll(&mut task_cx), Poll::Ready(&42));
+        assert_eq!(cell.telemetry_snapshot(2).cancellation_count, 0);
+        crate::test_complete!("transition_initializer_unwind_preserves_original_and_retry");
+    }
+
+    #[test]
+    fn transition_cancelled_initializer_finishes_fanout_before_wake_panic() {
+        let name = "transition_cancelled_initializer_finishes_fanout_before_wake_panic";
+        if !transition_panic_test_child(name) {
+            return;
+        }
+        init_test(name);
+        let cell = Arc::new(OnceCell::new());
+        let mut initializer = Box::pin(cell.get_or_init(pending::<u32>));
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(initializer.as_mut().poll(&mut task_cx).is_pending());
+        let mut first = Box::pin(cell.get_or_init(|| async { 99 }));
+        let mut last = Box::pin(cell.get_or_init(|| async { 42 }));
+        let (first_waker, wakes, drops) = transition_waker_probe(&cell, true, true, false);
+        let last_wakes = Arc::new(CountWaker::default());
+        let last_waker = Waker::from(Arc::clone(&last_wakes));
+        assert!(
+            first
+                .as_mut()
+                .poll(&mut Context::from_waker(&first_waker))
+                .is_pending()
+        );
+        assert!(
+            last.as_mut()
+                .poll(&mut Context::from_waker(&last_waker))
+                .is_pending()
+        );
+        drop(first_waker);
+
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(initializer)))
+            .expect_err("ordinary cancellation still propagates the first callback panic");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"first wake failure"));
+        assert_eq!(cell.get(), None);
+        assert_eq!(cell.state.load(Ordering::Acquire), UNINIT);
+        assert_eq!(cell.telemetry_snapshot(3).waiter_count, 0);
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(last_wakes.count(), 1);
+        assert_eq!(last.as_mut().poll(&mut task_cx), Poll::Ready(&42));
+        assert_eq!(first.as_mut().poll(&mut task_cx), Poll::Ready(&42));
+        assert_eq!(cell.telemetry_snapshot(3).cancellation_count, 0);
+        crate::test_complete!("transition_cancelled_initializer_finishes_fanout_before_wake_panic");
     }
 
     #[derive(Debug)]
