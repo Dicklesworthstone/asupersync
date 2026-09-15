@@ -616,24 +616,24 @@ fn execute_legacy_statement(
         .map_err(|error| SqliteError::Sqlite(error.to_string()))
 }
 
-fn rollback_orphaned_transaction_generation_guarded(
+fn rollback_orphaned_transaction_generation_guarded<E: SqliteConnectionOpError>(
     conn: &rusqlite::Connection,
     transaction_state: &Mutex<TransactionState>,
     transaction_generation: &AtomicU64,
-) -> Result<(), SqliteError> {
+) -> Result<(), E> {
     if *transaction_state.lock() != TransactionState::NeedsRollback {
         return Ok(());
     }
-    rollback_orphaned_transaction_mutex_guarded(conn, transaction_state)?;
+    rollback_orphaned_transaction_mutex_guarded::<E>(conn, transaction_state)?;
     let _ = advance_transaction_generation(transaction_generation);
     *transaction_state.lock() = TransactionState::Autocommit;
     Ok(())
 }
 
-fn rollback_orphaned_transaction_mutex_guarded(
+fn rollback_orphaned_transaction_mutex_guarded<E: SqliteConnectionOpError>(
     conn: &rusqlite::Connection,
     transaction_state: &Mutex<TransactionState>,
-) -> Result<(), SqliteError> {
+) -> Result<(), E> {
     // Use mutex guard for proper synchronization
     let mut state_guard = transaction_state.lock();
 
@@ -662,7 +662,7 @@ fn rollback_orphaned_transaction_mutex_guarded(
                     // Rollback failed, restore NeedsRollback state
                     let mut state_guard = transaction_state.lock();
                     *state_guard = TransactionState::NeedsRollback;
-                    return Err(SqliteError::Sqlite(e.to_string()));
+                    return Err(E::from_rusqlite(SqliteOperation::TransactionRollback, e));
                 }
             }
         }
@@ -1480,6 +1480,9 @@ pub enum SqliteRetryDisposition {
     Never,
     /// The same operation may be retried subject to caller policy.
     RetryOperation,
+    /// Start a new transaction and replay its work under caller policy.
+    /// A consumed commit handle or stale WAL snapshot cannot be retried in place.
+    RestartTransaction,
     /// Reopen the connection before retrying.
     ReopenConnection,
 }
@@ -1639,7 +1642,13 @@ impl SqliteErrorDiagnostic {
             Some(rusqlite::ffi::ErrorCode::DatabaseBusy) => (
                 SqliteErrorCategory::Busy,
                 Some("SQLITE_BUSY"),
-                SqliteRetryDisposition::RetryOperation,
+                if operation == SqliteOperation::TransactionCommit
+                    || extended_code == Some(rusqlite::ffi::SQLITE_BUSY_SNAPSHOT)
+                {
+                    SqliteRetryDisposition::RestartTransaction
+                } else {
+                    SqliteRetryDisposition::RetryOperation
+                },
                 false,
             ),
             Some(rusqlite::ffi::ErrorCode::DatabaseLocked) => (
@@ -2522,11 +2531,16 @@ enum SqliteConnectionOpCompletion<R, E> {
 
 trait SqliteConnectionOpError: Send + 'static {
     fn from_legacy(operation: SqliteOperation, error: SqliteError) -> Self;
+    fn from_rusqlite(operation: SqliteOperation, error: rusqlite::Error) -> Self;
     fn is_interrupt(&self) -> bool;
     fn statement_timeout(operation: SqliteOperation, limit: Duration) -> Self;
 }
 
 impl SqliteConnectionOpError for SqliteError {
+    fn from_rusqlite(_operation: SqliteOperation, error: rusqlite::Error) -> Self {
+        Self::Sqlite(error.to_string())
+    }
+
     fn from_legacy(_operation: SqliteOperation, error: SqliteError) -> Self {
         error
     }
@@ -2541,6 +2555,10 @@ impl SqliteConnectionOpError for SqliteError {
 }
 
 impl SqliteConnectionOpError for SqliteOperationError {
+    fn from_rusqlite(operation: SqliteOperation, error: rusqlite::Error) -> Self {
+        SqliteOperationError::from_rusqlite(operation, error)
+    }
+
     fn from_legacy(operation: SqliteOperation, error: SqliteError) -> Self {
         SqliteOperationError::from_legacy(operation, error)
     }
@@ -2922,7 +2940,10 @@ impl SqliteConnection {
         }
     }
 
-    async fn drain_orphaned_transaction(&self, cx: &Cx) -> Outcome<(), SqliteError> {
+    async fn drain_orphaned_transaction<E: SqliteConnectionOpError>(
+        &self,
+        cx: &Cx,
+    ) -> Outcome<(), E> {
         let current_state = *self.transaction_state.lock();
 
         // Only drain if transaction needs rollback
@@ -2932,13 +2953,19 @@ impl SqliteConnection {
 
         let transaction_state = Arc::clone(&self.transaction_state);
         let transaction_generation = Arc::clone(&self.transaction_generation);
-        self.run_connection_op(cx, "sqlite rollback cleanup", move |conn| {
-            rollback_orphaned_transaction_generation_guarded(
-                conn,
-                transaction_state.as_ref(),
-                transaction_generation.as_ref(),
-            )
-        })
+        self.run_connection_op_inner(
+            cx,
+            "sqlite rollback cleanup",
+            SqliteOperation::TransactionRollback,
+            None,
+            move |conn| {
+                rollback_orphaned_transaction_generation_guarded::<E>(
+                    conn,
+                    transaction_state.as_ref(),
+                    transaction_generation.as_ref(),
+                )
+            },
+        )
         .await
     }
 
@@ -2981,7 +3008,7 @@ impl SqliteConnection {
                 return;
             }
 
-            let _ = rollback_orphaned_transaction_generation_guarded(
+            let _ = rollback_orphaned_transaction_generation_guarded::<SqliteError>(
                 conn,
                 transaction_state.as_ref(),
                 transaction_generation.as_ref(),
@@ -3256,10 +3283,7 @@ impl SqliteConnection {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(sqlite_cancelled_reason(cx));
         }
-        match diagnose_legacy_outcome(
-            SqliteOperation::TransactionRollback,
-            self.drain_orphaned_transaction(cx).await,
-        ) {
+        match self.drain_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -3323,10 +3347,7 @@ impl SqliteConnection {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(sqlite_cancelled_reason(cx));
         }
-        match diagnose_legacy_outcome(
-            SqliteOperation::TransactionRollback,
-            self.drain_orphaned_transaction(cx).await,
-        ) {
+        match self.drain_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -3470,10 +3491,7 @@ impl SqliteConnection {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(sqlite_cancelled_reason(cx));
         }
-        match diagnose_legacy_outcome(
-            SqliteOperation::TransactionRollback,
-            self.drain_orphaned_transaction(cx).await,
-        ) {
+        match self.drain_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -3672,10 +3690,7 @@ impl SqliteConnection {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(sqlite_cancelled_reason(cx));
         }
-        match diagnose_legacy_outcome(
-            SqliteOperation::TransactionRollback,
-            self.drain_orphaned_transaction(cx).await,
-        ) {
+        match self.drain_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -4058,10 +4073,7 @@ impl SqliteConnection {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(sqlite_cancelled_reason(cx));
         }
-        match diagnose_legacy_outcome(
-            SqliteOperation::TransactionRollback,
-            self.drain_orphaned_transaction(cx).await,
-        ) {
+        match self.drain_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -4308,10 +4320,7 @@ impl SqliteConnection {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(sqlite_cancelled_reason(cx));
         }
-        match diagnose_legacy_outcome(
-            SqliteOperation::TransactionRollback,
-            self.drain_orphaned_transaction(cx).await,
-        ) {
+        match self.drain_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(error) => return Outcome::Err(error),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -4336,8 +4345,10 @@ impl SqliteConnection {
     pub fn close(&self) -> Result<(), SqliteError> {
         let mut guard = self.inner.lock();
         if let Some(conn) = guard.conn.as_ref() {
-            let _ =
-                rollback_orphaned_transaction_mutex_guarded(conn, self.transaction_state.as_ref());
+            let _ = rollback_orphaned_transaction_mutex_guarded::<SqliteError>(
+                conn,
+                self.transaction_state.as_ref(),
+            );
 
             // SECURITY FIX: Fail-closed WAL checkpoint to prevent data loss
             // WAL checkpoint failures now propagate as errors instead of being ignored
@@ -4606,8 +4617,10 @@ impl SqliteConnection {
     fn close_without_checkpoint(&self) -> Result<(), SqliteError> {
         let mut guard = self.inner.lock();
         if let Some(conn) = guard.conn.as_ref() {
-            let _ =
-                rollback_orphaned_transaction_mutex_guarded(conn, self.transaction_state.as_ref());
+            let _ = rollback_orphaned_transaction_mutex_guarded::<SqliteError>(
+                conn,
+                self.transaction_state.as_ref(),
+            );
             conn.flush_prepared_statement_cache();
         }
         *self.transaction_state.lock() = TransactionState::Autocommit;
@@ -4708,6 +4721,10 @@ impl SqliteTransaction<'_> {
     }
 
     /// Commits the transaction with structured engine diagnostics.
+    ///
+    /// This consumes the handle even if COMMIT fails. A busy result therefore
+    /// reports [`SqliteRetryDisposition::RestartTransaction`]: callers must
+    /// begin a new transaction and replay its work, not retry this handle.
     pub async fn commit_diagnosed(mut self, cx: &Cx) -> Outcome<(), SqliteOperationError> {
         if self.finished {
             trace_database_transaction(cx, "sqlite", "commit_diagnosed", "already_finished");

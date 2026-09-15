@@ -467,7 +467,8 @@ mod tests {
         let transaction_state = Mutex::new(TransactionState::NeedsRollback);
 
         // Verify rollback function works with mutex guard
-        let result = rollback_orphaned_transaction_mutex_guarded(&conn, &transaction_state);
+        let result =
+            rollback_orphaned_transaction_mutex_guarded::<SqliteError>(&conn, &transaction_state);
         assert!(result.is_ok());
 
         // State should be updated to Autocommit after successful rollback
@@ -3244,7 +3245,7 @@ mod tests {
                 // Deterministically impose the four-worker overtaking race: a
                 // cleanup reaches the real connection before the already-queued
                 // BEGIN and clears the first poison while SQLite is autocommit.
-                rollback_orphaned_transaction_mutex_guarded(
+                rollback_orphaned_transaction_mutex_guarded::<SqliteError>(
                     inner_guard.get().expect("connection remains open"),
                     conn.transaction_state.as_ref(),
                 )
@@ -3837,6 +3838,223 @@ mod tests {
             SqliteErrorCategory::NotFound
         );
         assert!(!format!("{missing_column:?}").contains("secret_column"));
+    }
+
+    #[test]
+    fn sqlite_diagnosed_retry_distinguishes_transaction_restart() {
+        for operation in [
+            SqliteOperation::Step,
+            SqliteOperation::TransactionBegin,
+            SqliteOperation::TransactionCommit,
+            SqliteOperation::TransactionRollback,
+        ] {
+            for code in [
+                rusqlite::ffi::SQLITE_BUSY,
+                rusqlite::ffi::SQLITE_BUSY_SNAPSHOT,
+            ] {
+                let error = SqliteOperationError::from_rusqlite(
+                    operation,
+                    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None),
+                );
+                let must_restart = operation == SqliteOperation::TransactionCommit
+                    || code == rusqlite::ffi::SQLITE_BUSY_SNAPSHOT;
+                assert_eq!(
+                    error.diagnostic().retry_disposition(),
+                    if must_restart {
+                        SqliteRetryDisposition::RestartTransaction
+                    } else {
+                        SqliteRetryDisposition::RetryOperation
+                    }
+                );
+                assert_eq!(error.diagnostic().is_retryable(), !must_restart);
+                assert_eq!(error.diagnostic().extended_code(), Some(code));
+                assert_eq!(error.diagnostic().category(), SqliteErrorCategory::Busy);
+            }
+        }
+    }
+
+    #[test]
+    fn sqlite_diagnosed_orphan_rollback_preserves_engine_error_and_retry() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let cx = create_test_cx();
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open failed: {other:?}"),
+            };
+            {
+                let guard = conn.inner.lock();
+                let raw = guard.get().unwrap();
+                raw.execute_batch("CREATE TABLE t(x); BEGIN; INSERT INTO t VALUES (1)")
+                    .unwrap();
+                raw.authorizer(Some(|ctx: AuthContext<'_>| {
+                    if matches!(
+                        ctx.action,
+                        AuthAction::Transaction {
+                            operation: TransactionOperation::Rollback
+                        }
+                    ) {
+                        Authorization::Deny
+                    } else {
+                        Authorization::Allow
+                    }
+                }))
+                .unwrap();
+                assert!(!raw.is_autocommit());
+                // Install an orphan without racing the best-effort Drop job.
+                *conn.transaction_state.lock() = TransactionState::NeedsRollback;
+            }
+            let generation = conn.transaction_generation.load(Ordering::Acquire);
+            for operation in 0..6 {
+                let outcome = match operation {
+                    0 => conn
+                        .execute_diagnosed(&cx, "INSERT INTO t VALUES (2)", &[])
+                        .await
+                        .map(|_| ()),
+                    1 => {
+                        conn.execute_batch_diagnosed(&cx, "INSERT INTO t VALUES (2)")
+                            .await
+                    }
+                    2 => conn
+                        .query_diagnosed(&cx, "SELECT x FROM t", &[])
+                        .await
+                        .map(|_| ()),
+                    3 => conn
+                        .query_row_diagnosed(&cx, "SELECT x FROM t", &[])
+                        .await
+                        .map(|_| ()),
+                    4 => conn.begin_diagnosed(&cx).await.map(|_| ()),
+                    _ => conn.set_busy_timeout_diagnosed(&cx, Duration::ZERO).await,
+                };
+                let Outcome::Err(error) = outcome else {
+                    panic!("operation {operation} must stop at failed rollback: {outcome:?}");
+                };
+                assert_eq!(
+                    error.diagnostic().operation(),
+                    SqliteOperation::TransactionRollback
+                );
+                assert_eq!(
+                    error.diagnostic().category(),
+                    SqliteErrorCategory::PermissionDenied
+                );
+                assert_eq!(error.diagnostic().primary_code(), Some("SQLITE_AUTH"));
+                assert_eq!(
+                    error.diagnostic().extended_code(),
+                    Some(rusqlite::ffi::SQLITE_AUTH)
+                );
+                assert!(error.engine_source().is_some());
+                assert!(matches!(error.legacy_error(), SqliteError::Sqlite(_)));
+                assert_eq!(
+                    *conn.transaction_state.lock(),
+                    TransactionState::NeedsRollback
+                );
+                assert_eq!(
+                    conn.transaction_generation.load(Ordering::Acquire),
+                    generation
+                );
+            }
+            // Legacy callers still receive the original string-error variant.
+            assert!(matches!(
+                conn.execute(&cx, "INSERT INTO t VALUES (3)", &[]).await,
+                Outcome::Err(SqliteError::Sqlite(_))
+            ));
+            {
+                let guard = conn.inner.lock();
+                guard
+                    .get()
+                    .unwrap()
+                    .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                    .unwrap();
+            }
+            let rows = match conn
+                .query_diagnosed(&cx, "SELECT COUNT(*) FROM t", &[])
+                .await
+            {
+                Outcome::Ok(rows) => rows,
+                other => panic!("cleanup retry failed: {other:?}"),
+            };
+            assert_eq!(rows[0].get_idx(0).unwrap().as_integer(), Some(0));
+            assert_eq!(*conn.transaction_state.lock(), TransactionState::Autocommit);
+            assert_ne!(
+                conn.transaction_generation.load(Ordering::Acquire),
+                generation
+            );
+        });
+    }
+
+    #[test]
+    fn sqlite_diagnosed_busy_commit_requires_new_transaction() {
+        let root = tempdir().unwrap().keep();
+        let path = root.join("commit-busy.db");
+        let cx = create_test_cx();
+        block_on(async {
+            let conn = match SqliteConnection::open(&cx, &path).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open failed: {other:?}"),
+            };
+            {
+                let guard = conn.inner.lock();
+                let raw = guard.get().unwrap();
+                raw.execute_batch(
+                    "PRAGMA journal_mode=PERSIST; CREATE TABLE t(x); INSERT INTO t VALUES (1)",
+                )
+                .unwrap();
+                raw.busy_timeout(Duration::ZERO).unwrap();
+            }
+            let reader = rusqlite::Connection::open(&path).unwrap();
+            reader.execute_batch("BEGIN").unwrap();
+            assert_eq!(
+                reader
+                    .query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            let transaction = match conn.begin_diagnosed(&cx).await {
+                Outcome::Ok(transaction) => transaction,
+                _ => panic!("begin failed"),
+            };
+            assert!(matches!(
+                transaction
+                    .execute(&cx, "INSERT INTO t VALUES (2)", &[])
+                    .await,
+                Outcome::Ok(1)
+            ));
+            let error = match transaction.commit_diagnosed(&cx).await {
+                Outcome::Err(error) => error,
+                other => panic!("reader must block commit: {other:?}"),
+            };
+            assert_eq!(error.diagnostic().category(), SqliteErrorCategory::Busy);
+            assert_eq!(
+                error.diagnostic().retry_disposition(),
+                SqliteRetryDisposition::RestartTransaction
+            );
+            assert!(!error.diagnostic().is_retryable());
+            reader.execute_batch("ROLLBACK").unwrap();
+            let rows = match conn
+                .query_diagnosed(&cx, "SELECT COUNT(*) FROM t", &[])
+                .await
+            {
+                Outcome::Ok(rows) => rows,
+                other => panic!("post-failure cleanup failed: {other:?}"),
+            };
+            assert_eq!(rows[0].get_idx(0).unwrap().as_integer(), Some(1));
+            let retry = match conn.begin_diagnosed(&cx).await {
+                Outcome::Ok(transaction) => transaction,
+                _ => panic!("new transaction failed"),
+            };
+            assert!(matches!(
+                retry.execute(&cx, "INSERT INTO t VALUES (3)", &[]).await,
+                Outcome::Ok(1)
+            ));
+            assert!(matches!(retry.commit_diagnosed(&cx).await, Outcome::Ok(())));
+            assert_eq!(
+                reader
+                    .query_row("SELECT COUNT(*) FROM t", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                2
+            );
+        });
     }
 
     #[test]
