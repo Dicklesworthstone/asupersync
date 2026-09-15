@@ -1742,7 +1742,13 @@ mod tests {
         assert_eq!(t.packets_lost_total(), 1);
         assert_eq!(t.bytes_in_flight(), 0);
         assert_eq!(t.take_newly_lost_packet_numbers(space), vec![1]);
-        let expected = ((cwnd_before + 400) / 2).max(2_400);
+        // asupersync-f3x3e3 / RFC 9002 A.7: this ACK both acknowledges packets
+        // (400 bytes) and newly declares a loss, so the loss is processed first
+        // — it moves the recovery epoch to `now`, and the just-acknowledged
+        // packets (all sent before `now`) must not grow cwnd. cwnd therefore
+        // nets exactly cwnd_before/2, not (cwnd_before + 400)/2 as the previous
+        // grow-then-halve ordering produced.
+        let expected = (cwnd_before / 2).max(2_400);
         assert_eq!(t.congestion_window_bytes(), expected, "loss halves cwnd");
         assert_eq!(t.ssthresh_bytes(), expected);
     }
