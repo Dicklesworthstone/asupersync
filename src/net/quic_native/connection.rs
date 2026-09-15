@@ -298,6 +298,14 @@ pub struct NativeQuicConnection {
     next_packet_numbers: [u64; 3],
     received_ack_trackers: [ReceivedPacketTracker; 3],
     migration_disabled: bool,
+    /// Peer-advertised `ack_delay_exponent` (RFC 9000 §18.2; default 3). Scales
+    /// the ACK Delay field of 1-RTT ACK frames into microseconds
+    /// (asupersync-mc7m2r).
+    peer_ack_delay_exponent: u32,
+    /// Peer-advertised `max_ack_delay` in microseconds (RFC 9000 §18.2; default
+    /// 25 ms). Bounds the RTT-sample `ack_delay` once the handshake is confirmed
+    /// (RFC 9002 §5.3, asupersync-mc7m2r).
+    peer_max_ack_delay_micros: u64,
     active_path_id: u64,
     migration_events: u64,
     drain_timeout_micros: u64,
@@ -476,6 +484,8 @@ impl NativeQuicConnection {
                 ReceivedPacketTracker::default(),
             ],
             migration_disabled: false,
+            peer_ack_delay_exponent: 3,
+            peer_max_ack_delay_micros: 25_000,
             active_path_id: 0,
             migration_events: 0,
             drain_timeout_micros: config.drain_timeout_micros,
@@ -1542,6 +1552,18 @@ impl NativeQuicConnection {
             })?,
             None => 0,
         };
+        // RFC 9000 §18.2: ack_delay_exponent defaults to 3 (the parser already
+        // rejects values > 20); it scales the ACK Delay field of 1-RTT ACKs.
+        self.peer_ack_delay_exponent =
+            u32::try_from(params.ack_delay_exponent.unwrap_or(3)).unwrap_or(3);
+        // RFC 9000 §18.2: max_ack_delay defaults to 25 ms and is carried in
+        // milliseconds; convert to microseconds. Feed it to the transport
+        // machine so both the RTT `ack_delay` clamp (RFC 9002 §5.3) and the PTO
+        // computation use the negotiated value (asupersync-mc7m2r).
+        let max_ack_delay_micros = params.max_ack_delay.unwrap_or(25).saturating_mul(1_000);
+        self.peer_max_ack_delay_micros = max_ack_delay_micros;
+        self.transport
+            .set_peer_max_ack_delay_micros(max_ack_delay_micros);
         Ok(())
     }
 
@@ -2295,6 +2317,28 @@ impl NativeQuicConnection {
         self.process_frame_at(cx, frame, space, 0)
     }
 
+    /// Decode an ACK frame's ACK Delay field into microseconds for RTT
+    /// estimation (RFC 9000 §19.3, RFC 9002 §5.3, asupersync-mc7m2r).
+    ///
+    /// The field is expressed in units of `2^ack_delay_exponent` microseconds:
+    /// 1-RTT ACKs use the peer's negotiated exponent; Initial and Handshake ACKs
+    /// use the default exponent 3. Once the handshake is confirmed, the result is
+    /// clamped by the peer's `max_ack_delay` so a peer cannot deflate our RTT
+    /// estimate (and thereby shorten our loss/PTO timers) by over-reporting delay.
+    fn decode_ack_delay(&self, space: PacketNumberSpace, raw_value: u64) -> u64 {
+        let exponent = if space == PacketNumberSpace::ApplicationData {
+            self.peer_ack_delay_exponent
+        } else {
+            3
+        };
+        let scaled = raw_value.checked_mul(1u64 << exponent).unwrap_or(u64::MAX);
+        if space == PacketNumberSpace::ApplicationData && self.tls.handshake_confirmed() {
+            scaled.min(self.peer_max_ack_delay_micros)
+        } else {
+            scaled
+        }
+    }
+
     fn process_frame_at(
         &mut self,
         cx: &Cx,
@@ -2317,7 +2361,8 @@ impl NativeQuicConnection {
                     first_ack_range.value(),
                     ack_ranges,
                 )?;
-                let _ = self.on_ack_ranges(cx, space, &ranges, ack_delay.value(), now_micros)?;
+                let ack_delay_micros = self.decode_ack_delay(space, ack_delay.value());
+                let _ = self.on_ack_ranges(cx, space, &ranges, ack_delay_micros, now_micros)?;
                 Ok(())
             }
             QuicFrame::Stream {
@@ -3567,6 +3612,68 @@ mod tests {
         conn.on_1rtt_keys_available(&cx).expect("1rtt keys");
         conn.on_handshake_confirmed(&cx).expect("confirmed");
         conn
+    }
+
+    #[test]
+    fn decode_ack_delay_scales_by_exponent_and_clamps_by_max_ack_delay() {
+        // asupersync-mc7m2r / RFC 9000 §19.3, RFC 9002 §5.3.
+        let cx = test_cx();
+        let mut conn = established_conn(); // handshake confirmed
+        // Peer advertises ack_delay_exponent = 5 (ACK Delay in units of 32 us)
+        // and max_ack_delay = 10 ms.
+        let params = TransportParameters {
+            ack_delay_exponent: Some(5),
+            max_ack_delay: Some(10),
+            ..TransportParameters::default()
+        };
+        conn.apply_peer_transport_parameters(&cx, &params)
+            .expect("apply params");
+
+        // 1-RTT ACK: 100 << 5 = 3_200 us, below the 10 ms clamp.
+        assert_eq!(
+            conn.decode_ack_delay(PacketNumberSpace::ApplicationData, 100),
+            3_200
+        );
+        // 1-RTT ACK, large delay: 1_000 << 5 = 32_000 us, clamped to the peer's
+        // max_ack_delay of 10 ms (10_000 us) so a peer cannot deflate our RTT.
+        assert_eq!(
+            conn.decode_ack_delay(PacketNumberSpace::ApplicationData, 1_000),
+            10_000
+        );
+        // Initial/Handshake ACKs use the default exponent 3 and are not clamped:
+        // 100 << 3 = 800 us.
+        assert_eq!(
+            conn.decode_ack_delay(PacketNumberSpace::Handshake, 100),
+            800
+        );
+        // Zero delay always decodes to zero.
+        assert_eq!(
+            conn.decode_ack_delay(PacketNumberSpace::ApplicationData, 0),
+            0
+        );
+    }
+
+    #[test]
+    fn decode_ack_delay_is_unclamped_before_handshake_confirmed() {
+        // asupersync-mc7m2r: RFC 9002 §5.3 clamps by max_ack_delay only after the
+        // handshake is confirmed. Before confirmation, scale but do not clamp.
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).expect("begin");
+        let params = TransportParameters {
+            ack_delay_exponent: Some(3),
+            max_ack_delay: Some(10),
+            ..TransportParameters::default()
+        };
+        conn.apply_peer_transport_parameters(&cx, &params)
+            .expect("apply params");
+        // Not confirmed: 5_000 << 3 = 40_000 us is returned unclamped (would be
+        // capped to 10_000 once confirmed).
+        assert!(!conn.tls().handshake_confirmed());
+        assert_eq!(
+            conn.decode_ack_delay(PacketNumberSpace::ApplicationData, 5_000),
+            40_000
+        );
     }
 
     #[test]

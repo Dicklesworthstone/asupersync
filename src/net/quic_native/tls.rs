@@ -1767,6 +1767,14 @@ impl QuicTlsMachine {
         self.level == CryptoLevel::OneRtt && self.handshake_confirmed
     }
 
+    /// Whether the handshake has been confirmed (RFC 9001 §4.1.2). The ACK path
+    /// uses this to decide when the peer's `max_ack_delay` clamp applies to RTT
+    /// samples (RFC 9002 §5.3, asupersync-mc7m2r).
+    #[must_use]
+    pub fn handshake_confirmed(&self) -> bool {
+        self.handshake_confirmed
+    }
+
     /// Whether 0-RTT application-data packets are currently allowed.
     #[must_use]
     pub fn can_send_0rtt(&self) -> bool {

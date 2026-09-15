@@ -637,6 +637,14 @@ impl QuicTransportMachine {
         Self::default()
     }
 
+    /// Adopt the peer's advertised `max_ack_delay` (RFC 9000 §18.2). It bounds
+    /// both the RTT-sample `ack_delay` adjustment (RFC 9002 §5.3) and the PTO
+    /// computation. Callers pass **microseconds** (the transport parameter is
+    /// carried in milliseconds) (asupersync-mc7m2r).
+    pub fn set_peer_max_ack_delay_micros(&mut self, max_ack_delay_micros: u64) {
+        self.recovery.max_ack_delay_micros = max_ack_delay_micros;
+    }
+
     /// Current connection state.
     #[must_use]
     pub fn state(&self) -> QuicConnectionState {

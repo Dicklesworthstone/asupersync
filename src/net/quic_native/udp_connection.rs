@@ -1162,7 +1162,7 @@ mod tests {
             )
             .await;
             let mut client = client.unwrap();
-            let _server = server.unwrap();
+            let mut server = server.unwrap();
             // Seed a full flight without sleeping for a real network timeout.
             // Handshake, packet protection, and probe transmission use real UDP.
             let connection = client.connection.inner_mut();
@@ -1200,8 +1200,57 @@ mod tests {
             assert_eq!(transport.congestion_window_bytes(), window);
             assert_eq!(transport.packets_lost_total(), 0);
             assert_eq!(transport.pto_count(), 1);
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_requested(true);
+            assert!(matches!(
+                client.flush(&cancelled).await,
+                Err(NativeQuicUdpConnectionError::Cancelled)
+            ));
+            assert_eq!(
+                client.connection.inner_mut().transport().bytes_in_flight(),
+                window,
+                "cancelled admission must not consume the probe permit"
+            );
             assert_eq!(client.flush(&cx).await.unwrap(), 1);
             assert_eq!(client.flush(&cx).await.unwrap(), 0, "permit consumed once");
+            let mut received_probe = false;
+            for _ in 0..4 {
+                let packets = timeout(
+                    cx.now(),
+                    Duration::from_secs(1),
+                    server.endpoint.receive_batch(&cx, RECEIVE_BATCH_SIZE),
+                )
+                .await
+                .expect("probe must reach the peer")
+                .unwrap();
+                for packet in packets {
+                    if !matches!(
+                        ProtectedHeaderPrefix::decode(&packet.data, server.local_cid.len()),
+                        Ok(ProtectedHeaderPrefix::Short { .. })
+                    ) {
+                        // Handshake retransmissions may precede the probe.
+                        continue;
+                    }
+                    let decoded = unprotect_1rtt_packet(
+                        &cx,
+                        server.local_cid,
+                        &mut server.protection,
+                        &packet.data,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        NativeQuicConnection::decode_frames(&decoded.plaintext).unwrap(),
+                        vec![QuicFrame::Ping]
+                    );
+                    assert!(!received_probe, "only one probe was authorized");
+                    received_probe = true;
+                }
+                if received_probe {
+                    break;
+                }
+            }
+            assert!(received_probe, "peer authenticated the PING probe");
             let connection = client.connection.inner_mut();
             assert_eq!(connection.transport().congestion_window_bytes(), window);
             assert_eq!(connection.pending_stream_data_bytes(), queued);
