@@ -661,6 +661,16 @@ impl<T> Sender<T> {
     }
 
     /// Convenience method: reserve and send in one step.
+    ///
+    /// **Cancellation:** this future owns `value` while it awaits a slot, so if
+    /// it is cancelled *before* the internal reserve completes, `value` is
+    /// dropped with the future and the message is lost — the "traditional (NOT
+    /// cancel-safe)" shape the module docs warn about. Callers that must not lose
+    /// `value` on cancellation should use the explicit two-phase API instead:
+    /// reserve first with [`reserve`](Self::reserve), then commit synchronously
+    /// on the returned permit (`let permit = tx.reserve(cx).await?;
+    /// permit.send(value)?;`). That keeps `value` in the caller's hands until the
+    /// slot is secured, so a cancellation between the two steps cannot drop it.
     #[inline]
     pub async fn send(&self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
         let result = self.reserve(cx).await;
