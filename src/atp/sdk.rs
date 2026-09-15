@@ -516,8 +516,16 @@ impl AtpSession {
             epoch_seq += 1;
         }
 
+        // Derive a unique, lab-deterministic stream id from Cx entropy, matching
+        // the transfer_nonce pattern used elsewhere in this file. std::process::id()
+        // was neither unique (every stream in a process shared one id) nor
+        // deterministic (it broke lab replay — hence its former ubs:ignore).
+        let mut stream_nonce = [0u8; 16];
+        cx.random_bytes(&mut stream_nonce);
+        let stream_hex: String = stream_nonce.iter().map(|b| format!("{b:02x}")).collect();
+
         let stream_handle = StreamHandle {
-            stream_id: format!("stream-{}", std::process::id()), // ubs:ignore
+            stream_id: format!("stream-{stream_hex}"),
             total_bytes: u64::try_from(data.len()).unwrap_or(u64::MAX),
             bytes_sent: 0,
             manifest: Some(manifest),
@@ -2031,6 +2039,42 @@ mod tests {
 
             // Consumer should be ready to consume verified data
             assert!(consumer.data_available());
+        });
+    }
+
+    #[test]
+    fn stream_large_buffer_assigns_unique_stream_ids() {
+        // Regression: stream_id was format!("stream-{}", std::process::id()), so
+        // every stream in a process shared one id. It must now be unique per
+        // stream (Cx-nonce derived), including for identical payloads.
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let remote_peer = [8u8; 32];
+
+            let a = session
+                .stream_large_buffer(cx, b"payload-a", remote_peer)
+                .await
+                .unwrap();
+            let b = session
+                .stream_large_buffer(cx, b"payload-b", remote_peer)
+                .await
+                .unwrap();
+            let a_again = session
+                .stream_large_buffer(cx, b"payload-a", remote_peer)
+                .await
+                .unwrap();
+
+            assert!(a.stream_id.starts_with("stream-"));
+            assert_ne!(
+                a.stream_id, b.stream_id,
+                "distinct streams need distinct ids"
+            );
+            assert_ne!(
+                a.stream_id, a_again.stream_id,
+                "even identical payloads are distinct stream operations"
+            );
         });
     }
 
