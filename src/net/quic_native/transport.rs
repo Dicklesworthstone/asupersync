@@ -419,15 +419,28 @@ impl LossRecovery {
         }
         self.sent_packets = survivors;
 
+        // RFC 9002 Appendix A.7 order: process loss BEFORE ack-driven growth.
+        // A newly detected loss moves the recovery epoch to `now`, and every
+        // packet acknowledged by this same ACK was sent before `now`, so per
+        // `InCongestionRecovery` none of them may grow cwnd. Growing first and
+        // halving second (the previous order) let a large ACK carrying a single
+        // loss inflate cwnd before the halving, weakening or even nullifying the
+        // multiplicative decrease (asupersync-f3x3e3).
+        let mut loss_reduced_cwnd = false;
+        if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
+            loss_reduced_cwnd = self.on_loss_congestion(lost_packet_sent_time, now_micros);
+        }
         if event.acked_packets > 0 {
             self.pto_count = 0;
             self.pto_rearmed_at_micros = None;
-            if acked_bytes_for_growth > 0 {
+            // Suppress growth for this ACK when the loss just moved the recovery
+            // epoch to `now` — all acknowledged packets are then in recovery.
+            // When no new reduction occurred (no loss, or a loss belonging to an
+            // already-active epoch), `acked_bytes_for_growth` was already gated
+            // against the active epoch in the accounting loop above.
+            if acked_bytes_for_growth > 0 && !loss_reduced_cwnd {
                 self.on_ack_congestion(acked_bytes_for_growth);
             }
-        }
-        if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
-            self.on_loss_congestion(lost_packet_sent_time, now_micros);
         }
         let acked_packets = u64::try_from(event.acked_packets).unwrap_or(u64::MAX);
         let lost_packets = u64::try_from(event.lost_packets).unwrap_or(u64::MAX);
@@ -456,11 +469,18 @@ impl LossRecovery {
         }
     }
 
-    fn on_loss_congestion(&mut self, newest_lost_packet_sent_micros: u64, now_micros: u64) {
+    /// Reduce cwnd for a congestion event. Returns `true` if this call actually
+    /// moved the recovery epoch to `now_micros` and halved cwnd, `false` if it
+    /// was a no-op because the lost packet belongs to an already-active epoch
+    /// (RFC 9002 Appendix B.6, one reduction per epoch). The return lets
+    /// `on_ack_ranges` honor the RFC 9002 A.7 ordering: when a loss moves the
+    /// epoch to `now`, the packets acknowledged by the same ACK must not grow
+    /// cwnd (asupersync-f3x3e3).
+    fn on_loss_congestion(&mut self, newest_lost_packet_sent_micros: u64, now_micros: u64) -> bool {
         // RFC 9002 Appendix B.6: Only reduce cwnd once per recovery epoch.
         if let Some(recovery_start) = self.congestion_recovery_start_time {
             if newest_lost_packet_sent_micros <= recovery_start {
-                return;
+                return false;
             }
         }
         self.congestion_recovery_start_time = Some(now_micros);
@@ -468,6 +488,7 @@ impl LossRecovery {
         let reduced = (self.congestion_window_bytes / 2).max(min_cwnd);
         self.ssthresh_bytes = reduced;
         self.congestion_window_bytes = reduced;
+        true
     }
 
     fn base_pto_micros(&self) -> u64 {
@@ -1143,6 +1164,42 @@ mod tests {
         t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 5, 10_200));
         let _ = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 20_050);
         assert!(t.congestion_window_bytes() <= t.ssthresh_bytes());
+    }
+
+    #[test]
+    fn combined_ack_and_loss_still_halves_cwnd_without_growth() {
+        // asupersync-f3x3e3 / RFC 9002 Appendix A.7: an ACK that both
+        // acknowledges new packets and newly declares a loss must process the
+        // loss (which moves the recovery epoch to `now`) BEFORE ack-driven
+        // growth. Every packet acknowledged by this ACK was sent before `now`,
+        // so per `InCongestionRecovery` none of them may grow cwnd; the net
+        // result is exactly cwnd/2, never (cwnd + growth)/2.
+        let mut t = QuicTransportMachine::new();
+        assert_eq!(t.congestion_window_bytes(), 12_000, "default cwnd");
+
+        // Send pn 1..=15 (helper defaults: 100 bytes, ack-eliciting, in-flight).
+        for pn in 1..=15u64 {
+            t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, pn, 1_000 + pn));
+        }
+        // One ACK acknowledges pn 4..=15 (12 * 100 = 1200 bytes of slow-start
+        // growth) and leaves pn 1,2,3 to the packet threshold (pn + 3 <= 15).
+        let acked: Vec<u64> = (4..=15).collect();
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &acked, 0, 50_000);
+        assert!(
+            event.lost_packets >= 3,
+            "pn 1,2,3 must be declared lost, saw {}",
+            event.lost_packets
+        );
+
+        // max(12000/2, 2 * 1200) = 6000, with NO growth from the 1200 acked
+        // bytes. The pre-fix order grew first (12000 + 1200 = 13200) then halved
+        // to 6600, leaving cwnd above the RFC-correct value after a loss.
+        assert_eq!(
+            t.congestion_window_bytes(),
+            6_000,
+            "combined ack+loss must net cwnd/2 (6000), not (cwnd + growth)/2 (6600)"
+        );
+        assert_eq!(t.ssthresh_bytes(), 6_000);
     }
 
     #[test]
