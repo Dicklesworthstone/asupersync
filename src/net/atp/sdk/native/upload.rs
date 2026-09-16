@@ -5,6 +5,10 @@
 //! private directory, then uses the existing verified native transfer. It does
 //! not claim live delivery before EOF, resumable stream epochs, or crash recovery.
 
+#[path = "writer.rs"]
+mod writer;
+pub use writer::{NativeUploadWriter, NativeUploadWriterTerminal};
+
 use super::{NativeAdmission, NativeTransferClient, NativeTransferError, committed_send};
 use crate::atp::safety::validate_portable_path_component;
 use crate::cx::{CancelWakerToken, Cx, Scope};
@@ -312,7 +316,7 @@ impl NativeTransferClient {
     ) -> NativeUploadReport {
         let admitted = validate_upload(cx, &options).and_then(|()| self.admit_sender().map_err(Into::into));
         match admitted {
-            Ok(admission) => Self::upload_admitted(cx, remote, options, reader, admission).await,
+            Ok(admission) => Self::upload_admitted(cx, remote, options, reader, admission, None).await,
             Err(error) => NativeUploadReport::failed(error),
         }
     }
@@ -354,7 +358,7 @@ impl NativeTransferClient {
         let admission = self.admit_sender()?;
         cx.spawn_in(scope, move |child| {
             let future: Pin<Box<dyn Future<Output = NativeUploadReport> + Send>> = Box::pin(async move {
-                Self::upload_admitted(&child, remote, options, reader, admission).await
+                Self::upload_admitted(&child, remote, options, reader, admission, None).await
             });
             future
         })
@@ -367,6 +371,7 @@ impl NativeTransferClient {
         options: NativeUploadOptions,
         mut reader: R,
         admission: NativeAdmission,
+        observer: Option<Arc<dyn SpoolObserver>>,
     ) -> NativeUploadReport {
         // Recheck the actual child authority/cancellation after admission.
         if let Err(error) = validate_upload(cx, &options) {
@@ -399,7 +404,9 @@ impl NativeTransferClient {
         let limit = options.max_bytes.unwrap_or(u64::MAX).min(admission.shared.config.max_transfer_bytes);
         let buffer_len = admission.shared.config.chunk_size.min(MAX_UPLOAD_BUFFER);
         let source = spool_source(cx, &mut reader, &spool, limit, buffer_len,
-            options.source_idle_timeout, &mut report.spooled_bytes).await;
+            options.source_idle_timeout, SpoolProgress {
+                written: &mut report.spooled_bytes, observer: observer.as_deref(),
+            }).await;
         report.outcome = match source {
             Err(error) => Err(error),
             Ok(digest) => {
@@ -426,6 +433,17 @@ impl NativeTransferClient {
     }
 }
 
+// Internal completion notification, never exposed as a user callback. Writers
+// use it for flush barriers only after a whole spool write has succeeded.
+trait SpoolObserver: Send + Sync {
+    fn on_spooled(&self, bytes: u64);
+}
+
+struct SpoolProgress<'a> {
+    written: &'a mut u64,
+    observer: Option<&'a dyn SpoolObserver>,
+}
+
 async fn spool_source<R: AsyncRead + Unpin>(
     cx: &Cx,
     reader: &mut R,
@@ -433,16 +451,16 @@ async fn spool_source<R: AsyncRead + Unpin>(
     limit: u64,
     buffer_len: usize,
     timeout: Duration,
-    written: &mut u64,
+    progress: SpoolProgress<'_>,
 ) -> Result<[u8; 32], NativeUploadError> {
     let mut buffer = vec![0u8; buffer_len];
     let mut hash = Sha256::new();
     loop {
-        let window = read_window(buffer.len(), limit, *written);
+        let window = read_window(buffer.len(), limit, *progress.written);
         let count = read_source(cx, reader, &mut buffer[..window], timeout).await?;
         checkpoint(cx)?;
         if count == 0 { break; }
-        if u64::try_from(count).unwrap_or(u64::MAX) > limit - *written {
+        if u64::try_from(count).unwrap_or(u64::MAX) > limit - *progress.written {
             return Err(NativeUploadError::TooLarge { limit });
         }
         let owner = Arc::clone(spool);
@@ -455,7 +473,10 @@ async fn spool_source<R: AsyncRead + Unpin>(
         buffer = returned;
         result?;
         hash.update(&buffer[..count]);
-        *written += count as u64;
+        *progress.written += count as u64;
+        if let Some(observer) = progress.observer {
+            observer.on_spooled(*progress.written);
+        }
     }
     let owner = Arc::clone(spool);
     spawn_blocking_io(move || {
