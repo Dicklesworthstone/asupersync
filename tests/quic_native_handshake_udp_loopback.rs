@@ -160,6 +160,116 @@ fn run_handshake_drop_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Ar
 }
 
 #[test]
+fn wire_peer_parameters_reject_invalid_max_ack_delay() {
+    use asupersync::net::quic_core::{
+        QuicCoreError, TP_MAX_ACK_DELAY, TransportParameters, encode_varint,
+    };
+
+    for delay in [16_384, 1 << 30, (1 << 62) - 1] {
+        // Construct the invalid peer TLV independently of parameter encoding,
+        // which may itself reject invalid local configuration in the future.
+        let mut value = Vec::new();
+        encode_varint(delay, &mut value).unwrap();
+        let mut encoded = Vec::new();
+        encode_varint(TP_MAX_ACK_DELAY, &mut encoded).unwrap();
+        encode_varint(u64::try_from(value.len()).unwrap(), &mut encoded).unwrap();
+        encoded.extend_from_slice(&value);
+        assert!(matches!(
+            TransportParameters::decode(&encoded),
+            Err(QuicCoreError::InvalidTransportParameter(TP_MAX_ACK_DELAY))
+        ));
+    }
+    for delay in [None, Some(0), Some(16_383)] {
+        let params = TransportParameters {
+            max_ack_delay: delay,
+            ..TransportParameters::default()
+        };
+        let mut encoded = Vec::new();
+        params.encode(&mut encoded).unwrap();
+        assert_eq!(
+            TransportParameters::decode(&encoded).unwrap().max_ack_delay,
+            delay
+        );
+    }
+}
+
+#[test]
+fn direct_peer_parameters_reject_invalid_max_ack_delay() {
+    use asupersync::net::quic_core::TransportParameters;
+
+    let cx = Cx::for_testing();
+    let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+    for delay in [16_384, (1 << 62) - 1, u64::MAX] {
+        let params = TransportParameters {
+            max_ack_delay: Some(delay),
+            disable_active_migration: true,
+            ..TransportParameters::default()
+        };
+        assert!(matches!(
+            connection.apply_peer_transport_parameters(&cx, &params),
+            Err(NativeQuicConnectionError::InvalidState(_))
+        ));
+        assert!(matches!(
+            connection.request_path_migration(&cx, 1),
+            Err(NativeQuicConnectionError::InvalidState(
+                "path migration requires established state"
+            ))
+        ));
+    }
+    for delay in [None, Some(0), Some(16_383)] {
+        connection
+            .apply_peer_transport_parameters(
+                &cx,
+                &TransportParameters {
+                    max_ack_delay: delay,
+                    ..TransportParameters::default()
+                },
+            )
+            .expect("default and boundary delays remain valid");
+    }
+}
+
+#[test]
+fn direct_peer_parameters_reject_invalid_ack_delay_exponents() {
+    use asupersync::net::quic_core::TransportParameters;
+
+    let cx = Cx::for_testing();
+    let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+    for exponent in [21, 64, u64::from(u32::MAX), u64::MAX] {
+        let params = TransportParameters {
+            ack_delay_exponent: Some(exponent),
+            disable_active_migration: true,
+            ..TransportParameters::default()
+        };
+        assert!(
+            matches!(
+                connection.apply_peer_transport_parameters(&cx, &params),
+                Err(NativeQuicConnectionError::InvalidState(_))
+            ),
+            "direct parameter exponent {exponent} must be rejected"
+        );
+        // Rejection must not install the accompanying migration restriction.
+        assert!(matches!(
+            connection.request_path_migration(&cx, 1),
+            Err(NativeQuicConnectionError::InvalidState(
+                "path migration requires established state"
+            ))
+        ));
+    }
+    for exponent in [None, Some(0), Some(20)] {
+        connection
+            .apply_peer_transport_parameters(
+                &cx,
+                &TransportParameters {
+                    ack_delay_exponent: exponent,
+                    ..TransportParameters::default()
+                },
+            )
+            .expect("default and boundary exponents remain valid");
+    }
+}
+
+#[test]
 fn real_tls13_handshake_completes_over_real_loopback_udp() {
     block_on(async {
         let cx = Cx::for_testing();

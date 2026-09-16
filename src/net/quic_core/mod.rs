@@ -602,7 +602,13 @@ impl TransportParameters {
                         return Err(QuicCoreError::InvalidTransportParameter(id));
                     }
                 }
-                TP_MAX_ACK_DELAY => set_unique_u64(&mut tp.max_ack_delay, id, value)?,
+                TP_MAX_ACK_DELAY => {
+                    set_unique_u64(&mut tp.max_ack_delay, id, value)?;
+                    // RFC 9000 §18.2 excludes delays of 2^14 ms or greater.
+                    if tp.max_ack_delay.is_some_and(|v| v >= (1 << 14)) {
+                        return Err(QuicCoreError::InvalidTransportParameter(id));
+                    }
+                }
                 TP_DISABLE_ACTIVE_MIGRATION => {
                     if tp.disable_active_migration {
                         return Err(QuicCoreError::DuplicateTransportParameter(id));

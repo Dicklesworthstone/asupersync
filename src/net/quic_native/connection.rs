@@ -1543,6 +1543,21 @@ impl NativeQuicConnection {
         params: &TransportParameters,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        // TransportParameters is publicly constructible, so callers can bypass
+        // the wire parser. Reject invalid exponents before changing any state
+        // or allowing an oversized shift in decode_ack_delay.
+        let ack_delay_exponent = params.ack_delay_exponent.unwrap_or(3);
+        if ack_delay_exponent > 20 {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "peer ack_delay_exponent exceeds 20",
+            ));
+        }
+        let max_ack_delay_millis = params.max_ack_delay.unwrap_or(25);
+        if max_ack_delay_millis >= (1 << 14) {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "peer max_ack_delay must be below 16384 milliseconds",
+            ));
+        }
         self.migration_disabled = params.disable_active_migration;
         self.max_datagram_frame_size = match params.max_datagram_frame_size {
             Some(max) => usize::try_from(max).map_err(|_| {
@@ -1552,15 +1567,14 @@ impl NativeQuicConnection {
             })?,
             None => 0,
         };
-        // RFC 9000 §18.2: ack_delay_exponent defaults to 3 (the parser already
-        // rejects values > 20); it scales the ACK Delay field of 1-RTT ACKs.
+        // The validated exponent scales the ACK Delay field of 1-RTT ACKs.
         self.peer_ack_delay_exponent =
-            u32::try_from(params.ack_delay_exponent.unwrap_or(3)).unwrap_or(3);
+            u32::try_from(ack_delay_exponent).expect("validated QUIC ACK delay exponent");
         // RFC 9000 §18.2: max_ack_delay defaults to 25 ms and is carried in
         // milliseconds; convert to microseconds. Feed it to the transport
         // machine so both the RTT `ack_delay` clamp (RFC 9002 §5.3) and the PTO
         // computation use the negotiated value (asupersync-mc7m2r).
-        let max_ack_delay_micros = params.max_ack_delay.unwrap_or(25).saturating_mul(1_000);
+        let max_ack_delay_micros = max_ack_delay_millis * 1_000;
         self.peer_max_ack_delay_micros = max_ack_delay_micros;
         self.transport
             .set_peer_max_ack_delay_micros(max_ack_delay_micros);
@@ -2331,7 +2345,7 @@ impl NativeQuicConnection {
         } else {
             3
         };
-        let scaled = raw_value.checked_mul(1u64 << exponent).unwrap_or(u64::MAX);
+        let scaled = raw_value.saturating_mul(1u64 << exponent);
         if space == PacketNumberSpace::ApplicationData && self.tls.handshake_confirmed() {
             scaled.min(self.peer_max_ack_delay_micros)
         } else {
