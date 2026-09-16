@@ -271,3 +271,10 @@ impl AtpSdk {
         &self.transfer_policy
     }
 }
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub mod native;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub use native::{
+    NativeReceiveTask, NativeReceiver, NativeSendTask, NativeTransferClient, NativeTransferError,
+};
