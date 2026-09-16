@@ -5,6 +5,10 @@
 //! private directory, then uses the existing verified native transfer. It does
 //! not claim live delivery before EOF, resumable stream epochs, or crash recovery.
 
+#[cfg(unix)]
+#[path = "checkpoint.rs"]
+pub mod recovery;
+
 #[path = "writer.rs"]
 mod writer;
 pub use writer::{NativeUploadWriter, NativeUploadWriterTerminal};
