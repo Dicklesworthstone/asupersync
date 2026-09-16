@@ -302,12 +302,23 @@ impl StrictEntropyGuard {
     fn with_policy(policy: &'static StrictEntropyPolicy) -> Self {
         // Never wrap the last live guard count to zero (which would admit
         // ambient entropy). A failed acquisition leaves the policy unchanged.
-        policy
-            .state
-            .fetch_update(STRICT_ENTROPY_ORDERING, STRICT_ENTROPY_ORDERING, |state| {
-                state.checked_add(2)
-            })
-            .expect("strict entropy guard count exhausted");
+        // Spell out the CAS loop to support both the stable lane and nightly,
+        // where fetch_update was renamed to try_update.
+        let mut state = policy.state.load(STRICT_ENTROPY_ORDERING);
+        loop {
+            let next = state
+                .checked_add(2)
+                .expect("strict entropy guard count exhausted");
+            match policy.state.compare_exchange_weak(
+                state,
+                next,
+                STRICT_ENTROPY_ORDERING,
+                STRICT_ENTROPY_ORDERING,
+            ) {
+                Ok(_) => break,
+                Err(observed) => state = observed,
+            }
+        }
         Self { policy }
     }
 }
@@ -492,14 +503,23 @@ mod tests {
         POLICY.enable();
         let guard = StrictEntropyGuard::with_policy(&POLICY);
         POLICY.disable();
-        assert!(POLICY.enabled(), "explicit disable cannot revoke a live guard");
+        assert!(
+            POLICY.enabled(),
+            "explicit disable cannot revoke a live guard"
+        );
         drop(guard);
-        assert!(!POLICY.enabled(), "the old enabled bit must not be restored");
+        assert!(
+            !POLICY.enabled(),
+            "the old enabled bit must not be restored"
+        );
 
         let guard = StrictEntropyGuard::with_policy(&POLICY);
         POLICY.enable();
         drop(guard);
-        assert!(POLICY.enabled(), "dropping a guard cannot undo explicit enable");
+        assert!(
+            POLICY.enabled(),
+            "dropping a guard cannot undo explicit enable"
+        );
         POLICY.disable();
         assert!(!POLICY.enabled());
     }

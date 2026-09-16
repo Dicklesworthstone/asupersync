@@ -2951,6 +2951,7 @@ fn asupersync_retry_disposition(retry: SqliteRetryDisposition) -> &'static str {
     match retry {
         SqliteRetryDisposition::Never => "never",
         SqliteRetryDisposition::RetryOperation => "retry_operation",
+        SqliteRetryDisposition::RestartTransaction => "restart_transaction",
         SqliteRetryDisposition::ReopenConnection => "reopen_connection",
         _ => "unknown_future_disposition",
     }
