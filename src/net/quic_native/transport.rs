@@ -453,10 +453,12 @@ impl LossRecovery {
         // halving second (the previous order) let a large ACK carrying a single
         // loss inflate cwnd before the halving, weakening or even nullifying the
         // multiplicative decrease (asupersync-f3x3e3).
-        let mut loss_reduced_cwnd = false;
-        if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
-            loss_reduced_cwnd = self.on_loss_congestion(lost_packet_sent_time, now_micros);
-        }
+        let mut loss_reduced_cwnd =
+            if let Some(lost_packet_sent_time) = newest_lost_packet_sent_micros {
+                self.on_loss_congestion(lost_packet_sent_time, now_micros)
+            } else {
+                false
+            };
         // RFC 9002 §7.6 / Appendix B.8: after the ordinary congestion event,
         // check whether this loss run establishes persistent congestion — a
         // full-outage window in which every ack-eliciting packet spanning more
