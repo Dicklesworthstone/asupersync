@@ -1366,10 +1366,10 @@ mod tests {
                 after_probe - window
             );
             assert_eq!(connection.transport().packets_lost_total(), 0);
-            // Import a genuinely unsent multi-packet flight into the router.
-            // Its bounded drain must preserve the suffix until delivery or close.
+            // Send one protected packet before a real destination error, then
+            // import only the unsent suffix into the router.
             connection
-                .write_stream_bytes(&cx, stream, Bytes::from(vec![7; 2400]), true)
+                .write_stream_bytes(&cx, stream, Bytes::from(vec![7; 3600]), true)
                 .unwrap();
             let original_endpoint = std::mem::replace(&mut client.endpoint, small_endpoint);
             assert!(matches!(
@@ -1378,10 +1378,54 @@ mod tests {
                     QuicUdpEndpointError::PacketTooLarge { limit: 1, .. }
                 ))
             ));
-            assert!(client.pending_outgoing.len() >= 2);
-            let expected_first = client.pending_outgoing[0].packet.data.clone();
-            let local_cid = client.local_cid;
+            assert!(client.pending_outgoing.len() >= 3);
+            let protected_flight: Vec<_> = client
+                .pending_outgoing
+                .iter()
+                .map(|packet| packet.packet.data.clone())
+                .collect();
+            let accounted = client.connection.inner_mut().transport().bytes_in_flight();
+            client.pending_outgoing[1].packet.dst_addr.set_port(0);
             client.endpoint = original_endpoint;
+            assert!(matches!(
+                client.flush(&cx).await,
+                Err(NativeQuicUdpConnectionError::Endpoint(_))
+            ));
+            assert_eq!(client.pending_outgoing.len(), protected_flight.len() - 1);
+            assert!(
+                client
+                    .pending_outgoing
+                    .iter()
+                    .map(|packet| &packet.packet.data)
+                    .eq(protected_flight[1..].iter()),
+                "the acknowledged prefix must be removed without changing the suffix"
+            );
+            assert_eq!(
+                client.connection.inner_mut().transport().bytes_in_flight(),
+                accounted,
+                "a partial send must not account for protected packets twice"
+            );
+            let received = timeout(
+                cx.now(),
+                Duration::from_secs(1),
+                server.endpoint.receive_batch(&cx, RECEIVE_BATCH_SIZE),
+            )
+            .await
+            .expect("the successful prefix must reach the peer")
+            .unwrap();
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0].data, protected_flight[0]);
+            unprotect_1rtt_packet(
+                &cx,
+                server.local_cid,
+                &mut server.protection,
+                &received[0].data,
+            )
+            .await
+            .expect("the peer must authenticate the successful prefix");
+            client.pending_outgoing[0].packet.dst_addr = client.peer_addr;
+            let expected_first = protected_flight[1].clone();
+            let local_cid = client.local_cid;
             let now = Instant::now();
             let (mut router, _endpoint, incoming) = ConnectionRouter::from_authenticated_parts(
                 client.into_managed_parts(),
