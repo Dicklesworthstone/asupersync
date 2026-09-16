@@ -238,26 +238,77 @@ fn native_upload_admission_precedes_source_polling_and_spool_creation() {
 
 #[test]
 fn native_upload_missing_capability_never_polls_or_spools_input() {
+    use asupersync::cx::cap::{CapMask, CapSet, CapSetRuntimeMask};
+
     let root = fixture("upload-authority");
     std::fs::write(root.join("keep.txt"), b"untouched").unwrap();
     let inspect = root.clone();
     run_native(1, async move {
-        let sender = native_client("no-io", sender_config("localhost", Duration::from_secs(2)), 1);
-        // Ambient lookup preserves runtime attenuation even though its return
-        // type is Cx<All>. Release the thread-local guard before any await;
-        // the captured context retains the narrowed mask.
-        let cx = {
-            let _restriction = Cx::push_restriction(asupersync::cx::cap::CapMask::none());
-            Cx::current().expect("native runtime installs a context")
-        };
-        let caps = cx.capabilities();
-        assert!(!caps.io && !caps.entropy && !caps.time);
-        let entered = Arc::new(AtomicBool::new(false));
-        let report = sender.send_reader(&cx, "127.0.0.1:9".parse().unwrap(),
-            NativeUploadOptions::new(root, "denied.bin"), ParkedInput(Arc::clone(&entered))).await;
-        assert!(matches!(report.outcome, Err(NativeUploadError::MissingCapability)));
-        assert!(!entered.load(Ordering::SeqCst));
-        assert_eq!(sender.active_transfers(), 0);
+        let sender = native_client(
+            "no-io",
+            sender_config("localhost", Duration::from_secs(2)),
+            1,
+        );
+        let parent = Cx::current().unwrap();
+        let scope = parent.scope();
+        let remote = "127.0.0.1:9".parse().unwrap();
+        // Each individually absent capability must suffice to deny admission.
+        // CapSet's parameter order is spawn, time, entropy, I/O, remote.
+        for (mask, expected) in [
+            (CapMask::none(), (false, false, false)),
+            (CapSet::<true, true, true, false, true>::MASK, (false, true, true)),
+            (CapSet::<true, true, false, true, true>::MASK, (true, false, true)),
+            (CapSet::<true, false, true, true, true>::MASK, (true, true, false)),
+        ] {
+            // Capture runtime attenuation in Cx<All>, then release the
+            // thread-local guard before any await.
+            let cx = {
+                let _restriction = Cx::push_restriction(mask);
+                Cx::current().expect("native runtime installs a context")
+            };
+            let caps = cx.capabilities();
+            assert_eq!((caps.io, caps.entropy, caps.time), expected);
+            let ambient = Cx::current().unwrap().capabilities();
+            assert!(ambient.io && ambient.entropy && ambient.time);
+            let entered = Arc::new(AtomicBool::new(false));
+            let options = NativeUploadOptions::new(&root, "denied.bin");
+            let report = sender
+                .send_reader(
+                    &cx,
+                    remote,
+                    options.clone(),
+                    ParkedInput(Arc::clone(&entered)),
+                )
+                .await;
+            assert!(matches!(
+                report.outcome,
+                Err(NativeUploadError::MissingCapability)
+            ));
+            let report = sender
+                .send_buffer(&cx, remote, options.clone(), b"denied")
+                .await;
+            assert!(matches!(
+                report.outcome,
+                Err(NativeUploadError::MissingCapability)
+            ));
+            assert!(matches!(
+                sender.spawn_send_reader(
+                    &cx,
+                    &scope,
+                    remote,
+                    options.clone(),
+                    ParkedInput(Arc::clone(&entered)),
+                ),
+                Err(NativeUploadError::MissingCapability)
+            ));
+            assert!(matches!(
+                sender.open_writer(&cx, &scope, remote, options),
+                Err(NativeUploadError::MissingCapability)
+            ));
+            assert!(!entered.load(Ordering::SeqCst));
+            assert_eq!(sender.active_transfers(), 0);
+            assert_empty_spool(&root);
+        }
     });
     assert_empty_spool(&inspect);
 }
