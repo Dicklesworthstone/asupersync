@@ -593,6 +593,19 @@ impl ConnectionRouter {
                     });
                 }
                 if routing_info.kind != PacketRoutingKind::OneRtt {
+                    if handle.packet_protection.as_mut().is_some_and(|protection| {
+                        authenticated_handshake_ack_only(
+                            cx,
+                            connection_id,
+                            &mut protection.protection,
+                            &packet.data,
+                        )
+                    }) {
+                        return Ok(RoutingResult::Routed {
+                            connection_id,
+                            outgoing_packets: Vec::new(),
+                        });
+                    }
                     // These encrypted handshake bytes belong to the retained
                     // TLS flight, never the legacy plaintext-frame path.
                     if authenticated.pending_final_flight_packets == 0
@@ -1957,6 +1970,81 @@ pub(crate) async fn unprotect_1rtt_packet(
     packet: &[u8],
 ) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
     unprotect_1rtt_packet_now(cx, connection_id, packet_protection, packet)
+}
+
+/// Recognize an authenticated, standalone Handshake ACK without mistaking it
+/// for a retransmitted TLS flight. Unknown, coalesced, or invalid packets keep
+/// the existing recovery behavior; only verified ACK/PADDING is suppressed.
+pub(crate) fn authenticated_handshake_ack_only(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    protection: &mut AtpPacketProtection,
+    packet: &[u8],
+) -> bool {
+    let Ok(ProtectedHeaderPrefix::Long(prefix)) = ProtectedHeaderPrefix::decode(packet, 0) else {
+        return false;
+    };
+    if prefix.packet_type != LongPacketType::Handshake || prefix.dst_cid != connection_id {
+        return false;
+    }
+    let space = PacketProtectionSpace::Handshake;
+    let offset = prefix.packet_number_offset;
+    let Ok(sample) = header_protection_sample(packet, offset) else {
+        return false;
+    };
+    let Outcome::Ok(mask) = protection.header_protection_mask_remote_now(cx, space, &sample) else {
+        return false;
+    };
+    let mut bytes = packet.to_vec();
+    let Ok(width) = remove_header_protection(&mut bytes, offset, mask.bytes) else {
+        return false;
+    };
+    let header_len = offset + usize::from(width);
+    if bytes.len() < header_len + PROTECTED_1RTT_TAG_LEN {
+        return false;
+    }
+    let truncated = bytes[offset..header_len]
+        .iter()
+        .fold(0u32, |acc, byte| (acc << 8) | u32::from(*byte));
+    let Ok(number) = decode_packet_number_reconstruct(
+        truncated,
+        width,
+        protection.highest_accepted_packet_number(space).unwrap_or(0),
+    ) else {
+        return false;
+    };
+    let tag_start = bytes.len() - PROTECTED_1RTT_TAG_LEN;
+    let protected = ProtectedPacket {
+        space,
+        key_phase: false,
+        packet_number: number,
+        ciphertext: bytes[header_len..tag_start].to_vec(),
+        tag: bytes[tag_start..].try_into().expect("tag length checked"),
+        proof: ProtectionProof {
+            provider_kind: protection.provider_kind(),
+            space,
+            key_phase: false,
+            generation: 0,
+            transcript_hash: TranscriptHash::from_bytes([0; 32]),
+            failure_code: None,
+        },
+    };
+    let Outcome::Ok(plaintext) =
+        protection.unprotect_packet_now(cx, &protected, &bytes[..header_len])
+    else {
+        return false;
+    };
+    let Ok((PacketHeader::Long(header), consumed)) = PacketHeader::decode(&bytes, 0) else {
+        return false;
+    };
+    if consumed != header_len || header.payload_length != (bytes.len() - offset) as u64 {
+        return false;
+    }
+    let Ok(frames) = NativeQuicConnection::decode_frames(&plaintext.plaintext) else {
+        return false;
+    };
+    frames.iter().any(|frame| matches!(frame, QuicFrame::Ack { .. }))
+        && frames.iter().all(|frame| matches!(frame, QuicFrame::Ack { .. } | QuicFrame::Padding { .. }))
 }
 
 /// Unmask and authenticate one short-header packet on the current task.
@@ -4185,6 +4273,56 @@ mod tests {
             .await
             .expect("derive 1-RTT keys");
         protection
+    }
+
+    #[test]
+    fn authenticated_handshake_ack_does_not_request_finished_retransmission() {
+        run_test_with_cx(|cx| async move {
+            let cid = ConnectionId::new(b"ack-peer").unwrap();
+            let mut protection = deterministic_one_rtt_protection(&cx).await;
+            let mut transcript = QuicHandshakeTranscript::new();
+            transcript.record("handshake", b"ack classification");
+            protection
+                .derive_keys(&cx, PacketProtectionSpace::Handshake, &transcript, b"ack test")
+                .await
+                .expect("derive handshake keys");
+            for (number, frame, expected) in [
+                (1, QuicFrame::Ack {
+                    largest_acknowledged: VarInt::from_u64_unchecked(0),
+                    ack_delay: VarInt::from_u64_unchecked(0),
+                    ack_range_count: VarInt::from_u64_unchecked(0),
+                    first_ack_range: VarInt::from_u64_unchecked(0),
+                    ack_ranges: Vec::new(), ecn_counts: None,
+                }, true),
+                (2, QuicFrame::Crypto { offset: VarInt::from_u64_unchecked(0), data: Bytes::from_static(b"finished") }, false),
+            ] {
+                let mut payload = BytesMut::new();
+                frame.encode(&mut payload).unwrap();
+                let header = PacketHeader::Long(LongHeader {
+                    packet_type: LongPacketType::Handshake, version: 1,
+                    dst_cid: cid, src_cid: cid, token: Vec::new(),
+                    payload_length: 4 + payload.len() as u64 + 16,
+                    packet_number: number, packet_number_len: 4,
+                });
+                let mut packet = Vec::new();
+                header.encode(&mut packet).unwrap();
+                let offset = packet.len() - 4;
+                let protected = protection.protect_packet_now(&cx, PacketProtectionRequest {
+                    space: PacketProtectionSpace::Handshake, key_phase: false,
+                    packet_number: number, associated_data: &packet, payload: &payload,
+                }).expect("protect");
+                packet.extend_from_slice(&protected.ciphertext);
+                packet.extend_from_slice(&protected.tag);
+                let sample = header_protection_sample(&packet, offset).unwrap();
+                let mask = protection.header_protection_mask_now(&cx, PacketProtectionSpace::Handshake, &sample).expect("mask");
+                apply_header_protection(&mut packet, offset, mask.bytes).unwrap();
+                let mut forged = packet.clone();
+                *forged.last_mut().unwrap() ^= 1;
+                assert!(!authenticated_handshake_ack_only(&cx, cid, &mut protection, &forged));
+                assert!(!authenticated_handshake_ack_only(&cx, ConnectionId::new(b"wrongcid").unwrap(), &mut protection, &packet));
+                assert_eq!(authenticated_handshake_ack_only(&cx, cid, &mut protection, &packet), expected);
+            }
+        });
     }
 
     async fn add_protected_test_connection(

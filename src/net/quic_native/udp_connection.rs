@@ -824,6 +824,14 @@ impl NativeQuicUdpConnection {
             }
             if packet.data.first().is_some_and(|byte| byte & 0x80 != 0) {
                 progress.packets_dropped = progress.packets_dropped.saturating_add(1);
+                if super::connection_manager::authenticated_handshake_ack_only(
+                    cx,
+                    self.local_cid,
+                    &mut self.protection,
+                    &packet.data,
+                ) {
+                    continue;
+                }
                 if !self.final_handshake_flight.is_empty()
                     && self.last_final_flight_retransmit.is_none_or(|last| {
                         packet.receive_time.saturating_duration_since(last)
