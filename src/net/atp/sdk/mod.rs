@@ -278,3 +278,11 @@ pub mod native;
 pub use native::{
     NativeReceiveTask, NativeReceiver, NativeSendTask, NativeTransferClient, NativeTransferError,
 };
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub mod native_auth;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub use native_auth::{
+    NativeAuthenticationError, NativeClientAuthorization, NativeClientCertificateId,
+    NativeTlsIdentity,
+};
