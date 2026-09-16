@@ -337,9 +337,9 @@ impl NativeUploadWriter {
     /// retained outcome and reconcile before retrying.
     pub async fn cancel_and_wait(&mut self, reason: CancelReason) -> &NativeUploadWriterTerminal {
         if self.terminal().is_none() {
-            let wake = self.input.stop(true);
+            // Publish attribution before another worker can observe input abort.
             self.worker.abort_with_reason(reason);
-            notify(wake);
+            notify(self.input.stop(true));
         }
         poll_fn(|ctx| self.poll_terminal(ctx)).await;
         self.terminal.as_ref().expect("joined native upload")
@@ -417,11 +417,10 @@ impl AsyncWrite for NativeUploadWriter {
 
 impl Drop for NativeUploadWriter {
     fn drop(&mut self) {
-        let wake = self.input.stop(true);
         if self.terminal.is_none() && !self.worker.is_finished() {
             self.worker.abort_with_reason(CancelReason::user("native upload writer dropped"));
         }
-        notify(wake);
+        notify(self.input.stop(true));
         let retired = self.input.state.lock().writer_waker.take();
         drop(retired);
     }

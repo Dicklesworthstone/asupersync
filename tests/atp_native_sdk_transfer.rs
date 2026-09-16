@@ -419,3 +419,6 @@ fn native_sdk_rejected_spawn_retires_sender_and_receiver_admission() {
 
 #[path = "atp_native_sdk/uploads.rs"]
 mod upload_cases;
+
+#[path = "atp_native_sdk/writer.rs"]
+mod writer_cases;
