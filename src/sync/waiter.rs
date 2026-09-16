@@ -57,7 +57,7 @@ pub struct WaiterChain<T = ()> {
 #[derive(Debug, Clone)]
 struct WaiterSlot<T> {
     id: WaiterId,
-    waker: Waker,
+    waker: QueuedWaker,
     pub(crate) tag: T,
     prev: Option<usize>,
     next: Option<usize>,
@@ -67,6 +67,7 @@ struct WaiterSlot<T> {
 /// its own queue lock is held. Constructing and cloning this Arc-backed waker
 /// does not invoke the queued task's RawWaker vtable; delegation happens only
 /// when the returned relay is woken after the caller releases its lock.
+#[derive(Debug)]
 struct DeferredWake {
     inner: Waker,
 }
@@ -87,6 +88,7 @@ impl Wake for DeferredWake {
 ///
 /// The caller must still retire this value outside any internal lock: dropping
 /// the final relay owner also drops the original task waker.
+#[derive(Debug, Clone)]
 pub(super) struct DeferredWaker {
     relay: Arc<DeferredWake>,
 }
@@ -111,6 +113,34 @@ impl DeferredWaker {
     }
 }
 
+/// Keep the original task identity accessible after deferring notifications.
+/// A direct waker needs no relay allocation until a deferred batch is built.
+/// Once deferred, every batch shares that one relay rather than recursively
+/// wrapping an earlier relay and growing wake/drop depth with each notification.
+#[derive(Debug, Clone)]
+enum QueuedWaker {
+    Direct(Waker),
+    Deferred(DeferredWaker),
+}
+
+impl QueuedWaker {
+    fn will_wake(&self, other: &Waker) -> bool {
+        match self {
+            Self::Direct(waker) => waker.will_wake(other),
+            Self::Deferred(waker) => waker.will_wake(other),
+        }
+    }
+
+    /// Transfer the queued owner without invoking a task's clone/drop callback.
+    /// The caller remains responsible for waking or retiring it after unlock.
+    fn into_waker(self) -> Waker {
+        match self {
+            Self::Direct(waker) => waker,
+            Self::Deferred(waker) => Waker::from(waker.relay),
+        }
+    }
+}
+
 /// Clone a stored waker through a known Arc-backed relay without invoking the
 /// stored task's RawWaker clone/drop callbacks in this call.
 ///
@@ -118,12 +148,19 @@ impl DeferredWaker {
 /// slot, and a second relay owner is returned. Callers may use this while
 /// holding an internal queue lock, then release that lock before waking or
 /// retiring the returned owner. They must also retire later slot replacements
-/// or removals outside the same lock.
-fn clone_waker_deferred(slot: &mut Waker) -> Waker {
-    let original = std::mem::replace(slot, Waker::noop().clone());
-    let relay = DeferredWaker::new(original);
-    *slot = relay.clone_waker();
-    relay.clone_waker()
+/// or removals outside the same lock. Repeated calls reuse the existing relay.
+fn clone_waker_deferred(slot: &mut QueuedWaker) -> Waker {
+    match slot {
+        QueuedWaker::Direct(waker) => {
+            let original = std::mem::replace(waker, Waker::noop().clone());
+            let relay = DeferredWaker::new(original);
+            let outbound = relay.clone_waker();
+            // The displaced Direct variant contains only the known noop waker.
+            *slot = QueuedWaker::Deferred(relay);
+            outbound
+        }
+        QueuedWaker::Deferred(relay) => relay.clone_waker(),
+    }
 }
 
 impl<T> Default for WaiterChain<T> {
@@ -163,7 +200,7 @@ impl<T> WaiterChain<T> {
         let new_id = self.next_id();
         let inserted = self.slots.insert(WaiterSlot {
             id: new_id,
-            waker,
+            waker: QueuedWaker::Direct(waker),
             tag,
             prev: self.tail,
             next: None,
@@ -190,7 +227,7 @@ impl<T> WaiterChain<T> {
         let new_id = self.next_id();
         let inserted = self.slots.insert(WaiterSlot {
             id: new_id,
-            waker,
+            waker: QueuedWaker::Direct(waker),
             tag,
             prev: None,
             next: self.head,
@@ -223,7 +260,7 @@ impl<T> WaiterChain<T> {
                 self.tail = None;
             }
         }
-        Some((slot.id, slot.waker, slot.tag))
+        Some((slot.id, slot.waker.into_waker(), slot.tag))
     }
 
     /// Returns the current front-of-queue id without removing.
@@ -252,7 +289,7 @@ impl<T> WaiterChain<T> {
             Some(n) => self.slots[n].prev = slot.prev,
             None => self.tail = slot.prev,
         }
-        Some(slot.waker)
+        Some(slot.waker.into_waker())
     }
 
     /// O(1) waker update by id. Returns whether the slot existed.
@@ -272,7 +309,7 @@ impl<T> WaiterChain<T> {
                     return false;
                 }
                 if !slot.waker.will_wake(new) {
-                    slot.waker.clone_from(new);
+                    slot.waker = QueuedWaker::Direct(new.clone());
                 }
                 true
             }
@@ -300,7 +337,7 @@ impl<T> WaiterChain<T> {
         if slot.waker.will_wake(&new) {
             Ok(new)
         } else {
-            Ok(std::mem::replace(&mut slot.waker, new))
+            Ok(std::mem::replace(&mut slot.waker, QueuedWaker::Direct(new)).into_waker())
         }
     }
 
@@ -308,7 +345,7 @@ impl<T> WaiterChain<T> {
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn front_waker(&self) -> Option<Waker> {
-        self.head.map(|id| self.slots[id].waker.clone())
+        self.head.map(|id| self.slots[id].waker.clone().into_waker())
     }
 
     /// Drain all wakers in order.
@@ -327,7 +364,7 @@ impl<T> WaiterChain<T> {
         let mut wakers = Vec::with_capacity(self.len());
         let mut current = self.head;
         while let Some(id) = current {
-            wakers.push(self.slots[id].waker.clone());
+            wakers.push(self.slots[id].waker.clone().into_waker());
             current = self.slots[id].next;
         }
         wakers
@@ -336,8 +373,9 @@ impl<T> WaiterChain<T> {
     /// Return one forwarding waker per slot without cloning any queued task's
     /// user-controlled RawWaker in this call.
     ///
-    /// Each stored waker is moved into an Arc-backed relay. One relay waker
-    /// stays in the queue and one is returned to the caller. The caller may
+    /// Each direct waker is moved into an Arc-backed relay on its first batch;
+    /// subsequent batches reuse that relay. One owner stays in the queue and
+    /// one is returned to the caller. The caller may
     /// therefore build the notification batch while holding its queue lock,
     /// release that lock, and only then invoke user wake callbacks. Subsequent
     /// replacement/removal must likewise retire the queued relay outside the
@@ -495,6 +533,111 @@ mod tests {
         assert_eq!(wakes.load(Ordering::SeqCst), 2);
         drop(queued);
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn repeated_deferred_clones_reuse_a_single_relay() {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut chain = WaiterChain::new();
+        let id = chain.push_back(Waker::from(Arc::new(DeferredWakeProbe {
+            wakes: Arc::clone(&wakes),
+            dropped: Arc::clone(&dropped),
+        })));
+
+        let first_batch = chain.clone_wakers_deferred();
+        for _ in 0..4096 {
+            let batch = chain.clone_wakers_deferred();
+            assert_eq!(batch.len(), 1);
+            assert!(
+                first_batch[0].will_wake(&batch[0]),
+                "repeated notifications must not allocate a nested relay"
+            );
+            batch[0].wake_by_ref();
+        }
+        assert_eq!(wakes.load(Ordering::SeqCst), 4096);
+        assert_eq!(chain.len(), 1);
+        assert!(chain.contains(id));
+        assert!(!dropped.load(Ordering::SeqCst));
+
+        let queued = chain.remove(id).expect("waiter is still queued");
+        assert!(queued.will_wake(&first_batch[0]));
+        drop(first_batch);
+        queued.wake();
+        assert_eq!(wakes.load(Ordering::SeqCst), 4097);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn deferred_refresh_preserves_original_task_identity() {
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let original = Waker::from(Arc::new(DeferredWakeProbe {
+            wakes: Arc::clone(&wakes),
+            dropped: Arc::clone(&dropped),
+        }));
+        let mut chain = WaiterChain::new();
+        let id = chain.push_back(original.clone());
+        let first_batch = chain.clone_wakers_deferred();
+
+        let retired = chain.replace_waker(id, original.clone()).unwrap();
+        assert!(retired.will_wake(&original));
+        assert!(chain.update_waker(id, &original));
+        let next_batch = chain.clone_wakers_deferred();
+        assert!(first_batch[0].will_wake(&next_batch[0]));
+
+        drop(retired);
+        drop(original);
+        drop(first_batch);
+        drop(next_batch);
+        assert!(!dropped.load(Ordering::SeqCst));
+        let queued = chain.remove(id).unwrap();
+        queued.wake();
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn deferred_replacement_keeps_retired_task_alive_until_returned_owner_drops() {
+        let old_wakes = Arc::new(AtomicUsize::new(0));
+        let old_dropped = Arc::new(AtomicBool::new(false));
+        let new_wakes = Arc::new(AtomicUsize::new(0));
+        let new_dropped = Arc::new(AtomicBool::new(false));
+        let mut chain = WaiterChain::new();
+        let id = chain.push_back(Waker::from(Arc::new(DeferredWakeProbe {
+            wakes: Arc::clone(&old_wakes),
+            dropped: Arc::clone(&old_dropped),
+        })));
+        let old_batch = chain.clone_wakers_deferred();
+        let retired = chain
+            .replace_waker(
+                id,
+                Waker::from(Arc::new(DeferredWakeProbe {
+                    wakes: Arc::clone(&new_wakes),
+                    dropped: Arc::clone(&new_dropped),
+                })),
+            )
+            .unwrap();
+
+        assert!(retired.will_wake(&old_batch[0]));
+        let new_batch = chain.clone_wakers_deferred();
+        assert!(!old_batch[0].will_wake(&new_batch[0]));
+        drop(old_batch);
+        assert!(!old_dropped.load(Ordering::SeqCst));
+        retired.wake();
+        assert_eq!(old_wakes.load(Ordering::SeqCst), 1);
+        assert!(old_dropped.load(Ordering::SeqCst));
+
+        new_batch[0].wake_by_ref();
+        assert_eq!(new_wakes.load(Ordering::SeqCst), 1);
+        let (_, queued, ()) = chain.pop_front().unwrap();
+        assert!(queued.will_wake(&new_batch[0]));
+        drop(new_batch);
+        assert!(!new_dropped.load(Ordering::SeqCst));
+        drop(queued);
+        assert!(new_dropped.load(Ordering::SeqCst));
+        assert!(chain.is_empty());
     }
 
     #[test]
