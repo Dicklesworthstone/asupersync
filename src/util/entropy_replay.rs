@@ -649,3 +649,6 @@ mod tests {
         replay.verify_complete().unwrap();
     }
 }
+
+mod codec;
+pub use codec::{EntropyTapeBytes, EntropyTapeDecodeLimits, EntropyTapeError};
