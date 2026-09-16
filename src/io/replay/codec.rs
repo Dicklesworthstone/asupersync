@@ -353,7 +353,9 @@ mod tests {
 
     #[test]
     fn native_errors_cannot_be_reinterpreted_under_a_different_os_tag() {
-        let error = io::Error::from_raw_os_error(22);
+        // File-not-found on both POSIX and Windows. EINVAL's POSIX value (22)
+        // is not a portable Windows error and may map to an unexportable kind.
+        let error = io::Error::from_raw_os_error(2);
         let tape = IoTape { events: vec![Event::Flush(Some(IoFailure::capture(&error)))], read_bytes: 0, write_bytes: 0, vectored: false };
         let encoded = tape.to_canonical_bytes(4096).unwrap();
         let decoded = IoTape::from_canonical_bytes(encoded.as_ref(), limits()).unwrap();
