@@ -243,7 +243,15 @@ fn native_upload_missing_capability_never_polls_or_spools_input() {
     let inspect = root.clone();
     run_native(1, async move {
         let sender = native_client("no-io", sender_config("localhost", Duration::from_secs(2)), 1);
-        let cx = Cx::detached_cancel_context();
+        // Ambient lookup preserves runtime attenuation even though its return
+        // type is Cx<All>. Release the thread-local guard before any await;
+        // the captured context retains the narrowed mask.
+        let cx = {
+            let _restriction = Cx::push_restriction(asupersync::cx::cap::CapMask::none());
+            Cx::current().expect("native runtime installs a context")
+        };
+        let caps = cx.capabilities();
+        assert!(!caps.io && !caps.entropy && !caps.time);
         let entered = Arc::new(AtomicBool::new(false));
         let report = sender.send_reader(&cx, "127.0.0.1:9".parse().unwrap(),
             NativeUploadOptions::new(root, "denied.bin"), ParkedInput(Arc::clone(&entered))).await;
