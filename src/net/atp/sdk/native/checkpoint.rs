@@ -12,16 +12,20 @@ use super::{
     NativeTransferError, NativeUploadCleanupError, NativeUploadError, NativeUploadOptions,
     SPOOL_CREATE_ATTEMPTS, Spool, SpoolProgress, checkpoint, spool_source, validate_upload,
 };
-use crate::cx::Cx;
+use crate::cx::{Cx, Scope};
 use crate::io::AsyncRead;
-use crate::net::atp::transport_quic::{ReceiveReceipt, SendReport};
-use crate::runtime::spawn_blocking_io;
+use crate::net::atp::transport_quic::{self, ReceiveReceipt, SendReport};
+use crate::runtime::{TaskHandle, spawn_blocking_io};
+use crate::types::Policy;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
+use std::future::Future;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 const JOURNAL_VERSION: u32 = 1;
@@ -121,6 +125,39 @@ pub struct NativeCheckpointPreparation {
     pub cleanup_error: Option<NativeUploadCleanupError>,
 }
 
+/// Explicit policy for a new attempt; never inferred from an elapsed timeout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NativeCheckpointRetry {
+    /// Send only a prepared, never-attempted source. Reuse a saved receipt.
+    #[default]
+    Never,
+    /// The caller accepts that this specific earlier attempt may have committed.
+    /// The exact attempt fences stale or concurrently reused retry decisions.
+    AcknowledgeUncertain {
+        /// Attempt returned by checkpoint inspection, not an arbitrary retry count.
+        attempt: u64,
+    },
+}
+
+/// Network outcome and local receipt persistence are independent terminal facts.
+#[derive(Debug)]
+#[must_use = "inspect the network outcome, persistence failure and cached-receipt flag"]
+pub struct NativeCheckpointAttempt {
+    /// Last durably confirmed local state; persistence failure may leave a newer
+    /// journal visible but is never reported as confirmed durability here.
+    pub checkpoint: NativeUploadCheckpoint,
+    /// Full native result, including partial/ambiguous publication diagnostics.
+    pub outcome: Result<SendReport, NativeCheckpointError>,
+    /// True only when returning a historical saved receipt without networking.
+    pub cached_receipt: bool,
+    /// Saving a successful peer receipt failed. Never discard that receipt or
+    /// automatically retry because of this independent local failure.
+    pub persistence_error: Option<io::Error>,
+}
+
+/// Scope-owned retry task. Outer join errors do not forge an inner receipt.
+pub type NativeCheckpointTask = TaskHandle<Result<NativeCheckpointAttempt, NativeCheckpointError>>;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredReceipt {
@@ -135,6 +172,16 @@ struct StoredReceipt {
 }
 
 impl StoredReceipt {
+    fn capture(report: &SendReport) -> Self {
+        Self {
+            transfer_id: report.transfer_id.clone(), bytes_sent: report.bytes_sent,
+            files: report.files, symbols_sent: report.symbols_sent,
+            feedback_rounds: report.feedback_rounds,
+            merkle_root_hex: report.merkle_root_hex.clone(),
+            receipt: report.receipt.clone(), peer: report.peer,
+        }
+    }
+
     fn report(&self) -> SendReport {
         SendReport {
             transfer_id: self.transfer_id.clone(),
@@ -165,6 +212,22 @@ struct Journal {
 }
 
 impl Journal {
+    fn next_attempt(&self, retry: NativeCheckpointRetry) -> Result<u64, NativeCheckpointError> {
+        match (self.state, retry) {
+            (NativeCheckpointState::Prepared, NativeCheckpointRetry::Never) => {}
+            (NativeCheckpointState::Sending, NativeCheckpointRetry::Never) => {
+                return Err(NativeCheckpointError::Uncertain { attempt: self.attempt });
+            }
+            (NativeCheckpointState::Sending, NativeCheckpointRetry::AcknowledgeUncertain { attempt })
+                if attempt == self.attempt => {}
+            _ => return Err(NativeCheckpointError::StaleAttempt),
+        }
+        if self.attempt >= MAX_CHECKPOINT_ATTEMPTS {
+            return Err(NativeCheckpointError::AttemptsExhausted);
+        }
+        Ok(self.attempt + 1)
+    }
+
     fn validate(&self) -> Result<(), NativeCheckpointError> {
         if self.version != JOURNAL_VERSION {
             return Err(NativeCheckpointError::Invalid("unsupported schema version"));
@@ -413,6 +476,152 @@ impl NativeTransferClient {
         record.check_binding(&lease.admission, remote)?;
         Ok(record.info(lease.directory.clone()))
     }
+
+    /// Send a fully prepared source, including after the producer/process exits.
+    ///
+    /// Requires the caller's expected endpoint and current TLS policy. Rehashes
+    /// the entire bounded source before networking; never trusts saved progress
+    /// as data. A file lock spans validation, intent, native transfer and receipt
+    /// persistence. A durable `Sending` intent precedes every network attempt.
+    /// A crash or any failed send leaves delivery uncertain, requiring an exact
+    /// `AcknowledgeUncertain` decision before another send. Attempts are bounded
+    /// over the checkpoint's lifetime, not reset when a client restarts.
+    ///
+    /// A saved success returns its historical receipt without another transfer.
+    /// This resumes from retained local bytes, not a remote byte offset, and
+    /// cannot guarantee exactly-once publication after a lost acknowledgement.
+    /// Do not mutate or replace checkpoint files while an operation owns them.
+    pub async fn send_checkpoint(
+        &self, cx: &Cx, directory: &Path, remote: SocketAddr, retry: NativeCheckpointRetry,
+    ) -> Result<NativeCheckpointAttempt, NativeCheckpointError> {
+        authorize(cx)?;
+        let admission = self.admit_sender()?;
+        Self::send_checkpoint_admitted(cx, directory.to_path_buf(), remote, retry, admission).await
+    }
+
+    /// Reserve capacity before enqueueing a restart/retry as a scope-owned task.
+    ///
+    /// Immediate rejection or pre-poll cancellation releases admission without
+    /// opening the checkpoint. The actual child context controls cancellation.
+    /// During a blocking journal write, its owner retains both lock and credit
+    /// until that write finishes, even if the async wrapper is hard-dropped.
+    pub fn spawn_send_checkpoint<P: Policy>(
+        &self, cx: &Cx, scope: &Scope<'_, P>, directory: impl Into<PathBuf>,
+        remote: SocketAddr, retry: NativeCheckpointRetry,
+    ) -> Result<NativeCheckpointTask, NativeCheckpointError> {
+        authorize(cx)?;
+        let admission = self.admit_sender()?;
+        let directory = directory.into();
+        cx.spawn_in(scope, move |child| {
+            let future: Pin<Box<dyn Future<Output = Result<NativeCheckpointAttempt, NativeCheckpointError>> + Send>> =
+                Box::pin(async move {
+                    Self::send_checkpoint_admitted(&child, directory, remote, retry, admission).await
+                });
+            future
+        }).map_err(|error| NativeTransferError::Spawn(error).into())
+    }
+
+    async fn send_checkpoint_admitted(
+        cx: &Cx, directory: PathBuf, remote: SocketAddr, retry: NativeCheckpointRetry,
+        admission: NativeAdmission,
+    ) -> Result<NativeCheckpointAttempt, NativeCheckpointError> {
+        authorize(cx)?;
+        let (lease, mut record) = spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
+        record.check_binding(&lease.admission, remote)?;
+        if let Some(receipt) = &record.receipt {
+            return Ok(NativeCheckpointAttempt {
+                checkpoint: record.info(lease.directory.clone()), outcome: Ok(receipt.report()),
+                cached_receipt: true, persistence_error: None,
+            });
+        }
+        let next_attempt = record.next_attempt(retry)?;
+        let source = verify_source(cx, &lease, &record).await?;
+        checkpoint(cx)?;
+        record.attempt = next_attempt;
+        record.state = NativeCheckpointState::Sending;
+        persist_record(cx, &lease, &record).await.map_err(|error| NativeCheckpointError::Publication {
+            directory: lease.directory.clone(), error,
+        })?;
+        // Cancellation during intent persistence cannot start network work.
+        checkpoint(cx)?;
+        let outcome = transport_quic::send_path(
+            cx, remote, &source, lease.admission.shared.config.clone(),
+            &lease.admission.shared.peer_label,
+        ).await.map_err(NativeTransferError::from).map_err(NativeCheckpointError::from)
+            .and_then(|report| {
+                if record.receipt_matches(&report) { Ok(report) }
+                else { Err(NativeCheckpointError::ReceiptMismatch(Box::new(report))) }
+            });
+        let mut persistence_error = None;
+        if let Ok(report) = &outcome {
+            let mut completed = record.clone();
+            completed.state = NativeCheckpointState::Acknowledged;
+            completed.receipt = Some(StoredReceipt::capture(report));
+            // Terminal publication must not discard a real result merely
+            // because cancellation arrived after the native operation returned.
+            match persist_record(cx, &lease, &completed).await {
+                Ok(()) => record = completed,
+                Err(error) => persistence_error = Some(error),
+            }
+        }
+        Ok(NativeCheckpointAttempt {
+            checkpoint: record.info(lease.directory.clone()), outcome,
+            cached_receipt: false, persistence_error,
+        })
+    }
+}
+
+async fn persist_record(cx: &Cx, lease: &Arc<Lease>, record: &Journal) -> io::Result<()> {
+    let mut nonce = [0; 16];
+    cx.random_bytes(&mut nonce);
+    let owner = Arc::clone(lease);
+    let record = record.clone();
+    spawn_blocking_io(move || write_journal(&owner.directory, &record, &nonce)).await
+}
+
+async fn verify_source(
+    cx: &Cx, lease: &Arc<Lease>, record: &Journal,
+) -> Result<PathBuf, NativeCheckpointError> {
+    let owner = Arc::clone(lease);
+    let name = record.file_name.clone();
+    let (path, mut file) = spawn_blocking_io(move || {
+        let payload = owner.directory.join("payload");
+        let meta = std::fs::symlink_metadata(&payload)?;
+        if !meta.file_type().is_dir() || meta.mode() & 0o077 != 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid checkpoint payload directory"));
+        }
+        let path = payload.join(name);
+        regular_file(&path)?;
+        let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&path)?;
+        Ok((path, file))
+    }).await?;
+    let mut buffer = vec![0; lease.admission.shared.config.chunk_size.min(MAX_UPLOAD_BUFFER)];
+    let mut hash = Sha256::new();
+    let mut total = 0;
+    loop {
+        checkpoint(cx)?;
+        let owner = Arc::clone(lease);
+        let window = super::read_window(buffer.len(), record.source_bytes, total);
+        let (returned_file, returned_buffer, read) = spawn_blocking_io(move || {
+            let _owner = owner;
+            let read = file.read(&mut buffer[..window]);
+            Ok((file, buffer, read))
+        }).await?;
+        file = returned_file;
+        buffer = returned_buffer;
+        let count = read?;
+        if count == 0 { break; }
+        if count as u64 > record.source_bytes - total {
+            return Err(NativeCheckpointError::SourceChanged);
+        }
+        total += count as u64;
+        hash.update(&buffer[..count]);
+    }
+    let digest: [u8; 32] = hash.finalize().into();
+    if total != record.source_bytes || digest != record.source_sha256 {
+        return Err(NativeCheckpointError::SourceChanged);
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -464,5 +673,27 @@ mod tests {
         let json = String::from_utf8(bytes).unwrap();
         assert!(serde_json::from_str::<Journal>(&json.replacen('{', "{\"extra\":1,", 1)).is_err());
         assert!(serde_json::from_str::<Journal>(&json.replacen('{', "{\"version\":1,", 1)).is_err());
+    }
+
+    #[test]
+    fn retries_require_exact_uncertain_attempt_and_never_reset_the_budget() {
+        let mut record = journal();
+        assert_eq!(record.next_attempt(NativeCheckpointRetry::Never).unwrap(), 1);
+        assert!(matches!(record.next_attempt(NativeCheckpointRetry::AcknowledgeUncertain { attempt: 0 }),
+            Err(NativeCheckpointError::StaleAttempt)));
+        record.state = NativeCheckpointState::Sending;
+        for attempt in 1..=MAX_CHECKPOINT_ATTEMPTS {
+            record.attempt = attempt;
+            assert!(matches!(record.next_attempt(NativeCheckpointRetry::Never),
+                Err(NativeCheckpointError::Uncertain { attempt: actual }) if actual == attempt));
+            assert!(matches!(record.next_attempt(NativeCheckpointRetry::AcknowledgeUncertain { attempt: attempt - 1 }),
+                Err(NativeCheckpointError::StaleAttempt)));
+            let next = record.next_attempt(NativeCheckpointRetry::AcknowledgeUncertain { attempt });
+            if attempt == MAX_CHECKPOINT_ATTEMPTS {
+                assert!(matches!(next, Err(NativeCheckpointError::AttemptsExhausted)));
+            } else {
+                assert_eq!(next.unwrap(), attempt + 1);
+            }
+        }
     }
 }
