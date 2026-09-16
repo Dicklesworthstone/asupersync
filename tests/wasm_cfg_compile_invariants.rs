@@ -49,6 +49,73 @@ fn run_cargo_check(args: &[&str], target_dir: &str) -> Output {
         .expect("failed to spawn cargo")
 }
 
+fn parse_feature_enables(manifest: &str, feature: &str) -> Vec<String> {
+    let mut in_features = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_features = trimmed == "[features]";
+            continue;
+        }
+        if !in_features || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((name, rest)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if name.trim() != feature {
+            continue;
+        }
+        let start = rest
+            .find('[')
+            .expect("feature enables must be a TOML array");
+        let end = rest[start..]
+            .find(']')
+            .expect("feature enable array must close on the same line");
+        let body = &rest[start + 1..start + end];
+        return body
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| item.trim_matches('"').to_string())
+            .collect();
+    }
+    panic!("feature `{feature}` not found in [features]");
+}
+
+#[test]
+fn wasm_browser_profiles_include_runtime_core_and_forbid_native_runtime() {
+    let manifest = std::fs::read_to_string(repo_root().join("Cargo.toml"))
+        .expect("Cargo.toml must be readable");
+    for profile in WASM_PROFILES {
+        let enables = parse_feature_enables(&manifest, profile);
+        assert!(
+            enables.iter().any(|name| name == "runtime-core"),
+            "{profile} must enable runtime-core so default-features = false, features = [{profile}] is self-sufficient; omitting it was the unresolved-serde wasm consumer defect"
+        );
+        assert!(
+            !enables.iter().any(|name| name == "native-runtime"),
+            "{profile} must not enable native-runtime (forbidden on wasm32)"
+        );
+    }
+    let naive_prod = ["wasm-runtime", "browser-io"];
+    let prod = parse_feature_enables(&manifest, "wasm-browser-prod");
+    assert_ne!(
+        prod.iter().map(String::as_str).collect::<Vec<_>>(),
+        naive_prod,
+        "the naive wasm-browser-prod list without runtime-core must not return"
+    );
+    let desktop = parse_feature_enables(&manifest, "desktop-runtime-profile");
+    assert!(
+        desktop.iter().any(|name| name == "runtime-core"),
+        "desktop-runtime-profile must keep runtime-core"
+    );
+    assert!(
+        desktop.iter().any(|name| name == "native-runtime"),
+        "desktop-runtime-profile must keep native-runtime"
+    );
+}
+
 #[test]
 fn canonical_wasm_profiles_match_browser_matrix() {
     let mut profiles = WASM_PROFILES.to_vec();

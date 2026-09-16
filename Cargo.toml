@@ -169,10 +169,13 @@ native-runtime = []
 # the next upstream factoring step without another API rename.
 desktop-runtime-profile = ["runtime-core", "native-runtime"]
 # Canonical wasm browser profiles (FP-BR-* in the wasm build plan).
-wasm-browser-dev = ["wasm-runtime", "browser-io"]
-wasm-browser-prod = ["wasm-runtime", "browser-io"]
-wasm-browser-deterministic = ["wasm-runtime", "deterministic-mode", "browser-trace"]
-wasm-browser-minimal = ["wasm-runtime"]
+# runtime-core is part of every profile so a consumer can select only the
+# profile under default-features = false. native-runtime stays out: it is
+# forbidden on wasm32 at src/lib.rs.
+wasm-browser-dev = ["wasm-runtime", "browser-io", "runtime-core"]
+wasm-browser-prod = ["wasm-runtime", "browser-io", "runtime-core"]
+wasm-browser-deterministic = ["wasm-runtime", "deterministic-mode", "browser-trace", "runtime-core"]
+wasm-browser-minimal = ["wasm-runtime", "runtime-core"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = [

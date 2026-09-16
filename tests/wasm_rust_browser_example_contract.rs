@@ -542,10 +542,10 @@ fn rust_browser_runtime_stability_artifact_tracks_canonical_profile_matrix_contr
         &cargo_toml,
         "Cargo.toml",
         &[
-            "wasm-browser-dev = [\"wasm-runtime\", \"browser-io\"]",
-            "wasm-browser-prod = [\"wasm-runtime\", \"browser-io\"]",
-            "wasm-browser-deterministic = [\"wasm-runtime\", \"deterministic-mode\", \"browser-trace\"]",
-            "wasm-browser-minimal = [\"wasm-runtime\"]",
+            "wasm-browser-dev = [\"wasm-runtime\", \"browser-io\", \"runtime-core\"]",
+            "wasm-browser-prod = [\"wasm-runtime\", \"browser-io\", \"runtime-core\"]",
+            "wasm-browser-deterministic = [\"wasm-runtime\", \"deterministic-mode\", \"browser-trace\", \"runtime-core\"]",
+            "wasm-browser-minimal = [\"wasm-runtime\", \"runtime-core\"]",
         ],
     );
 
