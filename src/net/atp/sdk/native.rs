@@ -10,6 +10,12 @@
 //! client authorization, and multi-entry publication is not rollback-atomic.
 //! This is the ATP-specific wire protocol, not generic QUIC interoperability.
 
+pub mod upload;
+pub use upload::{
+    NativeUploadCleanupError, NativeUploadError, NativeUploadOptions, NativeUploadReport,
+    NativeUploadTask,
+};
+
 use super::{AtpSdk, SdkMode};
 use crate::cx::{Cx, Scope};
 use crate::net::atp::transport_quic::native_link::{
