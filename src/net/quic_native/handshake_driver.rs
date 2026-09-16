@@ -1221,6 +1221,96 @@ impl QuicHandshakeDriver {
         }
         Ok(packets)
     }
+
+    /// Acknowledge authenticated client Finished packets before handing the
+    /// server's completed handshake to the application-data owner.
+    async fn send_final_handshake_ack(
+        &mut self,
+        cx: &Cx,
+        endpoint: &mut QuicUdpEndpoint,
+        peer: SocketAddr,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+    ) -> Result<(), QuicTlsError> {
+        let frame = handshake_ack_frame(&self.handshake_recv_packet_numbers[1])
+            .ok_or_else(|| handshake_failure("completed_handshake_without_received_packet"))?;
+        let mut payload = BytesMut::new();
+        frame
+            .encode(&mut payload)
+            .map_err(|_| handshake_failure("handshake_ack_encode"))?;
+        let header = PacketHeader::Long(LongHeader {
+            packet_type: LongPacketType::Handshake,
+            version: 1,
+            dst_cid,
+            src_cid,
+            token: Vec::new(),
+            payload_length: u64::from(HANDSHAKE_PACKET_NUMBER_LEN)
+                + payload.len() as u64
+                + QUIC_AEAD_TAG_LEN as u64,
+            packet_number,
+            packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
+        });
+        let mut header_bytes = Vec::new();
+        header
+            .encode(&mut header_bytes)
+            .map_err(|_| handshake_failure("long_header_encode"))?;
+        let data = self.protect_long_header_packet(
+            PacketProtectionSpace::Handshake,
+            &header_bytes,
+            packet_number,
+            &payload,
+        )?;
+        endpoint
+            .send_batch(
+                cx,
+                &[OutgoingPacket {
+                    dst_addr: peer,
+                    data,
+                    send_time: None,
+                }],
+            )
+            .await
+            .map_err(|_| handshake_failure("udp_send"))?;
+        Ok(())
+    }
+}
+
+fn handshake_ack_frame(received: &BTreeSet<u64>) -> Option<QuicFrame> {
+    use crate::net::atp::protocol::quic_frames::AckRange;
+
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    for &number in received.iter().rev() {
+        if let Some((_, smallest)) = ranges.last_mut() {
+            if number.checked_add(1) == Some(*smallest) {
+                *smallest = number;
+                continue;
+            }
+        }
+        // Bound the ACK packet even when authenticated receive history has
+        // many gaps. Older ranges can be omitted; missing packets never can
+        // be represented as received by bridging a gap.
+        if ranges.len() == 32 {
+            break;
+        }
+        ranges.push((number, number));
+    }
+    let &(largest, smallest) = ranges.first()?;
+    let ack_ranges: Vec<_> = ranges
+        .windows(2)
+        .map(|pair| AckRange {
+            gap: VarInt::from_u64_unchecked(pair[0].1 - pair[1].0 - 2),
+            ack_range_length: VarInt::from_u64_unchecked(pair[1].0 - pair[1].1),
+        })
+        .collect();
+    Some(QuicFrame::Ack {
+        largest_acknowledged: VarInt::from_u64_unchecked(largest),
+        ack_delay: VarInt::from_u64_unchecked(0),
+        ack_range_count: VarInt::from_u64_unchecked(ack_ranges.len() as u64),
+        first_ack_range: VarInt::from_u64_unchecked(largest - smallest),
+        ack_ranges,
+        ecn_counts: None,
+    })
 }
 
 async fn retransmit_handshake_flight(
@@ -1390,9 +1480,7 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
 
     for _ in 0..HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
-            return peer
-                .map(|(addr, _)| (addr, early_one_rtt))
-                .ok_or_else(|| handshake_failure("server_handshake_no_peer"));
+            break;
         }
         let received = match crate::time::timeout(
             cx.now(),
@@ -1481,8 +1569,12 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
     }
 
     if driver.is_complete() {
-        peer.map(|(addr, _)| (addr, early_one_rtt))
-            .ok_or_else(|| handshake_failure("server_handshake_no_peer"))
+        let (addr, client_cid) =
+            peer.ok_or_else(|| handshake_failure("server_handshake_no_peer"))?;
+        driver
+            .send_final_handshake_ack(cx, endpoint, addr, client_cid, server_scid, packet_number)
+            .await?;
+        Ok((addr, early_one_rtt))
     } else {
         Err(handshake_failure("server_handshake_incomplete"))
     }

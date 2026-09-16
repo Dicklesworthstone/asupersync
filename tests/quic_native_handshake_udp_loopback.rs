@@ -560,7 +560,11 @@ fn real_tls13_handshake_completes_over_real_loopback_udp() {
         let final_flight = client.take_final_flight();
         let finished_numbers: Vec<_> = final_flight
             .iter()
-            .map(|packet| decode_test_handshake_packet(&mut server, &packet.data).0.packet_number)
+            .map(|packet| {
+                decode_test_handshake_packet(&mut server, &packet.data)
+                    .0
+                    .packet_number
+            })
             .collect();
         assert!(!finished_numbers.is_empty());
         timeout(wall_now(), Duration::from_secs(2), async {
@@ -575,10 +579,14 @@ fn real_tls13_handshake_completes_over_real_loopback_udp() {
                             ..
                         } = frame
                         {
-                            assert_eq!(header.packet_type, asupersync::net::quic_core::LongPacketType::Handshake);
+                            assert_eq!(
+                                header.packet_type,
+                                asupersync::net::quic_core::LongPacketType::Handshake
+                            );
                             assert!(finished_numbers.iter().all(|number| {
                                 *number <= largest_acknowledged.value()
-                                    && *number >= largest_acknowledged.value() - first_ack_range.value()
+                                    && *number
+                                        >= largest_acknowledged.value() - first_ack_range.value()
                             }));
                             return;
                         }
@@ -609,7 +617,8 @@ fn decode_test_handshake_packet(
         TranscriptHash,
     };
 
-    let ProtectedHeaderPrefix::Long(prefix) = ProtectedHeaderPrefix::decode(packet, 0).unwrap() else {
+    let ProtectedHeaderPrefix::Long(prefix) = ProtectedHeaderPrefix::decode(packet, 0).unwrap()
+    else {
         panic!("expected long-header handshake packet");
     };
     let space = match prefix.packet_type {
@@ -619,7 +628,9 @@ fn decode_test_handshake_packet(
     };
     let sample = header_protection_sample(packet, prefix.packet_number_offset).unwrap();
     let provider = driver.provider_mut();
-    let mask = provider.header_protection_mask_remote(space, &sample).unwrap();
+    let mask = provider
+        .header_protection_mask_remote(space, &sample)
+        .unwrap();
     let mut bytes = packet.to_vec();
     remove_header_protection(&mut bytes, prefix.packet_number_offset, mask.bytes).unwrap();
     let (PacketHeader::Long(header), header_len) = PacketHeader::decode(&bytes, 0).unwrap() else {
@@ -641,8 +652,13 @@ fn decode_test_handshake_packet(
             failure_code: None,
         },
     };
-    let plaintext = provider.unprotect_packet(&protected, &bytes[..header_len]).unwrap();
-    (header, NativeQuicConnection::decode_frames(&plaintext.plaintext).unwrap())
+    let plaintext = provider
+        .unprotect_packet(&protected, &bytes[..header_len])
+        .unwrap();
+    (
+        header,
+        NativeQuicConnection::decode_frames(&plaintext.plaintext).unwrap(),
+    )
 }
 
 #[test]
