@@ -370,7 +370,7 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for RecordingIo<T> {
         result
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, ctx: &mut Context<'_>,) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.begin();
         let result = Pin::new(&mut this.inner).poll_shutdown(ctx);
@@ -771,3 +771,6 @@ mod tests {
         assert!(matches!(capture.into_parts().1, Err(IoCaptureError::InterruptedPoll)));
     }
 }
+
+mod codec;
+pub use codec::{IoTapeBytes, IoTapeDecodeLimits, IoTapeError};
