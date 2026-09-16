@@ -172,29 +172,121 @@ fn server_handshake_done_is_application_only_and_retransmitted_until_acked() {
     server.begin_handshake(&cx).unwrap();
     server.on_handshake_keys_available(&cx).unwrap();
     server.on_1rtt_keys_available(&cx).unwrap();
-    assert!(server.generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200).unwrap().is_empty());
+    assert!(
+        server
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+            .unwrap()
+            .is_empty()
+    );
     server.on_handshake_confirmed(&cx).unwrap();
     server.on_handshake_confirmed(&cx).unwrap();
     for space in [PacketNumberSpace::Initial, PacketNumberSpace::Handshake] {
         assert!(server.generate_frames(&cx, space, 1200).unwrap().is_empty());
     }
-    let first = server.generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200).unwrap();
+    let first = server
+        .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+        .unwrap();
     assert_eq!(first, vec![QuicFrame::HandshakeDone]);
-    let original = server.on_packet_sent_with_frames(
-        &cx, PacketNumberSpace::ApplicationData, 64, true, true, 1, &first,
-    ).unwrap();
+    let original = server
+        .on_packet_sent_with_frames(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            64,
+            true,
+            true,
+            1,
+            &first,
+        )
+        .unwrap();
     server.on_probe_timeout(&cx).unwrap();
-    let probe = server.generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200).unwrap();
+    let probe = server
+        .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+        .unwrap();
     assert!(probe.contains(&QuicFrame::HandshakeDone));
-    server.on_packet_sent_with_frames(
-        &cx, PacketNumberSpace::ApplicationData, 64, true, true, 2, &probe,
-    ).unwrap();
+    server
+        .on_packet_sent_with_frames(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            64,
+            true,
+            true,
+            2,
+            &probe,
+        )
+        .unwrap();
     // An ACK for the original flight must also retire the retransmitted copy.
-    server.on_ack_received(&cx, PacketNumberSpace::ApplicationData, &[original], 0, 3).unwrap();
+    server
+        .on_ack_received(&cx, PacketNumberSpace::ApplicationData, &[original], 0, 3)
+        .unwrap();
     server.on_probe_timeout(&cx).unwrap();
     server.on_handshake_confirmed(&cx).unwrap();
-    let after_ack = server.generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200).unwrap();
+    let after_ack = server
+        .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+        .unwrap();
     assert!(!after_ack.contains(&QuicFrame::HandshakeDone));
+}
+
+#[test]
+fn server_handshake_done_is_requeued_after_declared_packet_loss() {
+    use asupersync::net::atp::protocol::quic_frames::QuicFrame;
+    use asupersync::net::quic_native::{PacketNumberSpace, StreamRole};
+
+    let cx = Cx::for_testing();
+    let mut server = NativeQuicConnection::new(NativeQuicConnectionConfig {
+        role: StreamRole::Server,
+        ..NativeQuicConnectionConfig::default()
+    });
+    establish_for_application_data(&cx, &mut server).unwrap();
+    let frames = server
+        .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+        .unwrap();
+    assert_eq!(frames, vec![QuicFrame::HandshakeDone]);
+    server
+        .on_packet_sent_with_frames(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            64,
+            true,
+            true,
+            1,
+            &frames,
+        )
+        .unwrap();
+    let loss = server
+        .on_loss_timeout_expired(&cx, PacketNumberSpace::ApplicationData, 10_000_000)
+        .unwrap();
+    assert_eq!(loss.lost_packets, 1);
+    let retransmission = server
+        .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+        .unwrap();
+    assert_eq!(retransmission, frames);
+    let packet_number = server
+        .on_packet_sent_with_frames(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            64,
+            true,
+            true,
+            10_000_001,
+            &retransmission,
+        )
+        .unwrap();
+    server
+        .on_ack_received(
+            &cx,
+            PacketNumberSpace::ApplicationData,
+            &[packet_number],
+            0,
+            10_000_002,
+        )
+        .unwrap();
+    server.on_probe_timeout(&cx).unwrap();
+    assert!(
+        !server
+            .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+            .unwrap()
+            .contains(&QuicFrame::HandshakeDone)
+    );
 }
 
 #[test]
@@ -464,7 +556,93 @@ fn real_tls13_handshake_completes_over_real_loopback_udp() {
             server.peer_transport_parameters(),
             Some(b"client-transport-params".as_slice())
         );
+
+        let final_flight = client.take_final_flight();
+        let finished_numbers: Vec<_> = final_flight
+            .iter()
+            .map(|packet| decode_test_handshake_packet(&mut server, &packet.data).0.packet_number)
+            .collect();
+        assert!(!finished_numbers.is_empty());
+        timeout(wall_now(), Duration::from_secs(2), async {
+            loop {
+                for packet in client_ep.receive_batch(&cx, 16).await.unwrap() {
+                    assert_eq!(packet.src_addr, server_addr);
+                    let (header, frames) = decode_test_handshake_packet(&mut client, &packet.data);
+                    for frame in frames {
+                        if let asupersync::net::atp::protocol::quic_frames::QuicFrame::Ack {
+                            largest_acknowledged,
+                            first_ack_range,
+                            ..
+                        } = frame
+                        {
+                            assert_eq!(header.packet_type, asupersync::net::quic_core::LongPacketType::Handshake);
+                            assert!(finished_numbers.iter().all(|number| {
+                                *number <= largest_acknowledged.value()
+                                    && *number >= largest_acknowledged.value() - first_ack_range.value()
+                            }));
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("server must send a protected Handshake ACK for client Finished");
     });
+}
+
+// This test uses only small packet numbers (no truncated-number wraparound).
+// Decode the actual AEAD-protected UDP bytes independently of ACK generation.
+fn decode_test_handshake_packet(
+    driver: &mut QuicHandshakeDriver,
+    packet: &[u8],
+) -> (
+    asupersync::net::quic_core::LongHeader,
+    Vec<asupersync::net::atp::protocol::quic_frames::QuicFrame>,
+) {
+    use asupersync::net::quic_core::{
+        LongPacketType, PacketHeader, ProtectedHeaderPrefix, header_protection_sample,
+        remove_header_protection,
+    };
+    use asupersync::net::quic_native::tls::{
+        PacketProtectionSpace, ProtectedPacket, ProtectionProof, QuicPacketProtectionProvider,
+        TranscriptHash,
+    };
+
+    let ProtectedHeaderPrefix::Long(prefix) = ProtectedHeaderPrefix::decode(packet, 0).unwrap() else {
+        panic!("expected long-header handshake packet");
+    };
+    let space = match prefix.packet_type {
+        LongPacketType::Initial => PacketProtectionSpace::Initial,
+        LongPacketType::Handshake => PacketProtectionSpace::Handshake,
+        other => panic!("unexpected handshake packet type: {other:?}"),
+    };
+    let sample = header_protection_sample(packet, prefix.packet_number_offset).unwrap();
+    let provider = driver.provider_mut();
+    let mask = provider.header_protection_mask_remote(space, &sample).unwrap();
+    let mut bytes = packet.to_vec();
+    remove_header_protection(&mut bytes, prefix.packet_number_offset, mask.bytes).unwrap();
+    let (PacketHeader::Long(header), header_len) = PacketHeader::decode(&bytes, 0).unwrap() else {
+        panic!("expected decoded long header");
+    };
+    let tag_start = bytes.len() - 16;
+    let protected = ProtectedPacket {
+        space,
+        key_phase: false,
+        packet_number: header.packet_number,
+        ciphertext: bytes[header_len..tag_start].to_vec(),
+        tag: bytes[tag_start..].try_into().unwrap(),
+        proof: ProtectionProof {
+            provider_kind: provider.provider_kind(),
+            space,
+            key_phase: false,
+            generation: 0,
+            transcript_hash: TranscriptHash::from_bytes([0; 32]),
+            failure_code: None,
+        },
+    };
+    let plaintext = provider.unprotect_packet(&protected, &bytes[..header_len]).unwrap();
+    (header, NativeQuicConnection::decode_frames(&plaintext.plaintext).unwrap())
 }
 
 #[test]
@@ -654,13 +832,17 @@ fn datagram_and_stream_cross_real_udp_after_real_handshake() {
                 ),
             )
             .expect("install server protection");
-        establish_for_application_data(
-            &cx,
-            client_router
+        {
+            let client = client_router
                 .connection_mut_for_testing(&cx, app_cid)
-                .expect("client connection"),
-        )
-        .expect("client reaches app data");
+                .expect("client connection");
+            client.begin_handshake(&cx).unwrap();
+            client.on_handshake_keys_available(&cx).unwrap();
+            client.on_1rtt_keys_available(&cx).unwrap();
+            // The real TLS handshake above verified this server identity.
+            client.record_verified_server_identity();
+            assert!(!client.tls().handshake_confirmed());
+        }
         establish_for_application_data(
             &cx,
             server_router
@@ -668,6 +850,63 @@ fn datagram_and_stream_cross_real_udp_after_real_handshake() {
                 .expect("server connection"),
         )
         .expect("server reaches app data");
+
+        // Confirmation must cross the protected UDP data path, not be supplied
+        // to the client through a direct state-machine call.
+        let confirmation = server_router
+            .drain_application_data_for_testing(&cx, app_cid, client_addr, Instant::now())
+            .await
+            .expect("drain server confirmation");
+        assert!(!confirmation.is_empty(), "server must emit HANDSHAKE_DONE");
+        server_ep
+            .send_batch(&cx, &confirmation)
+            .await
+            .expect("send protected server confirmation");
+        timeout(wall_now(), Duration::from_secs(10), async {
+            loop {
+                let received = client_ep.receive_batch(&cx, 16).await.unwrap();
+                for packet in received {
+                    use asupersync::net::quic_core::{LongPacketType, ProtectedHeaderPrefix};
+
+                    assert_eq!(packet.src_addr, server_addr);
+                    if let ProtectedHeaderPrefix::Long(header) =
+                        ProtectedHeaderPrefix::decode(&packet.data, app_cid.len()).unwrap()
+                    {
+                        // The completed TLS driver can leave retransmitted
+                        // handshake flights in the socket. This fixture's
+                        // application router uses a separate CID; these are
+                        // not application packets and cannot confirm it.
+                        assert_eq!(header.dst_cid, client_scid);
+                        assert!(matches!(
+                            header.packet_type,
+                            LongPacketType::Initial | LongPacketType::Handshake
+                        ));
+                        continue;
+                    }
+                    match client_router.route_packet(&cx, packet).await.unwrap() {
+                        RoutingResult::Routed { .. } => {}
+                        other => panic!("expected routed server confirmation, got {other:?}"),
+                    }
+                }
+                if client_router
+                    .connection_mut_for_testing(&cx, app_cid)
+                    .unwrap()
+                    .tls()
+                    .handshake_confirmed()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("confirmation receive timed out");
+        assert!(
+            client_router
+                .connection_mut_for_testing(&cx, app_cid)
+                .unwrap()
+                .tls()
+                .handshake_confirmed()
+        );
 
         // 3. Enqueue an ATP-shaped control stream + two RaptorQ-shaped datagrams.
         let stream: StreamId;

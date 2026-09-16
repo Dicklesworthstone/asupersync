@@ -198,6 +198,7 @@ pub struct NativeQuicConnectionConfig {
 /// remembers the stream/offset key needed to release or requeue that copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RetransmittableFrameRef {
+    HandshakeDone,
     Stream {
         stream_id: StreamId,
         offset: u64,
@@ -218,6 +219,7 @@ enum RetransmittableFrameRef {
 impl RetransmittableFrameRef {
     fn from_frame(frame: &QuicFrame) -> Option<Self> {
         match frame {
+            QuicFrame::HandshakeDone => Some(Self::HandshakeDone),
             QuicFrame::Stream {
                 stream_id,
                 offset,
@@ -251,6 +253,7 @@ impl RetransmittableFrameRef {
 
     fn control_frame(&self) -> Option<QuicFrame> {
         match *self {
+            Self::HandshakeDone => Some(QuicFrame::HandshakeDone),
             Self::Stream { .. } => None,
             Self::ResetStream {
                 stream_id,
@@ -687,8 +690,15 @@ impl NativeQuicConnection {
                 QuicTlsError::ServerCertificateUnverified,
             ));
         }
+        let first_confirmation = !self.tls.handshake_confirmed();
         self.transport.on_established()?;
         self.tls.on_handshake_confirmed()?;
+        if first_confirmation && self.role == StreamRole::Server {
+            // RFC 9000 sections 19.20 and 13.3: confirm to the client and
+            // retain this control frame through the normal ACK/loss ledger.
+            self.pending_control_frames
+                .push_back(QuicFrame::HandshakeDone);
+        }
         self.peer_address_validated = true;
         let server_identity_verified = if self.role == StreamRole::Client {
             "true"
@@ -3020,14 +3030,24 @@ impl NativeQuicConnection {
         let mut frames = Vec::new();
         let mut used = 0usize;
 
-        while let Some(frame) = self.pending_control_frames.pop_front() {
+        let mut control_index = 0;
+        while let Some(frame) = self.pending_control_frames.get(control_index) {
+            if matches!(frame, QuicFrame::HandshakeDone)
+                && space != PacketNumberSpace::ApplicationData
+            {
+                control_index += 1;
+                continue;
+            }
             let mut encoded = BytesMut::new();
             frame.encode(&mut encoded)?;
             let frame_len = encoded.len();
             if !frames.is_empty() && used.saturating_add(frame_len) > max_frame_bytes {
-                self.pending_control_frames.push_front(frame);
                 break;
             }
+            let frame = self
+                .pending_control_frames
+                .remove(control_index)
+                .expect("control index came from the same queue");
             used = used.saturating_add(frame_len);
             frames.push(frame);
             if used >= max_frame_bytes {
