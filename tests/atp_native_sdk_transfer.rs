@@ -145,13 +145,13 @@ fn run_native<T: Send + 'static>(
     .expect("native runtime must build");
     let future: Pin<Box<dyn Future<Output = T> + Send>> = Box::pin(future);
     let result = runtime.block_on(runtime.handle().spawn(future));
-    runtime.block_on(async {
-        let start = Instant::now();
-        while !runtime.is_quiescent() {
-            assert!(start.elapsed() < Duration::from_secs(5), "native children did not drain");
-            asupersync::runtime::yield_now().await;
-        }
-    });
+    let start = Instant::now();
+    // A current-thread block_on registers its own root task. Check outside
+    // that task, then drive another turn if previously spawned work remains.
+    while !runtime.is_quiescent() {
+        assert!(start.elapsed() < Duration::from_secs(5), "native children did not drain");
+        runtime.block_on(asupersync::runtime::yield_now());
+    }
     assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
