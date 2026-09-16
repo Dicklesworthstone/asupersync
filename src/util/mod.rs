@@ -8,6 +8,7 @@ pub mod cache;
 pub mod det_hash;
 pub mod det_rng;
 pub mod entropy;
+pub mod entropy_replay;
 pub mod path_security;
 pub mod pool;
 pub mod resource;
