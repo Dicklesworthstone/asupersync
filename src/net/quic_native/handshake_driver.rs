@@ -1261,7 +1261,7 @@ impl QuicHandshakeDriver {
             packet_number,
             &payload,
         )?;
-        endpoint
+        let report = endpoint
             .send_batch(
                 cx,
                 &[OutgoingPacket {
@@ -1272,6 +1272,9 @@ impl QuicHandshakeDriver {
             )
             .await
             .map_err(|_| handshake_failure("udp_send"))?;
+        if report.packets_processed != 1 || report.error.is_some() {
+            return Err(handshake_failure("udp_send"));
+        }
         Ok(())
     }
 }
