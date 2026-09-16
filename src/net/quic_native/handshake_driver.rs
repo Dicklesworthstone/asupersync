@@ -1640,6 +1640,79 @@ pub fn server_config(
 pub(crate) mod tests {
     use super::*;
 
+    #[test]
+    fn handshake_ack_keeps_received_gaps_and_zero_delay() {
+        let frame = handshake_ack_frame(&BTreeSet::from([0, 2, 3, 9])).unwrap();
+        let QuicFrame::Ack {
+            largest_acknowledged,
+            ack_delay,
+            ack_range_count,
+            first_ack_range,
+            ack_ranges,
+            ecn_counts,
+        } = frame
+        else {
+            panic!("expected ACK");
+        };
+        assert_eq!(largest_acknowledged.value(), 9);
+        assert_eq!(ack_delay.value(), 0);
+        assert_eq!(first_ack_range.value(), 0);
+        assert_eq!(ack_range_count.value(), 2);
+        assert_eq!(ack_ranges.len(), 2);
+        // These ranges acknowledge exactly {9}, {3, 2}, {0}; never 1 or 4..8.
+        assert_eq!(ack_ranges[0].gap.value(), 4);
+        assert_eq!(ack_ranges[0].ack_range_length.value(), 1);
+        assert_eq!(ack_ranges[1].gap.value(), 0);
+        assert_eq!(ack_ranges[1].ack_range_length.value(), 0);
+        assert!(ecn_counts.is_none());
+    }
+
+    #[test]
+    fn handshake_ack_bounds_sparse_history_and_handles_packet_number_edges() {
+        assert!(handshake_ack_frame(&BTreeSet::new()).is_none());
+        let largest = (1u64 << 62) - 1;
+        let QuicFrame::Ack {
+            largest_acknowledged,
+            first_ack_range,
+            ack_ranges,
+            ..
+        } = handshake_ack_frame(&BTreeSet::from([largest - 1, largest])).unwrap()
+        else {
+            panic!("expected ACK");
+        };
+        assert_eq!(largest_acknowledged.value(), largest);
+        assert_eq!(first_ack_range.value(), 1);
+        assert!(ack_ranges.is_empty());
+
+        let sparse = (0..100).map(|number| number * 2).collect();
+        let frame = handshake_ack_frame(&sparse).unwrap();
+        let QuicFrame::Ack {
+            largest_acknowledged,
+            first_ack_range,
+            ack_range_count,
+            ref ack_ranges,
+            ..
+        } = frame
+        else {
+            panic!("expected ACK");
+        };
+        assert_eq!(largest_acknowledged.value(), 198);
+        assert_eq!(first_ack_range.value(), 0);
+        assert_eq!(ack_range_count.value(), 31);
+        assert_eq!(ack_ranges.len(), 31);
+        assert!(
+            ack_ranges
+                .iter()
+                .all(|range| range.gap.value() == 0 && range.ack_range_length.value() == 0)
+        );
+        let mut encoded = BytesMut::new();
+        frame.encode(&mut encoded).unwrap();
+        assert!(
+            encoded.len() < 1200 - 128,
+            "ACK leaves room for header and AEAD tag"
+        );
+    }
+
     // Canonical CA + leaf chain (P-256), valid ~100 years, generated with openssl
     // for the in-process handshake test. The leaf carries SAN DNS:localhost /
     // IP:127.0.0.1 and the serverAuth EKU that rustls-webpki requires; the client
