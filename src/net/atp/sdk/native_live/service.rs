@@ -161,6 +161,7 @@ struct Job {
 }
 
 /// One retained listening socket and a bounded set of canonical task handles.
+///
 /// There is no detached accept loop or unbounded completion channel. The caller
 /// must keep driving it; slow completion consumption backpressures acceptance.
 #[derive(Debug)]
