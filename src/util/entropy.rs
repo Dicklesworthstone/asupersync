@@ -8,7 +8,7 @@ use crate::util::DetRng;
 use parking_lot::Mutex;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 
 // Note: Using getrandom for OS entropy (rand::rngs::OsRng not available as dependency)
@@ -209,30 +209,66 @@ impl ThreadLocalEntropy {
 // Strict entropy isolation (lab tooling)
 // ============================================================================
 
-static STRICT_ENTROPY: AtomicBool = AtomicBool::new(false);
+static STRICT_ENTROPY: StrictEntropyPolicy = StrictEntropyPolicy::new();
 
-// The strict entropy bit is a standalone policy gate. It does not publish
+// The strict entropy state is a standalone policy gate. It does not publish
 // side data, so atomicity alone is sufficient; no cross-location ordering is
 // required.
 const STRICT_ENTROPY_ORDERING: Ordering = Ordering::Relaxed;
 
-/// Enable strict entropy isolation globally.
-#[inline]
-pub fn enable_strict_entropy() {
-    STRICT_ENTROPY.store(true, STRICT_ENTROPY_ORDERING);
+/// The low bit holds the explicit policy; each live guard owns two units.
+/// Keeping both in one atomic makes policy updates and overlapping scopes
+/// compose without a stale saved boolean disabling another scope's isolation.
+#[derive(Debug)]
+struct StrictEntropyPolicy {
+    state: AtomicUsize,
 }
 
-/// Disable strict entropy isolation globally.
+impl StrictEntropyPolicy {
+    const fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    fn enable(&self) {
+        self.state.fetch_or(1, STRICT_ENTROPY_ORDERING);
+    }
+
+    #[inline]
+    fn disable(&self) {
+        self.state.fetch_and(!1, STRICT_ENTROPY_ORDERING);
+    }
+
+    #[inline]
+    fn enabled(&self) -> bool {
+        self.state.load(STRICT_ENTROPY_ORDERING) != 0
+    }
+}
+
+/// Enable strict entropy isolation globally.
+///
+/// This explicit policy remains enabled after existing guards are dropped.
+#[inline]
+pub fn enable_strict_entropy() {
+    STRICT_ENTROPY.enable();
+}
+
+/// Disable the explicit global strict entropy policy.
+///
+/// Live [`StrictEntropyGuard`] scopes continue to enforce isolation until the
+/// last guard is dropped; this call cannot disable another scope's protection.
 #[inline]
 pub fn disable_strict_entropy() {
-    STRICT_ENTROPY.store(false, STRICT_ENTROPY_ORDERING);
+    STRICT_ENTROPY.disable();
 }
 
 /// Returns true if strict entropy isolation is enabled.
 #[inline]
 #[must_use]
 pub fn strict_entropy_enabled() -> bool {
-    STRICT_ENTROPY.load(STRICT_ENTROPY_ORDERING)
+    STRICT_ENTROPY.enabled()
 }
 
 /// Panic if strict entropy isolation is enabled.
@@ -245,9 +281,13 @@ pub fn check_ambient_entropy(source: &str) {
 }
 
 /// RAII guard to enable strict entropy isolation for a scope.
+///
+/// Guards may overlap across threads and be dropped in any order. Isolation
+/// stays enabled while any guard is alive, independently of the explicit global
+/// policy. Dropping a guard releases only that guard's claim.
 #[derive(Debug)]
 pub struct StrictEntropyGuard {
-    previous: bool,
+    policy: &'static StrictEntropyPolicy,
 }
 
 impl StrictEntropyGuard {
@@ -255,8 +295,20 @@ impl StrictEntropyGuard {
     #[must_use]
     #[inline]
     pub fn new() -> Self {
-        let previous = STRICT_ENTROPY.swap(true, STRICT_ENTROPY_ORDERING);
-        Self { previous }
+        Self::with_policy(&STRICT_ENTROPY)
+    }
+
+    #[inline]
+    fn with_policy(policy: &'static StrictEntropyPolicy) -> Self {
+        // Never wrap the last live guard count to zero (which would admit
+        // ambient entropy). A failed acquisition leaves the policy unchanged.
+        policy
+            .state
+            .fetch_update(STRICT_ENTROPY_ORDERING, STRICT_ENTROPY_ORDERING, |state| {
+                state.checked_add(2)
+            })
+            .expect("strict entropy guard count exhausted");
+        Self { policy }
     }
 }
 
@@ -268,7 +320,8 @@ impl Default for StrictEntropyGuard {
 
 impl Drop for StrictEntropyGuard {
     fn drop(&mut self) {
-        STRICT_ENTROPY.store(self.previous, STRICT_ENTROPY_ORDERING);
+        let previous = self.policy.state.fetch_sub(2, STRICT_ENTROPY_ORDERING);
+        debug_assert!(previous >= 2, "strict entropy guard count underflow");
     }
 }
 
@@ -405,6 +458,101 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    // Use independent policies so these tests exercise the production guard
+    // implementation without changing the global gate used by parallel OS
+    // entropy tests elsewhere in the crate.
+    #[test]
+    fn strict_guards_preserve_isolation_in_every_drop_order() {
+        static POLICY: StrictEntropyPolicy = StrictEntropyPolicy::new();
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut guards = [
+                Some(StrictEntropyGuard::with_policy(&POLICY)),
+                Some(StrictEntropyGuard::with_policy(&POLICY)),
+                Some(StrictEntropyGuard::with_policy(&POLICY)),
+            ];
+            assert!(POLICY.enabled());
+            for (dropped, index) in order.into_iter().enumerate() {
+                drop(guards[index].take());
+                assert_eq!(POLICY.enabled(), dropped < 2, "order={order:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn strict_guards_do_not_restore_stale_explicit_policy() {
+        static POLICY: StrictEntropyPolicy = StrictEntropyPolicy::new();
+        POLICY.enable();
+        let guard = StrictEntropyGuard::with_policy(&POLICY);
+        POLICY.disable();
+        assert!(POLICY.enabled(), "explicit disable cannot revoke a live guard");
+        drop(guard);
+        assert!(!POLICY.enabled(), "the old enabled bit must not be restored");
+
+        let guard = StrictEntropyGuard::with_policy(&POLICY);
+        POLICY.enable();
+        drop(guard);
+        assert!(POLICY.enabled(), "dropping a guard cannot undo explicit enable");
+        POLICY.disable();
+        assert!(!POLICY.enabled());
+    }
+
+    #[test]
+    fn strict_guards_preserve_another_threads_live_scope() {
+        static POLICY: StrictEntropyPolicy = StrictEntropyPolicy::new();
+        let first = StrictEntropyGuard::with_policy(&POLICY);
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            let second = StrictEntropyGuard::with_policy(&POLICY);
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            assert!(POLICY.enabled());
+            drop(second);
+        });
+
+        entered_rx.recv().unwrap();
+        drop(first);
+        let protected = POLICY.enabled();
+        // Always release and join the worker before asserting, including when
+        // testing an implementation with the original out-of-order-drop bug.
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(protected, "the worker still owned an isolation guard");
+        assert!(!POLICY.enabled());
+    }
+
+    #[test]
+    fn strict_guard_unwind_releases_only_its_own_claim() {
+        static POLICY: StrictEntropyPolicy = StrictEntropyPolicy::new();
+        let outer = StrictEntropyGuard::with_policy(&POLICY);
+        let result = std::panic::catch_unwind(|| {
+            let _inner = StrictEntropyGuard::with_policy(&POLICY);
+            panic!("exercise strict entropy cleanup");
+        });
+        assert!(result.is_err());
+        assert!(POLICY.enabled());
+        drop(outer);
+        assert!(!POLICY.enabled());
+    }
+
+    #[test]
+    fn strict_guard_overflow_fails_closed_without_changing_policy() {
+        static POLICY: StrictEntropyPolicy = StrictEntropyPolicy {
+            state: AtomicUsize::new(usize::MAX - 1),
+        };
+        let result = std::panic::catch_unwind(|| StrictEntropyGuard::with_policy(&POLICY));
+        assert!(result.is_err());
+        assert_eq!(POLICY.state.load(STRICT_ENTROPY_ORDERING), usize::MAX - 1);
+        assert!(POLICY.enabled());
+    }
 
     // =========================================================================
     // DetEntropy Core Functionality
