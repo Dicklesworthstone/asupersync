@@ -396,3 +396,7 @@ mod tests {
         assert!(!debug.contains("116, 101, 115, 116"));
     }
 }
+
+/// Live prefix delivery over an explicitly authenticated native TCP/TLS profile.
+#[path = "native_live.rs"]
+pub mod live;
