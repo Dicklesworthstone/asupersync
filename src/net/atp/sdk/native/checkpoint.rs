@@ -539,7 +539,11 @@ impl NativeTransferClient {
         checkpoint(cx)?;
         record.attempt = next_attempt;
         record.state = NativeCheckpointState::Sending;
-        persist_record(cx, &lease, &record).await.map_err(|error| NativeCheckpointError::Publication {
+        let mut intent_nonce = [0; 16];
+        let mut receipt_nonce = [0; 16];
+        cx.random_bytes(&mut intent_nonce);
+        cx.random_bytes(&mut receipt_nonce);
+        persist_record(&lease, &record, intent_nonce).await.map_err(|error| NativeCheckpointError::Publication {
             directory: lease.directory.clone(), error,
         })?;
         // Cancellation during intent persistence cannot start network work.
@@ -559,7 +563,7 @@ impl NativeTransferClient {
             completed.receipt = Some(StoredReceipt::capture(report));
             // Terminal publication must not discard a real result merely
             // because cancellation arrived after the native operation returned.
-            match persist_record(cx, &lease, &completed).await {
+            match persist_record(&lease, &completed, receipt_nonce).await {
                 Ok(()) => record = completed,
                 Err(error) => persistence_error = Some(error),
             }
@@ -571,9 +575,7 @@ impl NativeTransferClient {
     }
 }
 
-async fn persist_record(cx: &Cx, lease: &Arc<Lease>, record: &Journal) -> io::Result<()> {
-    let mut nonce = [0; 16];
-    cx.random_bytes(&mut nonce);
+async fn persist_record(lease: &Arc<Lease>, record: &Journal, nonce: [u8; 16]) -> io::Result<()> {
     let owner = Arc::clone(lease);
     let record = record.clone();
     spawn_blocking_io(move || write_journal(&owner.directory, &record, &nonce)).await
@@ -694,6 +696,43 @@ mod tests {
             } else {
                 assert_eq!(next.unwrap(), attempt + 1);
             }
+        }
+    }
+
+    #[test]
+    fn acknowledged_journal_retains_the_actual_receipt_and_rejects_inconsistent_facts() {
+        let mut record = journal();
+        let report = SendReport {
+            transfer_id: "actual-transfer".into(), bytes_sent: 7, files: 1,
+            symbols_sent: 13, feedback_rounds: 2, merkle_root_hex: "ab".repeat(32),
+            peer: record.remote,
+            receipt: ReceiveReceipt {
+                committed: true, bytes_received: 7, files: 1, sha_ok: true, merkle_ok: true,
+                symbols_accepted: 12, feedback_rounds: 2, decode_count: 1, decode_micros: 99,
+                reason: None, committed_paths: vec!["/data/data.bin".into()],
+            },
+        };
+        record.state = NativeCheckpointState::Acknowledged;
+        record.attempt = 2;
+        record.receipt = Some(StoredReceipt::capture(&report));
+        record.validate().unwrap();
+        let restored: Journal = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        restored.validate().unwrap();
+        let retained = restored.receipt.unwrap().report();
+        assert_eq!(retained.receipt, report.receipt);
+        assert_eq!(retained.transfer_id, report.transfer_id);
+        assert_eq!(retained.merkle_root_hex, report.merkle_root_hex);
+        for kind in 0..5 {
+            let mut wrong = record.clone();
+            let receipt = wrong.receipt.as_mut().unwrap();
+            match kind {
+                0 => receipt.peer.set_port(1235),
+                1 => receipt.receipt.bytes_received += 1,
+                2 => receipt.receipt.sha_ok = false,
+                3 => receipt.receipt.merkle_ok = false,
+                _ => receipt.receipt.committed = false,
+            }
+            assert!(wrong.validate().is_err(), "kind={kind}");
         }
     }
 }
