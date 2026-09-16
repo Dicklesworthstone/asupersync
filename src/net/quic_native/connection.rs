@@ -2466,10 +2466,17 @@ impl NativeQuicConnection {
                 Ok(())
             }
             QuicFrame::HandshakeDone => {
-                if self.role == StreamRole::Client && self.tls.level() == CryptoLevel::OneRtt {
-                    self.on_handshake_confirmed(cx)?;
+                if self.role != StreamRole::Client {
+                    return Err(NativeQuicConnectionError::InvalidState(
+                        "server cannot receive HANDSHAKE_DONE",
+                    ));
                 }
-                Ok(())
+                if space != PacketNumberSpace::ApplicationData {
+                    return Err(NativeQuicConnectionError::InvalidState(
+                        "HANDSHAKE_DONE requires application data packet space",
+                    ));
+                }
+                self.on_handshake_confirmed(cx)
             }
             QuicFrame::Datagram { .. } => {
                 self.process_datagram_frame_run(cx, std::slice::from_ref(frame), space)?;

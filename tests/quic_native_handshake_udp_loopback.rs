@@ -160,6 +160,81 @@ fn run_handshake_drop_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Ar
 }
 
 #[test]
+fn handshake_done_rejects_invalid_receiver_role_and_packet_space() {
+    use asupersync::net::atp::protocol::quic_frames::QuicFrame;
+    use asupersync::net::quic_native::{PacketNumberSpace, StreamRole};
+
+    let cx = Cx::for_testing();
+    for (role, space) in [
+        (StreamRole::Server, PacketNumberSpace::ApplicationData),
+        (StreamRole::Server, PacketNumberSpace::Initial),
+        (StreamRole::Server, PacketNumberSpace::Handshake),
+        (StreamRole::Client, PacketNumberSpace::Initial),
+        (StreamRole::Client, PacketNumberSpace::Handshake),
+    ] {
+        let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig {
+            role,
+            ..NativeQuicConnectionConfig::default()
+        });
+        connection.begin_handshake(&cx).unwrap();
+        connection.on_handshake_keys_available(&cx).unwrap();
+        connection.on_1rtt_keys_available(&cx).unwrap();
+        connection.record_verified_server_identity();
+        assert!(matches!(
+            connection.process_packet_frames(&cx, space, 0, &[QuicFrame::HandshakeDone], 1),
+            Err(NativeQuicConnectionError::InvalidState(_))
+        ));
+        assert!(!connection.tls().handshake_confirmed());
+    }
+}
+
+#[test]
+fn handshake_done_requires_keys_and_identity_but_allows_valid_duplicates() {
+    use asupersync::net::atp::protocol::quic_frames::QuicFrame;
+    use asupersync::net::quic_native::{PacketNumberSpace, QuicTlsError};
+
+    let cx = Cx::for_testing();
+    let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+    connection.begin_handshake(&cx).unwrap();
+    assert!(matches!(
+        connection.process_frame(
+            &cx,
+            &QuicFrame::HandshakeDone,
+            PacketNumberSpace::ApplicationData,
+        ),
+        Err(NativeQuicConnectionError::Tls(
+            QuicTlsError::HandshakeNotConfirmed
+        ))
+    ));
+    connection.on_handshake_keys_available(&cx).unwrap();
+    connection.on_1rtt_keys_available(&cx).unwrap();
+    assert!(matches!(
+        connection.process_frame(
+            &cx,
+            &QuicFrame::HandshakeDone,
+            PacketNumberSpace::ApplicationData,
+        ),
+        Err(NativeQuicConnectionError::Tls(
+            QuicTlsError::ServerCertificateUnverified
+        ))
+    ));
+    assert!(!connection.tls().handshake_confirmed());
+    connection.record_verified_server_identity();
+    for packet_number in 0..3 {
+        connection
+            .process_packet_frames(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                packet_number,
+                &[QuicFrame::HandshakeDone],
+                packet_number + 1,
+            )
+            .expect("authenticated confirmation and its retransmissions are valid");
+        assert!(connection.tls().handshake_confirmed());
+    }
+}
+
+#[test]
 fn wire_peer_parameters_reject_invalid_max_ack_delay() {
     use asupersync::net::quic_core::{
         QuicCoreError, TP_MAX_ACK_DELAY, TransportParameters, encode_varint,
