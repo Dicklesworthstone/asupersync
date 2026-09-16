@@ -419,6 +419,7 @@ impl LiveStreamSender {
 
 impl LiveStreamReceiver {
     /// Bound listeners and active/queued receive operations across receiver clones.
+    /// A reusable service reserves its whole connection budget until it drains.
     #[must_use]
     pub fn active_streams(&self) -> usize { self.admission.active.load(Ordering::Relaxed) }
 
@@ -468,6 +469,18 @@ impl LiveStreamListener {
         let timeout = config.operation_timeout;
         let (tcp, _) = bounded(cx, timeout, "accept", self.listener.accept()).await?;
         let tls = bounded(cx, timeout, "TLS handshake", self.receiver.acceptor.accept(tcp)).await?;
+        self.receiver.receive_authenticated(cx, tls, sink, progress).await
+    }
+}
+
+impl LiveStreamReceiver {
+    // One protocol owner for the one-shot listener and reusable service. The
+    // caller must complete this receiver's TLS accept before handing over I/O.
+    async fn receive_authenticated<W: AsyncWrite + Unpin>(
+        &self, cx: &Cx, tls: TlsStream<TcpStream>, sink: &mut W, progress: &mut Progress,
+    ) -> Result<LiveStreamReceipt, LiveStreamError> {
+        let config = &self.config;
+        let timeout = config.operation_timeout;
         check_alpn(&tls)?;
         let mut wire = Wire::new(tls);
         let hello = bounded(cx, timeout, "hello read", wire.receive()).await?;
@@ -503,6 +516,10 @@ impl LiveStreamListener {
         }
     }
 }
+
+/// Reusable, bounded, scope-owned live receiver service.
+#[path = "native_live/service.rs"]
+pub mod service;
 
 async fn write_epoch<W: AsyncWrite + Unpin>(sink: &mut W, data: &[u8], total: &mut u64) -> io::Result<()> {
     let mut written = 0;
