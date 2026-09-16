@@ -95,8 +95,7 @@ fn caught_context_divergence_cannot_turn_runtime_quiescence_into_replay_success(
         lab.scheduler.lock().schedule(task, 0);
         lab.run_until_quiescent();
         assert!(lab.is_quiescent());
-        let outcome = result.lock().unwrap().expect("task must publish a result");
-        outcome
+        result.lock().unwrap().expect("task must publish a result")
     }
     let capture = Arc::new(RecordingEntropy::new(Arc::new(DetEntropy::new(3)), limits()).unwrap());
     assert!(!scenario(capture.clone(), false));

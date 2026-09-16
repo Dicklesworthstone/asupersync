@@ -166,8 +166,7 @@ fn replay_in_lab(tape: IoTape) -> ResultShape {
     lab.run_until_quiescent();
     assert!(lab.is_quiescent());
     assert_eq!(lab.state.live_task_count(), 0);
-    let result = output.lock().unwrap().take().expect("a panicked replay cannot look successful");
-    result
+    output.lock().unwrap().take().expect("a panicked replay cannot look successful")
 }
 
 #[test]
