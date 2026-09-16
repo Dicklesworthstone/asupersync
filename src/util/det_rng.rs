@@ -87,10 +87,17 @@ impl DetRng {
     ///
     /// **Security**: Uses OS entropy to generate a cryptographically random seed.
     /// This provides replay-safe determinism while preventing seed prediction.
+    ///
+    /// # Panics
+    ///
+    /// Panics when strict entropy isolation is enabled. Use [`Self::new`] with
+    /// an explicit seed or the task's `Cx` entropy capability in that mode.
     #[must_use]
     pub fn from_entropy() -> Self {
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hash, Hasher};
+
+        crate::util::entropy::check_ambient_entropy("det-rng");
 
         // Generate high-quality seed from OS entropy
         let random_state = RandomState::new();
