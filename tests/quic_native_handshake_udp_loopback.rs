@@ -160,6 +160,44 @@ fn run_handshake_drop_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Ar
 }
 
 #[test]
+fn server_handshake_done_is_application_only_and_retransmitted_until_acked() {
+    use asupersync::net::atp::protocol::quic_frames::QuicFrame;
+    use asupersync::net::quic_native::{PacketNumberSpace, StreamRole};
+
+    let cx = Cx::for_testing();
+    let mut server = NativeQuicConnection::new(NativeQuicConnectionConfig {
+        role: StreamRole::Server,
+        ..NativeQuicConnectionConfig::default()
+    });
+    server.begin_handshake(&cx).unwrap();
+    server.on_handshake_keys_available(&cx).unwrap();
+    server.on_1rtt_keys_available(&cx).unwrap();
+    assert!(server.generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200).unwrap().is_empty());
+    server.on_handshake_confirmed(&cx).unwrap();
+    server.on_handshake_confirmed(&cx).unwrap();
+    for space in [PacketNumberSpace::Initial, PacketNumberSpace::Handshake] {
+        assert!(server.generate_frames(&cx, space, 1200).unwrap().is_empty());
+    }
+    let first = server.generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200).unwrap();
+    assert_eq!(first, vec![QuicFrame::HandshakeDone]);
+    let original = server.on_packet_sent_with_frames(
+        &cx, PacketNumberSpace::ApplicationData, 64, true, true, 1, &first,
+    ).unwrap();
+    server.on_probe_timeout(&cx).unwrap();
+    let probe = server.generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200).unwrap();
+    assert!(probe.contains(&QuicFrame::HandshakeDone));
+    server.on_packet_sent_with_frames(
+        &cx, PacketNumberSpace::ApplicationData, 64, true, true, 2, &probe,
+    ).unwrap();
+    // An ACK for the original flight must also retire the retransmitted copy.
+    server.on_ack_received(&cx, PacketNumberSpace::ApplicationData, &[original], 0, 3).unwrap();
+    server.on_probe_timeout(&cx).unwrap();
+    server.on_handshake_confirmed(&cx).unwrap();
+    let after_ack = server.generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200).unwrap();
+    assert!(!after_ack.contains(&QuicFrame::HandshakeDone));
+}
+
+#[test]
 fn handshake_done_rejects_invalid_receiver_role_and_packet_space() {
     use asupersync::net::atp::protocol::quic_frames::QuicFrame;
     use asupersync::net::quic_native::{PacketNumberSpace, StreamRole};
