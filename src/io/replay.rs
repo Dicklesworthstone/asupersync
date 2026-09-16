@@ -295,12 +295,12 @@ impl WriteInput<'_, '_> {
         hash.update(b"asupersync.io-write.v1");
         match self {
             Self::Scalar(buf) => hash.update(buf),
-            Self::Vectored(bufs) => { for buf in bufs { hash.update(buf.as_ref()); } }
+            Self::Vectored(bufs) => { for buf in bufs { hash.update(&buf[..]); } }
         }
         hash.finalize().into()
     }
 
-    fn matches_slices(self, recorded: &Option<Vec<usize>>) -> bool {
+    fn matches_slices(self, recorded: Option<&Vec<usize>>) -> bool {
         match (self, recorded) {
             (Self::Scalar(_), None) => true,
             (Self::Vectored(bufs), Some(lengths)) => {
@@ -509,7 +509,7 @@ impl ReplayIo {
         let Event::Write { length, slices, digest, accepted, error } = &self.tape.events[self.index] else {
             unreachable!("operation checked above")
         };
-        if input.length() != Some(*length) || !input.matches_slices(slices) || input.digest() != *digest {
+        if input.length() != Some(*length) || !input.matches_slices(slices.as_ref()) || input.digest() != *digest {
             return Poll::Ready(Err(self.refuse(operation, IoReplayMismatch::Request)));
         }
         let result = error.map_or(Ok(*accepted), |error| Err(error.replay()));

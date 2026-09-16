@@ -61,11 +61,13 @@ pub enum EntropyTapeError {
     Allocation,
 }
 
-/// Sensitive canonical bytes. Debug shows only their length; Drop zeroizes
-/// the owned buffer. `as_ref()` exposes plaintext deliberately for caller-owned
-/// encrypted storage or transport. Copies and persisted files are the caller's
-/// responsibility. This encoding provides integrity, NOT confidentiality or
-/// authenticity, and must not be placed in ordinary diagnostic artifacts.
+/// Sensitive canonical bytes.
+///
+/// Debug shows only their length; Drop zeroizes the owned buffer. `as_ref()`
+/// exposes plaintext deliberately for caller-owned encrypted storage or
+/// transport. Copies and persisted files are the caller's responsibility. This
+/// encoding provides integrity, NOT confidentiality or authenticity, and must
+/// not be placed in ordinary diagnostic artifacts.
 pub struct EntropyTapeBytes(Vec<u8>);
 
 impl fmt::Debug for EntropyTapeBytes {

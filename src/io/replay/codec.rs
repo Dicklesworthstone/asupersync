@@ -87,9 +87,11 @@ pub enum IoTapeError {
     Allocation,
 }
 
-/// Owned sensitive plaintext encoding. Drop zeroizes this buffer, not copies or
-/// files made by a caller. Protect exports with caller-owned encryption and
-/// access controls; a checksum is neither encryption nor authentication.
+/// Owned sensitive plaintext encoding.
+///
+/// Drop zeroizes this buffer, not copies or files made by a caller. Protect
+/// exports with caller-owned encryption and access controls; a checksum is
+/// neither encryption nor authentication.
 pub struct IoTapeBytes(Vec<u8>);
 
 impl fmt::Debug for IoTapeBytes {
