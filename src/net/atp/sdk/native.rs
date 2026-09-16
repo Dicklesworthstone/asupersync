@@ -212,19 +212,26 @@ impl NativeTransferClient {
     }
 
     fn admit(&self) -> Result<NativeAdmission, NativeTransferError> {
-        self.shared
-            .active
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
-                // The strict comparison also prevents usize overflow.
-                if active < self.shared.limit {
-                    Some(active + 1)
-                } else {
-                    None
-                }
-            })
-            .map_err(|_| NativeTransferError::CapacityExceeded {
-                limit: self.shared.limit,
-            })?;
+        // Use the same CAS retry algorithm on stable and nightly, where
+        // fetch_update was renamed to try_update.
+        let mut active = self.shared.active.load(Ordering::Relaxed);
+        loop {
+            // The strict comparison also prevents usize overflow.
+            if active >= self.shared.limit {
+                return Err(NativeTransferError::CapacityExceeded {
+                    limit: self.shared.limit,
+                });
+            }
+            match self.shared.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => active = observed,
+            }
+        }
         Ok(NativeAdmission {
             shared: Arc::clone(&self.shared),
         })
