@@ -29,13 +29,17 @@ use asupersync::types::CancelReason;
 use clap::Args;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use signal_hook::consts::signal::{SIGINT, SIGTERM};
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+#[path = "revocation_policy.rs"]
+mod revocation_policy;
+use revocation_policy::RevocationPolicy;
 
 const CONTROL_TICK: Duration = Duration::from_millis(50);
 type Publications = Arc<Mutex<BTreeMap<ResumeSessionKey, LiveFilePublication>>>;
@@ -133,8 +137,10 @@ fn deadline(now: u64, seconds: u64) -> u64 {
 // inbox locks remain process-owned. Started blocking jobs also hold an Arc.
 static LEDGER_OWNERSHIP: OnceLock<Arc<Ledger>> = OnceLock::new();
 
-pub(super) fn serve(config: ServeConfig, options: Options) -> io::Result<()> {
-    serve_inner(config, options, None, false)
+pub(super) fn serve(
+    config: ServeConfig, options: Options, revocations: Option<PathBuf>,
+) -> io::Result<()> {
+    serve_inner(config, options, None, false, revocations)
 }
 
 pub(super) fn serve_durable(
@@ -142,6 +148,7 @@ pub(super) fn serve_durable(
     options: Options,
     path: &Path,
     recover_committed: bool,
+    revocations: Option<PathBuf>,
 ) -> io::Result<()> {
     // Ledger growth has its own bound; never place it in a quota-accounted inbox.
     let parent = path
@@ -159,7 +166,7 @@ pub(super) fn serve_durable(
     LEDGER_OWNERSHIP
         .set(Arc::clone(&ledger))
         .map_err(|_| io::Error::other("foreground process already owns a session ledger"))?;
-    serve_inner(config, options, Some(ledger), recover_committed)
+    serve_inner(config, options, Some(ledger), recover_committed, revocations)
 }
 
 fn serve_inner(
@@ -167,6 +174,7 @@ fn serve_inner(
     options: Options,
     ledger: Option<Arc<Ledger>>,
     recover_committed: bool,
+    revocations: Option<PathBuf>,
 ) -> io::Result<()> {
     let limits = options.config(config.max_connections)?;
     if !(1..=86_400).contains(&config.shutdown_grace_secs) {
@@ -189,8 +197,22 @@ fn serve_inner(
         .iter()
         .map(|client| settings::selector(&client.certificate_sha256))
         .collect::<io::Result<Vec<_>>>()?;
-    let authorization = NativeClientAuthorization::new(settings::roots(&config.client_ca)?, ids)
-        .map_err(|_| invalid("invalid explicit client authorization"))?;
+    let authorization = NativeClientAuthorization::new(
+        settings::roots(&config.client_ca)?, ids.iter().copied(),
+    ).map_err(|_| invalid("invalid explicit client authorization"))?;
+    let revocation_policy = match revocations {
+        Some(path) => {
+            let parent = path.parent().ok_or_else(|| invalid("revocation policy parent required"))?;
+            let parent = std::fs::canonicalize(parent)?;
+            for inbox in &config.clients {
+                if std::fs::canonicalize(&inbox.directory)? == parent {
+                    return Err(invalid("revocation policy must be outside all inbox directories"));
+                }
+            }
+            Some(RevocationPolicy::open(path, ids, authorization.clone())?)
+        }
+        None => None,
+    };
     let receiver = sdk
         .live_stream_receiver(
             profile,
@@ -202,7 +224,11 @@ fn serve_inner(
     INBOX_OWNERSHIP
         .set(Arc::clone(&inboxes))
         .map_err(|_| io::Error::other("foreground process already owns inboxes"))?;
-    let signals = Signals::new([SIGINT, SIGTERM])?;
+    let signals = if revocation_policy.is_some() {
+        Signals::new([SIGINT, SIGTERM, SIGHUP])?
+    } else {
+        Signals::new([SIGINT, SIGTERM])?
+    };
     runtime(
         config.workers,
         serve_loop(
@@ -214,6 +240,7 @@ fn serve_inner(
             signals,
             ledger,
             recover_committed,
+            revocation_policy,
         ),
     )?;
     emit(json!({"schema_version": 1, "event": "stopped", "drained": true}))
@@ -228,6 +255,7 @@ async fn serve_loop(
     mut signals: Signals,
     ledger: Option<Arc<Ledger>>,
     recover_committed: bool,
+    mut revocation_policy: Option<RevocationPolicy>,
 ) -> io::Result<()> {
     let cx = Cx::current().ok_or_else(|| io::Error::other("missing shared resume context"))?;
     let scope = cx.scope();
@@ -235,6 +263,9 @@ async fn serve_loop(
         .bind_resumable_service::<LedgerSink>(&cx, config.bind, limits)
         .await
         .map_err(|_| io::Error::other("shared resumable listener could not bind"))?;
+    if let Some(policy) = &revocation_policy {
+        policy.install(&mut service)?;
+    }
     let publications: Publications = Arc::new(Mutex::new(BTreeMap::new()));
     let tracked = Arc::clone(&publications);
     let byte_limit = config.max_transfer_bytes;
@@ -295,6 +326,8 @@ async fn serve_loop(
         "mode": "shared", "application_commit": true, "session_preallocated": false,
         "durable_session_ledger": durable, "maximum_durable_keys": maximum_durable_keys,
         "continuation_restored": false, "committed_proof_recovery": recover_committed,
+        "revocation_generation": revocation_policy.as_ref().map(RevocationPolicy::generation),
+        "revoked_clients": service.revoked_clients(),
         "max_connections": limits.max_connections, "max_sessions": limits.max_sessions,
         "max_sessions_per_client": limits.max_sessions_per_client,
         "max_session_keys": limits.max_session_keys,
@@ -307,9 +340,18 @@ async fn serve_loop(
     let mut stopping_at = None;
     let mut cancelling = false;
     let mut failure = None;
+    let mut output_open = true;
     loop {
         let now = cx.now().as_nanos();
-        let signal_count = signals.pending().count();
+        let mut reload = false;
+        let mut signal_count = 0;
+        for signal in signals.pending() {
+            if signal == SIGHUP {
+                reload = true;
+            } else {
+                signal_count += 1;
+            }
+        }
         if signal_count != 0 {
             if stopping_at.is_none() {
                 service.stop_accepting();
@@ -329,11 +371,37 @@ async fn serve_loop(
             service.cancel(CancelReason::user("shared resume shutdown grace expired"));
             cancelling = true;
         }
+        if stopping_at.is_none() && reload {
+            if let Some(policy) = &mut revocation_policy {
+                let loaded = policy.reload(&cx, Duration::from_secs(config.operation_timeout_secs),
+                    &mut service).await;
+                let output = match loaded {
+                    Ok(event) => emit(event),
+                    Err(error) => {
+                        policy.fail_closed(&mut service);
+                        failure = Some(error);
+                        stopping_at = Some(cx.now().as_nanos());
+                        cancelling = true;
+                        emit(json!({"schema_version": 1, "event": "revocation_policy_rejected",
+                            "generation": policy.generation(), "admission_closed": true,
+                            "drained": false}))
+                    }
+                };
+                if let Err(error) = output {
+                    output_open = false;
+                    if failure.is_none() { failure = Some(error); }
+                    policy.fail_closed(&mut service);
+                    stopping_at = Some(cx.now().as_nanos());
+                    cancelling = true;
+                }
+            }
+        }
         if stopping_at.is_none() {
             // Active sessions are never retired underneath their worker. An
             // expired Proof deadline remains due when that join is collected.
             if let Err(error) = expire(&mut service, &mut retention, &publications, now) {
                 failure = Some(error);
+                output_open = false;
                 service.cancel(CancelReason::user("shared resume retirement output failed"));
                 stopping_at = Some(now);
                 cancelling = true;
@@ -385,9 +453,9 @@ async fn serve_loop(
         } else {
             None
         };
-        // Finish recording/retiring even if output fails, then cancel and drain
-        // every child before returning. A broken output pipe cannot detach work.
-        let output = if failure.is_none() {
+        // A policy/read failure must not suppress joined publication evidence.
+        // Only an actual output failure disables subsequent result writes.
+        let output = if output_open {
             emit(event)
         } else {
             Ok(())
@@ -397,6 +465,7 @@ async fn serve_loop(
             None => Ok(()),
         };
         if let Err(error) = output.and(retired) {
+            output_open = false;
             if failure.is_none() {
                 failure = Some(error);
             }
@@ -436,6 +505,9 @@ fn observe(
         Some(ResumeSessionStatus::Active) => None, // Busy refusal must not touch the owner.
         Some(ResumeSessionStatus::Idle) => {
             let snapshot = service.session_snapshot(&key)?;
+            if service.is_client_revoked(&key.client) {
+                return Some((key, "client_revoked"));
+            }
             if snapshot.failed {
                 return Some((key, "local_failure"));
             }
@@ -470,7 +542,11 @@ fn expire(
         .iter()
         .filter_map(|(key, retained)| {
             if service.session_status(key) == Some(ResumeSessionStatus::Idle) {
-                retained.expired(now).map(|reason| (*key, reason))
+                if service.is_client_revoked(&key.client) {
+                    Some((*key, "client_revoked"))
+                } else {
+                    retained.expired(now).map(|reason| (*key, reason))
+                }
             } else {
                 None
             }
@@ -518,6 +594,7 @@ fn rejection_status(rejection: &ResumeServiceRejection) -> &'static str {
     match rejection {
         ResumeServiceRejection::Busy => "session_busy",
         ResumeServiceRejection::Retired => "session_retired",
+        ResumeServiceRejection::Revoked => "client_revoked",
         ResumeServiceRejection::Capacity(_) => "session_capacity_refused",
         ResumeServiceRejection::AttemptsExhausted => "attempts_exhausted",
         ResumeServiceRejection::Stopping => "stopping",

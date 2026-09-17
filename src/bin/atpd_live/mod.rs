@@ -83,6 +83,9 @@ enum Command {
         /// Recover only committed final Proofs after checking saved file bytes.
         #[arg(long)]
         recover_committed: bool,
+        /// Existing private monotonic client-denial policy; reload with SIGHUP.
+        #[arg(long)]
+        revocations: Option<PathBuf>,
         #[command(flatten)]
         options: shared_resume::Options,
     },
@@ -104,6 +107,9 @@ enum Command {
         /// Existing strict receiver settings with per-client private inboxes.
         #[arg(long)]
         config: PathBuf,
+        /// Existing private monotonic client-denial policy; reload with SIGHUP.
+        #[arg(long)]
+        revocations: Option<PathBuf>,
         #[command(flatten)]
         options: shared_resume::Options,
     },
@@ -167,12 +173,14 @@ pub fn run() -> io::Result<()> {
             config,
             session_ledger,
             recover_committed,
+            revocations,
             options,
         } => shared_resume::serve_durable(
             settings::load(&config)?,
             options,
             &session_ledger,
             recover_committed,
+            revocations,
         ),
         Command::InitSessionLedger { path, max_keys } => {
             ledger::Ledger::initialize(&path, max_keys)?;
@@ -182,8 +190,8 @@ pub fn run() -> io::Result<()> {
         }
         Command::InspectSessionLedger { path } => ledger::inspect(&path),
         Command::Serve { config } => serve(settings::load(&config)?),
-        Command::ServeResumable { config, options } => {
-            shared_resume::serve(settings::load(&config)?, options)
+        Command::ServeResumable { config, revocations, options } => {
+            shared_resume::serve(settings::load(&config)?, options, revocations)
         }
         Command::Send { config, input } => send(settings::load(&config)?, input),
         Command::ReceiveResumable {
