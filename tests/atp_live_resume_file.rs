@@ -1,6 +1,6 @@
 //! Resume a real private file after a flushed epoch and a partial next write.
 //! Files and staging aliases are deliberately retained after the test.
-#![cfg(all(unix, feature = "tls", feature = "test-internals")))]
+#![cfg(all(unix, feature = "tls", feature = "test-internals"))]
 
 use asupersync::Cx;
 use asupersync::io::AsyncWrite;
