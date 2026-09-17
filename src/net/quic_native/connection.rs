@@ -2298,6 +2298,9 @@ impl NativeQuicConnection {
     /// [`NativeQuicConnectionError::is_stream_reassembly_backpressure`], discard
     /// this packet, and continue receiving. Other frame errors retain their
     /// ordinary processing semantics; this is not a general packet rollback.
+    /// A peer close ends packet processing immediately: preceding effects remain,
+    /// but trailing frames and subsequent packets cannot mutate the draining
+    /// connection or queue acknowledgements.
     pub fn process_packet_frames(
         &mut self,
         cx: &Cx,
@@ -2307,6 +2310,12 @@ impl NativeQuicConnection {
         now_micros: u64,
     ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
+        if matches!(
+            self.transport.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            return Ok(());
+        }
         if self
             .streams
             .packet_reassembly_fragment_limit_would_be_exceeded(
@@ -2330,6 +2339,12 @@ impl NativeQuicConnection {
                 self.process_datagram_frame_run(cx, &frames[start..index], space)?;
             } else {
                 self.process_frame_at(cx, &frames[index], space, now_micros)?;
+                if matches!(frames[index], QuicFrame::ConnectionClose { .. }) {
+                    // The peer has ended this connection. In particular, do
+                    // not let a trailing frame turn the close into an error
+                    // or enqueue an ACK/PATH_RESPONSE after entering draining.
+                    return Ok(());
+                }
                 index = index.saturating_add(1);
             }
         }
@@ -5309,6 +5324,98 @@ mod tests {
         conn.begin_close(&cx, 50_000, 0xdead).expect("close");
         assert_eq!(conn.transport().close_code(), Some(0xdead));
         assert!(!conn.close_was_peer_initiated());
+    }
+
+    #[test]
+    fn packet_peer_close_preserves_prefix_and_ignores_tail_without_ack() {
+        let cx = test_cx();
+        let space = PacketNumberSpace::ApplicationData;
+        for tail in [
+            QuicFrame::PathChallenge { data: [7; 8] },
+            QuicFrame::Datagram {
+                data: Bytes::from_static(b"after close"),
+            },
+            QuicFrame::Stream {
+                stream_id: VarInt::from_u64_unchecked(0),
+                offset: None,
+                data: Bytes::from_static(b"after close"),
+                fin: false,
+            },
+        ] {
+            let mut conn = established_conn();
+            let stream = conn.open_local_bidi(&cx).expect("stream");
+            assert_eq!(stream.0, 0);
+            let frames = [
+                QuicFrame::Datagram {
+                    data: Bytes::from_static(b"before close"),
+                },
+                QuicFrame::ConnectionClose {
+                    error_code: VarInt::from_u64_unchecked(42),
+                    frame_type: None,
+                    reason_phrase: Bytes::new(),
+                },
+                tail,
+            ];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).expect("encode");
+            conn.process_packet_payload(&cx, space, 7, &payload, 100)
+                .expect("trailing frames cannot fail a peer close");
+
+            assert_eq!(conn.state(), QuicConnectionState::Draining);
+            assert!(conn.close_was_peer_initiated());
+            assert_eq!(conn.transport().close_code(), Some(42));
+            assert_eq!(
+                conn.recv_datagram(),
+                Some(Bytes::from_static(b"before close"))
+            );
+            assert_eq!(conn.recv_datagram(), None);
+            assert_eq!(conn.streams.stream(stream).unwrap().recv_offset, 0);
+            assert!(conn.pending_control_frames.is_empty());
+            assert!(conn.received_ack_trackers[2].ranges.is_empty());
+        }
+    }
+
+    #[test]
+    fn packet_delivery_after_close_has_no_effects_and_still_checks_cancellation() {
+        for immediate in [false, true] {
+            let cx = test_cx();
+            let mut conn = established_conn();
+            if immediate {
+                conn.close_immediately(&cx, 42).expect("close");
+            } else {
+                conn.begin_close(&cx, 100, 42).expect("drain");
+            }
+            let state = conn.state();
+            let deadline = conn.transport().drain_deadline_micros();
+            let frames = [
+                QuicFrame::PathChallenge { data: [9; 8] },
+                QuicFrame::ConnectionClose {
+                    error_code: VarInt::from_u64_unchecked(99),
+                    frame_type: None,
+                    reason_phrase: Bytes::new(),
+                },
+            ];
+            conn.process_packet_frames(&cx, PacketNumberSpace::ApplicationData, 8, &frames, 200)
+                .expect("terminal packet discarded");
+            assert_eq!(conn.state(), state);
+            assert_eq!(conn.transport().close_code(), Some(42));
+            assert_eq!(conn.transport().drain_deadline_micros(), deadline);
+            assert!(!conn.close_was_peer_initiated());
+            assert!(conn.pending_control_frames.is_empty());
+            assert!(conn.received_ack_trackers[2].ranges.is_empty());
+
+            cx.set_cancel_requested(true);
+            assert_eq!(
+                conn.process_packet_frames(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    9,
+                    &frames,
+                    300,
+                ),
+                Err(NativeQuicConnectionError::Cancelled),
+            );
+        }
     }
 
     #[test]
