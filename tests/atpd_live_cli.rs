@@ -326,3 +326,6 @@ fn executable_sender_requires_a_real_handshake_not_merely_a_listening_socket() {
 // Retained-session executable recovery tests share the existing fixtures.
 #[path = "atpd_live_cli/resume.rs"]
 mod resume;
+// Durable admission and receipt recovery use independent process/wire witnesses.
+#[path = "atpd_live_cli/ledger.rs"]
+mod ledger;
