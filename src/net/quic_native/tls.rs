@@ -1723,6 +1723,7 @@ struct KeyEpoch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuicTlsMachine {
     level: CryptoLevel,
+    handshake_complete: bool,
     handshake_confirmed: bool,
     resumption_enabled: bool,
     local: KeyEpoch,
@@ -1738,6 +1739,7 @@ impl Default for QuicTlsMachine {
     fn default() -> Self {
         Self {
             level: CryptoLevel::Initial,
+            handshake_complete: false,
             handshake_confirmed: false,
             resumption_enabled: false,
             local: KeyEpoch::default(),
@@ -1761,10 +1763,10 @@ impl QuicTlsMachine {
         self.level
     }
 
-    /// Whether 1-RTT traffic is allowed.
+    /// Whether authenticated TLS completion permits 1-RTT traffic.
     #[must_use]
     pub fn can_send_1rtt(&self) -> bool {
-        self.level == CryptoLevel::OneRtt && self.handshake_confirmed
+        self.level == CryptoLevel::OneRtt && self.handshake_complete
     }
 
     /// Whether the handshake has been confirmed (RFC 9001 §4.1.2). The ACK path
@@ -1778,7 +1780,7 @@ impl QuicTlsMachine {
     /// Whether 0-RTT application-data packets are currently allowed.
     #[must_use]
     pub fn can_send_0rtt(&self) -> bool {
-        self.level >= CryptoLevel::Handshake && !self.handshake_confirmed && self.resumption_enabled
+        self.level >= CryptoLevel::Handshake && !self.handshake_complete && self.resumption_enabled
     }
 
     /// Whether session resumption is enabled for this handshake.
@@ -1828,11 +1830,21 @@ impl QuicTlsMachine {
         self.advance_to(CryptoLevel::OneRtt)
     }
 
-    /// Mark handshake as confirmed.
-    pub fn on_handshake_confirmed(&mut self) -> Result<(), QuicTlsError> {
+    /// Allow application traffic after the authenticated TLS handshake completes.
+    ///
+    /// The connection owner must enforce its peer-identity gate before calling
+    /// this; installing 1-RTT keys alone does not establish authentication.
+    pub(crate) fn on_authenticated_handshake_complete(&mut self) -> Result<(), QuicTlsError> {
         if self.level != CryptoLevel::OneRtt {
             return Err(QuicTlsError::HandshakeNotConfirmed);
         }
+        self.handshake_complete = true;
+        Ok(())
+    }
+
+    /// Mark handshake as confirmed.
+    pub fn on_handshake_confirmed(&mut self) -> Result<(), QuicTlsError> {
+        self.on_authenticated_handshake_complete()?;
         self.handshake_confirmed = true;
         Ok(())
     }
@@ -2049,6 +2061,41 @@ mod tests {
             .expect("trusted localhost chain verifies");
         assert_eq!(receipt.chain_len, 1);
         assert_eq!(receipt.root_count, 1);
+    }
+
+    #[test]
+    fn authenticated_completion_allows_data_but_not_key_updates() {
+        let mut machine = QuicTlsMachine::new();
+        machine.on_handshake_keys_available().unwrap();
+        machine.enable_resumption();
+        assert!(machine.can_send_0rtt());
+        assert_eq!(
+            machine.on_authenticated_handshake_complete(),
+            Err(QuicTlsError::HandshakeNotConfirmed)
+        );
+        assert!(!machine.can_send_1rtt());
+        machine.on_1rtt_keys_available().unwrap();
+        assert!(!machine.can_send_1rtt(), "keys alone do not authenticate");
+        machine.on_authenticated_handshake_complete().unwrap();
+        assert!(machine.can_send_1rtt());
+        assert!(!machine.can_send_0rtt());
+        assert!(!machine.handshake_confirmed());
+        assert_eq!(
+            machine.request_local_key_update(),
+            Err(QuicTlsError::HandshakeNotConfirmed)
+        );
+        assert_eq!(
+            machine.on_peer_key_phase(true),
+            Err(QuicTlsError::HandshakeNotConfirmed)
+        );
+        assert!(!machine.peer_key_phase_is_new_update(true, 1));
+        assert!(!machine.local_key_phase());
+        machine.on_handshake_confirmed().unwrap();
+        assert!(machine.handshake_confirmed());
+        assert!(matches!(
+            machine.request_local_key_update().unwrap(),
+            KeyUpdateEvent::LocalUpdateScheduled { .. }
+        ));
     }
 
     #[test]

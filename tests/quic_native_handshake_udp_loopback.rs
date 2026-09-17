@@ -684,6 +684,7 @@ fn decode_test_handshake_packet(
 
 #[test]
 fn real_tls13_final_ack_does_not_retransmit_client_finished() {
+    use asupersync::net::quic_core::TransportParameters;
     use asupersync::net::quic_native::NativeQuicUdpConnection;
 
     block_on(async {
@@ -696,7 +697,7 @@ fn real_tls13_final_ack_does_not_retransmit_client_finished() {
             QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
                 .await
                 .unwrap();
-        let mut server_endpoint =
+        let server_endpoint =
             QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
                 .await
                 .unwrap();
@@ -716,15 +717,22 @@ fn real_tls13_final_ack_does_not_retransmit_client_finished() {
             vec![ATP_QUIC_ALPN.to_vec()],
         )
         .unwrap();
-        // Empty transport parameters are valid and sufficient for this
-        // handshake-only journey; no application traffic is queued.
+        let mut parameters = Vec::new();
+        TransportParameters {
+            initial_max_data: Some(1 << 20),
+            initial_max_stream_data_bidi_remote: Some(1 << 18),
+            initial_max_streams_bidi: Some(4),
+            ..TransportParameters::default()
+        }
+        .encode(&mut parameters)
+        .unwrap();
         let client_driver = QuicHandshakeDriver::client(
             client_tls,
             ServerName::try_from("localhost").unwrap(),
-            Vec::new(),
+            parameters.clone(),
         )
         .unwrap();
-        let mut server_driver = QuicHandshakeDriver::server(server_tls, Vec::new()).unwrap();
+        let server_driver = QuicHandshakeDriver::server(server_tls, parameters).unwrap();
         let initial_cid = ConnectionId::new(b"ack-initial").unwrap();
         let (client, server) = zip(
             NativeQuicUdpConnection::connect(
@@ -737,17 +745,22 @@ fn real_tls13_final_ack_does_not_retransmit_client_finished() {
                 NativeQuicConnectionConfig::default(),
                 ATP_QUIC_ALPN,
             ),
-            server_handshake_over_udp(
+            NativeQuicUdpConnection::accept(
                 &cx,
-                &mut server_endpoint,
-                &mut server_driver,
+                server_endpoint,
+                server_driver,
                 initial_cid,
                 ConnectionId::new(b"ack-server").unwrap(),
+                NativeQuicConnectionConfig::default(),
+                ATP_QUIC_ALPN,
             ),
         )
         .await;
-        server.expect("server sent final Handshake ACK");
+        let mut server = server.expect("server sent final Handshake ACK");
         let mut client = client.expect("authenticated UDP client");
+        assert!(server.connection().inner().tls().handshake_confirmed());
+        assert!(client.connection().can_send_app_data());
+        assert!(!client.connection().inner().tls().handshake_confirmed());
         let progress = client
             .drive_io_once(&cx, Duration::from_secs(2))
             .await
@@ -756,6 +769,42 @@ fn real_tls13_final_ack_does_not_retransmit_client_finished() {
         assert!(progress.packets_dropped > 0, "received a long-header ACK");
         assert_eq!(progress.handshake_flights_retransmitted, 0);
         assert_eq!(progress.packets_sent, 0);
+        assert!(!client.connection().inner().tls().handshake_confirmed());
+
+        // TLS completion permits application traffic before peer confirmation.
+        // The server's first application response carries HANDSHAKE_DONE.
+        let stream = client.connection_mut().open_bidi_stream(&cx).unwrap();
+        client
+            .connection_mut()
+            .write_stream(
+                &cx,
+                stream,
+                Bytes::from_static(b"before-confirmation"),
+                true,
+            )
+            .unwrap();
+        assert!(client.flush(&cx).await.unwrap() > 0);
+        assert!(!client.connection().inner().tls().handshake_confirmed());
+        let received = server
+            .drive_io_once(&cx, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(!received.receive_timed_out);
+        assert_eq!(
+            server
+                .connection_mut()
+                .read_stream(&cx, stream, 64)
+                .unwrap()
+                .as_ref(),
+            b"before-confirmation"
+        );
+        assert!(received.packets_sent > 0);
+        let confirmed = client
+            .drive_io_once(&cx, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(!confirmed.receive_timed_out);
+        assert!(client.connection().inner().tls().handshake_confirmed());
     });
 }
 

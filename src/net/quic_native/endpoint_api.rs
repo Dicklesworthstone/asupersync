@@ -801,6 +801,21 @@ mod tests {
     fn loopback_reassembly_backpressure_retains_reliable_frames_for_retry() {
         let cx = test_cx();
         let (mut client, mut server) = established_pair(&cx);
+        // Settle server HANDSHAKE_DONE and its ACK before testing whether a
+        // rejected stream packet produces any output. Neither handshake
+        // control frame is a response to the backpressured stream packet.
+        assert_eq!(
+            pump_app_data(&cx, &mut server, &mut client, 1200, 0).unwrap(),
+            1
+        );
+        assert_eq!(
+            pump_app_data(&cx, &mut client, &mut server, 1200, 0).unwrap(),
+            1
+        );
+        assert_eq!(
+            pump_app_data(&cx, &mut server, &mut client, 1200, 0).unwrap(),
+            0
+        );
         let id = client.open_bidi_stream(&cx).unwrap();
         let mut expected = vec![b'.'; 8192];
         for fragment in 0..4095usize {

@@ -573,8 +573,12 @@ impl NativeQuicUdpConnection {
             // Reaching here means rustls/WebPKI completed the client handshake
             // for its configured ServerName and roots.
             connection.record_verified_server_identity();
+            connection
+                .inner_mut()
+                .on_authenticated_handshake_complete(cx)?;
+        } else {
+            connection.confirm_handshake(cx)?;
         }
-        connection.confirm_handshake(cx)?;
 
         // DATAGRAM admission must know this connection's exact packet budget
         // before the first flush (GH#66).

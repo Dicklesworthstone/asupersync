@@ -670,8 +670,13 @@ impl NativeQuicConnection {
         self.server_identity_verified = true;
     }
 
-    /// Confirm handshake and transition transport to `Established`.
-    pub fn on_handshake_confirmed(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
+    /// Establish application readiness after verified TLS completion.
+    ///
+    /// Client peer confirmation remains separate until HANDSHAKE_DONE arrives.
+    pub(crate) fn on_authenticated_handshake_complete(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         if self.tls.level() != CryptoLevel::OneRtt {
             return Err(NativeQuicConnectionError::Tls(
@@ -690,8 +695,16 @@ impl NativeQuicConnection {
                 QuicTlsError::ServerCertificateUnverified,
             ));
         }
-        let first_confirmation = !self.tls.handshake_confirmed();
         self.transport.on_established()?;
+        self.tls.on_authenticated_handshake_complete()?;
+        self.peer_address_validated = true;
+        Ok(())
+    }
+
+    /// Confirm handshake and transition transport to `Established`.
+    pub fn on_handshake_confirmed(&mut self, cx: &Cx) -> Result<(), NativeQuicConnectionError> {
+        self.on_authenticated_handshake_complete(cx)?;
+        let first_confirmation = !self.tls.handshake_confirmed();
         self.tls.on_handshake_confirmed()?;
         if first_confirmation && self.role == StreamRole::Server {
             // RFC 9000 sections 19.20 and 13.3: confirm to the client and
@@ -699,7 +712,6 @@ impl NativeQuicConnection {
             self.pending_control_frames
                 .push_back(QuicFrame::HandshakeDone);
         }
-        self.peer_address_validated = true;
         let server_identity_verified = if self.role == StreamRole::Client {
             "true"
         } else {
@@ -5374,6 +5386,51 @@ mod tests {
             }
         }
         panic!("expected congestion to limit packet sends"); // ubs:ignore - test assertion
+    }
+
+    #[test]
+    fn authenticated_completion_preserves_identity_and_cancellation_gates() {
+        let cx = test_cx();
+        let mut conn = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+        conn.begin_handshake(&cx).unwrap();
+        conn.on_handshake_keys_available(&cx).unwrap();
+        assert!(matches!(
+            conn.on_authenticated_handshake_complete(&cx),
+            Err(NativeQuicConnectionError::Tls(
+                QuicTlsError::HandshakeNotConfirmed
+            ))
+        ));
+        conn.on_1rtt_keys_available(&cx).unwrap();
+        assert!(matches!(
+            conn.on_authenticated_handshake_complete(&cx),
+            Err(NativeQuicConnectionError::Tls(
+                QuicTlsError::ServerCertificateUnverified
+            ))
+        ));
+        assert_eq!(conn.state(), QuicConnectionState::Handshaking);
+        assert!(!conn.can_send_1rtt());
+        assert!(!conn.tls().can_send_1rtt());
+        conn.record_verified_server_identity();
+        let cancelled = test_cx();
+        cancelled.set_cancel_requested(true);
+        assert!(matches!(
+            conn.on_authenticated_handshake_complete(&cancelled),
+            Err(NativeQuicConnectionError::Cancelled)
+        ));
+        assert_eq!(conn.state(), QuicConnectionState::Handshaking);
+        assert!(!conn.tls().can_send_1rtt());
+        conn.on_authenticated_handshake_complete(&cx).unwrap();
+        assert_eq!(conn.state(), QuicConnectionState::Established);
+        assert!(conn.can_send_1rtt());
+        assert!(!conn.tls().handshake_confirmed());
+        conn.process_frame_at(
+            &cx,
+            &QuicFrame::HandshakeDone,
+            PacketNumberSpace::ApplicationData,
+            0,
+        )
+        .unwrap();
+        assert!(conn.tls().handshake_confirmed());
     }
 
     #[test]
