@@ -24,8 +24,10 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::bytes::BytesMut;
+use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
+use crate::net::atp::protocol::quic_frames::QuicFrame;
+use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::quic::{AtpPacketProtection, AtpPacketProtectionConfig};
 use crate::net::quic_core::{ConnectionId, ProtectedHeaderPrefix, TransportParameters};
 use crate::time::timeout;
@@ -45,7 +47,7 @@ use super::handshake_driver::{
 };
 use super::managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
 use super::streams::{StreamRole, StreamWindows};
-use super::transport::PacketNumberSpace;
+use super::transport::{PacketNumberSpace, QuicConnectionState};
 
 const RECEIVE_BATCH_SIZE: usize = 32;
 const MAX_PACKETS_PER_FLUSH: usize = 64;
@@ -177,6 +179,16 @@ pub struct NativeQuicUdpConnection {
     clock_origin: Instant,
     // Already protected/accounted packets remain owned across a dropped flush.
     pending_outgoing: Vec<RoutedOutgoingPacket>,
+    local_close: Option<LocalClosePacket>,
+}
+
+/// One encrypted close is retained through send failure and reused verbatim
+/// for bounded responses. Reusing ciphertext does not reuse an AEAD nonce for
+/// a new encryption operation.
+struct LocalClosePacket {
+    packet: OutgoingPacket,
+    pending: bool,
+    last_sent: Option<Instant>,
 }
 
 /// Crate-private ownership transfer after the managed endpoint's preflight.
@@ -315,6 +327,9 @@ impl NativeQuicUdpConnection {
     }
 
     pub(crate) fn into_managed_parts(self) -> NativeQuicUdpHandoffParts {
+        // Managed preflight refuses a draining/closed owner and returns it
+        // intact, including this cache. Only established owners reach here.
+        debug_assert!(self.local_close.is_none());
         let Self {
             connection,
             endpoint,
@@ -328,6 +343,7 @@ impl NativeQuicUdpConnection {
             last_final_flight_retransmit,
             clock_origin,
             pending_outgoing,
+            local_close: _,
         } = self;
         NativeQuicUdpHandoffParts {
             connection,
@@ -373,6 +389,7 @@ impl NativeQuicUdpConnection {
             last_final_flight_retransmit,
             clock_origin,
             pending_outgoing,
+            local_close: None,
         }
     }
 
@@ -502,6 +519,7 @@ impl NativeQuicUdpConnection {
             last_final_flight_retransmit: None,
             clock_origin: Instant::now(),
             pending_outgoing: Vec::new(),
+            local_close: None,
         })
     }
 
@@ -640,23 +658,120 @@ impl NativeQuicUdpConnection {
         &self.negotiated_alpn
     }
 
-    /// Protect and send a bounded batch of queued application frames.
+    /// Begin a local application close using this owner's recovery clock and
+    /// flush its protected CONNECTION_CLOSE. Continue driving I/O during the
+    /// configured drain window to answer subsequent peer traffic with bounded
+    /// retransmissions. A send error retains the close for a later `flush`.
+    pub async fn close(
+        &mut self,
+        cx: &Cx,
+        app_error_code: u64,
+    ) -> Result<usize, NativeQuicUdpConnectionError> {
+        cx.checkpoint()
+            .map_err(|_| NativeQuicUdpConnectionError::Cancelled)?;
+        if VarInt::new(app_error_code).is_err() {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "application close code must fit a QUIC varint",
+            ).into());
+        }
+        if self.connection.inner().state() != QuicConnectionState::Closed {
+            let now_micros = self.instant_micros(Instant::now());
+            self.connection.begin_close(cx, now_micros, app_error_code)?;
+        }
+        self.flush(cx).await
+    }
+
+    async fn flush_local_close(
+        &mut self,
+        cx: &Cx,
+        now: Instant,
+    ) -> Result<usize, NativeQuicUdpConnectionError> {
+        if self.connection.close_was_peer_initiated() {
+            self.local_close = None;
+            return Ok(0);
+        }
+        if self.local_close.is_none() {
+            let code = self.connection.inner().transport().close_code().ok_or(
+                NativeQuicConnectionError::InvalidState("local close has no error code"),
+            )?;
+            let error_code = VarInt::new(code).map_err(|_| {
+                NativeQuicConnectionError::InvalidState("application close code must fit a QUIC varint")
+            })?;
+            let frames = [QuicFrame::ConnectionClose {
+                error_code,
+                frame_type: None,
+                reason_phrase: Bytes::new(),
+            }];
+            let mut payload = BytesMut::new();
+            super::NativeQuicConnection::encode_frames(&frames, &mut payload)?;
+            let now_micros = self.instant_micros(now);
+            let data = assemble_protected_1rtt_packet_inner(
+                cx, self.peer_cid, self.connection.inner_mut(), &mut self.protection,
+                &frames, &payload, now_micros, false, false,
+            ).await?;
+            self.local_close = Some(LocalClosePacket {
+                packet: OutgoingPacket { dst_addr: self.peer_addr, data, send_time: Some(now) },
+                pending: true,
+                last_sent: None,
+            });
+        }
+        let close = self.local_close.as_mut().expect("retained local close");
+        if !close.pending {
+            return Ok(0);
+        }
+        let limit = self.endpoint.config().max_packet_size;
+        if close.packet.data.len() > limit {
+            return Err(QuicUdpEndpointError::PacketTooLarge {
+                size: close.packet.data.len(), limit,
+            }.into());
+        }
+        std::future::poll_fn(|task_cx| {
+            use std::task::Poll;
+            let report = match self.endpoint.poll_send_batch(cx, task_cx, std::iter::once(&close.packet)) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(if error.kind() == std::io::ErrorKind::Interrupted {
+                    NativeQuicUdpConnectionError::Cancelled
+                } else {
+                    NativeQuicUdpConnectionError::Endpoint(error.into())
+                })),
+                Poll::Ready(Ok(report)) => report,
+            };
+            if report.packets_processed > 0 {
+                close.pending = false;
+                close.last_sent = Some(Instant::now());
+            }
+            if let Some(error) = report.error {
+                return Poll::Ready(Err(NativeQuicUdpConnectionError::BatchSend(error)));
+            }
+            if report.packets_processed == 0 {
+                return Poll::Ready(Err(NativeQuicUdpConnectionError::BatchSend(
+                    "UDP close send made no progress".to_owned(),
+                )));
+            }
+            Poll::Ready(Ok(report.packets_processed))
+        }).await
+    }
+
+    /// Protect and send a bounded batch of queued application frames, or the
+    /// retained local close while draining.
     /// Unsent protected packets stay in this owner across errors or a dropped
     /// flush future and are retried before new application frames are admitted.
     pub async fn flush(&mut self, cx: &Cx) -> Result<usize, NativeQuicUdpConnectionError> {
         if cx.checkpoint().is_err() {
             return Err(NativeQuicUdpConnectionError::Cancelled);
         }
-        if matches!(
-            self.connection.inner_mut().state(),
-            super::transport::QuicConnectionState::Closed
-                | super::transport::QuicConnectionState::Draining
-        ) {
-            self.pending_outgoing.clear();
-            return Ok(0);
-        }
         let now = Instant::now();
         let now_micros = self.instant_micros(now);
+        self.connection.inner_mut().poll(cx, now_micros)?;
+        let state = self.connection.inner().state();
+        if matches!(state, QuicConnectionState::Closed | QuicConnectionState::Draining) {
+            self.pending_outgoing.clear();
+            if state == QuicConnectionState::Closed {
+                self.local_close = None;
+                return Ok(0);
+            }
+            return self.flush_local_close(cx, now).await;
+        }
         let max_frame_bytes = PROTECTED_1RTT_MAX_PACKET_BYTES
             .saturating_sub(protected_1rtt_packet_len(self.peer_cid, 0));
         self.connection
