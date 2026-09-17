@@ -321,3 +321,8 @@ fn executable_sender_requires_a_real_handshake_not_merely_a_listening_socket() {
     assert!(result["transfer"]["receipt"].is_null());
     assert!(!sender.exit().success());
 }
+
+
+// Retained-session executable recovery tests share the existing fixtures.
+#[path = "atpd_live_cli/resume.rs"]
+mod resume;
