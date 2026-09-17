@@ -748,8 +748,7 @@ impl QuicUdpEndpoint {
     ///
     /// Ensures all reactor registrations are cleaned up and no obligations leak.
     pub async fn shutdown(&mut self, cx: &Cx) -> Result<(), QuicUdpEndpointError> {
-        self.socket.clear_registration();
-        self.managed_send_socket = None;
+        self.retire_io();
         if cx.checkpoint().is_err() {
             return Err(QuicUdpEndpointError::Cancelled);
         }
@@ -759,6 +758,12 @@ impl QuicUdpEndpoint {
         // Local registrations are already retired even if the owner is cancelled.
 
         Ok(())
+    }
+
+    /// Release local I/O ownership even when an owner's future is dropped.
+    pub(crate) fn retire_io(&mut self) {
+        self.socket.clear_registration();
+        self.managed_send_socket = None;
     }
 }
 

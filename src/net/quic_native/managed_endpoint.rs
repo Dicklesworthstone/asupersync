@@ -344,6 +344,18 @@ struct ManagedIncomingPacket {
     needs_clock_stamp: bool,
 }
 
+struct ManagedShutdownCleanup<'a>(&'a mut ManagedQuicEndpoint);
+
+impl Drop for ManagedShutdownCleanup<'_> {
+    fn drop(&mut self) {
+        self.0.connection_router.discard_all();
+        self.0.pending_outgoing.clear();
+        self.0.pending_incoming.clear();
+        self.0.timer_scheduler.cancel_pending();
+        self.0.udp_endpoint.retire_io();
+    }
+}
+
 struct ManagedApplicationRegistration(Option<Arc<ManagedApplicationWake>>);
 
 impl Drop for ManagedApplicationRegistration {
@@ -1755,14 +1767,12 @@ impl ManagedQuicEndpoint {
             .unwrap_or_else(|_| Instant::now());
         self.pending_outgoing.clear();
         self.timer_scheduler.cancel_pending();
-        let close_result = self.send_shutdown_closes(cx, now).await;
-        // Terminal cleanup is local ownership release, not new runtime work.
-        // Keep it unconditional so cancellation cannot strand a retained endpoint.
-        self.connection_router.discard_all();
-        self.pending_outgoing.clear();
-        self.pending_incoming.clear();
-        self.timer_scheduler.cancel_pending();
-        let udp_result = self.udp_endpoint.shutdown(cx).await;
+        // Hold cleanup across every suspension, including a blocked socket send.
+        // Dropping this future must retire ownership on the retained endpoint.
+        let cleanup = ManagedShutdownCleanup(self);
+        let close_result = cleanup.0.send_shutdown_closes(cx, now).await;
+        let udp_result = cleanup.0.udp_endpoint.shutdown(cx).await;
+        drop(cleanup);
         close_result?;
         udp_result.map_err(|error| match error {
             QuicUdpEndpointError::Cancelled => ManagedEndpointError::Cancelled,
@@ -1802,6 +1812,7 @@ impl ManagedQuicEndpoint {
                     other => other.into(),
                 })?;
             poll_fn(|task_cx| {
+                let _current = Cx::set_current(Some(cx.clone()));
                 if cancel.checkpoint(task_cx.waker()).is_err() {
                     return Poll::Ready(Err(ManagedEndpointError::Cancelled));
                 }
@@ -2910,6 +2921,81 @@ mod tests {
                 std::io::ErrorKind::WouldBlock
             );
             endpoint.shutdown(&cx).await.unwrap();
+            assert_eq!(driver.pending_count(), 0);
+        }));
+    }
+
+    #[test]
+    fn shutdown_uses_supplied_context_when_ambient_context_is_cancelled() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let (cx, _, driver, mut endpoint, peer, _) = selection_fixture(&owner).await;
+            let ambient = Cx::new();
+            ambient.cancel_with(crate::types::CancelKind::User, None);
+            let mut shutdown = Box::pin(endpoint.shutdown(&cx));
+            let result = {
+                let _current = Cx::set_current(Some(ambient));
+                shutdown
+                    .as_mut()
+                    .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            };
+            assert!(matches!(result, Poll::Ready(Ok(()))));
+            drop(shutdown);
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+            assert_eq!(driver.pending_count(), 0);
+            assert!(peer.recv_from(&mut [0_u8; 1_200]).unwrap().0 > 0);
+        }));
+    }
+
+    #[test]
+    fn shutdown_cleanup_retires_ownership_when_parked_future_is_dropped() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let (cx, _, driver, mut endpoint, peer, cid) = selection_fixture(&owner).await;
+            let deadline = endpoint.timer_scheduler.now(&cx).unwrap() + Duration::from_secs(60);
+            endpoint
+                .timer_scheduler
+                .schedule_timer(&cx, deadline)
+                .await
+                .unwrap();
+            let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+            {
+                let _current = Cx::set_current(Some(cx.clone()));
+                assert!(
+                    endpoint
+                        .timer_scheduler
+                        .poll_timer(&mut task_cx)
+                        .is_pending()
+                );
+            }
+            assert!(driver.pending_count() > 0);
+            endpoint.queue_connection_packets(
+                cid,
+                [OutgoingPacket {
+                    dst_addr: peer.local_addr().unwrap(),
+                    data: vec![1],
+                    send_time: None,
+                }],
+            );
+            // Exercise the ownership guard at a deterministic suspension point;
+            // this does not claim to force kernel UDP backpressure.
+            let mut parked = Box::pin(async {
+                let cleanup = ManagedShutdownCleanup(&mut endpoint);
+                std::future::pending::<()>().await;
+                drop(cleanup);
+            });
+            assert!(parked.as_mut().poll(&mut task_cx).is_pending());
+            drop(parked);
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+            assert!(endpoint.pending_outgoing.is_empty());
+            assert!(endpoint.pending_incoming.is_empty());
+            assert!(!endpoint.timer_scheduler.has_pending_timer());
             assert_eq!(driver.pending_count(), 0);
         }));
     }
