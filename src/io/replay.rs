@@ -48,9 +48,18 @@ pub struct IoCaptureLimits {
 impl IoCaptureLimits {
     /// Set all limits explicitly. Zero limits are valid and refuse relevant work.
     #[must_use]
-    pub const fn new(operations: usize, read_bytes: usize, write_bytes: usize, slices: usize) -> Self {
-        Self { max_operations: operations, max_read_bytes: read_bytes,
-            max_write_bytes: write_bytes, max_vectored_slices: slices }
+    pub const fn new(
+        operations: usize,
+        read_bytes: usize,
+        write_bytes: usize,
+        slices: usize,
+    ) -> Self {
+        Self {
+            max_operations: operations,
+            max_read_bytes: read_bytes,
+            max_write_bytes: write_bytes,
+            max_vectored_slices: slices,
+        }
     }
 }
 
@@ -87,7 +96,9 @@ pub enum IoOperation {
 }
 
 impl IoOperation {
-    fn is_read(self) -> bool { self == Self::Read }
+    fn is_read(self) -> bool {
+        self == Self::Read
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -98,18 +109,31 @@ struct IoFailure {
 
 impl IoFailure {
     fn capture(error: &io::Error) -> Self {
-        Self { kind: error.kind(), raw: error.raw_os_error() }
+        Self {
+            kind: error.kind(),
+            raw: error.raw_os_error(),
+        }
     }
 
     fn replay(self) -> io::Error {
-        self.raw.map_or_else(|| io::Error::from(self.kind), io::Error::from_raw_os_error)
+        self.raw
+            .map_or_else(|| io::Error::from(self.kind), io::Error::from_raw_os_error)
     }
 }
 
 enum Event {
-    Read { capacity: usize, bytes: Vec<u8>, error: Option<IoFailure> },
-    Write { length: usize, slices: Option<Vec<usize>>, digest: [u8; 32],
-        accepted: usize, error: Option<IoFailure> },
+    Read {
+        capacity: usize,
+        bytes: Vec<u8>,
+        error: Option<IoFailure>,
+    },
+    Write {
+        length: usize,
+        slices: Option<Vec<usize>>,
+        digest: [u8; 32],
+        accepted: usize,
+        error: Option<IoFailure>,
+    },
     Flush(Option<IoFailure>),
     Shutdown(Option<IoFailure>),
 }
@@ -119,7 +143,9 @@ impl Event {
         match self {
             Self::Read { .. } => IoOperation::Read,
             Self::Write { slices: None, .. } => IoOperation::Write,
-            Self::Write { slices: Some(_), .. } => IoOperation::WriteVectored,
+            Self::Write {
+                slices: Some(_), ..
+            } => IoOperation::WriteVectored,
             Self::Flush(_) => IoOperation::Flush,
             Self::Shutdown(_) => IoOperation::Shutdown,
         }
@@ -149,8 +175,10 @@ pub struct IoTape {
 
 impl fmt::Debug for IoTape {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IoTape").field("operations", &self.events.len())
-            .field("read_bytes", &self.read_bytes).field("write_bytes", &self.write_bytes)
+        f.debug_struct("IoTape")
+            .field("operations", &self.events.len())
+            .field("read_bytes", &self.read_bytes)
+            .field("write_bytes", &self.write_bytes)
             .finish_non_exhaustive()
     }
 }
@@ -158,20 +186,32 @@ impl fmt::Debug for IoTape {
 impl IoTape {
     /// Number of completed operations captured, including errors and zero lengths.
     #[must_use]
-    pub fn operations(&self) -> usize { self.events.len() }
+    pub fn operations(&self) -> usize {
+        self.events.len()
+    }
 
     /// Retained read bytes.
     #[must_use]
-    pub const fn read_bytes(&self) -> usize { self.read_bytes }
+    pub const fn read_bytes(&self) -> usize {
+        self.read_bytes
+    }
 
     /// Aggregate offered write bytes checked during replay, not bytes delivered.
     #[must_use]
-    pub const fn write_bytes(&self) -> usize { self.write_bytes }
+    pub const fn write_bytes(&self) -> usize {
+        self.write_bytes
+    }
 
     /// Consume the tape into an offline, fail-closed byte stream.
     #[must_use]
     pub fn replay(self) -> ReplayIo {
-        ReplayIo { tape: self, index: 0, failure: None, read_waiter: None, write_waiter: None }
+        ReplayIo {
+            tape: self,
+            index: 0,
+            failure: None,
+            read_waiter: None,
+            write_waiter: None,
+        }
     }
 }
 
@@ -192,8 +232,10 @@ pub struct RecordingIo<T> {
 
 impl<T> fmt::Debug for RecordingIo<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RecordingIo").field("tape", &self.tape)
-            .field("failure", &self.failure).finish_non_exhaustive()
+        f.debug_struct("RecordingIo")
+            .field("tape", &self.tape)
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
     }
 }
 
@@ -202,8 +244,18 @@ impl<T: AsyncWrite> RecordingIo<T> {
     #[must_use]
     pub fn new(inner: T, limits: IoCaptureLimits) -> Self {
         let vectored = inner.is_write_vectored();
-        Self { inner, limits, tape: IoTape { events: Vec::new(), read_bytes: 0,
-            write_bytes: 0, vectored }, failure: None, polling: false }
+        Self {
+            inner,
+            limits,
+            tape: IoTape {
+                events: Vec::new(),
+                read_bytes: 0,
+                write_bytes: 0,
+                vectored,
+            },
+            failure: None,
+            polling: false,
+        }
     }
 }
 
@@ -211,26 +263,36 @@ impl<T> RecordingIo<T> {
     /// First capture failure, independent of the original provider's I/O result.
     #[must_use]
     pub fn capture_error(&self) -> Option<IoCaptureError> {
-        self.failure.or(self.polling.then_some(IoCaptureError::InterruptedPoll))
+        self.failure
+            .or(self.polling.then_some(IoCaptureError::InterruptedPoll))
     }
 
     /// End capture and return both the original provider and complete tape/error.
     /// An incomplete tape is never returned. This does not close the provider.
     pub fn into_parts(self) -> (T, Result<IoTape, IoCaptureError>) {
         let failure = self.capture_error();
-        let result = match failure { Some(error) => Err(error), None => Ok(self.tape) };
+        let result = match failure {
+            Some(error) => Err(error),
+            None => Ok(self.tape),
+        };
         (self.inner, result)
     }
 
-    fn fail(&mut self, error: IoCaptureError) { self.failure.get_or_insert(error); }
+    fn fail(&mut self, error: IoCaptureError) {
+        self.failure.get_or_insert(error);
+    }
 
     fn begin(&mut self) {
-        if self.polling { self.fail(IoCaptureError::InterruptedPoll); }
+        if self.polling {
+            self.fail(IoCaptureError::InterruptedPoll);
+        }
         self.polling = true;
     }
 
     fn reserve(&mut self, read: usize, write: usize, slices: usize) -> bool {
-        if self.failure.is_some() { return false; }
+        if self.failure.is_some() {
+            return false;
+        }
         let error = if self.tape.events.len() >= self.limits.max_operations {
             Some(IoCaptureError::Limit("operations"))
         } else if read > self.limits.max_read_bytes - self.tape.read_bytes {
@@ -241,53 +303,84 @@ impl<T> RecordingIo<T> {
             Some(IoCaptureError::Limit("vectored slices"))
         } else if self.tape.events.try_reserve(1).is_err() {
             Some(IoCaptureError::Allocation)
-        } else { None };
-        if let Some(error) = error { self.fail(error); return false; }
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.fail(error);
+            return false;
+        }
         self.tape.read_bytes += read;
         self.tape.write_bytes += write;
         true
     }
 
     fn record_write(&mut self, input: WriteInput<'_, '_>, result: &io::Result<usize>) {
-        let Some(length) = input.length() else { self.fail(IoCaptureError::InvalidProgress); return; };
+        let Some(length) = input.length() else {
+            self.fail(IoCaptureError::InvalidProgress);
+            return;
+        };
         let (accepted, error) = match result {
             Ok(count) if *count <= length => (*count, None),
-            Ok(_) => { self.fail(IoCaptureError::InvalidProgress); return; }
+            Ok(_) => {
+                self.fail(IoCaptureError::InvalidProgress);
+                return;
+            }
             Err(error) => (0, Some(IoFailure::capture(error))),
         };
-        if !self.reserve(0, length, input.slice_count()) { return; }
+        if !self.reserve(0, length, input.slice_count()) {
+            return;
+        }
         let slices = match input {
             WriteInput::Scalar(_) => None,
             WriteInput::Vectored(bufs) => {
                 let mut lengths = Vec::new();
                 if lengths.try_reserve_exact(bufs.len()).is_err() {
-                    self.fail(IoCaptureError::Allocation); return;
+                    self.fail(IoCaptureError::Allocation);
+                    return;
                 }
                 lengths.extend(bufs.iter().map(|buf| buf.len()));
                 Some(lengths)
             }
         };
-        self.tape.events.push(Event::Write { length, slices, digest: input.digest(), accepted, error });
+        self.tape.events.push(Event::Write {
+            length,
+            slices,
+            digest: input.digest(),
+            accepted,
+            error,
+        });
     }
 }
 
 #[derive(Clone, Copy)]
-enum WriteInput<'a, 'b> { Scalar(&'a [u8]), Vectored(&'a [IoSlice<'b>]) }
+enum WriteInput<'a, 'b> {
+    Scalar(&'a [u8]),
+    Vectored(&'a [IoSlice<'b>]),
+}
 
 impl WriteInput<'_, '_> {
     fn length(self) -> Option<usize> {
         match self {
             Self::Scalar(buf) => Some(buf.len()),
-            Self::Vectored(bufs) => bufs.iter().try_fold(0usize, |n, buf| n.checked_add(buf.len())),
+            Self::Vectored(bufs) => bufs
+                .iter()
+                .try_fold(0usize, |n, buf| n.checked_add(buf.len())),
         }
     }
 
     fn slice_count(self) -> usize {
-        match self { Self::Scalar(_) => 0, Self::Vectored(bufs) => bufs.len() }
+        match self {
+            Self::Scalar(_) => 0,
+            Self::Vectored(bufs) => bufs.len(),
+        }
     }
 
     fn operation(self) -> IoOperation {
-        match self { Self::Scalar(_) => IoOperation::Write, Self::Vectored(_) => IoOperation::WriteVectored }
+        match self {
+            Self::Scalar(_) => IoOperation::Write,
+            Self::Vectored(_) => IoOperation::WriteVectored,
+        }
     }
 
     fn digest(self) -> [u8; 32] {
@@ -295,7 +388,11 @@ impl WriteInput<'_, '_> {
         hash.update(b"asupersync.io-write.v1");
         match self {
             Self::Scalar(buf) => hash.update(buf),
-            Self::Vectored(bufs) => { for buf in bufs { hash.update(&buf[..]); } }
+            Self::Vectored(bufs) => {
+                for buf in bufs {
+                    hash.update(&buf[..]);
+                }
+            }
         }
         hash.finalize().into()
     }
@@ -304,7 +401,8 @@ impl WriteInput<'_, '_> {
         match (self, recorded) {
             (Self::Scalar(_), None) => true,
             (Self::Vectored(bufs), Some(lengths)) => {
-                bufs.len() == lengths.len() && bufs.iter().zip(lengths).all(|(buf, len)| buf.len() == *len)
+                bufs.len() == lengths.len()
+                    && bufs.iter().zip(lengths).all(|(buf, len)| buf.len() == *len)
             }
             _ => false,
         }
@@ -312,7 +410,11 @@ impl WriteInput<'_, '_> {
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for RecordingIo<T> {
-    fn poll_read(self: Pin<&mut Self>, ctx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let before = buf.filled().len();
         let capacity = buf.remaining();
@@ -327,35 +429,54 @@ impl<T: AsyncRead + Unpin> AsyncRead for RecordingIo<T> {
                     this.fail(IoCaptureError::Allocation);
                 } else {
                     retained.extend_from_slice(bytes);
-                    this.tape.events.push(Event::Read { capacity, bytes: retained,
-                        error: outcome.as_ref().err().map(IoFailure::capture) });
+                    this.tape.events.push(Event::Read {
+                        capacity,
+                        bytes: retained,
+                        error: outcome.as_ref().err().map(IoFailure::capture),
+                    });
                 }
             }
-        } else if !bytes.is_empty() { this.fail(IoCaptureError::InvalidProgress); }
+        } else if !bytes.is_empty() {
+            this.fail(IoCaptureError::InvalidProgress);
+        }
         result
     }
 }
 
 impl<T: AsyncWrite + Unpin> AsyncWrite for RecordingIo<T> {
-    fn poll_write(self: Pin<&mut Self>, ctx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.begin();
         let result = Pin::new(&mut this.inner).poll_write(ctx, buf);
         this.polling = false;
-        if let Poll::Ready(outcome) = &result { this.record_write(WriteInput::Scalar(buf), outcome); }
+        if let Poll::Ready(outcome) = &result {
+            this.record_write(WriteInput::Scalar(buf), outcome);
+        }
         result
     }
 
-    fn poll_write_vectored(self: Pin<&mut Self>, ctx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.begin();
         let result = Pin::new(&mut this.inner).poll_write_vectored(ctx, bufs);
         this.polling = false;
-        if let Poll::Ready(outcome) = &result { this.record_write(WriteInput::Vectored(bufs), outcome); }
+        if let Poll::Ready(outcome) = &result {
+            this.record_write(WriteInput::Vectored(bufs), outcome);
+        }
         result
     }
 
-    fn is_write_vectored(&self) -> bool { self.tape.vectored }
+    fn is_write_vectored(&self) -> bool {
+        self.tape.vectored
+    }
 
     fn poll_flush(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
@@ -364,20 +485,24 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for RecordingIo<T> {
         this.polling = false;
         if let Poll::Ready(outcome) = &result {
             if this.reserve(0, 0, 0) {
-                this.tape.events.push(Event::Flush(outcome.as_ref().err().map(IoFailure::capture)));
+                this.tape
+                    .events
+                    .push(Event::Flush(outcome.as_ref().err().map(IoFailure::capture)));
             }
         }
         result
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, ctx: &mut Context<'_>,) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.begin();
         let result = Pin::new(&mut this.inner).poll_shutdown(ctx);
         this.polling = false;
         if let Poll::Ready(outcome) = &result {
             if this.reserve(0, 0, 0) {
-                this.tape.events.push(Event::Shutdown(outcome.as_ref().err().map(IoFailure::capture)));
+                this.tape.events.push(Event::Shutdown(
+                    outcome.as_ref().err().map(IoFailure::capture),
+                ));
             }
         }
         result
@@ -386,7 +511,9 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for RecordingIo<T> {
 
 /// First replay refusal. Does not contain payloads, fingerprints, or error text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("[ASUP-E401] I/O replay divergence at operation {index}: {reason:?} (expected {expected:?}, actual {actual:?})")]
+#[error(
+    "[ASUP-E401] I/O replay divergence at operation {index}: {reason:?} (expected {expected:?}, actual {actual:?})"
+)]
 pub struct IoReplayError {
     /// Zero-based completed-operation index.
     pub index: usize,
@@ -440,31 +567,45 @@ pub struct ReplayIo {
 
 impl fmt::Debug for ReplayIo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ReplayIo").field("index", &self.index).field("tape", &self.tape)
-            .field("failure", &self.failure).finish_non_exhaustive()
+        f.debug_struct("ReplayIo")
+            .field("index", &self.index)
+            .field("tape", &self.tape)
+            .field("failure", &self.failure)
+            .finish_non_exhaustive()
     }
 }
 
 impl ReplayIo {
     /// Number of exact source completions reproduced.
     #[must_use]
-    pub const fn consumed_operations(&self) -> usize { self.index }
+    pub const fn consumed_operations(&self) -> usize {
+        self.index
+    }
 
     /// Sticky first failure, even after the consumer catches/ignores its I/O error.
     #[must_use]
-    pub const fn failure(&self) -> Option<IoReplayError> { self.failure }
+    pub const fn failure(&self) -> Option<IoReplayError> {
+        self.failure
+    }
 
     /// Verify both absence of divergence and full capture-window consumption.
     pub fn verify_complete(&self) -> Result<(), IoReplayCompletionError> {
-        if let Some(error) = self.failure { return Err(IoReplayCompletionError::Diverged(error)); }
+        if let Some(error) = self.failure {
+            return Err(IoReplayCompletionError::Diverged(error));
+        }
         let remaining = self.tape.events.len() - self.index;
-        if remaining != 0 { return Err(IoReplayCompletionError::Remaining { remaining }); }
+        if remaining != 0 {
+            return Err(IoReplayCompletionError::Remaining { remaining });
+        }
         Ok(())
     }
 
     fn refuse(&mut self, actual: IoOperation, reason: IoReplayMismatch) -> io::Error {
         let error = *self.failure.get_or_insert(IoReplayError {
-            index: self.index, expected: self.tape.events.get(self.index).map(Event::operation), actual, reason,
+            index: self.index,
+            expected: self.tape.events.get(self.index).map(Event::operation),
+            actual,
+            reason,
         });
         self.wake_waiters();
         io::Error::new(io::ErrorKind::InvalidData, error)
@@ -479,8 +620,15 @@ impl ReplayIo {
         };
         let expected = event.operation();
         if expected.is_read() != actual.is_read() {
-            let slot = if actual.is_read() { &mut self.read_waiter } else { &mut self.write_waiter };
-            if !slot.as_ref().is_some_and(|waker| waker.will_wake(ctx.waker())) {
+            let slot = if actual.is_read() {
+                &mut self.read_waiter
+            } else {
+                &mut self.write_waiter
+            };
+            if !slot
+                .as_ref()
+                .is_some_and(|waker| waker.will_wake(ctx.waker()))
+            {
                 *slot = Some(ctx.waker().clone());
             }
             return Poll::Pending;
@@ -494,8 +642,12 @@ impl ReplayIo {
     fn wake_waiters(&mut self) {
         let read = self.read_waiter.take();
         let write = self.write_waiter.take();
-        if let Some(waker) = read { waker.wake(); }
-        if let Some(waker) = write { waker.wake(); }
+        if let Some(waker) = read {
+            waker.wake();
+        }
+        if let Some(waker) = write {
+            waker.wake();
+        }
     }
 
     fn advance(&mut self) {
@@ -503,13 +655,27 @@ impl ReplayIo {
         self.wake_waiters();
     }
 
-    fn write(&mut self, ctx: &mut Context<'_>, input: WriteInput<'_, '_>) -> Poll<io::Result<usize>> {
+    fn write(
+        &mut self,
+        ctx: &mut Context<'_>,
+        input: WriteInput<'_, '_>,
+    ) -> Poll<io::Result<usize>> {
         let operation = input.operation();
         ready!(self.ready(ctx, operation))?;
-        let Event::Write { length, slices, digest, accepted, error } = &self.tape.events[self.index] else {
+        let Event::Write {
+            length,
+            slices,
+            digest,
+            accepted,
+            error,
+        } = &self.tape.events[self.index]
+        else {
             unreachable!("operation checked above")
         };
-        if input.length() != Some(*length) || !input.matches_slices(slices.as_ref()) || input.digest() != *digest {
+        if input.length() != Some(*length)
+            || !input.matches_slices(slices.as_ref())
+            || input.digest() != *digest
+        {
             return Poll::Ready(Err(self.refuse(operation, IoReplayMismatch::Request)));
         }
         let result = error.map_or(Ok(*accepted), |error| Err(error.replay()));
@@ -517,7 +683,11 @@ impl ReplayIo {
         Poll::Ready(result)
     }
 
-    fn finish_write(&mut self, ctx: &mut Context<'_>, operation: IoOperation) -> Poll<io::Result<()>> {
+    fn finish_write(
+        &mut self,
+        ctx: &mut Context<'_>,
+        operation: IoOperation,
+    ) -> Poll<io::Result<()>> {
         ready!(self.ready(ctx, operation))?;
         let error = match &self.tape.events[self.index] {
             Event::Flush(error) | Event::Shutdown(error) => *error,
@@ -529,14 +699,25 @@ impl ReplayIo {
 }
 
 impl AsyncRead for ReplayIo {
-    fn poll_read(self: Pin<&mut Self>, ctx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         ready!(this.ready(ctx, IoOperation::Read))?;
-        let Event::Read { capacity, bytes, error } = &this.tape.events[this.index] else {
+        let Event::Read {
+            capacity,
+            bytes,
+            error,
+        } = &this.tape.events[this.index]
+        else {
             unreachable!("operation checked above")
         };
         if buf.remaining() != *capacity {
-            return Poll::Ready(Err(this.refuse(IoOperation::Read, IoReplayMismatch::Request)));
+            return Poll::Ready(Err(
+                this.refuse(IoOperation::Read, IoReplayMismatch::Request)
+            ));
         }
         buf.put_slice(bytes);
         let result = error.map_or(Ok(()), |error| Err(error.replay()));
@@ -546,15 +727,25 @@ impl AsyncRead for ReplayIo {
 }
 
 impl AsyncWrite for ReplayIo {
-    fn poll_write(self: Pin<&mut Self>, ctx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         self.get_mut().write(ctx, WriteInput::Scalar(buf))
     }
 
-    fn poll_write_vectored(self: Pin<&mut Self>, ctx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
         self.get_mut().write(ctx, WriteInput::Vectored(bufs))
     }
 
-    fn is_write_vectored(&self) -> bool { self.tape.vectored }
+    fn is_write_vectored(&self) -> bool {
+        self.tape.vectored
+    }
 
     fn poll_flush(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.get_mut().finish_write(ctx, IoOperation::Flush)
@@ -582,20 +773,36 @@ mod tests {
     }
 
     impl AsyncRead for Duplex {
-        fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
             self.polls += 1;
-            if self.pending { self.pending = false; return Poll::Pending; }
+            if self.pending {
+                self.pending = false;
+                return Poll::Pending;
+            }
             let n = self.input.len().min(buf.remaining()).min(2);
             buf.put_slice(&self.input[..n]);
             self.input = &self.input[n..];
             Poll::Ready(if self.read_error {
-                Err(io::Error::new(io::ErrorKind::ConnectionReset, "private error payload"))
-            } else { Ok(()) })
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    "private error payload",
+                ))
+            } else {
+                Ok(())
+            })
         }
     }
 
     impl AsyncWrite for Duplex {
-        fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
             self.polls += 1;
             let n = buf.len().min(2);
             self.output.extend_from_slice(&buf[..n]);
@@ -611,17 +818,33 @@ mod tests {
         }
     }
 
-    fn limits() -> IoCaptureLimits { IoCaptureLimits::new(32, 64, 64, 8) }
-    fn cx() -> Context<'static> { Context::from_waker(Waker::noop()) }
+    fn limits() -> IoCaptureLimits {
+        IoCaptureLimits::new(32, 64, 64, 8)
+    }
+    fn cx() -> Context<'static> {
+        Context::from_waker(Waker::noop())
+    }
     fn value<T>(poll: Poll<io::Result<T>>) -> io::Result<T> {
-        match poll { Poll::Ready(result) => result, Poll::Pending => panic!("expected completion") }
+        match poll {
+            Poll::Ready(result) => result,
+            Poll::Pending => panic!("expected completion"),
+        }
     }
 
     #[test]
     fn scalar_capture_replays_partial_progress_eof_and_native_errors() {
-        let mut capture = RecordingIo::new(Duplex { input: b"ab", ..Duplex::default() }, limits());
+        let mut capture = RecordingIo::new(
+            Duplex {
+                input: b"ab",
+                ..Duplex::default()
+            },
+            limits(),
+        );
         let mut ctx = cx();
-        assert_eq!(value(Pin::new(&mut capture).poll_write(&mut ctx, b"hello")).unwrap(), 2);
+        assert_eq!(
+            value(Pin::new(&mut capture).poll_write(&mut ctx, b"hello")).unwrap(),
+            2
+        );
         let mut bytes = [0; 5];
         let mut buf = ReadBuf::new(&mut bytes);
         buf.put_slice(b"x");
@@ -633,33 +856,62 @@ mod tests {
         value(Pin::new(&mut capture).poll_shutdown(&mut ctx)).unwrap();
         let (inner, tape) = capture.into_parts();
         let tape = tape.unwrap();
-        assert_eq!((inner.polls, inner.output.as_slice()), (5, b"he".as_slice()));
-        assert_eq!((tape.operations(), tape.read_bytes(), tape.write_bytes()), (5, 2, 5));
+        assert_eq!(
+            (inner.polls, inner.output.as_slice()),
+            (5, b"he".as_slice())
+        );
+        assert_eq!(
+            (tape.operations(), tape.read_bytes(), tape.write_bytes()),
+            (5, 2, 5)
+        );
         let mut replay = tape.replay();
-        assert_eq!(value(Pin::new(&mut replay).poll_write(&mut ctx, b"hello")).unwrap(), 2);
+        assert_eq!(
+            value(Pin::new(&mut replay).poll_write(&mut ctx, b"hello")).unwrap(),
+            2
+        );
         let mut bytes = [0; 5];
         let mut buf = ReadBuf::new(&mut bytes);
         buf.put_slice(b"x");
         value(Pin::new(&mut replay).poll_read(&mut ctx, &mut buf)).unwrap();
         assert_eq!(buf.filled(), b"xab");
         let error = value(Pin::new(&mut replay).poll_flush(&mut ctx)).unwrap_err();
-        assert_eq!((error.kind(), error.raw_os_error()), (original_error.kind(), original_error.raw_os_error()));
+        assert_eq!(
+            (error.kind(), error.raw_os_error()),
+            (original_error.kind(), original_error.raw_os_error())
+        );
         let mut buf = ReadBuf::new(&mut eof);
         value(Pin::new(&mut replay).poll_read(&mut ctx, &mut buf)).unwrap();
         assert!(buf.filled().is_empty());
         value(Pin::new(&mut replay).poll_shutdown(&mut ctx)).unwrap();
         replay.verify_complete().unwrap();
         let error = value(Pin::new(&mut replay).poll_read(&mut ctx, &mut buf)).unwrap_err();
-        assert_eq!(error.get_ref().unwrap().downcast_ref::<IoReplayError>().unwrap().reason, IoReplayMismatch::Exhausted);
-        assert!(matches!(replay.verify_complete(), Err(IoReplayCompletionError::Diverged(_))));
+        assert_eq!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<IoReplayError>()
+                .unwrap()
+                .reason,
+            IoReplayMismatch::Exhausted
+        );
+        assert!(matches!(
+            replay.verify_complete(),
+            Err(IoReplayCompletionError::Diverged(_))
+        ));
     }
 
     #[test]
     fn capture_limits_never_change_the_underlying_write_result() {
-        for limit in [IoCaptureLimits::new(0, 0, 0, 0), IoCaptureLimits::new(8, 0, 1, 0)] {
+        for limit in [
+            IoCaptureLimits::new(0, 0, 0, 0),
+            IoCaptureLimits::new(8, 0, 1, 0),
+        ] {
             let mut capture = RecordingIo::new(Duplex::default(), limit);
             for _ in 0..3 {
-                assert_eq!(value(Pin::new(&mut capture).poll_write(&mut cx(), b"abc")).unwrap(), 2);
+                assert_eq!(
+                    value(Pin::new(&mut capture).poll_write(&mut cx(), b"abc")).unwrap(),
+                    2
+                );
             }
             let (inner, result) = capture.into_parts();
             assert_eq!(inner.output, b"ababab");
@@ -674,10 +926,17 @@ mod tests {
         value(Pin::new(&mut capture).poll_write(&mut cx(), b"abc")).unwrap();
         let mut replay = capture.into_parts().1.unwrap().replay();
         let error = value(Pin::new(&mut replay).poll_write(&mut cx(), b"abX")).unwrap_err();
-        let first = *error.get_ref().unwrap().downcast_ref::<IoReplayError>().unwrap();
+        let first = *error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<IoReplayError>()
+            .unwrap();
         assert_eq!(first.reason, IoReplayMismatch::Request);
         let mut bytes = [0xa5; 4];
-        assert!(value(Pin::new(&mut replay).poll_read(&mut cx(), &mut ReadBuf::new(&mut bytes))).is_err());
+        assert!(
+            value(Pin::new(&mut replay).poll_read(&mut cx(), &mut ReadBuf::new(&mut bytes)))
+                .is_err()
+        );
         assert_eq!(bytes, [0xa5; 4]);
         assert_eq!(replay.failure(), Some(first));
         assert_eq!(replay.consumed_operations(), 0);
@@ -685,10 +944,21 @@ mod tests {
 
     #[test]
     fn pending_source_poll_does_not_create_an_eof_or_completion_event() {
-        let mut capture = RecordingIo::new(Duplex { input: b"ab", pending: true, ..Duplex::default() }, limits());
+        let mut capture = RecordingIo::new(
+            Duplex {
+                input: b"ab",
+                pending: true,
+                ..Duplex::default()
+            },
+            limits(),
+        );
         let mut bytes = [0; 2];
         let mut buf = ReadBuf::new(&mut bytes);
-        assert!(Pin::new(&mut capture).poll_read(&mut cx(), &mut buf).is_pending());
+        assert!(
+            Pin::new(&mut capture)
+                .poll_read(&mut cx(), &mut buf)
+                .is_pending()
+        );
         assert!(buf.filled().is_empty());
         value(Pin::new(&mut capture).poll_read(&mut cx(), &mut buf)).unwrap();
         let (inner, tape) = capture.into_parts();
@@ -700,9 +970,17 @@ mod tests {
     fn cross_direction_prerequisite_wakes_without_polling_spin() {
         struct Count(AtomicUsize);
         impl Wake for Count {
-            fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
         }
-        let mut capture = RecordingIo::new(Duplex { input: b"ok", ..Duplex::default() }, limits());
+        let mut capture = RecordingIo::new(
+            Duplex {
+                input: b"ok",
+                ..Duplex::default()
+            },
+            limits(),
+        );
         value(Pin::new(&mut capture).poll_write(&mut cx(), b"go")).unwrap();
         let mut bytes = [0; 2];
         value(Pin::new(&mut capture).poll_read(&mut cx(), &mut ReadBuf::new(&mut bytes))).unwrap();
@@ -711,9 +989,18 @@ mod tests {
         let waker = Waker::from(Arc::clone(&probe));
         let mut ctx = Context::from_waker(&waker);
         let mut buf = ReadBuf::new(&mut bytes);
-        for _ in 0..16 { assert!(Pin::new(&mut replay).poll_read(&mut ctx, &mut buf).is_pending()); }
+        for _ in 0..16 {
+            assert!(
+                Pin::new(&mut replay)
+                    .poll_read(&mut ctx, &mut buf)
+                    .is_pending()
+            );
+        }
         assert_eq!(probe.0.load(Ordering::SeqCst), 0);
-        assert_eq!(replay.verify_complete(), Err(IoReplayCompletionError::Remaining { remaining: 2 }));
+        assert_eq!(
+            replay.verify_complete(),
+            Err(IoReplayCompletionError::Remaining { remaining: 2 })
+        );
         value(Pin::new(&mut replay).poll_write(&mut cx(), b"go")).unwrap();
         assert_eq!(probe.0.load(Ordering::SeqCst), 1);
         value(Pin::new(&mut replay).poll_read(&mut ctx, &mut buf)).unwrap();
@@ -725,7 +1012,10 @@ mod tests {
     fn vectored_write_keeps_boundaries_even_when_concatenated_bytes_match() {
         let mut capture = RecordingIo::new(Duplex::default(), limits());
         let bufs = [IoSlice::new(b"a"), IoSlice::new(b""), IoSlice::new(b"bc")];
-        assert_eq!(value(Pin::new(&mut capture).poll_write_vectored(&mut cx(), &bufs)).unwrap(), 1);
+        assert_eq!(
+            value(Pin::new(&mut capture).poll_write_vectored(&mut cx(), &bufs)).unwrap(),
+            1
+        );
         let mut replay = capture.into_parts().1.unwrap().replay();
         let changed = [IoSlice::new(b"ab"), IoSlice::new(b""), IoSlice::new(b"c")];
         assert!(value(Pin::new(&mut replay).poll_write_vectored(&mut cx(), &changed)).is_err());
@@ -734,9 +1024,18 @@ mod tests {
 
     #[test]
     fn read_error_preserves_appended_bytes_without_retaining_private_error_text() {
-        let mut capture = RecordingIo::new(Duplex { input: b"ok", read_error: true, ..Duplex::default() }, limits());
+        let mut capture = RecordingIo::new(
+            Duplex {
+                input: b"ok",
+                read_error: true,
+                ..Duplex::default()
+            },
+            limits(),
+        );
         let mut bytes = [0; 2];
-        let error = value(Pin::new(&mut capture).poll_read(&mut cx(), &mut ReadBuf::new(&mut bytes))).unwrap_err();
+        let error =
+            value(Pin::new(&mut capture).poll_read(&mut cx(), &mut ReadBuf::new(&mut bytes)))
+                .unwrap_err();
         assert_eq!(error.to_string(), "private error payload");
         let tape = capture.into_parts().1.unwrap();
         assert!(!format!("{tape:?}").contains("private"));
@@ -754,21 +1053,41 @@ mod tests {
     fn caught_provider_panic_cannot_publish_a_partial_tape() {
         struct Panics(bool);
         impl AsyncWrite for Panics {
-            fn poll_write(mut self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
-                if !self.0 { self.0 = true; panic!("source poll panic"); }
+            fn poll_write(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                if !self.0 {
+                    self.0 = true;
+                    panic!("source poll panic");
+                }
                 Poll::Ready(Ok(bytes.len()))
             }
-            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
-            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
         }
         let mut capture = RecordingIo::new(Panics(false), limits());
         let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = Pin::new(&mut capture).poll_write(&mut cx(), b"secret");
         }));
         assert!(failed.is_err());
-        assert_eq!(capture.capture_error(), Some(IoCaptureError::InterruptedPoll));
-        assert_eq!(value(Pin::new(&mut capture).poll_write(&mut cx(), b"ok")).unwrap(), 2);
-        assert!(matches!(capture.into_parts().1, Err(IoCaptureError::InterruptedPoll)));
+        assert_eq!(
+            capture.capture_error(),
+            Some(IoCaptureError::InterruptedPoll)
+        );
+        assert_eq!(
+            value(Pin::new(&mut capture).poll_write(&mut cx(), b"ok")).unwrap(),
+            2
+        );
+        assert!(matches!(
+            capture.into_parts().1,
+            Err(IoCaptureError::InterruptedPoll)
+        ));
     }
 }
 

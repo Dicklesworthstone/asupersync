@@ -6,13 +6,13 @@
 //! configuration boundary instead of inheriting the runtime's unbounded queue
 //! default or an accidentally unlimited root region.
 
+use crate::record::RegionLimits;
 use crate::runtime::reactor::BrowserReactor;
 use crate::runtime::{Runtime, RuntimeConfig, RuntimeHandle};
-use crate::record::RegionLimits;
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Stable name for the first bounded desktop profile.
@@ -210,7 +210,10 @@ impl fmt::Display for DesktopRuntimeProfileError {
             Self::ZeroStealBatch => f.write_str("desktop profile requires a positive steal batch"),
             Self::ZeroPollBudget => f.write_str("desktop profile requires a positive poll budget"),
             Self::BlockingRangeInverted { min, max } => {
-                write!(f, "desktop blocking range is inverted: min={min}, max={max}")
+                write!(
+                    f,
+                    "desktop blocking range is inverted: min={min}, max={max}"
+                )
             }
             Self::ZeroRootLimit { kind } => write!(f, "desktop root limit is zero: {kind:?}"),
         }
@@ -358,7 +361,10 @@ mod tests {
         assert_eq!(config.global_queue_limit, 256);
         assert_eq!(config.blocking.min_threads, 1);
         assert_eq!(config.blocking.max_threads, 2);
-        assert_eq!(config.root_region_limits.as_ref().unwrap().max_tasks, Some(1_024));
+        assert_eq!(
+            config.root_region_limits.as_ref().unwrap().max_tasks,
+            Some(1_024)
+        );
         assert_eq!(config.thread_name_prefix, "asupersync-desktop");
     }
 
@@ -388,6 +394,9 @@ mod tests {
         assert_eq!(config.global_queue_limit, 1);
         assert_eq!(config.steal_batch_size, 1);
         assert_eq!(config.poll_budget, 1);
-        assert_eq!(config.root_region_limits.as_ref().unwrap().max_heap_bytes, Some(1));
+        assert_eq!(
+            config.root_region_limits.as_ref().unwrap().max_heap_bytes,
+            Some(1)
+        );
     }
 }

@@ -171,7 +171,9 @@ impl AtpSdk {
         let limit = usize::try_from(self.default_config.max_concurrent_transfers)
             .map_err(|_| NativeTransferError::InvalidLimit("max_concurrent_transfers"))?;
         if limit == 0 {
-            return Err(NativeTransferError::InvalidLimit("max_concurrent_transfers"));
+            return Err(NativeTransferError::InvalidLimit(
+                "max_concurrent_transfers",
+            ));
         }
         if self.transfer_policy.max_transfer_size_bytes == 0 {
             return Err(NativeTransferError::InvalidLimit("max_transfer_size_bytes"));
@@ -182,8 +184,8 @@ impl AtpSdk {
         config.max_transfer_bytes = config
             .max_transfer_bytes
             .min(self.transfer_policy.max_transfer_size_bytes);
-        let chunk_limit = usize::try_from(self.transfer_policy.max_chunk_size_bytes)
-            .unwrap_or(usize::MAX);
+        let chunk_limit =
+            usize::try_from(self.transfer_policy.max_chunk_size_bytes).unwrap_or(usize::MAX);
         config.chunk_size = config.chunk_size.min(chunk_limit);
         config.validate()?;
         Ok(NativeTransferClient {
@@ -313,9 +315,9 @@ impl NativeTransferClient {
             // wrapper while retaining the compiler's Send requirement.
             let future: Pin<
                 Box<dyn Future<Output = Result<SendReport, NativeTransferError>> + Send>,
-            > = Box::pin(async move {
-                Self::send_admitted(&child, remote, &source, admission).await
-            });
+            > = Box::pin(
+                async move { Self::send_admitted(&child, remote, &source, admission).await },
+            );
             future
         })
         .map_err(NativeTransferError::Spawn)
@@ -478,9 +480,11 @@ mod tests {
             peer: "127.0.0.1:1234".parse().unwrap(),
         };
         assert!(committed_send(report.clone()).is_ok());
-        for (committed, sha_ok, merkle_ok) in
-            [(false, true, true), (true, false, true), (true, true, false)]
-        {
+        for (committed, sha_ok, merkle_ok) in [
+            (false, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
             let mut rejected = report.clone();
             rejected.receipt.committed = committed;
             rejected.receipt.sha_ok = sha_ok;
@@ -522,13 +526,12 @@ mod tests {
 
     #[test]
     fn native_size_limits_never_relax_either_policy() {
-        let sdk = AtpSdk::new_in_process(SessionConfig::default()).with_transfer_policy(
-            TransferPolicy {
+        let sdk =
+            AtpSdk::new_in_process(SessionConfig::default()).with_transfer_policy(TransferPolicy {
                 max_transfer_size_bytes: 2048,
                 max_chunk_size_bytes: 512,
                 ..TransferPolicy::default()
-            },
-        );
+            });
         for (bytes, chunk, expected_bytes, expected_chunk) in
             [(4096, 1024, 2048, 512), (1024, 256, 1024, 256)]
         {
@@ -597,7 +600,9 @@ mod tests {
         });
         assert!(matches!(
             sdk.native_transfers(QuicConfig::default()),
-            Err(NativeTransferError::InvalidLimit("max_concurrent_transfers"))
+            Err(NativeTransferError::InvalidLimit(
+                "max_concurrent_transfers"
+            ))
         ));
         for (bytes, chunk, field) in [
             (0, 512, "max_transfer_size_bytes"),
@@ -631,14 +636,18 @@ mod tests {
         let sdk = AtpSdk::new_in_process(SessionConfig::default());
         assert!(matches!(
             sdk.native_transfers(QuicConfig::default()),
-            Err(NativeTransferError::Transport(QuicTransportError::Config(_)))
+            Err(NativeTransferError::Transport(QuicTransportError::Config(
+                _
+            )))
         ));
         let client = client(1);
         let cx = Cx::for_testing();
         let remote = "127.0.0.1:9".parse().unwrap();
         futures_lite::future::block_on(async {
             assert!(matches!(
-                client.send_path(&cx, remote, Path::new("unused-source")).await,
+                client
+                    .send_path(&cx, remote, Path::new("unused-source"))
+                    .await,
                 Err(NativeTransferError::MissingClientTls)
             ));
             assert!(matches!(

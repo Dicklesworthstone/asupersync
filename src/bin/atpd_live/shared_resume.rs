@@ -17,7 +17,8 @@ use asupersync::net::atp::sdk::native_auth::live::commit::file::{
 };
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::service::{
     ResumableService, ResumeServiceCompletion, ResumeServiceConfig, ResumeServiceOutcome,
-    ResumeSessionInit, ResumeServiceRejection, ResumeSessionKey, ResumeSessionSnapshot, ResumeSessionStatus,
+    ResumeServiceRejection, ResumeSessionInit, ResumeSessionKey, ResumeSessionSnapshot,
+    ResumeSessionStatus,
 };
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::{
     RESUMABLE_LIVE_ALPN, ResumeError, ResumeReport,
@@ -67,15 +68,19 @@ impl Options {
         let connections = usize::try_from(connections)
             .map_err(|_| invalid("connection limit is not representable"))?;
         if !(1..=1024).contains(&self.max_sessions)
-            || connections == 0 || connections > self.max_sessions
+            || connections == 0
+            || connections > self.max_sessions
             || self.max_sessions_per_client == 0
             || self.max_sessions_per_client > self.max_sessions
-            || self.max_session_keys < self.max_sessions || self.max_session_keys > 65_536
+            || self.max_session_keys < self.max_sessions
+            || self.max_session_keys > 65_536
             || !(1..=1024).contains(&self.attempts_per_session)
             || !(1..=86_400).contains(&self.idle_retention_secs)
             || !(1..=86_400).contains(&self.proof_recovery_secs)
         {
-            return Err(invalid("invalid shared resume connection, session, key, attempt, or retention limits"));
+            return Err(invalid(
+                "invalid shared resume connection, session, key, attempt, or retention limits",
+            ));
         }
         Ok(ResumeServiceConfig {
             max_connections: connections,
@@ -101,9 +106,13 @@ impl Retention {
             return retained;
         }
         if committed {
-            Self::Committed { until: deadline(now, options.proof_recovery_secs) }
+            Self::Committed {
+                until: deadline(now, options.proof_recovery_secs),
+            }
         } else {
-            Self::Incomplete { until: deadline(now, options.idle_retention_secs) }
+            Self::Incomplete {
+                until: deadline(now, options.idle_retention_secs),
+            }
         }
     }
 
@@ -129,47 +138,84 @@ pub(super) fn serve(config: ServeConfig, options: Options) -> io::Result<()> {
 }
 
 pub(super) fn serve_durable(
-    config: ServeConfig, options: Options, path: &Path, recover_committed: bool,
+    config: ServeConfig,
+    options: Options,
+    path: &Path,
+    recover_committed: bool,
 ) -> io::Result<()> {
     // Ledger growth has its own bound; never place it in a quota-accounted inbox.
-    let parent = path.parent().ok_or_else(|| invalid("ledger parent required"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("ledger parent required"))?;
     let parent = std::fs::canonicalize(parent)?;
     for inbox in &config.clients {
         if std::fs::canonicalize(&inbox.directory)? == parent {
-            return Err(invalid("session ledger must be outside all inbox directories"));
+            return Err(invalid(
+                "session ledger must be outside all inbox directories",
+            ));
         }
     }
     let ledger = Ledger::open(path)?;
-    LEDGER_OWNERSHIP.set(Arc::clone(&ledger))
+    LEDGER_OWNERSHIP
+        .set(Arc::clone(&ledger))
         .map_err(|_| io::Error::other("foreground process already owns a session ledger"))?;
     serve_inner(config, options, Some(ledger), recover_committed)
 }
 
 fn serve_inner(
-    config: ServeConfig, options: Options, ledger: Option<Arc<Ledger>>, recover_committed: bool,
+    config: ServeConfig,
+    options: Options,
+    ledger: Option<Arc<Ledger>>,
+    recover_committed: bool,
 ) -> io::Result<()> {
     let limits = options.config(config.max_connections)?;
     if !(1..=86_400).contains(&config.shutdown_grace_secs) {
         return Err(invalid("shutdown grace must be 1..=86400 seconds"));
     }
-    let profile = settings::profile(config.schema_version, config.workers, config.epoch_bytes,
-        config.max_transfer_bytes, config.operation_timeout_secs)?;
+    let profile = settings::profile(
+        config.schema_version,
+        config.workers,
+        config.epoch_bytes,
+        config.max_transfer_bytes,
+        config.operation_timeout_secs,
+    )?;
     // Reserve SDK capacity for retained sessions, not only currently connected
     // clients. A disconnected transfer still owns a sink and retransmission state.
     let sessions = u32::try_from(limits.max_sessions)
         .map_err(|_| invalid("session limit is not representable"))?;
     let sdk = settings::sdk(sessions, &profile)?;
-    let ids = config.clients.iter().map(|client| settings::selector(&client.certificate_sha256))
+    let ids = config
+        .clients
+        .iter()
+        .map(|client| settings::selector(&client.certificate_sha256))
         .collect::<io::Result<Vec<_>>>()?;
     let authorization = NativeClientAuthorization::new(settings::roots(&config.client_ca)?, ids)
         .map_err(|_| invalid("invalid explicit client authorization"))?;
-    let receiver = sdk.live_stream_receiver(profile, settings::identity(&config.identity)?, authorization)
+    let receiver = sdk
+        .live_stream_receiver(
+            profile,
+            settings::identity(&config.identity)?,
+            authorization,
+        )
         .map_err(|_| invalid("invalid authenticated receiver configuration"))?;
     let inboxes = Arc::new(storage::load(&config.clients)?);
-    INBOX_OWNERSHIP.set(Arc::clone(&inboxes))
+    INBOX_OWNERSHIP
+        .set(Arc::clone(&inboxes))
         .map_err(|_| io::Error::other("foreground process already owns inboxes"))?;
     let signals = Signals::new([SIGINT, SIGTERM])?;
-    runtime(config.workers, serve_loop(config, options, limits, receiver, inboxes, signals, ledger, recover_committed))?;
+    runtime(
+        config.workers,
+        serve_loop(
+            config,
+            options,
+            limits,
+            receiver,
+            inboxes,
+            signals,
+            ledger,
+            recover_committed,
+        ),
+    )?;
     emit(json!({"schema_version": 1, "event": "stopped", "drained": true}))
 }
 
@@ -185,8 +231,10 @@ async fn serve_loop(
 ) -> io::Result<()> {
     let cx = Cx::current().ok_or_else(|| io::Error::other("missing shared resume context"))?;
     let scope = cx.scope();
-    let mut service = receiver.bind_resumable_service::<LedgerSink>(&cx, config.bind, limits)
-        .await.map_err(|_| io::Error::other("shared resumable listener could not bind"))?;
+    let mut service = receiver
+        .bind_resumable_service::<LedgerSink>(&cx, config.bind, limits)
+        .await
+        .map_err(|_| io::Error::other("shared resumable listener could not bind"))?;
     let publications: Publications = Arc::new(Mutex::new(BTreeMap::new()));
     let tracked = Arc::clone(&publications);
     let byte_limit = config.max_transfer_bytes;
@@ -201,14 +249,21 @@ async fn serve_loop(
             // Recovery is read-only and precedes all new claim, quota, entropy,
             // or staging effects. Unresolved history never falls through to Fresh.
             if recover_committed {
-                let owner = ledger.as_ref().ok_or_else(|| invalid("receipt recovery requires a ledger"))?;
-                if let Some(receipt) = owner.recover_committed(key, inbox.directory.clone(), byte_limit).await? {
+                let owner = ledger
+                    .as_ref()
+                    .ok_or_else(|| invalid("receipt recovery requires a ledger"))?;
+                if let Some(receipt) = owner
+                    .recover_committed(key, inbox.directory.clone(), byte_limit)
+                    .await?
+                {
                     return Ok(ResumeSessionInit::Committed(receipt));
                 }
             }
             // The SDK invokes this once per admitted certificate/nonce key.
             // Reconnects retain this very sink and incur no second reservation.
-            if ledger.is_none() { inbox.reserve(byte_limit)?; }
+            if ledger.is_none() {
+                inbox.reserve(byte_limit)?;
+            }
             let mut nonce = [0; 16];
             child.random_bytes(&mut nonce);
             let filename = format!("{}.bin", hex(&nonce));
@@ -218,17 +273,24 @@ async fn serve_loop(
                 Some(ledger) => Some(ledger.claim(key, filename.clone(), byte_limit).await?),
                 None => None,
             };
-            if claim.is_some() { inbox.reserve(byte_limit)?; }
-            let sink = LiveFileSink::create(&child, inbox.directory.clone(), filename, byte_limit).await?;
+            if claim.is_some() {
+                inbox.reserve(byte_limit)?;
+            }
+            let sink =
+                LiveFileSink::create(&child, inbox.directory.clone(), filename, byte_limit).await?;
             let mut entries = tracked.lock();
             if entries.contains_key(&key) {
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, "session already has a publication"));
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "session already has a publication",
+                ));
             }
             entries.insert(key, sink.publication());
             Ok(ResumeSessionInit::Fresh(LedgerSink::new(sink, claim)))
         }
     };
-    emit(json!({"schema_version": 1, "event": "ready", "address": service.local_addr(),
+    emit(
+        json!({"schema_version": 1, "event": "ready", "address": service.local_addr(),
         "pid": std::process::id(), "profile": String::from_utf8_lossy(RESUMABLE_LIVE_ALPN),
         "mode": "shared", "application_commit": true, "session_preallocated": false,
         "durable_session_ledger": durable, "maximum_durable_keys": maximum_durable_keys,
@@ -238,7 +300,8 @@ async fn serve_loop(
         "max_session_keys": limits.max_session_keys,
         "max_attempts_per_session": limits.max_attempts_per_session,
         "max_transfer_bytes": byte_limit, "idle_retention_secs": options.idle_retention_secs,
-        "proof_recovery_secs": options.proof_recovery_secs}))?;
+        "proof_recovery_secs": options.proof_recovery_secs}),
+    )?;
 
     let mut retention = BTreeMap::new();
     let mut stopping_at = None;
@@ -282,13 +345,19 @@ async fn serve_loop(
                 Err(_) => continue,
             }
         } else {
-            match asupersync::time::timeout(cx.now(), CONTROL_TICK,
-                service.next_restoring(&cx, &scope, factory.clone())).await
+            match asupersync::time::timeout(
+                cx.now(),
+                CONTROL_TICK,
+                service.next_restoring(&cx, &scope, factory.clone()),
+            )
+            .await
             {
                 Ok(Ok(completion)) => completion,
                 Err(_) => continue,
                 Ok(Err(_)) => {
-                    failure = Some(io::Error::other("shared resume service admission or context failed"));
+                    failure = Some(io::Error::other(
+                        "shared resume service admission or context failed",
+                    ));
                     service.cancel(CancelReason::user("shared resume service failure"));
                     stopping_at = Some(now);
                     cancelling = true;
@@ -296,24 +365,41 @@ async fn serve_loop(
                 }
             }
         };
-        let Some(completion) = completion else { break; };
-        let publication = completion.session.and_then(|key| publications.lock().get(&key).cloned());
+        let Some(completion) = completion else {
+            break;
+        };
+        let publication = completion
+            .session
+            .and_then(|key| publications.lock().get(&key).cloned());
         let event = completion_event(&completion, publication.as_ref());
         let now = cx.now().as_nanos();
         let retirement = if stopping_at.is_none() {
-            observe(&service, &mut retention, &publications, &completion, now, options)
+            observe(
+                &service,
+                &mut retention,
+                &publications,
+                &completion,
+                now,
+                options,
+            )
         } else {
             None
         };
         // Finish recording/retiring even if output fails, then cancel and drain
         // every child before returning. A broken output pipe cannot detach work.
-        let output = if failure.is_none() { emit(event) } else { Ok(()) };
+        let output = if failure.is_none() {
+            emit(event)
+        } else {
+            Ok(())
+        };
         let retired = match retirement {
             Some((key, reason)) => retire(&mut service, &mut retention, &publications, key, reason),
             None => Ok(()),
         };
         if let Err(error) = output.and(retired) {
-            if failure.is_none() { failure = Some(error); }
+            if failure.is_none() {
+                failure = Some(error);
+            }
             service.cancel(CancelReason::user("shared resume output failed"));
             stopping_at.get_or_insert(now);
             cancelling = true;
@@ -325,7 +411,10 @@ async fn serve_loop(
     // These are read-only handles, not file deletion or storage quota refunds.
     let retired = std::mem::take(&mut *publications.lock());
     drop(retired);
-    match failure { Some(error) => Err(error), None => Ok(()) }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn observe(
@@ -347,7 +436,9 @@ fn observe(
         Some(ResumeSessionStatus::Active) => None, // Busy refusal must not touch the owner.
         Some(ResumeSessionStatus::Idle) => {
             let snapshot = service.session_snapshot(&key)?;
-            if snapshot.failed { return Some((key, "local_failure")); }
+            if snapshot.failed {
+                return Some((key, "local_failure"));
+            }
             if snapshot.attempts >= options.attempts_per_session {
                 return Some((key, "attempts_exhausted"));
             }
@@ -355,9 +446,15 @@ fn observe(
             // actual routed worker returning its retained state supplies activity.
             if matches!(&completion.outcome, ResumeServiceOutcome::Transfer(_)) {
                 let previous = retention.get(&key).copied();
-                retention.insert(key, Retention::observe(previous, now, snapshot.completed.is_some(), options));
+                retention.insert(
+                    key,
+                    Retention::observe(previous, now, snapshot.completed.is_some(), options),
+                );
             }
-            retention.get(&key).and_then(|retained| retained.expired(now)).map(|reason| (key, reason))
+            retention
+                .get(&key)
+                .and_then(|retained| retained.expired(now))
+                .map(|reason| (key, reason))
         }
     }
 }
@@ -369,14 +466,19 @@ fn expire(
     now: u64,
 ) -> io::Result<()> {
     // At most max_sessions entries. No unbounded history of completed handles.
-    let expired: Vec<_> = retention.iter().filter_map(|(key, retained)| {
-        if service.session_status(key) == Some(ResumeSessionStatus::Idle) {
-            retained.expired(now).map(|reason| (*key, reason))
-        } else {
-            None
-        }
-    }).collect();
-    for (key, reason) in expired { retire(service, retention, publications, key, reason)?; }
+    let expired: Vec<_> = retention
+        .iter()
+        .filter_map(|(key, retained)| {
+            if service.session_status(key) == Some(ResumeSessionStatus::Idle) {
+                retained.expired(now).map(|reason| (*key, reason))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (key, reason) in expired {
+        retire(service, retention, publications, key, reason)?;
+    }
     Ok(())
 }
 
@@ -387,14 +489,18 @@ fn retire(
     key: ResumeSessionKey,
     reason: &'static str,
 ) -> io::Result<()> {
-    let snapshot = service.retire(&key).map_err(|_| io::Error::other("idle session retirement refused"))?;
+    let snapshot = service
+        .retire(&key)
+        .map_err(|_| io::Error::other("idle session retirement refused"))?;
     retention.remove(&key);
     let publication = publications.lock().remove(&key);
-    emit(json!({"schema_version": 1, "event": "session_retired", "session": key_json(key),
+    emit(
+        json!({"schema_version": 1, "event": "session_retired", "session": key_json(key),
         "reason": reason, "snapshot": snapshot.as_ref().map(snapshot_json),
         "publication": publication.as_ref().map(publication_json),
         "resident_sessions": service.resident_sessions(), "retained_keys": service.retained_keys(),
-        "tombstone_retained": true, "sender_receipt_observed": false}))
+        "tombstone_retained": true, "sender_receipt_observed": false}),
+    )
 }
 
 fn key_json(key: ResumeSessionKey) -> Value {
@@ -417,24 +523,42 @@ fn rejection_status(rejection: &ResumeServiceRejection) -> &'static str {
         ResumeServiceRejection::Stopping => "stopping",
         ResumeServiceRejection::Spawn(_) => "spawn_failed",
         ResumeServiceRejection::Factory(LiveStreamError::Io(error))
-            if ledger::is_replay_refusal(error) => "durable_session_refused",
+            if ledger::is_replay_refusal(error) =>
+        {
+            "durable_session_refused"
+        }
         ResumeServiceRejection::Factory(LiveStreamError::Io(error))
-            if error.kind() == io::ErrorKind::StorageFull => "retention_refused",
+            if error.kind() == io::ErrorKind::StorageFull =>
+        {
+            "retention_refused"
+        }
         ResumeServiceRejection::Factory(_) => "factory_failed",
         ResumeServiceRejection::Connection(ResumeError::Transfer(
-            LiveStreamError::Tls(_) | LiveStreamError::Authentication(_))) => "tls_failed",
-        ResumeServiceRejection::Connection(ResumeError::Transfer(LiveStreamError::Timeout(_))) => "timeout",
-        ResumeServiceRejection::Connection(ResumeError::Continuity(_) | ResumeError::PeerIdentity) => "continuity_refused",
+            LiveStreamError::Tls(_) | LiveStreamError::Authentication(_),
+        )) => "tls_failed",
+        ResumeServiceRejection::Connection(ResumeError::Transfer(LiveStreamError::Timeout(_))) => {
+            "timeout"
+        }
+        ResumeServiceRejection::Connection(
+            ResumeError::Continuity(_) | ResumeError::PeerIdentity,
+        ) => "continuity_refused",
         ResumeServiceRejection::Connection(ResumeError::LocalFailure) => "local_failure",
         _ => "connection_refused",
     }
 }
 
-fn completion_event(completion: &ResumeServiceCompletion, publication: Option<&LiveFilePublication>) -> Value {
+fn completion_event(
+    completion: &ResumeServiceCompletion,
+    publication: Option<&LiveFilePublication>,
+) -> Value {
     let (kind, transfer, proof_written) = match &completion.outcome {
-        ResumeServiceOutcome::Transfer(report) => ("transfer", report_json(report), report.outcome.is_ok()),
+        ResumeServiceOutcome::Transfer(report) => {
+            ("transfer", report_json(report), report.outcome.is_ok())
+        }
         ResumeServiceOutcome::Rejected(rejection) => (
-            "rejected", json!({"status": rejection_status(rejection)}), false,
+            "rejected",
+            json!({"status": rejection_status(rejection)}),
+            false,
         ),
         ResumeServiceOutcome::JoinFailed(error) => {
             let status = match error {
@@ -451,7 +575,6 @@ fn completion_event(completion: &ResumeServiceCompletion, publication: Option<&L
         "proof_write_confirmed": proof_written, "sender_receipt_observed": false})
 }
 
-
 // Preserve the standalone commands' structured result vocabulary. These
 // projections intentionally omit arbitrary certificate, sink and panic strings.
 fn report_json(report: &ResumeReport) -> Value {
@@ -463,7 +586,9 @@ fn report_json(report: &ResumeReport) -> Value {
         Err(ResumeError::Continuity(_)) => "continuity_refused",
         Err(ResumeError::Transfer(LiveStreamError::Timeout(_))) => "timeout",
         Err(ResumeError::Transfer(LiveStreamError::Cancelled(_))) => "cancelled",
-        Err(ResumeError::Transfer(LiveStreamError::Tls(_) | LiveStreamError::Authentication(_))) => "tls_failed",
+        Err(ResumeError::Transfer(
+            LiveStreamError::Tls(_) | LiveStreamError::Authentication(_),
+        )) => "tls_failed",
         Err(ResumeError::Transfer(LiveStreamError::Commit(error))) => match error.as_ref() {
             LiveStreamCommitError::CommittedWithoutProof { .. } => "committed_without_proof",
             _ => "commit_unconfirmed",
@@ -481,8 +606,10 @@ fn report_json(report: &ResumeReport) -> Value {
 fn publication_json(publication: &LiveFilePublication) -> Value {
     let status = publication.status();
     let state = match status.state {
-        LiveFileState::Staged => "staged", LiveFileState::Committing => "committing",
-        LiveFileState::Published => "published", LiveFileState::Durable => "durable",
+        LiveFileState::Staged => "staged",
+        LiveFileState::Committing => "committing",
+        LiveFileState::Published => "published",
+        LiveFileState::Durable => "durable",
     };
     json!({"state": state, "error": status.error_kind.is_some(),
         "filename": publication.destination_path().file_name().and_then(|name| name.to_str())})

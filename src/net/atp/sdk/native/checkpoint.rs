@@ -8,9 +8,9 @@
 //! recovery of a partially consumed producer or remote byte-offset resumption.
 
 use super::{
-    BufferReader, MAX_UPLOAD_BUFFER, NativeAdmission, NativeTransferClient,
-    NativeTransferError, NativeUploadCleanupError, NativeUploadError, NativeUploadOptions,
-    SPOOL_CREATE_ATTEMPTS, Spool, SpoolProgress, checkpoint, spool_source, validate_upload,
+    BufferReader, MAX_UPLOAD_BUFFER, NativeAdmission, NativeTransferClient, NativeTransferError,
+    NativeUploadCleanupError, NativeUploadError, NativeUploadOptions, SPOOL_CREATE_ATTEMPTS, Spool,
+    SpoolProgress, checkpoint, spool_source, validate_upload,
 };
 use crate::cx::{Cx, Scope};
 use crate::io::AsyncRead;
@@ -174,11 +174,14 @@ struct StoredReceipt {
 impl StoredReceipt {
     fn capture(report: &SendReport) -> Self {
         Self {
-            transfer_id: report.transfer_id.clone(), bytes_sent: report.bytes_sent,
-            files: report.files, symbols_sent: report.symbols_sent,
+            transfer_id: report.transfer_id.clone(),
+            bytes_sent: report.bytes_sent,
+            files: report.files,
+            symbols_sent: report.symbols_sent,
             feedback_rounds: report.feedback_rounds,
             merkle_root_hex: report.merkle_root_hex.clone(),
-            receipt: report.receipt.clone(), peer: report.peer,
+            receipt: report.receipt.clone(),
+            peer: report.peer,
         }
     }
 
@@ -216,10 +219,14 @@ impl Journal {
         match (self.state, retry) {
             (NativeCheckpointState::Prepared, NativeCheckpointRetry::Never) => {}
             (NativeCheckpointState::Sending, NativeCheckpointRetry::Never) => {
-                return Err(NativeCheckpointError::Uncertain { attempt: self.attempt });
+                return Err(NativeCheckpointError::Uncertain {
+                    attempt: self.attempt,
+                });
             }
-            (NativeCheckpointState::Sending, NativeCheckpointRetry::AcknowledgeUncertain { attempt })
-                if attempt == self.attempt => {}
+            (
+                NativeCheckpointState::Sending,
+                NativeCheckpointRetry::AcknowledgeUncertain { attempt },
+            ) if attempt == self.attempt => {}
             _ => return Err(NativeCheckpointError::StaleAttempt),
         }
         if self.attempt >= MAX_CHECKPOINT_ATTEMPTS {
@@ -233,45 +240,74 @@ impl Journal {
             return Err(NativeCheckpointError::Invalid("unsupported schema version"));
         }
         NativeUploadOptions::new("unused", &self.file_name).validate()?;
-        if self.server_name.is_empty() || self.server_name.len() > 253
+        if self.server_name.is_empty()
+            || self.server_name.len() > 253
             || self.local_peer_label.len() != 64
             || !self.local_peer_label.bytes().all(|b| b.is_ascii_hexdigit())
-            || self.remote.port() == 0 || self.remote.ip().is_unspecified()
+            || self.remote.port() == 0
+            || self.remote.ip().is_unspecified()
         {
-            return Err(NativeCheckpointError::Invalid("invalid endpoint or identity"));
+            return Err(NativeCheckpointError::Invalid(
+                "invalid endpoint or identity",
+            ));
         }
         let valid = match self.state {
             NativeCheckpointState::Prepared => self.attempt == 0 && self.receipt.is_none(),
-            NativeCheckpointState::Sending => (1..=MAX_CHECKPOINT_ATTEMPTS).contains(&self.attempt)
-                && self.receipt.is_none(),
-            NativeCheckpointState::Acknowledged => (1..=MAX_CHECKPOINT_ATTEMPTS).contains(&self.attempt)
-                && self.receipt.as_ref().is_some_and(|r| self.receipt_matches(&r.report())),
+            NativeCheckpointState::Sending => {
+                (1..=MAX_CHECKPOINT_ATTEMPTS).contains(&self.attempt) && self.receipt.is_none()
+            }
+            NativeCheckpointState::Acknowledged => {
+                (1..=MAX_CHECKPOINT_ATTEMPTS).contains(&self.attempt)
+                    && self
+                        .receipt
+                        .as_ref()
+                        .is_some_and(|r| self.receipt_matches(&r.report()))
+            }
         };
         if !valid {
-            return Err(NativeCheckpointError::Invalid("inconsistent lifecycle or receipt"));
+            return Err(NativeCheckpointError::Invalid(
+                "inconsistent lifecycle or receipt",
+            ));
         }
         Ok(())
     }
 
     fn receipt_matches(&self, report: &SendReport) -> bool {
-        report.peer == self.remote && report.files == 1 && report.receipt.files == 1
+        report.peer == self.remote
+            && report.files == 1
+            && report.receipt.files == 1
             && report.receipt.bytes_received == self.source_bytes
-            && report.receipt.committed && report.receipt.sha_ok && report.receipt.merkle_ok
-            && report.receipt.reason.is_none() && !report.transfer_id.is_empty()
+            && report.receipt.committed
+            && report.receipt.sha_ok
+            && report.receipt.merkle_ok
+            && report.receipt.reason.is_none()
+            && !report.transfer_id.is_empty()
             && report.merkle_root_hex.len() == 64
-            && report.merkle_root_hex.bytes().all(|b| b.is_ascii_hexdigit())
+            && report
+                .merkle_root_hex
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
     }
 
     fn info(&self, directory: PathBuf) -> NativeUploadCheckpoint {
         NativeUploadCheckpoint {
-            directory, remote: self.remote, file_name: self.file_name.clone(),
-            source_bytes: self.source_bytes, source_sha256: self.source_sha256,
-            state: self.state, attempt: self.attempt,
+            directory,
+            remote: self.remote,
+            file_name: self.file_name.clone(),
+            source_bytes: self.source_bytes,
+            source_sha256: self.source_sha256,
+            state: self.state,
+            attempt: self.attempt,
         }
     }
 
-    fn check_binding(&self, admission: &NativeAdmission, remote: SocketAddr) -> Result<(), NativeCheckpointError> {
-        if self.remote != remote || self.server_name != server_name(admission)?
+    fn check_binding(
+        &self,
+        admission: &NativeAdmission,
+        remote: SocketAddr,
+    ) -> Result<(), NativeCheckpointError> {
+        if self.remote != remote
+            || self.server_name != server_name(admission)?
             || self.local_peer_label != admission.shared.peer_label
         {
             return Err(NativeCheckpointError::BindingMismatch);
@@ -279,14 +315,19 @@ impl Journal {
         if self.source_bytes > admission.shared.config.max_transfer_bytes {
             return Err(NativeUploadError::TooLarge {
                 limit: admission.shared.config.max_transfer_bytes,
-            }.into());
+            }
+            .into());
         }
         Ok(())
     }
 }
 
 fn server_name(admission: &NativeAdmission) -> Result<String, NativeCheckpointError> {
-    let tls = admission.shared.config.client_tls.as_ref()
+    let tls = admission
+        .shared
+        .config
+        .client_tls
+        .as_ref()
         .ok_or(NativeTransferError::MissingClientTls)?;
     Ok(tls.server_name.to_str().into_owned())
 }
@@ -302,7 +343,10 @@ fn authorize(cx: &Cx) -> Result<(), NativeCheckpointError> {
 
 fn regular_file(path: &Path) -> io::Result<()> {
     if !std::fs::symlink_metadata(path)?.file_type().is_file() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "checkpoint path is not a regular file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "checkpoint path is not a regular file",
+        ));
     }
     Ok(())
 }
@@ -310,7 +354,10 @@ fn regular_file(path: &Path) -> io::Result<()> {
 fn read_journal(directory: &Path) -> Result<Journal, NativeCheckpointError> {
     let path = directory.join("journal.json");
     regular_file(&path)?;
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
     let mut bytes = Vec::new();
     file.take(JOURNAL_LIMIT + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > JOURNAL_LIMIT {
@@ -325,10 +372,17 @@ fn read_journal(directory: &Path) -> Result<Journal, NativeCheckpointError> {
 fn write_journal(directory: &Path, record: &Journal, nonce: &[u8; 16]) -> io::Result<()> {
     let bytes = serde_json::to_vec(record).map_err(io::Error::other)?;
     if bytes.len() as u64 > JOURNAL_LIMIT {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "journal exceeds size limit"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "journal exceeds size limit",
+        ));
     }
     let temporary = directory.join(format!(".journal-{}.next", hex::encode(nonce)));
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
@@ -346,27 +400,50 @@ struct Lease {
 }
 
 impl Lease {
-    fn open(directory: &Path, admission: NativeAdmission) -> Result<(Arc<Self>, Journal), NativeCheckpointError> {
+    fn open(
+        directory: &Path,
+        admission: NativeAdmission,
+    ) -> Result<(Arc<Self>, Journal), NativeCheckpointError> {
         let meta = std::fs::symlink_metadata(directory)?;
         if !meta.file_type().is_dir() || meta.mode() & 0o077 != 0 {
-            return Err(NativeCheckpointError::Invalid("checkpoint directory must be private and not a symlink"));
+            return Err(NativeCheckpointError::Invalid(
+                "checkpoint directory must be private and not a symlink",
+            ));
         }
         let directory = directory.canonicalize()?;
         let path = directory.join("lock");
         regular_file(&path)?;
-        let lock = OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
         match lock.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Err(NativeCheckpointError::Busy),
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
         let record = read_journal(&directory)?;
-        Ok((Arc::new(Self { _lock: lock, directory, admission }), record))
+        Ok((
+            Arc::new(Self {
+                _lock: lock,
+                directory,
+                admission,
+            }),
+            record,
+        ))
     }
 }
 
-fn publish_prepared(spool: &Spool, record: &Journal, nonce: &[u8; 16]) -> Result<PathBuf, NativeCheckpointError> {
-    let parent = spool.directory.parent().ok_or(NativeCheckpointError::Invalid("spool has no parent"))?;
+fn publish_prepared(
+    spool: &Spool,
+    record: &Journal,
+    nonce: &[u8; 16],
+) -> Result<PathBuf, NativeCheckpointError> {
+    let parent = spool
+        .directory
+        .parent()
+        .ok_or(NativeCheckpointError::Invalid("spool has no parent"))?;
     let directory = parent.join(format!(".atp-checkpoint-{}", hex::encode(nonce)));
     // Collision never touches a pre-existing checkpoint or claims its ownership.
     DirBuilder::new().mode(0o700).create(&directory)?;
@@ -378,14 +455,21 @@ fn publish_prepared(spool: &Spool, record: &Journal, nonce: &[u8; 16]) -> Result
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))?;
         File::open(&path)?.sync_all()?;
         File::open(&payload)?.sync_all()?;
-        let lock = OpenOptions::new().read(true).write(true).create_new(true).mode(0o600)
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
             .open(directory.join("lock"))?;
         lock.try_lock().map_err(io::Error::from)?;
         lock.sync_all()?;
         write_journal(&directory, record, nonce)?;
         File::open(parent)?.sync_all()
     };
-    publish().map_err(|error| NativeCheckpointError::Publication { directory: directory.clone(), error })?;
+    publish().map_err(|error| NativeCheckpointError::Publication {
+        directory: directory.clone(),
+        error,
+    })?;
     Ok(directory)
 }
 
@@ -404,15 +488,25 @@ impl NativeTransferClient {
     /// fabricated valid checkpoint. Remote byte-offset resume and recovery of
     /// a producer interrupted before EOF are not supplied by this API.
     pub async fn prepare_reader<R: AsyncRead + Unpin>(
-        &self, cx: &Cx, remote: SocketAddr, options: NativeUploadOptions, mut reader: R,
+        &self,
+        cx: &Cx,
+        remote: SocketAddr,
+        options: NativeUploadOptions,
+        mut reader: R,
     ) -> Result<NativeCheckpointPreparation, NativeCheckpointError> {
         validate_upload(cx, &options)?;
         let admission = Arc::new(self.admit_sender()?);
         let mut record = Journal {
-            version: JOURNAL_VERSION, file_name: options.file_name.clone(),
-            source_bytes: 0, source_sha256: [0; 32], remote,
-            server_name: server_name(&admission)?, local_peer_label: admission.shared.peer_label.clone(),
-            state: NativeCheckpointState::Prepared, attempt: 0, receipt: None,
+            version: JOURNAL_VERSION,
+            file_name: options.file_name.clone(),
+            source_bytes: 0,
+            source_sha256: [0; 32],
+            remote,
+            server_name: server_name(&admission)?,
+            local_peer_label: admission.shared.peer_label.clone(),
+            state: NativeCheckpointState::Prepared,
+            attempt: 0,
+            receipt: None,
         };
         record.validate()?;
         let mut created = None;
@@ -424,16 +518,34 @@ impl NativeTransferClient {
             let name = options.file_name.clone();
             let owner = Arc::clone(&admission);
             match spawn_blocking_io(move || Spool::create(&parent, &name, &nonce, owner)).await {
-                Ok(spool) => { created = Some(spool); break; }
+                Ok(spool) => {
+                    created = Some(spool);
+                    break;
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error.into()),
             }
         }
-        let spool = created.ok_or(NativeCheckpointError::Invalid("spool collision budget exhausted"))?;
-        let limit = options.max_bytes.unwrap_or(u64::MAX).min(admission.shared.config.max_transfer_bytes);
-        let digest = spool_source(cx, &mut reader, &spool, limit,
-            admission.shared.config.chunk_size.min(MAX_UPLOAD_BUFFER), options.source_idle_timeout,
-            SpoolProgress { written: &mut record.source_bytes, observer: None }).await;
+        let spool = created.ok_or(NativeCheckpointError::Invalid(
+            "spool collision budget exhausted",
+        ))?;
+        let limit = options
+            .max_bytes
+            .unwrap_or(u64::MAX)
+            .min(admission.shared.config.max_transfer_bytes);
+        let digest = spool_source(
+            cx,
+            &mut reader,
+            &spool,
+            limit,
+            admission.shared.config.chunk_size.min(MAX_UPLOAD_BUFFER),
+            options.source_idle_timeout,
+            SpoolProgress {
+                written: &mut record.source_bytes,
+                observer: None,
+            },
+        )
+        .await;
         let published = match digest {
             Err(error) => Err(error.into()),
             Ok(digest) => {
@@ -442,22 +554,37 @@ impl NativeTransferClient {
                 let saved = record.clone();
                 let mut nonce = [0; 16];
                 cx.random_bytes(&mut nonce);
-                spawn_blocking_io(move || Ok(publish_prepared(&owner, &saved, &nonce))).await
-                    .map_err(NativeCheckpointError::from).and_then(|result| result)
+                spawn_blocking_io(move || Ok(publish_prepared(&owner, &saved, &nonce)))
+                    .await
+                    .map_err(NativeCheckpointError::from)
+                    .and_then(|result| result)
             }
         };
         let owner = Arc::clone(&spool);
-        let cleanup_error = spawn_blocking_io(move || owner.cleanup()).await.err()
-            .map(|error| NativeUploadCleanupError { directory: spool.directory.clone(), error });
+        let cleanup_error = spawn_blocking_io(move || owner.cleanup())
+            .await
+            .err()
+            .map(|error| NativeUploadCleanupError {
+                directory: spool.directory.clone(),
+                error,
+            });
         let directory = published?;
-        Ok(NativeCheckpointPreparation { checkpoint: record.info(directory), cleanup_error })
+        Ok(NativeCheckpointPreparation {
+            checkpoint: record.info(directory),
+            cleanup_error,
+        })
     }
 
     /// Prepare a borrowed buffer with the same bounded, durable source path.
     pub async fn prepare_buffer(
-        &self, cx: &Cx, remote: SocketAddr, options: NativeUploadOptions, data: &[u8],
+        &self,
+        cx: &Cx,
+        remote: SocketAddr,
+        options: NativeUploadOptions,
+        data: &[u8],
     ) -> Result<NativeCheckpointPreparation, NativeCheckpointError> {
-        self.prepare_reader(cx, remote, options, BufferReader(data)).await
+        self.prepare_reader(cx, remote, options, BufferReader(data))
+            .await
     }
 
     /// Inspect the journal under an exclusive, nonblocking OS lock. No send.
@@ -467,12 +594,16 @@ impl NativeTransferClient {
     /// do not turn local metadata or a peer label into remote authorization.
     /// This is journal inspection, not a rehash of the retained source.
     pub async fn inspect_checkpoint(
-        &self, cx: &Cx, directory: &Path, remote: SocketAddr,
+        &self,
+        cx: &Cx,
+        directory: &Path,
+        remote: SocketAddr,
     ) -> Result<NativeUploadCheckpoint, NativeCheckpointError> {
         authorize(cx)?;
         let admission = self.admit_sender()?;
         let directory = directory.to_path_buf();
-        let (lease, record) = spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
+        let (lease, record) =
+            spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
         record.check_binding(&lease.admission, remote)?;
         Ok(record.info(lease.directory.clone()))
     }
@@ -492,7 +623,11 @@ impl NativeTransferClient {
     /// cannot guarantee exactly-once publication after a lost acknowledgement.
     /// Do not mutate or replace checkpoint files while an operation owns them.
     pub async fn send_checkpoint(
-        &self, cx: &Cx, directory: &Path, remote: SocketAddr, retry: NativeCheckpointRetry,
+        &self,
+        cx: &Cx,
+        directory: &Path,
+        remote: SocketAddr,
+        retry: NativeCheckpointRetry,
     ) -> Result<NativeCheckpointAttempt, NativeCheckpointError> {
         authorize(cx)?;
         let admission = self.admit_sender()?;
@@ -506,32 +641,47 @@ impl NativeTransferClient {
     /// During a blocking journal write, its owner retains both lock and credit
     /// until that write finishes, even if the async wrapper is hard-dropped.
     pub fn spawn_send_checkpoint<P: Policy>(
-        &self, cx: &Cx, scope: &Scope<'_, P>, directory: impl Into<PathBuf>,
-        remote: SocketAddr, retry: NativeCheckpointRetry,
+        &self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        directory: impl Into<PathBuf>,
+        remote: SocketAddr,
+        retry: NativeCheckpointRetry,
     ) -> Result<NativeCheckpointTask, NativeCheckpointError> {
         authorize(cx)?;
         let admission = self.admit_sender()?;
         let directory = directory.into();
         cx.spawn_in(scope, move |child| {
-            let future: Pin<Box<dyn Future<Output = Result<NativeCheckpointAttempt, NativeCheckpointError>> + Send>> =
-                Box::pin(async move {
-                    Self::send_checkpoint_admitted(&child, directory, remote, retry, admission).await
-                });
+            let future: Pin<
+                Box<
+                    dyn Future<Output = Result<NativeCheckpointAttempt, NativeCheckpointError>>
+                        + Send,
+                >,
+            > = Box::pin(async move {
+                Self::send_checkpoint_admitted(&child, directory, remote, retry, admission).await
+            });
             future
-        }).map_err(|error| NativeTransferError::Spawn(error).into())
+        })
+        .map_err(|error| NativeTransferError::Spawn(error).into())
     }
 
     async fn send_checkpoint_admitted(
-        cx: &Cx, directory: PathBuf, remote: SocketAddr, retry: NativeCheckpointRetry,
+        cx: &Cx,
+        directory: PathBuf,
+        remote: SocketAddr,
+        retry: NativeCheckpointRetry,
         admission: NativeAdmission,
     ) -> Result<NativeCheckpointAttempt, NativeCheckpointError> {
         authorize(cx)?;
-        let (lease, mut record) = spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
+        let (lease, mut record) =
+            spawn_blocking_io(move || Ok(Lease::open(&directory, admission))).await??;
         record.check_binding(&lease.admission, remote)?;
         if let Some(receipt) = &record.receipt {
             return Ok(NativeCheckpointAttempt {
-                checkpoint: record.info(lease.directory.clone()), outcome: Ok(receipt.report()),
-                cached_receipt: true, persistence_error: None,
+                checkpoint: record.info(lease.directory.clone()),
+                outcome: Ok(receipt.report()),
+                cached_receipt: true,
+                persistence_error: None,
             });
         }
         let next_attempt = record.next_attempt(retry)?;
@@ -543,19 +693,31 @@ impl NativeTransferClient {
         let mut receipt_nonce = [0; 16];
         cx.random_bytes(&mut intent_nonce);
         cx.random_bytes(&mut receipt_nonce);
-        persist_record(&lease, &record, intent_nonce).await.map_err(|error| NativeCheckpointError::Publication {
-            directory: lease.directory.clone(), error,
-        })?;
+        persist_record(&lease, &record, intent_nonce)
+            .await
+            .map_err(|error| NativeCheckpointError::Publication {
+                directory: lease.directory.clone(),
+                error,
+            })?;
         // Cancellation during intent persistence cannot start network work.
         checkpoint(cx)?;
         let outcome = transport_quic::send_path(
-            cx, remote, &source, lease.admission.shared.config.clone(),
+            cx,
+            remote,
+            &source,
+            lease.admission.shared.config.clone(),
             &lease.admission.shared.peer_label,
-        ).await.map_err(NativeTransferError::from).map_err(NativeCheckpointError::from)
-            .and_then(|report| {
-                if record.receipt_matches(&report) { Ok(report) }
-                else { Err(NativeCheckpointError::ReceiptMismatch(Box::new(report))) }
-            });
+        )
+        .await
+        .map_err(NativeTransferError::from)
+        .map_err(NativeCheckpointError::from)
+        .and_then(|report| {
+            if record.receipt_matches(&report) {
+                Ok(report)
+            } else {
+                Err(NativeCheckpointError::ReceiptMismatch(Box::new(report)))
+            }
+        });
         let mut persistence_error = None;
         if let Ok(report) = &outcome {
             let mut completed = record.clone();
@@ -569,8 +731,10 @@ impl NativeTransferClient {
             }
         }
         Ok(NativeCheckpointAttempt {
-            checkpoint: record.info(lease.directory.clone()), outcome,
-            cached_receipt: false, persistence_error,
+            checkpoint: record.info(lease.directory.clone()),
+            outcome,
+            cached_receipt: false,
+            persistence_error,
         })
     }
 }
@@ -582,7 +746,9 @@ async fn persist_record(lease: &Arc<Lease>, record: &Journal, nonce: [u8; 16]) -
 }
 
 async fn verify_source(
-    cx: &Cx, lease: &Arc<Lease>, record: &Journal,
+    cx: &Cx,
+    lease: &Arc<Lease>,
+    record: &Journal,
 ) -> Result<PathBuf, NativeCheckpointError> {
     let owner = Arc::clone(lease);
     let name = record.file_name.clone();
@@ -590,14 +756,29 @@ async fn verify_source(
         let payload = owner.directory.join("payload");
         let meta = std::fs::symlink_metadata(&payload)?;
         if !meta.file_type().is_dir() || meta.mode() & 0o077 != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid checkpoint payload directory"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid checkpoint payload directory",
+            ));
         }
         let path = payload.join(name);
         regular_file(&path)?;
-        let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
         Ok((path, file))
-    }).await?;
-    let mut buffer = vec![0; lease.admission.shared.config.chunk_size.min(MAX_UPLOAD_BUFFER)];
+    })
+    .await?;
+    let mut buffer = vec![
+        0;
+        lease
+            .admission
+            .shared
+            .config
+            .chunk_size
+            .min(MAX_UPLOAD_BUFFER)
+    ];
     let mut hash = Sha256::new();
     let mut total = 0;
     loop {
@@ -608,11 +789,14 @@ async fn verify_source(
             let _owner = owner;
             let read = file.read(&mut buffer[..window]);
             Ok((file, buffer, read))
-        }).await?;
+        })
+        .await?;
         file = returned_file;
         buffer = returned_buffer;
         let count = read?;
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         if count as u64 > record.source_bytes - total {
             return Err(NativeCheckpointError::SourceChanged);
         }
@@ -632,10 +816,16 @@ mod tests {
 
     fn journal() -> Journal {
         Journal {
-            version: JOURNAL_VERSION, file_name: "data.bin".into(), source_bytes: 7,
-            source_sha256: [3; 32], remote: "127.0.0.1:1234".parse().unwrap(),
-            server_name: "localhost".into(), local_peer_label: "01".repeat(32),
-            state: NativeCheckpointState::Prepared, attempt: 0, receipt: None,
+            version: JOURNAL_VERSION,
+            file_name: "data.bin".into(),
+            source_bytes: 7,
+            source_sha256: [3; 32],
+            remote: "127.0.0.1:1234".parse().unwrap(),
+            server_name: "localhost".into(),
+            local_peer_label: "01".repeat(32),
+            state: NativeCheckpointState::Prepared,
+            attempt: 0,
+            receipt: None,
         }
     }
 
@@ -654,7 +844,10 @@ mod tests {
         let mut invalid = original.clone();
         invalid.attempt = 1;
         assert!(invalid.validate().is_err());
-        for state in [NativeCheckpointState::Sending, NativeCheckpointState::Acknowledged] {
+        for state in [
+            NativeCheckpointState::Sending,
+            NativeCheckpointState::Acknowledged,
+        ] {
             let mut invalid = original.clone();
             invalid.state = state;
             assert!(invalid.validate().is_err());
@@ -674,25 +867,39 @@ mod tests {
         decoded.validate().unwrap();
         let json = String::from_utf8(bytes).unwrap();
         assert!(serde_json::from_str::<Journal>(&json.replacen('{', "{\"extra\":1,", 1)).is_err());
-        assert!(serde_json::from_str::<Journal>(&json.replacen('{', "{\"version\":1,", 1)).is_err());
+        assert!(
+            serde_json::from_str::<Journal>(&json.replacen('{', "{\"version\":1,", 1)).is_err()
+        );
     }
 
     #[test]
     fn retries_require_exact_uncertain_attempt_and_never_reset_the_budget() {
         let mut record = journal();
-        assert_eq!(record.next_attempt(NativeCheckpointRetry::Never).unwrap(), 1);
-        assert!(matches!(record.next_attempt(NativeCheckpointRetry::AcknowledgeUncertain { attempt: 0 }),
-            Err(NativeCheckpointError::StaleAttempt)));
+        assert_eq!(
+            record.next_attempt(NativeCheckpointRetry::Never).unwrap(),
+            1
+        );
+        assert!(matches!(
+            record.next_attempt(NativeCheckpointRetry::AcknowledgeUncertain { attempt: 0 }),
+            Err(NativeCheckpointError::StaleAttempt)
+        ));
         record.state = NativeCheckpointState::Sending;
         for attempt in 1..=MAX_CHECKPOINT_ATTEMPTS {
             record.attempt = attempt;
             assert!(matches!(record.next_attempt(NativeCheckpointRetry::Never),
                 Err(NativeCheckpointError::Uncertain { attempt: actual }) if actual == attempt));
-            assert!(matches!(record.next_attempt(NativeCheckpointRetry::AcknowledgeUncertain { attempt: attempt - 1 }),
-                Err(NativeCheckpointError::StaleAttempt)));
+            assert!(matches!(
+                record.next_attempt(NativeCheckpointRetry::AcknowledgeUncertain {
+                    attempt: attempt - 1
+                }),
+                Err(NativeCheckpointError::StaleAttempt)
+            ));
             let next = record.next_attempt(NativeCheckpointRetry::AcknowledgeUncertain { attempt });
             if attempt == MAX_CHECKPOINT_ATTEMPTS {
-                assert!(matches!(next, Err(NativeCheckpointError::AttemptsExhausted)));
+                assert!(matches!(
+                    next,
+                    Err(NativeCheckpointError::AttemptsExhausted)
+                ));
             } else {
                 assert_eq!(next.unwrap(), attempt + 1);
             }
@@ -703,20 +910,33 @@ mod tests {
     fn acknowledged_journal_retains_the_actual_receipt_and_rejects_inconsistent_facts() {
         let mut record = journal();
         let report = SendReport {
-            transfer_id: "actual-transfer".into(), bytes_sent: 7, files: 1,
-            symbols_sent: 13, feedback_rounds: 2, merkle_root_hex: "ab".repeat(32),
+            transfer_id: "actual-transfer".into(),
+            bytes_sent: 7,
+            files: 1,
+            symbols_sent: 13,
+            feedback_rounds: 2,
+            merkle_root_hex: "ab".repeat(32),
             peer: record.remote,
             receipt: ReceiveReceipt {
-                committed: true, bytes_received: 7, files: 1, sha_ok: true, merkle_ok: true,
-                symbols_accepted: 12, feedback_rounds: 2, decode_count: 1, decode_micros: 99,
-                reason: None, committed_paths: vec!["/data/data.bin".into()],
+                committed: true,
+                bytes_received: 7,
+                files: 1,
+                sha_ok: true,
+                merkle_ok: true,
+                symbols_accepted: 12,
+                feedback_rounds: 2,
+                decode_count: 1,
+                decode_micros: 99,
+                reason: None,
+                committed_paths: vec!["/data/data.bin".into()],
             },
         };
         record.state = NativeCheckpointState::Acknowledged;
         record.attempt = 2;
         record.receipt = Some(StoredReceipt::capture(&report));
         record.validate().unwrap();
-        let restored: Journal = serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
+        let restored: Journal =
+            serde_json::from_slice(&serde_json::to_vec(&record).unwrap()).unwrap();
         restored.validate().unwrap();
         let retained = restored.receipt.unwrap().report();
         assert_eq!(retained.receipt, report.receipt);

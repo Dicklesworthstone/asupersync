@@ -24,12 +24,23 @@ pub(super) struct LedgerSink {
 
 impl LedgerSink {
     pub fn new(file: LiveFileSink, claim: Option<Claim>) -> Self {
-        Self { file, claim, receipt: None, published: false, persist: None, terminal: None }
+        Self {
+            file,
+            claim,
+            receipt: None,
+            published: false,
+            persist: None,
+            terminal: None,
+        }
     }
 }
 
 impl AsyncWrite for LedgerSink {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         Pin::new(&mut this.file).poll_write(cx, bytes)
     }
@@ -42,13 +53,22 @@ impl AsyncWrite for LedgerSink {
 }
 
 impl LiveStreamCommitSink for LedgerSink {
-    fn poll_commit(self: Pin<&mut Self>, cx: &mut Context<'_>, receipt: &LiveStreamReceipt) -> Poll<io::Result<()>> {
+    fn poll_commit(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        receipt: &LiveStreamReceipt,
+    ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if this.receipt.as_ref().is_some_and(|old| old != receipt) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidInput, "ledger sink receipt changed")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "ledger sink receipt changed",
+            )));
         }
         if let Some(terminal) = this.terminal {
-            return Poll::Ready(terminal.map_err(|(kind, raw)| raw.map_or_else(|| io::Error::from(kind), io::Error::from_raw_os_error)));
+            return Poll::Ready(terminal.map_err(|(kind, raw)| {
+                raw.map_or_else(|| io::Error::from(kind), io::Error::from_raw_os_error)
+            }));
         }
         this.receipt.get_or_insert_with(|| receipt.clone());
         if !this.published {
@@ -61,12 +81,24 @@ impl LiveStreamCommitSink for LedgerSink {
         }
         if let Some(claim) = &this.claim {
             if this.persist.is_none() {
-                let claim = claim.clone(); let receipt = receipt.clone();
+                let claim = claim.clone();
+                let receipt = receipt.clone();
                 this.persist = Some(Box::pin(async move { claim.commit(receipt).await }));
             }
-            let result = ready!(this.persist.as_mut().expect("receipt persistence").as_mut().poll(cx));
+            let result = ready!(
+                this.persist
+                    .as_mut()
+                    .expect("receipt persistence")
+                    .as_mut()
+                    .poll(cx)
+            );
             this.persist = None;
-            this.terminal = Some(result.as_ref().map(|()| ()).map_err(|error| (error.kind(), error.raw_os_error())));
+            this.terminal = Some(
+                result
+                    .as_ref()
+                    .map(|()| ())
+                    .map_err(|error| (error.kind(), error.raw_os_error())),
+            );
             return Poll::Ready(result);
         }
         this.terminal = Some(Ok(()));

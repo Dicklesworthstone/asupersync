@@ -3,8 +3,8 @@
 use super::{assert_content, fixture, native_client, receiver_config, run_native, sender_config};
 use asupersync::Cx;
 use asupersync::io::{AsyncRead, ReadBuf};
-use asupersync::net::atp::sdk::native::{NativeUploadError, NativeUploadOptions};
 use asupersync::net::atp::sdk::NativeTransferError;
+use asupersync::net::atp::sdk::native::{NativeUploadError, NativeUploadOptions};
 use asupersync::net::atp::transport_quic::QuicReceiveOptions;
 use asupersync::runtime::JoinError;
 use asupersync::types::CancelReason;
@@ -26,14 +26,23 @@ struct ChunkedInput {
 }
 
 impl AsyncRead for ChunkedInput {
-    fn poll_read(mut self: Pin<&mut Self>, ctx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        assert!(buf.remaining() <= 4096, "SDK must honor the stricter read buffer cap");
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        assert!(
+            buf.remaining() <= 4096,
+            "SDK must honor the stricter read buffer cap"
+        );
         if self.pending {
             self.pending = false;
             ctx.waker().wake_by_ref();
             return Poll::Pending;
         }
-        let count = (self.bytes.len() - self.offset).min(buf.remaining()).min(4093);
+        let count = (self.bytes.len() - self.offset)
+            .min(buf.remaining())
+            .min(4093);
         buf.put_slice(&self.bytes[self.offset..self.offset + count]);
         self.offset += count;
         self.pending = true;
@@ -44,7 +53,11 @@ impl AsyncRead for ChunkedInput {
 struct ParkedInput(Arc<AtomicBool>);
 
 impl AsyncRead for ParkedInput {
-    fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         self.0.store(true, Ordering::SeqCst);
         // Deliberately no wake: the SDK must supply the cancellation/timeout wake.
         Poll::Pending
@@ -53,12 +66,17 @@ impl AsyncRead for ParkedInput {
 
 fn assert_empty_spool(parent: &Path) {
     assert_eq!(std::fs::read_dir(parent).unwrap().count(), 1);
-    assert_eq!(std::fs::read(parent.join("keep.txt")).unwrap(), b"untouched");
+    assert_eq!(
+        std::fs::read(parent.join("keep.txt")).unwrap(),
+        b"untouched"
+    );
 }
 
 #[test]
 fn native_upload_async_reader_and_buffer_deliver_real_verified_objects() {
-    for (workers, use_buffer, length) in [(1, false, 128 * 1024 + 17), (2, true, 8193), (1, true, 0)] {
+    for (workers, use_buffer, length) in
+        [(1, false, 128 * 1024 + 17), (2, true, 8193), (1, true, 0)]
+    {
         let root = fixture("upload-success");
         let spool = root.join("spool");
         std::fs::create_dir(&spool).unwrap();
@@ -73,17 +91,33 @@ fn native_upload_async_reader_and_buffer_deliver_real_verified_objects() {
             let timeout = Duration::from_secs(20);
             let sender = native_client("upload-sender", sender_config("localhost", timeout), 1);
             let receiver_client = native_client("upload-receiver", receiver_config(timeout), 1);
-            let receiver = receiver_client.bind_receiver(
-                &cx, "127.0.0.1:0".parse().unwrap(), receive_root, QuicReceiveOptions::default(),
-            ).await.unwrap();
+            let receiver = receiver_client
+                .bind_receiver(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    receive_root,
+                    QuicReceiveOptions::default(),
+                )
+                .await
+                .unwrap();
             let remote = receiver.local_addr();
             let options = NativeUploadOptions::new(spool, "object.bin");
             let (report, received) = if use_buffer {
-                zip(sender.send_buffer(&cx, remote, options, &data), receiver.receive(&cx)).await
+                zip(
+                    sender.send_buffer(&cx, remote, options, &data),
+                    receiver.receive(&cx),
+                )
+                .await
             } else {
                 let scope = cx.scope();
-                let reader = ChunkedInput { bytes: data, offset: 0, pending: true };
-                let mut task = sender.spawn_send_reader(&cx, &scope, remote, options, reader).unwrap();
+                let reader = ChunkedInput {
+                    bytes: data,
+                    offset: 0,
+                    pending: true,
+                };
+                let mut task = sender
+                    .spawn_send_reader(&cx, &scope, remote, options, reader)
+                    .unwrap();
                 let (joined, received) = zip(task.join(&cx), receiver.receive(&cx)).await;
                 (joined.expect("upload worker joined"), received)
             };
@@ -107,9 +141,16 @@ fn native_upload_async_reader_and_buffer_deliver_real_verified_objects() {
 fn native_upload_oversize_and_read_failure_never_contact_the_peer() {
     struct FailsAfterPrefix(bool);
     impl AsyncRead for FailsAfterPrefix {
-        fn poll_read(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
             if self.0 {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::UnexpectedEof, "input failed")));
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "input failed",
+                )));
             }
             self.0 = true;
             buf.put_slice(b"prefix");
@@ -128,22 +169,36 @@ fn native_upload_oversize_and_read_failure_never_contact_the_peer() {
         let sender = native_client("bounded-upload", config, 1);
         let mut options = NativeUploadOptions::new(&root, "over-limit.bin");
         options.max_bytes = Some(100); // Must not widen the native 31-byte cap.
-        let report = sender.send_buffer(&cx, sink.local_addr().unwrap(), options, &[7; 32]).await;
-        assert!(matches!(report.outcome, Err(NativeUploadError::TooLarge { limit: 31 })));
+        let report = sender
+            .send_buffer(&cx, sink.local_addr().unwrap(), options, &[7; 32])
+            .await;
+        assert!(matches!(
+            report.outcome,
+            Err(NativeUploadError::TooLarge { limit: 31 })
+        ));
         assert!(report.spooled_bytes <= 31);
         assert!(report.source_sha256.is_none());
         assert!(report.cleanup_error.is_none());
-        let report = sender.send_reader(
-            &cx, sink.local_addr().unwrap(), NativeUploadOptions::new(&root, "failed.bin"),
-            FailsAfterPrefix(false),
-        ).await;
-        assert!(matches!(report.outcome, Err(NativeUploadError::Io(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof));
+        let report = sender
+            .send_reader(
+                &cx,
+                sink.local_addr().unwrap(),
+                NativeUploadOptions::new(&root, "failed.bin"),
+                FailsAfterPrefix(false),
+            )
+            .await;
+        assert!(
+            matches!(report.outcome, Err(NativeUploadError::Io(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof)
+        );
         assert_eq!(report.spooled_bytes, 6);
         assert!(report.source_sha256.is_none());
         assert!(report.cleanup_error.is_none());
         assert_eq!(sender.active_transfers(), 0);
         let mut packet = [0u8; 2048];
-        assert_eq!(sink.recv_from(&mut packet).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            sink.recv_from(&mut packet).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     });
     assert_empty_spool(&inspect);
 }
@@ -155,15 +210,27 @@ fn native_upload_stalled_source_times_out_instead_of_reporting_eof() {
     let inspect = root.clone();
     run_native(1, async move {
         let cx = Cx::current().unwrap();
-        let sender = native_client("upload-timeout", sender_config("localhost", Duration::from_secs(2)), 1);
+        let sender = native_client(
+            "upload-timeout",
+            sender_config("localhost", Duration::from_secs(2)),
+            1,
+        );
         let entered = Arc::new(AtomicBool::new(false));
         let mut options = NativeUploadOptions::new(&root, "stalled.bin");
         options.source_idle_timeout = Duration::from_millis(25);
-        let report = sender.send_reader(
-            &cx, "127.0.0.1:9".parse().unwrap(), options, ParkedInput(Arc::clone(&entered)),
-        ).await;
+        let report = sender
+            .send_reader(
+                &cx,
+                "127.0.0.1:9".parse().unwrap(),
+                options,
+                ParkedInput(Arc::clone(&entered)),
+            )
+            .await;
         assert!(entered.load(Ordering::SeqCst));
-        assert!(matches!(report.outcome, Err(NativeUploadError::SourceTimeout)));
+        assert!(matches!(
+            report.outcome,
+            Err(NativeUploadError::SourceTimeout)
+        ));
         assert!(report.source_sha256.is_none());
         assert!(report.cleanup_error.is_none());
         assert_eq!(sender.active_transfers(), 0);
@@ -179,24 +246,41 @@ fn native_upload_cancellation_wakes_a_source_that_never_wakes_itself() {
     run_native(2, async move {
         let cx = Cx::current().unwrap();
         let scope = cx.scope();
-        let sender = native_client("upload-cancel", sender_config("localhost", Duration::from_secs(2)), 1);
+        let sender = native_client(
+            "upload-cancel",
+            sender_config("localhost", Duration::from_secs(2)),
+            1,
+        );
         let entered = Arc::new(AtomicBool::new(false));
         let mut options = NativeUploadOptions::new(&root, "cancelled.bin");
         options.source_idle_timeout = Duration::from_secs(3600);
-        let mut task = sender.spawn_send_reader(
-            &cx, &scope, "127.0.0.1:9".parse().unwrap(), options, ParkedInput(Arc::clone(&entered)),
-        ).unwrap();
+        let mut task = sender
+            .spawn_send_reader(
+                &cx,
+                &scope,
+                "127.0.0.1:9".parse().unwrap(),
+                options,
+                ParkedInput(Arc::clone(&entered)),
+            )
+            .unwrap();
         asupersync::time::timeout(cx.now(), Duration::from_secs(5), async {
-            while !entered.load(Ordering::SeqCst) { asupersync::runtime::yield_now().await; }
-        }).await.expect("source must actually begin waiting");
+            while !entered.load(Ordering::SeqCst) {
+                asupersync::runtime::yield_now().await;
+            }
+        })
+        .await
+        .expect("source must actually begin waiting");
         assert_eq!(sender.active_transfers(), 1);
         let reason = CancelReason::user("cancel stalled SDK input");
         task.abort_with_reason(reason.clone());
         let joined = asupersync::time::timeout(cx.now(), Duration::from_secs(5), task.join(&cx))
-            .await.expect("cancellation must not wait for the one-hour source timeout");
+            .await
+            .expect("cancellation must not wait for the one-hour source timeout");
         match joined {
             Ok(report) => {
-                assert!(matches!(report.outcome, Err(NativeUploadError::Cancelled { reason: Some(ref actual) }) if actual == &reason));
+                assert!(
+                    matches!(report.outcome, Err(NativeUploadError::Cancelled { reason: Some(ref actual) }) if actual == &reason)
+                );
                 assert!(report.cleanup_error.is_none());
             }
             Err(JoinError::Cancelled(actual)) => assert_eq!(actual, reason),
@@ -215,18 +299,37 @@ fn native_upload_admission_precedes_source_polling_and_spool_creation() {
     run_native(1, async move {
         let cx = Cx::current().unwrap();
         let scope = cx.scope();
-        let sender = native_client("upload-admission", sender_config("localhost", Duration::from_secs(2)), 1);
+        let sender = native_client(
+            "upload-admission",
+            sender_config("localhost", Duration::from_secs(2)),
+            1,
+        );
         let entered = Arc::new(AtomicBool::new(false));
         let options = NativeUploadOptions::new(&root, "queued.bin");
-        let mut first = sender.spawn_send_reader(
-            &cx, &scope, "127.0.0.1:9".parse().unwrap(), options.clone(), ParkedInput(Arc::clone(&entered)),
-        ).unwrap();
+        let mut first = sender
+            .spawn_send_reader(
+                &cx,
+                &scope,
+                "127.0.0.1:9".parse().unwrap(),
+                options.clone(),
+                ParkedInput(Arc::clone(&entered)),
+            )
+            .unwrap();
         assert_eq!(sender.active_transfers(), 1);
         assert!(!entered.load(Ordering::SeqCst));
         assert_empty_spool(&root);
-        assert!(matches!(sender.clone().spawn_send_reader(
-            &cx, &scope, "127.0.0.1:9".parse().unwrap(), options, ParkedInput(Arc::clone(&entered)),
-        ), Err(NativeUploadError::Native(NativeTransferError::CapacityExceeded { limit: 1 }))));
+        assert!(matches!(
+            sender.clone().spawn_send_reader(
+                &cx,
+                &scope,
+                "127.0.0.1:9".parse().unwrap(),
+                options,
+                ParkedInput(Arc::clone(&entered)),
+            ),
+            Err(NativeUploadError::Native(
+                NativeTransferError::CapacityExceeded { limit: 1 }
+            ))
+        ));
         first.abort_with_reason(CancelReason::user("cancel queued upload"));
         let joined = first.join(&cx).await;
         assert!(matches!(joined, Err(JoinError::Cancelled(_))));
@@ -256,9 +359,18 @@ fn native_upload_missing_capability_never_polls_or_spools_input() {
         // CapSet's parameter order is spawn, time, entropy, I/O, remote.
         for (mask, expected) in [
             (CapMask::none(), (false, false, false)),
-            (CapSet::<true, true, true, false, true>::MASK, (false, true, true)),
-            (CapSet::<true, true, false, true, true>::MASK, (true, false, true)),
-            (CapSet::<true, false, true, true, true>::MASK, (true, true, false)),
+            (
+                CapSet::<true, true, true, false, true>::MASK,
+                (false, true, true),
+            ),
+            (
+                CapSet::<true, true, false, true, true>::MASK,
+                (true, false, true),
+            ),
+            (
+                CapSet::<true, false, true, true, true>::MASK,
+                (true, true, false),
+            ),
         ] {
             // Capture runtime attenuation in Cx<All>, then release the
             // thread-local guard before any await.

@@ -11,7 +11,8 @@ use asupersync::util::{
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn assert_ambient_refused(source: &str, operation: impl FnOnce()) {
-    let payload = catch_unwind(AssertUnwindSafe(operation)).expect_err("ambient entropy was admitted");
+    let payload =
+        catch_unwind(AssertUnwindSafe(operation)).expect_err("ambient entropy was admitted");
     let message = payload
         .downcast_ref::<String>()
         .map(String::as_str)
@@ -20,7 +21,11 @@ fn assert_ambient_refused(source: &str, operation: impl FnOnce()) {
     let expected = format!(
         "ambient entropy source \"{source}\" used in strict mode; use Cx::random_* instead"
     );
-    assert_eq!(message, expected.as_str(), "unexpected panic is not a refusal");
+    assert_eq!(
+        message,
+        expected.as_str(),
+        "unexpected panic is not a refusal"
+    );
 }
 
 fn assert_all_ambient_sources_refused() {
@@ -69,11 +74,13 @@ fn strict_entropy_guards_protect_public_sources_without_changing_seeded_replay()
 
     // Unwinding an inner scope must release only its own isolation claim.
     let outer = StrictEntropyGuard::new();
-    assert!(catch_unwind(|| {
-        let _inner = StrictEntropyGuard::new();
-        panic!("exercise guard unwind");
-    })
-    .is_err());
+    assert!(
+        catch_unwind(|| {
+            let _inner = StrictEntropyGuard::new();
+            panic!("exercise guard unwind");
+        })
+        .is_err()
+    );
     assert!(strict_entropy_enabled());
     assert_all_ambient_sources_refused();
     drop(outer);

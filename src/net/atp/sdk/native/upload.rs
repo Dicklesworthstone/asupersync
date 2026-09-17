@@ -72,7 +72,9 @@ impl NativeUploadOptions {
         validate_portable_path_component(&self.file_name)
             .map_err(NativeUploadError::InvalidName)?;
         if self.file_name.len() > 255 {
-            return Err(NativeUploadError::InvalidName("filename exceeds 255 bytes".into()));
+            return Err(NativeUploadError::InvalidName(
+                "filename exceeds 255 bytes".into(),
+            ));
         }
         if self.spool_parent.as_os_str().is_empty() || self.source_idle_timeout.is_zero() {
             return Err(NativeUploadError::InvalidOptions);
@@ -178,7 +180,9 @@ impl Spool {
         nonce: &[u8; 16],
         admission: Arc<NativeAdmission>,
     ) -> io::Result<Arc<Self>> {
-        let directory = parent.canonicalize()?.join(format!(".atp-upload-{}", hex::encode(nonce)));
+        let directory = parent
+            .canonicalize()?
+            .join(format!(".atp-upload-{}", hex::encode(nonce)));
         let mut builder = DirBuilder::new();
         #[cfg(unix)]
         {
@@ -238,7 +242,9 @@ fn ignore_missing(result: io::Result<()>) -> io::Result<()> {
 }
 
 fn checkpoint(cx: &Cx) -> Result<(), NativeUploadError> {
-    cx.checkpoint().map_err(|_| NativeUploadError::Cancelled { reason: cx.cancel_reason() })
+    cx.checkpoint().map_err(|_| NativeUploadError::Cancelled {
+        reason: cx.cancel_reason(),
+    })
 }
 
 fn validate_upload(cx: &Cx, options: &NativeUploadOptions) -> Result<(), NativeUploadError> {
@@ -269,7 +275,10 @@ async fn read_source<R: AsyncRead + Unpin>(
     buffer: &mut [u8],
     timeout: Duration,
 ) -> Result<usize, NativeUploadError> {
-    let mut cancellation = ReadCancellation { cx: cx.clone(), token: None };
+    let mut cancellation = ReadCancellation {
+        cx: cx.clone(),
+        token: None,
+    };
     let read = poll_fn(|ctx| {
         cancellation.token = Some(cx.refresh_cancel_waker(cancellation.token.take(), ctx.waker()));
         // Register then check: publication in between cannot lose the wake.
@@ -318,9 +327,12 @@ impl NativeTransferClient {
         options: NativeUploadOptions,
         reader: R,
     ) -> NativeUploadReport {
-        let admitted = validate_upload(cx, &options).and_then(|()| self.admit_sender().map_err(Into::into));
+        let admitted =
+            validate_upload(cx, &options).and_then(|()| self.admit_sender().map_err(Into::into));
         match admitted {
-            Ok(admission) => Self::upload_admitted(cx, remote, options, reader, admission, None).await,
+            Ok(admission) => {
+                Self::upload_admitted(cx, remote, options, reader, admission, None).await
+            }
             Err(error) => NativeUploadReport::failed(error),
         }
     }
@@ -334,7 +346,8 @@ impl NativeTransferClient {
         options: NativeUploadOptions,
         data: &[u8],
     ) -> NativeUploadReport {
-        self.send_reader(cx, remote, options, BufferReader(data)).await
+        self.send_reader(cx, remote, options, BufferReader(data))
+            .await
     }
 
     /// Admit the entire input and transfer journey as one scope-owned task.
@@ -361,9 +374,10 @@ impl NativeTransferClient {
         validate_upload(cx, &options)?;
         let admission = self.admit_sender()?;
         cx.spawn_in(scope, move |child| {
-            let future: Pin<Box<dyn Future<Output = NativeUploadReport> + Send>> = Box::pin(async move {
-                Self::upload_admitted(&child, remote, options, reader, admission, None).await
-            });
+            let future: Pin<Box<dyn Future<Output = NativeUploadReport> + Send>> =
+                Box::pin(async move {
+                    Self::upload_admitted(&child, remote, options, reader, admission, None).await
+                });
             future
         })
         .map_err(|error| NativeTransferError::Spawn(error).into())
@@ -383,7 +397,8 @@ impl NativeTransferClient {
         }
         let admission = Arc::new(admission);
         let mut created = Err(NativeUploadError::Io(io::Error::new(
-            io::ErrorKind::AlreadyExists, "unique upload spool names exhausted",
+            io::ErrorKind::AlreadyExists,
+            "unique upload spool names exhausted",
         )));
         for _ in 0..SPOOL_CREATE_ATTEMPTS {
             if let Err(error) = checkpoint(cx) {
@@ -395,9 +410,15 @@ impl NativeTransferClient {
             let name = options.file_name.clone();
             let owner = Arc::clone(&admission);
             match spawn_blocking_io(move || Spool::create(&parent, &name, &nonce, owner)).await {
-                Ok(spool) => { created = Ok(spool); break; }
+                Ok(spool) => {
+                    created = Ok(spool);
+                    break;
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => { created = Err(error.into()); break; }
+                Err(error) => {
+                    created = Err(error.into());
+                    break;
+                }
             }
         }
         let spool = match created {
@@ -405,12 +426,24 @@ impl NativeTransferClient {
             Err(error) => return NativeUploadReport::failed(error),
         };
         let mut report = NativeUploadReport::failed(NativeUploadError::InvalidOptions);
-        let limit = options.max_bytes.unwrap_or(u64::MAX).min(admission.shared.config.max_transfer_bytes);
+        let limit = options
+            .max_bytes
+            .unwrap_or(u64::MAX)
+            .min(admission.shared.config.max_transfer_bytes);
         let buffer_len = admission.shared.config.chunk_size.min(MAX_UPLOAD_BUFFER);
-        let source = spool_source(cx, &mut reader, &spool, limit, buffer_len,
-            options.source_idle_timeout, SpoolProgress {
-                written: &mut report.spooled_bytes, observer: observer.as_deref(),
-            }).await;
+        let source = spool_source(
+            cx,
+            &mut reader,
+            &spool,
+            limit,
+            buffer_len,
+            options.source_idle_timeout,
+            SpoolProgress {
+                written: &mut report.spooled_bytes,
+                observer: observer.as_deref(),
+            },
+        )
+        .await;
         report.outcome = match source {
             Err(error) => Err(error),
             Ok(digest) => {
@@ -418,17 +451,24 @@ impl NativeTransferClient {
                 match checkpoint(cx) {
                     Err(error) => Err(error),
                     Ok(()) => transport_quic::send_path(
-                        cx, remote, &spool.path, admission.shared.config.clone(),
+                        cx,
+                        remote,
+                        &spool.path,
+                        admission.shared.config.clone(),
                         &admission.shared.peer_label,
-                    ).await.map_err(NativeTransferError::from)
-                        .and_then(committed_send).map_err(Into::into),
+                    )
+                    .await
+                    .map_err(NativeTransferError::from)
+                    .and_then(committed_send)
+                    .map_err(Into::into),
                 }
             }
         };
         let cleanup_owner = Arc::clone(&spool);
         if let Err(error) = spawn_blocking_io(move || cleanup_owner.cleanup()).await {
             report.cleanup_error = Some(NativeUploadCleanupError {
-                directory: spool.directory.clone(), error,
+                directory: spool.directory.clone(),
+                error,
             });
         }
         // `spool` and every disk job retain the slot, so hard-drop cleanup also
@@ -463,17 +503,22 @@ async fn spool_source<R: AsyncRead + Unpin>(
         let window = read_window(buffer.len(), limit, *progress.written);
         let count = read_source(cx, reader, &mut buffer[..window], timeout).await?;
         checkpoint(cx)?;
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         if u64::try_from(count).unwrap_or(u64::MAX) > limit - *progress.written {
             return Err(NativeUploadError::TooLarge { limit });
         }
         let owner = Arc::clone(spool);
         let (returned, result) = spawn_blocking_io(move || {
             let mut file = owner.file.lock();
-            let result = file.as_mut().ok_or_else(|| io::Error::other("upload spool closed"))
+            let result = file
+                .as_mut()
+                .ok_or_else(|| io::Error::other("upload spool closed"))
                 .and_then(|file| file.write_all(&buffer[..count]));
             Ok((buffer, result))
-        }).await?;
+        })
+        .await?;
         buffer = returned;
         result?;
         hash.update(&buffer[..count]);
@@ -484,11 +529,15 @@ async fn spool_source<R: AsyncRead + Unpin>(
     }
     let owner = Arc::clone(spool);
     spawn_blocking_io(move || {
-        let mut file = owner.file.lock().take()
+        let mut file = owner
+            .file
+            .lock()
+            .take()
             .ok_or_else(|| io::Error::other("upload spool closed"))?;
         file.flush()?;
         file.sync_data()
-    }).await?;
+    })
+    .await?;
     checkpoint(cx)?;
     Ok(hash.finalize().into())
 }
@@ -496,7 +545,11 @@ async fn spool_source<R: AsyncRead + Unpin>(
 struct BufferReader<'a>(&'a [u8]);
 
 impl AsyncRead for BufferReader<'_> {
-    fn poll_read(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let count = self.0.len().min(buf.remaining());
         buf.put_slice(&self.0[..count]);
         self.0 = &self.0[count..];
@@ -510,10 +563,19 @@ mod tests {
 
     #[test]
     fn upload_names_cannot_escape_the_spool_or_alias_windows_devices() {
-        for name in ["", ".", "..", "../file", "a/b", "a\\b", "C:foo", "NUL", "x.", "x "] {
-            assert!(NativeUploadOptions::new("spool", name).validate().is_err(), "{name:?}");
+        for name in [
+            "", ".", "..", "../file", "a/b", "a\\b", "C:foo", "NUL", "x.", "x ",
+        ] {
+            assert!(
+                NativeUploadOptions::new("spool", name).validate().is_err(),
+                "{name:?}"
+            );
         }
-        assert!(NativeUploadOptions::new("spool", "payload.bin").validate().is_ok());
+        assert!(
+            NativeUploadOptions::new("spool", "payload.bin")
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -541,8 +603,13 @@ mod tests {
         loop {
             let mut bytes = [0u8; 3];
             let mut buf = ReadBuf::new(&mut bytes);
-            assert!(matches!(Pin::new(&mut reader).poll_read(&mut cx, &mut buf), Poll::Ready(Ok(()))));
-            if buf.filled().is_empty() { break; }
+            assert!(matches!(
+                Pin::new(&mut reader).poll_read(&mut cx, &mut buf),
+                Poll::Ready(Ok(()))
+            ));
+            if buf.filled().is_empty() {
+                break;
+            }
             output.extend_from_slice(buf.filled());
         }
         assert_eq!(output, b"abcdefg");

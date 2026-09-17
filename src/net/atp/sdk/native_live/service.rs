@@ -17,12 +17,12 @@
 //! owning regions still must drain the children. User polls/destructors that
 //! never return cannot be preempted. No wire-format or sink-durability change.
 
-use super::{
-    Cancellation, LiveStreamError, LiveStreamReceiver, LiveStreamReport, Permit,
-    Progress, authorize, bounded, check_alpn, checkpoint,
-};
 use super::super::NativeClientCertificateId;
 use super::commit::{FlushOnly, LiveStreamCommitSink};
+use super::{
+    Cancellation, LiveStreamError, LiveStreamReceiver, LiveStreamReport, Permit, Progress,
+    authorize, bounded, check_alpn, checkpoint,
+};
 use crate::cx::{Cx, Scope};
 use crate::io::AsyncWrite;
 use crate::net::{TcpListener, TcpStream};
@@ -111,7 +111,10 @@ impl LiveStreamServiceControl {
         let (retired, wake) = {
             let mut state = self.state.lock();
             let upgrade = matches!(state.request, StopRequest::Running)
-                || matches!((&state.request, &request), (StopRequest::Drain, StopRequest::Abort(_)));
+                || matches!(
+                    (&state.request, &request),
+                    (StopRequest::Drain, StopRequest::Abort(_))
+                );
             let retired = if upgrade {
                 Some(std::mem::replace(&mut state.request, request))
             } else {
@@ -120,7 +123,9 @@ impl LiveStreamServiceControl {
             (retired, state.waiter.take())
         };
         drop(retired);
-        if let Some(wake) = wake { wake.wake(); }
+        if let Some(wake) = wake {
+            wake.wake();
+        }
     }
 
     fn register(&self, waker: &Waker) {
@@ -128,7 +133,11 @@ impl LiveStreamServiceControl {
         let candidate = waker.clone();
         let retired = {
             let mut state = self.state.lock();
-            if state.waiter.as_ref().is_some_and(|old| old.will_wake(waker)) {
+            if state
+                .waiter
+                .as_ref()
+                .is_some_and(|old| old.will_wake(waker))
+            {
                 Some(candidate)
             } else {
                 state.waiter.replace(candidate)
@@ -198,22 +207,38 @@ impl LiveStreamReceiver {
     ) -> Result<LiveStreamService, LiveStreamError> {
         authorize(cx)?;
         if max_connections == 0 || max_connections > self.admission.capacity {
-            return Err(LiveStreamError::Configuration("invalid service connection budget"));
+            return Err(LiveStreamError::Configuration(
+                "invalid service connection budget",
+            ));
         }
         let mut permits = Vec::new();
         let mut jobs = Vec::new();
-        permits.try_reserve_exact(max_connections).map_err(|_| allocation_error())?;
-        jobs.try_reserve_exact(max_connections).map_err(|_| allocation_error())?;
-        for _ in 0..max_connections { permits.push(self.admission.reserve()?); }
+        permits
+            .try_reserve_exact(max_connections)
+            .map_err(|_| allocation_error())?;
+        jobs.try_reserve_exact(max_connections)
+            .map_err(|_| allocation_error())?;
+        for _ in 0..max_connections {
+            permits.push(self.admission.reserve()?);
+        }
         let listener = bounded(
-            cx, self.config.operation_timeout, "service bind", TcpListener::bind(address),
-        ).await?;
+            cx,
+            self.config.operation_timeout,
+            "service bind",
+            TcpListener::bind(address),
+        )
+        .await?;
         let address = listener.local_addr()?;
         Ok(LiveStreamService {
-            listener: Some(listener), address, receiver: self.clone(),
+            listener: Some(listener),
+            address,
+            receiver: self.clone(),
             capacity: Some(Arc::new(Capacity { _permits: permits })),
-            max_connections, jobs, next_connection: Some(0),
-            control: LiveStreamServiceControl::default(), abort_dispatched: false,
+            max_connections,
+            jobs,
+            next_connection: Some(0),
+            control: LiveStreamServiceControl::default(),
+            abort_dispatched: false,
         })
     }
 }
@@ -225,19 +250,27 @@ fn allocation_error() -> LiveStreamError {
 impl LiveStreamService {
     /// Address assigned to the retained socket; remains available after closure.
     #[must_use]
-    pub const fn local_addr(&self) -> SocketAddr { self.address }
+    pub const fn local_addr(&self) -> SocketAddr {
+        self.address
+    }
 
     /// Configured bound on workers, including finished but uncollected workers.
     #[must_use]
-    pub const fn max_connections(&self) -> usize { self.max_connections }
+    pub const fn max_connections(&self) -> usize {
+        self.max_connections
+    }
 
     /// Accepted workers still owned by this manager, including ready joins.
     #[must_use]
-    pub fn in_flight(&self) -> usize { self.jobs.len() }
+    pub fn in_flight(&self) -> usize {
+        self.jobs.len()
+    }
 
     /// A request handle suitable for another task or thread.
     #[must_use]
-    pub fn control(&self) -> LiveStreamServiceControl { self.control.clone() }
+    pub fn control(&self) -> LiveStreamServiceControl {
+        self.control.clone()
+    }
 
     /// True only after admission closed and every retained join was collected.
     #[must_use]
@@ -286,10 +319,16 @@ impl LiveStreamService {
         Fut: Future<Output = io::Result<W>> + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        self.next_inner(cx, scope, move |child, peer| {
-            let future = make_sink(child, peer);
-            async move { future.await.map(FlushOnly) }
-        }, false).await
+        self.next_inner(
+            cx,
+            scope,
+            move |child, peer| {
+                let future = make_sink(child, peer);
+                async move { future.await.map(FlushOnly) }
+            },
+            false,
+        )
+        .await
     }
 
     /// Accept sinks whose application commit must succeed before final Proof.
@@ -301,7 +340,10 @@ impl LiveStreamService {
     /// from an acknowledged local commit whose peer Proof could not complete.
     /// Earlier workers keep their own policy if next and next_committing are mixed.
     pub async fn next_committing<P, F, Fut, W>(
-        &mut self, cx: &Cx, scope: &Scope<'_, P>, make_sink: F,
+        &mut self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        make_sink: F,
     ) -> Result<Option<LiveStreamCompletion>, LiveStreamError>
     where
         P: Policy,
@@ -313,7 +355,11 @@ impl LiveStreamService {
     }
 
     async fn next_inner<P, F, Fut, W>(
-        &mut self, cx: &Cx, scope: &Scope<'_, P>, make_sink: F, require_commit: bool,
+        &mut self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        make_sink: F,
+        require_commit: bool,
     ) -> Result<Option<LiveStreamCompletion>, LiveStreamError>
     where
         P: Policy,
@@ -324,9 +370,13 @@ impl LiveStreamService {
         let mut cancellation = Cancellation { cx, token: None };
         let result = poll_fn(|ctx| {
             self.control.register(ctx.waker());
-            cancellation.token = Some(cx.refresh_cancel_waker(cancellation.token.take(), ctx.waker()));
+            cancellation.token =
+                Some(cx.refresh_cancel_waker(cancellation.token.take(), ctx.waker()));
             if let Err(error) = authorize(cx) {
-                self.cancel(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("live service authority ended")));
+                self.cancel(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("live service authority ended")),
+                );
                 return Poll::Ready(Err(error));
             }
             self.apply_stop();
@@ -335,14 +385,26 @@ impl LiveStreamService {
             }
             if self.listener.is_none() {
                 self.release_if_drained();
-                return if self.jobs.is_empty() { Poll::Ready(Ok(None)) } else { Poll::Pending };
+                return if self.jobs.is_empty() {
+                    Poll::Ready(Ok(None))
+                } else {
+                    Poll::Pending
+                };
             }
-            if self.jobs.len() >= self.max_connections { return Poll::Pending; }
+            if self.jobs.len() >= self.max_connections {
+                return Poll::Pending;
+            }
             let Some(connection) = self.next_connection else {
                 self.stop_accepting();
-                return Poll::Ready(Err(LiveStreamError::Configuration("service connection IDs exhausted")));
+                return Poll::Ready(Err(LiveStreamError::Configuration(
+                    "service connection IDs exhausted",
+                )));
             };
-            let accepted = self.listener.as_ref().expect("open listener").poll_accept(ctx);
+            let accepted = self
+                .listener
+                .as_ref()
+                .expect("open listener")
+                .poll_accept(ctx);
             let (tcp, address) = match accepted {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(error)) => {
@@ -362,14 +424,20 @@ impl LiveStreamService {
             let capacity = Arc::clone(self.capacity.as_ref().expect("open service reservation"));
             let factory = make_sink.clone();
             let task = cx.spawn_in(scope, move |child| {
-                let future: Pin<Box<dyn Future<Output = LiveStreamSessionReport> + Send>> = Box::pin(async move {
-                    let _capacity = capacity;
-                    serve_connection(&receiver, &child, tcp, address, factory, require_commit).await
-                });
+                let future: Pin<Box<dyn Future<Output = LiveStreamSessionReport> + Send>> =
+                    Box::pin(async move {
+                        let _capacity = capacity;
+                        serve_connection(&receiver, &child, tcp, address, factory, require_commit)
+                            .await
+                    });
                 future
             });
             match task {
-                Ok(task) => self.jobs.push(Job { connection, address, task }),
+                Ok(task) => self.jobs.push(Job {
+                    connection,
+                    address,
+                    task,
+                }),
                 Err(error) => {
                     self.stop_accepting();
                     return Poll::Ready(Err(LiveStreamError::Spawn(error)));
@@ -379,7 +447,8 @@ impl LiveStreamService {
             // completed before the manager had a chance to poll its handle.
             ctx.waker().wake_by_ref();
             Poll::Pending
-        }).await;
+        })
+        .await;
         self.control.clear_waiter();
         result
     }
@@ -397,8 +466,13 @@ impl LiveStreamService {
                 return Poll::Ready(Some(completion));
             }
             self.release_if_drained();
-            if self.jobs.is_empty() { Poll::Ready(None) } else { Poll::Pending }
-        }).await;
+            if self.jobs.is_empty() {
+                Poll::Ready(None)
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
         self.control.clear_waiter();
         result
     }
@@ -408,7 +482,11 @@ impl LiveStreamService {
             if let Poll::Ready(result) = self.jobs[index].task.poll_join(ctx) {
                 let job = self.jobs.swap_remove(index);
                 self.release_if_drained();
-                return Poll::Ready(LiveStreamCompletion { connection: job.connection, address: job.address, result });
+                return Poll::Ready(LiveStreamCompletion {
+                    connection: job.connection,
+                    address: job.address,
+                    result,
+                });
             }
         }
         Poll::Pending
@@ -417,12 +495,16 @@ impl LiveStreamService {
     fn apply_stop(&mut self) {
         match self.control.snapshot() {
             StopRequest::Running => {}
-            StopRequest::Drain => { drop(self.listener.take()); }
+            StopRequest::Drain => {
+                drop(self.listener.take());
+            }
             StopRequest::Abort(reason) => {
                 drop(self.listener.take());
                 if !self.abort_dispatched {
                     self.abort_dispatched = true;
-                    for job in &self.jobs { job.task.abort_with_reason(reason.clone()); }
+                    for job in &self.jobs {
+                        job.task.abort_with_reason(reason.clone());
+                    }
                 }
             }
         }
@@ -463,18 +545,35 @@ where
         let timeout = receiver.config.operation_timeout;
         let tls = bounded(cx, timeout, "TLS handshake", receiver.acceptor.accept(tcp)).await?;
         check_alpn(&tls)?;
-        let certificate = tls.peer_leaf_certificate_der()
-            .ok_or(LiveStreamError::Protocol("authenticated client certificate missing"))?;
+        let certificate = tls
+            .peer_leaf_certificate_der()
+            .ok_or(LiveStreamError::Protocol(
+                "authenticated client certificate missing",
+            ))?;
         let authenticated = LiveStreamPeer {
-            certificate: NativeClientCertificateId::from_certificate(&CertificateDer::from(certificate)),
+            certificate: NativeClientCertificateId::from_certificate(&CertificateDer::from(
+                certificate,
+            )),
             address,
         };
         peer = Some(authenticated);
         checkpoint(cx)?;
-        let mut sink = bounded(cx, timeout, "sink creation", make_sink(cx.clone(), authenticated)).await?;
-        receiver.receive_authenticated_with_commit(cx, tls, &mut sink, &mut progress, require_commit).await
-    }.await;
-    LiveStreamSessionReport { peer, transfer: progress.report(outcome) }
+        let mut sink = bounded(
+            cx,
+            timeout,
+            "sink creation",
+            make_sink(cx.clone(), authenticated),
+        )
+        .await?;
+        receiver
+            .receive_authenticated_with_commit(cx, tls, &mut sink, &mut progress, require_commit)
+            .await
+    }
+    .await;
+    LiveStreamSessionReport {
+        peer,
+        transfer: progress.report(outcome),
+    }
 }
 
 #[cfg(test)]
@@ -513,11 +612,19 @@ mod tests {
 
     #[test]
     fn capacity_remains_held_by_a_worker_after_the_manager_owner_drops() {
-        let admission = Arc::new(super::super::Admission { active: AtomicUsize::new(0), capacity: 2 });
-        let capacity = Arc::new(Capacity { _permits: vec![admission.reserve().unwrap(), admission.reserve().unwrap()] });
+        let admission = Arc::new(super::super::Admission {
+            active: AtomicUsize::new(0),
+            capacity: 2,
+        });
+        let capacity = Arc::new(Capacity {
+            _permits: vec![admission.reserve().unwrap(), admission.reserve().unwrap()],
+        });
         let worker = Arc::clone(&capacity);
         drop(capacity);
-        assert!(matches!(admission.reserve(), Err(LiveStreamError::Capacity)));
+        assert!(matches!(
+            admission.reserve(),
+            Err(LiveStreamError::Capacity)
+        ));
         drop(worker);
         assert_eq!(admission.active.load(Ordering::Relaxed), 0);
     }

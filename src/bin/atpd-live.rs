@@ -6,12 +6,22 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(all(feature = "atp-cli", feature = "tls", unix, not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "atp-cli",
+    feature = "tls",
+    unix,
+    not(target_arch = "wasm32")
+))]
 #[path = "atpd_live/mod.rs"]
 mod app;
 
 fn main() -> std::process::ExitCode {
-    #[cfg(all(feature = "atp-cli", feature = "tls", unix, not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "atp-cli",
+        feature = "tls",
+        unix,
+        not(target_arch = "wasm32")
+    ))]
     {
         match app::run() {
             Ok(()) => std::process::ExitCode::SUCCESS,
@@ -21,7 +31,12 @@ fn main() -> std::process::ExitCode {
             }
         }
     }
-    #[cfg(not(all(feature = "atp-cli", feature = "tls", unix, not(target_arch = "wasm32"))))]
+    #[cfg(not(all(
+        feature = "atp-cli",
+        feature = "tls",
+        unix,
+        not(target_arch = "wasm32")
+    )))]
     {
         eprintln!("atpd-live requires a native Unix target and --features atp-cli");
         std::process::ExitCode::FAILURE

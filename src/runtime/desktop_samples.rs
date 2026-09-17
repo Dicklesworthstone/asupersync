@@ -20,10 +20,10 @@
 
 use std::time::{Duration, Instant};
 
+use crate::Budget;
 use crate::desktop_profile::{
     DesktopRuntime, DesktopRuntimeProfile, DesktopRuntimeStartError, ForeignCallCompletion,
 };
-use crate::Budget;
 
 /// A bounded runtime owned end-to-end by the sample holder.
 ///

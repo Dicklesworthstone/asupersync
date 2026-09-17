@@ -76,7 +76,10 @@ fn closed_input() -> io::Error {
 impl Input {
     fn new(capacity: usize) -> Arc<Self> {
         assert!(capacity > 0, "native upload input capacity must be nonzero");
-        Arc::new(Self { capacity, state: Mutex::new(InputState::default()) })
+        Arc::new(Self {
+            capacity,
+            state: Mutex::new(InputState::default()),
+        })
     }
 
     fn poll_write(&self, ctx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
@@ -182,7 +185,8 @@ impl AsyncRead for InputReader {
             let mut state = self.0.state.lock();
             if state.aborted {
                 return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::Interrupted, "native upload producer aborted",
+                    io::ErrorKind::Interrupted,
+                    "native upload producer aborted",
                 )));
             }
             let count = buf.remaining().min(state.bytes.len());
@@ -274,36 +278,61 @@ impl NativeTransferClient {
         let input = Input::new(self.shared.config.chunk_size.min(MAX_UPLOAD_BUFFER));
         let reader = InputReader(Arc::clone(&input));
         let observer: Arc<dyn SpoolObserver> = input.clone();
-        let worker = cx.spawn_in(scope, move |child| {
-            let future: Pin<Box<dyn Future<Output = NativeUploadReport> + Send>> = Box::pin(async move {
-                Self::upload_admitted(&child, remote, options, reader, admission, Some(observer)).await
-            });
-            future
-        }).map_err(NativeTransferError::Spawn)?;
-        Ok(NativeUploadWriter { input, worker, terminal: None })
+        let worker = cx
+            .spawn_in(scope, move |child| {
+                let future: Pin<Box<dyn Future<Output = NativeUploadReport> + Send>> =
+                    Box::pin(async move {
+                        Self::upload_admitted(
+                            &child,
+                            remote,
+                            options,
+                            reader,
+                            admission,
+                            Some(observer),
+                        )
+                        .await
+                    });
+                future
+            })
+            .map_err(NativeTransferError::Spawn)?;
+        Ok(NativeUploadWriter {
+            input,
+            worker,
+            terminal: None,
+        })
     }
 }
 
 impl NativeUploadWriter {
     /// Maximum unread producer bytes in the queue (not the full transport RSS).
     #[must_use]
-    pub fn buffer_capacity(&self) -> usize { self.input.capacity }
+    pub fn buffer_capacity(&self) -> usize {
+        self.input.capacity
+    }
 
     /// Current unread producer bytes. This is not a delivery/completion signal.
     #[must_use]
-    pub fn buffered_bytes(&self) -> usize { self.input.state.lock().bytes.len() }
+    pub fn buffered_bytes(&self) -> usize {
+        self.input.state.lock().bytes.len()
+    }
 
     /// Peak unread bytes retained in this pipe.
     #[must_use]
-    pub fn buffer_high_water(&self) -> usize { self.input.state.lock().high_water }
+    pub fn buffer_high_water(&self) -> usize {
+        self.input.state.lock().high_water
+    }
 
     /// Total bytes accepted from successful write calls.
     #[must_use]
-    pub fn accepted_bytes(&self) -> u64 { self.input.state.lock().accepted }
+    pub fn accepted_bytes(&self) -> u64 {
+        self.input.state.lock().accepted
+    }
 
     /// Bytes acknowledged by completed local spool writes, not a peer receipt.
     #[must_use]
-    pub fn spooled_bytes(&self) -> u64 { self.input.state.lock().spooled }
+    pub fn spooled_bytes(&self) -> u64 {
+        self.input.state.lock().spooled
+    }
 
     /// Inspect retained terminal facts, collecting a ready join without blocking.
     /// This never consumes a report or interprets queue emptiness as completion.
@@ -352,17 +381,23 @@ impl NativeUploadWriter {
     }
 
     fn poll_terminal(&mut self, ctx: &mut Context<'_>) -> Poll<()> {
-        if self.terminal.is_some() { return Poll::Ready(()); }
+        if self.terminal.is_some() {
+            return Poll::Ready(());
+        }
         match self.worker.poll_join(ctx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => { self.settle(result); Poll::Ready(()) }
+            Poll::Ready(result) => {
+                self.settle(result);
+                Poll::Ready(())
+            }
         }
     }
 
     fn terminal_io_result(&self) -> io::Result<()> {
         match self.terminal.as_ref().expect("terminal join observed") {
             Err(JoinError::Cancelled(reason)) => Err(io::Error::new(
-                io::ErrorKind::Interrupted, format!("upload worker cancelled: {reason}"),
+                io::ErrorKind::Interrupted,
+                format!("upload worker cancelled: {reason}"),
             )),
             Err(error) => Err(io::Error::other(format!("upload worker failed: {error}"))),
             Ok(report) => {
@@ -377,9 +412,13 @@ impl NativeUploadWriter {
                     return Err(io::Error::new(kind, error.to_string()));
                 }
                 if let Some(cleanup) = &report.cleanup_error {
-                    return Err(io::Error::new(cleanup.error.kind(), format!(
-                        "peer receipt retained, but local upload cleanup failed: {}", cleanup.error,
-                    )));
+                    return Err(io::Error::new(
+                        cleanup.error.kind(),
+                        format!(
+                            "peer receipt retained, but local upload cleanup failed: {}",
+                            cleanup.error,
+                        ),
+                    ));
                 }
                 Ok(())
             }
@@ -389,7 +428,9 @@ impl NativeUploadWriter {
 
 impl AsyncWrite for NativeUploadWriter {
     fn poll_write(
-        mut self: Pin<&mut Self>, ctx: &mut Context<'_>, buf: &[u8],
+        mut self: Pin<&mut Self>,
+        ctx: &mut Context<'_>,
+        buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         // Also register for deferred admission/worker failure, not only queue
         // space: the consumer may fail before ever polling its input reader.
@@ -418,7 +459,8 @@ impl AsyncWrite for NativeUploadWriter {
 impl Drop for NativeUploadWriter {
     fn drop(&mut self) {
         if self.terminal.is_none() && !self.worker.is_finished() {
-            self.worker.abort_with_reason(CancelReason::user("native upload writer dropped"));
+            self.worker
+                .abort_with_reason(CancelReason::user("native upload writer dropped"));
         }
         notify(self.input.stop(true));
         let retired = self.input.state.lock().writer_waker.take();
@@ -434,20 +476,33 @@ mod tests {
 
     struct WakeCount(AtomicUsize);
     impl Wake for WakeCount {
-        fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
-        fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
     }
     fn counter() -> (Arc<WakeCount>, Waker) {
         let count = Arc::new(WakeCount(AtomicUsize::new(0)));
         (Arc::clone(&count), Waker::from(count))
     }
-    fn read(reader: &mut InputReader, ctx: &mut Context<'_>, size: usize) -> Poll<io::Result<Vec<u8>>> {
+    fn read(
+        reader: &mut InputReader,
+        ctx: &mut Context<'_>,
+        size: usize,
+    ) -> Poll<io::Result<Vec<u8>>> {
         let mut storage = vec![0; size];
         let mut buf = ReadBuf::new(&mut storage);
-        Pin::new(reader).poll_read(ctx, &mut buf).map(|result| result.map(|()| buf.filled().to_vec()))
+        Pin::new(reader)
+            .poll_read(ctx, &mut buf)
+            .map(|result| result.map(|()| buf.filled().to_vec()))
     }
     fn ready<T: std::fmt::Debug>(poll: Poll<io::Result<T>>) -> T {
-        match poll { Poll::Ready(Ok(value)) => value, other => panic!("expected success: {other:?}") }
+        match poll {
+            Poll::Ready(Ok(value)) => value,
+            other => panic!("expected success: {other:?}"),
+        }
     }
 
     #[test]
@@ -457,9 +512,15 @@ mod tests {
         let (count, waker) = counter();
         let mut ctx = Context::from_waker(&waker);
         assert_eq!(ready(input.poll_write(&mut ctx, b"abcdef")), 3);
-        for _ in 0..20 { assert!(input.poll_write(&mut ctx, b"def").is_pending()); }
+        for _ in 0..20 {
+            assert!(input.poll_write(&mut ctx, b"def").is_pending());
+        }
         assert_eq!(count.0.load(Ordering::SeqCst), 0);
-        assert_eq!(input.state.lock().accepted, 3, "pending writes accept nothing");
+        assert_eq!(
+            input.state.lock().accepted,
+            3,
+            "pending writes accept nothing"
+        );
         assert_eq!(ready(read(&mut reader, &mut ctx, 2)), b"ab");
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
         assert_eq!(ready(input.poll_write(&mut ctx, b"def")), 2);
@@ -482,7 +543,10 @@ mod tests {
         assert_eq!(ready(read(&mut reader, &mut ctx, 3)), b"def");
         assert_eq!(ready(read(&mut reader, &mut ctx, 3)), b"g");
         assert!(ready(read(&mut reader, &mut ctx, 3)).is_empty());
-        assert!(matches!(input.poll_write(&mut ctx, b"x"), Poll::Ready(Err(_))));
+        assert!(matches!(
+            input.poll_write(&mut ctx, b"x"),
+            Poll::Ready(Err(_))
+        ));
     }
 
     #[test]
@@ -513,7 +577,10 @@ mod tests {
         assert!(input.poll_write(&mut ctx, b"y").is_pending());
         drop(reader);
         assert_eq!(count.0.load(Ordering::SeqCst), 1);
-        assert!(matches!(input.poll_write(&mut ctx, b"y"), Poll::Ready(Err(_))));
+        assert!(matches!(
+            input.poll_write(&mut ctx, b"y"),
+            Poll::Ready(Err(_))
+        ));
 
         let input = Input::new(1);
         reader = InputReader(Arc::clone(&input));
@@ -541,7 +608,9 @@ mod tests {
                         other => panic!("unexpected write: {other:?}"),
                     }
                 }
-                if accepted == expected.len() { notify(input.stop(false)); }
+                if accepted == expected.len() {
+                    notify(input.stop(false));
+                }
                 observed.extend(ready(read(&mut reader, &mut ctx, 3)));
                 input.on_spooled(observed.len() as u64);
                 assert!(input.state.lock().bytes.len() <= capacity);

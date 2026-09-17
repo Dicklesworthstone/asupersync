@@ -46,12 +46,18 @@ pub(super) struct Options {
 }
 
 impl Options {
-    pub(super) fn new(attempts: u32, retry_delay_ms: u64, proof_recovery_secs: u64) -> io::Result<Self> {
+    pub(super) fn new(
+        attempts: u32,
+        retry_delay_ms: u64,
+        proof_recovery_secs: u64,
+    ) -> io::Result<Self> {
         if !(1..=1024).contains(&attempts)
             || !(1..=60_000).contains(&retry_delay_ms)
             || !(1..=86_400).contains(&proof_recovery_secs)
         {
-            return Err(invalid("resume requires 1..=1024 attempts, 1..=60000 ms retry delay and 1..=86400 s proof recovery"));
+            return Err(invalid(
+                "resume requires 1..=1024 attempts, 1..=60000 ms retry delay and 1..=86400 s proof recovery",
+            ));
         }
         Ok(Self {
             attempts,
@@ -74,8 +80,12 @@ struct Stop {
 impl Stop {
     fn new(signals: Signals, grace: Duration) -> Self {
         Self {
-            signals, requested_at: None, grace, force: false,
-            deadline: None, recovery_expired: false,
+            signals,
+            requested_at: None,
+            grace,
+            force: false,
+            deadline: None,
+            recovery_expired: false,
         }
     }
 
@@ -100,11 +110,15 @@ impl Stop {
 
     fn abort_reason(&self, now: Time) -> Option<CancelReason> {
         if self.recovery_expired {
-            return Some(CancelReason::user("atpd-live proof recovery window expired"));
+            return Some(CancelReason::user(
+                "atpd-live proof recovery window expired",
+            ));
         }
-        if self.force || self.requested_at.is_some_and(|start| {
-            now.as_nanos().saturating_sub(start.as_nanos()) >= duration_nanos(self.grace)
-        }) {
+        if self.force
+            || self.requested_at.is_some_and(|start| {
+                now.as_nanos().saturating_sub(start.as_nanos()) >= duration_nanos(self.grace)
+            })
+        {
             return Some(CancelReason::user("atpd-live resumable shutdown"));
         }
         None
@@ -118,7 +132,9 @@ impl Stop {
 }
 
 fn first_deadline(existing: Option<Time>, now: Time, duration: Duration) -> Time {
-    existing.unwrap_or_else(|| Time::from_nanos(now.as_nanos().saturating_add(duration_nanos(duration))))
+    existing.unwrap_or_else(|| {
+        Time::from_nanos(now.as_nanos().saturating_add(duration_nanos(duration)))
+    })
 }
 
 fn duration_nanos(duration: Duration) -> u64 {
@@ -128,7 +144,10 @@ fn duration_nanos(duration: Duration) -> u64 {
 /// Keep joining after cancellation. In particular, never timeout/drop an
 /// admitted filesystem commit merely to implement the signal polling interval.
 async fn join_attempt<T>(
-    cx: &Cx, task: &mut TaskHandle<T>, stop: &mut Stop, entered: &AtomicBool,
+    cx: &Cx,
+    task: &mut TaskHandle<T>,
+    stop: &mut Stop,
+    entered: &AtomicBool,
 ) -> Result<T, JoinError> {
     let mut aborted = false;
     loop {
@@ -142,7 +161,9 @@ async fn join_attempt<T>(
                 aborted = true;
             }
         }
-        match asupersync::time::timeout(cx.now(), CONTROL_TICK, poll_fn(|ctx| task.poll_join(ctx))).await {
+        match asupersync::time::timeout(cx.now(), CONTROL_TICK, poll_fn(|ctx| task.poll_join(ctx)))
+            .await
+        {
             Ok(result) => return result,
             Err(_) => continue,
         }
@@ -158,18 +179,30 @@ async fn delay(cx: &Cx, stop: &mut Stop, duration: Duration) {
         if stop.stopping() || elapsed >= total {
             return;
         }
-        asupersync::time::sleep(cx.now(), CONTROL_TICK.min(Duration::from_nanos(total - elapsed))).await;
+        asupersync::time::sleep(
+            cx.now(),
+            CONTROL_TICK.min(Duration::from_nanos(total - elapsed)),
+        )
+        .await;
     }
 }
 
 fn network_error(error: &io::Error) -> bool {
-    matches!(error.kind(),
-        io::ErrorKind::ConnectionRefused | io::ErrorKind::ConnectionReset
-        | io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe
-        | io::ErrorKind::NotConnected | io::ErrorKind::TimedOut
-        | io::ErrorKind::UnexpectedEof | io::ErrorKind::Interrupted
-        | io::ErrorKind::WouldBlock | io::ErrorKind::NetworkUnreachable
-        | io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkDown)
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkDown
+    )
 }
 
 // Only transport failures are eligible at the sender. In particular, do not
@@ -186,11 +219,18 @@ fn sender_retryable(error: &ResumeError) -> bool {
 fn receiver_retryable(error: &ResumeError) -> bool {
     match error {
         ResumeError::PeerIdentity | ResumeError::Continuity(_) => true,
-        ResumeError::Transfer(LiveStreamError::Tls(_) | LiveStreamError::Frame(_)
-            | LiveStreamError::Protocol(_) | LiveStreamError::Timeout(_)) => true,
+        ResumeError::Transfer(
+            LiveStreamError::Tls(_)
+            | LiveStreamError::Frame(_)
+            | LiveStreamError::Protocol(_)
+            | LiveStreamError::Timeout(_),
+        ) => true,
         ResumeError::Transfer(LiveStreamError::Io(error)) => network_error(error),
         ResumeError::Transfer(LiveStreamError::Commit(error)) => {
-            matches!(error.as_ref(), LiveStreamCommitError::CommittedWithoutProof { .. })
+            matches!(
+                error.as_ref(),
+                LiveStreamCommitError::CommittedWithoutProof { .. }
+            )
         }
         _ => false,
     }
@@ -205,7 +245,9 @@ fn report_json(report: &ResumeReport) -> Value {
         Err(ResumeError::Continuity(_)) => "continuity_refused",
         Err(ResumeError::Transfer(LiveStreamError::Timeout(_))) => "timeout",
         Err(ResumeError::Transfer(LiveStreamError::Cancelled(_))) => "cancelled",
-        Err(ResumeError::Transfer(LiveStreamError::Tls(_) | LiveStreamError::Authentication(_))) => "tls_failed",
+        Err(ResumeError::Transfer(
+            LiveStreamError::Tls(_) | LiveStreamError::Authentication(_),
+        )) => "tls_failed",
         Err(ResumeError::Transfer(LiveStreamError::Commit(error))) => match error.as_ref() {
             LiveStreamCommitError::CommittedWithoutProof { .. } => "committed_without_proof",
             _ => "commit_unconfirmed",
@@ -234,21 +276,37 @@ fn publication_json(publication: &LiveFilePublication) -> Value {
 }
 
 pub(super) fn send(config: SendConfig, input: PathBuf, options: Options) -> io::Result<()> {
-    let profile = settings::profile(config.schema_version, config.workers, config.epoch_bytes,
-        config.max_transfer_bytes, config.operation_timeout_secs)?;
-    if config.remote.port() == 0 { return Err(invalid("remote port must be nonzero")); }
+    let profile = settings::profile(
+        config.schema_version,
+        config.workers,
+        config.epoch_bytes,
+        config.max_transfer_bytes,
+        config.operation_timeout_secs,
+    )?;
+    if config.remote.port() == 0 {
+        return Err(invalid("remote port must be nonzero"));
+    }
     let server_name = ServerName::try_from(config.server_name.clone())
         .map_err(|_| invalid("invalid TLS server name"))?;
-    let sender = settings::sdk(1, &profile)?.live_stream_sender(profile, server_name,
-        settings::roots(&config.server_ca)?, settings::identity(&config.identity)?)
+    let sender = settings::sdk(1, &profile)?
+        .live_stream_sender(
+            profile,
+            server_name,
+            settings::roots(&config.server_ca)?,
+            settings::identity(&config.identity)?,
+        )
         .map_err(|_| invalid("invalid authenticated sender configuration"))?;
     let file = settings::open_regular(&input, false)?;
-    if file.metadata()?.len() > config.max_transfer_bytes { return Err(invalid("source exceeds transfer limit")); }
+    if file.metadata()?.len() > config.max_transfer_bytes {
+        return Err(invalid("source exceeds transfer limit"));
+    }
     let signals = Signals::new([SIGINT, SIGTERM])?;
     runtime(config.workers, async move {
-        let cx = Cx::current().ok_or_else(|| io::Error::other("missing resumable sender context"))?;
+        let cx =
+            Cx::current().ok_or_else(|| io::Error::other("missing resumable sender context"))?;
         let scope = cx.scope();
-        let mut session = sender.resumable_reader(&cx, config.remote, File::from_std(file), options.attempts)
+        let mut session = sender
+            .resumable_reader(&cx, config.remote, File::from_std(file), options.attempts)
             .map_err(|_| io::Error::other("resumable sender admission failed"))?;
         let mut stop = Stop::new(signals, Duration::ZERO);
         for _ in 0..options.attempts {
@@ -261,21 +319,29 @@ pub(super) fn send(config: SendConfig, input: PathBuf, options: Options) -> io::
             }
             let entered = Arc::new(AtomicBool::new(false));
             let worker_entered = Arc::clone(&entered);
-            let mut task = cx.spawn_in(&scope, move |child| {
-                let future: Pin<Box<dyn Future<Output = SendAttempt> + Send>> = Box::pin(async move {
-                    worker_entered.store(true, Ordering::Release);
-                    let report = session.send(&child).await;
-                    (session, report)
-                });
-                future
-            }).map_err(|_| io::Error::other("resumable sender worker admission failed"))?;
-            let (returned, report) = join_attempt(&cx, &mut task, &mut stop, &entered).await
-                .map_err(|_| io::Error::other("resumable sender worker did not return its session"))?;
+            let mut task = cx
+                .spawn_in(&scope, move |child| {
+                    let future: Pin<Box<dyn Future<Output = SendAttempt> + Send>> =
+                        Box::pin(async move {
+                            worker_entered.store(true, Ordering::Release);
+                            let report = session.send(&child).await;
+                            (session, report)
+                        });
+                    future
+                })
+                .map_err(|_| io::Error::other("resumable sender worker admission failed"))?;
+            let (returned, report) = join_attempt(&cx, &mut task, &mut stop, &entered)
+                .await
+                .map_err(|_| {
+                    io::Error::other("resumable sender worker did not return its session")
+                })?;
             session = returned;
             let retryable = report.outcome.as_ref().err().is_some_and(sender_retryable);
-            emit(json!({"schema_version": 1, "event": "resume_attempt", "direction": "send",
+            emit(
+                json!({"schema_version": 1, "event": "resume_attempt", "direction": "send",
                 "transfer": report_json(&report), "retry_eligible": retryable,
-                "stopping": stop.stopping()}))?;
+                "stopping": stop.stopping()}),
+            )?;
             if report.outcome.is_ok() {
                 emit(json!({"schema_version": 1, "event": "send_result",
                     "transfer": report_json(&report), "final_proof_direction": "received"}))?;
@@ -284,7 +350,9 @@ pub(super) fn send(config: SendConfig, input: PathBuf, options: Options) -> io::
             if stop.stopping() || !retryable || report.attempts >= options.attempts {
                 emit(json!({"schema_version": 1, "event": "send_result",
                     "transfer": report_json(&report), "final_proof_direction": "not_received"}))?;
-                return Err(io::Error::other("retained-session send did not receive final peer Proof"));
+                return Err(io::Error::other(
+                    "retained-session send did not receive final peer Proof",
+                ));
             }
             delay(&cx, &mut stop, options.retry_delay).await;
             if stop.stopping() {
@@ -294,7 +362,9 @@ pub(super) fn send(config: SendConfig, input: PathBuf, options: Options) -> io::
                 return Err(io::Error::from(io::ErrorKind::Interrupted));
             }
         }
-        Err(io::Error::other("retained-session send exhausted its attempt budget"))
+        Err(io::Error::other(
+            "retained-session send exhausted its attempt budget",
+        ))
     })
 }
 
@@ -302,87 +372,138 @@ pub(super) fn receive(config: ServeConfig, options: Options) -> io::Result<()> {
     // This is deliberately one locally provisioned session, not a nonce-indexed
     // multi-client cache. Unknown peers cannot create more sinks or quota entries.
     if config.clients.len() != 1 || config.max_connections != 1 {
-        return Err(invalid("receive-resumable requires exactly one client and max_connections=1"));
+        return Err(invalid(
+            "receive-resumable requires exactly one client and max_connections=1",
+        ));
     }
     if !(1..=86400).contains(&config.shutdown_grace_secs) {
         return Err(invalid("shutdown grace must be 1..=86400 seconds"));
     }
-    let profile = settings::profile(config.schema_version, config.workers, config.epoch_bytes,
-        config.max_transfer_bytes, config.operation_timeout_secs)?;
+    let profile = settings::profile(
+        config.schema_version,
+        config.workers,
+        config.epoch_bytes,
+        config.max_transfer_bytes,
+        config.operation_timeout_secs,
+    )?;
     let client = settings::selector(&config.clients[0].certificate_sha256)?;
-    let authorization = NativeClientAuthorization::new(settings::roots(&config.client_ca)?, [client])
-        .map_err(|_| invalid("invalid explicit client authorization"))?;
-    let receiver = settings::sdk(1, &profile)?.live_stream_receiver(profile,
-        settings::identity(&config.identity)?, authorization)
+    let authorization =
+        NativeClientAuthorization::new(settings::roots(&config.client_ca)?, [client])
+            .map_err(|_| invalid("invalid explicit client authorization"))?;
+    let receiver = settings::sdk(1, &profile)?
+        .live_stream_receiver(
+            profile,
+            settings::identity(&config.identity)?,
+            authorization,
+        )
         .map_err(|_| invalid("invalid authenticated receiver configuration"))?;
     let inboxes = Arc::new(storage::load(&config.clients)?);
     let inbox = Arc::clone(inboxes.get(&client).expect("validated single inbox"));
-    INBOX_OWNERSHIP.set(inboxes).map_err(|_| io::Error::other("foreground process already owns inboxes"))?;
+    INBOX_OWNERSHIP
+        .set(inboxes)
+        .map_err(|_| io::Error::other("foreground process already owns inboxes"))?;
     let signals = Signals::new([SIGINT, SIGTERM])?;
     let workers = config.workers;
     runtime(workers, async move {
-        let cx = Cx::current().ok_or_else(|| io::Error::other("missing resumable receiver context"))?;
+        let cx =
+            Cx::current().ok_or_else(|| io::Error::other("missing resumable receiver context"))?;
         let scope = cx.scope();
         inbox.reserve(config.max_transfer_bytes)?;
         let mut nonce = [0; 16];
         cx.random_bytes(&mut nonce);
-        let sink = LiveFileSink::create(&cx, inbox.directory.clone(), format!("{}.bin", hex(&nonce)),
-            config.max_transfer_bytes).await?;
+        let sink = LiveFileSink::create(
+            &cx,
+            inbox.directory.clone(),
+            format!("{}.bin", hex(&nonce)),
+            config.max_transfer_bytes,
+        )
+        .await?;
         let publication = sink.publication();
-        let mut session = receiver.bind_resumable_committing(&cx, config.bind, client, sink, options.attempts)
-            .await.map_err(|_| io::Error::other("resumable listener could not bind"))?;
-        emit(json!({"schema_version": 1, "event": "ready", "address": session.local_addr()?,
+        let mut session = receiver
+            .bind_resumable_committing(&cx, config.bind, client, sink, options.attempts)
+            .await
+            .map_err(|_| io::Error::other("resumable listener could not bind"))?;
+        emit(
+            json!({"schema_version": 1, "event": "ready", "address": session.local_addr()?,
             "pid": std::process::id(), "profile": String::from_utf8_lossy(RESUMABLE_LIVE_ALPN),
             "application_commit": true, "max_connections": 1, "max_attempts": options.attempts,
             "expected_client_certificate_sha256": hex(client.as_bytes()),
             "max_transfer_bytes": config.max_transfer_bytes,
             "proof_recovery_secs": options.proof_recovery.as_secs(),
-            "session_preallocated": true, "publication": publication_json(&publication)}))?;
+            "session_preallocated": true, "publication": publication_json(&publication)}),
+        )?;
         let mut stop = Stop::new(signals, Duration::from_secs(config.shutdown_grace_secs));
         let mut end = "attempts_exhausted";
         let mut last = None;
         for _ in 0..options.attempts {
             stop.observe(&cx);
-            if stop.stopping() { break; }
+            if stop.stopping() {
+                break;
+            }
             let entered = Arc::new(AtomicBool::new(false));
             let worker_entered = Arc::clone(&entered);
-            let mut task = cx.spawn_in(&scope, move |child| {
-                let future: Pin<Box<dyn Future<Output = ReceiveAttempt> + Send>> = Box::pin(async move {
-                    worker_entered.store(true, Ordering::Release);
-                    let report = session.receive(&child).await;
-                    (session, report)
-                });
-                future
-            }).map_err(|_| io::Error::other("resumable receiver worker admission failed"))?;
-            let (returned, report) = join_attempt(&cx, &mut task, &mut stop, &entered).await
-                .map_err(|_| io::Error::other("resumable receiver worker did not return its session"))?;
+            let mut task = cx
+                .spawn_in(&scope, move |child| {
+                    let future: Pin<Box<dyn Future<Output = ReceiveAttempt> + Send>> =
+                        Box::pin(async move {
+                            worker_entered.store(true, Ordering::Release);
+                            let report = session.receive(&child).await;
+                            (session, report)
+                        });
+                    future
+                })
+                .map_err(|_| io::Error::other("resumable receiver worker admission failed"))?;
+            let (returned, report) = join_attempt(&cx, &mut task, &mut stop, &entered)
+                .await
+                .map_err(|_| {
+                    io::Error::other("resumable receiver worker did not return its session")
+                })?;
             session = returned;
             if report.completed.is_some() {
                 stop.open_recovery_window(cx.now(), options.proof_recovery);
             }
             let retryable = report.outcome.as_ref().err().is_none_or(receiver_retryable);
-            emit(json!({"schema_version": 1, "event": "resume_attempt", "direction": "receive",
+            emit(
+                json!({"schema_version": 1, "event": "resume_attempt", "direction": "receive",
                 "transfer": report_json(&report), "publication": publication_json(&publication),
                 "final_proof_direction": "written_not_peer_acknowledged",
-                "retry_eligible": retryable, "stopping": stop.stopping()}))?;
+                "retry_eligible": retryable, "stopping": stop.stopping()}),
+            )?;
             last = Some(report);
-            if !retryable { end = "terminal_failure"; break; }
-            if stop.stopping() { break; }
-            if last.as_ref().is_some_and(|report| report.attempts >= options.attempts) { break; }
+            if !retryable {
+                end = "terminal_failure";
+                break;
+            }
+            if stop.stopping() {
+                break;
+            }
+            if last
+                .as_ref()
+                .is_some_and(|report| report.attempts >= options.attempts)
+            {
+                break;
+            }
             delay(&cx, &mut stop, options.retry_delay).await;
         }
-        if stop.recovery_expired { end = "proof_recovery_expired"; }
-        else if stop.requested_at.is_some() { end = "shutdown_requested"; }
+        if stop.recovery_expired {
+            end = "proof_recovery_expired";
+        } else if stop.requested_at.is_some() {
+            end = "shutdown_requested";
+        }
         let completed = session.completed_receipt().cloned();
         let attempts = last.as_ref().map_or(0, |report| report.attempts);
         drop(session); // Close the same listener and release its lifetime credit.
-        emit(json!({"schema_version": 1, "event": "receive_result", "recovery_end": end,
+        emit(
+            json!({"schema_version": 1, "event": "receive_result", "recovery_end": end,
             "attempts": attempts, "completed_receipt": completed.as_ref().map(receipt_json),
             "publication": publication_json(&publication),
             "last_transfer": last.as_ref().map(report_json),
-            "sender_receipt_observed": false}))?;
+            "sender_receipt_observed": false}),
+        )?;
         if completed.is_none() {
-            return Err(io::Error::other("retained-session receive ended without application commit"));
+            return Err(io::Error::other(
+                "retained-session receive ended without application commit",
+            ));
         }
         Ok(())
     })?;

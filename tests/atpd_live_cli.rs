@@ -4,7 +4,12 @@
 //! created directory and log is retained. Watchdogs kill only children created
 //! by this test, and a successful exit is never the sole delivery witness.
 
-#![cfg(all(feature = "atp-cli", feature = "tls", unix, not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "atp-cli",
+    feature = "tls",
+    unix,
+    not(target_arch = "wasm32")
+))]
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
@@ -39,22 +44,40 @@ impl Fixture {
         let inbox = root.join("inbox");
         std::fs::create_dir(&inbox).unwrap();
         std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let fixture: Value = serde_json::from_str(include_str!("fixtures/atp_native_auth_identities.json")).unwrap();
+        let fixture: Value =
+            serde_json::from_str(include_str!("fixtures/atp_native_auth_identities.json")).unwrap();
         std::fs::write(root.join("ca.pem"), fixture["ca"].as_str().unwrap()).unwrap();
         for name in ["server", "allowed", "unlisted", "expired"] {
-            std::fs::write(root.join(format!("{name}.pem")), fixture["identities"][name]["certificate"].as_str().unwrap()).unwrap();
+            std::fs::write(
+                root.join(format!("{name}.pem")),
+                fixture["identities"][name]["certificate"].as_str().unwrap(),
+            )
+            .unwrap();
             let key = root.join(format!("{name}.key"));
             std::fs::write(&key, fixture["identities"][name]["key"].as_str().unwrap()).unwrap();
             std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
-        let pem = fixture["identities"]["allowed"]["certificate"].as_str().unwrap();
-        let cert = CertificateDer::pem_reader_iter(&mut BufReader::new(pem.as_bytes())).next().unwrap().unwrap();
+        let pem = fixture["identities"]["allowed"]["certificate"]
+            .as_str()
+            .unwrap();
+        let cert = CertificateDer::pem_reader_iter(&mut BufReader::new(pem.as_bytes()))
+            .next()
+            .unwrap()
+            .unwrap();
         let allowed = hex::encode(Sha256::digest(cert.as_ref()));
-        Self { root, inbox, sequence: AtomicUsize::new(0), allowed }
+        Self {
+            root,
+            inbox,
+            sequence: AtomicUsize::new(0),
+            allowed,
+        }
     }
 
     fn unique(&self, extension: &str) -> PathBuf {
-        self.root.join(format!("{}.{extension}", self.sequence.fetch_add(1, Ordering::SeqCst)))
+        self.root.join(format!(
+            "{}.{extension}",
+            self.sequence.fetch_add(1, Ordering::SeqCst)
+        ))
     }
 
     fn json_file(&self, value: Value) -> PathBuf {
@@ -107,10 +130,20 @@ impl Fixture {
 
     fn spawn(&self, operation: &str, config: &Path, input: Option<&Path>) -> Process {
         let stderr = self.unique("stderr");
-        let error_log = OpenOptions::new().write(true).create_new(true).open(&stderr).unwrap();
+        let error_log = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stderr)
+            .unwrap();
         let mut command = Command::new(BINARY);
-        command.args([operation, "--config"]).arg(config).stdout(Stdio::piped()).stderr(error_log);
-        if let Some(input) = input { command.arg("--input").arg(input); }
+        command
+            .args([operation, "--config"])
+            .arg(config)
+            .stdout(Stdio::piped())
+            .stderr(error_log);
+        if let Some(input) = input {
+            command.arg("--input").arg(input);
+        }
         let mut child = command.spawn().unwrap();
         let output = child.stdout.take().unwrap();
         let (sender, events) = mpsc::channel();
@@ -119,14 +152,24 @@ impl Fixture {
                 let record = line.map_err(|error| error.to_string()).and_then(|line| {
                     serde_json::from_str::<Value>(&line).map_err(|error| error.to_string())
                 });
-                if sender.send(record).is_err() { break; }
+                if sender.send(record).is_err() {
+                    break;
+                }
             }
         });
-        Process { child, reader: Some(reader), events, stderr }
+        Process {
+            child,
+            reader: Some(reader),
+            events,
+            stderr,
+        }
     }
 
     fn entries(&self) -> Vec<PathBuf> {
-        let mut files: Vec<_> = std::fs::read_dir(&self.inbox).unwrap().map(|entry| entry.unwrap().path()).collect();
+        let mut files: Vec<_> = std::fs::read_dir(&self.inbox)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
         files.sort();
         files
     }
@@ -141,21 +184,39 @@ struct Process {
 
 impl Process {
     fn event(&mut self, expected: &str) -> Value {
-        let event = self.events.recv_timeout(WAIT).unwrap_or_else(|error| {
-            panic!("missing {expected} event: {error}; retained stderr {}", self.stderr.display())
-        }).unwrap();
-        assert_eq!(event["event"], expected, "unexpected executable result: {event}");
+        let event = self
+            .events
+            .recv_timeout(WAIT)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "missing {expected} event: {error}; retained stderr {}",
+                    self.stderr.display()
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            event["event"], expected,
+            "unexpected executable result: {event}"
+        );
         event
     }
 
     fn exit(&mut self) -> ExitStatus {
         let start = Instant::now();
         let status = loop {
-            if let Some(status) = self.child.try_wait().unwrap() { break status; }
-            assert!(start.elapsed() < WAIT, "child failed to exit; stderr {}", self.stderr.display());
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                start.elapsed() < WAIT,
+                "child failed to exit; stderr {}",
+                self.stderr.display()
+            );
             thread::sleep(Duration::from_millis(5));
         };
-        if let Some(reader) = self.reader.take() { reader.join().unwrap(); }
+        if let Some(reader) = self.reader.take() {
+            reader.join().unwrap();
+        }
         status
     }
 
@@ -170,13 +231,22 @@ impl Process {
 
 impl Drop for Process {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) { let _ = self.child.kill(); }
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
-        if let Some(reader) = self.reader.take() { let _ = reader.join(); }
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
     }
 }
 
-fn verify_publication(fixture: &Fixture, sent: &Value, received: &Value, expected: &[u8]) -> PathBuf {
+fn verify_publication(
+    fixture: &Fixture,
+    sent: &Value,
+    received: &Value,
+    expected: &[u8],
+) -> PathBuf {
     assert_eq!(sent["transfer"]["status"], "complete");
     assert_eq!(received["transfer"]["status"], "complete");
     assert_eq!(sent["transfer"]["receipt"], received["transfer"]["receipt"]);
@@ -187,14 +257,24 @@ fn verify_publication(fixture: &Fixture, sent: &Value, received: &Value, expecte
     assert!(filename.ends_with(".bin"));
     let path = fixture.inbox.join(filename);
     assert_eq!(std::fs::read(&path).unwrap(), expected);
-    assert_eq!(received["transfer"]["receipt"]["sha256"], hex::encode(Sha256::digest(expected)));
+    assert_eq!(
+        received["transfer"]["receipt"]["sha256"],
+        hex::encode(Sha256::digest(expected))
+    );
     let published = std::fs::metadata(&path).unwrap();
     assert_eq!(published.permissions().mode() & 0o777, 0o600);
-    let aliases = fixture.entries().into_iter().filter(|entry| {
-        let metadata = std::fs::metadata(entry).unwrap();
-        (metadata.dev(), metadata.ino()) == (published.dev(), published.ino())
-    }).count();
-    assert_eq!(aliases, 2, "retained staging and final aliases must name the actual committed inode");
+    let aliases = fixture
+        .entries()
+        .into_iter()
+        .filter(|entry| {
+            let metadata = std::fs::metadata(entry).unwrap();
+            (metadata.dev(), metadata.ino()) == (published.dev(), published.ino())
+        })
+        .count();
+    assert_eq!(
+        aliases, 2,
+        "retained staging and final aliases must name the actual committed inode"
+    );
     path
 }
 
@@ -202,19 +282,32 @@ fn verify_publication(fixture: &Fixture, sent: &Value, received: &Value, expecte
 fn executable_sender_and_receiver_commit_multiple_files_on_one_bound_port() {
     for workers in [1, 2] {
         let fixture = Fixture::new();
-        let (mut receiver, address) = fixture.start_receiver(fixture.receiver_config(workers, 4096, 65536));
+        let (mut receiver, address) =
+            fixture.start_receiver(fixture.receiver_config(workers, 4096, 65536));
         let mut paths = Vec::new();
-        for bytes in [b"first executable transfer".as_slice(), &[0x5a; 1024][..], b""] {
-            let (status, sent) = fixture.send(fixture.sender_config(address, "allowed", workers), bytes);
+        for bytes in [
+            b"first executable transfer".as_slice(),
+            &[0x5a; 1024][..],
+            b"",
+        ] {
+            let (status, sent) =
+                fixture.send(fixture.sender_config(address, "allowed", workers), bytes);
             assert!(status.success());
             let received = receiver.event("completion");
             let path = verify_publication(&fixture, &sent, &received, bytes);
-            assert!(!paths.contains(&path), "new sends must not clobber previous files");
+            assert!(
+                !paths.contains(&path),
+                "new sends must not clobber previous files"
+            );
             paths.push(path);
         }
         receiver.stop();
-        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"first executable transfer");
-        let (mut restarted, _) = fixture.start_receiver(fixture.receiver_config(workers, 4096, 65536));
+        assert_eq!(
+            std::fs::read(&paths[0]).unwrap(),
+            b"first executable transfer"
+        );
+        let (mut restarted, _) =
+            fixture.start_receiver(fixture.receiver_config(workers, 4096, 65536));
         restarted.stop();
     }
 }
@@ -223,7 +316,11 @@ fn executable_sender_and_receiver_commit_multiple_files_on_one_bound_port() {
 fn executable_authentication_refuses_unlisted_expired_and_wrong_server_names() {
     let fixture = Fixture::new();
     let (mut receiver, address) = fixture.start_receiver(fixture.receiver_config(2, 4096, 65536));
-    for (identity, hostname) in [("unlisted", "localhost"), ("expired", "localhost"), ("allowed", "wrong.invalid")] {
+    for (identity, hostname) in [
+        ("unlisted", "localhost"),
+        ("expired", "localhost"),
+        ("allowed", "wrong.invalid"),
+    ] {
         let mut config = fixture.sender_config(address, identity, 1);
         config["server_name"] = json!(hostname);
         let (status, sent) = fixture.send(config, b"must not be published");
@@ -233,7 +330,10 @@ fn executable_authentication_refuses_unlisted_expired_and_wrong_server_names() {
         assert_eq!(received["transfer"]["status"], "tls_failed");
         assert!(received["publication"].is_null());
         assert!(received["client_certificate_sha256"].is_null());
-        assert_eq!(fixture.entries(), vec![fixture.inbox.join(".atpd-live.lock")]);
+        assert_eq!(
+            fixture.entries(),
+            vec![fixture.inbox.join(".atpd-live.lock")]
+        );
     }
     // A refused client must not have killed the reusable listener.
     let (status, sent) = fixture.send(fixture.sender_config(address, "allowed", 1), b"accepted");
@@ -254,13 +354,19 @@ fn executable_retention_refusal_survives_process_restart_without_deleting_data()
     let before = fixture.entries();
     let (status, _) = fixture.send(fixture.sender_config(address, "allowed", 1), b"next");
     assert!(!status.success());
-    assert_eq!(receiver.event("completion")["transfer"]["status"], "retention_refused");
+    assert_eq!(
+        receiver.event("completion")["transfer"]["status"],
+        "retention_refused"
+    );
     assert_eq!(fixture.entries(), before);
     receiver.stop();
     let (mut restarted, address) = fixture.start_receiver(config);
     let (status, _) = fixture.send(fixture.sender_config(address, "allowed", 1), b"next");
     assert!(!status.success());
-    assert_eq!(restarted.event("completion")["transfer"]["status"], "retention_refused");
+    assert_eq!(
+        restarted.event("completion")["transfer"]["status"],
+        "retention_refused"
+    );
     assert_eq!(fixture.entries(), before);
     assert_eq!(std::fs::read(path).unwrap(), bytes);
     restarted.stop();
@@ -274,20 +380,50 @@ fn executable_startup_rejects_concurrent_inbox_owner_and_invalid_configuration()
     let path = fixture.json_file(config.clone());
     let mut conflicting = fixture.spawn("serve", &path, None);
     assert!(!conflicting.exit().success());
-    assert!(conflicting.events.try_iter().all(|event| event.unwrap()["event"] != "ready"));
+    assert!(
+        conflicting
+            .events
+            .try_iter()
+            .all(|event| event.unwrap()["event"] != "ready")
+    );
     for invalid in [
-        { let mut c = config.clone(); c["ambient_trust_fallback"] = json!(true); c },
-        { let mut c = config.clone(); c["identity"]["private_key"] = json!(fixture.root.join("missing.key")); c },
-        { let mut c = config; c["max_connections"] = json!(0); c },
+        {
+            let mut c = config.clone();
+            c["ambient_trust_fallback"] = json!(true);
+            c
+        },
+        {
+            let mut c = config.clone();
+            c["identity"]["private_key"] = json!(fixture.root.join("missing.key"));
+            c
+        },
+        {
+            let mut c = config;
+            c["max_connections"] = json!(0);
+            c
+        },
     ] {
         let path = fixture.json_file(invalid);
         let mut process = fixture.spawn("serve", &path, None);
         assert!(!process.exit().success());
-        assert!(process.events.try_iter().all(|event| event.unwrap()["event"] != "ready"));
+        assert!(
+            process
+                .events
+                .try_iter()
+                .all(|event| event.unwrap()["event"] != "ready")
+        );
     }
-    let (status, sent) = fixture.send(fixture.sender_config(address, "allowed", 1), b"original owner still serves");
+    let (status, sent) = fixture.send(
+        fixture.sender_config(address, "allowed", 1),
+        b"original owner still serves",
+    );
     assert!(status.success());
-    verify_publication(&fixture, &sent, &receiver.event("completion"), b"original owner still serves");
+    verify_publication(
+        &fixture,
+        &sent,
+        &receiver.event("completion"),
+        b"original owner still serves",
+    );
     receiver.stop();
 }
 
@@ -315,13 +451,15 @@ fn executable_sender_requires_a_real_handshake_not_merely_a_listening_socket() {
     };
     socket.set_read_timeout(Some(WAIT)).unwrap();
     let mut record = [0; 4096];
-    assert!(socket.read(&mut record).unwrap() > 0, "actual TLS bytes must reach the independent peer");
+    assert!(
+        socket.read(&mut record).unwrap() > 0,
+        "actual TLS bytes must reach the independent peer"
+    );
     let result = sender.event("send_result");
     assert_eq!(result["transfer"]["status"], "timeout");
     assert!(result["transfer"]["receipt"].is_null());
     assert!(!sender.exit().success());
 }
-
 
 // Retained-session executable recovery tests share the existing fixtures.
 #[path = "atpd_live_cli/resume.rs"]

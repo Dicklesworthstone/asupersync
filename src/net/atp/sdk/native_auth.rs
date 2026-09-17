@@ -12,8 +12,8 @@
 //! certificate fetch, permissive fallback, TLS resumption, or early data.
 
 use super::{AtpSdk, NativeTransferClient, NativeTransferError};
-use crate::net::atp::transport_quic::native_link::{QuicClientTls, QuicServerTls};
 use crate::net::atp::transport_quic::QuicConfig;
+use crate::net::atp::transport_quic::native_link::{QuicClientTls, QuicServerTls};
 use crate::net::quic_native::handshake_driver::ATP_QUIC_ALPN;
 use parking_lot::RwLock;
 use rustls::client::danger::HandshakeSignatureValid;
@@ -229,7 +229,9 @@ impl ClientCertVerifier for AuthorizedClientVerifier {
         intermediates: &[CertificateDer<'_>],
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
-        let verified = self.webpki.verify_client_cert(end_entity, intermediates, now)?;
+        let verified = self
+            .webpki
+            .verify_client_cert(end_entity, intermediates, now)?;
         self.authorization.check_allowed(end_entity)?;
         Ok(verified)
     }
@@ -277,7 +279,10 @@ fn client_tls(
     config.alpn_protocols = vec![ATP_QUIC_ALPN.to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
     config.enable_early_data = false;
-    Ok(QuicClientTls { server_name: name, config: Arc::new(config) })
+    Ok(QuicClientTls {
+        server_name: name,
+        config: Arc::new(config),
+    })
 }
 
 fn server_tls(
@@ -286,9 +291,14 @@ fn server_tls(
 ) -> Result<QuicServerTls, NativeAuthenticationError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let webpki = WebPkiClientVerifier::builder_with_provider(
-        Arc::clone(&authorization.roots), Arc::clone(&provider),
-    ).build()?;
-    let verifier = Arc::new(AuthorizedClientVerifier { webpki, authorization });
+        Arc::clone(&authorization.roots),
+        Arc::clone(&provider),
+    )
+    .build()?;
+    let verifier = Arc::new(AuthorizedClientVerifier {
+        webpki,
+        authorization,
+    });
     let mut config = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(verifier)
@@ -300,7 +310,9 @@ fn server_tls(
     config.send_tls13_tickets = 0;
     config.max_early_data_size = 0;
     config.send_half_rtt_data = false;
-    Ok(QuicServerTls { config: Arc::new(config) })
+    Ok(QuicServerTls {
+        config: Arc::new(config),
+    })
 }
 
 impl AtpSdk {
@@ -368,7 +380,10 @@ mod tests {
         let id = NativeClientCertificateId::from_sha256([7; 32]);
         assert_eq!(bounded_ids([id, id]).unwrap().len(), 1);
         assert!(bounded_ids(std::iter::repeat_n(id, MAX_NATIVE_AUTHORIZED_CLIENTS)).is_ok());
-        assert!(matches!(bounded_ids(std::iter::repeat(id)), Err(NativeAuthenticationError::TooManyClients)));
+        assert!(matches!(
+            bounded_ids(std::iter::repeat(id)),
+            Err(NativeAuthenticationError::TooManyClients)
+        ));
         assert!(bounded_ids([]).unwrap().is_empty());
     }
 
@@ -377,19 +392,34 @@ mod tests {
         let first = CertificateDer::from(vec![1, 2, 3]);
         let second = CertificateDer::from(vec![1, 2, 4]);
         let digest: [u8; 32] = Sha256::digest(first.as_ref()).into();
-        assert_eq!(NativeClientCertificateId::from_certificate(&first).as_bytes(), &digest);
-        assert_ne!(NativeClientCertificateId::from_certificate(&first), NativeClientCertificateId::from_certificate(&second));
+        assert_eq!(
+            NativeClientCertificateId::from_certificate(&first).as_bytes(),
+            &digest
+        );
+        assert_ne!(
+            NativeClientCertificateId::from_certificate(&first),
+            NativeClientCertificateId::from_certificate(&second)
+        );
     }
 
     #[test]
     fn empty_roots_are_never_replaced_with_ambient_trust() {
-        assert!(matches!(NativeClientAuthorization::new(RootCertStore::empty(), []), Err(NativeAuthenticationError::EmptyRoots)));
+        assert!(matches!(
+            NativeClientAuthorization::new(RootCertStore::empty(), []),
+            Err(NativeAuthenticationError::EmptyRoots)
+        ));
     }
 
     #[test]
     fn identity_debug_does_not_expose_key_or_certificate_bytes() {
-        let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(b"test-key-material".to_vec()));
-        let identity = NativeTlsIdentity::new(vec![CertificateDer::from(b"test-certificate-material".to_vec())], key).unwrap();
+        let key = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+            b"test-key-material".to_vec(),
+        ));
+        let identity = NativeTlsIdentity::new(
+            vec![CertificateDer::from(b"test-certificate-material".to_vec())],
+            key,
+        )
+        .unwrap();
         let debug = format!("{identity:?}");
         assert!(debug.contains("NativeTlsIdentity"));
         assert!(!debug.contains("material"));

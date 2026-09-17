@@ -1,13 +1,13 @@
 #![cfg(feature = "desktop-runtime-profile")]
 
-use asupersync::desktop_profile::{
-    run_foreign_call, DESKTOP_RUNTIME_PROFILE_NAME, DesktopRuntimeProfile,
-    DesktopRuntimeProfileError, ForeignCallCompletion,
-};
 use asupersync::channel::{self, mpsc};
+use asupersync::desktop_profile::{
+    DESKTOP_RUNTIME_PROFILE_NAME, DesktopRuntimeProfile, DesktopRuntimeProfileError,
+    ForeignCallCompletion, run_foreign_call,
+};
 use asupersync::lab::run_async_under_lab;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 #[test]
@@ -47,7 +47,8 @@ fn public_profile_rejects_unbounded_and_inverted_inputs() {
 fn lab_bounded_channel_cancellation_preserves_saturation_boundary() {
     let (result, report) = run_async_under_lab(0xFCB_002A, |cx| async move {
         let (tx, mut rx) = mpsc::channel(1);
-        tx.try_send(1_u8).expect("the one-slot channel starts empty");
+        tx.try_send(1_u8)
+            .expect("the one-slot channel starts empty");
 
         let full = tx
             .try_send(2_u8)
@@ -73,10 +74,7 @@ fn lab_bounded_channel_cancellation_preserves_saturation_boundary() {
         child.abort();
 
         let joined = child.join(&cx).await;
-        assert!(matches!(
-            &joined,
-            Ok(Err(mpsc::SendError::Cancelled(2)))
-        ));
+        assert!(matches!(&joined, Ok(Err(mpsc::SendError::Cancelled(2)))));
         assert_eq!(rx.try_recv(), Ok(1));
         joined
     });
@@ -130,7 +128,10 @@ fn foreign_call_completion_survives_cancelled_result_delivery() {
     });
 
     assert!(!before_release);
-    assert!(matches!(result, Err(asupersync::runtime::JoinError::Cancelled(_))));
+    assert!(matches!(
+        result,
+        Err(asupersync::runtime::JoinError::Cancelled(_))
+    ));
 
     // The wrapper's task has drained, but the foreign closure may still be
     // finishing on the blocking worker. Wait only through the runtime's
@@ -179,8 +180,10 @@ fn invalid_profile_cannot_start_a_runtime() {
     let invalid = DesktopRuntimeProfile::with_limits(1, 0, 1, 1, 0, 0, 1, 1, 1, 1);
     assert!(matches!(
         invalid.start(),
-        Err(asupersync::desktop_profile::DesktopRuntimeStartError::InvalidProfile(
-            DesktopRuntimeProfileError::UnboundedGlobalQueue
-        ))
+        Err(
+            asupersync::desktop_profile::DesktopRuntimeStartError::InvalidProfile(
+                DesktopRuntimeProfileError::UnboundedGlobalQueue
+            )
+        )
     ));
 }

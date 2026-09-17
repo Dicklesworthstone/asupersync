@@ -2,7 +2,11 @@
 //! The gated source cannot reach EOF until the peer has flushed its first epoch:
 //! a whole-source spool implementation cannot pass that causal witness.
 
-#![cfg(all(feature = "tls", feature = "test-internals", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "tls",
+    feature = "test-internals",
+    not(target_arch = "wasm32")
+))]
 
 use asupersync::Cx;
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -21,8 +25,8 @@ use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -31,14 +35,24 @@ fn fixtures() -> serde_json::Value {
 }
 fn certificate(name: &str) -> CertificateDer<'static> {
     let fixtures = fixtures();
-    let text = if name == "ca" { fixtures["ca"].as_str() }
-        else { fixtures["identities"][name]["certificate"].as_str() }.unwrap();
-    CertificateDer::pem_reader_iter(&mut io::BufReader::new(text.as_bytes())).next().unwrap().unwrap()
+    let text = if name == "ca" {
+        fixtures["ca"].as_str()
+    } else {
+        fixtures["identities"][name]["certificate"].as_str()
+    }
+    .unwrap();
+    CertificateDer::pem_reader_iter(&mut io::BufReader::new(text.as_bytes()))
+        .next()
+        .unwrap()
+        .unwrap()
 }
 fn identity(name: &str) -> NativeTlsIdentity {
     let fixtures = fixtures();
     let text = fixtures["identities"][name]["key"].as_str().unwrap();
-    let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(text.as_bytes())).next().unwrap().unwrap();
+    let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(text.as_bytes()))
+        .next()
+        .unwrap()
+        .unwrap();
     NativeTlsIdentity::new(vec![certificate(name)], key).unwrap()
 }
 fn roots() -> RootCertStore {
@@ -47,7 +61,10 @@ fn roots() -> RootCertStore {
     roots
 }
 fn sdk() -> AtpSdk {
-    AtpSdk::new_in_process(SessionConfig { max_concurrent_transfers: 1, ..SessionConfig::default() })
+    AtpSdk::new_in_process(SessionConfig {
+        max_concurrent_transfers: 1,
+        ..SessionConfig::default()
+    })
 }
 fn config(epoch_bytes: usize, max_bytes: u64) -> LiveStreamConfig {
     let mut config = LiveStreamConfig::default();
@@ -57,36 +74,65 @@ fn config(epoch_bytes: usize, max_bytes: u64) -> LiveStreamConfig {
     config
 }
 fn sender_with(name: &'static str, client: &str, config: LiveStreamConfig) -> LiveStreamSender {
-    sdk().live_stream_sender(config, ServerName::try_from(name).unwrap(), roots(), identity(client)).unwrap()
+    sdk()
+        .live_stream_sender(
+            config,
+            ServerName::try_from(name).unwrap(),
+            roots(),
+            identity(client),
+        )
+        .unwrap()
 }
-fn sender(config: LiveStreamConfig) -> LiveStreamSender { sender_with("localhost", "allowed", config) }
+fn sender(config: LiveStreamConfig) -> LiveStreamSender {
+    sender_with("localhost", "allowed", config)
+}
 fn receiver(config: LiveStreamConfig) -> LiveStreamReceiver {
     let allowed = NativeClientCertificateId::from_certificate(&certificate("allowed"));
     let policy = NativeClientAuthorization::new(roots(), [allowed]).unwrap();
-    sdk().live_stream_receiver(config, identity("server"), policy).unwrap()
+    sdk()
+        .live_stream_receiver(config, identity("server"), policy)
+        .unwrap()
 }
 
 fn run<T: Send + 'static>(workers: usize, future: impl Future<Output = T> + Send + 'static) -> T {
-    let runtime = if workers == 1 { RuntimeBuilder::current_thread() }
-        else { RuntimeBuilder::multi_thread().worker_threads(workers).with_sharded_state(true) }
-        .build().unwrap();
+    let runtime = if workers == 1 {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(workers)
+            .with_sharded_state(true)
+    }
+    .build()
+    .unwrap();
     let future: Pin<Box<dyn Future<Output = T> + Send>> = Box::pin(future);
     let result = runtime.block_on(runtime.handle().spawn(future));
     let started = Instant::now();
     // Observe quiescence outside block_on: its root is itself a live task.
     while !runtime.is_quiescent() {
-        assert!(started.elapsed() < Duration::from_secs(5), "live children did not drain");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "live children did not drain"
+        );
         runtime.block_on(yield_now());
     }
-    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
     result
 }
 async fn witness(cx: &Cx, flag: &AtomicBool) {
     asupersync::time::timeout(cx.now(), Duration::from_secs(5), async {
-        while !flag.load(Ordering::SeqCst) { yield_now().await; }
-    }).await.expect("the test must reach its claimed live state");
+        while !flag.load(Ordering::SeqCst) {
+            yield_now().await;
+        }
+    })
+    .await
+    .expect("the test must reach its claimed live state");
 }
 
 #[derive(Default)]
@@ -101,13 +147,27 @@ struct Probe {
     release_flush: AtomicBool,
     source_parked: AtomicBool,
 }
-struct Sink { probe: Arc<Probe>, gate_flush: bool, fail_after: Option<usize> }
+struct Sink {
+    probe: Arc<Probe>,
+    gate_flush: bool,
+    fail_after: Option<usize>,
+}
 impl AsyncWrite for Sink {
-    fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let mut output = self.probe.bytes.lock().unwrap();
-        let remaining = self.fail_after.unwrap_or(usize::MAX).saturating_sub(output.len());
+        let remaining = self
+            .fail_after
+            .unwrap_or(usize::MAX)
+            .saturating_sub(output.len());
         if remaining == 0 {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::PermissionDenied, "deliberate sink failure")));
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "deliberate sink failure",
+            )));
         }
         let count = bytes.len().min(remaining).min(3); // Exercise partial writes.
         output.extend_from_slice(&bytes[..count]);
@@ -119,13 +179,20 @@ impl AsyncWrite for Sink {
             let old = self.probe.flush_waiter.lock().unwrap().replace(incoming);
             drop(old);
             self.probe.flush_parked.store(true, Ordering::SeqCst);
-            if !self.probe.release_flush.load(Ordering::SeqCst) { return Poll::Pending; }
+            if !self.probe.release_flush.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
         }
         if self.probe.bytes.lock().unwrap().as_slice() == b"first" {
-            assert!(!self.probe.eof.load(Ordering::SeqCst), "first prefix arrived only after EOF");
+            assert!(
+                !self.probe.eof.load(Ordering::SeqCst),
+                "first prefix arrived only after EOF"
+            );
             self.probe.first_flushed.store(true, Ordering::SeqCst);
             let wake = self.probe.source_waiter.lock().unwrap().take();
-            if let Some(wake) = wake { wake.wake(); }
+            if let Some(wake) = wake {
+                wake.wake();
+            }
         }
         Poll::Ready(Ok(()))
     }
@@ -133,9 +200,18 @@ impl AsyncWrite for Sink {
         panic!("live receiver must not implicitly shut down a caller-owned sink");
     }
 }
-struct GatedSource { probe: Arc<Probe>, step: u8, park_forever: bool, fail: bool }
+struct GatedSource {
+    probe: Arc<Probe>,
+    step: u8,
+    park_forever: bool,
+    fail: bool,
+}
 impl AsyncRead for GatedSource {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         if self.step == 0 {
             buf.put_slice(b"first");
             self.step = 1;
@@ -146,22 +222,44 @@ impl AsyncRead for GatedSource {
             let incoming = cx.waker().clone();
             let old = self.probe.source_waiter.lock().unwrap().replace(incoming);
             drop(old);
-            if !self.probe.first_flushed.load(Ordering::SeqCst) { return Poll::Pending; }
+            if !self.probe.first_flushed.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
         }
         if self.park_forever {
             self.probe.source_parked.store(true, Ordering::SeqCst);
             return Poll::Pending; // The production adapter must supply cancel/timeout wakes.
         }
-        if self.fail { return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, "source failed after a prefix"))); }
-        if self.step == 1 { buf.put_slice(b"-last"); self.step = 2; }
-        else { self.probe.eof.store(true, Ordering::SeqCst); }
+        if self.fail {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "source failed after a prefix",
+            )));
+        }
+        if self.step == 1 {
+            buf.put_slice(b"-last");
+            self.step = 2;
+        } else {
+            self.probe.eof.store(true, Ordering::SeqCst);
+        }
         self.probe.reads.fetch_add(1, Ordering::SeqCst);
         Poll::Ready(Ok(()))
     }
 }
-fn sink(probe: &Arc<Probe>) -> Sink { Sink { probe: Arc::clone(probe), gate_flush: false, fail_after: None } }
+fn sink(probe: &Arc<Probe>) -> Sink {
+    Sink {
+        probe: Arc::clone(probe),
+        gate_flush: false,
+        fail_after: None,
+    }
+}
 fn source(probe: &Arc<Probe>) -> GatedSource {
-    GatedSource { probe: Arc::clone(probe), step: 0, park_forever: false, fail: false }
+    GatedSource {
+        probe: Arc::clone(probe),
+        step: 0,
+        park_forever: false,
+        fail: false,
+    }
 }
 
 #[test]
@@ -172,18 +270,27 @@ fn live_prefix_reaches_the_peer_before_producer_eof_on_both_native_backends() {
             let scope = cx.scope();
             let send = sender(config(8, 100));
             let receive = receiver(config(8, 100));
-            let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
             let address = listener.local_addr().unwrap();
             let probe = Arc::new(Probe::default());
-            let mut receiving = listener.spawn_receive_into(&cx, &scope, sink(&probe)).unwrap();
-            let mut sending = send.spawn_send_reader(&cx, &scope, address, source(&probe)).unwrap();
+            let mut receiving = listener
+                .spawn_receive_into(&cx, &scope, sink(&probe))
+                .unwrap();
+            let mut sending = send
+                .spawn_send_reader(&cx, &scope, address, source(&probe))
+                .unwrap();
             let (sent, received) = zip(sending.join(&cx), receiving.join(&cx)).await;
-            let sent = sent.unwrap(); let received = received.unwrap();
+            let sent = sent.unwrap();
+            let received = received.unwrap();
             assert!(probe.first_flushed.load(Ordering::SeqCst));
             assert!(probe.eof.load(Ordering::SeqCst));
             assert_eq!(*probe.bytes.lock().unwrap(), b"first-last");
             assert_eq!(received.sink_written_bytes, 10);
-            let sent = sent.outcome.unwrap(); let received = received.outcome.unwrap();
+            let sent = sent.outcome.unwrap();
+            let received = received.outcome.unwrap();
             assert_eq!(sent, received);
             assert_eq!((sent.prefix.epochs, sent.prefix.bytes), (2, 10));
             let digest: [u8; 32] = Sha256::digest(b"first-last").into();
@@ -195,35 +302,63 @@ fn live_prefix_reaches_the_peer_before_producer_eof_on_both_native_backends() {
 
 #[test]
 fn live_sink_backpressure_stops_source_read_ahead_at_one_epoch() {
-    struct Counted { probe: Arc<Probe>, data: &'static [u8] }
+    struct Counted {
+        probe: Arc<Probe>,
+        data: &'static [u8],
+    }
     impl AsyncRead for Counted {
-        fn poll_read(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
             self.probe.reads.fetch_add(1, Ordering::SeqCst);
             let count = self.data.len().min(buf.remaining());
-            buf.put_slice(&self.data[..count]); self.data = &self.data[count..];
+            buf.put_slice(&self.data[..count]);
+            self.data = &self.data[count..];
             Poll::Ready(Ok(()))
         }
     }
     run(2, async {
-        let cx = Cx::current().unwrap(); let scope = cx.scope();
-        let send = sender(config(8, 100)); let receive = receiver(config(8, 100));
-        let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let cx = Cx::current().unwrap();
+        let scope = cx.scope();
+        let send = sender(config(8, 100));
+        let receive = receiver(config(8, 100));
+        let listener = receive
+            .bind(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let address = listener.local_addr().unwrap();
         let probe = Arc::new(Probe::default());
-        let mut output = sink(&probe); output.gate_flush = true;
+        let mut output = sink(&probe);
+        output.gate_flush = true;
         let mut receiving = listener.spawn_receive_into(&cx, &scope, output).unwrap();
-        let input = Counted { probe: Arc::clone(&probe), data: b"0123456789abcdef" };
+        let input = Counted {
+            probe: Arc::clone(&probe),
+            data: b"0123456789abcdef",
+        };
         let mut sending = send.spawn_send_reader(&cx, &scope, address, input).unwrap();
         witness(&cx, &probe.flush_parked).await;
-        for _ in 0..64 { yield_now().await; }
-        assert_eq!(probe.reads.load(Ordering::SeqCst), 1, "unacknowledged sink flush cannot permit another read");
+        for _ in 0..64 {
+            yield_now().await;
+        }
+        assert_eq!(
+            probe.reads.load(Ordering::SeqCst),
+            1,
+            "unacknowledged sink flush cannot permit another read"
+        );
         assert_eq!(probe.bytes.lock().unwrap().len(), 8);
         assert!(!sending.is_finished());
         probe.release_flush.store(true, Ordering::SeqCst);
         let wake = probe.flush_waiter.lock().unwrap().take();
-        if let Some(wake) = wake { wake.wake(); }
+        if let Some(wake) = wake {
+            wake.wake();
+        }
         let (sent, received) = zip(sending.join(&cx), receiving.join(&cx)).await;
-        assert_eq!(sent.unwrap().outcome.unwrap(), received.unwrap().outcome.unwrap());
+        assert_eq!(
+            sent.unwrap().outcome.unwrap(),
+            received.unwrap().outcome.unwrap()
+        );
         assert_eq!(*probe.bytes.lock().unwrap(), b"0123456789abcdef");
         assert_eq!((send.active_streams(), receive.active_streams()), (0, 0));
     });
@@ -233,15 +368,29 @@ fn live_sink_backpressure_stops_source_read_ahead_at_one_epoch() {
 fn live_source_failure_is_not_successful_truncation() {
     run(1, async {
         let cx = Cx::current().unwrap();
-        let send = sender(config(8, 100)); let receive = receiver(config(8, 100));
-        let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let send = sender(config(8, 100));
+        let receive = receiver(config(8, 100));
+        let listener = receive
+            .bind(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let address = listener.local_addr().unwrap();
         let probe = Arc::new(Probe::default());
-        let mut input = source(&probe); input.fail = true;
+        let mut input = source(&probe);
+        input.fail = true;
         let mut output = sink(&probe);
-        let (sent, received) = zip(send.send_reader(&cx, address, input), listener.receive_into(&cx, &mut output)).await;
-        assert!(matches!(sent.outcome, Err(LiveStreamError::Io(ref error)) if error.kind() == io::ErrorKind::InvalidData));
-        assert!(received.outcome.is_err(), "raw EOF must never finalize the prefix");
+        let (sent, received) = zip(
+            send.send_reader(&cx, address, input),
+            listener.receive_into(&cx, &mut output),
+        )
+        .await;
+        assert!(
+            matches!(sent.outcome, Err(LiveStreamError::Io(ref error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+        assert!(
+            received.outcome.is_err(),
+            "raw EOF must never finalize the prefix"
+        );
         assert_eq!(sent.prefix.as_ref().unwrap().bytes, 5);
         assert_eq!(sent.prefix, received.prefix);
         assert_eq!(received.sink_written_bytes, 5);
@@ -254,13 +403,24 @@ fn live_source_failure_is_not_successful_truncation() {
 fn live_partial_sink_failure_retains_written_bytes_but_does_not_ack_the_epoch() {
     run(1, async {
         let cx = Cx::current().unwrap();
-        let send = sender(config(8, 100)); let receive = receiver(config(8, 100));
-        let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let send = sender(config(8, 100));
+        let receive = receiver(config(8, 100));
+        let listener = receive
+            .bind(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let address = listener.local_addr().unwrap();
         let probe = Arc::new(Probe::default());
-        let mut output = sink(&probe); output.fail_after = Some(3);
-        let (sent, received) = zip(send.send_reader(&cx, address, &b"abcdefgh"[..]), listener.receive_into(&cx, &mut output)).await;
-        assert!(matches!(received.outcome, Err(LiveStreamError::Io(ref error)) if error.kind() == io::ErrorKind::PermissionDenied));
+        let mut output = sink(&probe);
+        output.fail_after = Some(3);
+        let (sent, received) = zip(
+            send.send_reader(&cx, address, &b"abcdefgh"[..]),
+            listener.receive_into(&cx, &mut output),
+        )
+        .await;
+        assert!(
+            matches!(received.outcome, Err(LiveStreamError::Io(ref error)) if error.kind() == io::ErrorKind::PermissionDenied)
+        );
         assert!(sent.outcome.is_err());
         assert_eq!(received.sink_written_bytes, 3);
         assert_eq!(received.prefix.as_ref().unwrap().bytes, 0);
@@ -274,24 +434,37 @@ fn live_partial_sink_failure_retains_written_bytes_but_does_not_ack_the_epoch() 
 fn live_cancel_wakes_a_parked_source_and_preserves_the_delivered_prefix() {
     for workers in [1, 2] {
         run(workers, async {
-            let cx = Cx::current().unwrap(); let scope = cx.scope();
-            let mut sender_config = config(8, 100); sender_config.operation_timeout = Duration::from_secs(3600);
-            let send = sender(sender_config); let receive = receiver(config(8, 100));
-            let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let mut sender_config = config(8, 100);
+            sender_config.operation_timeout = Duration::from_secs(3600);
+            let send = sender(sender_config);
+            let receive = receiver(config(8, 100));
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
             let address = listener.local_addr().unwrap();
             let probe = Arc::new(Probe::default());
-            let mut input = source(&probe); input.park_forever = true;
-            let mut receiving = listener.spawn_receive_into(&cx, &scope, sink(&probe)).unwrap();
+            let mut input = source(&probe);
+            input.park_forever = true;
+            let mut receiving = listener
+                .spawn_receive_into(&cx, &scope, sink(&probe))
+                .unwrap();
             let mut sending = send.spawn_send_reader(&cx, &scope, address, input).unwrap();
             witness(&cx, &probe.source_parked).await;
             assert!(probe.first_flushed.load(Ordering::SeqCst));
             let reason = CancelReason::user("cancel live source after confirmed first epoch");
             sending.abort_with_reason(reason.clone());
-            let sent = asupersync::time::timeout(cx.now(), Duration::from_secs(5), sending.join(&cx)).await
-                .expect("cancel wake must not wait for the one-hour source deadline")
-                .expect("acknowledged cancellation preserves the returned domain report");
+            let sent =
+                asupersync::time::timeout(cx.now(), Duration::from_secs(5), sending.join(&cx))
+                    .await
+                    .expect("cancel wake must not wait for the one-hour source deadline")
+                    .expect("acknowledged cancellation preserves the returned domain report");
             let received = receiving.join(&cx).await.unwrap();
-            assert!(matches!(sent.outcome, Err(LiveStreamError::Cancelled(Some(ref actual))) if actual == &reason));
+            assert!(
+                matches!(sent.outcome, Err(LiveStreamError::Cancelled(Some(ref actual))) if actual == &reason)
+            );
             assert_eq!(sent.prefix.as_ref().unwrap().bytes, 5);
             assert_eq!(sent.prefix, received.prefix);
             assert!(received.outcome.is_err());
@@ -303,25 +476,42 @@ fn live_cancel_wakes_a_parked_source_and_preserves_the_delivered_prefix() {
 
 #[test]
 fn live_negotiated_limits_and_empty_finalization_never_publish_an_oversized_epoch() {
-    for (length, limit, success, prefix) in [(0, 0, true, 0), (1, 0, false, 0), (10, 10, true, 10), (11, 10, false, 9)] {
+    for (length, limit, success, prefix) in [
+        (0, 0, true, 0),
+        (1, 0, false, 0),
+        (10, 10, true, 10),
+        (11, 10, false, 9),
+    ] {
         run(1, async move {
             let cx = Cx::current().unwrap();
-            let send = sender(config(8, 100)); let receive = receiver(config(3, limit));
-            let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let send = sender(config(8, 100));
+            let receive = receiver(config(3, limit));
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
             let address = listener.local_addr().unwrap();
-            let input = vec![9; length]; let mut output = Vec::new();
-            let (sent, received) = zip(send.send_reader(&cx, address, input.as_slice()), listener.receive_into(&cx, &mut output)).await;
+            let input = vec![9; length];
+            let mut output = Vec::new();
+            let (sent, received) = zip(
+                send.send_reader(&cx, address, input.as_slice()),
+                listener.receive_into(&cx, &mut output),
+            )
+            .await;
             assert_eq!(output, vec![9; prefix]);
             assert_eq!(received.sink_written_bytes, prefix as u64);
             assert_eq!(sent.prefix, received.prefix);
             if success {
-                let sent = sent.outcome.unwrap(); let received = received.outcome.unwrap();
+                let sent = sent.outcome.unwrap();
+                let received = received.outcome.unwrap();
                 assert_eq!(sent, received);
                 let hash: [u8; 32] = Sha256::digest(&input).into();
                 assert_eq!(sent.source_sha256, hash);
                 assert_eq!(sent.prefix.bytes, length as u64);
             } else {
-                assert!(matches!(sent.outcome, Err(LiveStreamError::TooLarge(actual)) if actual == limit));
+                assert!(
+                    matches!(sent.outcome, Err(LiveStreamError::TooLarge(actual)) if actual == limit)
+                );
                 assert!(received.outcome.is_err());
             }
             assert_eq!((send.active_streams(), receive.active_streams()), (0, 0));
@@ -334,14 +524,26 @@ fn live_authentication_failure_cannot_poll_a_source_or_touch_a_sink() {
     for (name, client) in [("localhost", "unlisted"), ("wrong.example", "allowed")] {
         run(1, async move {
             let cx = Cx::current().unwrap();
-            let send = sender_with(name, client, config(8, 100)); let receive = receiver(config(8, 100));
-            let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let send = sender_with(name, client, config(8, 100));
+            let receive = receiver(config(8, 100));
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
             let address = listener.local_addr().unwrap();
-            let probe = Arc::new(Probe::default()); let mut output = sink(&probe);
-            let (sent, received) = zip(send.send_reader(&cx, address, source(&probe)), listener.receive_into(&cx, &mut output)).await;
+            let probe = Arc::new(Probe::default());
+            let mut output = sink(&probe);
+            let (sent, received) = zip(
+                send.send_reader(&cx, address, source(&probe)),
+                listener.receive_into(&cx, &mut output),
+            )
+            .await;
             assert!(sent.outcome.is_err() && received.outcome.is_err());
-            assert!(matches!(sent.outcome, Err(LiveStreamError::Tls(_))) || matches!(received.outcome, Err(LiveStreamError::Tls(_))),
-                "certificate refusal must reach TLS, not pass via arbitrary timeout");
+            assert!(
+                matches!(sent.outcome, Err(LiveStreamError::Tls(_)))
+                    || matches!(received.outcome, Err(LiveStreamError::Tls(_))),
+                "certificate refusal must reach TLS, not pass via arbitrary timeout"
+            );
             assert_eq!(probe.reads.load(Ordering::SeqCst), 0);
             assert!(probe.bytes.lock().unwrap().is_empty());
             assert!(sent.prefix.is_none() && received.prefix.is_none());
@@ -353,15 +555,26 @@ fn live_authentication_failure_cannot_poll_a_source_or_touch_a_sink() {
 #[test]
 fn live_capacity_is_reserved_before_enqueue_and_rejected_work_has_no_io() {
     run(1, async {
-        let cx = Cx::current().unwrap(); let scope = cx.scope();
-        let send = sender(config(8, 100)); let receive = receiver(config(8, 100));
+        let cx = Cx::current().unwrap();
+        let scope = cx.scope();
+        let send = sender(config(8, 100));
+        let receive = receiver(config(8, 100));
         let probe = Arc::new(Probe::default());
         let address = "127.0.0.1:9".parse().unwrap();
-        let mut first = send.spawn_send_reader(&cx, &scope, address, source(&probe)).unwrap();
+        let mut first = send
+            .spawn_send_reader(&cx, &scope, address, source(&probe))
+            .unwrap();
         assert_eq!(send.active_streams(), 1);
-        assert!(matches!(send.clone().spawn_send_reader(&cx, &scope, address, source(&probe)), Err(LiveStreamError::Capacity)));
+        assert!(matches!(
+            send.clone()
+                .spawn_send_reader(&cx, &scope, address, source(&probe)),
+            Err(LiveStreamError::Capacity)
+        ));
         first.abort_with_reason(CancelReason::user("cancel queued live stream"));
-        assert!(matches!(first.join(&cx).await, Err(JoinError::Cancelled(_))));
+        assert!(matches!(
+            first.join(&cx).await,
+            Err(JoinError::Cancelled(_))
+        ));
         assert_eq!(probe.reads.load(Ordering::SeqCst), 0);
         assert_eq!(send.active_streams(), 0);
         // Capability denial is a runtime attenuation of a full-capability Cx,
@@ -372,13 +585,26 @@ fn live_capacity_is_reserved_before_enqueue_and_rejected_work_has_no_io() {
             Cx::current().expect("native runtime installs a context")
         };
         let missing = send.send_reader(&denied, address, source(&probe)).await;
-        assert!(matches!(missing.outcome, Err(LiveStreamError::MissingCapability)));
-        let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+        assert!(matches!(
+            missing.outcome,
+            Err(LiveStreamError::MissingCapability)
+        ));
+        let listener = receive
+            .bind(&cx, "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let bound = listener.local_addr().unwrap();
-        assert!(matches!(receive.clone().bind(&cx, "127.0.0.1:0".parse().unwrap()).await, Err(LiveStreamError::Capacity)));
+        assert!(matches!(
+            receive
+                .clone()
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await,
+            Err(LiveStreamError::Capacity)
+        ));
         drop(listener);
         assert_eq!(receive.active_streams(), 0);
-        let _rebound = std::net::TcpListener::bind(bound).expect("dropped listener releases its actual socket");
+        let _rebound = std::net::TcpListener::bind(bound)
+            .expect("dropped listener releases its actual socket");
     });
 }
 
@@ -392,17 +618,35 @@ struct RawWire {
 impl RawWire {
     fn new(stream: asupersync::tls::TlsStream<asupersync::net::TcpStream>) -> Self {
         assert_eq!(stream.alpn_protocol(), Some(LIVE_STREAM_ALPN));
-        Self { stream, codec: asupersync::net::atp::protocol::codec::AtpFrameCodec::new(), bytes: asupersync::bytes::BytesMut::new() }
+        Self {
+            stream,
+            codec: asupersync::net::atp::protocol::codec::AtpFrameCodec::new(),
+            bytes: asupersync::bytes::BytesMut::new(),
+        }
     }
-    async fn send(&mut self, kind: asupersync::net::atp::protocol::frames::FrameType, payload: Vec<u8>) {
+    async fn send(
+        &mut self,
+        kind: asupersync::net::atp::protocol::frames::FrameType,
+        payload: Vec<u8>,
+    ) {
         use asupersync::net::atp::protocol::frames::{Frame, ProtocolVersion};
-        self.stream.write_all(&Frame::new(ProtocolVersion::V0, kind, payload).unwrap().to_wire_bytes().unwrap()).await.unwrap();
+        self.stream
+            .write_all(
+                &Frame::new(ProtocolVersion::V0, kind, payload)
+                    .unwrap()
+                    .to_wire_bytes()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         self.stream.flush().await.unwrap();
     }
     async fn receive(&mut self) -> asupersync::net::atp::protocol::frames::Frame {
         use asupersync::codec::Decoder;
         loop {
-            if let Some(frame) = self.codec.decode(&mut self.bytes).unwrap() { return frame; }
+            if let Some(frame) = self.codec.decode(&mut self.bytes).unwrap() {
+                return frame;
+            }
             let mut bytes = [0; 4096];
             let count = self.stream.read(&mut bytes).await.unwrap();
             assert!(count > 0, "required peer frame is missing");
@@ -413,10 +657,18 @@ impl RawWire {
 fn raw_client_config() -> rustls::ClientConfig {
     let fixtures = fixtures();
     let key = fixtures["identities"]["allowed"]["key"].as_str().unwrap();
-    let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(key.as_bytes())).next().unwrap().unwrap();
-    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
-        .with_root_certificates(roots()).with_client_auth_cert(vec![certificate("allowed")], key).unwrap();
+    let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(key.as_bytes()))
+        .next()
+        .unwrap()
+        .unwrap();
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_root_certificates(roots())
+    .with_client_auth_cert(vec![certificate("allowed")], key)
+    .unwrap();
     config.alpn_protocols = vec![LIVE_STREAM_ALPN.to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
     config
@@ -425,42 +677,76 @@ fn raw_client_config() -> rustls::ClientConfig {
 #[test]
 fn live_authenticated_malformed_epochs_never_escape_integrity_or_finalization_checks() {
     use asupersync::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
-    for (case, expected_bytes) in [("digest", 0), ("sequence", 0), ("replay", 8), ("final", 8), ("truncated", 0), ("eof", 0), ("oversize", 0)] {
+    for (case, expected_bytes) in [
+        ("digest", 0),
+        ("sequence", 0),
+        ("replay", 8),
+        ("final", 8),
+        ("truncated", 0),
+        ("eof", 0),
+        ("oversize", 0),
+    ] {
         run(1, async move {
             let cx = Cx::current().unwrap();
             let receive = receiver(config(8, 100));
-            let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
             let address = listener.local_addr().unwrap();
             let peer = async {
                 let tcp = asupersync::net::TcpStream::connect(address).await.unwrap();
                 let connector = asupersync::tls::TlsConnector::new(raw_client_config());
                 let mut wire = RawWire::new(connector.connect("localhost", tcp).await.unwrap());
-                let mut hello = b"ATPLIVE1".to_vec(); hello.extend_from_slice(&[7; 32]);
-                hello.extend_from_slice(&8u32.to_be_bytes()); hello.extend_from_slice(&100u64.to_be_bytes());
+                let mut hello = b"ATPLIVE1".to_vec();
+                hello.extend_from_slice(&[7; 32]);
+                hello.extend_from_slice(&8u32.to_be_bytes());
+                hello.extend_from_slice(&100u64.to_be_bytes());
                 wire.send(FrameType::Handshake, hello.clone()).await;
                 let ack = wire.receive().await;
                 assert_eq!(ack.frame_type(), FrameType::HandshakeAck);
                 assert_eq!(ack.payload(), hello);
-                let mut initial = Sha256::new(); initial.update(b"asupersync.atp.live.hello.v1"); initial.update(&hello);
-                let mut epoch = vec![0; 16]; epoch.extend_from_slice(&initial.finalize());
-                epoch.extend_from_slice(&Sha256::digest(b"verified")); epoch.extend_from_slice(b"verified");
-                if case == "eof" { return; } // Even an empty stream needs finalization.
+                let mut initial = Sha256::new();
+                initial.update(b"asupersync.atp.live.hello.v1");
+                initial.update(&hello);
+                let mut epoch = vec![0; 16];
+                epoch.extend_from_slice(&initial.finalize());
+                epoch.extend_from_slice(&Sha256::digest(b"verified"));
+                epoch.extend_from_slice(b"verified");
+                if case == "eof" {
+                    return;
+                } // Even an empty stream needs finalization.
                 if case == "replay" || case == "final" {
                     wire.send(FrameType::ObjectData, epoch.clone()).await;
                     let ack = wire.receive().await;
                     assert_eq!(ack.frame_type(), FrameType::Control);
-                    assert_eq!(u64::from_be_bytes(ack.payload()[8..16].try_into().unwrap()), 8);
+                    assert_eq!(
+                        u64::from_be_bytes(ack.payload()[8..16].try_into().unwrap()),
+                        8
+                    );
                     if case == "final" {
-                        let mut final_payload = ack.payload().to_vec(); final_payload.extend_from_slice(&[0; 32]);
+                        let mut final_payload = ack.payload().to_vec();
+                        final_payload.extend_from_slice(&[0; 32]);
                         wire.send(FrameType::ObjectComplete, final_payload).await;
                         return;
                     }
                 }
-                if case == "digest" { epoch[87] ^= 1; }
-                if case == "sequence" { epoch[7] = 1; }
-                if case == "oversize" { epoch = vec![0; 64 * 1024 + 257]; }
-                let mut bytes = Frame::new(ProtocolVersion::V0, FrameType::ObjectData, epoch).unwrap().to_wire_bytes().unwrap();
-                if case == "truncated" { bytes.pop(); }
+                if case == "digest" {
+                    epoch[87] ^= 1;
+                }
+                if case == "sequence" {
+                    epoch[7] = 1;
+                }
+                if case == "oversize" {
+                    epoch = vec![0; 64 * 1024 + 257];
+                }
+                let mut bytes = Frame::new(ProtocolVersion::V0, FrameType::ObjectData, epoch)
+                    .unwrap()
+                    .to_wire_bytes()
+                    .unwrap();
+                if case == "truncated" {
+                    bytes.pop();
+                }
                 // Rejection may close the socket before an oversized frame finishes.
                 let _ = wire.stream.write_all(&bytes).await;
                 let _ = wire.stream.flush().await;
@@ -468,14 +754,27 @@ fn live_authenticated_malformed_epochs_never_escape_integrity_or_finalization_ch
             let mut output = Vec::new();
             let (_, report) = zip(peer, listener.receive_into(&cx, &mut output)).await;
             match case {
-                "digest" => assert!(matches!(report.outcome, Err(LiveStreamError::Protocol("epoch digest mismatch")))),
-                "sequence" | "replay" => assert!(matches!(report.outcome, Err(LiveStreamError::Protocol("noncontiguous or rebound epoch")))),
-                "final" => assert!(matches!(report.outcome, Err(LiveStreamError::Protocol("wrong final stream commitment")))),
+                "digest" => assert!(matches!(
+                    report.outcome,
+                    Err(LiveStreamError::Protocol("epoch digest mismatch"))
+                )),
+                "sequence" | "replay" => assert!(matches!(
+                    report.outcome,
+                    Err(LiveStreamError::Protocol("noncontiguous or rebound epoch"))
+                )),
+                "final" => assert!(matches!(
+                    report.outcome,
+                    Err(LiveStreamError::Protocol("wrong final stream commitment"))
+                )),
                 "oversize" => assert!(matches!(report.outcome, Err(LiveStreamError::Frame(_)))),
-                _ => assert!(matches!(report.outcome, Err(LiveStreamError::Io(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof)),
+                _ => assert!(
+                    matches!(report.outcome, Err(LiveStreamError::Io(ref error)) if error.kind() == io::ErrorKind::UnexpectedEof)
+                ),
             }
             assert_eq!(output.len(), expected_bytes);
-            if expected_bytes > 0 { assert_eq!(output, b"verified"); }
+            if expected_bytes > 0 {
+                assert_eq!(output, b"verified");
+            }
             assert_eq!(report.sink_written_bytes, expected_bytes as u64);
             assert_eq!(report.prefix.unwrap().bytes, expected_bytes as u64);
             assert_eq!(receive.active_streams(), 0);
@@ -488,17 +787,30 @@ fn live_sender_requires_the_exact_final_proof_even_for_an_empty_source() {
     use asupersync::net::atp::protocol::frames::FrameType;
     run(1, async {
         let cx = Cx::current().unwrap();
-        let listener = asupersync::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
         let address = listener.local_addr().unwrap();
         let peer = async {
             let provider = Arc::new(rustls::crypto::ring::default_provider());
-            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots()), Arc::clone(&provider)).build().unwrap();
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::new(roots()),
+                Arc::clone(&provider),
+            )
+            .build()
+            .unwrap();
             let fixtures = fixtures();
             let key = fixtures["identities"]["server"]["key"].as_str().unwrap();
-            let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(key.as_bytes())).next().unwrap().unwrap();
+            let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(key.as_bytes()))
+                .next()
+                .unwrap()
+                .unwrap();
             let mut config = rustls::ServerConfig::builder_with_provider(provider)
-                .with_protocol_versions(&[&rustls::version::TLS13]).unwrap()
-                .with_client_cert_verifier(verifier).with_single_cert(vec![certificate("server")], key).unwrap();
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(vec![certificate("server")], key)
+                .unwrap();
             config.alpn_protocols = vec![LIVE_STREAM_ALPN.to_vec()];
             config.send_tls13_tickets = 0;
             let acceptor = asupersync::tls::TlsAcceptor::new(config);
@@ -506,16 +818,21 @@ fn live_sender_requires_the_exact_final_proof_even_for_an_empty_source() {
             let mut wire = RawWire::new(acceptor.accept(tcp).await.unwrap());
             let hello = wire.receive().await;
             assert_eq!(hello.frame_type(), FrameType::Handshake);
-            wire.send(FrameType::HandshakeAck, hello.payload().to_vec()).await;
+            wire.send(FrameType::HandshakeAck, hello.payload().to_vec())
+                .await;
             let final_frame = wire.receive().await;
             assert_eq!(final_frame.frame_type(), FrameType::ObjectComplete);
             assert_eq!(final_frame.payload().len(), 80);
-            let mut wrong = final_frame.payload().to_vec(); wrong[79] ^= 1;
+            let mut wrong = final_frame.payload().to_vec();
+            wrong[79] ^= 1;
             wire.send(FrameType::Proof, wrong).await;
         };
         let send = sender(config(8, 100));
         let (report, ()) = zip(send.send_reader(&cx, address, &b""[..]), peer).await;
-        assert!(matches!(report.outcome, Err(LiveStreamError::Protocol("wrong final proof"))));
+        assert!(matches!(
+            report.outcome,
+            Err(LiveStreamError::Protocol("wrong final proof"))
+        ));
         assert_eq!(report.prefix.unwrap().bytes, 0);
         assert_eq!(send.active_streams(), 0);
     });
@@ -525,27 +842,54 @@ fn live_sender_requires_the_exact_final_proof_even_for_an_empty_source() {
 fn live_stalled_sources_and_sinks_have_real_timeout_wakeups() {
     for stall_source in [true, false] {
         run(1, async move {
-            let cx = Cx::current().unwrap(); let scope = cx.scope();
-            let mut send_config = config(8, 100); let mut receive_config = config(8, 100);
-            if stall_source { send_config.operation_timeout = Duration::from_secs(1); }
-            else { receive_config.operation_timeout = Duration::from_secs(1); }
-            let send = sender(send_config); let receive = receiver(receive_config);
-            let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
-            let address = listener.local_addr().unwrap(); let probe = Arc::new(Probe::default());
-            let mut input = source(&probe); input.park_forever = stall_source;
-            let mut output = sink(&probe); output.gate_flush = !stall_source;
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let mut send_config = config(8, 100);
+            let mut receive_config = config(8, 100);
+            if stall_source {
+                send_config.operation_timeout = Duration::from_secs(1);
+            } else {
+                receive_config.operation_timeout = Duration::from_secs(1);
+            }
+            let send = sender(send_config);
+            let receive = receiver(receive_config);
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let probe = Arc::new(Probe::default());
+            let mut input = source(&probe);
+            input.park_forever = stall_source;
+            let mut output = sink(&probe);
+            output.gate_flush = !stall_source;
             let mut receiving = listener.spawn_receive_into(&cx, &scope, output).unwrap();
             let mut sending = send.spawn_send_reader(&cx, &scope, address, input).unwrap();
-            witness(&cx, if stall_source { &probe.source_parked } else { &probe.flush_parked }).await;
+            witness(
+                &cx,
+                if stall_source {
+                    &probe.source_parked
+                } else {
+                    &probe.flush_parked
+                },
+            )
+            .await;
             let (sent, received) = zip(sending.join(&cx), receiving.join(&cx)).await;
-            let sent = sent.unwrap(); let received = received.unwrap();
+            let sent = sent.unwrap();
+            let received = received.unwrap();
             if stall_source {
-                assert!(matches!(sent.outcome, Err(LiveStreamError::Timeout("source read"))));
+                assert!(matches!(
+                    sent.outcome,
+                    Err(LiveStreamError::Timeout("source read"))
+                ));
                 assert!(received.outcome.is_err());
                 assert_eq!(sent.prefix.as_ref().unwrap().bytes, 5);
                 assert_eq!(sent.prefix, received.prefix);
             } else {
-                assert!(matches!(received.outcome, Err(LiveStreamError::Timeout("sink epoch"))));
+                assert!(matches!(
+                    received.outcome,
+                    Err(LiveStreamError::Timeout("sink epoch"))
+                ));
                 assert!(sent.outcome.is_err());
                 assert_eq!(received.sink_written_bytes, 5);
                 assert_eq!(received.prefix.as_ref().unwrap().bytes, 0);

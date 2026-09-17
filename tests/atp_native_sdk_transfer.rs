@@ -4,20 +4,20 @@
 //! No verifier bypass, synthetic session, or progress-only success is used.
 //! Fixture directories are deliberately retained; tests do not delete files.
 
-#![cfg(all(feature = "tls", feature = "test-internals", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "tls",
+    feature = "test-internals",
+    not(target_arch = "wasm32")
+))]
 
 use asupersync::Cx;
 use asupersync::net::atp::protocol::PeerId;
-use asupersync::net::atp::sdk::{
-    AtpSdk, NativeTransferClient, NativeTransferError, SessionConfig,
-};
+use asupersync::net::atp::sdk::{AtpSdk, NativeTransferClient, NativeTransferError, SessionConfig};
 use asupersync::net::atp::transport_quic::native_link::{QuicClientTls, QuicServerTls};
 use asupersync::net::atp::transport_quic::{
     QuicConfig, QuicReceiveOptions, ReceiveReport, SendReport,
 };
-use asupersync::net::quic_native::handshake_driver::{
-    ATP_QUIC_ALPN, client_config, server_config,
-};
+use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
 use asupersync::runtime::{JoinError, RuntimeBuilder};
 use asupersync::types::CancelReason;
 use futures_lite::future::zip;
@@ -120,7 +120,10 @@ fn native_client(label: &str, config: QuicConfig, capacity: u32) -> NativeTransf
 
 fn fixture(label: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
         "asupersync-native-sdk-{label}-{}-{stamp}-{sequence}",
@@ -149,10 +152,18 @@ fn run_native<T: Send + 'static>(
     // A current-thread block_on registers its own root task. Check outside
     // that task, then drive another turn if previously spawned work remains.
     while !runtime.is_quiescent() {
-        assert!(start.elapsed() < Duration::from_secs(5), "native children did not drain");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "native children did not drain"
+        );
         runtime.block_on(asupersync::runtime::yield_now());
     }
-    assert!(runtime.task_inspector(Default::default()).list_tasks().is_empty());
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
     result
@@ -191,7 +202,11 @@ async fn transfer(
             received.expect("receiver must reach canonical join"),
         )
     } else {
-        zip(sender.send_path(&cx, address, &source), receiver.receive(&cx)).await
+        zip(
+            sender.send_path(&cx, address, &source),
+            receiver.receive(&cx),
+        )
+        .await
     };
     // Both operations have terminated before asserting either result.
     assert_eq!(sender.active_transfers(), 0);
@@ -212,8 +227,15 @@ fn assert_content(report: &ReceiveReport, destination: &Path, relative: &str, by
         .iter()
         .find(|path| path.ends_with(relative))
         .expect("receipt must identify the expected committed path");
-    assert!(path.starts_with(destination), "publication escaped the supplied destination");
-    assert_eq!(std::fs::read(path).unwrap(), bytes, "wrong committed bytes at {path:?}");
+    assert!(
+        path.starts_with(destination),
+        "publication escaped the supplied destination"
+    );
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        bytes,
+        "wrong committed bytes at {path:?}"
+    );
 }
 
 #[test]
@@ -244,7 +266,12 @@ fn native_sdk_scoped_directory_transfer_publishes_nested_and_empty_files() {
     let receive_root = destination.clone();
     let (_, received) = run_native(2, transfer(source, receive_root, true));
     assert_content(&received, &destination, "first.bin", b"first file");
-    assert_content(&received, &destination, "nested/second.bin", &[0x5au8; 8193]);
+    assert_content(
+        &received,
+        &destination,
+        "nested/second.bin",
+        &[0x5au8; 8193],
+    );
     assert_content(&received, &destination, "empty.bin", &[]);
     assert_eq!(received.bytes_received, 8203);
 }
@@ -290,8 +317,14 @@ fn native_sdk_wrong_server_identity_never_returns_commit_success() {
             receiver.receive(&cx),
         )
         .await;
-        assert!(matches!(sent, Err(NativeTransferError::Transport(_))), "{sent:?}");
-        assert!(received.is_err(), "wrong-identity transfer unexpectedly committed");
+        assert!(
+            matches!(sent, Err(NativeTransferError::Transport(_))),
+            "{sent:?}"
+        );
+        assert!(
+            received.is_err(),
+            "wrong-identity transfer unexpectedly committed"
+        );
         assert_eq!(sender.active_transfers(), 0);
         assert_eq!(receiver_client.active_transfers(), 0);
     });
@@ -312,8 +345,13 @@ fn native_sdk_silent_peer_cannot_pass_by_constructing_a_local_handle() {
             sender_config("localhost", Duration::from_millis(250)),
             1,
         );
-        let result = sender.send_path(&cx, silent.local_addr().unwrap(), &source).await;
-        assert!(matches!(result, Err(NativeTransferError::Transport(_))), "{result:?}");
+        let result = sender
+            .send_path(&cx, silent.local_addr().unwrap(), &source)
+            .await;
+        assert!(
+            matches!(result, Err(NativeTransferError::Transport(_))),
+            "{result:?}"
+        );
         assert_eq!(sender.active_transfers(), 0);
         drop(silent);
     });
@@ -345,7 +383,10 @@ fn native_sdk_bound_receiver_owns_capacity_and_releases_its_actual_socket() {
                 QuicReceiveOptions::default(),
             )
             .await;
-        assert!(matches!(refused, Err(NativeTransferError::CapacityExceeded { limit: 1 })));
+        assert!(matches!(
+            refused,
+            Err(NativeTransferError::CapacityExceeded { limit: 1 })
+        ));
         assert_eq!(client.active_transfers(), 1);
         drop(receiver);
         assert_eq!(clone.active_transfers(), 0);
@@ -353,8 +394,15 @@ fn native_sdk_bound_receiver_owns_capacity_and_releases_its_actual_socket() {
         let bind_failure = client
             .bind_receiver(&cx, address, &root, QuicReceiveOptions::default())
             .await;
-        assert!(matches!(bind_failure, Err(NativeTransferError::Transport(_))));
-        assert_eq!(client.active_transfers(), 0, "bind failure leaked admission");
+        assert!(matches!(
+            bind_failure,
+            Err(NativeTransferError::Transport(_))
+        ));
+        assert_eq!(
+            client.active_transfers(),
+            0,
+            "bind failure leaked admission"
+        );
         drop(rebound);
     });
 }
@@ -364,16 +412,30 @@ fn native_sdk_sender_capacity_is_reserved_before_enqueue_and_cancel_drains_it() 
     run_native(1, async {
         let cx = Cx::current().unwrap();
         let scope = cx.scope();
-        let client = native_client("sender", sender_config("localhost", Duration::from_secs(2)), 1);
+        let client = native_client(
+            "sender",
+            sender_config("localhost", Duration::from_secs(2)),
+            1,
+        );
         let mut send = client
-            .spawn_send_path(&cx, &scope, "127.0.0.1:9".parse().unwrap(), "never-read-source")
+            .spawn_send_path(
+                &cx,
+                &scope,
+                "127.0.0.1:9".parse().unwrap(),
+                "never-read-source",
+            )
             .unwrap();
         // The current-thread coordinator has not yielded: the child cannot yet
         // have opened a source or socket. Its queued factory nevertheless owns
         // the native slot, rather than admitting unlimited queued send workers.
         assert_eq!(client.active_transfers(), 1);
         assert!(matches!(
-            client.spawn_send_path(&cx, &scope, "127.0.0.1:9".parse().unwrap(), "also-never-read"),
+            client.spawn_send_path(
+                &cx,
+                &scope,
+                "127.0.0.1:9".parse().unwrap(),
+                "also-never-read"
+            ),
             Err(NativeTransferError::CapacityExceeded { limit: 1 })
         ));
         let reason = CancelReason::user("native SDK cancellation before first poll");
@@ -393,9 +455,18 @@ fn native_sdk_rejected_spawn_retires_sender_and_receiver_admission() {
         let cx = Cx::current().unwrap();
         let unbacked = Cx::for_testing();
         let scope = unbacked.scope();
-        let sender = native_client("sender", sender_config("localhost", Duration::from_secs(2)), 1);
+        let sender = native_client(
+            "sender",
+            sender_config("localhost", Duration::from_secs(2)),
+            1,
+        );
         assert!(matches!(
-            sender.spawn_send_path(&unbacked, &scope, "127.0.0.1:9".parse().unwrap(), "never-read"),
+            sender.spawn_send_path(
+                &unbacked,
+                &scope,
+                "127.0.0.1:9".parse().unwrap(),
+                "never-read"
+            ),
             Err(NativeTransferError::Spawn(_))
         ));
         assert_eq!(sender.active_transfers(), 0);
@@ -410,7 +481,10 @@ fn native_sdk_rejected_spawn_retires_sender_and_receiver_admission() {
             .await
             .unwrap();
         let address = receiver.local_addr();
-        assert!(matches!(receiver.spawn(&unbacked, &scope), Err(NativeTransferError::Spawn(_))));
+        assert!(matches!(
+            receiver.spawn(&unbacked, &scope),
+            Err(NativeTransferError::Spawn(_))
+        ));
         assert_eq!(receiver_client.active_transfers(), 0);
         let rebound = UdpSocket::bind(address).expect("failed spawn retires captured listener");
         drop(rebound);

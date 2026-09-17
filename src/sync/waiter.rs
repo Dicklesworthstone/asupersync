@@ -345,7 +345,8 @@ impl<T> WaiterChain<T> {
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn front_waker(&self) -> Option<Waker> {
-        self.head.map(|id| self.slots[id].waker.clone().into_waker())
+        self.head
+            .map(|id| self.slots[id].waker.clone().into_waker())
     }
 
     /// Drain all wakers in order.

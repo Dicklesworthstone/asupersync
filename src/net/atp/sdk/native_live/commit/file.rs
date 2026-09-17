@@ -20,8 +20,8 @@
 //! pool to avoid its inline fallback. A hard-dropped started syscall can finish
 //! later. Retain the publication handle to inspect its observed local status.
 
-use super::{LiveStreamCommitSink, LiveStreamReceipt};
 use super::super::{MAX_LIVE_EPOCH_BYTES, authorize};
+use super::{LiveStreamCommitSink, LiveStreamReceipt};
 use crate::cx::Cx;
 use crate::fs::File;
 use crate::io::AsyncWrite;
@@ -75,15 +75,21 @@ pub struct LiveFilePublication(Arc<Publication>);
 impl LiveFilePublication {
     /// Retained private plaintext path; after publication this aliases the final inode.
     #[must_use]
-    pub fn staging_path(&self) -> &Path { &self.0.staging }
+    pub fn staging_path(&self) -> &Path {
+        &self.0.staging
+    }
 
     /// Caller-selected destination. Its existence alone is not this transfer's receipt.
     #[must_use]
-    pub fn destination_path(&self) -> &Path { &self.0.destination }
+    pub fn destination_path(&self) -> &Path {
+        &self.0.destination
+    }
 
     /// Snapshot local effects without polling, retrying or modifying the sink.
     #[must_use]
-    pub fn status(&self) -> LiveFileStatus { *self.0.status.lock() }
+    pub fn status(&self) -> LiveFileStatus {
+        *self.0.status.lock()
+    }
 }
 
 type CommitJob = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
@@ -134,46 +140,80 @@ impl LiveFileSink {
         max_bytes: u64,
     ) -> io::Result<Self> {
         authorize(cx).map_err(io::Error::other)?;
-        if !directory.is_absolute() { return Err(invalid("absolute private directory required")); }
-        if filename.is_empty() || filename.len() > 200 || matches!(filename.as_str(), "." | "..")
+        if !directory.is_absolute() {
+            return Err(invalid("absolute private directory required"));
+        }
+        if filename.is_empty()
+            || filename.len() > 200
+            || matches!(filename.as_str(), "." | "..")
             || filename.starts_with(".atp-live-")
-            || !filename.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            || !filename
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
         {
             return Err(invalid("invalid local live-file name"));
         }
         let mut nonce = [0_u8; 16];
         cx.random_bytes(&mut nonce);
         let mut suffix = String::with_capacity(32);
-        for byte in nonce { write!(&mut suffix, "{byte:02x}").expect("write to String"); }
+        for byte in nonce {
+            write!(&mut suffix, "{byte:02x}").expect("write to String");
+        }
         let (file, publication) = spawn_blocking_io(move || {
             let metadata = std::fs::symlink_metadata(&directory)?;
             if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "live-file directory must be private"));
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "live-file directory must be private",
+                ));
             }
             let directory = std::fs::canonicalize(directory)?;
             let handle = std::fs::File::open(&directory)?;
             let staging = directory.join(format!(".atp-live-{suffix}.part"));
             let destination = directory.join(filename);
-            let file = std::fs::OpenOptions::new().read(true).write(true)
-                .create_new(true).mode(0o600).open(&staging)?;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&staging)?;
             let publication = LiveFilePublication(Arc::new(Publication {
-                staging, destination, directory: handle,
-                status: Mutex::new(LiveFileStatus { state: LiveFileState::Staged, error_kind: None }),
+                staging,
+                destination,
+                directory: handle,
+                status: Mutex::new(LiveFileStatus {
+                    state: LiveFileState::Staged,
+                    error_kind: None,
+                }),
             }));
             Ok((File::from_std(file), publication))
-        }).await?;
+        })
+        .await?;
         Ok(Self {
-            file: Some(file), publication, limit: max_bytes, written: 0,
-            write_failed: false, receipt: None, job: None, terminal: None,
+            file: Some(file),
+            publication,
+            limit: max_bytes,
+            written: 0,
+            write_failed: false,
+            receipt: None,
+            job: None,
+            terminal: None,
         })
     }
 
     /// Retain this before moving the sink into a service or scoped receiver.
     #[must_use]
-    pub fn publication(&self) -> LiveFilePublication { self.publication.clone() }
+    pub fn publication(&self) -> LiveFilePublication {
+        self.publication.clone()
+    }
 
     fn completed(&mut self, result: io::Result<()>) -> Poll<io::Result<()>> {
-        self.terminal = Some(result.as_ref().copied().map_err(|e| (e.kind(), e.raw_os_error())));
+        self.terminal = Some(
+            result
+                .as_ref()
+                .copied()
+                .map_err(|e| (e.kind(), e.raw_os_error())),
+        );
         if let Err(error) = &result {
             self.publication.0.status.lock().error_kind = Some(error.kind());
         }
@@ -182,17 +222,29 @@ impl LiveFileSink {
 }
 
 impl AsyncWrite for LiveFileSink {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         if this.receipt.is_some() || this.write_failed {
             return Poll::Ready(Err(invalid("live-file sink is sealed or failed")));
         }
-        if bytes.is_empty() { return Poll::Ready(Ok(0)); }
+        if bytes.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         let remaining = this.limit.saturating_sub(this.written);
-        let count = bytes.len().min(MAX_LIVE_EPOCH_BYTES)
+        let count = bytes
+            .len()
+            .min(MAX_LIVE_EPOCH_BYTES)
             .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-        if count == 0 { return Poll::Ready(Err(invalid("live-file byte limit exceeded"))); }
-        let result = ready!(Pin::new(this.file.as_mut().expect("unsealed file")).poll_write(cx, &bytes[..count]));
+        if count == 0 {
+            return Poll::Ready(Err(invalid("live-file byte limit exceeded")));
+        }
+        let result = ready!(
+            Pin::new(this.file.as_mut().expect("unsealed file")).poll_write(cx, &bytes[..count])
+        );
         match &result {
             Ok(written) => this.written += *written as u64,
             Err(_) => this.write_failed = true,
@@ -202,20 +254,29 @@ impl AsyncWrite for LiveFileSink {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if this.receipt.is_some() { return Poll::Ready(Err(invalid("live-file sink is sealed"))); }
+        if this.receipt.is_some() {
+            return Poll::Ready(Err(invalid("live-file sink is sealed")));
+        }
         let result = ready!(Pin::new(this.file.as_mut().expect("unsealed file")).poll_flush(cx));
-        if result.is_err() { this.write_failed = true; }
+        if result.is_err() {
+            this.write_failed = true;
+        }
         Poll::Ready(result)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Err(io::Error::new(io::ErrorKind::Unsupported, "explicit verified commit required")))
+        Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "explicit verified commit required",
+        )))
     }
 }
 
 impl LiveStreamCommitSink for LiveFileSink {
     fn poll_commit(
-        self: Pin<&mut Self>, cx: &mut Context<'_>, receipt: &LiveStreamReceipt,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        receipt: &LiveStreamReceipt,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         if this.receipt.as_ref().is_some_and(|bound| bound != receipt) {
@@ -229,12 +290,16 @@ impl LiveStreamCommitSink for LiveFileSink {
         if this.receipt.is_none() {
             this.receipt = Some(receipt.clone());
             if this.write_failed || receipt.prefix.bytes != this.written {
-                return this.completed(Err(invalid("live-file byte count or write state mismatch")));
+                return this
+                    .completed(Err(invalid("live-file byte count or write state mismatch")));
             }
         }
         if this.job.is_none() {
-            let flushed = ready!(Pin::new(this.file.as_mut().expect("uncommitted file")).poll_flush(cx));
-            if let Err(error) = flushed { return this.completed(Err(error)); }
+            let flushed =
+                ready!(Pin::new(this.file.as_mut().expect("uncommitted file")).poll_flush(cx));
+            if let Err(error) = flushed {
+                return this.completed(Err(error));
+            }
             let file = this.file.take().expect("uncommitted file");
             let publication = this.publication.clone();
             let receipt = receipt.clone();
@@ -247,8 +312,11 @@ impl LiveStreamCommitSink for LiveFileSink {
                         publication.0.status.lock().error_kind = Some(error.kind());
                     }
                     result
-                }).await;
-                if let Err(error) = &result { observed.0.status.lock().error_kind = Some(error.kind()); }
+                })
+                .await;
+                if let Err(error) = &result {
+                    observed.0.status.lock().error_kind = Some(error.kind());
+                }
                 result
             }));
         }
@@ -263,10 +331,14 @@ fn publish(file: File, publication: &Publication, receipt: &LiveStreamReceipt) -
     let mut file = file.into_std()?;
     let metadata = file.metadata()?;
     let path_metadata = std::fs::symlink_metadata(&publication.staging)?;
-    let parent = publication.destination.parent().ok_or_else(|| invalid("missing parent"))?;
+    let parent = publication
+        .destination
+        .parent()
+        .ok_or_else(|| invalid("missing parent"))?;
     let parent_metadata = std::fs::symlink_metadata(parent)?;
     let held_parent = publication.directory.metadata()?;
-    if !metadata.is_file() || !path_metadata.is_file()
+    if !metadata.is_file()
+        || !path_metadata.is_file()
         || (metadata.dev(), metadata.ino()) != (path_metadata.dev(), path_metadata.ino())
         || !parent_metadata.is_dir()
         || (parent_metadata.dev(), parent_metadata.ino()) != (held_parent.dev(), held_parent.ino())
@@ -280,15 +352,22 @@ fn publish(file: File, publication: &Publication, receipt: &LiveStreamReceipt) -
     let mut remaining = receipt.prefix.bytes;
     let mut buffer = vec![0_u8; MAX_LIVE_EPOCH_BYTES].into_boxed_slice();
     while remaining != 0 {
-        let window = buffer.len().min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let window = buffer
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
         let count = file.read(&mut buffer[..window])?;
-        if count == 0 { return Err(io::Error::from(io::ErrorKind::UnexpectedEof)); }
+        if count == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
         hash.update(&buffer[..count]);
         remaining -= count as u64;
     }
     let digest: [u8; 32] = hash.finalize().into();
     if file.read(&mut buffer[..1])? != 0 || digest != receipt.source_sha256 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "live-file content changed"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "live-file content changed",
+        ));
     }
     file.sync_all()?;
     std::fs::hard_link(&publication.staging, &publication.destination)?;

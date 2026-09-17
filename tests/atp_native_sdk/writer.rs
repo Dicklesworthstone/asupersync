@@ -4,7 +4,9 @@ use super::{assert_content, fixture, native_client, receiver_config, run_native,
 use asupersync::Cx;
 use asupersync::io::{AsyncWrite, AsyncWriteExt};
 use asupersync::net::atp::sdk::native::upload::NativeUploadWriterTerminal;
-use asupersync::net::atp::sdk::native::{NativeTransferError, NativeUploadError, NativeUploadOptions};
+use asupersync::net::atp::sdk::native::{
+    NativeTransferError, NativeUploadError, NativeUploadOptions,
+};
 use asupersync::net::atp::transport_quic::QuicReceiveOptions;
 use asupersync::runtime::JoinError;
 use asupersync::types::CancelReason;
@@ -20,16 +22,21 @@ use std::time::Duration;
 
 fn assert_clean(parent: &Path) {
     assert_eq!(std::fs::read_dir(parent).unwrap().count(), 1);
-    assert_eq!(std::fs::read(parent.join("keep.txt")).unwrap(), b"untouched");
+    assert_eq!(
+        std::fs::read(parent.join("keep.txt")).unwrap(),
+        b"untouched"
+    );
 }
 
 fn assert_cancelled(result: &NativeUploadWriterTerminal, reason: &CancelReason) {
     match result {
         Err(JoinError::Cancelled(actual)) => assert_eq!(actual, reason),
         Ok(report) => {
-            assert!(matches!(&report.outcome,
+            assert!(
+                matches!(&report.outcome,
                 Err(NativeUploadError::Cancelled { reason: Some(actual) }) if actual == reason),
-                "unexpected report: {report:?}");
+                "unexpected report: {report:?}"
+            );
             assert!(report.cleanup_error.is_none());
         }
         other => panic!("unexpected cancellation result: {other:?}"),
@@ -54,12 +61,23 @@ fn native_writer_delivers_exact_bytes_and_shutdown_waits_for_the_peer() {
             let timeout = Duration::from_secs(20);
             let sender = native_client("writer", sender_config("localhost", timeout), 1);
             let receiver_client = native_client("writer-peer", receiver_config(timeout), 1);
-            let receiver = receiver_client.bind_receiver(
-                &cx, "127.0.0.1:0".parse().unwrap(), output, QuicReceiveOptions::default(),
-            ).await.unwrap();
-            let mut writer = sender.open_writer(
-                &cx, &scope, receiver.local_addr(), NativeUploadOptions::new(spool, "output.bin"),
-            ).unwrap();
+            let receiver = receiver_client
+                .bind_receiver(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    output,
+                    QuicReceiveOptions::default(),
+                )
+                .await
+                .unwrap();
+            let mut writer = sender
+                .open_writer(
+                    &cx,
+                    &scope,
+                    receiver.local_addr(),
+                    NativeUploadOptions::new(spool, "output.bin"),
+                )
+                .unwrap();
             for chunk in bytes.chunks(4093) {
                 writer.write_all(chunk).await.unwrap();
             }
@@ -76,7 +94,12 @@ fn native_writer_delivers_exact_bytes_and_shutdown_waits_for_the_peer() {
             // the worker and the same EOF, not abort or manufacture a receipt.
             {
                 let mut shutdown = Box::pin(writer.shutdown());
-                assert!(shutdown.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+                assert!(
+                    shutdown
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
             }
             assert!(writer.terminal().is_none());
             let (closed, received) = zip(writer.shutdown(), receiver.receive(&cx)).await;
@@ -92,8 +115,22 @@ fn native_writer_delivers_exact_bytes_and_shutdown_waits_for_the_peer() {
             assert!(report.cleanup_error.is_none());
             let id = sent.transfer_id.clone();
             writer.shutdown().await.unwrap();
-            assert_eq!(writer.finish().await.as_ref().unwrap().outcome.as_ref().unwrap().transfer_id, id);
-            assert_eq!(writer.write_all(b"late").await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+            assert_eq!(
+                writer
+                    .finish()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .outcome
+                    .as_ref()
+                    .unwrap()
+                    .transfer_id,
+                id
+            );
+            assert_eq!(
+                writer.write_all(b"late").await.unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
             assert_eq!(sender.active_transfers(), 0);
             assert_eq!(receiver_client.active_transfers(), 0);
             received
@@ -117,27 +154,50 @@ fn native_writer_pending_write_is_cancel_safe_and_capacity_is_pre_enqueued() {
         config.chunk_size = 7;
         let sender = native_client("writer-backpressure", config, 1);
         let options = NativeUploadOptions::new(&root, "queued.bin");
-        let mut writer = sender.open_writer(&cx, &scope, sink.local_addr().unwrap(), options.clone()).unwrap();
+        let mut writer = sender
+            .open_writer(&cx, &scope, sink.local_addr().unwrap(), options.clone())
+            .unwrap();
         assert_eq!(sender.active_transfers(), 1);
-        assert!(matches!(sender.clone().open_writer(&cx, &scope, sink.local_addr().unwrap(), options),
-            Err(NativeUploadError::Native(NativeTransferError::CapacityExceeded { limit: 1 }))));
+        assert!(matches!(
+            sender
+                .clone()
+                .open_writer(&cx, &scope, sink.local_addr().unwrap(), options),
+            Err(NativeUploadError::Native(
+                NativeTransferError::CapacityExceeded { limit: 1 }
+            ))
+        ));
         {
             let mut ctx = Context::from_waker(Waker::noop());
-            assert!(matches!(Pin::new(&mut writer).poll_write(&mut ctx, b"123456789"), Poll::Ready(Ok(7))));
+            assert!(matches!(
+                Pin::new(&mut writer).poll_write(&mut ctx, b"123456789"),
+                Poll::Ready(Ok(7))
+            ));
             let mut pending = Box::pin(writer.write_all(b"not-accepted"));
-            for _ in 0..16 { assert!(pending.as_mut().poll(&mut ctx).is_pending()); }
+            for _ in 0..16 {
+                assert!(pending.as_mut().poll(&mut ctx).is_pending());
+            }
         }
-        assert_eq!(writer.accepted_bytes(), 7, "dropping a pending write cannot commit bytes");
+        assert_eq!(
+            writer.accepted_bytes(),
+            7,
+            "dropping a pending write cannot commit bytes"
+        );
         writer.flush().await.unwrap();
         assert_eq!(writer.spooled_bytes(), 7);
         assert!(writer.terminal().is_none());
         let mut packet = [0u8; 2048];
-        assert_eq!(sink.recv_from(&mut packet).unwrap_err().kind(), io::ErrorKind::WouldBlock,
-            "local flush must not start the manifest-first network transfer");
+        assert_eq!(
+            sink.recv_from(&mut packet).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "local flush must not start the manifest-first network transfer"
+        );
         let reason = CancelReason::user("cancel unclosed writer");
         assert_cancelled(writer.cancel_and_wait(reason.clone()).await, &reason);
         assert_eq!(sender.active_transfers(), 0);
-        assert_eq!(sink.recv_from(&mut packet).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            sink.recv_from(&mut packet).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     });
     assert_clean(&inspect);
 }
@@ -153,17 +213,34 @@ fn native_writer_drop_aborts_instead_of_publishing_a_partial_object() {
             let scope = cx.scope();
             let sink = UdpSocket::bind("127.0.0.1:0").unwrap();
             sink.set_nonblocking(true).unwrap();
-            let sender = native_client("writer-drop", sender_config("localhost", Duration::from_secs(2)), 1);
-            let mut writer = sender.open_writer(&cx, &scope, sink.local_addr().unwrap(),
-                NativeUploadOptions::new(&root, "partial.bin")).unwrap();
+            let sender = native_client(
+                "writer-drop",
+                sender_config("localhost", Duration::from_secs(2)),
+                1,
+            );
+            let mut writer = sender
+                .open_writer(
+                    &cx,
+                    &scope,
+                    sink.local_addr().unwrap(),
+                    NativeUploadOptions::new(&root, "partial.bin"),
+                )
+                .unwrap();
             writer.write_all(b"this is only a prefix").await.unwrap();
             writer.flush().await.unwrap();
             drop(writer);
             asupersync::time::timeout(cx.now(), Duration::from_secs(5), async {
-                while sender.active_transfers() != 0 { asupersync::runtime::yield_now().await; }
-            }).await.expect("dropped writer must drain and release admission");
+                while sender.active_transfers() != 0 {
+                    asupersync::runtime::yield_now().await;
+                }
+            })
+            .await
+            .expect("dropped writer must drain and release admission");
             let mut packet = [0u8; 2048];
-            assert_eq!(sink.recv_from(&mut packet).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            assert_eq!(
+                sink.recv_from(&mut packet).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
         });
         assert_clean(&inspect);
     }
@@ -180,18 +257,34 @@ fn native_writer_worker_failure_wakes_pending_producer_and_retains_typed_error()
         let mut config = sender_config("localhost", Duration::from_secs(2));
         config.chunk_size = 1;
         let sender = native_client("writer-spool-error", config, 1);
-        let mut writer = sender.open_writer(&cx, &scope, "127.0.0.1:9".parse().unwrap(),
-            NativeUploadOptions::new(root.join("missing-parent"), "error.bin")).unwrap();
+        let mut writer = sender
+            .open_writer(
+                &cx,
+                &scope,
+                "127.0.0.1:9".parse().unwrap(),
+                NativeUploadOptions::new(root.join("missing-parent"), "error.bin"),
+            )
+            .unwrap();
         {
             let mut ctx = Context::from_waker(Waker::noop());
-            assert!(matches!(Pin::new(&mut writer).poll_write(&mut ctx, b"x"), Poll::Ready(Ok(1))));
+            assert!(matches!(
+                Pin::new(&mut writer).poll_write(&mut ctx, b"x"),
+                Poll::Ready(Ok(1))
+            ));
         }
-        let error = asupersync::time::timeout(cx.now(), Duration::from_secs(5), writer.write_all(b"y"))
-            .await.expect("failure before the first source read must wake a blocked writer")
-            .expect_err("spool creation must fail");
-        assert!(matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::BrokenPipe));
+        let error =
+            asupersync::time::timeout(cx.now(), Duration::from_secs(5), writer.write_all(b"y"))
+                .await
+                .expect("failure before the first source read must wake a blocked writer")
+                .expect_err("spool creation must fail");
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::BrokenPipe
+        ));
         let report = writer.finish().await.as_ref().unwrap();
-        assert!(matches!(&report.outcome, Err(NativeUploadError::Io(error)) if error.kind() == io::ErrorKind::NotFound));
+        assert!(
+            matches!(&report.outcome, Err(NativeUploadError::Io(error)) if error.kind() == io::ErrorKind::NotFound)
+        );
         assert_eq!(report.spooled_bytes, 0);
         assert!(report.cleanup_error.is_none());
         assert_eq!(sender.active_transfers(), 0);
@@ -212,18 +305,30 @@ fn native_writer_oversize_cannot_turn_shutdown_into_prefix_success() {
         let mut config = sender_config("localhost", Duration::from_secs(2));
         config.max_transfer_bytes = 31;
         let sender = native_client("writer-oversize", config, 1);
-        let mut writer = sender.open_writer(&cx, &scope, sink.local_addr().unwrap(),
-            NativeUploadOptions::new(&root, "too-large.bin")).unwrap();
+        let mut writer = sender
+            .open_writer(
+                &cx,
+                &scope,
+                sink.local_addr().unwrap(),
+                NativeUploadOptions::new(&root, "too-large.bin"),
+            )
+            .unwrap();
         // Queued bytes are not a size/integrity receipt; the uploader rejects
         // the oversize input before any remote connection is established.
         writer.write_all(&[7; 32]).await.unwrap();
         assert!(writer.shutdown().await.is_err());
         let report = writer.finish().await.as_ref().unwrap();
-        assert!(matches!(&report.outcome, Err(NativeUploadError::TooLarge { limit: 31 })));
+        assert!(matches!(
+            &report.outcome,
+            Err(NativeUploadError::TooLarge { limit: 31 })
+        ));
         assert!(report.source_sha256.is_none());
         assert!(report.cleanup_error.is_none());
         let mut packet = [0u8; 2048];
-        assert_eq!(sink.recv_from(&mut packet).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            sink.recv_from(&mut packet).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         assert_eq!(sender.active_transfers(), 0);
     });
     assert_clean(&inspect);
@@ -238,15 +343,31 @@ fn native_writer_shutdown_does_not_succeed_when_a_peer_never_answers() {
         let cx = Cx::current().unwrap();
         let scope = cx.scope();
         let sink = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let sender = native_client("writer-silent-peer",
-            sender_config("localhost", Duration::from_millis(100)), 1);
-        let mut writer = sender.open_writer(&cx, &scope, sink.local_addr().unwrap(),
-            NativeUploadOptions::new(&root, "unacknowledged.bin")).unwrap();
-        writer.write_all(b"not remotely acknowledged").await.unwrap();
+        let sender = native_client(
+            "writer-silent-peer",
+            sender_config("localhost", Duration::from_millis(100)),
+            1,
+        );
+        let mut writer = sender
+            .open_writer(
+                &cx,
+                &scope,
+                sink.local_addr().unwrap(),
+                NativeUploadOptions::new(&root, "unacknowledged.bin"),
+            )
+            .unwrap();
+        writer
+            .write_all(b"not remotely acknowledged")
+            .await
+            .unwrap();
         writer.flush().await.unwrap();
         let result = asupersync::time::timeout(cx.now(), Duration::from_secs(5), writer.shutdown())
-            .await.expect("configured transport timeout must terminate");
-        assert!(result.is_err(), "EOF/local flush cannot fabricate a peer receipt");
+            .await
+            .expect("configured transport timeout must terminate");
+        assert!(
+            result.is_err(),
+            "EOF/local flush cannot fabricate a peer receipt"
+        );
         let report = writer.finish().await.as_ref().unwrap();
         assert!(matches!(&report.outcome, Err(NativeUploadError::Native(_))));
         assert!(report.cleanup_error.is_none());

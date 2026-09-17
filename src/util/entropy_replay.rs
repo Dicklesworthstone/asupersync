@@ -40,7 +40,11 @@ impl EntropyCaptureLimits {
     /// Set all bounds explicitly. Zero calls/bytes permit only an empty capture.
     #[must_use]
     pub const fn new(max_calls: usize, max_bytes: usize, max_streams: usize) -> Self {
-        Self { max_calls, max_bytes, max_streams }
+        Self {
+            max_calls,
+            max_bytes,
+            max_streams,
+        }
     }
 }
 
@@ -142,15 +146,21 @@ impl fmt::Debug for EntropyTape {
 impl EntropyTape {
     /// Total recorded calls, including forks and zero-length reads.
     #[must_use]
-    pub const fn calls(&self) -> usize { self.calls }
+    pub const fn calls(&self) -> usize {
+        self.calls
+    }
 
     /// Total retained random bytes, including eight per `next_u64` result.
     #[must_use]
-    pub const fn bytes(&self) -> usize { self.bytes }
+    pub const fn bytes(&self) -> usize {
+        self.bytes
+    }
 
     /// Total sources, including the root.
     #[must_use]
-    pub fn streams(&self) -> usize { self.streams.len() }
+    pub fn streams(&self) -> usize {
+        self.streams.len()
+    }
 
     /// Replay with exact task identities at every recorded fork.
     #[must_use]
@@ -166,7 +176,11 @@ impl EntropyTape {
             shared: Arc::new(ReplayShared {
                 tape: self,
                 matching,
-                state: Mutex::new(ReplayState { positions, consumed: 0, failure: None }),
+                state: Mutex::new(ReplayState {
+                    positions,
+                    consumed: 0,
+                    failure: None,
+                }),
             }),
             stream: 0,
         }
@@ -216,16 +230,23 @@ impl fmt::Debug for RecordingEntropy {
 impl RecordingEntropy {
     /// Start a bounded capture. The source is not called during construction.
     pub fn new(
-        source: Arc<dyn EntropySource>, limits: EntropyCaptureLimits,
+        source: Arc<dyn EntropySource>,
+        limits: EntropyCaptureLimits,
     ) -> Result<Self, EntropyCaptureError> {
-        if limits.max_streams == 0 { return Err(EntropyCaptureError::NoRootCapacity); }
+        if limits.max_streams == 0 {
+            return Err(EntropyCaptureError::NoRootCapacity);
+        }
         Ok(Self {
             source,
             shared: Arc::new(CaptureShared {
                 limits,
                 state: Mutex::new(CaptureState {
-                    streams: vec![Vec::new()], calls: 0, bytes: 0, in_flight: 0,
-                    finished: false, failure: None,
+                    streams: vec![Vec::new()],
+                    calls: 0,
+                    bytes: 0,
+                    in_flight: 0,
+                    finished: false,
+                    failure: None,
                 }),
             }),
             stream: 0,
@@ -247,31 +268,57 @@ impl RecordingEntropy {
     pub fn finish(&self) -> Result<EntropyTape, EntropyCaptureError> {
         let (streams, calls, bytes) = {
             let mut state = self.shared.state.lock();
-            if state.finished { return Err(EntropyCaptureError::Finished); }
-            if let Some(error) = state.failure { return Err(error); }
+            if state.finished {
+                return Err(EntropyCaptureError::Finished);
+            }
+            if let Some(error) = state.failure {
+                return Err(error);
+            }
             if state.in_flight != 0 {
-                return Err(EntropyCaptureError::InFlight { calls: state.in_flight });
+                return Err(EntropyCaptureError::InFlight {
+                    calls: state.in_flight,
+                });
             }
             state.finished = true;
             (std::mem::take(&mut state.streams), state.calls, state.bytes)
         };
-        let streams = streams.into_iter().map(|events| {
-            events.into_iter().map(|event| event.expect("completed capture entry")).collect()
-        }).collect();
-        Ok(EntropyTape { streams, calls, bytes })
+        let streams = streams
+            .into_iter()
+            .map(|events| {
+                events
+                    .into_iter()
+                    .map(|event| event.expect("completed capture entry"))
+                    .collect()
+            })
+            .collect();
+        Ok(EntropyTape {
+            streams,
+            calls,
+            bytes,
+        })
     }
 
     fn reserve(&self, request: EntropyRequest) -> Option<PendingCapture> {
         let mut state = self.shared.state.lock();
-        if state.finished || state.failure.is_some() { return None; }
-        let bytes = match request { EntropyRequest::Bytes(n) => n, EntropyRequest::U64 => 8, EntropyRequest::Fork(_) => 0 };
+        if state.finished || state.failure.is_some() {
+            return None;
+        }
+        let bytes = match request {
+            EntropyRequest::Bytes(n) => n,
+            EntropyRequest::U64 => 8,
+            EntropyRequest::Fork(_) => 0,
+        };
         let refusal = if state.calls >= self.shared.limits.max_calls {
             Some(EntropyCaptureError::CallLimit)
         } else if bytes > self.shared.limits.max_bytes - state.bytes {
             Some(EntropyCaptureError::ByteLimit)
-        } else if matches!(request, EntropyRequest::Fork(_)) && state.streams.len() >= self.shared.limits.max_streams {
+        } else if matches!(request, EntropyRequest::Fork(_))
+            && state.streams.len() >= self.shared.limits.max_streams
+        {
             Some(EntropyCaptureError::StreamLimit)
-        } else { None };
+        } else {
+            None
+        };
         if let Some(error) = refusal {
             state.failure = Some(error);
             return None;
@@ -286,14 +333,20 @@ impl RecordingEntropy {
             let child = state.streams.len();
             state.streams.push(Vec::new());
             Some(child)
-        } else { None };
+        } else {
+            None
+        };
         let index = state.streams[self.stream].len();
         state.streams[self.stream].push(None);
         state.calls += 1;
         state.bytes += bytes;
         state.in_flight += 1;
         Some(PendingCapture {
-            shared: Arc::clone(&self.shared), stream: self.stream, index, child, completed: false,
+            shared: Arc::clone(&self.shared),
+            stream: self.stream,
+            index,
+            child,
+            completed: false,
         })
     }
 }
@@ -324,7 +377,9 @@ impl Drop for PendingCapture {
     fn drop(&mut self) {
         if !self.completed {
             let mut state = self.shared.state.lock();
-            state.failure.get_or_insert(EntropyCaptureError::InterruptedCall);
+            state
+                .failure
+                .get_or_insert(EntropyCaptureError::InterruptedCall);
             state.in_flight -= 1;
         }
     }
@@ -348,7 +403,9 @@ impl EntropySource for RecordingEntropy {
     fn next_u64(&self) -> u64 {
         let pending = self.reserve(EntropyRequest::U64);
         let value = self.source.next_u64();
-        if let Some(pending) = pending { pending.complete(Event::U64(value)); }
+        if let Some(pending) = pending {
+            pending.complete(Event::U64(value));
+        }
         value
     }
 
@@ -356,13 +413,21 @@ impl EntropySource for RecordingEntropy {
         let task = task_key(task_id);
         let pending = self.reserve(EntropyRequest::Fork(task));
         let source = self.source.fork(task_id);
-        let Some(pending) = pending else { return source; };
+        let Some(pending) = pending else {
+            return source;
+        };
         let child = pending.child.expect("reserved child source");
         pending.complete(Event::Fork { task, child });
-        Arc::new(Self { source, shared: Arc::clone(&self.shared), stream: child })
+        Arc::new(Self {
+            source,
+            shared: Arc::clone(&self.shared),
+            stream: child,
+        })
     }
 
-    fn source_id(&self) -> &'static str { "recording" }
+    fn source_id(&self) -> &'static str {
+        "recording"
+    }
 }
 
 /// Task identity policy for replaying a recorded fork tree.
@@ -378,7 +443,9 @@ pub enum EntropyForkMatching {
 
 /// A sticky replay divergence, with request shapes only, never random values.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("[ASUP-E401] entropy replay divergence at source {stream} call {call}: expected {expected:?}, got {actual:?}")]
+#[error(
+    "[ASUP-E401] entropy replay divergence at source {stream} call {call}: expected {expected:?}, got {actual:?}"
+)]
 pub struct EntropyReplayError {
     /// Source ordinal in the captured fork tree.
     pub stream: usize,
@@ -450,25 +517,41 @@ impl ReplayEntropy {
     /// be checked again after further valid calls. Divergence is permanent.
     pub fn verify_complete(&self) -> Result<(), EntropyReplayCompletionError> {
         let state = self.shared.state.lock();
-        if let Some(error) = &state.failure { return Err(error.clone().into()); }
+        if let Some(error) = &state.failure {
+            return Err(error.clone().into());
+        }
         let calls = self.shared.tape.calls - state.consumed;
-        if calls != 0 { return Err(EntropyReplayCompletionError::Remaining { calls }); }
+        if calls != 0 {
+            return Err(EntropyReplayCompletionError::Remaining { calls });
+        }
         Ok(())
     }
 
     fn consume<T>(
-        &self, actual: EntropyRequest, read: impl FnOnce(&Event) -> T,
+        &self,
+        actual: EntropyRequest,
+        read: impl FnOnce(&Event) -> T,
     ) -> Result<T, EntropyReplayError> {
         let mut state = self.shared.state.lock();
-        if let Some(error) = &state.failure { return Err(error.clone()); }
+        if let Some(error) = &state.failure {
+            return Err(error.clone());
+        }
         let call = state.positions[self.stream];
         let event = self.shared.tape.streams[self.stream].get(call);
         let expected = event.map(Event::request);
         let matches = expected == Some(actual)
             || (self.shared.matching == EntropyForkMatching::ForkOrder
-                && matches!((expected, actual), (Some(EntropyRequest::Fork(_)), EntropyRequest::Fork(_))));
+                && matches!(
+                    (expected, actual),
+                    (Some(EntropyRequest::Fork(_)), EntropyRequest::Fork(_))
+                ));
         if !matches {
-            let error = EntropyReplayError { stream: self.stream, call, expected, actual };
+            let error = EntropyReplayError {
+                stream: self.stream,
+                call,
+                expected,
+                actual,
+            };
             state.failure = Some(error.clone());
             return Err(error);
         }
@@ -504,24 +587,34 @@ impl ReplayEntropy {
             Event::Fork { child, .. } => *child,
             _ => unreachable!("matched fork request"),
         })?;
-        Ok(Self { shared: Arc::clone(&self.shared), stream })
+        Ok(Self {
+            shared: Arc::clone(&self.shared),
+            stream,
+        })
     }
 }
 
 impl EntropySource for ReplayEntropy {
     fn fill_bytes(&self, dest: &mut [u8]) {
-        self.try_fill_bytes(dest).unwrap_or_else(|error| panic!("{error}"));
+        self.try_fill_bytes(dest)
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     fn next_u64(&self) -> u64 {
-        self.try_next_u64().unwrap_or_else(|error| panic!("{error}"))
+        self.try_next_u64()
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     fn fork(&self, task_id: TaskId) -> Arc<dyn EntropySource> {
-        Arc::new(self.try_fork(task_id).unwrap_or_else(|error| panic!("{error}")))
+        Arc::new(
+            self.try_fork(task_id)
+                .unwrap_or_else(|error| panic!("{error}")),
+        )
     }
 
-    fn source_id(&self) -> &'static str { "replay" }
+    fn source_id(&self) -> &'static str {
+        "replay"
+    }
 }
 
 #[cfg(test)]
@@ -578,12 +671,18 @@ mod tests {
         assert_eq!(unchanged, [0xa5; 8]);
         assert_eq!(child.try_next_u64().unwrap_err(), error);
         assert_eq!(replay.try_next_u64().unwrap_err(), error);
-        assert!(matches!(replay.verify_complete(), Err(EntropyReplayCompletionError::Diverged(_))));
+        assert!(matches!(
+            replay.verify_complete(),
+            Err(EntropyReplayCompletionError::Diverged(_))
+        ));
     }
 
     #[test]
     fn exhaustion_panics_through_trait_and_cannot_be_hidden_by_catching_it() {
-        let replay = recorder(EntropyCaptureLimits::new(1, 8, 1)).finish().unwrap().replay();
+        let replay = recorder(EntropyCaptureLimits::new(1, 8, 1))
+            .finish()
+            .unwrap()
+            .replay();
         replay.verify_complete().unwrap();
         assert!(catch_unwind(AssertUnwindSafe(|| replay.next_u64())).is_err());
         let error = replay.failure().unwrap();
@@ -597,14 +696,20 @@ mod tests {
         capture.fork(task(1, 0)).next_u64();
         let replay = capture.finish().unwrap().replay();
         let child = replay.try_fork(task(1, 0)).unwrap();
-        assert_eq!(replay.verify_complete(), Err(EntropyReplayCompletionError::Remaining { calls: 1 }));
+        assert_eq!(
+            replay.verify_complete(),
+            Err(EntropyReplayCompletionError::Remaining { calls: 1 })
+        );
         child.try_next_u64().unwrap();
         replay.verify_complete().unwrap();
     }
 
     #[test]
     fn overflow_preserves_provider_behavior_but_never_publishes_a_partial_tape() {
-        for limits in [EntropyCaptureLimits::new(0, 8, 1), EntropyCaptureLimits::new(1, 7, 1)] {
+        for limits in [
+            EntropyCaptureLimits::new(0, 8, 1),
+            EntropyCaptureLimits::new(1, 7, 1),
+        ] {
             let capture = recorder(limits);
             let reference = DetEntropy::new(42);
             assert_eq!(capture.next_u64(), reference.next_u64());
@@ -621,7 +726,10 @@ mod tests {
 
     #[test]
     fn fork_remapping_requires_explicit_opt_in_and_preserves_child_values() {
-        for matching in [EntropyForkMatching::ExactTaskId, EntropyForkMatching::ForkOrder] {
+        for matching in [
+            EntropyForkMatching::ExactTaskId,
+            EntropyForkMatching::ForkOrder,
+        ] {
             let capture = recorder(EntropyCaptureLimits::new(2, 8, 2));
             let expected = capture.fork(task(1, 9)).next_u64();
             let replay = capture.finish().unwrap().replay_with(matching);
@@ -643,7 +751,10 @@ mod tests {
         assert_eq!(expected, reference.next_u64());
         let tape = capture.finish().unwrap();
         assert_eq!(capture.next_u64(), reference.next_u64());
-        assert!(matches!(capture.finish(), Err(EntropyCaptureError::Finished)));
+        assert!(matches!(
+            capture.finish(),
+            Err(EntropyCaptureError::Finished)
+        ));
         let replay = tape.replay();
         assert_eq!(replay.next_u64(), expected);
         replay.verify_complete().unwrap();

@@ -11,17 +11,17 @@
 //! until service shutdown, so a late reconnect cannot recreate committed effects.
 //! There is no automatic eviction, process-crash recovery, or hidden retry.
 
+use super::super::super::super::NativeClientCertificateId;
+use super::super::super::{
+    Cancellation, LiveStreamError, LiveStreamPrefix, LiveStreamReceipt, LiveStreamReceiver, Permit,
+    Wire, authorize, bounded, expect,
+};
 #[cfg(test)]
 use super::Credit;
 use super::{
-    RESUMABLE_LIVE_ALPN, ResumeError, ResumeReport,
-    decode_offer, peer_certificate, validate_attempts,
+    RESUMABLE_LIVE_ALPN, ResumeError, ResumeReport, decode_offer, peer_certificate,
+    validate_attempts,
 };
-use super::super::super::{
-    Cancellation, LiveStreamError, LiveStreamPrefix, LiveStreamReceipt,
-    LiveStreamReceiver, Permit, Wire, authorize, bounded, expect,
-};
-use super::super::super::super::NativeClientCertificateId;
 use crate::cx::{Cx, Scope};
 use crate::net::atp::protocol::frames::FrameType;
 use crate::net::{TcpListener, TcpStream};
@@ -70,13 +70,19 @@ pub struct ResumeServiceConfig {
 impl ResumeServiceConfig {
     fn validate(self, capacity: usize) -> Result<(), LiveStreamError> {
         validate_attempts(self.max_attempts_per_session)?;
-        if self.max_connections == 0 || self.max_connections > self.max_sessions
-            || self.max_sessions == 0 || self.max_sessions > capacity
-            || self.max_sessions > 1024 || self.max_sessions_per_client == 0
+        if self.max_connections == 0
+            || self.max_connections > self.max_sessions
+            || self.max_sessions == 0
+            || self.max_sessions > capacity
+            || self.max_sessions > 1024
+            || self.max_sessions_per_client == 0
             || self.max_sessions_per_client > self.max_sessions
-            || self.max_session_keys < self.max_sessions || self.max_session_keys > 65_536
+            || self.max_session_keys < self.max_sessions
+            || self.max_session_keys > 65_536
         {
-            return Err(LiveStreamError::Configuration("invalid shared resume limits"));
+            return Err(LiveStreamError::Configuration(
+                "invalid shared resume limits",
+            ));
         }
         Ok(())
     }
@@ -180,7 +186,9 @@ struct Entry<W> {
     snapshot: Option<ResumeSessionSnapshot>,
 }
 
-pub(super) struct Capacity { _permits: Vec<Permit> }
+pub(super) struct Capacity {
+    _permits: Vec<Permit>,
+}
 struct Authenticated {
     key: ResumeSessionKey,
     wire: Wire<TlsStream<TcpStream>>,
@@ -192,14 +200,28 @@ struct Authenticated {
 type WorkerResult<W> = Result<(ServiceReceiver<W>, ResumeReport), ResumeServiceRejection>;
 enum JobKind<W> {
     Handshake(TaskHandle<Result<Authenticated, ResumeError>>),
-    Transfer { key: ResumeSessionKey, task: TaskHandle<WorkerResult<W>> },
+    Transfer {
+        key: ResumeSessionKey,
+        task: TaskHandle<WorkerResult<W>>,
+    },
 }
-struct Job<W> { connection: u64, address: SocketAddr, kind: JobKind<W> }
+struct Job<W> {
+    connection: u64,
+    address: SocketAddr,
+    kind: JobKind<W>,
+}
 enum FinishedKind<W> {
     Handshake(Result<Result<Authenticated, ResumeError>, JoinError>),
-    Transfer { key: ResumeSessionKey, result: Result<WorkerResult<W>, JoinError> },
+    Transfer {
+        key: ResumeSessionKey,
+        result: Result<WorkerResult<W>, JoinError>,
+    },
 }
-struct Finished<W> { connection: u64, address: SocketAddr, kind: FinishedKind<W> }
+struct Finished<W> {
+    connection: u64,
+    address: SocketAddr,
+    kind: FinishedKind<W>,
+}
 
 /// Shared listener and bounded registry, driven by its owning task.
 ///
@@ -225,9 +247,12 @@ pub struct ResumableService<W> {
 
 impl<W> fmt::Debug for ResumableService<W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResumableService").field("address", &self.address)
-            .field("connections", &self.jobs.len()).field("resident_sessions", &self.residents)
-            .field("retained_keys", &self.entries.len()).finish_non_exhaustive()
+        f.debug_struct("ResumableService")
+            .field("address", &self.address)
+            .field("connections", &self.jobs.len())
+            .field("resident_sessions", &self.residents)
+            .field("retained_keys", &self.entries.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -237,46 +262,77 @@ impl LiveStreamReceiver {
     /// Reserves max_sessions SDK credits before creating a socket. No sink factory
     /// runs until a verified client and valid resume hello have passed admission.
     pub async fn bind_resumable_service<W: super::LiveStreamCommitSink + Unpin>(
-        &self, cx: &Cx, address: SocketAddr, config: ResumeServiceConfig,
+        &self,
+        cx: &Cx,
+        address: SocketAddr,
+        config: ResumeServiceConfig,
     ) -> Result<ResumableService<W>, LiveStreamError> {
         authorize(cx)?;
         config.validate(self.admission.capacity)?;
         let mut permits = Vec::new();
-        permits.try_reserve_exact(config.max_sessions).map_err(|_| allocation())?;
+        permits
+            .try_reserve_exact(config.max_sessions)
+            .map_err(|_| allocation())?;
         let mut jobs = Vec::new();
-        jobs.try_reserve_exact(config.max_connections).map_err(|_| allocation())?;
-        for _ in 0..config.max_sessions { permits.push(self.admission.reserve()?); }
+        jobs.try_reserve_exact(config.max_connections)
+            .map_err(|_| allocation())?;
+        for _ in 0..config.max_sessions {
+            permits.push(self.admission.reserve()?);
+        }
         let mut tls = (**self.acceptor.config()).clone();
         tls.alpn_protocols = vec![RESUMABLE_LIVE_ALPN.to_vec()];
-        let listener = bounded(cx, self.config.operation_timeout, "shared resume bind", TcpListener::bind(address)).await?;
+        let listener = bounded(
+            cx,
+            self.config.operation_timeout,
+            "shared resume bind",
+            TcpListener::bind(address),
+        )
+        .await?;
         let address = listener.local_addr()?;
         Ok(ResumableService {
-            listener: Some(listener), address, receiver: self.clone(), acceptor: TlsAcceptor::new(tls),
-            config, capacity: Some(Arc::new(Capacity { _permits: permits })),
-            entries: BTreeMap::new(), residents: 0, clients: BTreeMap::new(), jobs,
+            listener: Some(listener),
+            address,
+            receiver: self.clone(),
+            acceptor: TlsAcceptor::new(tls),
+            config,
+            capacity: Some(Arc::new(Capacity { _permits: permits })),
+            entries: BTreeMap::new(),
+            residents: 0,
+            clients: BTreeMap::new(),
+            jobs,
             next_connection: Some(0),
         })
     }
 }
 
-fn allocation() -> LiveStreamError { io::Error::from(io::ErrorKind::OutOfMemory).into() }
+fn allocation() -> LiveStreamError {
+    io::Error::from(io::ErrorKind::OutOfMemory).into()
+}
 
 impl<W> ResumableService<W> {
     /// Address of the actual retained listener, including an OS-assigned port.
     #[must_use]
-    pub const fn local_addr(&self) -> SocketAddr { self.address }
+    pub const fn local_addr(&self) -> SocketAddr {
+        self.address
+    }
 
     /// Handshakes/transfers and uncollected connection results currently owned.
     #[must_use]
-    pub fn in_flight(&self) -> usize { self.jobs.len() }
+    pub fn in_flight(&self) -> usize {
+        self.jobs.len()
+    }
 
     /// Resident sinks, including completed sinks awaiting explicit retirement.
     #[must_use]
-    pub const fn resident_sessions(&self) -> usize { self.residents }
+    pub const fn resident_sessions(&self) -> usize {
+        self.residents
+    }
 
     /// Admitted lifetime keys, including failed and explicitly retired tombstones.
     #[must_use]
-    pub fn retained_keys(&self) -> usize { self.entries.len() }
+    pub fn retained_keys(&self) -> usize {
+        self.entries.len()
+    }
 
     /// Current state for a known key; no socket address participates in lookup.
     #[must_use]
@@ -287,21 +343,33 @@ impl<W> ResumableService<W> {
     /// Last collected snapshot; an active worker may have progressed beyond it.
     #[must_use]
     pub fn session_snapshot(&self, key: &ResumeSessionKey) -> Option<&ResumeSessionSnapshot> {
-        self.entries.get(key).and_then(|entry| entry.snapshot.as_ref())
+        self.entries
+            .get(key)
+            .and_then(|entry| entry.snapshot.as_ref())
     }
 
     /// Drop an idle sink while retaining a refusal tombstone and its last metadata.
     ///
     /// Idempotent for a retired key. This never aborts active work, deletes a file,
     /// refunds storage charges, or permits a factory to run again for this key.
-    pub fn retire(&mut self, key: &ResumeSessionKey) -> Result<Option<ResumeSessionSnapshot>, ResumeRetireError> {
-        let entry = self.entries.get_mut(key).ok_or(ResumeRetireError::Unknown)?;
-        if entry.status == ResumeSessionStatus::Active { return Err(ResumeRetireError::Active); }
+    pub fn retire(
+        &mut self,
+        key: &ResumeSessionKey,
+    ) -> Result<Option<ResumeSessionSnapshot>, ResumeRetireError> {
+        let entry = self
+            .entries
+            .get_mut(key)
+            .ok_or(ResumeRetireError::Unknown)?;
+        if entry.status == ResumeSessionStatus::Active {
+            return Err(ResumeRetireError::Active);
+        }
         let retired = entry.receiver.take();
         let was_resident = entry.status == ResumeSessionStatus::Idle;
         entry.status = ResumeSessionStatus::Retired;
         let snapshot = entry.snapshot.clone();
-        if was_resident { self.release_resident(key.client); }
+        if was_resident {
+            self.release_resident(key.client);
+        }
         drop(retired);
         Ok(snapshot)
     }
@@ -333,9 +401,14 @@ impl<W> ResumableService<W> {
 
     fn release_resident(&mut self, client: NativeClientCertificateId) {
         self.residents -= 1;
-        let count = self.clients.get_mut(&client).expect("resident client count");
+        let count = self
+            .clients
+            .get_mut(&client)
+            .expect("resident client count");
         *count -= 1;
-        if *count == 0 { self.clients.remove(&client); }
+        if *count == 0 {
+            self.clients.remove(&client);
+        }
     }
 
     fn release_if_drained(&mut self) {
@@ -360,18 +433,28 @@ impl<W> ResumableService<W> {
                 },
             };
             let job = self.jobs.swap_remove(index);
-            return Poll::Ready(Finished { connection: job.connection, address: job.address, kind });
+            return Poll::Ready(Finished {
+                connection: job.connection,
+                address: job.address,
+                kind,
+            });
         }
         Poll::Pending
     }
 
-    fn completed_transfer(&mut self, key: ResumeSessionKey, result: Result<WorkerResult<W>, JoinError>) -> ResumeServiceOutcome {
+    fn completed_transfer(
+        &mut self,
+        key: ResumeSessionKey,
+        result: Result<WorkerResult<W>, JoinError>,
+    ) -> ResumeServiceOutcome {
         let entry = self.entries.get_mut(&key).expect("admitted resume key");
         let outcome = match result {
             Ok(Ok((receiver, report))) => {
                 entry.snapshot = Some(ResumeSessionSnapshot {
-                    prefix: report.prefix.clone(), completed: report.completed.clone(),
-                    attempts: report.attempts, sink_written_bytes: report.sink_written_bytes,
+                    prefix: report.prefix.clone(),
+                    completed: report.completed.clone(),
+                    attempts: report.attempts,
+                    sink_written_bytes: report.sink_written_bytes,
                     failed: receiver.failed(),
                 });
                 // Keep even failed sinks until explicit retirement: their destructor
@@ -403,21 +486,34 @@ impl<W> ResumableService<W> {
         poll_fn(|ctx| {
             if let Poll::Ready(finished) = self.poll_finished(ctx) {
                 let (session, outcome) = match finished.kind {
-                    FinishedKind::Transfer { key, result } => (Some(key), self.completed_transfer(key, result)),
+                    FinishedKind::Transfer { key, result } => {
+                        (Some(key), self.completed_transfer(key, result))
+                    }
                     FinishedKind::Handshake(result) => match result {
-                        Ok(Ok(auth)) => (Some(auth.key), ResumeServiceOutcome::Rejected(ResumeServiceRejection::Stopping)),
+                        Ok(Ok(auth)) => (
+                            Some(auth.key),
+                            ResumeServiceOutcome::Rejected(ResumeServiceRejection::Stopping),
+                        ),
                         Ok(Err(error)) => (None, ResumeServiceOutcome::Rejected(error.into())),
                         Err(error) => (None, ResumeServiceOutcome::JoinFailed(error)),
                     },
                 };
                 self.release_if_drained();
                 return Poll::Ready(Some(ResumeServiceCompletion {
-                    connection: finished.connection, address: finished.address, session, outcome,
+                    connection: finished.connection,
+                    address: finished.address,
+                    session,
+                    outcome,
                 }));
             }
             self.release_if_drained();
-            if self.jobs.is_empty() { Poll::Ready(None) } else { Poll::Pending }
-        }).await
+            if self.jobs.is_empty() {
+                Poll::Ready(None)
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
     }
 }
 
@@ -430,7 +526,10 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
     /// has no deadline; pending TLS, hello, factory and transfers use operation limits.
     /// Manager cancellation requests child cancellation; drain_next must still run.
     pub async fn next<P, F, Fut>(
-        &mut self, cx: &Cx, scope: &Scope<'_, P>, make_sink: F,
+        &mut self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        make_sink: F,
     ) -> Result<Option<ResumeServiceCompletion>, LiveStreamError>
     where
         P: Policy,
@@ -440,7 +539,8 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
         self.next_restoring(cx, scope, move |child, key| {
             let future = make_sink(child, key);
             async move { future.await.map(ResumeSessionInit::Fresh) }
-        }).await
+        })
+        .await
     }
 
     /// Route either a new sink or an application-validated historical receipt.
@@ -454,7 +554,10 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
     /// All connection, resident, per-client, key, attempt and drain limits apply.
     /// Changing the factory cannot resurrect an already retired or failed key.
     pub async fn next_restoring<P, F, Fut>(
-        &mut self, cx: &Cx, scope: &Scope<'_, P>, make_sink: F,
+        &mut self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        make_sink: F,
     ) -> Result<Option<ResumeServiceCompletion>, LiveStreamError>
     where
         P: Policy,
@@ -463,41 +566,75 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
     {
         let mut cancellation = Cancellation { cx, token: None };
         poll_fn(|ctx| {
-            cancellation.token = Some(cx.refresh_cancel_waker(cancellation.token.take(), ctx.waker()));
+            cancellation.token =
+                Some(cx.refresh_cancel_waker(cancellation.token.take(), ctx.waker()));
             if let Err(error) = authorize(cx) {
-                self.cancel(cx.cancel_reason().unwrap_or_else(|| CancelReason::user("shared resume authority ended")));
+                self.cancel(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("shared resume authority ended")),
+                );
                 return Poll::Ready(Err(error));
             }
             if let Poll::Ready(finished) = self.poll_finished(ctx) {
                 let (session, outcome) = match finished.kind {
-                    FinishedKind::Transfer { key, result } => (Some(key), self.completed_transfer(key, result)),
-                    FinishedKind::Handshake(Err(error)) => (None, ResumeServiceOutcome::JoinFailed(error)),
-                    FinishedKind::Handshake(Ok(Err(error))) => (None, ResumeServiceOutcome::Rejected(error.into())),
+                    FinishedKind::Transfer { key, result } => {
+                        (Some(key), self.completed_transfer(key, result))
+                    }
+                    FinishedKind::Handshake(Err(error)) => {
+                        (None, ResumeServiceOutcome::JoinFailed(error))
+                    }
+                    FinishedKind::Handshake(Ok(Err(error))) => {
+                        (None, ResumeServiceOutcome::Rejected(error.into()))
+                    }
                     FinishedKind::Handshake(Ok(Ok(auth))) => {
                         let key = auth.key;
-                        match self.route(cx, scope, finished.connection, finished.address, auth, make_sink.clone()) {
-                            Ok(()) => { ctx.waker().wake_by_ref(); return Poll::Pending; }
+                        match self.route(
+                            cx,
+                            scope,
+                            finished.connection,
+                            finished.address,
+                            auth,
+                            make_sink.clone(),
+                        ) {
+                            Ok(()) => {
+                                ctx.waker().wake_by_ref();
+                                return Poll::Pending;
+                            }
                             Err(error) => (Some(key), ResumeServiceOutcome::Rejected(error)),
                         }
                     }
                 };
                 self.release_if_drained();
                 return Poll::Ready(Ok(Some(ResumeServiceCompletion {
-                    connection: finished.connection, address: finished.address, session, outcome,
+                    connection: finished.connection,
+                    address: finished.address,
+                    session,
+                    outcome,
                 })));
             }
             self.release_if_drained();
             let Some(listener) = &self.listener else {
-                return if self.jobs.is_empty() { Poll::Ready(Ok(None)) } else { Poll::Pending };
+                return if self.jobs.is_empty() {
+                    Poll::Ready(Ok(None))
+                } else {
+                    Poll::Pending
+                };
             };
-            if self.jobs.len() >= self.config.max_connections { return Poll::Pending; }
+            if self.jobs.len() >= self.config.max_connections {
+                return Poll::Pending;
+            }
             let Some(connection) = self.next_connection else {
                 self.stop_accepting();
-                return Poll::Ready(Err(LiveStreamError::Configuration("shared resume connection IDs exhausted")));
+                return Poll::Ready(Err(LiveStreamError::Configuration(
+                    "shared resume connection IDs exhausted",
+                )));
             };
             let (tcp, address) = match listener.poll_accept(ctx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(error)) => { self.stop_accepting(); return Poll::Ready(Err(error.into())); }
+                Poll::Ready(Err(error)) => {
+                    self.stop_accepting();
+                    return Poll::Ready(Err(error.into()));
+                }
                 Poll::Ready(Ok(pair)) => pair,
             };
             self.next_connection = connection.checked_add(1);
@@ -505,38 +642,65 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
             let timeout = self.receiver.config.operation_timeout;
             let capacity = Arc::clone(self.capacity.as_ref().expect("open service capacity"));
             let task = cx.spawn_in(scope, move |child| {
-                let future: Pin<Box<dyn Future<Output = Result<Authenticated, ResumeError>> + Send>> = Box::pin(async move {
+                let future: Pin<
+                    Box<dyn Future<Output = Result<Authenticated, ResumeError>> + Send>,
+                > = Box::pin(async move {
                     let _capacity = capacity;
                     authorize(&child)?;
-                    let tls = bounded(&child, timeout, "shared resume TLS", acceptor.accept(tcp)).await?;
+                    let tls =
+                        bounded(&child, timeout, "shared resume TLS", acceptor.accept(tcp)).await?;
                     let client = NativeClientCertificateId::from_sha256(peer_certificate(&tls)?);
                     let mut wire = Wire::new(tls);
-                    let frame = bounded(&child, timeout, "shared resume hello", wire.receive()).await?;
+                    let frame =
+                        bounded(&child, timeout, "shared resume hello", wire.receive()).await?;
                     let offered = expect(&frame, FrameType::Handshake)?;
                     let hello = decode_offer(offered)?;
-                    Ok(Authenticated { key: ResumeSessionKey { client, nonce: hello.nonce }, wire, offered: offered.to_vec(), _capacity })
+                    Ok(Authenticated {
+                        key: ResumeSessionKey {
+                            client,
+                            nonce: hello.nonce,
+                        },
+                        wire,
+                        offered: offered.to_vec(),
+                        _capacity,
+                    })
                 });
                 future
             });
             match task {
-                Ok(task) => self.jobs.push(Job { connection, address, kind: JobKind::Handshake(task) }),
-                Err(error) => { self.stop_accepting(); return Poll::Ready(Err(LiveStreamError::Spawn(error))); }
+                Ok(task) => self.jobs.push(Job {
+                    connection,
+                    address,
+                    kind: JobKind::Handshake(task),
+                }),
+                Err(error) => {
+                    self.stop_accepting();
+                    return Poll::Ready(Err(LiveStreamError::Spawn(error)));
+                }
             }
             ctx.waker().wake_by_ref();
             Poll::Pending
-        }).await
+        })
+        .await
     }
 
     fn route<P, F, Fut>(
-        &mut self, cx: &Cx, scope: &Scope<'_, P>, connection: u64, address: SocketAddr,
-        auth: Authenticated, factory: F,
+        &mut self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        connection: u64,
+        address: SocketAddr,
+        auth: Authenticated,
+        factory: F,
     ) -> Result<(), ResumeServiceRejection>
     where
         P: Policy,
         F: Fn(Cx, ResumeSessionKey) -> Fut + Send + 'static,
         Fut: Future<Output = io::Result<ResumeSessionInit<W>>> + Send + 'static,
     {
-        if self.listener.is_none() { return Err(ResumeServiceRejection::Stopping); }
+        if self.listener.is_none() {
+            return Err(ResumeServiceRejection::Stopping);
+        }
         let key = auth.key;
         let existing = if let Some(entry) = self.entries.get_mut(&key) {
             match entry.status {
@@ -545,18 +709,37 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
                 ResumeSessionStatus::Idle => {}
             }
             let receiver = entry.receiver.as_mut().expect("idle session owner");
-            if receiver.failed() { return Err(ResumeServiceRejection::Connection(ResumeError::LocalFailure)); }
-            if !receiver.has_attempts() { return Err(ResumeServiceRejection::AttemptsExhausted); }
+            if receiver.failed() {
+                return Err(ResumeServiceRejection::Connection(
+                    ResumeError::LocalFailure,
+                ));
+            }
+            if !receiver.has_attempts() {
+                return Err(ResumeServiceRejection::AttemptsExhausted);
+            }
             entry.status = ResumeSessionStatus::Active;
             entry.receiver.take()
         } else {
-            if self.entries.len() >= self.config.max_session_keys { return Err(ResumeServiceRejection::Capacity("lifetime key")); }
-            if self.residents >= self.config.max_sessions { return Err(ResumeServiceRejection::Capacity("resident session")); }
+            if self.entries.len() >= self.config.max_session_keys {
+                return Err(ResumeServiceRejection::Capacity("lifetime key"));
+            }
+            if self.residents >= self.config.max_sessions {
+                return Err(ResumeServiceRejection::Capacity("resident session"));
+            }
             let clients = self.clients.entry(key.client).or_default();
-            if *clients >= self.config.max_sessions_per_client { return Err(ResumeServiceRejection::Capacity("per-client session")); }
+            if *clients >= self.config.max_sessions_per_client {
+                return Err(ResumeServiceRejection::Capacity("per-client session"));
+            }
             *clients += 1;
             self.residents += 1;
-            self.entries.insert(key, Entry { receiver: None, status: ResumeSessionStatus::Active, snapshot: None });
+            self.entries.insert(
+                key,
+                Entry {
+                    receiver: None,
+                    status: ResumeSessionStatus::Active,
+                    snapshot: None,
+                },
+            );
             None
         };
         let capacity = Arc::clone(self.capacity.as_ref().expect("open service capacity"));
@@ -564,28 +747,52 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
         let config = self.receiver.config.clone();
         let maximum = self.config.max_attempts_per_session;
         let task = cx.spawn_in(scope, move |child| {
-            let future: Pin<Box<dyn Future<Output = WorkerResult<W>> + Send>> = Box::pin(async move {
-                let _capacity = capacity;
-                let mut receiver = match existing {
-                    Some(receiver) => receiver,
-                    None => {
-                        authorize(&child).map_err(ResumeServiceRejection::Factory)?;
-                        let initialized = bounded(&child, config.operation_timeout, "resume sink creation", factory(child.clone(), key))
-                            .await.map_err(ResumeServiceRejection::Factory)?;
-                        ServiceReceiver::new(initialized, key, acceptor, config, maximum, Arc::clone(&_capacity))
+            let future: Pin<Box<dyn Future<Output = WorkerResult<W>> + Send>> =
+                Box::pin(async move {
+                    let _capacity = capacity;
+                    let mut receiver = match existing {
+                        Some(receiver) => receiver,
+                        None => {
+                            authorize(&child).map_err(ResumeServiceRejection::Factory)?;
+                            let initialized = bounded(
+                                &child,
+                                config.operation_timeout,
+                                "resume sink creation",
+                                factory(child.clone(), key),
+                            )
+                            .await
+                            .map_err(ResumeServiceRejection::Factory)?;
+                            ServiceReceiver::new(
+                                initialized,
+                                key,
+                                acceptor,
+                                config,
+                                maximum,
+                                Arc::clone(&_capacity),
+                            )
                             .map_err(ResumeServiceRejection::Factory)?
-                    }
-                };
-                let mut auth = auth;
-                let report = receiver.attempt(&child, &mut auth.wire, &auth.offered).await;
-                Ok((receiver, report))
-            });
+                        }
+                    };
+                    let mut auth = auth;
+                    let report = receiver
+                        .attempt(&child, &mut auth.wire, &auth.offered)
+                        .await;
+                    Ok((receiver, report))
+                });
             future
         });
         match task {
-            Ok(task) => { self.jobs.push(Job { connection, address, kind: JobKind::Transfer { key, task } }); Ok(()) }
+            Ok(task) => {
+                self.jobs.push(Job {
+                    connection,
+                    address,
+                    kind: JobKind::Transfer { key, task },
+                });
+                Ok(())
+            }
             Err(error) => {
-                self.entries.get_mut(&key).expect("reserved key").status = ResumeSessionStatus::Retired;
+                self.entries.get_mut(&key).expect("reserved key").status =
+                    ResumeSessionStatus::Retired;
                 self.release_resident(key.client);
                 self.stop_accepting();
                 Err(ResumeServiceRejection::Spawn(error))

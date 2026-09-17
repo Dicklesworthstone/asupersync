@@ -9,8 +9,8 @@
 //! no terminal report; use a scope-owned task and join it.
 
 use super::{
-    LiveStreamError, LiveStreamListener, LiveStreamReceipt, LiveStreamReport,
-    LiveStreamTask, Progress, authorize, bounded,
+    LiveStreamError, LiveStreamListener, LiveStreamReceipt, LiveStreamReport, LiveStreamTask,
+    Progress, authorize, bounded,
 };
 use crate::cx::{Cx, Scope};
 use crate::io::AsyncWrite;
@@ -103,7 +103,11 @@ pub(super) async fn finish<W: LiveStreamCommitSink + Unpin>(
     sink: &mut W,
     receipt: &LiveStreamReceipt,
 ) -> Result<(), LiveStreamError> {
-    let mut commit = std::pin::pin!(Commit { sink, receipt, started: false });
+    let mut commit = std::pin::pin!(Commit {
+        sink,
+        receipt,
+        started: false
+    });
     let observed = bounded(cx, timeout, "sink commit", commit.as_mut()).await;
     let (result, interruption) = match observed {
         Ok(()) => return Ok(()),
@@ -119,7 +123,10 @@ pub(super) async fn finish<W: LiveStreamCommitSink + Unpin>(
         }
     };
     match result {
-        Ok(()) => Err(proof_failed(receipt, interruption.expect("interrupted commit"))),
+        Ok(()) => Err(proof_failed(
+            receipt,
+            interruption.expect("interrupted commit"),
+        )),
         Err(source) => Err(LiveStreamError::Commit(Box::new(
             LiveStreamCommitError::Unconfirmed {
                 receipt: Box::new(receipt.clone()),
@@ -135,7 +142,11 @@ pub(super) async fn finish<W: LiveStreamCommitSink + Unpin>(
 pub(super) struct FlushOnly<W>(pub(super) W);
 
 impl<W: AsyncWrite + Unpin> AsyncWrite for FlushOnly<W> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bytes: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.get_mut().0).poll_write(cx, bytes)
     }
 
@@ -149,7 +160,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for FlushOnly<W> {
 }
 
 impl<W: AsyncWrite + Unpin> LiveStreamCommitSink for FlushOnly<W> {
-    fn poll_commit(self: Pin<&mut Self>, _: &mut Context<'_>, _: &LiveStreamReceipt) -> Poll<io::Result<()>> {
+    fn poll_commit(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &LiveStreamReceipt,
+    ) -> Poll<io::Result<()>> {
         // The compatibility path passes require_commit=false and never calls us.
         Poll::Ready(Ok(()))
     }
@@ -173,9 +188,18 @@ impl LiveStreamListener {
             authorize(cx)?;
             let timeout = self.receiver.config.operation_timeout;
             let (tcp, _) = bounded(cx, timeout, "accept", self.listener.accept()).await?;
-            let tls = bounded(cx, timeout, "TLS handshake", self.receiver.acceptor.accept(tcp)).await?;
-            self.receiver.receive_authenticated_with_commit(cx, tls, sink, &mut progress, true).await
-        }.await;
+            let tls = bounded(
+                cx,
+                timeout,
+                "TLS handshake",
+                self.receiver.acceptor.accept(tcp),
+            )
+            .await?;
+            self.receiver
+                .receive_authenticated_with_commit(cx, tls, sink, &mut progress, true)
+                .await
+        }
+        .await;
         progress.report(outcome)
     }
 
@@ -198,7 +222,8 @@ impl LiveStreamListener {
             let future: Pin<Box<dyn Future<Output = LiveStreamReport> + Send>> =
                 Box::pin(async move { self.receive_committing(&child, &mut sink).await });
             future
-        }).map_err(LiveStreamError::Spawn)
+        })
+        .map_err(LiveStreamError::Spawn)
     }
 }
 
