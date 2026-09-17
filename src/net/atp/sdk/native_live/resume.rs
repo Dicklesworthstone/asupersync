@@ -69,6 +69,9 @@ pub enum ResumeError {
     /// The certificate differs from the explicitly expected or pinned identity.
     #[error("resumable stream peer certificate changed")]
     PeerIdentity,
+    /// The local final-state checkpoint failed or was interrupted before finalization.
+    #[error(transparent)]
+    Checkpoint(#[from] Box<finalization::FinalProofPersistError>),
 }
 
 /// Snapshot after an attempt; a prefix alone is never whole-stream success.
@@ -291,7 +294,7 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
                 .map_err(ResumeError::from)
                 .and_then(|()| self.budget.take())
             {
-                Ok(()) => self.send_inner(cx).await,
+                Ok(()) => self.send_inner(cx, None).await,
                 Err(error) => Err(error),
             }
         };
@@ -306,7 +309,11 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
         }
     }
 
-    async fn send_inner(&mut self, cx: &Cx) -> Result<LiveStreamReceipt, ResumeError> {
+    async fn send_inner(
+        &mut self,
+        cx: &Cx,
+        mut checkpoint: Option<&mut (dyn finalization::FinalProofStore + Send + Unpin)>,
+    ) -> Result<LiveStreamReceipt, ResumeError> {
         let timeout = self.config.operation_timeout;
         let tcp = bounded(
             cx,
@@ -413,6 +420,10 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
                 .as_ref()
                 .expect("source finished")
                 .clone();
+            if let Some(store) = checkpoint.as_mut() {
+                let saved = finalization::FinalProofCheckpoint::capture(self)?;
+                finalization::persist(cx, timeout, &mut **store, &saved).await?;
+            }
             let payload = encode_final(&receipt);
             bounded(
                 cx,
@@ -873,3 +884,7 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
 /// Shared-port, bounded routing of authenticated retained resume sessions.
 #[path = "resume/service.rs"]
 pub mod service;
+
+/// Persist source-EOF state before finalization and recover Proof without the source.
+#[path = "resume/finalization.rs"]
+pub mod finalization;
