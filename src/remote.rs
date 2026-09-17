@@ -4860,7 +4860,7 @@ where
     }
 
     let accepted_at = cx.now();
-    let mut expires_at = accepted_at + request.lease;
+    let mut expires_at = accepted_at + remote_service_clamp_lease(request.lease);
     let child_spec = request
         .budget
         .map_or_else(ChildRegionSpec::inherit, |budget| {
@@ -5160,7 +5160,7 @@ where
                         }
                         let lease = lease.expect("validated V3 renewal lease");
                         if !is_replay {
-                            expires_at = cx.now() + lease;
+                            expires_at = cx.now() + remote_service_clamp_lease(lease);
                             last_renewal = Some((renewal_id, lease));
                         }
                         let renewed = RemoteServiceSessionEvent::LeaseRenewed {
@@ -5382,7 +5382,7 @@ async fn remote_service_dispatch_with_lease(
     request: SpawnRequest,
 ) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
     let accepted_at = cx.now();
-    let expires_at = accepted_at + request.lease;
+    let expires_at = accepted_at + remote_service_clamp_lease(request.lease);
     let child_budget = cx.budget().tightened_by_timeout(accepted_at, request.lease);
     let child = cx
         .open_child_region(ChildRegionSpec::inherit().with_budget(child_budget))
@@ -5460,6 +5460,45 @@ async fn remote_service_dispatch_with_lease(
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 fn remote_service_lease_expired(now: Time, expires_at: Time) -> bool {
     now >= expires_at
+}
+
+/// Maximum lease duration the V3 remote service will enforce for one task,
+/// regardless of the peer-requested value. A peer supplies `lease_secs` as an
+/// unbounded `u64`, so without a cap a single admitted-but-adversarial peer can
+/// pin its child task, region and admission slot indefinitely
+/// (`Time + Duration` saturates). The enforced expiry is bounded here; the
+/// requested value is still echoed back unchanged so the client's exact-match
+/// renewal verification is unaffected (br-asupersync-35qp1j).
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+const MAX_REMOTE_LEASE: Duration = Duration::from_secs(86_400);
+
+/// Bound a peer-requested lease to [`MAX_REMOTE_LEASE`] for expiry enforcement.
+/// Leases at or below the cap pass through unchanged.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+fn remote_service_clamp_lease(lease: Duration) -> Duration {
+    lease.min(MAX_REMOTE_LEASE)
+}
+
+#[cfg(all(test, feature = "tls", not(target_arch = "wasm32")))]
+#[test]
+fn remote_service_clamps_oversized_peer_lease() {
+    // Under and at the cap pass through unchanged; over the cap — up to the
+    // pathological `u64::MAX` pin-forever request — is bounded to
+    // `MAX_REMOTE_LEASE` so an adversarial peer cannot hold a task, region and
+    // slot indefinitely (br-asupersync-35qp1j). Enforcement only.
+    assert_eq!(
+        remote_service_clamp_lease(Duration::from_secs(30)),
+        Duration::from_secs(30)
+    );
+    assert_eq!(remote_service_clamp_lease(MAX_REMOTE_LEASE), MAX_REMOTE_LEASE);
+    assert_eq!(
+        remote_service_clamp_lease(MAX_REMOTE_LEASE + Duration::from_secs(1)),
+        MAX_REMOTE_LEASE
+    );
+    assert_eq!(
+        remote_service_clamp_lease(Duration::new(u64::MAX, 999_999_999)),
+        MAX_REMOTE_LEASE
+    );
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
