@@ -5371,6 +5371,63 @@ mod tests {
     }
 
     #[test]
+    fn local_close_commit_only_accepts_exact_close_without_recovery_work() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let frames = [QuicFrame::ConnectionClose {
+            error_code: VarInt::from_u64_unchecked(42),
+            frame_type: None,
+            reason_phrase: Bytes::new(),
+        }];
+        assert!(conn.validate_local_close_packet(&cx, 64, &frames).is_err());
+        conn.begin_close(&cx, 0, 42).unwrap();
+        let space = PacketNumberSpace::ApplicationData;
+        let number = conn.next_packet_number_for_protection(space).unwrap();
+        let flight = conn.transport().bytes_in_flight();
+        assert!(
+            conn.validate_local_close_packet(&cx, 64, &[QuicFrame::Ping])
+                .is_err()
+        );
+        assert!(
+            conn.validate_local_close_packet(&cx, 64, &[frames[0].clone(), QuicFrame::Ping])
+                .is_err()
+        );
+        let wrong_code = [QuicFrame::ConnectionClose {
+            error_code: VarInt::from_u64_unchecked(43),
+            frame_type: None,
+            reason_phrase: Bytes::new(),
+        }];
+        assert!(
+            conn.validate_local_close_packet(&cx, 64, &wrong_code)
+                .is_err()
+        );
+        let cancelled = test_cx();
+        cancelled.set_cancel_requested(true);
+        assert!(matches!(
+            conn.on_local_close_packet_sent(&cancelled, 64, &frames),
+            Err(NativeQuicConnectionError::Cancelled)
+        ));
+        assert_eq!(
+            conn.next_packet_number_for_protection(space).unwrap(),
+            number
+        );
+        assert_eq!(
+            conn.on_local_close_packet_sent(&cx, 64, &frames).unwrap(),
+            number
+        );
+        assert_eq!(
+            conn.next_packet_number_for_protection(space).unwrap(),
+            number + 1
+        );
+        assert_eq!(conn.transport().bytes_in_flight(), flight);
+        assert!(conn.transport().pto_deadline_micros(0).is_none());
+        conn.peer_close_observed = true;
+        assert!(conn.validate_local_close_packet(&cx, 64, &frames).is_err());
+        conn.close_immediately(&cx, 42).unwrap();
+        assert!(conn.validate_local_close_packet(&cx, 64, &frames).is_err());
+    }
+
+    #[test]
     fn packet_peer_close_preserves_prefix_and_ignores_tail_without_ack() {
         let cx = test_cx();
         let space = PacketNumberSpace::ApplicationData;
