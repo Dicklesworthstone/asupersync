@@ -694,9 +694,12 @@ impl NativeQuicUdpConnection {
             let code = self.connection.inner().transport().close_code().ok_or(
                 NativeQuicConnectionError::InvalidState("local close has no error code"),
             )?;
-            let error_code = VarInt::new(code).map_err(|_| {
-                NativeQuicConnectionError::InvalidState("application close code must fit a QUIC varint")
-            })?;
+            let crate::types::Outcome::Ok(error_code) = VarInt::new(code) else {
+                return Err(NativeQuicConnectionError::InvalidState(
+                    "application close code must fit a QUIC varint",
+                )
+                .into());
+            };
             let frames = [QuicFrame::ConnectionClose {
                 error_code,
                 frame_type: None,
