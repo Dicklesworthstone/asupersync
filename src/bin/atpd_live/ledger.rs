@@ -53,6 +53,7 @@ pub(super) struct Ledger {
     path: PathBuf,
     directory: File,
     maximum_keys: u32,
+    recovery_reads: std::sync::atomic::AtomicUsize,
     state: Mutex<State>,
 }
 
@@ -175,7 +176,8 @@ impl Ledger {
         // process. Synchronize it now before treating its refusal as durable.
         file.sync_all()?;
         directory.sync_all()?;
-        Ok(Arc::new(Self { path, directory, maximum_keys, state: Mutex::new(State {
+        Ok(Arc::new(Self { path, directory, maximum_keys,
+            recovery_reads: std::sync::atomic::AtomicUsize::new(0), state: Mutex::new(State {
             file, entries, records, previous, poisoned: false,
         }) }))
     }
@@ -332,3 +334,6 @@ pub(super) fn inspect(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 #[path = "ledger_tests.rs"]
 mod tests;
+
+#[path = "ledger_recovery.rs"]
+mod recovery;
