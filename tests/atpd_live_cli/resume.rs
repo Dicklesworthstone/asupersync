@@ -376,3 +376,6 @@ fn executable_resume_receiver_rejects_ambiguous_multi_client_settings_before_fil
 // Shared-port executable journeys reuse the opaque relay and process fixtures.
 #[path = "shared_resume.rs"]
 mod shared_resume;
+
+#[path = "receipt_recovery.rs"]
+mod receipt_recovery;
