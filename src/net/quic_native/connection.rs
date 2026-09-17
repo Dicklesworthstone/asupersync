@@ -1517,6 +1517,50 @@ impl NativeQuicConnection {
         Ok(())
     }
 
+    /// Only the locally initiated close may bypass the ordinary draining send
+    /// gate. No application, ACK, probe, or peer-close response is admitted here.
+    pub(crate) fn is_local_close_frame(&self, frames: &[QuicFrame]) -> bool {
+        self.state() == QuicConnectionState::Draining
+            && !self.peer_close_observed
+            && self.tls.can_send_1rtt()
+            && matches!(frames, [QuicFrame::ConnectionClose {
+                error_code, frame_type: None, reason_phrase,
+            }] if Some(error_code.value()) == self.transport.close_code()
+                && reason_phrase.is_empty())
+    }
+
+    pub(crate) fn validate_local_close_packet(
+        &self,
+        cx: &Cx,
+        bytes: u64,
+        frames: &[QuicFrame],
+    ) -> Result<(), NativeQuicConnectionError> {
+        checkpoint(cx)?;
+        if !self.is_local_close_frame(frames) {
+            return Err(NativeQuicConnectionError::InvalidState(
+                "terminal packet must contain only the local CONNECTION_CLOSE",
+            ));
+        }
+        self.ensure_anti_amplification_limit(bytes)
+    }
+
+    /// Commit a protected close without creating congestion/recovery work for
+    /// a connection that has already stopped sending ordinary packets.
+    pub(crate) fn on_local_close_packet_sent(
+        &mut self,
+        cx: &Cx,
+        bytes: u64,
+        frames: &[QuicFrame],
+    ) -> Result<u64, NativeQuicConnectionError> {
+        self.validate_local_close_packet(cx, bytes, frames)?;
+        let number = self.next_packet_number(PacketNumberSpace::ApplicationData)?;
+        if self.role == StreamRole::Server && !self.peer_address_validated {
+            self.anti_amplification_bytes_sent =
+                self.anti_amplification_bytes_sent.saturating_add(bytes);
+        }
+        Ok(number)
+    }
+
     /// Poll transport timers (drain deadline).
     pub fn poll(&mut self, cx: &Cx, now_micros: u64) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;

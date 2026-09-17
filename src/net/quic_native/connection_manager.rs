@@ -1840,6 +1840,15 @@ pub(crate) async fn assemble_protected_1rtt_packet_inner(
             ),
         });
     }
+    let local_close = !pto_probe && !ack_eliciting && connection.is_local_close_frame(frames);
+    if local_close {
+        connection
+            .validate_local_close_packet(cx, packet_len as u64, frames)
+            .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: err.to_string(),
+            })?;
+    }
     let packet_number = connection
         .next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
         .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
@@ -1932,7 +1941,9 @@ pub(crate) async fn assemble_protected_1rtt_packet_inner(
         }
     })?;
 
-    let committed_packet_number = if pto_probe {
+    let committed_packet_number = if local_close {
+        connection.on_local_close_packet_sent(cx, packet_len as u64, frames)
+    } else if pto_probe {
         connection.on_pto_probe_packet_sent(cx, packet_len as u64, now_micros, frames)
     } else {
         connection.on_packet_sent_with_frames(
