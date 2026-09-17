@@ -72,6 +72,9 @@ pub enum ResumeError {
     /// The local final-state checkpoint failed or was interrupted before finalization.
     #[error(transparent)]
     Checkpoint(#[from] Box<finalization::FinalProofPersistError>),
+    /// A write-ahead sender journal failed or was interrupted before transmission.
+    #[error(transparent)]
+    Journal(#[from] Box<journal::SenderCheckpointPersistError>),
 }
 
 /// Snapshot after an attempt; a prefix alone is never whole-stream success.
@@ -312,9 +315,26 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
     async fn send_inner(
         &mut self,
         cx: &Cx,
+        checkpoint: Option<&mut (dyn finalization::FinalProofStore + Send + Unpin)>,
+    ) -> Result<LiveStreamReceipt, ResumeError> {
+        self.send_inner_journaled(cx, checkpoint, None).await
+    }
+
+    async fn send_inner_journaled(
+        &mut self,
+        cx: &Cx,
         mut checkpoint: Option<&mut (dyn finalization::FinalProofStore + Send + Unpin)>,
+        mut journal: Option<&mut (dyn journal::SenderCheckpointStore + Send + Unpin)>,
     ) -> Result<LiveStreamReceipt, ResumeError> {
         let timeout = self.config.operation_timeout;
+        // Persist this admitted attempt before reconnecting an existing session.
+        // The first negotiation is saved below, before reading any source bytes.
+        if self.agreed.is_some() {
+            if let Some(store) = journal.as_mut() {
+                let saved = journal::SenderCheckpoint::capture(self)?;
+                journal::persist(cx, timeout, &mut **store, &saved, &mut self.failed).await?;
+            }
+        }
         let tcp = bounded(
             cx,
             timeout,
@@ -344,6 +364,10 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
         .await?;
         let ack = bounded(cx, timeout, "resume state", wire.receive()).await?;
         self.reconcile(expect(&ack, FrameType::HandshakeAck)?)?;
+        if let Some(store) = journal.as_mut() {
+            let saved = journal::SenderCheckpoint::capture(self)?;
+            journal::persist(cx, timeout, &mut **store, &saved, &mut self.failed).await?;
+        }
         loop {
             if self.pending.is_none() && self.final_receipt.is_none() {
                 let agreed = self.agreed.as_ref().expect("negotiated session");
@@ -397,6 +421,11 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
                         written: 0,
                     });
                 }
+            }
+            // Durable intent precedes every possible peer data/publication effect.
+            if let Some(store) = journal.as_mut() {
+                let saved = journal::SenderCheckpoint::capture(self)?;
+                journal::persist(cx, timeout, &mut **store, &saved, &mut self.failed).await?;
             }
             if let Some(pending) = &self.pending {
                 // Wire owns only a copy; the session keeps the retransmission window.
@@ -888,3 +917,7 @@ pub mod service;
 /// Persist source-EOF state before finalization and recover Proof without the source.
 #[path = "resume/finalization.rs"]
 pub mod finalization;
+
+/// Write-ahead epoch checkpoints and replayable-source sender restart.
+#[path = "resume/journal.rs"]
+pub mod journal;
