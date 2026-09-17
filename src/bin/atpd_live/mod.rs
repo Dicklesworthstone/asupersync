@@ -4,6 +4,7 @@
 mod ledger;
 mod ledger_sink;
 mod resume;
+mod sender_checkpoint;
 mod settings;
 mod shared_resume;
 mod storage;
@@ -50,6 +51,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Send one source, persisting EOF intent before requesting final publication.
+    SendCheckpointed {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
+        /// New private checkpoint file; existing files are never reused or overwritten.
+        #[arg(long)]
+        checkpoint: PathBuf,
+        #[command(flatten)]
+        options: sender_checkpoint::Options,
+    },
+    /// Recover only a previously committed final Proof, without opening a source.
+    RecoverProof {
+        #[arg(long)]
+        config: PathBuf,
+        /// Existing complete checkpoint, retained under exclusive ownership.
+        #[arg(long)]
+        checkpoint: PathBuf,
+        #[command(flatten)]
+        options: sender_checkpoint::Options,
+    },
     /// Shared resumable receiving with durable duplicate suppression across restart.
     ServeDurable {
         #[arg(long)]
@@ -129,6 +152,12 @@ enum Command {
 
 pub(super) fn run() -> io::Result<()> {
     match Cli::parse().command {
+        Command::SendCheckpointed { config, input, checkpoint, options } => {
+            sender_checkpoint::send(settings::load(&config)?, input, checkpoint, options)
+        }
+        Command::RecoverProof { config, checkpoint, options } => {
+            sender_checkpoint::recover(settings::load(&config)?, checkpoint, options)
+        }
         Command::ServeDurable {
             config,
             session_ledger,
