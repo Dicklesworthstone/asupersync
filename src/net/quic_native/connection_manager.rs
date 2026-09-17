@@ -1973,7 +1973,9 @@ pub(crate) async fn unprotect_1rtt_packet(
 }
 
 /// Recognize an authenticated, standalone Handshake ACK without mistaking it
-/// for a retransmitted TLS flight. Unknown, coalesced, or invalid packets keep
+/// for a retransmitted TLS flight.
+///
+/// Unknown, coalesced, or invalid packets keep
 /// the existing recovery behavior; only verified ACK/PADDING is suppressed.
 pub(crate) fn authenticated_handshake_ack_only(
     cx: &Cx,
@@ -2009,7 +2011,9 @@ pub(crate) fn authenticated_handshake_ack_only(
     let Ok(number) = decode_packet_number_reconstruct(
         truncated,
         width,
-        protection.highest_accepted_packet_number(space).unwrap_or(0),
+        protection
+            .highest_accepted_packet_number(space)
+            .unwrap_or(0),
     ) else {
         return false;
     };
@@ -2043,8 +2047,12 @@ pub(crate) fn authenticated_handshake_ack_only(
     let Ok(frames) = NativeQuicConnection::decode_frames(&plaintext.plaintext) else {
         return false;
     };
-    frames.iter().any(|frame| matches!(frame, QuicFrame::Ack { .. }))
-        && frames.iter().all(|frame| matches!(frame, QuicFrame::Ack { .. } | QuicFrame::Padding { .. }))
+    frames
+        .iter()
+        .any(|frame| matches!(frame, QuicFrame::Ack { .. }))
+        && frames
+            .iter()
+            .all(|frame| matches!(frame, QuicFrame::Ack { .. } | QuicFrame::Padding { .. }))
 }
 
 /// Unmask and authenticate one short-header packet on the current task.
@@ -2515,6 +2523,7 @@ impl Default for QuicTimerScheduler {
 mod tests {
     use super::*;
     use crate::bytes::{Bytes, BytesMut};
+    use crate::net::VarInt;
     use crate::net::atp::protocol::quic_frames::QuicFrame;
     use crate::net::atp::quic::AtpPacketProtection;
     use crate::net::quic_core::{LongHeader, LongPacketType, PacketHeader};
@@ -4283,44 +4292,88 @@ mod tests {
             let mut transcript = QuicHandshakeTranscript::new();
             transcript.record("handshake", b"ack classification");
             protection
-                .derive_keys(&cx, PacketProtectionSpace::Handshake, &transcript, b"ack test")
+                .derive_keys(
+                    &cx,
+                    PacketProtectionSpace::Handshake,
+                    &transcript,
+                    b"ack test",
+                )
                 .await
                 .expect("derive handshake keys");
             for (number, frame, expected) in [
-                (1, QuicFrame::Ack {
-                    largest_acknowledged: VarInt::from_u64_unchecked(0),
-                    ack_delay: VarInt::from_u64_unchecked(0),
-                    ack_range_count: VarInt::from_u64_unchecked(0),
-                    first_ack_range: VarInt::from_u64_unchecked(0),
-                    ack_ranges: Vec::new(), ecn_counts: None,
-                }, true),
-                (2, QuicFrame::Crypto { offset: VarInt::from_u64_unchecked(0), data: Bytes::from_static(b"finished") }, false),
+                (
+                    1,
+                    QuicFrame::Ack {
+                        largest_acknowledged: VarInt::from_u64_unchecked(0),
+                        ack_delay: VarInt::from_u64_unchecked(0),
+                        ack_range_count: VarInt::from_u64_unchecked(0),
+                        first_ack_range: VarInt::from_u64_unchecked(0),
+                        ack_ranges: Vec::new(),
+                        ecn_counts: None,
+                    },
+                    true,
+                ),
+                (
+                    2,
+                    QuicFrame::Crypto {
+                        offset: VarInt::from_u64_unchecked(0),
+                        data: Bytes::from_static(b"finished"),
+                    },
+                    false,
+                ),
             ] {
                 let mut payload = BytesMut::new();
                 frame.encode(&mut payload).unwrap();
                 let header = PacketHeader::Long(LongHeader {
-                    packet_type: LongPacketType::Handshake, version: 1,
-                    dst_cid: cid, src_cid: cid, token: Vec::new(),
+                    packet_type: LongPacketType::Handshake,
+                    version: 1,
+                    dst_cid: cid,
+                    src_cid: cid,
+                    token: Vec::new(),
                     payload_length: 4 + payload.len() as u64 + 16,
-                    packet_number: number, packet_number_len: 4,
+                    packet_number: number,
+                    packet_number_len: 4,
                 });
                 let mut packet = Vec::new();
                 header.encode(&mut packet).unwrap();
                 let offset = packet.len() - 4;
-                let protected = protection.protect_packet_now(&cx, PacketProtectionRequest {
-                    space: PacketProtectionSpace::Handshake, key_phase: false,
-                    packet_number: number, associated_data: &packet, payload: &payload,
-                }).expect("protect");
+                let protected = protection
+                    .protect_packet_now(
+                        &cx,
+                        PacketProtectionRequest {
+                            space: PacketProtectionSpace::Handshake,
+                            key_phase: false,
+                            packet_number: number,
+                            associated_data: &packet,
+                            payload: &payload,
+                        },
+                    )
+                    .expect("protect");
                 packet.extend_from_slice(&protected.ciphertext);
                 packet.extend_from_slice(&protected.tag);
                 let sample = header_protection_sample(&packet, offset).unwrap();
-                let mask = protection.header_protection_mask_now(&cx, PacketProtectionSpace::Handshake, &sample).expect("mask");
+                let mask = protection
+                    .header_protection_mask_now(&cx, PacketProtectionSpace::Handshake, &sample)
+                    .expect("mask");
                 apply_header_protection(&mut packet, offset, mask.bytes).unwrap();
                 let mut forged = packet.clone();
                 *forged.last_mut().unwrap() ^= 1;
-                assert!(!authenticated_handshake_ack_only(&cx, cid, &mut protection, &forged));
-                assert!(!authenticated_handshake_ack_only(&cx, ConnectionId::new(b"wrongcid").unwrap(), &mut protection, &packet));
-                assert_eq!(authenticated_handshake_ack_only(&cx, cid, &mut protection, &packet), expected);
+                assert!(!authenticated_handshake_ack_only(
+                    &cx,
+                    cid,
+                    &mut protection,
+                    &forged
+                ));
+                assert!(!authenticated_handshake_ack_only(
+                    &cx,
+                    ConnectionId::new(b"wrongcid").unwrap(),
+                    &mut protection,
+                    &packet
+                ));
+                assert_eq!(
+                    authenticated_handshake_ack_only(&cx, cid, &mut protection, &packet),
+                    expected
+                );
             }
         });
     }

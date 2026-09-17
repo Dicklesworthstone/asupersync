@@ -91,6 +91,10 @@ struct HandshakeDropProxy {
 
 impl HandshakeDropProxy {
     fn spawn(server_addr: SocketAddr) -> Self {
+        Self::spawn_with_server_deduplication(server_addr, false)
+    }
+
+    fn spawn_with_server_deduplication(server_addr: SocketAddr, deduplicate_server: bool) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind handshake drop proxy");
         socket
             .set_nonblocking(true)
@@ -99,7 +103,7 @@ impl HandshakeDropProxy {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let handle = thread::spawn(move || {
-            run_handshake_drop_proxy(socket, server_addr, thread_stop);
+            run_handshake_drop_proxy(socket, server_addr, thread_stop, deduplicate_server);
         });
         Self {
             addr,
@@ -120,10 +124,16 @@ impl Drop for HandshakeDropProxy {
     }
 }
 
-fn run_handshake_drop_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Arc<AtomicBool>) {
+fn run_handshake_drop_proxy(
+    socket: UdpSocket,
+    server_addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    deduplicate_server: bool,
+) {
     let mut client_addr = None;
     let mut dropped_client_initial = false;
     let mut dropped_server_flight = false;
+    let mut seen_server_packets = std::collections::HashSet::new();
     let started = Instant::now();
     let mut buf = vec![0u8; 65_535];
 
@@ -141,11 +151,22 @@ fn run_handshake_drop_proxy(socket: UdpSocket, server_addr: SocketAddr, stop: Ar
                         client_addr = Some(src);
                         server_addr
                     };
-                    if !from_server && !dropped_client_initial {
+                    if deduplicate_server && from_server {
+                        let fresh = seen_server_packets.insert(buf[..len].to_vec());
+                        eprintln!("handshake proxy server packet: bytes={len} fresh={fresh}");
+                        if !fresh {
+                            continue;
+                        }
+                        assert!(
+                            seen_server_packets.len() <= 128,
+                            "bounded handshake history"
+                        );
+                    }
+                    if !deduplicate_server && !from_server && !dropped_client_initial {
                         dropped_client_initial = true;
                         continue;
                     }
-                    if from_server && !dropped_server_flight {
+                    if !deduplicate_server && from_server && !dropped_server_flight {
                         dropped_server_flight = true;
                         continue;
                     }
@@ -659,6 +680,83 @@ fn decode_test_handshake_packet(
         header,
         NativeQuicConnection::decode_frames(&plaintext.plaintext).unwrap(),
     )
+}
+
+#[test]
+fn real_tls13_final_ack_does_not_retransmit_client_finished() {
+    use asupersync::net::quic_native::NativeQuicUdpConnection;
+
+    block_on(async {
+        let cx = Cx::for_testing();
+        let udp_config = QuicUdpEndpointConfig {
+            max_packet_size: 16_384,
+            ..QuicUdpEndpointConfig::default()
+        };
+        let client_endpoint =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config.clone())
+                .await
+                .unwrap();
+        let mut server_endpoint =
+            QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+                .await
+                .unwrap();
+        let server_addr = server_endpoint.local_addr();
+        // Retained server CRYPTO flights legitimately request a Finished
+        // resend. Remove byte-identical server retransmissions in this
+        // fixture so the post-handoff receive isolates the fresh final ACK.
+        let proxy = HandshakeDropProxy::spawn_with_server_deduplication(server_addr, true);
+        let client_tls = client_config(
+            vec![parse_one_cert(CA_CERT_PEM)],
+            vec![ATP_QUIC_ALPN.to_vec()],
+        )
+        .unwrap();
+        let server_tls = server_config(
+            vec![parse_one_cert(LEAF_CERT_PEM)],
+            leaf_key(),
+            vec![ATP_QUIC_ALPN.to_vec()],
+        )
+        .unwrap();
+        // Empty transport parameters are valid and sufficient for this
+        // handshake-only journey; no application traffic is queued.
+        let client_driver = QuicHandshakeDriver::client(
+            client_tls,
+            ServerName::try_from("localhost").unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        let mut server_driver = QuicHandshakeDriver::server(server_tls, Vec::new()).unwrap();
+        let initial_cid = ConnectionId::new(b"ack-initial").unwrap();
+        let (client, server) = zip(
+            NativeQuicUdpConnection::connect(
+                &cx,
+                client_endpoint,
+                proxy.addr,
+                client_driver,
+                initial_cid,
+                ConnectionId::new(b"ack-client").unwrap(),
+                NativeQuicConnectionConfig::default(),
+                ATP_QUIC_ALPN,
+            ),
+            server_handshake_over_udp(
+                &cx,
+                &mut server_endpoint,
+                &mut server_driver,
+                initial_cid,
+                ConnectionId::new(b"ack-server").unwrap(),
+            ),
+        )
+        .await;
+        server.expect("server sent final Handshake ACK");
+        let mut client = client.expect("authenticated UDP client");
+        let progress = client
+            .drive_io_once(&cx, Duration::from_secs(2))
+            .await
+            .expect("consume final ACK");
+        assert!(!progress.receive_timed_out, "ACK must actually arrive");
+        assert!(progress.packets_dropped > 0, "received a long-header ACK");
+        assert_eq!(progress.handshake_flights_retransmitted, 0);
+        assert_eq!(progress.packets_sent, 0);
+    });
 }
 
 #[test]
