@@ -453,3 +453,8 @@ mod tests {
         }
     }
 }
+
+/// Explicit private-file persistence for the source-EOF checkpoint.
+#[cfg(unix)]
+#[path = "finalization/file.rs"]
+pub mod file;
