@@ -2,6 +2,7 @@
 //! No legacy daemon listener, PID protocol, RPC, or configuration is enabled.
 
 mod resume;
+mod shared_resume;
 mod settings;
 mod storage;
 
@@ -43,6 +44,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Serve multiple authenticated retained sessions on one reconnect port.
+    ServeResumable {
+        /// Existing strict receiver settings with per-client private inboxes.
+        #[arg(long)]
+        config: PathBuf,
+        #[command(flatten)]
+        options: shared_resume::Options,
+    },
     /// Receive into private, quota-bounded inboxes. SIGINT/TERM stop then drain.
     Serve {
         /// Strict version-1 JSON settings; no default or ambient trust fallback.
@@ -89,6 +98,9 @@ enum Command {
 pub(super) fn run() -> io::Result<()> {
     match Cli::parse().command {
         Command::Serve { config } => serve(settings::load(&config)?),
+        Command::ServeResumable { config, options } => {
+            shared_resume::serve(settings::load(&config)?, options)
+        }
         Command::Send { config, input } => send(settings::load(&config)?, input),
         Command::ReceiveResumable { config, attempts, retry_delay_ms, proof_recovery_secs } => {
             let options = resume::Options::new(attempts, retry_delay_ms, proof_recovery_secs)?;
