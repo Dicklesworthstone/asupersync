@@ -206,3 +206,7 @@ impl LiveStreamListener {
 #[cfg(unix)]
 #[path = "commit/file.rs"]
 pub mod file;
+
+/// Authenticated connection recovery with retained source and committing sink state.
+#[path = "resume.rs"]
+pub mod resume;
