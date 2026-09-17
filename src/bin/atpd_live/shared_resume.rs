@@ -17,7 +17,7 @@ use asupersync::net::atp::sdk::native_auth::live::commit::file::{
 };
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::service::{
     ResumableService, ResumeServiceCompletion, ResumeServiceConfig, ResumeServiceOutcome,
-    ResumeServiceRejection, ResumeSessionKey, ResumeSessionSnapshot, ResumeSessionStatus,
+    ResumeSessionInit, ResumeServiceRejection, ResumeSessionKey, ResumeSessionSnapshot, ResumeSessionStatus,
 };
 use asupersync::net::atp::sdk::native_auth::live::commit::resume::{
     RESUMABLE_LIVE_ALPN, ResumeError, ResumeReport,
@@ -125,10 +125,12 @@ fn deadline(now: u64, seconds: u64) -> u64 {
 static LEDGER_OWNERSHIP: OnceLock<Arc<Ledger>> = OnceLock::new();
 
 pub(super) fn serve(config: ServeConfig, options: Options) -> io::Result<()> {
-    serve_inner(config, options, None)
+    serve_inner(config, options, None, false)
 }
 
-pub(super) fn serve_durable(config: ServeConfig, options: Options, path: &Path) -> io::Result<()> {
+pub(super) fn serve_durable(
+    config: ServeConfig, options: Options, path: &Path, recover_committed: bool,
+) -> io::Result<()> {
     // Ledger growth has its own bound; never place it in a quota-accounted inbox.
     let parent = path.parent().ok_or_else(|| invalid("ledger parent required"))?;
     let parent = std::fs::canonicalize(parent)?;
@@ -140,10 +142,12 @@ pub(super) fn serve_durable(config: ServeConfig, options: Options, path: &Path) 
     let ledger = Ledger::open(path)?;
     LEDGER_OWNERSHIP.set(Arc::clone(&ledger))
         .map_err(|_| io::Error::other("foreground process already owns a session ledger"))?;
-    serve_inner(config, options, Some(ledger))
+    serve_inner(config, options, Some(ledger), recover_committed)
 }
 
-fn serve_inner(config: ServeConfig, options: Options, ledger: Option<Arc<Ledger>>) -> io::Result<()> {
+fn serve_inner(
+    config: ServeConfig, options: Options, ledger: Option<Arc<Ledger>>, recover_committed: bool,
+) -> io::Result<()> {
     let limits = options.config(config.max_connections)?;
     if !(1..=86_400).contains(&config.shutdown_grace_secs) {
         return Err(invalid("shutdown grace must be 1..=86400 seconds"));
@@ -165,7 +169,7 @@ fn serve_inner(config: ServeConfig, options: Options, ledger: Option<Arc<Ledger>
     INBOX_OWNERSHIP.set(Arc::clone(&inboxes))
         .map_err(|_| io::Error::other("foreground process already owns inboxes"))?;
     let signals = Signals::new([SIGINT, SIGTERM])?;
-    runtime(config.workers, serve_loop(config, options, limits, receiver, inboxes, signals, ledger))?;
+    runtime(config.workers, serve_loop(config, options, limits, receiver, inboxes, signals, ledger, recover_committed))?;
     emit(json!({"schema_version": 1, "event": "stopped", "drained": true}))
 }
 
@@ -177,6 +181,7 @@ async fn serve_loop(
     inboxes: Arc<storage::Inboxes>,
     mut signals: Signals,
     ledger: Option<Arc<Ledger>>,
+    recover_committed: bool,
 ) -> io::Result<()> {
     let cx = Cx::current().ok_or_else(|| io::Error::other("missing shared resume context"))?;
     let scope = cx.scope();
@@ -193,6 +198,14 @@ async fn serve_loop(
         let tracked = Arc::clone(&tracked);
         async move {
             let inbox = inbox.ok_or_else(|| io::Error::from(io::ErrorKind::PermissionDenied))?;
+            // Recovery is read-only and precedes all new claim, quota, entropy,
+            // or staging effects. Unresolved history never falls through to Fresh.
+            if recover_committed {
+                let owner = ledger.as_ref().ok_or_else(|| invalid("receipt recovery requires a ledger"))?;
+                if let Some(receipt) = owner.recover_committed(key, inbox.directory.clone(), byte_limit).await? {
+                    return Ok(ResumeSessionInit::Committed(receipt));
+                }
+            }
             // The SDK invokes this once per admitted certificate/nonce key.
             // Reconnects retain this very sink and incur no second reservation.
             if ledger.is_none() { inbox.reserve(byte_limit)?; }
@@ -212,14 +225,14 @@ async fn serve_loop(
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, "session already has a publication"));
             }
             entries.insert(key, sink.publication());
-            Ok(LedgerSink::new(sink, claim))
+            Ok(ResumeSessionInit::Fresh(LedgerSink::new(sink, claim)))
         }
     };
     emit(json!({"schema_version": 1, "event": "ready", "address": service.local_addr(),
         "pid": std::process::id(), "profile": String::from_utf8_lossy(RESUMABLE_LIVE_ALPN),
         "mode": "shared", "application_commit": true, "session_preallocated": false,
         "durable_session_ledger": durable, "maximum_durable_keys": maximum_durable_keys,
-        "continuation_restored": false,
+        "continuation_restored": false, "committed_proof_recovery": recover_committed,
         "max_connections": limits.max_connections, "max_sessions": limits.max_sessions,
         "max_sessions_per_client": limits.max_sessions_per_client,
         "max_session_keys": limits.max_session_keys,
@@ -270,7 +283,7 @@ async fn serve_loop(
             }
         } else {
             match asupersync::time::timeout(cx.now(), CONTROL_TICK,
-                service.next(&cx, &scope, factory.clone())).await
+                service.next_restoring(&cx, &scope, factory.clone())).await
             {
                 Ok(Ok(completion)) => completion,
                 Err(_) => continue,

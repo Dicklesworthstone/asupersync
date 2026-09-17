@@ -53,6 +53,9 @@ enum Command {
         /// Existing initialized ledger outside all inbox directories; never recreated.
         #[arg(long)]
         session_ledger: PathBuf,
+        /// Recover only committed final Proofs after checking saved file bytes.
+        #[arg(long)]
+        recover_committed: bool,
         #[command(flatten)]
         options: shared_resume::Options,
     },
@@ -122,8 +125,8 @@ enum Command {
 
 pub(super) fn run() -> io::Result<()> {
     match Cli::parse().command {
-        Command::ServeDurable { config, session_ledger, options } => {
-            shared_resume::serve_durable(settings::load(&config)?, options, &session_ledger)
+        Command::ServeDurable { config, session_ledger, recover_committed, options } => {
+            shared_resume::serve_durable(settings::load(&config)?, options, &session_ledger, recover_committed)
         }
         Command::InitSessionLedger { path, max_keys } => {
             ledger::Ledger::initialize(&path, max_keys)?;
