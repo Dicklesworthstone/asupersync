@@ -364,7 +364,14 @@ fn live_capacity_is_reserved_before_enqueue_and_rejected_work_has_no_io() {
         assert!(matches!(first.join(&cx).await, Err(JoinError::Cancelled(_))));
         assert_eq!(probe.reads.load(Ordering::SeqCst), 0);
         assert_eq!(send.active_streams(), 0);
-        let missing = send.send_reader(&Cx::detached_cancel_context(), address, source(&probe)).await;
+        // Capability denial is a runtime attenuation of a full-capability Cx,
+        // not a compile-time no-cap context: capture the restriction into a
+        // Cx<All> and release the thread-local guard before the await.
+        let denied = {
+            let _restriction = Cx::push_restriction(asupersync::cx::cap::CapMask::none());
+            Cx::current().expect("native runtime installs a context")
+        };
+        let missing = send.send_reader(&denied, address, source(&probe)).await;
         assert!(matches!(missing.outcome, Err(LiveStreamError::MissingCapability)));
         let listener = receive.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
         let bound = listener.local_addr().unwrap();
