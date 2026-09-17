@@ -201,3 +201,8 @@ impl LiveStreamListener {
         }).map_err(LiveStreamError::Spawn)
     }
 }
+
+/// Explicit no-overwrite publication in a caller-owned private Unix directory.
+#[cfg(unix)]
+#[path = "commit/file.rs"]
+pub mod file;
