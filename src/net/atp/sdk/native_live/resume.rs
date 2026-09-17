@@ -42,6 +42,7 @@ use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// Explicitly negotiated profile for retained-session reconnection.
@@ -94,10 +95,17 @@ pub struct ResumeReport {
     pub completed: Option<LiveStreamReceipt>,
 }
 
+// Keep admission alive through destruction of returned, uncollected session
+// owners as well as active futures. Neither form grants a second admission.
+enum Credit {
+    Direct { _permit: Permit },
+    Shared { _capacity: Arc<service::Capacity> },
+}
+
 struct Budget {
     used: u32,
     maximum: u32,
-    _permit: Permit,
+    _credit: Credit,
 }
 
 impl Budget {
@@ -224,7 +232,7 @@ impl LiveStreamSender {
             offered: Hello { nonce, epoch_bytes: self.config.epoch_bytes, max_bytes: self.config.max_bytes },
             agreed: None, peer: None, prefix: None, hash: Sha256::new(),
             pending: None, buffer: Vec::new(), final_receipt: None, completed: None,
-            failed: false, budget: Budget { used: 0, maximum: max_attempts, _permit: permit },
+            failed: false, budget: Budget { used: 0, maximum: max_attempts, _credit: Credit::Direct { _permit: permit } },
         })
     }
 }
@@ -401,7 +409,8 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
 #[must_use = "retain and drive the session to receive and commit data"]
 pub struct ResumableReceiver<W> {
     sink: W,
-    listener: TcpListener,
+    // None only for a session privately owned by the shared-port service.
+    listener: Option<TcpListener>,
     acceptor: TlsAcceptor,
     expected_client: NativeClientCertificateId,
     config: LiveStreamConfig,
@@ -447,10 +456,10 @@ impl LiveStreamReceiver {
         tls.alpn_protocols = vec![RESUMABLE_LIVE_ALPN.to_vec()];
         let listener = bounded(cx, self.config.operation_timeout, "resume bind", TcpListener::bind(address)).await?;
         Ok(ResumableReceiver {
-            sink, listener, acceptor: TlsAcceptor::new(tls), expected_client, config: self.config.clone(),
+            sink, listener: Some(listener), acceptor: TlsAcceptor::new(tls), expected_client, config: self.config.clone(),
             offered: None, agreed: None, prefix: None, hash: Sha256::new(), pending: None,
             sink_written_bytes: 0, final_receipt: None, commit_started: false, completed: None,
-            failed: false, budget: Budget { used: 0, maximum: max_attempts, _permit: permit },
+            failed: false, budget: Budget { used: 0, maximum: max_attempts, _credit: Credit::Direct { _permit: permit } },
         })
     }
 }
@@ -470,7 +479,7 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
 
     /// Address of the same retained listening socket across all attempts.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
+        self.listener.as_ref().expect("standalone resume listener").local_addr()
     }
 
     /// Accept one connection and continue this client-bound stream.
@@ -498,7 +507,8 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
 
     async fn receive_inner(&mut self, cx: &Cx) -> Result<LiveStreamReceipt, ResumeError> {
         let timeout = self.config.operation_timeout;
-        let (tcp, _) = bounded(cx, timeout, "resume accept", self.listener.accept()).await?;
+        let listener = self.listener.as_ref().expect("standalone resume listener");
+        let (tcp, _) = bounded(cx, timeout, "resume accept", listener.accept()).await?;
         let tls = bounded(cx, timeout, "resume TLS", self.acceptor.accept(tcp)).await?;
         if peer_certificate(&tls)? != *self.expected_client.as_bytes() {
             return Err(ResumeError::PeerIdentity);
@@ -506,6 +516,15 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
         let mut wire = Wire::new(tls);
         let hello = bounded(cx, timeout, "resume hello read", wire.receive()).await?;
         let offered = expect(&hello, FrameType::Handshake)?;
+        self.receive_wire(cx, &mut wire, offered).await
+    }
+
+    // Shared protocol owner. Callers have authenticated TLS and bound the full
+    // client certificate before passing the already-read hello and buffered wire.
+    async fn receive_wire(
+        &mut self, cx: &Cx, wire: &mut Wire<TlsStream<TcpStream>>, offered: &[u8],
+    ) -> Result<LiveStreamReceipt, ResumeError> {
+        let timeout = self.config.operation_timeout;
         let mut agreed = decode_offer(offered)?;
         if let Some(previous) = &self.offered {
             if previous != offered {
@@ -640,3 +659,7 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
         }
     }
 }
+
+/// Shared-port, bounded routing of authenticated retained resume sessions.
+#[path = "resume/service.rs"]
+pub mod service;
