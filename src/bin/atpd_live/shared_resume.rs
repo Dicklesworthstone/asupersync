@@ -5,6 +5,8 @@
 //! shutdown. Retiring an idle sink keeps the SDK's refusal tombstone; neither
 //! reconnects nor retirement create another sink or refund retained disk usage.
 
+use super::ledger::{self, Ledger};
+use super::ledger_sink::LedgerSink;
 use super::settings::{self, ServeConfig, hex, invalid};
 use super::{INBOX_OWNERSHIP, emit, receipt_json, runtime, storage};
 use asupersync::Cx;
@@ -30,7 +32,8 @@ use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::collections::BTreeMap;
 use std::io;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const CONTROL_TICK: Duration = Duration::from_millis(50);
@@ -117,7 +120,30 @@ fn deadline(now: u64, seconds: u64) -> u64 {
     now.saturating_add(seconds.saturating_mul(1_000_000_000))
 }
 
+// Keep the exclusive ledger lock through uncertain runtime teardown, just as
+// inbox locks remain process-owned. Started blocking jobs also hold an Arc.
+static LEDGER_OWNERSHIP: OnceLock<Arc<Ledger>> = OnceLock::new();
+
 pub(super) fn serve(config: ServeConfig, options: Options) -> io::Result<()> {
+    serve_inner(config, options, None)
+}
+
+pub(super) fn serve_durable(config: ServeConfig, options: Options, path: &Path) -> io::Result<()> {
+    // Ledger growth has its own bound; never place it in a quota-accounted inbox.
+    let parent = path.parent().ok_or_else(|| invalid("ledger parent required"))?;
+    let parent = std::fs::canonicalize(parent)?;
+    for inbox in &config.clients {
+        if std::fs::canonicalize(&inbox.directory)? == parent {
+            return Err(invalid("session ledger must be outside all inbox directories"));
+        }
+    }
+    let ledger = Ledger::open(path)?;
+    LEDGER_OWNERSHIP.set(Arc::clone(&ledger))
+        .map_err(|_| io::Error::other("foreground process already owns a session ledger"))?;
+    serve_inner(config, options, Some(ledger))
+}
+
+fn serve_inner(config: ServeConfig, options: Options, ledger: Option<Arc<Ledger>>) -> io::Result<()> {
     let limits = options.config(config.max_connections)?;
     if !(1..=86_400).contains(&config.shutdown_grace_secs) {
         return Err(invalid("shutdown grace must be 1..=86400 seconds"));
@@ -139,7 +165,7 @@ pub(super) fn serve(config: ServeConfig, options: Options) -> io::Result<()> {
     INBOX_OWNERSHIP.set(Arc::clone(&inboxes))
         .map_err(|_| io::Error::other("foreground process already owns inboxes"))?;
     let signals = Signals::new([SIGINT, SIGTERM])?;
-    runtime(config.workers, serve_loop(config, options, limits, receiver, inboxes, signals))?;
+    runtime(config.workers, serve_loop(config, options, limits, receiver, inboxes, signals, ledger))?;
     emit(json!({"schema_version": 1, "event": "stopped", "drained": true}))
 }
 
@@ -150,37 +176,50 @@ async fn serve_loop(
     receiver: LiveStreamReceiver,
     inboxes: Arc<storage::Inboxes>,
     mut signals: Signals,
+    ledger: Option<Arc<Ledger>>,
 ) -> io::Result<()> {
     let cx = Cx::current().ok_or_else(|| io::Error::other("missing shared resume context"))?;
     let scope = cx.scope();
-    let mut service = receiver.bind_resumable_service::<LiveFileSink>(&cx, config.bind, limits)
+    let mut service = receiver.bind_resumable_service::<LedgerSink>(&cx, config.bind, limits)
         .await.map_err(|_| io::Error::other("shared resumable listener could not bind"))?;
     let publications: Publications = Arc::new(Mutex::new(BTreeMap::new()));
     let tracked = Arc::clone(&publications);
     let byte_limit = config.max_transfer_bytes;
+    let durable = ledger.is_some();
+    let maximum_durable_keys = ledger.as_ref().map(|ledger| ledger.maximum_keys());
     let factory = move |child: Cx, key: ResumeSessionKey| {
         let inbox = inboxes.get(&key.client).cloned();
+        let ledger = ledger.clone();
         let tracked = Arc::clone(&tracked);
         async move {
             let inbox = inbox.ok_or_else(|| io::Error::from(io::ErrorKind::PermissionDenied))?;
             // The SDK invokes this once per admitted certificate/nonce key.
             // Reconnects retain this very sink and incur no second reservation.
-            inbox.reserve(byte_limit)?;
+            if ledger.is_none() { inbox.reserve(byte_limit)?; }
             let mut nonce = [0; 16];
             child.random_bytes(&mut nonce);
-            let sink = LiveFileSink::create(&child, inbox.directory.clone(),
-                format!("{}.bin", hex(&nonce)), byte_limit).await?;
+            let filename = format!("{}.bin", hex(&nonce));
+            // Persist before quota admission, file creation, or any publication.
+            // An old key fails here, even when the old process left no receipt.
+            let claim = match ledger {
+                Some(ledger) => Some(ledger.claim(key, filename.clone(), byte_limit).await?),
+                None => None,
+            };
+            if claim.is_some() { inbox.reserve(byte_limit)?; }
+            let sink = LiveFileSink::create(&child, inbox.directory.clone(), filename, byte_limit).await?;
             let mut entries = tracked.lock();
             if entries.contains_key(&key) {
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, "session already has a publication"));
             }
             entries.insert(key, sink.publication());
-            Ok(sink)
+            Ok(LedgerSink::new(sink, claim))
         }
     };
     emit(json!({"schema_version": 1, "event": "ready", "address": service.local_addr(),
         "pid": std::process::id(), "profile": String::from_utf8_lossy(RESUMABLE_LIVE_ALPN),
         "mode": "shared", "application_commit": true, "session_preallocated": false,
+        "durable_session_ledger": durable, "maximum_durable_keys": maximum_durable_keys,
+        "continuation_restored": false,
         "max_connections": limits.max_connections, "max_sessions": limits.max_sessions,
         "max_sessions_per_client": limits.max_sessions_per_client,
         "max_session_keys": limits.max_session_keys,
@@ -277,7 +316,7 @@ async fn serve_loop(
 }
 
 fn observe(
-    service: &ResumableService<LiveFileSink>,
+    service: &ResumableService<LedgerSink>,
     retention: &mut BTreeMap<ResumeSessionKey, Retention>,
     publications: &Publications,
     completion: &ResumeServiceCompletion,
@@ -311,7 +350,7 @@ fn observe(
 }
 
 fn expire(
-    service: &mut ResumableService<LiveFileSink>,
+    service: &mut ResumableService<LedgerSink>,
     retention: &mut BTreeMap<ResumeSessionKey, Retention>,
     publications: &Publications,
     now: u64,
@@ -329,7 +368,7 @@ fn expire(
 }
 
 fn retire(
-    service: &mut ResumableService<LiveFileSink>,
+    service: &mut ResumableService<LedgerSink>,
     retention: &mut BTreeMap<ResumeSessionKey, Retention>,
     publications: &Publications,
     key: ResumeSessionKey,
@@ -364,6 +403,8 @@ fn rejection_status(rejection: &ResumeServiceRejection) -> &'static str {
         ResumeServiceRejection::AttemptsExhausted => "attempts_exhausted",
         ResumeServiceRejection::Stopping => "stopping",
         ResumeServiceRejection::Spawn(_) => "spawn_failed",
+        ResumeServiceRejection::Factory(LiveStreamError::Io(error))
+            if ledger::is_replay_refusal(error) => "durable_session_refused",
         ResumeServiceRejection::Factory(LiveStreamError::Io(error))
             if error.kind() == io::ErrorKind::StorageFull => "retention_refused",
         ResumeServiceRejection::Factory(_) => "factory_failed",

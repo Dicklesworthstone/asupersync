@@ -1,6 +1,8 @@
 //! Foreground executable integration for the authenticated live-transfer profile.
 //! No legacy daemon listener, PID protocol, RPC, or configuration is enabled.
 
+mod ledger;
+mod ledger_sink;
 mod resume;
 mod shared_resume;
 mod settings;
@@ -44,6 +46,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Shared resumable receiving with durable duplicate suppression across restart.
+    ServeDurable {
+        #[arg(long)]
+        config: PathBuf,
+        /// Existing initialized ledger outside all inbox directories; never recreated.
+        #[arg(long)]
+        session_ledger: PathBuf,
+        #[command(flatten)]
+        options: shared_resume::Options,
+    },
+    /// Provision a new private session ledger without overwriting existing state.
+    InitSessionLedger {
+        #[arg(long)]
+        path: PathBuf,
+        /// Persistent lifetime key budget; each key reserves a claim and receipt.
+        #[arg(long)]
+        max_keys: u32,
+    },
+    /// Inspect historical claims/receipts while the ledger is exclusively offline.
+    InspectSessionLedger {
+        #[arg(long)]
+        path: PathBuf,
+    },
     /// Serve multiple authenticated retained sessions on one reconnect port.
     ServeResumable {
         /// Existing strict receiver settings with per-client private inboxes.
@@ -97,6 +122,14 @@ enum Command {
 
 pub(super) fn run() -> io::Result<()> {
     match Cli::parse().command {
+        Command::ServeDurable { config, session_ledger, options } => {
+            shared_resume::serve_durable(settings::load(&config)?, options, &session_ledger)
+        }
+        Command::InitSessionLedger { path, max_keys } => {
+            ledger::Ledger::initialize(&path, max_keys)?;
+            emit(json!({"schema_version": 1, "event": "session_ledger_initialized", "maximum_keys": max_keys}))
+        }
+        Command::InspectSessionLedger { path } => ledger::inspect(&path),
         Command::Serve { config } => serve(settings::load(&config)?),
         Command::ServeResumable { config, options } => {
             shared_resume::serve(settings::load(&config)?, options)
