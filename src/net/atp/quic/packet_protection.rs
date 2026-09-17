@@ -722,12 +722,41 @@ impl AtpPacketProtection {
         packet: &ProtectedPacket,
         associated_data: &[u8],
     ) -> AtpOutcome<UnprotectedPacket> {
+        self.unprotect_packet_inner(cx, packet, associated_data, true)
+    }
+
+    /// Authenticate retained Handshake traffic for recovery classification only.
+    ///
+    /// Duplicate ACKs must still be distinguishable from duplicate CRYPTO
+    /// flights. This does not admit frames for delivery: the caller may only
+    /// inspect them to decide whether a retained flight needs retransmission.
+    /// Normal receive APIs continue rejecting replayed packet numbers.
+    pub(crate) fn inspect_handshake_packet_now(
+        &mut self,
+        cx: &Cx,
+        packet: &ProtectedPacket,
+        associated_data: &[u8],
+    ) -> AtpOutcome<UnprotectedPacket> {
+        if packet.space != PacketProtectionSpace::Handshake {
+            return Outcome::err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
+        }
+        self.unprotect_packet_inner(cx, packet, associated_data, false)
+    }
+
+    fn unprotect_packet_inner(
+        &mut self,
+        cx: &Cx,
+        packet: &ProtectedPacket,
+        associated_data: &[u8],
+        reject_replays: bool,
+    ) -> AtpOutcome<UnprotectedPacket> {
         self.trace_provider_profile_once(cx, "unprotect");
 
-        if self
-            .accepted_packets
-            .get(&packet.space)
-            .is_some_and(|window| window.rejects(packet.packet_number))
+        if reject_replays
+            && self
+                .accepted_packets
+                .get(&packet.space)
+                .is_some_and(|window| window.rejects(packet.packet_number))
         {
             if cx.trace_buffer().is_some() {
                 cx.trace_with_fields(

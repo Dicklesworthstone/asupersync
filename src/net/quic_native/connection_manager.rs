@@ -2034,7 +2034,7 @@ pub(crate) fn authenticated_handshake_ack_only(
         },
     };
     let Outcome::Ok(plaintext) =
-        protection.unprotect_packet_now(cx, &protected, &bytes[..header_len])
+        protection.inspect_handshake_packet_now(cx, &protected, &bytes[..header_len])
     else {
         return false;
     };
@@ -4336,6 +4336,7 @@ mod tests {
                 });
                 let mut packet = Vec::new();
                 header.encode(&mut packet).unwrap();
+                let associated_data = packet.clone();
                 let offset = packet.len() - 4;
                 let protected = protection
                     .protect_packet_now(
@@ -4374,6 +4375,33 @@ mod tests {
                     authenticated_handshake_ack_only(&cx, cid, &mut protection, &packet),
                     expected
                 );
+                // An exact replay must retain its authenticated frame class:
+                // ACKs stay silent, while CRYPTO still requests recovery.
+                assert_eq!(
+                    authenticated_handshake_ack_only(&cx, cid, &mut protection, &packet),
+                    expected
+                );
+                assert!(!authenticated_handshake_ack_only(
+                    &cx,
+                    cid,
+                    &mut protection,
+                    &forged
+                ));
+                // Inspection never grants delivery admission for a replay.
+                assert!(matches!(
+                    protection.unprotect_packet_now(&cx, &protected, &associated_data),
+                    Outcome::Err(crate::net::atp::protocol::outcome::AtpError::Auth(
+                        crate::net::atp::protocol::outcome::AuthError::ReplayedNonce
+                    ))
+                ));
+                let mut wrong_space = protected.clone();
+                wrong_space.space = PacketProtectionSpace::OneRtt;
+                assert!(matches!(
+                    protection.inspect_handshake_packet_now(&cx, &wrong_space, &associated_data),
+                    Outcome::Err(crate::net::atp::protocol::outcome::AtpError::Protocol(
+                        crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch
+                    ))
+                ));
             }
         });
     }
