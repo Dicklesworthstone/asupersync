@@ -126,6 +126,9 @@ pub enum LiveStreamError {
     /// Runtime admission failed before execution.
     #[error("live stream task admission failed: {0:?}")]
     Spawn(SpawnError),
+    /// Application commit failure or successful commit without final peer Proof.
+    #[error(transparent)]
+    Commit(#[from] Box<commit::LiveStreamCommitError>),
 }
 
 /// A contiguous prefix, not evidence that the whole stream is complete.
@@ -479,6 +482,14 @@ impl LiveStreamReceiver {
     async fn receive_authenticated<W: AsyncWrite + Unpin>(
         &self, cx: &Cx, tls: TlsStream<TcpStream>, sink: &mut W, progress: &mut Progress,
     ) -> Result<LiveStreamReceipt, LiveStreamError> {
+        let mut sink = commit::FlushOnly(sink);
+        self.receive_authenticated_with_commit(cx, tls, &mut sink, progress, false).await
+    }
+
+    async fn receive_authenticated_with_commit<W: commit::LiveStreamCommitSink + Unpin>(
+        &self, cx: &Cx, tls: TlsStream<TcpStream>, sink: &mut W,
+        progress: &mut Progress, require_commit: bool,
+    ) -> Result<LiveStreamReceipt, LiveStreamError> {
         let config = &self.config;
         let timeout = config.operation_timeout;
         check_alpn(&tls)?;
@@ -500,7 +511,13 @@ impl LiveStreamReceiver {
                     return Err(LiveStreamError::Protocol("wrong final stream commitment"));
                 }
                 bounded(cx, timeout, "final sink flush", sink.flush()).await?;
-                bounded(cx, timeout, "final proof write", wire.send(FrameType::Proof, final_payload)).await?;
+                if require_commit {
+                    commit::finish(cx, timeout, sink, &receipt).await?;
+                }
+                let proof = bounded(cx, timeout, "final proof write", wire.send(FrameType::Proof, final_payload)).await;
+                proof.map_err(|error| {
+                    if require_commit { commit::proof_failed(&receipt, error) } else { error }
+                })?;
                 return Ok(receipt);
             }
             let payload = expect(&frame, FrameType::ObjectData)?;
@@ -516,6 +533,10 @@ impl LiveStreamReceiver {
         }
     }
 }
+
+/// Application commit barriers, distinct from ordinary epoch flushes.
+#[path = "native_live/commit.rs"]
+pub mod commit;
 
 /// Reusable, bounded, scope-owned live receiver service.
 #[path = "native_live/service.rs"]
