@@ -23,6 +23,11 @@ use zeroize::Zeroizing;
 const MAX_RECOVERY_READS: usize = 64;
 struct ReadPermit(Arc<Ledger>);
 impl ReadPermit {
+    // `fetch_update` is deprecated on the pinned nightly (renamed to
+    // `try_update`), which is a `-D warnings` error in the all-features lint
+    // gate. `try_update` does not exist on the stable subset, so keep the call
+    // and allow the deprecation, matching `database::sqlite` and `runtime::state`.
+    #[allow(deprecated)]
     fn reserve(ledger: &Arc<Ledger>) -> io::Result<Self> {
         ledger.recovery_reads.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             (used < MAX_RECOVERY_READS).then(|| used + 1)
