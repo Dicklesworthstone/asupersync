@@ -1,6 +1,7 @@
 //! Foreground executable integration for the authenticated live-transfer profile.
 //! No legacy daemon listener, PID protocol, RPC, or configuration is enabled.
 
+mod resume;
 mod settings;
 mod storage;
 
@@ -48,6 +49,33 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Recover one client-bound transfer while this receiver process stays alive.
+    ReceiveResumable {
+        /// Existing receiver settings with one client and max_connections=1.
+        #[arg(long)]
+        config: PathBuf,
+        /// Maximum connection attempts, including failed handshakes and idle accepts.
+        #[arg(long)]
+        attempts: u32,
+        /// Delay between attempts; the session is never recreated.
+        #[arg(long, default_value_t = 250)]
+        retry_delay_ms: u64,
+        /// Absolute Proof recovery window after local commit; attempts also bound it.
+        #[arg(long, default_value_t = 30)]
+        proof_recovery_secs: u64,
+    },
+    /// Retry eligible network failures using one retained authenticated sender.
+    SendResumable {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
+        /// Explicit retry permission: 1..=1024 total attempts, never new uploads.
+        #[arg(long)]
+        attempts: u32,
+        #[arg(long, default_value_t = 250)]
+        retry_delay_ms: u64,
+    },
     /// Send a regular file and require the receiver's exact final Proof.
     Send {
         #[arg(long)]
@@ -62,6 +90,14 @@ pub(super) fn run() -> io::Result<()> {
     match Cli::parse().command {
         Command::Serve { config } => serve(settings::load(&config)?),
         Command::Send { config, input } => send(settings::load(&config)?, input),
+        Command::ReceiveResumable { config, attempts, retry_delay_ms, proof_recovery_secs } => {
+            let options = resume::Options::new(attempts, retry_delay_ms, proof_recovery_secs)?;
+            resume::receive(settings::load(&config)?, options)
+        }
+        Command::SendResumable { config, input, attempts, retry_delay_ms } => {
+            let options = resume::Options::new(attempts, retry_delay_ms, 1)?;
+            resume::send(settings::load(&config)?, input, options)
+        }
     }
 }
 
