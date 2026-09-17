@@ -42,6 +42,12 @@ mod restoration;
 pub use restoration::ResumeSessionInit;
 use restoration::ServiceReceiver;
 
+#[path = "revocation.rs"]
+mod revocation;
+pub use revocation::{
+    MAX_REVOKED_RESUME_CLIENTS, ResumeClientRevocation, ResumeRevokeError,
+};
+
 /// Exact client identity plus stream continuity identifier. A nonce is not authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ResumeSessionKey {
@@ -127,6 +133,9 @@ pub enum ResumeServiceRejection {
     /// This key is a retained tombstone, never a new-session request.
     #[error("resume session has been retired")]
     Retired,
+    /// This service has permanently revoked the authenticated client certificate.
+    #[error("resume client authority has been revoked")]
+    Revoked,
     /// Resident, per-client, or lifetime key admission was refused.
     #[error("shared resume {0} capacity exhausted")]
     Capacity(&'static str),
@@ -241,6 +250,7 @@ pub struct ResumableService<W> {
     entries: BTreeMap<ResumeSessionKey, Entry<W>>,
     residents: usize,
     clients: BTreeMap<NativeClientCertificateId, usize>,
+    revocations: revocation::Revocations,
     jobs: Vec<Job<W>>,
     next_connection: Option<u64>,
 }
@@ -252,6 +262,7 @@ impl<W> fmt::Debug for ResumableService<W> {
             .field("connections", &self.jobs.len())
             .field("resident_sessions", &self.residents)
             .field("retained_keys", &self.entries.len())
+            .field("revoked_clients", &self.revoked_clients())
             .finish_non_exhaustive()
     }
 }
@@ -299,6 +310,7 @@ impl LiveStreamReceiver {
             entries: BTreeMap::new(),
             residents: 0,
             clients: BTreeMap::new(),
+            revocations: revocation::Revocations::default(),
             jobs,
             next_connection: Some(0),
         })
@@ -702,6 +714,12 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
             return Err(ResumeServiceRejection::Stopping);
         }
         let key = auth.key;
+        // Check after collecting authentication, not only in the TLS verifier:
+        // the handshake may have completed before its client was revoked.
+        // Neither a new nonce nor a saved receipt bypasses this service policy.
+        if self.is_client_revoked(&key.client) {
+            return Err(ResumeServiceRejection::Revoked);
+        }
         let existing = if let Some(entry) = self.entries.get_mut(&key) {
             match entry.status {
                 ResumeSessionStatus::Active => return Err(ResumeServiceRejection::Busy),
