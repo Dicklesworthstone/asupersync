@@ -372,3 +372,7 @@ fn executable_resume_receiver_rejects_ambiguous_multi_client_settings_before_fil
     assert!(receiver.events.try_iter().all(|event| event.unwrap()["event"] != "ready"));
     assert!(fixture.entries().is_empty());
 }
+
+// Shared-port executable journeys reuse the opaque relay and process fixtures.
+#[path = "shared_resume.rs"]
+mod shared_resume;
