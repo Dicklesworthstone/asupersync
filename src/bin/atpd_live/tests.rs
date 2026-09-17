@@ -28,7 +28,7 @@ fn certificate_selectors_require_full_digests_and_normalize_case() {
         settings::selector(&lower.to_uppercase()).unwrap()
     );
     for value in [
-        "".to_owned(),
+        String::new(),
         "0".repeat(63),
         "0".repeat(65),
         "gg".repeat(32),

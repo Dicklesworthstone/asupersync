@@ -165,7 +165,7 @@ async fn join_attempt<T>(
             .await
         {
             Ok(result) => return result,
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
 }

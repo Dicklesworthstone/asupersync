@@ -150,14 +150,19 @@ enum Command {
     },
 }
 
-pub(super) fn run() -> io::Result<()> {
+pub fn run() -> io::Result<()> {
     match Cli::parse().command {
-        Command::SendCheckpointed { config, input, checkpoint, options } => {
-            sender_checkpoint::send(settings::load(&config)?, input, checkpoint, options)
-        }
-        Command::RecoverProof { config, checkpoint, options } => {
-            sender_checkpoint::recover(settings::load(&config)?, checkpoint, options)
-        }
+        Command::SendCheckpointed {
+            config,
+            input,
+            checkpoint,
+            options,
+        } => sender_checkpoint::send(settings::load(&config)?, input, checkpoint, options),
+        Command::RecoverProof {
+            config,
+            checkpoint,
+            options,
+        } => sender_checkpoint::recover(settings::load(&config)?, checkpoint, options),
         Command::ServeDurable {
             config,
             session_ledger,

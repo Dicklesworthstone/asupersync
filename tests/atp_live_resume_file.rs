@@ -128,7 +128,7 @@ impl LiveStreamCommitSink for GatedFile {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let result = Pin::new(&mut this.file).poll_commit(cx, receipt);
-        if let Poll::Ready(Ok(())) = &result {
+        if matches!(&result, Poll::Ready(Ok(()))) {
             assert_eq!(this.gate.commits.fetch_add(1, Ordering::SeqCst), 0);
         }
         result

@@ -605,7 +605,7 @@ mod tests {
                     match input.poll_write(&mut ctx, &expected[accepted..]) {
                         Poll::Ready(Ok(n)) => accepted += n,
                         Poll::Pending => {}
-                        other => panic!("unexpected write: {other:?}"),
+                        other @ Poll::Ready(_) => panic!("unexpected write: {other:?}"),
                     }
                 }
                 if accepted == expected.len() {

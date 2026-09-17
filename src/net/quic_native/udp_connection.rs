@@ -1521,8 +1521,13 @@ mod tests {
                     / 3,
             )
             .max(Duration::from_millis(1));
-            client.local_close.as_mut().unwrap().last_sent =
-                Some(Instant::now() - interval - Duration::from_millis(1));
+            client.local_close.as_mut().unwrap().last_sent = Some(
+                Instant::now()
+                    .checked_sub(interval)
+                    .unwrap()
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap(),
+            );
             let mut wrong_cid = packet.clone();
             wrong_cid.data[1] ^= 1;
             let mut wrong_peer = packet.clone();
@@ -1556,8 +1561,11 @@ mod tests {
                 .transport()
                 .drain_deadline_micros()
                 .unwrap();
-            client.clock_origin =
-                Instant::now() - Duration::from_micros(deadline) - Duration::from_millis(1);
+            client.clock_origin = Instant::now()
+                .checked_sub(Duration::from_micros(deadline))
+                .unwrap()
+                .checked_sub(Duration::from_millis(1))
+                .unwrap();
             client.local_close.as_mut().unwrap().pending = true;
             assert_eq!(
                 client.flush_local_close(&cx, Instant::now()).await.unwrap(),

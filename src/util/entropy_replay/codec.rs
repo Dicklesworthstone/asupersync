@@ -392,7 +392,7 @@ mod tests {
             bytes.as_ref()
         );
         assert!(format!("{bytes:?}").starts_with("EntropyTapeBytes { encoded_bytes:"));
-        assert!(!format!("{tape:?}").contains("["));
+        assert!(!format!("{tape:?}").contains('['));
     }
 
     #[test]

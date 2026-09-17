@@ -301,9 +301,7 @@ impl Store {
         let store = self.clone();
         move |_child, key| {
             store.calls.fetch_add(1, Ordering::SeqCst);
-            if store.fail_factory == 2 {
-                panic!("deliberate factory panic");
-            }
+            assert!(store.fail_factory != 2, "deliberate factory panic");
             if store.fail_factory == 1 {
                 return ready(Err(io::Error::from(io::ErrorKind::PermissionDenied)));
             }

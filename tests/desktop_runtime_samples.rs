@@ -130,7 +130,7 @@ fn host_sample_runs_foreign_call_before_host_deadline() {
 #[test]
 fn host_sample_refuses_deadline_already_in_past() {
     let sample = HostClockSample::start().expect("standard profile is valid");
-    let past = Instant::now() - Duration::from_secs(1);
+    let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     let outcome = sample.run_foreign_call_before(past, || 0);
     assert_eq!(outcome.err(), Some(SampleClockError::DeadlineInPast));
     sample.close(Duration::from_secs(1));

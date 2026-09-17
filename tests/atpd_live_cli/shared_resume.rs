@@ -193,7 +193,11 @@ fn verify_shared(
     assert_eq!(received["proof_write_confirmed"], true);
     assert_eq!(received["sender_receipt_observed"], false);
     let name = received["publication"]["filename"].as_str().unwrap();
-    assert!(name.ends_with(".bin") && !name.contains('/'));
+    assert_eq!(
+        name.rsplit_once('.').map(|(_, extension)| extension),
+        Some("bin")
+    );
+    assert!(!name.contains('/'));
     let path = directory.join(name);
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     assert_eq!(

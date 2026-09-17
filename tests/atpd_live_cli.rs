@@ -254,7 +254,10 @@ fn verify_publication(
     assert_eq!(received["publication"]["error"], false);
     assert_eq!(received["client_certificate_sha256"], fixture.allowed);
     let filename = received["publication"]["filename"].as_str().unwrap();
-    assert!(filename.ends_with(".bin"));
+    assert_eq!(
+        filename.rsplit_once('.').map(|(_, extension)| extension),
+        Some("bin")
+    );
     let path = fixture.inbox.join(filename);
     assert_eq!(std::fs::read(&path).unwrap(), expected);
     assert_eq!(

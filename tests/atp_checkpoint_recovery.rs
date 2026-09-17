@@ -364,15 +364,16 @@ fn checkpoint_crashed_sender_requires_exact_acknowledgement_before_retry() {
         remote,
         "crash-send",
     );
+    let mut receive_buffer = vec![0; 65535];
     assert!(
-        socket.recv_from(&mut [0; 65535]).unwrap().0 > 0,
+        socket.recv_from(&mut receive_buffer).unwrap().0 > 0,
         "native send must actually start"
     );
     child.0.kill().unwrap();
     assert!(!child.0.wait().unwrap().success()); // No Rust Drop or cleanup ran in that process.
     let directory = saved(&root);
     socket.set_nonblocking(true).unwrap();
-    while socket.recv_from(&mut [0; 65535]).is_ok() {}
+    while socket.recv_from(&mut receive_buffer).is_ok() {}
     let (socket, directory, root) = run(async move {
         let cx = Cx::current().unwrap();
         let sender = sender();

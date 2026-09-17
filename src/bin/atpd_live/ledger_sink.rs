@@ -96,7 +96,7 @@ impl LiveStreamCommitSink for LedgerSink {
             this.terminal = Some(
                 result
                     .as_ref()
-                    .map(|()| ())
+                    .copied()
                     .map_err(|error| (error.kind(), error.raw_os_error())),
             );
             return Poll::Ready(result);
