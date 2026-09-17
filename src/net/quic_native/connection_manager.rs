@@ -1133,6 +1133,94 @@ impl ConnectionRouter {
         Ok(closed)
     }
 
+    /// Prepare terminal 1-RTT output without discarding its encryption keys.
+    /// Shutdown owns these packets separately from ordinary application output.
+    pub(crate) async fn prepare_shutdown_close_packets(
+        &mut self,
+        cx: &Cx,
+        now: Instant,
+    ) -> Result<Vec<(OutgoingPacket, Instant)>, ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        let mut packets = Vec::new();
+        for (connection_id, handle) in &mut self.connections {
+            let origin = handle.clock_origin.unwrap_or(self.clock_origin);
+            let now_micros = instant_micros_from(origin, now);
+            if !matches!(
+                handle.connection.state(),
+                QuicConnectionState::Draining | QuicConnectionState::Closed
+            ) {
+                handle
+                    .connection
+                    .begin_close(cx, now_micros, 0)
+                    .or_else(|_| handle.connection.close_immediately(cx, 0))
+                    .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                        connection_id: *connection_id,
+                        reason: error.to_string(),
+                    })?;
+            }
+            let Some(protection) = handle.packet_protection.as_mut() else {
+                // Pre-1RTT shutdown still performs local teardown only.
+                continue;
+            };
+            let Some(code) = handle.connection.transport().close_code() else {
+                continue;
+            };
+            let Outcome::Ok(error_code) = crate::net::atp::protocol::varint::VarInt::new(code)
+            else {
+                return Err(ConnectionRouterError::PacketProcessingFailed {
+                    connection_id: *connection_id,
+                    reason: "close code exceeds QUIC varint range".to_string(),
+                });
+            };
+            let frames = [QuicFrame::ConnectionClose {
+                error_code,
+                frame_type: None,
+                reason_phrase: crate::bytes::Bytes::new(),
+            }];
+            if !handle.connection.is_local_close_frame(&frames) {
+                continue;
+            }
+            let Some(deadline) = handle
+                .connection
+                .transport()
+                .drain_deadline_micros()
+                .and_then(|micros| origin.checked_add(Duration::from_micros(micros)))
+                .filter(|deadline| *deadline > now)
+            else {
+                continue;
+            };
+            let mut payload = crate::bytes::BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).map_err(|error| {
+                ConnectionRouterError::PacketProcessingFailed {
+                    connection_id: *connection_id,
+                    reason: error.to_string(),
+                }
+            })?;
+            let data = assemble_protected_1rtt_packet_inner(
+                cx,
+                handle.peer_connection_id.unwrap_or(*connection_id),
+                &mut handle.connection,
+                &mut protection.protection,
+                &frames,
+                payload.as_ref(),
+                now_micros,
+                false,
+                false,
+            )
+            .await?;
+            packets.push((
+                OutgoingPacket {
+                    dst_addr: handle.peer_addr,
+                    data,
+                    send_time: Some(now),
+                },
+                deadline,
+            ));
+        }
+        Ok(packets)
+    }
+
     /// Refresh a connection's PTO deadline from its transport state.
     fn refresh_connection_timer(
         cx: &Cx,

@@ -1732,10 +1732,11 @@ impl ManagedQuicEndpoint {
         Ok(())
     }
 
-    /// Gracefully shut down the endpoint.
+    /// Shut down the endpoint, sending a protected close for local 1-RTT connections.
     ///
-    /// This stops accepting new connections, drains existing connections,
-    /// and ensures all resources are cleaned up properly.
+    /// Sends are bounded by each connection's drain deadline. Cancellation or a
+    /// send failure still releases local ownership. This terminal operation does
+    /// not retain routes for close retransmission or send pre-1RTT close packets.
     pub async fn shutdown(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
         cx.trace(&format!(
             "Shutting down managed QUIC endpoint {}",
@@ -1752,7 +1753,9 @@ impl ManagedQuicEndpoint {
             .timer_scheduler
             .now(cx)
             .unwrap_or_else(|_| Instant::now());
-        let close_result = self.connection_router.close_all(cx, now, 0);
+        self.pending_outgoing.clear();
+        self.timer_scheduler.cancel_pending();
+        let close_result = self.send_shutdown_closes(cx, now).await;
         // Terminal cleanup is local ownership release, not new runtime work.
         // Keep it unconditional so cancellation cannot strand a retained endpoint.
         self.connection_router.discard_all();
@@ -1760,10 +1763,7 @@ impl ManagedQuicEndpoint {
         self.pending_incoming.clear();
         self.timer_scheduler.cancel_pending();
         let udp_result = self.udp_endpoint.shutdown(cx).await;
-        close_result.map_err(|error| match error {
-            ConnectionRouterError::Cancelled => ManagedEndpointError::Cancelled,
-            other => other.into(),
-        })?;
+        close_result?;
         udp_result.map_err(|error| match error {
             QuicUdpEndpointError::Cancelled => ManagedEndpointError::Cancelled,
             other => other.into(),
@@ -1775,6 +1775,67 @@ impl ManagedQuicEndpoint {
             closed_connections
         ));
 
+        Ok(())
+    }
+
+    async fn send_shutdown_closes(
+        &mut self,
+        cx: &Cx,
+        now: Instant,
+    ) -> Result<(), ManagedEndpointError> {
+        let packets = self
+            .connection_router
+            .prepare_shutdown_close_packets(cx, now)
+            .await
+            .map_err(|error| match error {
+                ConnectionRouterError::Cancelled => ManagedEndpointError::Cancelled,
+                other => other.into(),
+            })?;
+        let mut cancel = QuicCancelWake::new(cx);
+        for (packet, deadline) in packets {
+            self.timer_scheduler.cancel_pending();
+            self.timer_scheduler
+                .schedule_timer_bound(cx, deadline)
+                .await
+                .map_err(|error| match error {
+                    ConnectionRouterError::Cancelled => ManagedEndpointError::Cancelled,
+                    other => other.into(),
+                })?;
+            poll_fn(|task_cx| {
+                if cancel.checkpoint(task_cx.waker()).is_err() {
+                    return Poll::Ready(Err(ManagedEndpointError::Cancelled));
+                }
+                // Check before every socket poll, including a resumed blocked send.
+                if matches!(
+                    self.timer_scheduler.poll_timer(task_cx),
+                    Poll::Ready(Some(_))
+                ) {
+                    return Poll::Ready(Err(ManagedEndpointError::UdpEndpoint(
+                        "QUIC close send exceeded drain deadline".to_string(),
+                    )));
+                }
+                match self
+                    .udp_endpoint
+                    .poll_send_batch(cx, task_cx, std::iter::once(&packet))
+                {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Err(error)) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        Poll::Ready(Err(ManagedEndpointError::Cancelled))
+                    }
+                    Poll::Ready(Err(error)) => {
+                        Poll::Ready(Err(ManagedEndpointError::UdpEndpoint(error.to_string())))
+                    }
+                    Poll::Ready(Ok(result)) => Poll::Ready(match result.error {
+                        Some(error) => Err(ManagedEndpointError::UdpEndpoint(error)),
+                        None if result.packets_processed == 1 => Ok(()),
+                        None => Err(ManagedEndpointError::UdpEndpoint(
+                            "QUIC close send made invalid progress".to_string(),
+                        )),
+                    }),
+                }
+            })
+            .await?;
+        }
         Ok(())
     }
 }
@@ -2850,6 +2911,132 @@ mod tests {
             );
             endpoint.shutdown(&cx).await.unwrap();
             assert_eq!(driver.pending_count(), 0);
+        }));
+    }
+
+    #[test]
+    fn shutdown_sends_only_protected_close_and_releases_ownership() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let (cx, _, driver, mut endpoint, peer, cid) = selection_fixture(&owner).await;
+            let address = endpoint.local_addr();
+            endpoint
+                .create_connection_for_testing(
+                    &cx,
+                    ConnectionId::new(b"idle").unwrap(),
+                    peer.local_addr().unwrap(),
+                )
+                .await
+                .unwrap();
+            endpoint.queue_connection_packets(
+                cid,
+                [OutgoingPacket {
+                    dst_addr: peer.local_addr().unwrap(),
+                    data: b"stale application output".to_vec(),
+                    send_time: None,
+                }],
+            );
+            endpoint.shutdown(&cx).await.unwrap();
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+            assert!(endpoint.pending_outgoing.is_empty());
+            assert_eq!(driver.pending_count(), 0);
+            let mut bytes = [0_u8; 1_200];
+            let (length, from) = peer.recv_from(&mut bytes).unwrap();
+            assert_eq!(from, address);
+            let mut verifier = selection_packet_protection(&cx).await;
+            let plaintext = crate::net::quic_native::connection_manager::unprotect_1rtt_packet(
+                &cx,
+                cid,
+                &mut verifier,
+                &bytes[..length],
+            )
+            .await
+            .unwrap()
+            .plaintext;
+            let frames =
+                crate::net::quic_native::NativeQuicConnection::decode_frames(&plaintext).unwrap();
+            assert!(matches!(frames.as_slice(), [
+                crate::net::atp::protocol::quic_frames::QuicFrame::ConnectionClose {
+                    error_code, frame_type: None, reason_phrase,
+                }
+            ] if error_code.value() == 0 && reason_phrase.is_empty()));
+            endpoint.shutdown(&cx).await.unwrap();
+            assert_eq!(
+                peer.recv_from(&mut bytes).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }));
+    }
+
+    #[test]
+    fn shutdown_send_failure_still_retires_connections_and_timer() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            let (cx, _, driver, mut endpoint, peer, _) = selection_fixture(&owner).await;
+            endpoint.udp_endpoint = QuicUdpEndpoint::bind(
+                &cx, "127.0.0.1:0".parse().unwrap(), QuicUdpEndpointConfig {
+                    max_packet_size: 1,
+                    ..QuicUdpEndpointConfig::default()
+                },
+            ).await.unwrap();
+            assert!(matches!(endpoint.shutdown(&cx).await,
+                Err(ManagedEndpointError::UdpEndpoint(message)) if message.contains("exceeds endpoint limit")));
+            assert_eq!(endpoint.connection_stats().active_connections, 0);
+            assert!(!endpoint.timer_scheduler.has_pending_timer());
+            assert_eq!(driver.pending_count(), 0);
+            let mut bytes = [0_u8; 1_200];
+            assert_eq!(peer.recv_from(&mut bytes).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        }));
+    }
+
+    #[test]
+    fn shutdown_is_silent_after_peer_close_or_cancellation() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let owner = Cx::current().unwrap();
+            for cancelled in [false, true] {
+                let (cx, _, driver, mut endpoint, peer, cid) = selection_fixture(&owner).await;
+                if cancelled {
+                    cx.cancel_with(crate::types::CancelKind::User, None);
+                } else {
+                    endpoint
+                        .connection_router
+                        .connection_mut_for_testing(&cx, cid)
+                        .unwrap()
+                        .process_frame(
+                            &cx,
+                            &crate::net::atp::protocol::quic_frames::QuicFrame::ConnectionClose {
+                                error_code: crate::net::atp::protocol::varint::VarInt::new(42)
+                                    .unwrap(),
+                                frame_type: None,
+                                reason_phrase: crate::bytes::Bytes::new(),
+                            },
+                            crate::net::quic_native::PacketNumberSpace::ApplicationData,
+                        )
+                        .unwrap();
+                }
+                let result = endpoint.shutdown(&cx).await;
+                if cancelled {
+                    assert_eq!(result, Err(ManagedEndpointError::Cancelled));
+                } else {
+                    result.unwrap();
+                }
+                assert_eq!(endpoint.connection_stats().active_connections, 0);
+                assert_eq!(driver.pending_count(), 0);
+                let mut bytes = [0_u8; 1_200];
+                assert_eq!(
+                    peer.recv_from(&mut bytes).unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            }
         }));
     }
 
