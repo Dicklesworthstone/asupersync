@@ -789,25 +789,24 @@ impl TlsConnectorBuilder {
 
     /// br-asupersync-sx6j9y — apply the strict-CA gate when the
     /// builder has opted in. Returns `true` to admit the cert,
-    /// `false` to reject it. Always emits a warn-level log on
-    /// rejection so a silent trust bypass cannot occur even when
-    /// the gate fires invisibly.
+    /// `false` to reject it. Logs rejections at warn level when
+    /// tracing integration is enabled.
     #[cfg(feature = "tls")]
     fn admit_root_certificate(&self, cert: &Certificate) -> bool {
         if !self.validate_ca_constraints {
             return true;
         }
         let der = cert.as_der();
-        if is_ca_certificate(der) {
-            return true;
-        }
+        let is_ca = is_ca_certificate(der);
         #[cfg(feature = "tracing-integration")]
-        tracing::warn!(
-            "TLS: rejecting non-CA cert from add_root_certificate / \
-             add_root_certificates — basicConstraints CA:TRUE missing or \
-             absent (br-asupersync-sx6j9y; with_strict_ca_validation is on)"
-        );
-        false
+        if !is_ca {
+            tracing::warn!(
+                "TLS: rejecting non-CA cert from add_root_certificate / \
+                 add_root_certificates — basicConstraints CA:TRUE missing or \
+                 absent (br-asupersync-sx6j9y; with_strict_ca_validation is on)"
+            );
+        }
+        is_ca
     }
 
     /// Fallback for the `tls`-disabled build — strict-CA gate is a no-op

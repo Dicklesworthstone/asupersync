@@ -173,7 +173,7 @@ impl LiveFileSink {
     pub fn publication(&self) -> LiveFilePublication { self.publication.clone() }
 
     fn completed(&mut self, result: io::Result<()>) -> Poll<io::Result<()>> {
-        self.terminal = Some(result.as_ref().map(|()| ()).map_err(|e| (e.kind(), e.raw_os_error())));
+        self.terminal = Some(result.as_ref().copied().map_err(|e| (e.kind(), e.raw_os_error())));
         if let Err(error) = &result {
             self.publication.0.status.lock().error_kind = Some(error.kind());
         }
@@ -278,7 +278,7 @@ fn publish(file: File, publication: &Publication, receipt: &LiveStreamReceipt) -
     file.seek(SeekFrom::Start(0))?;
     let mut hash = Sha256::new();
     let mut remaining = receipt.prefix.bytes;
-    let mut buffer = [0_u8; MAX_LIVE_EPOCH_BYTES];
+    let mut buffer = vec![0_u8; MAX_LIVE_EPOCH_BYTES].into_boxed_slice();
     while remaining != 0 {
         let window = buffer.len().min(usize::try_from(remaining).unwrap_or(usize::MAX));
         let count = file.read(&mut buffer[..window])?;
