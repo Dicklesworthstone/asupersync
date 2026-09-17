@@ -179,6 +179,8 @@ struct Authenticated {
     key: ResumeSessionKey,
     wire: Wire<TlsStream<TcpStream>>,
     offered: Vec<u8>,
+    // A completed handshake can wait uncollected while its socket is still live.
+    _capacity: Arc<Capacity>,
 }
 
 type WorkerResult<W> = Result<(ResumableReceiver<W>, ResumeReport), ResumeServiceRejection>;
@@ -482,7 +484,7 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
                     let frame = bounded(&child, timeout, "shared resume hello", wire.receive()).await?;
                     let offered = expect(&frame, FrameType::Handshake)?;
                     let hello = decode_offer(offered)?;
-                    Ok(Authenticated { key: ResumeSessionKey { client, nonce: hello.nonce }, wire, offered: offered.to_vec() })
+                    Ok(Authenticated { key: ResumeSessionKey { client, nonce: hello.nonce }, wire, offered: offered.to_vec(), _capacity })
                 });
                 future
             });
@@ -581,3 +583,7 @@ impl<W> Drop for ResumableService<W> {
         self.cancel(CancelReason::user("shared resume service dropped"));
     }
 }
+
+#[cfg(test)]
+#[path = "service_tests.rs"]
+mod tests;
