@@ -1127,7 +1127,9 @@ impl NativeQuicUdpConnection {
             QuicConnectionState::Draining => {
                 self.connection.inner().transport().drain_deadline_micros()
             }
-            QuicConnectionState::Closed => return Ok(Duration::ZERO),
+            // Preserve caller-driven idle pacing after expiry. Returning zero
+            // forever would turn an existing drive loop into a busy loop.
+            QuicConnectionState::Closed => return Ok(requested),
             _ => self
                 .connection
                 .inner_mut()
@@ -1571,7 +1573,7 @@ mod tests {
                 client
                     .receive_wait_duration(&cx, Duration::from_secs(1))
                     .unwrap(),
-                Duration::ZERO
+                Duration::from_secs(1)
             );
         });
     }
