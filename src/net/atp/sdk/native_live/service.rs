@@ -22,6 +22,7 @@ use super::{
     Progress, authorize, bounded, check_alpn, checkpoint,
 };
 use super::super::NativeClientCertificateId;
+use super::commit::{FlushOnly, LiveStreamCommitSink};
 use crate::cx::{Cx, Scope};
 use crate::io::AsyncWrite;
 use crate::net::{TcpListener, TcpStream};
@@ -285,6 +286,41 @@ impl LiveStreamService {
         Fut: Future<Output = io::Result<W>> + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        self.next_inner(cx, scope, move |child, peer| {
+            let future = make_sink(child, peer);
+            async move { future.await.map(FlushOnly) }
+        }, false).await
+    }
+
+    /// Accept sinks whose application commit must succeed before final Proof.
+    ///
+    /// Authentication, quotas and completion collection are identical to next.
+    /// The sink factory is still invoked only after mTLS. Once commit begins,
+    /// cancellation/timeout drains it before releasing the worker's credit.
+    /// Inspect LiveStreamError::Commit to distinguish an unconfirmed transaction
+    /// from an acknowledged local commit whose peer Proof could not complete.
+    /// Earlier workers keep their own policy if next and next_committing are mixed.
+    pub async fn next_committing<P, F, Fut, W>(
+        &mut self, cx: &Cx, scope: &Scope<'_, P>, make_sink: F,
+    ) -> Result<Option<LiveStreamCompletion>, LiveStreamError>
+    where
+        P: Policy,
+        F: Fn(Cx, LiveStreamPeer) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = io::Result<W>> + Send + 'static,
+        W: LiveStreamCommitSink + Unpin + Send + 'static,
+    {
+        self.next_inner(cx, scope, make_sink, true).await
+    }
+
+    async fn next_inner<P, F, Fut, W>(
+        &mut self, cx: &Cx, scope: &Scope<'_, P>, make_sink: F, require_commit: bool,
+    ) -> Result<Option<LiveStreamCompletion>, LiveStreamError>
+    where
+        P: Policy,
+        F: Fn(Cx, LiveStreamPeer) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = io::Result<W>> + Send + 'static,
+        W: LiveStreamCommitSink + Unpin + Send + 'static,
+    {
         let mut cancellation = Cancellation { cx, token: None };
         let result = poll_fn(|ctx| {
             self.control.register(ctx.waker());
@@ -328,7 +364,7 @@ impl LiveStreamService {
             let task = cx.spawn_in(scope, move |child| {
                 let future: Pin<Box<dyn Future<Output = LiveStreamSessionReport> + Send>> = Box::pin(async move {
                     let _capacity = capacity;
-                    serve_connection(&receiver, &child, tcp, address, factory).await
+                    serve_connection(&receiver, &child, tcp, address, factory, require_commit).await
                 });
                 future
             });
@@ -413,11 +449,12 @@ async fn serve_connection<F, Fut, W>(
     tcp: TcpStream,
     address: SocketAddr,
     make_sink: F,
+    require_commit: bool,
 ) -> LiveStreamSessionReport
 where
     F: FnOnce(Cx, LiveStreamPeer) -> Fut,
     Fut: Future<Output = io::Result<W>>,
-    W: AsyncWrite + Unpin,
+    W: LiveStreamCommitSink + Unpin,
 {
     let mut progress = Progress::default();
     let mut peer = None;
@@ -435,7 +472,7 @@ where
         peer = Some(authenticated);
         checkpoint(cx)?;
         let mut sink = bounded(cx, timeout, "sink creation", make_sink(cx.clone(), authenticated)).await?;
-        receiver.receive_authenticated(cx, tls, &mut sink, &mut progress).await
+        receiver.receive_authenticated_with_commit(cx, tls, &mut sink, &mut progress, require_commit).await
     }.await;
     LiveStreamSessionReport { peer, transfer: progress.report(outcome) }
 }
