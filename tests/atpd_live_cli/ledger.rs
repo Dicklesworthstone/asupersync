@@ -560,3 +560,6 @@ fn durable_receipt_failure_does_not_erase_publication_or_emit_successful_proof()
     assert_eq!(fixture.entries(), before);
     stop(&mut receiver);
 }
+
+#[path = "revocation_policy.rs"]
+mod revocation_policy;
