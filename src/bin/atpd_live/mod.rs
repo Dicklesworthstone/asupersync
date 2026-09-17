@@ -29,7 +29,7 @@ use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use settings::{SendConfig, ServeConfig, hex, invalid};
 
@@ -105,15 +105,20 @@ fn serve(config: ServeConfig) -> io::Result<()> {
     let receiver = sdk.live_stream_receiver(profile, settings::identity(&config.identity)?, authorization)
         .map_err(|_| invalid("invalid authenticated receiver configuration"))?;
     let inboxes = Arc::new(storage::load(&config.clients)?);
-    // Keep the exclusive directory locks until AFTER runtime/blocking-pool drain.
-    let retained_inboxes = Arc::clone(&inboxes);
+    INBOX_OWNERSHIP.set(Arc::clone(&inboxes))
+        .map_err(|_| io::Error::other("foreground process already owns inboxes"))?;
     let signals = Signals::new([SIGINT, SIGTERM])?;
     let workers = config.workers;
-    let result = runtime(workers, serve_loop(config, receiver, inboxes, signals));
-    drop(retained_inboxes);
-    result?;
+    runtime(workers, serve_loop(config, receiver, inboxes, signals))?;
     emit(json!({"schema_version": 1, "event": "stopped", "drained": true}))
 }
+
+// This is a foreground process, not a reusable library owner. Keep each
+// exclusive inbox lock until the OS tears down the process, even when runtime
+// shutdown cannot confirm that its blocking workers finished. Static storage
+// is intentional: returning an error must not open a second writer's admission
+// window while an old started filesystem call can still publish.
+static INBOX_OWNERSHIP: OnceLock<Arc<storage::Inboxes>> = OnceLock::new();
 
 type Publications = Arc<Mutex<BTreeMap<SocketAddr, LiveFilePublication>>>;
 
