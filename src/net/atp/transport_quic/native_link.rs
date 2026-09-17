@@ -5006,7 +5006,6 @@ impl QuicLink {
         } else {
             decoded_frames
         };
-        let acked_stream_ranges = acked_packet_ranges_from_frames(process_frames)?;
         self.clock = self.clock.saturating_add(CLOCK_STEP_MICROS);
         match self.conn.process_packet_frames(
             cx,
@@ -5016,6 +5015,17 @@ impl QuicLink {
             self.clock,
         ) {
             Ok(()) => {
+                if matches!(
+                    self.conn.state(),
+                    crate::net::quic_native::QuicConnectionState::Draining
+                        | crate::net::quic_native::QuicConnectionState::Closed
+                ) {
+                    // Core processing stops at CONNECTION_CLOSE. Do not parse
+                    // trailing ACKs, resurrect an ACK after DATAGRAM shedding,
+                    // or account frames that the connection never accepted.
+                    return Ok(InboundPacketDisposition::Applied);
+                }
+                let acked_stream_ranges = acked_packet_ranges_from_frames(process_frames)?;
                 if shed_datagram_frames {
                     // The packet itself was received and authenticated; only
                     // its DATAGRAM payload was shed. Acknowledge it so the

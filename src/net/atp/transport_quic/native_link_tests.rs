@@ -19,6 +19,146 @@ mod tests {
     }
 
     #[test]
+    fn peer_close_ignores_tail_and_shed_datagram_ack_over_real_udp() {
+        use crate::net::atp::protocol::varint::VarInt;
+        use crate::net::quic_native::handshake_driver::tests::{
+            CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert,
+        };
+        use crate::net::quic_native::handshake_driver::{client_config, server_config};
+        use futures_lite::future::{block_on, zip};
+
+        block_on(async {
+            for fill_datagram_queue in [false, true] {
+                let cx = Cx::for_testing();
+                let config = QuicConfig::default();
+                let endpoint = bind_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
+                    .await
+                    .unwrap();
+                let address = endpoint.local_addr();
+                let client_tls = QuicClientTls {
+                    server_name: ServerName::try_from("localhost").unwrap(),
+                    config: client_config(
+                        vec![parse_one_cert(CA_CERT_PEM)],
+                        vec![ATP_QUIC_ALPN.to_vec()],
+                    )
+                    .unwrap(),
+                };
+                let server_tls = QuicServerTls {
+                    config: server_config(
+                        vec![parse_one_cert(LEAF_CERT_PEM)],
+                        leaf_key(),
+                        vec![ATP_QUIC_ALPN.to_vec()],
+                    )
+                    .unwrap(),
+                };
+                let (client, server) = zip(
+                    connect(&cx, address, &client_tls, &config),
+                    accept(&cx, endpoint, &server_tls, &config),
+                )
+                .await;
+                let mut client = client.unwrap();
+                let (mut server, early) = server.unwrap();
+                server.ingest_packets(&cx, early).unwrap();
+                if fill_datagram_queue {
+                    while server.conn.inbound_datagram_remaining_capacity() > 0 {
+                        server
+                            .conn
+                            .process_frame(
+                                &cx,
+                                &QuicFrame::Datagram {
+                                    data: Bytes::from_static(b"queued"),
+                                },
+                                PacketNumberSpace::ApplicationData,
+                            )
+                            .unwrap();
+                    }
+                }
+                let prior_datagrams = server.conn.datagrams_received();
+                server
+                    .conn
+                    .generate_frames(&cx, PacketNumberSpace::ApplicationData, 65535)
+                    .unwrap();
+                assert!(!server.conn.has_pending_control_frames());
+
+                // The malformed ACK is encoded correctly but has an invalid
+                // range. It must not be interpreted after the peer close, by
+                // either core processing or the adapter's recovery accounting.
+                let frames = [
+                    QuicFrame::ConnectionClose {
+                        error_code: VarInt(42),
+                        frame_type: None,
+                        reason_phrase: Bytes::new(),
+                    },
+                    QuicFrame::Datagram {
+                        data: Bytes::from_static(b"ignored"),
+                    },
+                    QuicFrame::PathChallenge { data: [9; 8] },
+                    QuicFrame::Ack {
+                        largest_acknowledged: VarInt(0),
+                        ack_delay: VarInt(0),
+                        ack_range_count: VarInt(0),
+                        first_ack_range: VarInt(1),
+                        ack_ranges: Vec::new(),
+                        ecn_counts: None,
+                    },
+                ];
+                let mut payload = BytesMut::new();
+                for frame in &frames {
+                    frame.encode(&mut payload).unwrap();
+                }
+                let header = encode_one_rtt_header(10, false);
+                let request = PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 10,
+                    associated_data: &header,
+                    payload: &payload,
+                };
+                let protected =
+                    protection_result(client.protection.protect_packets(&cx, &[request]))
+                        .unwrap()
+                        .pop()
+                        .unwrap();
+                let mut data = header.to_vec();
+                data.extend_from_slice(&protected.ciphertext);
+                data.extend_from_slice(&protected.tag);
+                client
+                    .endpoint
+                    .send_batch(
+                        &cx,
+                        &[OutgoingPacket {
+                            dst_addr: address,
+                            data,
+                            send_time: None,
+                        }],
+                    )
+                    .await
+                    .unwrap();
+                let received = crate::time::timeout(
+                    crate::time::wall_now(),
+                    Duration::from_secs(10),
+                    server.endpoint.receive_batch(&cx, 1),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(received.len(), 1);
+                let report = server
+                    .ingest_packets(&cx, received)
+                    .expect("peer close accepted");
+                assert_eq!(report.packets_consumed, 1);
+                assert_eq!(report.one_rtt_packets_processed, 1);
+                assert!(server.conn.close_was_peer_initiated());
+                assert_eq!(server.conn.transport().close_code(), Some(42));
+                assert_eq!(server.conn.datagrams_received(), prior_datagrams);
+                assert!(!server.conn.has_pending_control_frames());
+                assert!(server.pending_decoded_packets.is_empty());
+                assert!(server.pending_received_packets.is_empty());
+            }
+        });
+    }
+
+    #[test]
     fn reassembly_backpressure_drops_without_parking_or_ack_over_real_udp() {
         use crate::net::atp::protocol::varint::VarInt;
         use crate::net::quic_native::handshake_driver::tests::{
