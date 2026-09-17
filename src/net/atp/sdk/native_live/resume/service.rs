@@ -11,8 +11,10 @@
 //! until service shutdown, so a late reconnect cannot recreate committed effects.
 //! There is no automatic eviction, process-crash recovery, or hidden retry.
 
+#[cfg(test)]
+use super::Credit;
 use super::{
-    Budget, Credit, RESUMABLE_LIVE_ALPN, ResumableReceiver, ResumeError, ResumeReport,
+    RESUMABLE_LIVE_ALPN, ResumeError, ResumeReport,
     decode_offer, peer_certificate, validate_attempts,
 };
 use super::super::super::{
@@ -26,7 +28,6 @@ use crate::net::{TcpListener, TcpStream};
 use crate::runtime::{JoinError, SpawnError, TaskHandle};
 use crate::tls::{TlsAcceptor, TlsStream};
 use crate::types::{CancelReason, Policy};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::{Future, poll_fn};
@@ -35,6 +36,11 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+
+#[path = "restoration.rs"]
+mod restoration;
+pub use restoration::ResumeSessionInit;
+use restoration::ServiceReceiver;
 
 /// Exact client identity plus stream continuity identifier. A nonce is not authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -169,7 +175,7 @@ pub enum ResumeRetireError {
 }
 
 struct Entry<W> {
-    receiver: Option<ResumableReceiver<W>>,
+    receiver: Option<ServiceReceiver<W>>,
     status: ResumeSessionStatus,
     snapshot: Option<ResumeSessionSnapshot>,
 }
@@ -183,7 +189,7 @@ struct Authenticated {
     _capacity: Arc<Capacity>,
 }
 
-type WorkerResult<W> = Result<(ResumableReceiver<W>, ResumeReport), ResumeServiceRejection>;
+type WorkerResult<W> = Result<(ServiceReceiver<W>, ResumeReport), ResumeServiceRejection>;
 enum JobKind<W> {
     Handshake(TaskHandle<Result<Authenticated, ResumeError>>),
     Transfer { key: ResumeSessionKey, task: TaskHandle<WorkerResult<W>> },
@@ -366,7 +372,7 @@ impl<W> ResumableService<W> {
                 entry.snapshot = Some(ResumeSessionSnapshot {
                     prefix: report.prefix.clone(), completed: report.completed.clone(),
                     attempts: report.attempts, sink_written_bytes: report.sink_written_bytes,
-                    failed: receiver.failed,
+                    failed: receiver.failed(),
                 });
                 // Keep even failed sinks until explicit retirement: their destructor
                 // may own application cleanup, and snapshots must not imply rollback.
@@ -430,6 +436,30 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
         P: Policy,
         F: Fn(Cx, ResumeSessionKey) -> Fut + Clone + Send + Sync + 'static,
         Fut: Future<Output = io::Result<W>> + Send + 'static,
+    {
+        self.next_restoring(cx, scope, move |child, key| {
+            let future = make_sink(child, key);
+            async move { future.await.map(ResumeSessionInit::Fresh) }
+        }).await
+    }
+
+    /// Route either a new sink or an application-validated historical receipt.
+    ///
+    /// The factory executes once after fresh mTLS and bounded key admission,
+    /// under the same operation deadline as sink creation. Committed decisions
+    /// restore only final-Proof exchange: no epoch, sink write or commit runs.
+    /// The application must validate protected history before returning one.
+    /// Unresolved claims must remain errors, not fresh or completed sessions.
+    /// Recovered reports mark receipt_reused and record zero new sink writes.
+    /// All connection, resident, per-client, key, attempt and drain limits apply.
+    /// Changing the factory cannot resurrect an already retired or failed key.
+    pub async fn next_restoring<P, F, Fut>(
+        &mut self, cx: &Cx, scope: &Scope<'_, P>, make_sink: F,
+    ) -> Result<Option<ResumeServiceCompletion>, LiveStreamError>
+    where
+        P: Policy,
+        F: Fn(Cx, ResumeSessionKey) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = io::Result<ResumeSessionInit<W>>> + Send + 'static,
     {
         let mut cancellation = Cancellation { cx, token: None };
         poll_fn(|ctx| {
@@ -504,7 +534,7 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
     where
         P: Policy,
         F: Fn(Cx, ResumeSessionKey) -> Fut + Send + 'static,
-        Fut: Future<Output = io::Result<W>> + Send + 'static,
+        Fut: Future<Output = io::Result<ResumeSessionInit<W>>> + Send + 'static,
     {
         if self.listener.is_none() { return Err(ResumeServiceRejection::Stopping); }
         let key = auth.key;
@@ -515,8 +545,8 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
                 ResumeSessionStatus::Idle => {}
             }
             let receiver = entry.receiver.as_mut().expect("idle session owner");
-            if receiver.failed { return Err(ResumeServiceRejection::Connection(ResumeError::LocalFailure)); }
-            if receiver.budget.used >= receiver.budget.maximum { return Err(ResumeServiceRejection::AttemptsExhausted); }
+            if receiver.failed() { return Err(ResumeServiceRejection::Connection(ResumeError::LocalFailure)); }
+            if !receiver.has_attempts() { return Err(ResumeServiceRejection::AttemptsExhausted); }
             entry.status = ResumeSessionStatus::Active;
             entry.receiver.take()
         } else {
@@ -540,28 +570,14 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
                     Some(receiver) => receiver,
                     None => {
                         authorize(&child).map_err(ResumeServiceRejection::Factory)?;
-                        let sink = bounded(&child, config.operation_timeout, "resume sink creation", factory(child.clone(), key))
+                        let initialized = bounded(&child, config.operation_timeout, "resume sink creation", factory(child.clone(), key))
                             .await.map_err(ResumeServiceRejection::Factory)?;
-                        ResumableReceiver {
-                            sink, listener: None, acceptor, expected_client: key.client, config,
-                            offered: None, agreed: None, prefix: None, hash: Sha256::new(), pending: None,
-                            sink_written_bytes: 0, final_receipt: None, commit_started: false, completed: None,
-                            failed: false, budget: Budget { used: 0, maximum,
-                                _credit: Credit::Shared { _capacity: Arc::clone(&_capacity) } },
-                        }
+                        ServiceReceiver::new(initialized, key, acceptor, config, maximum, Arc::clone(&_capacity))
+                            .map_err(ResumeServiceRejection::Factory)?
                     }
                 };
-                let reused = receiver.completed.is_some();
                 let mut auth = auth;
-                let outcome = match authorize(&child).map_err(ResumeError::from).and_then(|()| receiver.budget.take()) {
-                    Ok(()) => receiver.receive_wire(&child, &mut auth.wire, &auth.offered).await,
-                    Err(error) => Err(error),
-                };
-                let report = ResumeReport {
-                    outcome, prefix: receiver.prefix.clone(), attempts: receiver.budget.used, receipt_reused: reused,
-                    retained_epoch_bytes: receiver.pending.as_ref().map_or(0, |epoch| epoch.bytes().len()),
-                    sink_written_bytes: receiver.sink_written_bytes, completed: receiver.completed.clone(),
-                };
+                let report = receiver.attempt(&child, &mut auth.wire, &auth.offered).await;
                 Ok((receiver, report))
             });
             future
