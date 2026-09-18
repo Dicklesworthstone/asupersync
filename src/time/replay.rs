@@ -25,6 +25,9 @@ use std::fmt;
 use std::sync::Arc;
 use zeroize::Zeroize;
 
+mod codec;
+pub use codec::{TimeTapeBytes, TimeTapeDecodeLimits, TimeTapeError};
+
 /// Why a complete clock-observation window cannot be extracted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
