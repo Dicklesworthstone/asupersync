@@ -6,7 +6,7 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
-fn drive<F: Future>(future: F) -> F::Output {
+pub(super) fn drive<F: Future>(future: F) -> F::Output {
     let mut future = std::pin::pin!(future);
     let mut cx = Context::from_waker(Waker::noop());
     for _ in 0..1000 {
@@ -112,7 +112,7 @@ fn capture() -> RecordingSession<TestIo, TestClock> {
 
 // The SAME consumer runs against live providers and replay providers. Its
 // request depends on BOTH entropy and time; writes are accepted in short chunks.
-fn exchange<'a, I, E, C>(
+pub(super) fn exchange<'a, I, E, C>(
     io: &'a mut I,
     entropy: &'a E,
     clock: &'a C,

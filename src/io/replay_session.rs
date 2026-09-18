@@ -297,5 +297,11 @@ impl ReplaySession {
     }
 }
 
+mod codec;
+pub use codec::{SessionBytes, SessionDecodeLimits, SessionTapeError};
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod http_tests;
