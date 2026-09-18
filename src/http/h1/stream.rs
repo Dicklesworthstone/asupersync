@@ -3036,12 +3036,17 @@ mod tests {
         drop(body);
 
         assert!(writer.consumer_dropped());
+        // br-asupersync-hw83se: push_bytes now RETAINS "hello" on a consumer
+        // drop, so the follow-up discard supplies only the next pipelined
+        // request — re-passing "hello" here would double-buffer it. (The exact
+        // driver Path B — push then discard_bytes(&[]) — is covered by
+        // incoming_body_consumer_drop_during_push_retains_bytes_for_empty_discard.)
         let error = block_on(writer.push_bytes(&cx, b"hello"))
             .expect_err("driver must observe early consumer drop");
         assert_eq!(error, IncomingBodyError::ConsumerDropped);
 
         let progress = writer
-            .discard_bytes(b"helloGET /next HTTP/1.1\r\n")
+            .discard_bytes(b"GET /next HTTP/1.1\r\n")
             .expect("bounded discard keeps framing synchronized");
         assert_eq!(progress.frames, 1);
         assert_eq!(progress.bytes, 5);
