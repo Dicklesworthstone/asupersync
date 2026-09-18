@@ -75,6 +75,9 @@ pub enum ResumeError {
     /// A write-ahead sender journal failed or was interrupted before transmission.
     #[error(transparent)]
     Journal(#[from] Box<journal::SenderCheckpointPersistError>),
+    /// Receiver persistence failed or was interrupted before the next acknowledgment.
+    #[error(transparent)]
+    ReceiverJournal(#[from] Box<receiver_journal::ReceiverCheckpointPersistError>),
 }
 
 /// Snapshot after an attempt; a prefix alone is never whole-stream success.
@@ -569,7 +572,6 @@ impl<W> fmt::Debug for ResumableReceiver<W> {
             .field("attempts", &self.budget.used)
             .field("sink_written_bytes", &self.sink_written_bytes)
             .field("completed", &self.completed.is_some())
-            .field("failed", &self.failed)
             .finish_non_exhaustive()
     }
 }
@@ -684,7 +686,18 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
     }
 
     async fn receive_inner(&mut self, cx: &Cx) -> Result<LiveStreamReceipt, ResumeError> {
+        self.receive_inner_checkpointed(cx, None).await
+    }
+
+    async fn receive_inner_checkpointed(
+        &mut self,
+        cx: &Cx,
+        mut journal: receiver_journal::Store<'_>,
+    ) -> Result<LiveStreamReceipt, ResumeError> {
         let timeout = self.config.operation_timeout;
+        if self.agreed.is_some() {
+            self.checkpoint_boundary(cx, &mut journal).await?;
+        }
         let listener = self.listener.as_ref().expect("standalone resume listener");
         let (tcp, _) = bounded(cx, timeout, "resume accept", listener.accept()).await?;
         let tls = bounded(cx, timeout, "resume TLS", self.acceptor.accept(tcp)).await?;
@@ -694,7 +707,7 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
         let mut wire = Wire::new(tls);
         let hello = bounded(cx, timeout, "resume hello read", wire.receive()).await?;
         let offered = expect(&hello, FrameType::Handshake)?;
-        self.receive_wire(cx, &mut wire, offered).await
+        self.receive_wire_checkpointed(cx, &mut wire, offered, journal).await
     }
 
     // Shared protocol owner. Callers have authenticated TLS and bound the full
@@ -704,6 +717,16 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
         cx: &Cx,
         wire: &mut Wire<TlsStream<TcpStream>>,
         offered: &[u8],
+    ) -> Result<LiveStreamReceipt, ResumeError> {
+        self.receive_wire_checkpointed(cx, wire, offered, None).await
+    }
+
+    async fn receive_wire_checkpointed(
+        &mut self,
+        cx: &Cx,
+        wire: &mut Wire<TlsStream<TcpStream>>,
+        offered: &[u8],
+        mut journal: receiver_journal::Store<'_>,
     ) -> Result<LiveStreamReceipt, ResumeError> {
         let timeout = self.config.operation_timeout;
         let mut agreed = decode_offer(offered)?;
@@ -718,6 +741,7 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
             self.agreed = Some(agreed);
             self.offered = Some(offered.to_vec());
         }
+        self.checkpoint_boundary(cx, &mut journal).await?;
         let mut state = offer(self.agreed.as_ref().expect("agreed session"));
         state.extend_from_slice(&encode_prefix(self.prefix.as_ref().expect("agreed prefix")));
         state.extend_from_slice(&digest(&self.hash));
@@ -742,7 +766,11 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
                     return Err(ResumeError::Continuity("wrong final commitment"));
                 }
                 self.final_receipt = Some(receipt.clone());
+                // Persist uncertainty before invoking any application publication.
+                self.checkpoint_boundary(cx, &mut journal).await?;
                 self.finalize(cx).await?;
+                // A Proof cannot overtake the durable successful-commit observation.
+                self.checkpoint_boundary(cx, &mut journal).await?;
                 let proof = bounded(
                     cx,
                     timeout,
@@ -775,6 +803,8 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
                     written: 0,
                 });
             }
+            // Retain the exact pending epoch before its first possible sink write.
+            self.checkpoint_boundary(cx, &mut journal).await?;
             bounded(
                 cx,
                 timeout,
@@ -782,6 +812,8 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
                 poll_fn(|ctx| self.poll_epoch(ctx)),
             )
             .await?;
+            // The store synchronizes sink bytes before recording this prefix.
+            self.checkpoint_boundary(cx, &mut journal).await?;
             let prefix = encode_prefix(self.prefix.as_ref().expect("completed epoch"));
             bounded(
                 cx,
@@ -921,3 +953,7 @@ pub mod finalization;
 /// Write-ahead epoch checkpoints and replayable-source sender restart.
 #[path = "resume/journal.rs"]
 pub mod journal;
+
+/// Write-ahead receiver checkpoints and verified partial-sink restoration.
+#[path = "resume/receiver_journal.rs"]
+pub mod receiver_journal;
