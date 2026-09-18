@@ -13,6 +13,7 @@ use crate::net::TcpStream;
 use crate::net::atp::sdk::native_auth::live::commit::LiveStreamCommitSink;
 use crate::net::atp::sdk::native_auth::live::{LiveStreamConfig, LiveStreamError, Wire, authorize};
 use crate::tls::{TlsAcceptor, TlsStream};
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::Arc;
@@ -123,7 +124,7 @@ impl<W> JournaledSession<W> {
             receiver.budget.used = saved.used;
             receiver.budget.maximum = saved.maximum;
         }
-        Ok(JournaledReceiver { receiver, store })
+        Ok(JournaledReceiver { receiver, store: Mutex::new(store) })
     }
 }
 
@@ -162,7 +163,10 @@ fn validate_binding(
 
 pub(in super::super) struct JournaledReceiver<W> {
     pub(in super::super) receiver: ResumableReceiver<W>,
-    store: Box<dyn ReceiverCheckpointStore + Send + Unpin>,
+    // A store need not be Sync. Its exclusively borrowed owner must not remove
+    // Sync from otherwise Sync service instantiations. get_mut needs no lock
+    // and never carries a mutex guard across a persistence await.
+    store: Mutex<Box<dyn ReceiverCheckpointStore + Send + Unpin>>,
 }
 
 impl<W: LiveStreamCommitSink + Unpin> JournaledReceiver<W> {
@@ -182,7 +186,7 @@ impl<W: LiveStreamCommitSink + Unpin> JournaledReceiver<W> {
                 .and_then(|()| receiver.budget.take())
             {
                 Ok(()) => {
-                    let mut store: super::Store<'_> = Some(&mut *self.store);
+                    let mut store: super::Store<'_> = Some(&mut **self.store.get_mut());
                     // Charge an existing session's authenticated routed attempt
                     // durably before checking a possibly changed offer or replying.
                     let checkpoint = if receiver.agreed.is_some() {
