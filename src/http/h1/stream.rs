@@ -1139,6 +1139,24 @@ impl IncomingRequestBodyWriter {
         }
         if self.shared.consumer_dropped() {
             self.sender.take();
+            // br-asupersync-hw83se: the driver handed us these bytes because it
+            // saw a live consumer, then called `push_bytes` rather than
+            // `discard_bytes`; if the consumer dropped in that window, retain
+            // the bytes (bounded by the buffer cap) so the driver's follow-up
+            // `discard_bytes(&[])` can still decode this body's framing and the
+            // start of the next pipelined request. Returning here without
+            // buffering silently lost them and desynchronized the keep-alive
+            // connection. Best-effort under the cap: an over-cap chunk is not
+            // retained (the connection is closing regardless).
+            if !data.is_empty()
+                && self
+                    .buffer
+                    .len()
+                    .checked_add(data.len())
+                    .is_some_and(|total| total <= self.max_buffered_bytes)
+            {
+                self.buffer.extend_from_slice(data);
+            }
             return Err(IncomingBodyError::ConsumerDropped);
         }
         if self.done {
@@ -3025,6 +3043,37 @@ mod tests {
         let progress = writer
             .discard_bytes(b"helloGET /next HTTP/1.1\r\n")
             .expect("bounded discard keeps framing synchronized");
+        assert_eq!(progress.frames, 1);
+        assert_eq!(progress.bytes, 5);
+        assert!(progress.synchronized_eof);
+        assert_eq!(writer.take_remainder().as_ref(), b"GET /next HTTP/1.1\r\n");
+    }
+
+    #[test]
+    fn incoming_body_consumer_drop_during_push_retains_bytes_for_empty_discard() {
+        // br-asupersync-hw83se: reproduces the real driver's Path B. The driver
+        // saw a live consumer, so it called `push_bytes` (not `discard_bytes`)
+        // with the read chunk it had `mem::take`n from its buffer — the only
+        // copy. If the consumer dropped during that call, `push_bytes` returns
+        // ConsumerDropped and the driver follows up with `discard_bytes(&[])`
+        // (the EMPTY slice — it already handed the bytes over). Recovery must
+        // therefore come from what `push_bytes` retained. Before the fix it
+        // retained nothing, so the body framing AND the start of the next
+        // pipelined request were lost, desynchronizing the keep-alive stream.
+        let cx = Cx::for_testing();
+        let (mut writer, body) = IncomingRequestBody::channel(&cx, BodyKind::ContentLength(5));
+        drop(body);
+        assert!(writer.consumer_dropped());
+
+        // The driver's `input` carries this body's bytes plus the next request.
+        let error = block_on(writer.push_bytes(&cx, b"helloGET /next HTTP/1.1\r\n"))
+            .expect_err("driver must observe the consumer drop");
+        assert_eq!(error, IncomingBodyError::ConsumerDropped);
+
+        // Exactly what the driver does next: discard with the EMPTY slice.
+        let progress = writer
+            .discard_bytes(b"")
+            .expect("retained bytes keep framing synchronized under an empty discard");
         assert_eq!(progress.frames, 1);
         assert_eq!(progress.bytes, 5);
         assert!(progress.synchronized_eof);
