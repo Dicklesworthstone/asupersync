@@ -8,11 +8,10 @@
 //! receipt. Partial receiver state and pre-EOF sender state are not restored.
 
 use super::{
-    Budget, Credit, Hello, LiveStreamConfig, LiveStreamError, LiveStreamPrefix,
-    LiveStreamReceipt, LiveStreamSender, OFFER_BYTES, RESUMABLE_LIVE_ALPN,
-    RESUME_BYTES, ResumableSender, ResumeError, ResumeReport, Wire, authorize,
-    bounded, decode_offer, encode_final, expect, initial, offer, peer_certificate,
-    validate_attempts,
+    Budget, Credit, Hello, LiveStreamConfig, LiveStreamError, LiveStreamPrefix, LiveStreamReceipt,
+    LiveStreamSender, OFFER_BYTES, RESUMABLE_LIVE_ALPN, RESUME_BYTES, ResumableSender, ResumeError,
+    ResumeReport, Wire, authorize, bounded, decode_offer, encode_final, expect, initial, offer,
+    peer_certificate, validate_attempts,
 };
 use crate::cx::Cx;
 use crate::io::AsyncRead;
@@ -62,20 +61,31 @@ pub struct FinalProofCheckpoint {
 
 impl fmt::Debug for FinalProofCheckpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FinalProofCheckpoint").finish_non_exhaustive()
+        f.debug_struct("FinalProofCheckpoint")
+            .finish_non_exhaustive()
     }
 }
 
 impl FinalProofCheckpoint {
     pub(super) fn capture<R>(sender: &ResumableSender<R>) -> Result<Self, ResumeError> {
         let agreed = sender.agreed.as_ref().ok_or(ResumeError::LocalFailure)?;
-        let receipt = sender.final_receipt.clone().ok_or(ResumeError::LocalFailure)?;
-        if sender.failed || sender.pending.is_some() || sender.prefix.as_ref() != Some(&receipt.prefix) {
+        let receipt = sender
+            .final_receipt
+            .clone()
+            .ok_or(ResumeError::LocalFailure)?;
+        if sender.failed
+            || sender.pending.is_some()
+            || sender.prefix.as_ref() != Some(&receipt.prefix)
+        {
             return Err(ResumeError::LocalFailure);
         }
         let saved = Self {
-            offered: offer(&sender.offered).try_into().map_err(|_| ResumeError::LocalFailure)?,
-            agreed: offer(agreed).try_into().map_err(|_| ResumeError::LocalFailure)?,
+            offered: offer(&sender.offered)
+                .try_into()
+                .map_err(|_| ResumeError::LocalFailure)?,
+            agreed: offer(agreed)
+                .try_into()
+                .map_err(|_| ResumeError::LocalFailure)?,
             receipt,
             server_certificate: sender.peer.ok_or(ResumeError::PeerIdentity)?,
             remote: sender.remote,
@@ -87,25 +97,36 @@ impl FinalProofCheckpoint {
 
     /// Actual data length/hash/chain to finalize. This is NOT peer acknowledgment.
     #[must_use]
-    pub fn intent(&self) -> &LiveStreamReceipt { &self.receipt }
+    pub fn intent(&self) -> &LiveStreamReceipt {
+        &self.receipt
+    }
 
     /// Original explicit destination. Restoring additionally requires caller agreement.
     #[must_use]
-    pub const fn remote(&self) -> SocketAddr { self.remote }
+    pub const fn remote(&self) -> SocketAddr {
+        self.remote
+    }
 
     fn validate(&self) -> io::Result<Hello> {
         let offered = decode_offer(&self.offered).map_err(|_| invalid())?;
         let agreed = decode_offer(&self.agreed).map_err(|_| invalid())?;
         let prefix = &self.receipt.prefix;
-        if offered.nonce != agreed.nonce || prefix.stream_nonce != agreed.nonce
-            || agreed.epoch_bytes > offered.epoch_bytes || agreed.max_bytes > offered.max_bytes
-            || prefix.bytes > agreed.max_bytes || prefix.epochs > prefix.bytes
+        if offered.nonce != agreed.nonce
+            || prefix.stream_nonce != agreed.nonce
+            || agreed.epoch_bytes > offered.epoch_bytes
+            || agreed.max_bytes > offered.max_bytes
+            || prefix.bytes > agreed.max_bytes
+            || prefix.epochs > prefix.bytes
             || (prefix.epochs == 0) != (prefix.bytes == 0)
             || prefix.bytes > prefix.epochs.saturating_mul(agreed.epoch_bytes as u64)
-            || self.domain.is_empty() || self.domain.len() > MAX_NAME_BYTES
-            || !self.domain.is_ascii() || self.remote.port() == 0
+            || self.domain.is_empty()
+            || self.domain.len() > MAX_NAME_BYTES
+            || !self.domain.is_ascii()
+            || self.remote.port() == 0
             || ServerName::try_from(self.domain.clone()).is_err()
-        { return Err(invalid()); }
+        {
+            return Err(invalid());
+        }
         if prefix.bytes == 0 {
             let empty: [u8; 32] = Sha256::digest(b"").into();
             if *prefix != initial(&agreed) || self.receipt.source_sha256 != empty {
@@ -152,19 +173,26 @@ impl FinalProofCheckpoint {
         }
         let body = bytes.len() - 32;
         let name_len = usize::from(u16::from_be_bytes([bytes[267], bytes[268]]));
-        if &bytes[..8] != MAGIC || name_len == 0 || name_len > MAX_NAME_BYTES
-            || body != FIXED_BYTES + name_len || bytes[body..] != checksum(&bytes[..body])
-        { return Err(invalid()); }
+        if &bytes[..8] != MAGIC
+            || name_len == 0
+            || name_len > MAX_NAME_BYTES
+            || body != FIXED_BYTES + name_len
+            || bytes[body..] != checksum(&bytes[..body])
+        {
+            return Err(invalid());
+        }
         let offered: [u8; OFFER_BYTES] = bytes[8..68].try_into().map_err(|_| invalid())?;
         let agreed: [u8; OFFER_BYTES] = bytes[68..128].try_into().map_err(|_| invalid())?;
         let hello = decode_offer(&agreed).map_err(|_| invalid())?;
-        let number = |start| u64::from_be_bytes(bytes[start..start + 8].try_into().expect("bounded field"));
+        let number =
+            |start| u64::from_be_bytes(bytes[start..start + 8].try_into().expect("bounded field"));
         let address = &bytes[240..267];
         let port = u16::from_be_bytes([address[17], address[18]]);
         let remote = match address[0] {
-            4 if address[5..17] == [0; 12] && address[19..27] == [0; 8] => {
-                SocketAddr::from((Ipv4Addr::new(address[1], address[2], address[3], address[4]), port))
-            }
+            4 if address[5..17] == [0; 12] && address[19..27] == [0; 8] => SocketAddr::from((
+                Ipv4Addr::new(address[1], address[2], address[3], address[4]),
+                port,
+            )),
             6 => {
                 let octets: [u8; 16] = address[1..17].try_into().map_err(|_| invalid())?;
                 let flow = u32::from_be_bytes(address[19..23].try_into().expect("bounded flow"));
@@ -174,27 +202,37 @@ impl FinalProofCheckpoint {
             _ => return Err(invalid()),
         };
         let saved = Self {
-            offered, agreed, remote,
+            offered,
+            agreed,
+            remote,
             receipt: LiveStreamReceipt {
                 prefix: LiveStreamPrefix {
                     stream_nonce: hello.nonce,
-                    epochs: number(128), bytes: number(136),
+                    epochs: number(128),
+                    bytes: number(136),
                     chain: bytes[144..176].try_into().map_err(|_| invalid())?,
                 },
                 source_sha256: bytes[176..208].try_into().map_err(|_| invalid())?,
             },
             server_certificate: bytes[208..240].try_into().map_err(|_| invalid())?,
-            domain: std::str::from_utf8(&bytes[FIXED_BYTES..body]).map_err(|_| invalid())?.to_owned(),
+            domain: std::str::from_utf8(&bytes[FIXED_BYTES..body])
+                .map_err(|_| invalid())?
+                .to_owned(),
         };
         saved.validate()?;
         Ok(saved)
     }
 
     fn check_remote_state(&self, state: &[u8]) -> Result<(), ResumeError> {
-        if state.len() != RESUME_BYTES || state[..OFFER_BYTES] != self.agreed
+        if state.len() != RESUME_BYTES
+            || state[..OFFER_BYTES] != self.agreed
             || state[OFFER_BYTES..RESUME_BYTES - 1] != encode_final(&self.receipt)
             || state[RESUME_BYTES - 1] != 1
-        { return Err(ResumeError::Continuity("receiver has not committed the exact saved final prefix")); }
+        {
+            return Err(ResumeError::Continuity(
+                "receiver has not committed the exact saved final prefix",
+            ));
+        }
         Ok(())
     }
 }
@@ -209,7 +247,9 @@ impl FinalProofCheckpoint {
 pub trait FinalProofStore {
     /// Persist the exact source-EOF intent, registering a waker while Pending.
     fn poll_store(
-        self: Pin<&mut Self>, cx: &mut Context<'_>, checkpoint: &FinalProofCheckpoint,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        checkpoint: &FinalProofCheckpoint,
     ) -> Poll<io::Result<()>>;
 }
 
@@ -241,9 +281,16 @@ impl<S: FinalProofStore + Unpin + ?Sized> Future for Store<'_, S> {
 }
 
 pub(super) async fn persist<S: FinalProofStore + Unpin + ?Sized>(
-    cx: &Cx, timeout: Duration, store: &mut S, checkpoint: &FinalProofCheckpoint,
+    cx: &Cx,
+    timeout: Duration,
+    store: &mut S,
+    checkpoint: &FinalProofCheckpoint,
 ) -> Result<(), ResumeError> {
-    let mut operation = std::pin::pin!(Store { store, checkpoint, started: false });
+    let mut operation = std::pin::pin!(Store {
+        store,
+        checkpoint,
+        started: false
+    });
     let observed = bounded(cx, timeout, "sender final checkpoint", operation.as_mut()).await;
     let (stored, interruption, source) = match observed {
         Ok(()) => return Ok(()),
@@ -254,7 +301,12 @@ pub(super) async fn persist<S: FinalProofStore + Unpin + ?Sized>(
             Err(source) => (false, Some(Box::new(error)), Some(source)),
         },
     };
-    Err(Box::new(FinalProofPersistError { stored, interruption, source }).into())
+    Err(Box::new(FinalProofPersistError {
+        stored,
+        interruption,
+        source,
+    })
+    .into())
 }
 
 impl<R: AsyncRead + Unpin> ResumableSender<R> {
@@ -265,7 +317,9 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
     /// withholds ObjectComplete; earlier flushed epochs are not rolled back.
     /// Hard drop provides no report; retain the session/store and join its owner.
     pub async fn send_checkpointed<S: FinalProofStore + Send + Unpin>(
-        &mut self, cx: &Cx, store: &mut S,
+        &mut self,
+        cx: &Cx,
+        store: &mut S,
     ) -> ResumeReport {
         let receipt_reused = self.completed.is_some();
         let outcome = if let Some(receipt) = &self.completed {
@@ -273,15 +327,22 @@ impl<R: AsyncRead + Unpin> ResumableSender<R> {
         } else if self.failed {
             Err(ResumeError::LocalFailure)
         } else {
-            match authorize(cx).map_err(ResumeError::from).and_then(|()| self.budget.take()) {
+            match authorize(cx)
+                .map_err(ResumeError::from)
+                .and_then(|()| self.budget.take())
+            {
                 Ok(()) => self.send_inner(cx, Some(store)).await,
                 Err(error) => Err(error),
             }
         };
         ResumeReport {
-            outcome, prefix: self.prefix.clone(), attempts: self.budget.used, receipt_reused,
+            outcome,
+            prefix: self.prefix.clone(),
+            attempts: self.budget.used,
+            receipt_reused,
             retained_epoch_bytes: self.pending.as_ref().map_or(0, |epoch| epoch.bytes().len()),
-            sink_written_bytes: 0, completed: self.completed.clone(),
+            sink_written_bytes: 0,
+            completed: self.completed.clone(),
         }
     }
 }
@@ -300,8 +361,10 @@ pub struct FinalProofSender {
 }
 impl fmt::Debug for FinalProofSender {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FinalProofSender").field("attempts", &self.budget.used)
-            .field("completed", &self.completed).finish_non_exhaustive()
+        f.debug_struct("FinalProofSender")
+            .field("attempts", &self.budget.used)
+            .field("completed", &self.completed)
+            .finish_non_exhaustive()
     }
 }
 
@@ -314,23 +377,40 @@ impl LiveStreamSender {
     /// authorizes the client certificate. No source, socket or random nonce is
     /// created here. Protected checkpoint provenance is the caller's obligation.
     pub fn restore_final_proof(
-        &self, cx: &Cx, remote: SocketAddr, checkpoint: FinalProofCheckpoint, max_attempts: u32,
+        &self,
+        cx: &Cx,
+        remote: SocketAddr,
+        checkpoint: FinalProofCheckpoint,
+        max_attempts: u32,
     ) -> Result<FinalProofSender, ResumeError> {
         authorize(cx)?;
         validate_attempts(max_attempts)?;
         let agreed = checkpoint.validate().map_err(LiveStreamError::from)?;
         if checkpoint.remote != remote || checkpoint.domain != self.domain {
-            return Err(ResumeError::Continuity("checkpoint endpoint or TLS name changed"));
+            return Err(ResumeError::Continuity(
+                "checkpoint endpoint or TLS name changed",
+            ));
         }
-        if checkpoint.receipt.prefix.bytes > self.config.max_bytes || agreed.epoch_bytes > self.config.epoch_bytes {
-            return Err(LiveStreamError::Configuration("checkpoint exceeds current transfer policy").into());
+        if checkpoint.receipt.prefix.bytes > self.config.max_bytes
+            || agreed.epoch_bytes > self.config.epoch_bytes
+        {
+            return Err(LiveStreamError::Configuration(
+                "checkpoint exceeds current transfer policy",
+            )
+            .into());
         }
         let permit = self.admission.reserve()?;
         let mut tls = (**self.connector.config()).clone();
         tls.alpn_protocols = vec![RESUMABLE_LIVE_ALPN.to_vec()];
         Ok(FinalProofSender {
-            checkpoint, connector: TlsConnector::new(tls), config: self.config.clone(),
-            budget: Budget { used: 0, maximum: max_attempts, _credit: Credit::Direct { _permit: permit } },
+            checkpoint,
+            connector: TlsConnector::new(tls),
+            config: self.config.clone(),
+            budget: Budget {
+                used: 0,
+                maximum: max_attempts,
+                _credit: Credit::Direct { _permit: permit },
+            },
             completed: false,
         })
     }
@@ -345,14 +425,20 @@ impl FinalProofSender {
         let outcome = if reused {
             Ok(self.checkpoint.receipt.clone())
         } else {
-            match authorize(cx).map_err(ResumeError::from).and_then(|()| self.budget.take()) {
+            match authorize(cx)
+                .map_err(ResumeError::from)
+                .and_then(|()| self.budget.take())
+            {
                 Ok(()) => self.attempt(cx).await,
                 Err(error) => Err(error),
             }
         };
         ResumeReport {
-            outcome, prefix: Some(self.checkpoint.receipt.prefix.clone()),
-            attempts: self.budget.used, receipt_reused: reused, retained_epoch_bytes: 0,
+            outcome,
+            prefix: Some(self.checkpoint.receipt.prefix.clone()),
+            attempts: self.budget.used,
+            receipt_reused: reused,
+            retained_epoch_bytes: 0,
             sink_written_bytes: 0,
             completed: self.completed.then(|| self.checkpoint.receipt.clone()),
         }
@@ -361,15 +447,41 @@ impl FinalProofSender {
     async fn attempt(&mut self, cx: &Cx) -> Result<LiveStreamReceipt, ResumeError> {
         let timeout = self.config.operation_timeout;
         let saved = &self.checkpoint;
-        let tcp = bounded(cx, timeout, "final recovery connect", TcpStream::connect(saved.remote)).await?;
-        let tls = bounded(cx, timeout, "final recovery TLS", self.connector.connect(&saved.domain, tcp)).await?;
-        if peer_certificate(&tls)? != saved.server_certificate { return Err(ResumeError::PeerIdentity); }
+        let tcp = bounded(
+            cx,
+            timeout,
+            "final recovery connect",
+            TcpStream::connect(saved.remote),
+        )
+        .await?;
+        let tls = bounded(
+            cx,
+            timeout,
+            "final recovery TLS",
+            self.connector.connect(&saved.domain, tcp),
+        )
+        .await?;
+        if peer_certificate(&tls)? != saved.server_certificate {
+            return Err(ResumeError::PeerIdentity);
+        }
         let mut wire = Wire::new(tls);
-        bounded(cx, timeout, "final recovery hello", wire.send(FrameType::Handshake, saved.offered.to_vec())).await?;
+        bounded(
+            cx,
+            timeout,
+            "final recovery hello",
+            wire.send(FrameType::Handshake, saved.offered.to_vec()),
+        )
+        .await?;
         let state = bounded(cx, timeout, "final recovery state", wire.receive()).await?;
         saved.check_remote_state(expect(&state, FrameType::HandshakeAck)?)?;
         let payload = encode_final(&saved.receipt);
-        bounded(cx, timeout, "final recovery request", wire.send(FrameType::ObjectComplete, payload.clone())).await?;
+        bounded(
+            cx,
+            timeout,
+            "final recovery request",
+            wire.send(FrameType::ObjectComplete, payload.clone()),
+        )
+        .await?;
         let proof = bounded(cx, timeout, "final recovery Proof", wire.receive()).await?;
         if expect(&proof, FrameType::Proof)? != payload {
             return Err(ResumeError::Continuity("wrong recovered final Proof"));
@@ -384,12 +496,21 @@ mod tests {
     use super::*;
 
     fn saved() -> FinalProofCheckpoint {
-        let hello = Hello { nonce: [7; 32], epoch_bytes: 8, max_bytes: 64 };
+        let hello = Hello {
+            nonce: [7; 32],
+            epoch_bytes: 8,
+            max_bytes: 64,
+        };
         let prefix = initial(&hello);
         FinalProofCheckpoint {
-            offered: offer(&hello).try_into().unwrap(), agreed: offer(&hello).try_into().unwrap(),
-            receipt: LiveStreamReceipt { prefix, source_sha256: Sha256::digest(b"").into() },
-            server_certificate: [9; 32], remote: "127.0.0.1:8443".parse().unwrap(),
+            offered: offer(&hello).try_into().unwrap(),
+            agreed: offer(&hello).try_into().unwrap(),
+            receipt: LiveStreamReceipt {
+                prefix,
+                source_sha256: Sha256::digest(b"").into(),
+            },
+            server_certificate: [9; 32],
+            remote: "127.0.0.1:8443".parse().unwrap(),
             domain: "localhost".to_owned(),
         }
     }
@@ -418,12 +539,20 @@ mod tests {
             assert!(FinalProofCheckpoint::from_canonical_bytes(&bytes[..end]).is_err());
         }
         for index in 0..bytes.len() {
-            let mut changed = bytes.clone(); changed[index] ^= 1;
+            let mut changed = bytes.clone();
+            changed[index] ^= 1;
             assert!(FinalProofCheckpoint::from_canonical_bytes(&changed).is_err());
         }
-        let mut trailing = bytes; trailing.push(0);
+        let mut trailing = bytes;
+        trailing.push(0);
         assert!(FinalProofCheckpoint::from_canonical_bytes(&trailing).is_err());
-        assert!(FinalProofCheckpoint::from_canonical_bytes(&vec![0; MAX_FINAL_PROOF_CHECKPOINT_BYTES + 1]).is_err());
+        assert!(
+            FinalProofCheckpoint::from_canonical_bytes(&vec![
+                0;
+                MAX_FINAL_PROOF_CHECKPOINT_BYTES + 1
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -431,10 +560,15 @@ mod tests {
         let bytes = saved().to_canonical_bytes().unwrap();
         // Empty hash/chain, epoch count, nonce agreement, address padding and name length.
         for index in [128, 144, 176, 8 + 16, 245, 267] {
-            let mut changed = bytes.clone(); changed[index] ^= 1;
+            let mut changed = bytes.clone();
+            changed[index] ^= 1;
             let body = changed.len() - 32;
-            let digest = checksum(&changed[..body]); changed[body..].copy_from_slice(&digest);
-            assert!(FinalProofCheckpoint::from_canonical_bytes(&changed).is_err(), "field {index}");
+            let digest = checksum(&changed[..body]);
+            changed[body..].copy_from_slice(&digest);
+            assert!(
+                FinalProofCheckpoint::from_canonical_bytes(&changed).is_err(),
+                "field {index}"
+            );
         }
     }
 
@@ -442,13 +576,17 @@ mod tests {
     fn remote_completion_flag_never_substitutes_for_exact_final_prefix() {
         let saved = saved();
         let mut state = saved.agreed.to_vec();
-        state.extend_from_slice(&encode_final(saved.intent())); state.push(0);
+        state.extend_from_slice(&encode_final(saved.intent()));
+        state.push(0);
         assert!(saved.check_remote_state(&state).is_err());
-        state[140] = 1; assert!(saved.check_remote_state(&state).is_ok());
-        state[140] = 2; assert!(saved.check_remote_state(&state).is_err());
+        state[140] = 1;
+        assert!(saved.check_remote_state(&state).is_ok());
+        state[140] = 2;
+        assert!(saved.check_remote_state(&state).is_err());
         state[140] = 1;
         for index in 0..140 {
-            let mut changed = state.clone(); changed[index] ^= 1;
+            let mut changed = state.clone();
+            changed[index] ^= 1;
             assert!(saved.check_remote_state(&changed).is_err());
         }
     }

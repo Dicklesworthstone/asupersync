@@ -207,18 +207,35 @@ enum Command {
 
 pub fn run() -> io::Result<()> {
     match Cli::parse().command {
-        Command::ReceiveJournaled { config, journal, data, options } => {
-            receiver_journal::receive(settings::load(&config)?, journal, data, options)
-        }
-        Command::ResumeReceiver { config, journal, data, options } => {
-            receiver_journal::resume(settings::load(&config)?, journal, data, options)
-        }
-        Command::SendJournaled { config, input, journal, options } => {
-            sender_checkpoint::journal::send(settings::load(&config)?, input, journal, options)
-        }
-        Command::ResumeJournaled { config, input, journal, retry_delay_ms } => {
-            sender_checkpoint::journal::resume(settings::load(&config)?, input, journal, retry_delay_ms)
-        }
+        Command::ReceiveJournaled {
+            config,
+            journal,
+            data,
+            options,
+        } => receiver_journal::receive(settings::load(&config)?, journal, data, options),
+        Command::ResumeReceiver {
+            config,
+            journal,
+            data,
+            options,
+        } => receiver_journal::resume(settings::load(&config)?, journal, data, options),
+        Command::SendJournaled {
+            config,
+            input,
+            journal,
+            options,
+        } => sender_checkpoint::journal::send(settings::load(&config)?, input, journal, options),
+        Command::ResumeJournaled {
+            config,
+            input,
+            journal,
+            retry_delay_ms,
+        } => sender_checkpoint::journal::resume(
+            settings::load(&config)?,
+            input,
+            journal,
+            retry_delay_ms,
+        ),
         Command::SendCheckpointed {
             config,
             input,
@@ -251,9 +268,11 @@ pub fn run() -> io::Result<()> {
         }
         Command::InspectSessionLedger { path } => ledger::inspect(&path),
         Command::Serve { config } => serve(settings::load(&config)?),
-        Command::ServeResumable { config, revocations, options } => {
-            shared_resume::serve(settings::load(&config)?, options, revocations)
-        }
+        Command::ServeResumable {
+            config,
+            revocations,
+            options,
+        } => shared_resume::serve(settings::load(&config)?, options, revocations),
         Command::Send { config, input } => send(settings::load(&config)?, input),
         Command::ReceiveResumable {
             config,

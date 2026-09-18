@@ -708,7 +708,8 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
         let mut wire = Wire::new(tls);
         let hello = bounded(cx, timeout, "resume hello read", wire.receive()).await?;
         let offered = expect(&hello, FrameType::Handshake)?;
-        self.receive_wire_checkpointed(cx, &mut wire, offered, journal).await
+        self.receive_wire_checkpointed(cx, &mut wire, offered, journal)
+            .await
     }
 
     // Shared protocol owner. Callers have authenticated TLS and bound the full
@@ -719,7 +720,8 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
         wire: &mut Wire<TlsStream<TcpStream>>,
         offered: &[u8],
     ) -> Result<LiveStreamReceipt, ResumeError> {
-        self.receive_wire_checkpointed(cx, wire, offered, None).await
+        self.receive_wire_checkpointed(cx, wire, offered, None)
+            .await
     }
 
     async fn receive_wire_checkpointed(

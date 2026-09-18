@@ -5490,7 +5490,10 @@ fn remote_service_clamps_oversized_peer_lease() {
         remote_service_clamp_lease(Duration::from_secs(30)),
         Duration::from_secs(30)
     );
-    assert_eq!(remote_service_clamp_lease(MAX_REMOTE_LEASE), MAX_REMOTE_LEASE);
+    assert_eq!(
+        remote_service_clamp_lease(MAX_REMOTE_LEASE),
+        MAX_REMOTE_LEASE
+    );
     assert_eq!(
         remote_service_clamp_lease(MAX_REMOTE_LEASE + Duration::from_secs(1)),
         MAX_REMOTE_LEASE

@@ -138,7 +138,9 @@ fn deadline(now: u64, seconds: u64) -> u64 {
 static LEDGER_OWNERSHIP: OnceLock<Arc<Ledger>> = OnceLock::new();
 
 pub(super) fn serve(
-    config: ServeConfig, options: Options, revocations: Option<PathBuf>,
+    config: ServeConfig,
+    options: Options,
+    revocations: Option<PathBuf>,
 ) -> io::Result<()> {
     serve_inner(config, options, None, false, revocations)
 }
@@ -166,7 +168,13 @@ pub(super) fn serve_durable(
     LEDGER_OWNERSHIP
         .set(Arc::clone(&ledger))
         .map_err(|_| io::Error::other("foreground process already owns a session ledger"))?;
-    serve_inner(config, options, Some(ledger), recover_committed, revocations)
+    serve_inner(
+        config,
+        options,
+        Some(ledger),
+        recover_committed,
+        revocations,
+    )
 }
 
 fn serve_inner(
@@ -197,16 +205,20 @@ fn serve_inner(
         .iter()
         .map(|client| settings::selector(&client.certificate_sha256))
         .collect::<io::Result<Vec<_>>>()?;
-    let authorization = NativeClientAuthorization::new(
-        settings::roots(&config.client_ca)?, ids.iter().copied(),
-    ).map_err(|_| invalid("invalid explicit client authorization"))?;
+    let authorization =
+        NativeClientAuthorization::new(settings::roots(&config.client_ca)?, ids.iter().copied())
+            .map_err(|_| invalid("invalid explicit client authorization"))?;
     let revocation_policy = match revocations {
         Some(path) => {
-            let parent = path.parent().ok_or_else(|| invalid("revocation policy parent required"))?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| invalid("revocation policy parent required"))?;
             let parent = std::fs::canonicalize(parent)?;
             for inbox in &config.clients {
                 if std::fs::canonicalize(&inbox.directory)? == parent {
-                    return Err(invalid("revocation policy must be outside all inbox directories"));
+                    return Err(invalid(
+                        "revocation policy must be outside all inbox directories",
+                    ));
                 }
             }
             Some(RevocationPolicy::open(path, ids, authorization.clone())?)
@@ -373,8 +385,13 @@ async fn serve_loop(
         }
         if stopping_at.is_none() && reload {
             if let Some(policy) = &mut revocation_policy {
-                let loaded = policy.reload(&cx, Duration::from_secs(config.operation_timeout_secs),
-                    &mut service).await;
+                let loaded = policy
+                    .reload(
+                        &cx,
+                        Duration::from_secs(config.operation_timeout_secs),
+                        &mut service,
+                    )
+                    .await;
                 let output = match loaded {
                     Ok(event) => emit(event),
                     Err(error) => {
@@ -382,14 +399,18 @@ async fn serve_loop(
                         failure = Some(error);
                         stopping_at = Some(cx.now().as_nanos());
                         cancelling = true;
-                        emit(json!({"schema_version": 1, "event": "revocation_policy_rejected",
+                        emit(
+                            json!({"schema_version": 1, "event": "revocation_policy_rejected",
                             "generation": policy.generation(), "admission_closed": true,
-                            "drained": false}))
+                            "drained": false}),
+                        )
                     }
                 };
                 if let Err(error) = output {
                     output_open = false;
-                    if failure.is_none() { failure = Some(error); }
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
                     policy.fail_closed(&mut service);
                     stopping_at = Some(cx.now().as_nanos());
                     cancelling = true;
@@ -455,11 +476,7 @@ async fn serve_loop(
         };
         // A policy/read failure must not suppress joined publication evidence.
         // Only an actual output failure disables subsequent result writes.
-        let output = if output_open {
-            emit(event)
-        } else {
-            Ok(())
-        };
+        let output = if output_open { emit(event) } else { Ok(()) };
         let retired = match retirement {
             Some((key, reason)) => retire(&mut service, &mut retention, &publications, key, reason),
             None => Ok(()),

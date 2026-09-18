@@ -146,10 +146,18 @@ impl Inbox {
     /// For resume, `existing_bytes` must belong to the exclusively owned file
     /// already counted by this owner's startup scan. Call once before binding;
     /// connection retries reuse the reservation. No charges are ever refunded.
-    pub fn reserve_private_file(&self, maximum: u64, existing_bytes: Option<u64>) -> io::Result<()> {
+    pub fn reserve_private_file(
+        &self,
+        maximum: u64,
+        existing_bytes: Option<u64>,
+    ) -> io::Result<()> {
         let (bytes, entries) = match existing_bytes {
-            Some(existing) => (maximum.checked_sub(existing)
-                .ok_or_else(|| invalid("retained data exceeds transfer ceiling"))?, 0),
+            Some(existing) => (
+                maximum
+                    .checked_sub(existing)
+                    .ok_or_else(|| invalid("retained data exceeds transfer ceiling"))?,
+                0,
+            ),
             None => (maximum, 1),
         };
         self.reserve_charge(bytes, entries)
@@ -184,8 +192,12 @@ mod journal_tests {
     fn config(bytes: u64, entries: u64) -> InboxConfig {
         let directory = tempfile::tempdir().unwrap().keep();
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-        InboxConfig { certificate_sha256: "11".repeat(32), directory,
-            max_retained_bytes: bytes, max_retained_entries: entries }
+        InboxConfig {
+            certificate_sha256: "11".repeat(32),
+            directory,
+            max_retained_bytes: bytes,
+            max_retained_entries: entries,
+        }
     }
 
     #[test]
@@ -195,10 +207,16 @@ mod journal_tests {
         inbox.reserve_private_file(10, None).unwrap();
         assert_eq!((inbox.usage.lock().bytes, inbox.maximum_entries), (10, 2));
         assert_eq!(inbox.usage.lock().entries, 2);
-        assert_eq!(inbox.reserve_private_file(0, None).unwrap_err().kind(), io::ErrorKind::StorageFull);
+        assert_eq!(
+            inbox.reserve_private_file(0, None).unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
         drop(inbox);
         let legacy = Inbox::open(&config).unwrap();
-        assert_eq!(legacy.reserve(5).unwrap_err().kind(), io::ErrorKind::StorageFull);
+        assert_eq!(
+            legacy.reserve(5).unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
         assert_eq!((legacy.usage.lock().bytes, legacy.maximum_bytes), (0, 10));
         assert_eq!(legacy.usage.lock().entries, 1);
     }
@@ -212,7 +230,10 @@ mod journal_tests {
         inbox.reserve_private_file(10, Some(3)).unwrap();
         assert_eq!(inbox.usage.lock().bytes, 10);
         assert_eq!(inbox.usage.lock().entries, 2);
-        assert_eq!(inbox.reserve_private_file(2, Some(3)).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            inbox.reserve_private_file(2, Some(3)).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
         assert_eq!(inbox.usage.lock().bytes, 10);
     }
 
@@ -222,7 +243,10 @@ mod journal_tests {
         std::fs::write(config.directory.join("partial"), b"abc").unwrap();
         std::fs::write(config.directory.join("unrelated"), b"1234567").unwrap();
         let inbox = Inbox::open(&config).unwrap();
-        assert_eq!(inbox.reserve_private_file(10, Some(3)).unwrap_err().kind(), io::ErrorKind::StorageFull);
+        assert_eq!(
+            inbox.reserve_private_file(10, Some(3)).unwrap_err().kind(),
+            io::ErrorKind::StorageFull
+        );
         assert_eq!(inbox.usage.lock().bytes, 10);
         assert_eq!(inbox.usage.lock().entries, 3);
     }

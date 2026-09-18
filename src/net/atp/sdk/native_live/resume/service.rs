@@ -44,9 +44,7 @@ use restoration::ServiceReceiver;
 
 #[path = "revocation.rs"]
 mod revocation;
-pub use revocation::{
-    MAX_REVOKED_RESUME_CLIENTS, ResumeClientRevocation, ResumeRevokeError,
-};
+pub use revocation::{MAX_REVOKED_RESUME_CLIENTS, ResumeClientRevocation, ResumeRevokeError};
 
 /// Exact client identity plus stream continuity identifier. A nonce is not authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
