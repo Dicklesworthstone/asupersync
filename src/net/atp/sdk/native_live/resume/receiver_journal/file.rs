@@ -27,7 +27,7 @@ use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, ready};
 use zeroize::Zeroizing;
 
@@ -401,6 +401,58 @@ pub struct ReceiverJournalFile {
     latest: Option<ReceiverCheckpoint>,
     failure: Option<Failure>,
 }
+
+/// Non-owning observation of the latest confirmed journal checkpoint.
+///
+/// Keep this before moving a file pair into a standalone or shared receiver.
+/// It cannot write, bind, retry, publish, or release the owner's locks. Clones
+/// do not prolong the data/WAL lifetime, and reads never wait on its state mutex.
+/// A checkpoint is historical local state, not a peer acknowledgment or
+/// evidence that all current work is durable. On reopen, retained data still
+/// requires the normal restoration content checks.
+#[derive(Clone)]
+pub struct ReceiverJournalObserver {
+    storage: Weak<Storage>,
+}
+
+impl fmt::Debug for ReceiverJournalObserver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceiverJournalObserver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ReceiverJournalObserver {
+    /// Copy the latest completed append/reopen observation without reading files.
+    ///
+    /// `WouldBlock` means either no checkpoint exists yet or the storage owner
+    /// is updating it; this is not an asynchronous readiness notification.
+    /// `NotConnected` means the paired storage owner is gone, not that all
+    /// descriptor-owned I/O finished; only the runtime's joins/drain establish that.
+    /// Unconfirmed persistence returns an error rather than a possibly advanced
+    /// record. A queued operation may not have begun: success here never means
+    /// quiescence, that a pending operation succeeded, or that Proof was received.
+    /// Retain the returned snapshot separately when it is needed after drain.
+    /// The snapshot can contain one plaintext pending epoch; protect all copies.
+    pub fn checkpoint(&self) -> io::Result<ReceiverCheckpoint> {
+        let storage = self
+            .storage
+            .upgrade()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?;
+        let state = storage
+            .state
+            .try_lock()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))?;
+        if state.poisoned {
+            return Err(io::Error::other("receiver journal persistence is unconfirmed"));
+        }
+        state
+            .latest
+            .clone()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::WouldBlock))
+    }
+}
+
 impl fmt::Debug for ReceiverJournalFile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ReceiverJournalFile")
@@ -410,6 +462,15 @@ impl fmt::Debug for ReceiverJournalFile {
     }
 }
 impl ReceiverJournalFile {
+    /// Observe confirmed WAL state after this owner moves into a receiver.
+    /// The observer does not extend file-lock ownership or expose mutable state.
+    #[must_use]
+    pub fn observer(&self) -> ReceiverJournalObserver {
+        ReceiverJournalObserver {
+            storage: Arc::downgrade(&self.storage),
+        }
+    }
+
     /// Create both private files without replacing either path. Partial failures retain files.
     pub fn create_new(journal: &Path, data: &Path, limits: ReceiverFileLimits) -> io::Result<Self> {
         Ok(Self {
@@ -723,6 +784,12 @@ impl fmt::Debug for JournaledFileReceiver {
     }
 }
 impl JournaledFileReceiver {
+    /// Observe persisted state separately from newer in-memory transfer progress.
+    #[must_use]
+    pub fn observer(&self) -> ReceiverJournalObserver {
+        self.journal.observer()
+    }
+
     /// Actual bound socket address; resume requires the sender's original endpoint.
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.receiver.local_addr()
@@ -964,5 +1031,66 @@ mod tests {
         append_data(&store, b"unrecorded");
         assert!(store.service_session().is_err());
         assert_eq!(std::fs::read(&data).unwrap(), b"unrecorded");
+    }
+
+    #[test]
+    fn observer_is_nonblocking_nonowning_and_distinguishes_commit_intent() {
+        let (journal, data) = files();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits()).unwrap();
+        let observer = store.observer();
+        let copy = observer.clone();
+        assert_eq!(observer.checkpoint().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        let (start, _, _) = checkpoints();
+        store.storage.append(start.clone()).unwrap();
+        let snapshot = observer.checkpoint().unwrap();
+        assert_eq!(snapshot.prefix().bytes, 0);
+        assert!(snapshot.committed_receipt().is_none());
+        {
+            // Calling from the thread that already owns this lock must not deadlock.
+            let _updating = store.storage.state.lock();
+            assert_eq!(copy.checkpoint().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        }
+        let mut finalizing = start;
+        finalizing.phase = ReceiverCheckpointPhase::Finalizing;
+        store.storage.append(finalizing.clone()).unwrap();
+        assert_eq!(observer.checkpoint().unwrap().phase(), ReceiverCheckpointPhase::Finalizing);
+        assert!(observer.checkpoint().unwrap().committed_receipt().is_none());
+        store.storage.commit(&finalizing.receipt()).unwrap();
+        let mut committed = finalizing;
+        committed.phase = ReceiverCheckpointPhase::Committed;
+        store.storage.append(committed.clone()).unwrap();
+        let confirmed = copy.checkpoint().unwrap();
+        assert_eq!(confirmed.committed_receipt(), committed.committed_receipt());
+        let history = std::fs::read(&journal).unwrap();
+        assert!(!format!("{observer:?}").contains("receiver.wal"));
+        drop(store);
+        assert_eq!(observer.checkpoint().unwrap_err().kind(), io::ErrorKind::NotConnected);
+        assert_eq!(copy.checkpoint().unwrap_err().kind(), io::ErrorKind::NotConnected);
+        // Neither observers nor returned snapshots keep the original locks alive.
+        for path in [&journal, &data] {
+            assert!(OpenOptions::new().read(true).write(true).open(path).unwrap().try_lock().is_ok());
+        }
+        assert_eq!(std::fs::read(&journal).unwrap(), history);
+        assert_eq!(confirmed.phase(), ReceiverCheckpointPhase::Committed);
+        assert_eq!(snapshot.phase(), ReceiverCheckpointPhase::Receiving);
+    }
+
+    #[test]
+    fn observer_refuses_unconfirmed_persistence_without_fabricating_a_new_snapshot() {
+        let (journal, data) = files();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits()).unwrap();
+        let observer = store.observer();
+        let (start, pending, _) = checkpoints();
+        store.storage.append(start).unwrap();
+        let prior = observer.checkpoint().unwrap();
+        let mut corruptor = OpenOptions::new().append(true).open(&journal).unwrap();
+        corruptor.write_all(&[0]).unwrap();
+        corruptor.sync_all().unwrap();
+        assert!(store.storage.append(pending).is_err());
+        assert!(store.storage.state.lock().poisoned);
+        assert_eq!(observer.checkpoint().unwrap_err().kind(), io::ErrorKind::Other);
+        assert_eq!(prior.pending_bytes(), 0);
+        assert!(prior.committed_receipt().is_none());
+        assert_eq!(std::fs::metadata(&data).unwrap().len(), 0);
     }
 }
