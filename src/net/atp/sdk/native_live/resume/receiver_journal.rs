@@ -557,3 +557,8 @@ mod tests {
         assert_eq!(saved.committed_receipt().unwrap().source_sha256, Sha256::digest(b"prefix01abcdefgh").as_slice());
     }
 }
+
+/// Private Unix data-file and bounded write-ahead journal ownership.
+#[cfg(unix)]
+#[path = "receiver_journal/file.rs"]
+pub mod file;
