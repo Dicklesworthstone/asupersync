@@ -572,6 +572,7 @@ impl<W> fmt::Debug for ResumableReceiver<W> {
             .field("attempts", &self.budget.used)
             .field("sink_written_bytes", &self.sink_written_bytes)
             .field("completed", &self.completed.is_some())
+            .field("failed", &self.failed)
             .finish_non_exhaustive()
     }
 }
@@ -641,7 +642,7 @@ impl<W: LiveStreamCommitSink + Unpin> ResumableReceiver<W> {
         self.completed.as_ref()
     }
 
-    /// Successful sink writes, including a partially written/unflushed epoch.
+    /// Successful sink writes, including a partially flushed epoch.
     #[must_use]
     pub const fn sink_written_bytes(&self) -> u64 {
         self.sink_written_bytes
