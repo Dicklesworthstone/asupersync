@@ -2084,6 +2084,7 @@ impl ThreeLaneScheduler {
                 steal_batch_size,
                 enable_parking,
                 empty_backoff: 0,
+                busy_turns_since_io: 0,
                 cancel_streak: 0,
                 ready_dispatch_streak: 0,
                 browser_ready_handoff_limit,
@@ -3214,6 +3215,8 @@ pub struct ThreeLaneWorker {
     enable_parking: bool,
     /// Persistent empty-work backoff state across idle outer-loop iterations.
     empty_backoff: u32,
+    /// Scheduling turns since the last periodic reactor poll, including root pumps.
+    busy_turns_since_io: usize,
     /// Number of consecutive cancel-lane dispatches.
     cancel_streak: usize,
     /// Number of consecutive ready-lane dispatches.
@@ -5017,7 +5020,6 @@ impl ThreeLaneWorker {
         // woken while the worker ran elsewhere are runnable again here.
         self.rescue_stranded_local_tasks();
 
-        let mut dispatches_since_io = 0;
         'dispatch: loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
@@ -5036,16 +5038,7 @@ impl ThreeLaneWorker {
                 self.reset_empty_backoff();
                 self.execute(task);
                 self.publish_preemption_fairness_certificate_if_due();
-                dispatches_since_io += 1;
-                if dispatches_since_io == BUSY_IO_POLL_INTERVAL {
-                    dispatches_since_io = 0;
-                    if let Some(io) = &self.io_driver {
-                        // Readiness must progress even when a task continually
-                        // wakes itself. Never wait for I/O or its leader while
-                        // runnable work remains, and hold no scheduler lock.
-                        let _ = io.try_turn_with(Some(Duration::ZERO), |_, _| {});
-                    }
-                }
+                self.poll_busy_io_if_due();
                 continue;
             }
 
@@ -5056,7 +5049,7 @@ impl ThreeLaneWorker {
             }
 
             // PHASE 5: Drive I/O (Leader/Follower pattern).
-            dispatches_since_io = 0;
+            self.busy_turns_since_io = 0;
             let io_phase = self.drive_io_phase(return_when_idle);
             if matches!(io_phase, IoPhaseOutcome::Progress) {
                 // We polled I/O, so we might have woken tasks. Continue loop.
@@ -7083,6 +7076,19 @@ impl ThreeLaneWorker {
         }
     }
 
+    /// Bounds reactor starvation across dispatch loops and current-thread root pumps.
+    fn poll_busy_io_if_due(&mut self) {
+        self.busy_turns_since_io += 1;
+        if self.busy_turns_since_io == BUSY_IO_POLL_INTERVAL {
+            self.busy_turns_since_io = 0;
+            if let Some(io) = &self.io_driver {
+                // Never wait for I/O or its polling leader while runnable work
+                // remains. Driver locks are released before readiness wakes tasks.
+                let _ = io.try_turn_with(Some(Duration::ZERO), |_, _| {});
+            }
+        }
+    }
+
     /// Runs a single scheduling step.
     ///
     /// Returns `true` if a task was executed.
@@ -7092,6 +7098,9 @@ impl ThreeLaneWorker {
             return false;
         }
 
+        // A self-waking root calls this even when no child task is runnable.
+        // Keep the budget on the worker so repeated single turns cannot reset it.
+        self.poll_busy_io_if_due();
         if let Some(task) = self.next_task() {
             self.execute(task);
             self.publish_preemption_fairness_certificate_if_due();
