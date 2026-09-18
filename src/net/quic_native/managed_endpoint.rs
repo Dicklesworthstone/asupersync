@@ -2933,7 +2933,11 @@ mod tests {
         runtime.block_on(runtime.handle().spawn(async {
             let owner = Cx::current().unwrap();
             let (cx, _, driver, mut endpoint, peer, _) = selection_fixture(&owner).await;
-            let ambient = Cx::new();
+            let ambient = Cx::new(
+                crate::types::RegionId::new_for_test(0, 2),
+                crate::types::TaskId::new_for_test(0, 1),
+                crate::types::Budget::INFINITE,
+            );
             ambient.cancel_with(crate::types::CancelKind::User, None);
             let mut shutdown = Box::pin(endpoint.shutdown(&cx));
             let result = {
