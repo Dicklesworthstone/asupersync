@@ -147,7 +147,7 @@ fn file_identity(metadata: &Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
     )
 }
 fn private_directory(metadata: &Metadata) -> bool {
-    metadata.is_dir() && metadata.permissions().mode() & 0o077 == 0
+    metadata.is_dir() && metadata.permissions().mode().trailing_zeros() >= 6
 }
 fn verify_file(directory: &Path, entry: &Entry, stopped: &AtomicBool) -> io::Result<()> {
     if !directory.is_absolute() || !super::valid_filename(entry.filename.as_bytes()) {
@@ -171,7 +171,7 @@ fn verify_file(directory: &Path, entry: &Entry, stopped: &AtomicBool) -> io::Res
     }
     let mut remaining = receipt.prefix.bytes;
     let mut hash = Sha256::new();
-    let mut buffer = Zeroizing::new([0_u8; 64 * 1024]);
+    let mut buffer = Zeroizing::new(vec![0_u8; 64 * 1024]);
     while remaining != 0 {
         check_stop(stopped)?;
         let window = buffer
