@@ -3,6 +3,7 @@
 
 mod ledger;
 mod ledger_sink;
+mod receiver_journal;
 mod resume;
 mod sender_checkpoint;
 mod settings;
@@ -51,6 +52,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Receive one client into new journal/data files with recoverable partial state.
+    ReceiveJournaled {
+        #[arg(long)]
+        config: PathBuf,
+        /// New private write-ahead journal outside the configured inbox.
+        #[arg(long)]
+        journal: PathBuf,
+        /// New private in-place data file inside the sole configured inbox.
+        #[arg(long)]
+        data: PathBuf,
+        #[command(flatten)]
+        options: receiver_journal::CreateOptions,
+    },
+    /// Restore the original receiver journal/data inode without resetting budgets.
+    ResumeReceiver {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long)]
+        data: PathBuf,
+        #[command(flatten)]
+        options: receiver_journal::WaitOptions,
+    },
     /// Persist each pending epoch so a new sender process can continue before EOF.
     SendJournaled {
         #[arg(long)]
@@ -182,6 +207,12 @@ enum Command {
 
 pub fn run() -> io::Result<()> {
     match Cli::parse().command {
+        Command::ReceiveJournaled { config, journal, data, options } => {
+            receiver_journal::receive(settings::load(&config)?, journal, data, options)
+        }
+        Command::ResumeReceiver { config, journal, data, options } => {
+            receiver_journal::resume(settings::load(&config)?, journal, data, options)
+        }
         Command::SendJournaled { config, input, journal, options } => {
             sender_checkpoint::journal::send(settings::load(&config)?, input, journal, options)
         }
