@@ -462,3 +462,9 @@ impl TimeSource for OrderedReplayClock {
 
 #[cfg(test)]
 mod tests;
+
+mod codec;
+pub use codec::{OrderedSessionBytes, OrderedSessionDecodeLimits, OrderedSessionTapeError};
+mod send;
+pub use send::OrderedSendConsumerFuture;
+

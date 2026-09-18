@@ -298,7 +298,11 @@ impl ReplayOrder {
 
     pub(super) fn clear_waiters(&self) {
         let waiters = { std::mem::take(&mut self.0.lock().waiters) };
-        drop(waiters); // User destructor callbacks run only after unlocking.
+        // Cleanup can run while another panic is unwinding. Attempt every
+        // destructor without holding the mutex or allowing one to skip the rest.
+        for waker in waiters.into_iter().flatten() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)));
+        }
     }
 
     fn wake_waiters(&self) {
