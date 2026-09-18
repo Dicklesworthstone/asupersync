@@ -116,3 +116,4 @@ pub use read_line::{LineReader, ReadLine, ReadLineCancelSafe, read_line};
 pub use std::io::SeekFrom;
 
 pub mod replay;
+pub mod replay_session;
