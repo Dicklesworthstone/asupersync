@@ -997,7 +997,36 @@ where
             // Read next request
             let mut req = match req {
                 Some(Ok(req)) => req,
-                Some(Err(e)) => return Err(e),
+                Some(Err(error)) => {
+                    // br-asupersync-hw83se: a rejected request *head* owes the
+                    // client the status the configured limits promise
+                    // (400 / 413 / 414 / 431 / 505) with `Connection: close`
+                    // before the socket closes. Answering with a bare
+                    // `return Err` dropped the connection silently —
+                    // indistinguishable from a transport fault — and the
+                    // 413/431 that `max_headers_size` / `max_body_size`
+                    // advertise never reached the wire. Errors with no
+                    // meaningful client-facing status (transport I/O,
+                    // body-stream lifecycle) still abandon the connection.
+                    let Some(reject) = head_parse_failure_response(&error) else {
+                        return Err(error);
+                    };
+                    state.phase = ConnectionPhase::Writing;
+                    framed.send(reject)?;
+                    poll_fn(|cx| {
+                        if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                            return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "connection cancelled",
+                            ))));
+                        }
+                        framed.poll_flush(cx).map_err(HttpError::Io)
+                    })
+                    .await?;
+                    state.requests_served += 1;
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
                 None => {
                     // Clean EOF - connection closed by client
                     state.phase = ConnectionPhase::Closing;
@@ -1432,9 +1461,25 @@ where
             }
 
             state.phase = ConnectionPhase::Reading;
-            let Some((head, body_kind)) =
-                read_streaming_request_head(cx, &mut io, &mut read_buffer, &self.config).await?
-            else {
+            let head_and_body =
+                match read_streaming_request_head(cx, &mut io, &mut read_buffer, &self.config).await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        // br-asupersync-hw83se: write the rejected head's status
+                        // (see `head_parse_failure_response`) before closing,
+                        // instead of dropping the streaming connection silently.
+                        let Some(response) = head_parse_failure_response(&error) else {
+                            return Err(error);
+                        };
+                        state.phase = ConnectionPhase::Writing;
+                        write_streaming_response(cx, &mut io, response).await?;
+                        state.requests_served += 1;
+                        state.phase = ConnectionPhase::Closing;
+                        break;
+                    }
+                };
+            let Some((head, body_kind)) = head_and_body else {
                 state.phase = ConnectionPhase::Closing;
                 break;
             };
@@ -1760,9 +1805,25 @@ where
     }
 
     state.phase = ConnectionPhase::Reading;
-    let Some((head, body_kind)) =
-        read_streaming_request_head(cx, &mut io, &mut read_buffer, &config).await?
-    else {
+    let head_and_body =
+        match read_streaming_request_head(cx, &mut io, &mut read_buffer, &config).await {
+            Ok(value) => value,
+            Err(error) => {
+                // br-asupersync-hw83se: write the rejected head's status (see
+                // `head_parse_failure_response`) before closing, instead of
+                // dropping the produced/streaming connection silently.
+                let Some(response) = head_parse_failure_response(&error) else {
+                    return Err(error);
+                };
+                state.phase = ConnectionPhase::Writing;
+                write_streaming_response(cx, &mut io, response).await?;
+                state.requests_served += 1;
+                state.phase = ConnectionPhase::Closing;
+                let _ = io.shutdown().await;
+                return Ok(state);
+            }
+        };
+    let Some((head, body_kind)) = head_and_body else {
         state.phase = ConnectionPhase::Closing;
         let _ = io.shutdown().await;
         return Ok(state);
@@ -2688,6 +2749,67 @@ where
         }
         StreamingJoinFirst::Handler(None) => Ok(None),
     }
+}
+
+/// Map a rejected request *head* to the HTTP status the server owes the client
+/// before it closes the connection (`br-asupersync-hw83se`).
+///
+/// The serve loops previously answered a head-parse failure with a bare
+/// `return Err(..)` / `?`, dropping the connection with no response at all: a
+/// client could not tell an oversized-header or malformed-request refusal from
+/// a dead socket, and the 413/431 that the configured `max_headers_size` /
+/// `max_body_size` advertise never reached the wire. This mirrors
+/// [`incoming_body_failure_response`], which already covers the streaming-body
+/// path, for the request-head path on both the buffered and streaming servers.
+///
+/// Returns `None` for errors that carry no meaningful client-facing status —
+/// transport I/O, body-stream lifecycle, and response-parsing variants that
+/// never originate from decoding a server-side request head — so those keep
+/// abandoning the connection rather than fabricating a status. The match is
+/// deliberately exhaustive so a newly added [`HttpError`] variant forces a
+/// classification decision here instead of silently defaulting.
+fn head_parse_failure_response(error: &HttpError) -> Option<Response> {
+    let (status, message): (u16, &str) = match error {
+        HttpError::HeadersTooLarge | HttpError::TooManyHeaders => {
+            (431, "request header fields exceed the configured limit")
+        }
+        HttpError::RequestLineTooLong => (414, "request line exceeds the configured limit"),
+        HttpError::BodyTooLarge | HttpError::BodyTooLargeDetailed { .. } => {
+            (413, "request body exceeds the configured limit")
+        }
+        HttpError::UnsupportedVersion => (505, "unsupported HTTP version"),
+        HttpError::BadRequestLine
+        | HttpError::BadHeader
+        | HttpError::BadMethod
+        | HttpError::BadContentLength
+        | HttpError::DuplicateContentLength
+        | HttpError::DuplicateTransferEncoding
+        | HttpError::BadTransferEncoding
+        | HttpError::InvalidHeaderName
+        | HttpError::InvalidHeaderValue
+        | HttpError::BadChunkedEncoding
+        | HttpError::AmbiguousBodyLength
+        | HttpError::TrailersNotAllowed => (400, "malformed request head"),
+        HttpError::Io(_)
+        | HttpError::BodyCancelled
+        | HttpError::BodyChannelClosed
+        | HttpError::PrefetchedDataRemaining(_)
+        | HttpError::TooManyInformationalResponses { .. } => return None,
+    };
+    Some(Response {
+        status,
+        reason: String::new(),
+        version: Version::Http11,
+        headers: vec![
+            (
+                "content-type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            ),
+            ("connection".to_string(), "close".to_string()),
+        ],
+        body: message.as_bytes().to_vec(),
+        trailers: Vec::new(),
+    })
 }
 
 fn incoming_body_failure_response(version: Version, error: &IncomingBodyError) -> Option<Response> {
@@ -6600,6 +6722,184 @@ mod tests {
         assert!(written.starts_with("HTTP/1.1 417 Expectation Failed\r\n"));
         assert!(written.contains("Connection: close\r\n"));
         assert!(!written.contains("200 OK"));
+    }
+
+    #[test]
+    fn serve_answers_oversized_request_head_with_431_before_closing() {
+        // br-asupersync-hw83se: a request head that blows the configured
+        // `max_headers_size` must receive a 431 with `Connection: close`, not
+        // the bare connection drop the client cannot distinguish from a
+        // transport fault. Before the fix the buffered serve loop answered the
+        // codec's `HeadersTooLarge` with `return Err`, writing nothing.
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let handler_called = Arc::new(AtomicBool::new(false));
+        let padding = "a".repeat(512);
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: {padding}\r\nConnection: close\r\n\r\n"
+        );
+        let io = TestIo::new(request.into_bytes(), Arc::clone(&written));
+        let handler_called_for_handler = Arc::clone(&handler_called);
+        let server = Http1Server::with_config(
+            move |_req| {
+                handler_called_for_handler.store(true, Ordering::SeqCst);
+                async move { Response::new(200, "OK", b"must not run") }
+            },
+            localhost_server_config().max_headers_size(64),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async { server.serve(io).await })
+            .expect("an oversized head closes the connection cleanly with a 431");
+
+        assert!(
+            !handler_called.load(Ordering::SeqCst),
+            "handler must never run for a rejected head"
+        );
+        assert_eq!(state.requests_served, 1);
+        assert_eq!(state.phase, ConnectionPhase::Closing);
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(
+            written.starts_with("HTTP/1.1 431 "),
+            "expected a 431 refusal, wrote {written:?}"
+        );
+        assert!(
+            written
+                .to_ascii_lowercase()
+                .contains("\r\nconnection: close\r\n"),
+            "refusal must close the connection, wrote {written:?}"
+        );
+        assert!(
+            !written.contains("200 OK"),
+            "handler response leaked after the head refusal: {written:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_serve_answers_oversized_request_head_with_431_before_closing() {
+        // br-asupersync-hw83se: the streaming (SSE/produced) server routes head
+        // reads through `serve_produced_connection`, which owed the same 431 as
+        // the buffered path. Before the fix a rejected head propagated the
+        // codec error and dropped the connection with nothing written; the SSE
+        // source must never run.
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let source_calls = Arc::new(AtomicUsize::new(0));
+        let eof_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let source = CountingSseSource::finite(
+            ["must-not-run"],
+            Arc::clone(&source_calls),
+            Arc::clone(&eof_calls),
+            Arc::clone(&cancel_calls),
+        );
+        let source = Arc::new(Mutex::new(Some(source)));
+        let source_for_handler = Arc::clone(&source);
+        let server = Http1StreamingServer::with_config_sse(
+            move |_cx, _request| {
+                let source = source_for_handler
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("one live SSE request");
+                async move { StreamingSse::from_source(source).into_http1_response(NonZeroUsize::MIN) }
+            },
+            localhost_server_config().max_headers_size(64),
+        );
+        let padding = "a".repeat(512);
+        let request = format!(
+            "GET /events HTTP/1.1\r\nHost: localhost\r\nX-Pad: {padding}\r\nConnection: close\r\n\r\n"
+        );
+        let io = TestIo::new(request.into_bytes(), Arc::clone(&written));
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let state = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_sse(&cx, io).await
+            })
+            .expect("an oversized head closes the streaming connection cleanly with a 431");
+
+        assert_eq!(
+            source_calls.load(Ordering::SeqCst),
+            0,
+            "the SSE source must never run for a rejected head"
+        );
+        assert_eq!(state.requests_served, 1);
+        assert_eq!(state.phase, ConnectionPhase::Closing);
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(
+            written.starts_with("HTTP/1.1 431 "),
+            "expected a 431 refusal, wrote {written:?}"
+        );
+        assert!(
+            written
+                .to_ascii_lowercase()
+                .contains("\r\nconnection: close\r\n"),
+            "refusal must close the connection, wrote {written:?}"
+        );
+    }
+
+    #[test]
+    fn head_parse_failure_response_maps_each_error_class_to_its_status() {
+        // br-asupersync-hw83se: the single mapping every head-parse rejection
+        // site shares. Oversized heads are 431/413/414, unsupported versions
+        // are 505, other malformed heads are 400, and non-head-attributable
+        // errors carry no status (the connection is abandoned instead).
+        let status = |error: &HttpError| head_parse_failure_response(error).map(|response| response.status);
+
+        assert_eq!(status(&HttpError::HeadersTooLarge), Some(431));
+        assert_eq!(status(&HttpError::TooManyHeaders), Some(431));
+        assert_eq!(status(&HttpError::RequestLineTooLong), Some(414));
+        assert_eq!(status(&HttpError::BodyTooLarge), Some(413));
+        assert_eq!(
+            status(&HttpError::BodyTooLargeDetailed {
+                actual: 9,
+                limit: 8
+            }),
+            Some(413)
+        );
+        assert_eq!(status(&HttpError::UnsupportedVersion), Some(505));
+        assert_eq!(status(&HttpError::BadRequestLine), Some(400));
+        assert_eq!(status(&HttpError::BadHeader), Some(400));
+        assert_eq!(status(&HttpError::BadMethod), Some(400));
+        assert_eq!(status(&HttpError::InvalidHeaderName), Some(400));
+        assert_eq!(status(&HttpError::AmbiguousBodyLength), Some(400));
+
+        // No meaningful client-facing status: keep abandoning the connection.
+        assert_eq!(
+            status(&HttpError::Io(io::Error::from(io::ErrorKind::UnexpectedEof))),
+            None
+        );
+        assert_eq!(status(&HttpError::BodyCancelled), None);
+        assert_eq!(status(&HttpError::BodyChannelClosed), None);
+        assert_eq!(status(&HttpError::PrefetchedDataRemaining(0)), None);
+        assert_eq!(
+            status(&HttpError::TooManyInformationalResponses { actual: 2, limit: 1 }),
+            None
+        );
+
+        // The written refusal carries a safe closing shape.
+        let refusal =
+            head_parse_failure_response(&HttpError::HeadersTooLarge).expect("431 refusal exists");
+        assert!(matches!(refusal.version, Version::Http11));
+        assert!(
+            refusal
+                .headers
+                .iter()
+                .any(|(name, value)| name == "connection" && value == "close")
+        );
+        assert!(
+            refusal
+                .headers
+                .iter()
+                .any(|(name, value)| name == "content-type" && value.starts_with("text/plain"))
+        );
     }
 
     #[test]
