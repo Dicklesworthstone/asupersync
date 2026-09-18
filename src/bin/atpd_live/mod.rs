@@ -1,6 +1,7 @@
 //! Foreground executable integration for the authenticated live-transfer profile.
 //! No legacy daemon listener, PID protocol, RPC, or configuration is enabled.
 
+mod journal_catalog;
 mod ledger;
 mod ledger_sink;
 mod receiver_journal;
@@ -52,6 +53,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Multi-client receiving with persistent partial-session restoration.
+    ServeJournaled {
+        #[arg(long)]
+        config: PathBuf,
+        /// Existing catalog in its dedicated private WAL directory.
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        revocations: Option<PathBuf>,
+        #[command(flatten)]
+        options: shared_resume::Options,
+        #[command(flatten)]
+        journals: shared_resume::journal::JournalOptions,
+    },
+    /// Initialize a new receiver catalog in an existing empty private directory.
+    InitReceiverCatalog {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        max_keys: u32,
+        /// Persistent aggregate reservation across all per-session WALs.
+        #[arg(long)]
+        max_total_journal_bytes: u64,
+    },
     /// Receive one client into new journal/data files with recoverable partial state.
     ReceiveJournaled {
         #[arg(long)]
@@ -207,6 +232,14 @@ enum Command {
 
 pub fn run() -> io::Result<()> {
     match Cli::parse().command {
+        Command::ServeJournaled { config, catalog, revocations, options, journals } => {
+            shared_resume::journal::serve(settings::load(&config)?, options, journals, catalog, revocations)
+        }
+        Command::InitReceiverCatalog { path, max_keys, max_total_journal_bytes } => {
+            journal_catalog::Catalog::initialize(&path, max_keys, max_total_journal_bytes)?;
+            emit(json!({"schema_version": 1, "event": "receiver_catalog_initialized",
+                "maximum_keys": max_keys, "maximum_total_journal_bytes": max_total_journal_bytes}))
+        }
         Command::ReceiveJournaled {
             config,
             journal,

@@ -712,3 +712,7 @@ fn publication_json(publication: &LiveFilePublication) -> Value {
 #[cfg(test)]
 #[path = "shared_resume_tests.rs"]
 mod tests;
+
+/// Persistent shared file-journal catalog and executable routing.
+#[path = "shared_journal.rs"]
+pub(super) mod journal;
