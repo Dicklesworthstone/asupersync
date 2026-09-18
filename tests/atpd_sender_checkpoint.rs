@@ -435,7 +435,7 @@ impl Relay {
                                     break;
                                 }
                             }
-                            Err(error) if would_wait(&error) => continue,
+                            Err(error) if would_wait(&error) => {}
                             Err(_) => break,
                         }
                     }
@@ -460,7 +460,7 @@ impl Relay {
                                 break;
                             }
                         }
-                        Err(error) if would_wait(&error) => continue,
+                        Err(error) if would_wait(&error) => {}
                         Err(_) => break,
                     }
                 }
@@ -614,11 +614,9 @@ fn source_free_recovery_refuses_a_fresh_uncommitted_receiver_even_for_empty_inpu
         assert!(failed["transfer"]["receipt"].is_null());
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0]["retry_eligible"], false);
-        assert!(
-            files(&empty_inbox)
-                .iter()
-                .all(|(name, _, len)| !name.ends_with(".bin") && *len == 0)
-        );
+        assert!(files(&empty_inbox).iter().all(|(name, _, len)| {
+            name.rsplit_once('.').map(|(_, extension)| extension) != Some("bin") && *len == 0
+        }));
         assert!(committed_record(&new_ledger).is_none());
         fresh.stop();
     }

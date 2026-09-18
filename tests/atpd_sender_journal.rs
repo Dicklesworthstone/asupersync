@@ -331,7 +331,7 @@ impl Relay {
                                     break;
                                 }
                             }
-                            Err(error) if retry_read(&error) => continue,
+                            Err(error) if retry_read(&error) => {}
                             Err(_) => break,
                         }
                     }
@@ -357,7 +357,7 @@ impl Relay {
                                 break;
                             }
                         }
-                        Err(error) if retry_read(&error) => continue,
+                        Err(error) if retry_read(&error) => {}
                         Err(_) => break,
                     }
                 }

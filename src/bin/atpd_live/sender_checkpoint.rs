@@ -345,8 +345,9 @@ async fn drive(
 fn retryable(error: &ResumeError) -> bool {
     match error {
         ResumeError::Transfer(LiveStreamError::Timeout(_)) => true,
-        ResumeError::Transfer(LiveStreamError::Io(error))
-        | ResumeError::Transfer(LiveStreamError::Tls(TlsError::Io(error))) => matches!(
+        ResumeError::Transfer(
+            LiveStreamError::Io(error) | LiveStreamError::Tls(TlsError::Io(error)),
+        ) => matches!(
             error.kind(),
             io::ErrorKind::ConnectionRefused
                 | io::ErrorKind::ConnectionReset
