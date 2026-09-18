@@ -24,6 +24,73 @@ use asupersync::observability::TaskInspectorConfig;
 use asupersync::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder, SpawnError, yield_now};
 use asupersync::sync::{LockError, Mutex, OwnedMutexGuard};
 
+/// A ready peer must not prevent already-registered socket readiness from
+/// waking its owner.
+///
+/// Send only after the receive future has returned Pending,
+/// so a successful first syscall cannot bypass the reactor under test.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn continuous_ready_work_does_not_starve_registered_udp_readiness() {
+    use std::future::Future;
+
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let mut socket = asupersync::net::UdpSocket::from_std(socket).unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let registered = Rc::new(Cell::new(false));
+        let received = Rc::new(Cell::new(false));
+        let child_registered = Rc::clone(&registered);
+        let child_received = Rc::clone(&received);
+        let mut task = cx
+            .spawn_local(move |_| async move {
+                let mut bytes = [0_u8; 1];
+                let mut receive = std::pin::pin!(socket.recv_from(&mut bytes));
+                let result = poll_fn(|ctx| {
+                    let result = receive.as_mut().poll(ctx);
+                    if result.is_pending() {
+                        child_registered.set(true);
+                    }
+                    result
+                })
+                .await;
+                child_received.set(true);
+                result
+            })
+            .unwrap();
+        let started = Instant::now();
+        while !registered.get() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "receive never parked"
+            );
+            yield_now().await;
+        }
+        peer.send_to(&[42], address).unwrap();
+        let started = Instant::now();
+        while !received.get() && started.elapsed() < Duration::from_secs(2) {
+            yield_now().await;
+        }
+        let progressed_while_busy = received.get();
+        // Retire the receiver even on the negative control: awaiting its join
+        // lets the worker become idle and perform its ordinary reactor turn.
+        let result = asupersync::time::timeout(cx.now(), Duration::from_secs(5), task.join(&cx))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.0, 1);
+        assert!(
+            progressed_while_busy,
+            "ready work starved registered UDP readiness"
+        );
+    });
+    assert!(runtime.is_quiescent());
+}
+
 /// A paused caller must observe retirement even after thousands of other
 /// runtimes have come and gone. An older live runtime remains a control for
 /// implementations that incorrectly retire every key below a high-water mark.

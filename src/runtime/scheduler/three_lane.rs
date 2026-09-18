@@ -185,6 +185,9 @@ const ADAPTIVE_EPROCESS_LAMBDA: f64 = 0.5;
 /// the hottest scheduling path while bounding how stale a busy worker's
 /// snapshot can be. Workers also publish before idle parking and on shutdown.
 const PREEMPTION_FAIRNESS_PUBLISH_INTERVAL: u64 = 64;
+/// Bound reactor starvation under continuously runnable work without putting
+/// a reactor syscall or driver lock on every task dispatch.
+const BUSY_IO_POLL_INTERVAL: usize = 64;
 // Keep a short spin/yield window for wakeup handoff while still reducing
 // runaway idle burn on noisy wake paths.
 const SPIN_LIMIT: u32 = 8;
@@ -5014,6 +5017,7 @@ impl ThreeLaneWorker {
         // woken while the worker ran elsewhere are runnable again here.
         self.rescue_stranded_local_tasks();
 
+        let mut dispatches_since_io = 0;
         'dispatch: loop {
             if self.shutdown.load(Ordering::Relaxed) {
                 break;
@@ -5032,6 +5036,16 @@ impl ThreeLaneWorker {
                 self.reset_empty_backoff();
                 self.execute(task);
                 self.publish_preemption_fairness_certificate_if_due();
+                dispatches_since_io += 1;
+                if dispatches_since_io == BUSY_IO_POLL_INTERVAL {
+                    dispatches_since_io = 0;
+                    if let Some(io) = &self.io_driver {
+                        // Readiness must progress even when a task continually
+                        // wakes itself. Never wait for I/O or its leader while
+                        // runnable work remains, and hold no scheduler lock.
+                        let _ = io.try_turn_with(Some(Duration::ZERO), |_, _| {});
+                    }
+                }
                 continue;
             }
 
@@ -5042,6 +5056,7 @@ impl ThreeLaneWorker {
             }
 
             // PHASE 5: Drive I/O (Leader/Follower pattern).
+            dispatches_since_io = 0;
             let io_phase = self.drive_io_phase(return_when_idle);
             if matches!(io_phase, IoPhaseOutcome::Progress) {
                 // We polled I/O, so we might have woken tasks. Continue loop.
