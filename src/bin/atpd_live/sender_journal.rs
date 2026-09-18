@@ -33,7 +33,7 @@ use std::sync::{
 };
 
 #[derive(Args, Clone, Copy, Debug)]
-pub(crate) struct CreateOptions {
+pub struct CreateOptions {
     /// Lifetime attempt ceiling once the first negotiated snapshot is saved.
     #[arg(long)]
     attempts: u32,
@@ -95,7 +95,7 @@ impl Work {
     }
 }
 
-pub(crate) fn send(
+pub fn send(
     config: SendConfig,
     input: PathBuf,
     path: PathBuf,
@@ -111,7 +111,7 @@ pub(crate) fn send(
     execute(config, options, authority, source, journal, None, signals)
 }
 
-pub(crate) fn resume(
+pub fn resume(
     config: SendConfig,
     input: PathBuf,
     path: PathBuf,
