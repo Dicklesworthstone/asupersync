@@ -55,6 +55,7 @@ mod driver;
 mod elapsed;
 mod interval;
 pub mod intrusive_wheel;
+pub mod replay;
 mod sleep;
 mod timeout_future;
 pub mod utc;
