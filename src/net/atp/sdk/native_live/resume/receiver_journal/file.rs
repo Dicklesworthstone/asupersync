@@ -454,6 +454,61 @@ impl ReceiverJournalFile {
             terminal: None,
         })
     }
+
+    /// Transfer this paired owner into a factory for `ResumableService::next_journaled`.
+    ///
+    /// A newly created empty pair becomes a new session; a reopened pair retains
+    /// its complete checkpoint and original data reader. This never binds another
+    /// listener, creates a file, or acquires another SDK transfer credit. Metadata
+    /// and descriptor work runs on the blocking pool. The service then checks the
+    /// authenticated key, current limits and actual retained bytes under its one
+    /// factory/revalidation deadline before replying. A pending/failed store or
+    /// uncertain application commit cannot become a new writable session.
+    ///
+    /// Select create versus reopen from a protected application catalog, never
+    /// by treating a missing old file as permission to create another transfer.
+    /// Both files remain private in-place data; no atomic publication is added.
+    pub async fn into_service_session(
+        self,
+    ) -> io::Result<
+        super::shared::JournaledSession<impl LiveStreamCommitSink + Send + Unpin + 'static>,
+    > {
+        spawn_blocking_io(move || self.service_session()).await
+    }
+
+    fn service_session(self) -> io::Result<super::shared::JournaledSession<ReceiverFileSink>> {
+        if let Some(error) = self.failure {
+            return Err(restore_error(error));
+        }
+        if self.pending.is_some() {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        {
+            let state = self.storage.state.lock();
+            if state.poisoned || state.file.metadata()?.len() != state.bytes {
+                return Err(invalid());
+            }
+            self.storage.verify(&state.file)?;
+        }
+        if self.latest.is_some() {
+            let saved = self.checkpoint()?;
+            if saved.phase() == ReceiverCheckpointPhase::Finalizing {
+                return Err(io::Error::other("receiver application commit remains unresolved"));
+            }
+            let sink = self.sink()?;
+            let retained = AsyncFile::from_std(self.storage.reader()?);
+            Ok(super::shared::JournaledSession::restore(sink, self, retained, saved))
+        } else {
+            if self.storage.data.metadata()?.len() != 0
+                || self.storage.state.lock().latest.is_some()
+            {
+                return Err(invalid());
+            }
+            let sink = self.sink()?;
+            Ok(super::shared::JournaledSession::new(sink, self))
+        }
+    }
+
     /// Bind a newly created empty file pair for one explicitly selected client.
     pub async fn bind_new(
         self,
@@ -853,5 +908,61 @@ mod tests {
         assert!(store.storage.append(start).is_err());
         assert!(store.storage.state.lock().poisoned);
         assert_eq!(std::fs::metadata(&data).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn shared_factory_handoff_keeps_both_locks_without_writing_or_binding() {
+        let (journal, data) = files();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits()).unwrap();
+        let before = std::fs::read(&journal).unwrap();
+        let session = store.service_session().unwrap();
+        assert_eq!(std::fs::read(&journal).unwrap(), before);
+        assert_eq!(std::fs::metadata(&data).unwrap().len(), 0);
+        for path in [&journal, &data] {
+            let other = OpenOptions::new().read(true).write(true).open(path).unwrap();
+            assert!(other.try_lock().is_err());
+        }
+        drop(session);
+        for path in [&journal, &data] {
+            let other = OpenOptions::new().read(true).write(true).open(path).unwrap();
+            assert!(other.try_lock().is_ok());
+        }
+        assert_eq!(std::fs::read(&journal).unwrap(), before);
+    }
+
+    #[test]
+    fn shared_handoff_retains_history_and_refuses_uncertain_or_unrecorded_state() {
+        let (journal, data) = files();
+        let (start, pending, _) = checkpoints();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits()).unwrap();
+        store.storage.append(start).unwrap();
+        store.storage.append(pending).unwrap();
+        append_data(&store, b"abc");
+        drop(store);
+        let before = std::fs::read(&journal).unwrap();
+        let reopened = ReceiverJournalFile::open_existing(&journal, &data).unwrap();
+        let session = reopened.service_session().unwrap();
+        assert_eq!(std::fs::read(&journal).unwrap(), before);
+        assert_eq!(std::fs::read(&data).unwrap(), b"abc");
+        assert!(ReceiverJournalFile::open_existing(&journal, &data).is_err());
+        drop(session);
+
+        let (journal, data) = files();
+        let (start, _, _) = checkpoints();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits()).unwrap();
+        store.storage.append(start.clone()).unwrap();
+        let mut uncertain = start;
+        uncertain.phase = ReceiverCheckpointPhase::Finalizing;
+        store.storage.append(uncertain).unwrap();
+        drop(store);
+        let before = std::fs::read(&journal).unwrap();
+        assert!(ReceiverJournalFile::open_existing(&journal, &data).unwrap().service_session().is_err());
+        assert_eq!(std::fs::read(&journal).unwrap(), before);
+
+        let (journal, data) = files();
+        let store = ReceiverJournalFile::create_new(&journal, &data, limits()).unwrap();
+        append_data(&store, b"unrecorded");
+        assert!(store.service_session().is_err());
+        assert_eq!(std::fs::read(&data).unwrap(), b"unrecorded");
     }
 }
