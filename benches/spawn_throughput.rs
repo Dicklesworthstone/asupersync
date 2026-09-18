@@ -823,11 +823,48 @@ fn bench_adversarial_tails(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measures the busy scheduling paths with a real reactor and no ready I/O.
+/// Keep construction outside samples; every sample completes all its yields.
+fn bench_busy_io_poll_overhead(c: &mut Criterion) {
+    const YIELDS: u64 = 1_024;
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let mut group = c.benchmark_group("scheduler_busy_io_poll");
+    group.throughput(Throughput::Elements(YIELDS));
+    group.sample_size(50);
+    group.bench_function("self_waking_root", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                for _ in 0..YIELDS {
+                    asupersync::runtime::yield_now().await;
+                }
+            });
+        });
+    });
+    group.bench_function("self_waking_child", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let mut child = cx
+                    .spawn_local(|_| async {
+                        for _ in 0..YIELDS {
+                            asupersync::runtime::yield_now().await;
+                        }
+                    })
+                    .unwrap();
+                child.join(&cx).await.unwrap();
+            });
+        });
+    });
+    group.finish();
+    assert!(runtime.is_quiescent());
+}
+
 criterion_group!(
     benches,
     bench_spawn_throughput,
     bench_join_handle_completion,
     bench_join_set_fanout,
-    bench_adversarial_tails
+    bench_adversarial_tails,
+    bench_busy_io_poll_overhead
 );
 criterion_main!(benches);
