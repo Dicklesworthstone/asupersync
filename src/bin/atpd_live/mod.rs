@@ -51,6 +51,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Persist each pending epoch so a new sender process can continue before EOF.
+    SendJournaled {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
+        /// New append-only private journal; existing paths are never reused.
+        #[arg(long)]
+        journal: PathBuf,
+        #[command(flatten)]
+        options: sender_checkpoint::journal::CreateOptions,
+    },
+    /// Revalidate the original source and continue an existing sender journal.
+    ResumeJournaled {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        input: PathBuf,
+        /// Existing complete journal; its attempt and storage budgets are retained.
+        #[arg(long)]
+        journal: PathBuf,
+        #[arg(long, default_value_t = 250)]
+        retry_delay_ms: u64,
+    },
     /// Send one source, persisting EOF intent before requesting final publication.
     SendCheckpointed {
         #[arg(long)]
@@ -158,6 +182,12 @@ enum Command {
 
 pub fn run() -> io::Result<()> {
     match Cli::parse().command {
+        Command::SendJournaled { config, input, journal, options } => {
+            sender_checkpoint::journal::send(settings::load(&config)?, input, journal, options)
+        }
+        Command::ResumeJournaled { config, input, journal, retry_delay_ms } => {
+            sender_checkpoint::journal::resume(settings::load(&config)?, input, journal, retry_delay_ms)
+        }
         Command::SendCheckpointed {
             config,
             input,

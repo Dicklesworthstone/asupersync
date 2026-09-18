@@ -322,3 +322,6 @@ fn transfer_json(report: &ResumeReport) -> Value {
 #[cfg(test)]
 #[path = "sender_checkpoint_tests.rs"]
 mod tests;
+
+#[path = "sender_journal.rs"]
+pub(super) mod journal;
