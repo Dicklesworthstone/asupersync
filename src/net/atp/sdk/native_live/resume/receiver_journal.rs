@@ -813,3 +813,7 @@ mod tests {
 #[cfg(unix)]
 #[path = "receiver_journal/file.rs"]
 pub mod file;
+
+/// Journaled fresh and restored sessions on the existing shared receiver port.
+#[path = "receiver_journal/shared.rs"]
+pub mod shared;

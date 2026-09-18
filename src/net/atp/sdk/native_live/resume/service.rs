@@ -40,7 +40,8 @@ use std::task::{Context, Poll};
 #[path = "restoration.rs"]
 mod restoration;
 pub use restoration::ResumeSessionInit;
-use restoration::ServiceReceiver;
+use restoration::{ServiceInit, ServiceReceiver};
+use super::receiver_journal::shared::JournaledSession;
 
 #[path = "revocation.rs"]
 mod revocation;
@@ -574,6 +575,54 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
         F: Fn(Cx, ResumeSessionKey) -> Fut + Clone + Send + Sync + 'static,
         Fut: Future<Output = io::Result<ResumeSessionInit<W>>> + Send + 'static,
     {
+        self.next_initialized(cx, scope, move |child, key| {
+            let future = make_sink(child, key);
+            async move { future.await.map(ServiceInit::Existing) }
+        })
+        .await
+    }
+
+    /// Admit a fresh or restored journaled receiver on this same listening port.
+    ///
+    /// The factory runs once per authenticated certificate/nonce after all registry
+    /// limits and revocation checks. Its sink, WAL and optional retained-data reader
+    /// remain owned by the worker/session. Factory work and content revalidation
+    /// share one operation deadline. No second socket or SDK credit is required.
+    /// Every routed attempt retains WAL barriers, even when later calls use next
+    /// or next_restoring. Wrong keys, changed bytes, insufficient current policy,
+    /// exhausted history and uncertain commits fail initialization and tombstone
+    /// the key. The caller must preserve a protected key-to-file catalog across
+    /// process exit; this method never interprets missing history as a fresh sink.
+    /// Stop/cancel and drain_next as usual; revocation does not abandon a started WAL.
+    pub async fn next_journaled<P, F, Fut>(
+        &mut self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        make_session: F,
+    ) -> Result<Option<ResumeServiceCompletion>, LiveStreamError>
+    where
+        P: Policy,
+        F: Fn(Cx, ResumeSessionKey) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = io::Result<JournaledSession<W>>> + Send + 'static,
+    {
+        self.next_initialized(cx, scope, move |child, key| {
+            let future = make_session(child, key);
+            async move { future.await.map(ServiceInit::Journaled) }
+        })
+        .await
+    }
+
+    async fn next_initialized<P, F, Fut>(
+        &mut self,
+        cx: &Cx,
+        scope: &Scope<'_, P>,
+        make_sink: F,
+    ) -> Result<Option<ResumeServiceCompletion>, LiveStreamError>
+    where
+        P: Policy,
+        F: Fn(Cx, ResumeSessionKey) -> Fut + Clone + Send + Sync + 'static,
+        Fut: Future<Output = io::Result<ServiceInit<W>>> + Send + 'static,
+    {
         let mut cancellation = Cancellation { cx, token: None };
         poll_fn(|ctx| {
             cancellation.token =
@@ -706,7 +755,7 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
     where
         P: Policy,
         F: Fn(Cx, ResumeSessionKey) -> Fut + Send + 'static,
-        Fut: Future<Output = io::Result<ResumeSessionInit<W>>> + Send + 'static,
+        Fut: Future<Output = io::Result<ServiceInit<W>>> + Send + 'static,
     {
         if self.listener.is_none() {
             return Err(ResumeServiceRejection::Stopping);
@@ -770,22 +819,23 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
                         Some(receiver) => receiver,
                         None => {
                             authorize(&child).map_err(ResumeServiceRejection::Factory)?;
-                            let initialized = bounded(
+                            bounded(
                                 &child,
                                 config.operation_timeout,
                                 "resume sink creation",
-                                factory(child.clone(), key),
+                                async {
+                                    let initialized = factory(child.clone(), key).await?;
+                                    initialized.initialize(
+                                        &child,
+                                        key,
+                                        acceptor,
+                                        config,
+                                        maximum,
+                                        Arc::clone(&_capacity),
+                                    ).await
+                                },
                             )
                             .await
-                            .map_err(ResumeServiceRejection::Factory)?;
-                            ServiceReceiver::new(
-                                initialized,
-                                key,
-                                acceptor,
-                                config,
-                                maximum,
-                                Arc::clone(&_capacity),
-                            )
                             .map_err(ResumeServiceRejection::Factory)?
                         }
                     };

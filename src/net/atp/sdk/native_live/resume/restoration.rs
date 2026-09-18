@@ -13,6 +13,7 @@ use super::super::{
     Budget, Credit, ResumableReceiver, ResumeError, ResumeReport, decode_offer, initial, offer,
 };
 use super::{Capacity, ResumeSessionKey};
+use super::super::receiver_journal::shared::{JournaledReceiver, JournaledSession};
 use crate::cx::Cx;
 use crate::net::TcpStream;
 use crate::net::atp::protocol::frames::FrameType;
@@ -42,6 +43,35 @@ pub enum ResumeSessionInit<W> {
 pub(super) enum ServiceReceiver<W> {
     Live(Box<ResumableReceiver<W>>),
     Receipt(Box<ReceiptReceiver>),
+    Journaled(Box<JournaledReceiver<W>>),
+}
+
+// Preserve the exhaustively matchable public ResumeSessionInit enum. The new
+// API selects this private variant rather than changing established factories.
+pub(super) enum ServiceInit<W> {
+    Existing(ResumeSessionInit<W>),
+    Journaled(JournaledSession<W>),
+}
+
+impl<W> ServiceInit<W> {
+    pub(super) async fn initialize(
+        self,
+        cx: &Cx,
+        key: ResumeSessionKey,
+        acceptor: TlsAcceptor,
+        config: LiveStreamConfig,
+        maximum: u32,
+        capacity: Arc<Capacity>,
+    ) -> Result<ServiceReceiver<W>, LiveStreamError> {
+        match self {
+            Self::Existing(initialized) =>
+                ServiceReceiver::new(initialized, key, acceptor, config, maximum, capacity),
+            Self::Journaled(initialized) => initialized
+                .initialize(cx, key, acceptor, config, maximum, capacity)
+                .await
+                .map(|receiver| ServiceReceiver::Journaled(Box::new(receiver))),
+        }
+    }
 }
 
 pub(super) struct ReceiptReceiver {
@@ -126,6 +156,7 @@ impl<W> ServiceReceiver<W> {
         match self {
             Self::Live(receiver) => receiver.failed,
             Self::Receipt(_) => false,
+            Self::Journaled(receiver) => receiver.receiver.failed,
         }
     }
 
@@ -133,6 +164,7 @@ impl<W> ServiceReceiver<W> {
         let budget = match self {
             Self::Live(receiver) => &receiver.budget,
             Self::Receipt(receiver) => &receiver.budget,
+            Self::Journaled(receiver) => &receiver.receiver.budget,
         };
         budget.used < budget.maximum
     }
@@ -146,6 +178,7 @@ impl<W: LiveStreamCommitSink + Unpin> ServiceReceiver<W> {
         offered: &[u8],
     ) -> ResumeReport {
         match self {
+            Self::Journaled(receiver) => receiver.attempt(cx, wire, offered).await,
             Self::Live(receiver) => {
                 let reused = receiver.completed.is_some();
                 let outcome = match authorize(cx)
