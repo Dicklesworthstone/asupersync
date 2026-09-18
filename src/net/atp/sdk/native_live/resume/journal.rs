@@ -543,3 +543,8 @@ mod tests {
         saved.read_hash[0] ^= 1; assert!(saved.validate().is_err());
     }
 }
+
+/// Append-only private Unix storage for write-ahead sender checkpoints.
+#[cfg(unix)]
+#[path = "journal/file.rs"]
+pub mod file;
