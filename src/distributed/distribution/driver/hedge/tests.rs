@@ -26,8 +26,8 @@ fn done<F: Future>(future: Pin<&mut F>, waker: &Waker) -> F::Output {
 fn config(level: ConsistencyLevel, capacity: usize) -> DistributionConfig {
     DistributionConfig {
         consistency: level, max_concurrent: capacity, hedge_enabled: true,
-        hedge_delay: std::time::Duration::from_nanos(10),
-        ack_timeout: std::time::Duration::from_nanos(100),
+        hedge_delay: std::time::Duration::from_millis(10),
+        ack_timeout: std::time::Duration::from_millis(100),
         ..Default::default()
     }
 }
@@ -63,7 +63,11 @@ impl Fixture {
         super::super::run(config, &self.cx, &self.encoded, assignments, probe, &self.auth,
             Some(TimerDriverHandle::new(Arc::clone(&self.driver))))
     }
-    fn advance(&self, nanos: u64) { self.clock.advance(nanos); self.driver.process_timers(); }
+    // Use whole milliseconds: the production timer wheel has 1ms slots.
+    fn advance(&self, millis: u64) {
+        self.clock.advance(millis.checked_mul(1_000_000).unwrap());
+        self.driver.process_timers();
+    }
 }
 
 // Mode 0 parks, 1 succeeds, 2 errors, 3 lies about count, 4 lies about

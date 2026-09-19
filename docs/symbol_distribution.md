@@ -46,3 +46,16 @@ Focused validation (the runner and toolchain must be available):
 ```bash
 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --lib distributed::distribution::
 ```
+
+The cross-process regression starts independent mTLS service processes with
+private immutable stores. A nonresponding TLS primary must observe client close
+when healthy replicas satisfy quorum; successful replicas are then fetched by
+exact batch digest. A wrong-key primary under `All` must leave backup processes
+uncontacted. Parent tests own and reap every subprocess, and watchdog termination
+fails rather than counting as graceful cleanup. The ignored `replica_process`
+entry is explicitly invoked as a worker by the two parent acceptance tests.
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync \
+  --features tls,test-internals --test distribution_hedge_process -- --nocapture
+```
