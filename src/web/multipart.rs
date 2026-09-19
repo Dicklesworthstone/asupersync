@@ -2296,9 +2296,18 @@ fn parse_multipart(
 
         pos = skip_line_ending(body, after_delim);
 
-        // Safety: if we haven't advanced, bail.
+        // br-asupersync-hw83se: a body that ends after a non-closing delimiter is
+        // malformed — the final `--boundary--` close delimiter is missing. The
+        // streaming decoder rejects this (finish() → "missing closing boundary");
+        // the buffered parser must agree so the two entry points do not disagree
+        // on the same bytes. Cases above break validly on the real close
+        // delimiter before reaching here, so this is reached only for a body
+        // truncated after a regular part delimiter.
         if pos >= body.len() {
-            break;
+            return Err(malformed_multipart_error(
+                StatusCode::BAD_REQUEST,
+                "multipart part missing closing boundary",
+            ));
         }
     }
 
@@ -3656,6 +3665,37 @@ mod tests {
         let fragmented = fragmented.finish().expect("fragmented many-parts EOF");
         assert_streamed_field_parity(&one_frame, &fragmented);
         assert_eq!(one_frame.len(), 64);
+    }
+
+    #[test]
+    fn buffered_parser_rejects_body_missing_closing_boundary() {
+        // br-asupersync-hw83se: the buffered parse_multipart used to accept a
+        // body truncated after a non-closing part delimiter (no final `--B--`),
+        // while the streaming decoder rejected it — the two entry points
+        // disagreed on the same bytes. The buffered parser now rejects it too. A
+        // well-formed body (with the close delimiter) still parses.
+        let malformed =
+            b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nvalue\r\n--B\r\n".to_vec();
+        let error = parse_multipart(
+            &Bytes::from(malformed),
+            "B",
+            &MultipartLimits::default(),
+            wall_now(),
+        )
+        .expect_err("a body missing the closing boundary must be rejected");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+
+        let valid =
+            b"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nvalue\r\n--B--\r\n".to_vec();
+        let fields = parse_multipart(
+            &Bytes::from(valid),
+            "B",
+            &MultipartLimits::default(),
+            wall_now(),
+        )
+        .expect("a well-formed body still parses");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].text().unwrap(), "value");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
