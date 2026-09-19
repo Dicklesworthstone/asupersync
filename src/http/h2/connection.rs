@@ -129,6 +129,54 @@ impl Decoder for FrameCodec {
     type Error = H2Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.decode_item(src)? {
+            Some(DecodedFrame::Frame(frame)) => Ok(Some(frame)),
+            Some(DecodedFrame::PriorityError(error)) => Err(error),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Listener-only decoding outcome. A consumed PRIORITY error does not poison
+/// the framed transport; connection sequencing still decides its final scope.
+#[derive(Debug)]
+pub(super) enum DecodedFrame {
+    Frame(Frame),
+    PriorityError(H2Error),
+}
+
+#[derive(Debug)]
+pub(super) struct ListenerFrameCodec(FrameCodec);
+
+impl ListenerFrameCodec {
+    pub(super) fn new() -> Self {
+        Self(FrameCodec::new())
+    }
+
+    pub(super) fn set_max_frame_size(&mut self, size: u32) {
+        self.0.set_max_frame_size(size);
+    }
+}
+
+impl Decoder for ListenerFrameCodec {
+    type Item = DecodedFrame;
+    type Error = H2Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        self.0.decode_item(src)
+    }
+}
+
+impl<T: AsRef<Frame>> Encoder<T> for ListenerFrameCodec {
+    type Error = H2Error;
+
+    fn encode(&mut self, item: T, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        self.0.encode(item, dst)
+    }
+}
+
+impl FrameCodec {
+    fn decode_item(&mut self, src: &mut BytesMut) -> Result<Option<DecodedFrame>, H2Error> {
         loop {
             // First, try to parse the header if we don't have one.
             let header = if let Some(header) = self.partial_header.take() {
@@ -167,14 +215,24 @@ impl Decoder for FrameCodec {
                 continue;
             }
 
-            let frame = parse_frame(&header, payload)?;
+            let frame = match parse_frame(&header, payload) {
+                Ok(frame) => frame,
+                Err(error)
+                    if header.frame_type == FrameType::Priority as u8
+                        && header.stream_id != 0
+                        && error.stream_id == Some(header.stream_id) =>
+                {
+                    return Ok(Some(DecodedFrame::PriorityError(error)));
+                }
+                Err(error) => return Err(error),
+            };
             match &frame {
                 Frame::Headers(frame) => self.awaiting_continuation = !frame.end_headers,
                 Frame::PushPromise(frame) => self.awaiting_continuation = !frame.end_headers,
                 Frame::Continuation(frame) => self.awaiting_continuation = !frame.end_headers,
                 _ => {}
             }
-            return Ok(Some(frame));
+            return Ok(Some(DecodedFrame::Frame(frame)));
         }
     }
 }
@@ -953,8 +1011,11 @@ impl Connection {
         });
     }
 
-    /// Process an incoming frame.
-    pub fn process_frame(&mut self, frame: Frame) -> Result<Option<ReceivedFrame>, H2Error> {
+    fn check_incoming_frame(
+        &mut self,
+        is_settings: bool,
+        continuation_stream: Option<u32>,
+    ) -> Result<(), H2Error> {
         // Check continuation timeout before processing
         self.check_continuation_timeout()?;
 
@@ -968,11 +1029,11 @@ impl Connection {
 
         // RFC 9113 §6.10: CONTINUATION frame sequencing. Either side of the
         // boundary is a connection-level PROTOCOL_ERROR.
-        match (&frame, self.continuation_stream_id) {
+        match (continuation_stream, self.continuation_stream_id) {
             // Mid-sequence: only CONTINUATION on the expected stream is
             // valid; anything else (including CONTINUATION on a different
             // stream) terminates the connection.
-            (Frame::Continuation(cont), Some(expected)) if cont.stream_id == expected => {}
+            (Some(actual), Some(expected)) if actual == expected => {}
             (_, Some(_)) => {
                 return Err(H2Error::protocol("expected CONTINUATION frame"));
             }
@@ -981,7 +1042,7 @@ impl Connection {
             // PROTOCOL_ERROR via stream.recv_continuation when the stream
             // existed but headers were complete — non-conformant with
             // §6.10's connection-error mandate.
-            (Frame::Continuation(_), None) => {
+            (Some(_), None) => {
                 return Err(H2Error::protocol(
                     "CONTINUATION without preceding HEADERS/PUSH_PROMISE (RFC 9113 §6.10)",
                 ));
@@ -1001,13 +1062,37 @@ impl Connection {
         // normally. After this guard, only SETTINGS advances out of
         // Handshaking; everything else triggers a GOAWAY-bound
         // PROTOCOL_ERROR.
-        if matches!(self.state, ConnectionState::Handshaking)
-            && !matches!(frame, Frame::Settings(_))
-        {
+        if matches!(self.state, ConnectionState::Handshaking) && !is_settings {
             return Err(H2Error::protocol(
                 "first frame on the connection must be SETTINGS (RFC 9113 §3.4)",
             ));
         }
+
+        Ok(())
+    }
+
+    pub(super) fn process_decoded_frame(
+        &mut self,
+        frame: DecodedFrame,
+    ) -> Result<Option<ReceivedFrame>, H2Error> {
+        match frame {
+            DecodedFrame::Frame(frame) => self.process_frame(frame),
+            DecodedFrame::PriorityError(error) => {
+                self.check_incoming_frame(false, None)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Process an incoming frame.
+    pub fn process_frame(&mut self, frame: Frame) -> Result<Option<ReceivedFrame>, H2Error> {
+        self.check_incoming_frame(
+            matches!(frame, Frame::Settings(_)),
+            match &frame {
+                Frame::Continuation(frame) => Some(frame.stream_id),
+                _ => None,
+            },
+        )?;
 
         let result = match frame {
             Frame::Data(f) => self.process_data(f),
@@ -2686,6 +2771,160 @@ mod tests {
             }
             _ => panic!("expected PING frame"),
         }
+    }
+
+    fn priority_error_wire(payload: &[u8]) -> BytesMut {
+        let mut bytes = BytesMut::new();
+        FrameHeader {
+            length: u32::try_from(payload.len()).unwrap(),
+            frame_type: FrameType::Priority as u8,
+            flags: 0,
+            stream_id: 1,
+        }
+        .write(&mut bytes);
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn listener_priority_decode_preserves_public_errors_and_fragmentation() {
+        for (payload, code) in [
+            (&[0, 0, 0, 0][..], ErrorCode::FrameSizeError),
+            (&[0, 0, 0, 1, 0][..], ErrorCode::ProtocolError),
+        ] {
+            let wire = priority_error_wire(payload);
+            let public_error = FrameCodec::new().decode(&mut wire.clone()).unwrap_err();
+            assert_eq!(public_error.code, code);
+            assert_eq!(public_error.stream_id, Some(1));
+            for split in 0..wire.len() {
+                let mut codec = ListenerFrameCodec::new();
+                let mut input = BytesMut::from(&wire[..split]);
+                assert!(codec.decode(&mut input).unwrap().is_none());
+                input.extend_from_slice(&wire[split..]);
+                Frame::Ping(PingFrame::new([7; 8]))
+                    .encode(&mut input)
+                    .unwrap();
+                let Some(DecodedFrame::PriorityError(error)) = codec.decode(&mut input).unwrap()
+                else {
+                    panic!("expected consumed PRIORITY error");
+                };
+                assert_eq!(error.code, code);
+                assert_eq!(error.stream_id, Some(1));
+                assert!(matches!(
+                    codec.decode(&mut input).unwrap(),
+                    Some(DecodedFrame::Frame(Frame::Ping(_)))
+                ));
+                assert!(input.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn listener_priority_error_does_not_poison_framed_transport() {
+        use crate::stream::Stream as _;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        let mut wire = priority_error_wire(&[0; 4]);
+        Frame::Ping(PingFrame::new([9; 8]))
+            .encode(&mut wire)
+            .unwrap();
+        let mut framed = crate::codec::Framed::new(
+            std::io::Cursor::new(wire.to_vec()),
+            ListenerFrameCodec::new(),
+        );
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut context),
+            Poll::Ready(Some(Ok(DecodedFrame::PriorityError(_))))
+        ));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut context),
+            Poll::Ready(Some(Ok(DecodedFrame::Frame(Frame::Ping(_)))))
+        ));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut context),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn listener_priority_error_obeys_connection_preflight() {
+        fn malformed() -> DecodedFrame {
+            ListenerFrameCodec::new()
+                .decode(&mut priority_error_wire(&[0; 4]))
+                .unwrap()
+                .unwrap()
+        }
+        let mut conn = Connection::server(Settings::default());
+        let error = conn.process_decoded_frame(malformed()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert_eq!(error.stream_id, None);
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+            .unwrap();
+        let error = conn.process_decoded_frame(malformed()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::FrameSizeError);
+        assert_eq!(error.stream_id, Some(1));
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            Bytes::from_static(&[0x82]),
+            false,
+            false,
+        )))
+        .unwrap();
+        let error = conn.process_decoded_frame(malformed()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert_eq!(error.stream_id, None);
+    }
+
+    #[test]
+    fn listener_codec_keeps_other_parse_errors_terminal() {
+        let mut stream_zero = priority_error_wire(&[0; 4]);
+        stream_zero[8] = 0;
+        let error = ListenerFrameCodec::new()
+            .decode(&mut stream_zero)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert_eq!(error.stream_id, None);
+
+        let mut oversized = priority_error_wire(&[0; 5]);
+        let mut codec = ListenerFrameCodec::new();
+        codec.set_max_frame_size(4);
+        let error = codec.decode(&mut oversized).unwrap_err();
+        assert_eq!(error.code, ErrorCode::FrameSizeError);
+        assert_eq!(error.stream_id, None);
+
+        // A HEADERS self-dependency is stream-scoped in the parser, but must
+        // not become recoverable: its field block has not updated HPACK state.
+        let mut headers = priority_error_wire(&[0, 0, 0, 1, 0, 0x82]);
+        headers[3] = FrameType::Headers as u8;
+        headers[4] = 0x24; // PRIORITY | END_HEADERS
+        let error = ListenerFrameCodec::new().decode(&mut headers).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert_eq!(error.stream_id, Some(1));
+    }
+
+    #[test]
+    fn listener_decoded_headers_keep_hpack_errors_connection_scoped() {
+        let mut conn = Connection::server(Settings::default());
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+            .unwrap();
+        let mut wire = BytesMut::new();
+        Frame::Headers(HeadersFrame::new(
+            1,
+            Bytes::from_static(&[0x80]),
+            true,
+            true,
+        ))
+        .encode(&mut wire)
+        .unwrap();
+        let frame = ListenerFrameCodec::new()
+            .decode(&mut wire)
+            .unwrap()
+            .unwrap();
+        let error = conn.process_decoded_frame(frame).unwrap_err();
+        assert_eq!(error.code, ErrorCode::CompressionError);
+        assert_eq!(error.stream_id, None);
     }
 
     #[test]

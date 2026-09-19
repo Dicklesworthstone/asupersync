@@ -9,7 +9,7 @@
 //!
 //! The accept-loop `Http2Listener` and per-connection frame-pump driver land
 //! in the next increments (full design recorded on the bead): preface +
-//! SETTINGS handshake over `Framed<TcpStream, FrameCodec>`, per-stream
+//! SETTINGS handshake over a private framed codec, per-stream
 //! handler dispatch through a response funnel, and request-aware graceful
 //! drain via the D2.3 two-stage GOAWAY primitives on
 //! [`crate::http::h2::connection::Connection`].
@@ -23,8 +23,11 @@ use crate::http::h1::HttpError;
 use crate::http::h1::server::{HostPolicy, parse_request_timeout_header, validate_host_header};
 use crate::http::h1::stream::{BodyKind, OutgoingBody, OutgoingBodySender};
 use crate::http::h1::types::{Method, Request, Response, Version};
-use crate::http::h2::connection::{CLIENT_PREFACE, Connection, FrameCodec, ReceivedFrame};
+use crate::http::h2::connection::{
+    CLIENT_PREFACE, Connection, DecodedFrame, ListenerFrameCodec, ReceivedFrame,
+};
 use crate::http::h2::error::{ErrorCode, H2Error};
+#[cfg(test)]
 use crate::http::h2::frame::Frame;
 use crate::http::h2::hpack::Header;
 use crate::http::h2::settings::Settings;
@@ -1890,7 +1893,7 @@ fn suppress_response_body_for_head(resp: &mut Response) {
 /// One wake-up of the connection driver's event select.
 enum DriverEvent {
     /// An incoming frame (or EOF when `None`).
-    Frame(Option<Result<Frame, H2Error>>),
+    Frame(Option<Result<DecodedFrame, H2Error>>),
     /// A handler finished and its response is ready to encode.
     Response(FunnelItem),
     /// One credit-admitted frame or EOF from an active produced body.
@@ -2004,7 +2007,7 @@ fn h2_pump_failure_diagnostic(error: &H2PumpWriteError) -> Option<WebBodyDiagnos
 
 async fn pump_writes(
     conn: &mut Connection,
-    framed: &mut Framed<TcpStream, FrameCodec>,
+    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
 ) -> Result<(), H2PumpWriteError> {
     loop {
         // Respect the codec's soft buffer boundary before removing another
@@ -2025,7 +2028,7 @@ async fn pump_writes(
 
 async fn pump_writes_with_body_diagnostics(
     conn: &mut Connection,
-    framed: &mut Framed<TcpStream, FrameCodec>,
+    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
     pending_requests: &HashMap<u32, (Vec<Header>, Vec<u8>)>,
     dispatched_streams: &HashSet<u32>,
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
@@ -2085,7 +2088,7 @@ async fn pump_writes_with_body_diagnostics(
 /// Wait for the next driver event: incoming frame, completed handler
 /// response, or a shutdown-phase transition.
 async fn next_driver_event(
-    framed: &mut Framed<TcpStream, FrameCodec>,
+    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
     resp_rx: &mut mpsc::Receiver<FunnelItem>,
     conn: &Connection,
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
@@ -2569,12 +2572,12 @@ where
 /// [`Connection::graceful_shutdown_complete`].
 /// Builds the inbound frame codec for a freshly-accepted connection, setting
 /// the decoder's accept limit to this listener's advertised
-/// `SETTINGS_MAX_FRAME_SIZE`. A fresh [`FrameCodec`] otherwise keeps the
+/// `SETTINGS_MAX_FRAME_SIZE`. A fresh codec otherwise keeps the
 /// protocol default (16 KiB), which would reject conformant peer frames sized
 /// within a larger advertised limit. `max_frame_size` must be the LOCAL
 /// advertised value, never the peer's (br-asupersync-i1r9cw).
-fn frame_codec_for(max_frame_size: u32) -> FrameCodec {
-    let mut codec = FrameCodec::new();
+fn frame_codec_for(max_frame_size: u32) -> ListenerFrameCodec {
+    let mut codec = ListenerFrameCodec::new();
     codec.set_max_frame_size(max_frame_size);
     codec
 }
@@ -2914,7 +2917,7 @@ where
                 cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 frame decode failed");
                 return Err(io::Error::other(decode_error));
             }
-            DriverEvent::Frame(Some(Ok(frame))) => match conn.process_frame(frame) {
+            DriverEvent::Frame(Some(Ok(frame))) => match conn.process_decoded_frame(frame) {
                 Err(protocol_error) => {
                     // Stream-scoped errors (RFC 9113 §5.4.2) reset only the
                     // offending stream; tearing down the whole multiplexed
@@ -6134,7 +6137,7 @@ mod tests {
             .expect("decode succeeds under the advertised limit")
             .expect("a full frame is available");
         assert!(
-            matches!(frame, Frame::Data(_)),
+            matches!(frame, DecodedFrame::Frame(Frame::Data(_))),
             "expected a DATA frame, got {frame:?}",
         );
     }

@@ -30,6 +30,7 @@ use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder as _;
 use asupersync::http::h1::server::HostPolicy;
 use asupersync::http::h1::types::Response;
+use asupersync::http::h2::ErrorCode;
 use asupersync::http::h2::connection::CLIENT_PREFACE;
 use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame, PingFrame, SettingsFrame};
 use asupersync::http::h2::listener::{Http2Listener, Http2ListenerConfig};
@@ -46,6 +47,161 @@ fn idle_config(idle: Duration) -> Http2ListenerConfig {
         .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
         .max_requests_per_connection(None)
         .idle_timeout(Some(idle))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DecodeProbe {
+    Priority,
+    PendingPriority,
+    BeforeSettings,
+    DuringContinuation,
+    StreamZero,
+    OversizedPriority,
+    MalformedHeaders,
+    InvalidHpack,
+}
+
+/// Exercise the listener's actual Framed reader, not just frame parsing.
+fn decode_probe_client(addr: SocketAddr, probe: DecodeProbe) -> Vec<Frame> {
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(CLIENT_PREFACE).unwrap();
+    let mut request = BytesMut::new();
+    // A complete PRIORITY frame with four payload bytes instead of five.
+    let mut malformed_priority = [0, 0, 4, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    if matches!(probe, DecodeProbe::BeforeSettings) {
+        request.extend_from_slice(&malformed_priority);
+    }
+    Frame::Settings(SettingsFrame::new(Vec::new()))
+        .encode(&mut request)
+        .unwrap();
+    let mut block = BytesMut::new();
+    HpackEncoder::new().encode(
+        &[
+            Header::new(":method", "GET"),
+            Header::new(":scheme", "http"),
+            Header::new(":path", "/survivor"),
+            Header::new(":authority", "localhost"),
+        ],
+        &mut block,
+    );
+    let block = block.freeze();
+    match probe {
+        DecodeProbe::BeforeSettings => {}
+        DecodeProbe::Priority => request.extend_from_slice(&malformed_priority),
+        DecodeProbe::PendingPriority => {
+            Frame::Headers(HeadersFrame::new(1, block.clone(), false, true))
+                .encode(&mut request)
+                .unwrap();
+            request.extend_from_slice(&malformed_priority);
+        }
+        DecodeProbe::DuringContinuation => {
+            Frame::Headers(HeadersFrame::new(1, block.clone(), false, false))
+                .encode(&mut request)
+                .unwrap();
+            request.extend_from_slice(&malformed_priority);
+        }
+        DecodeProbe::StreamZero => {
+            malformed_priority[8] = 0;
+            request.extend_from_slice(&malformed_priority);
+        }
+        DecodeProbe::OversizedPriority => {
+            request.extend_from_slice(&[0, 0x40, 1, 2, 0, 0, 0, 0, 1]);
+            request.extend_from_slice(&vec![0; 16_385]);
+        }
+        DecodeProbe::MalformedHeaders => {
+            // HEADERS with a self-dependent priority: its parser emits a
+            // stream-tagged error, but it must not enter PRIORITY recovery.
+            request.extend_from_slice(&[0, 0, 5, 1, 0x24, 0, 0, 0, 1, 0, 0, 0, 1, 0]);
+        }
+        DecodeProbe::InvalidHpack => {
+            Frame::Headers(HeadersFrame::new(1, vec![0x80].into(), true, true))
+                .encode(&mut request)
+                .unwrap();
+        }
+    }
+    Frame::Headers(HeadersFrame::new(3, block, true, true))
+        .encode(&mut request)
+        .unwrap();
+    stream.write_all(&request).unwrap();
+    let mut codec = FrameCodec::new();
+    let mut input = BytesMut::new();
+    let mut frames = Vec::new();
+    loop {
+        while let Some(frame) = codec.decode(&mut input).unwrap() {
+            if matches!(&frame, Frame::Settings(settings) if !settings.ack) {
+                let mut ack = BytesMut::new();
+                Frame::Settings(SettingsFrame::ack())
+                    .encode(&mut ack)
+                    .unwrap();
+                let _ = stream.write_all(&ack);
+            }
+            let finished = matches!(&frame, Frame::GoAway(_))
+                || matches!(&frame, Frame::Data(data) if data.stream_id == 3 && data.end_stream)
+                || matches!(&frame, Frame::Headers(headers) if headers.stream_id == 3 && headers.end_stream);
+            frames.push(frame);
+            if finished {
+                return frames;
+            }
+        }
+        let mut chunk = [0; 4096];
+        let n = stream
+            .read(&mut chunk)
+            .expect("response or GOAWAY before deadline");
+        if n == 0 {
+            return frames;
+        }
+        input.extend_from_slice(&chunk[..n]);
+    }
+}
+
+#[test]
+fn h2_priority_decode_recovery_preserves_connection_error_boundaries() {
+    for probe in [
+        DecodeProbe::Priority,
+        DecodeProbe::PendingPriority,
+        DecodeProbe::BeforeSettings,
+        DecodeProbe::DuringContinuation,
+        DecodeProbe::StreamZero,
+        DecodeProbe::OversizedPriority,
+        DecodeProbe::MalformedHeaders,
+        DecodeProbe::InvalidHpack,
+    ] {
+        let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+        let handle = runtime.handle();
+        runtime.block_on(async move {
+            let listener = Http2Listener::bind_with_config(
+                "127.0.0.1:0",
+                |_| async { Response::new(200, "OK", b"survived".to_vec()) },
+                idle_config(Duration::from_secs(5)),
+            ).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let manager = listener.connection_manager().clone();
+            let run = handle.clone().try_spawn(async move { listener.run(&handle).await }).unwrap();
+            let result = std::thread::spawn(move || decode_probe_client(addr, probe)).join();
+            assert!(manager.begin_drain(Duration::from_secs(5)));
+            let _ = run.await.unwrap();
+            let frames = result.expect("probe client");
+            if matches!(probe, DecodeProbe::Priority | DecodeProbe::PendingPriority) {
+                assert!(frames.iter().any(|f| matches!(f, Frame::RstStream(r) if r.stream_id == 1 && r.error_code == ErrorCode::FrameSizeError)), "{probe:?}: {frames:?}");
+                assert!(!frames.iter().any(|f| matches!(f, Frame::GoAway(_))), "{probe:?}: {frames:?}");
+                assert!(frames.iter().any(|f| matches!(f, Frame::Data(d) if d.stream_id == 3 && &d.data[..] == b"survived")), "sibling request must complete: {frames:?}");
+            } else {
+                let expected = match probe {
+                    DecodeProbe::OversizedPriority => ErrorCode::FrameSizeError,
+                    DecodeProbe::InvalidHpack => ErrorCode::CompressionError,
+                    _ => ErrorCode::ProtocolError,
+                };
+                assert!(frames.iter().any(|f| matches!(f, Frame::GoAway(g) if g.error_code == expected)), "{probe:?}: {frames:?}");
+                assert!(!frames.iter().any(|f| matches!(f, Frame::Data(_))), "fatal frame must stop sibling request: {probe:?}: {frames:?}");
+            }
+        });
+    }
 }
 
 /// What one raw h2 client observed before the connection closed.
