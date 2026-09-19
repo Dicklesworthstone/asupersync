@@ -2642,11 +2642,21 @@ pub struct SqliteConnection {
 
 impl fmt::Debug for SqliteConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = *self.transaction_state.lock();
-        f.debug_struct("SqliteConnection")
-            .field("open", &self.inner.lock().conn.is_some())
-            .field("pool", &self.pool)
-            .field("transaction_state", &state)
+        // A paused row stream can hold `inner` until its caller drains it.
+        // Diagnostics must not wait for that same caller to make progress.
+        let open = self.inner.try_lock().map(|guard| guard.conn.is_some());
+        let state = self.transaction_state.try_lock().map(|guard| *guard);
+        let mut debug = f.debug_struct("SqliteConnection");
+        match open {
+            Some(open) => debug.field("open", &open),
+            None => debug.field("open", &"<locked>"),
+        };
+        debug.field("pool", &self.pool);
+        match state {
+            Some(state) => debug.field("transaction_state", &state),
+            None => debug.field("transaction_state", &"<locked>"),
+        };
+        debug
             .field(
                 "transaction_generation",
                 &self.transaction_generation.load(Ordering::Acquire),

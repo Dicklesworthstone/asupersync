@@ -2371,6 +2371,51 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_connection_debug_does_not_wait_for_locked_state() {
+        let pool = BlockingPool::new(0, 1);
+        let native = rusqlite::Connection::open_in_memory().unwrap();
+        let interrupt = Arc::new(native.get_interrupt_handle());
+        let connection = SqliteConnection {
+            inner: Arc::new(Mutex::new(SqliteConnectionInner::new(native))),
+            pool: pool.handle(),
+            stream_pool: None,
+            transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+            transaction_generation: Arc::new(AtomicU64::new(0)),
+            interrupt,
+            statement_timeout_override: None,
+        };
+        let unlocked = format!("{connection:?}");
+        assert!(unlocked.contains("open: true"));
+        assert!(unlocked.contains("transaction_state: Autocommit"));
+
+        // Release the locks before joining even on failure, so the old blocking
+        // formatter fails the assertion instead of hanging the test process.
+        for lock_inner in [true, false] {
+            std::thread::scope(|scope| {
+                let inner = lock_inner.then(|| connection.inner.lock());
+                let transaction = (!lock_inner).then(|| connection.transaction_state.lock());
+                let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                let connection = &connection;
+                let worker = scope.spawn(move || {
+                    let _ = sender.send(format!("{connection:?}"));
+                });
+                let result = receiver.recv_timeout(Duration::from_secs(2));
+                drop(transaction);
+                drop(inner);
+                worker.join().unwrap();
+                let formatted = result.expect("Debug must finish while the state lock is held");
+                let field = if lock_inner {
+                    "open"
+                } else {
+                    "transaction_state"
+                };
+                assert!(formatted.contains(&format!("{field}: \"<locked>\"")));
+            });
+        }
+        pool.shutdown();
+    }
+
+    #[test]
     fn sqlite_paused_streams_do_not_starve_cross_connection_execute() {
         use std::future::Future;
         use std::pin::Pin;
