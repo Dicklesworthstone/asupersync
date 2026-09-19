@@ -282,3 +282,6 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests;
+
+mod workflow;
+pub use workflow::{CheckpointAuthority, CheckpointConfig, CheckpointError, ReplicatedCheckpoint};

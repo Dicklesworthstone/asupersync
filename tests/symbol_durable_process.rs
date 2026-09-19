@@ -279,3 +279,107 @@ fn durable_network_service_without_a_blocking_pool_refuses_without_disk_append()
     process.finish(0);
     assert_eq!(std::fs::metadata(path).unwrap().len(), before);
 }
+
+#[test]
+fn persisted_manifest_recovers_after_replica_crash_without_retaining_batch_parameters() {
+    use asupersync::distributed::symbol_service::checkpoint::{
+        CheckpointAuthority, CheckpointConfig, CheckpointError, ManifestLimits, RecoveryManifest,
+    };
+    let manifest_limits = ManifestLimits { max_encoded_bytes: 4096, max_replicas: 4, max_decoded_bytes: 4096 };
+    let decode_limits = SnapshotDecodeLimits { max_snapshot_bytes: 4096, max_source_symbols_per_block: 32, max_source_blocks: 4 };
+    let path = journal_path();
+    let metadata_path = journal_path(); // A separate, newly created, durably linked file.
+    let first = Process::start(&path, "create");
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let expected = runtime.block_on(async {
+        let cx = Cx::current().unwrap(); let transport = transport(&cx, first.address);
+        let mut snapshot = RegionSnapshot::empty(RegionId::from_arena(ArenaIndex::new(9, 3)));
+        snapshot.origin_id = 77; snapshot.epoch = 5; snapshot.sequence = 8;
+        snapshot.metadata = vec![83; 768]; snapshot.sign(&AuthKey::from_seed(88));
+        let expected = SnapshotIdentity { region_id: snapshot.region_id, origin_id: 77, epoch: 5, sequence: 8 };
+        let mut encoder = StateEncoder::new(EncodingConfig { symbol_size: 128, max_source_blocks: 2,
+            min_repair_symbols: 0, repair_overhead: 1.0, path_quality: None }, DetRng::new(3));
+        let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+        let security = SecurityContext::new(AuthKey::from_seed(42));
+        security.authorize_replica("replica", None).unwrap();
+        let mut distributor = SymbolDistributor::new(DistributionConfig {
+            consistency: ConsistencyLevel::All, max_concurrent: 1, ack_timeout: Duration::from_secs(8), ..Default::default()
+        });
+        let checkpoint = transport.replicate_checkpoint(&mut distributor, &encoded,
+            &[ReplicaInfo::new("replica", "ignored")], &security,
+            CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(101) },
+            CheckpointConfig { manifest: manifest_limits, decode: decode_limits,
+                minimum_recovery_replicas: 1, timeout: Duration::from_secs(12) }).await.unwrap();
+        assert!(checkpoint.distribution().quorum_achieved);
+        assert_eq!(checkpoint.manifest().replicas().len(), 1);
+        assert_eq!(distributor.metrics.distributions_successful, 1);
+        assert_eq!(transport.in_flight(), 0);
+        let mut metadata = OpenOptions::new().write(true).open(&metadata_path).unwrap();
+        metadata.write_all(checkpoint.encoded_manifest()).unwrap(); metadata.sync_all().unwrap();
+        expected
+        // All snapshot/encoding/batch/manifest owners die here. Only independent
+        // expected authority survives; no ObjectParams or ReplicaFetch is kept.
+    });
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    first.crash_after_ack();
+    let original_length = std::fs::metadata(&path).unwrap().len();
+    let reopened = Process::start(&path, "reopen");
+    let runtime = RuntimeBuilder::multi_thread().worker_threads(2).build().unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap(); let transport = transport(&cx, reopened.address);
+        let bytes = std::fs::read(&metadata_path).unwrap(); // Small, caller-owned test fixture.
+        let manifest = RecoveryManifest::from_canonical_bytes(&bytes, &AuthKey::from_seed(101), expected,
+            &NodeId::new("origin"), manifest_limits).unwrap();
+        drop(bytes);
+        let config = RemoteRecoveryConfig { max_replicas: 4, max_concurrent_requests: 1, required_replicas: 1,
+            recovery_timeout: Duration::from_secs(8), replica_timeout: Duration::from_secs(6),
+            max_received_symbols: 64, max_received_payload_bytes: 16384 };
+        let mut weak = config; weak.required_replicas = 0;
+        assert!(matches!(transport.recover_checkpoint(&manifest, weak, decode_limits, &AuthKey::from_seed(88)).await,
+            Err(CheckpointError::RecoveryThreshold)));
+        assert_eq!(transport.in_flight(), 0);
+        let snapshot = transport.recover_checkpoint(&manifest, config, decode_limits, &AuthKey::from_seed(88)).await.unwrap();
+        assert_eq!(snapshot.metadata, vec![83; 768]); assert_eq!(snapshot.sequence, 8);
+        assert_eq!(snapshot.region_id, expected.region_id);
+        assert_eq!(snapshot.origin_id, expected.origin_id); assert_eq!(snapshot.epoch, expected.epoch);
+        assert_eq!(transport.in_flight(), 0);
+    });
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    reopened.finish(1);
+    assert_eq!(std::fs::metadata(path).unwrap().len(), original_length, "recovery performs no journal append");
+}
+
+#[test]
+fn invalid_snapshot_key_never_publishes_a_checkpoint_to_a_live_replica() {
+    use asupersync::distributed::symbol_service::checkpoint::{CheckpointAuthority, CheckpointConfig, CheckpointError, ManifestLimits};
+    let path = journal_path(); let process = Process::start(&path, "create");
+    let initial_length = std::fs::metadata(&path).unwrap().len();
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap(); let transport = transport(&cx, process.address);
+        let mut snapshot = RegionSnapshot::empty(RegionId::from_arena(ArenaIndex::new(9, 3)));
+        snapshot.origin_id = 77; snapshot.epoch = 5; snapshot.sequence = 8;
+        snapshot.metadata = vec![83; 768]; snapshot.sign(&AuthKey::from_seed(88));
+        let expected = SnapshotIdentity { region_id: snapshot.region_id, origin_id: 77, epoch: 5, sequence: 8 };
+        let mut encoder = StateEncoder::new(EncodingConfig { symbol_size: 128, max_source_blocks: 2,
+            min_repair_symbols: 0, repair_overhead: 1.0, path_quality: None }, DetRng::new(3));
+        let encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+        let security = SecurityContext::new(AuthKey::from_seed(42)); security.authorize_replica("replica", None).unwrap();
+        let mut distributor = SymbolDistributor::new(Default::default());
+        let result = transport.replicate_checkpoint(&mut distributor, &encoded,
+            &[ReplicaInfo::new("replica", "ignored")], &security,
+            CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(89), manifest_key: &AuthKey::from_seed(101) },
+            CheckpointConfig { manifest: ManifestLimits { max_encoded_bytes: 4096, max_replicas: 4, max_decoded_bytes: 4096 },
+                decode: SnapshotDecodeLimits { max_snapshot_bytes: 4096, max_source_symbols_per_block: 32, max_source_blocks: 4 },
+                minimum_recovery_replicas: 1, timeout: Duration::from_secs(8) }).await;
+        assert!(matches!(result, Err(CheckpointError::Decode)));
+        assert_eq!(distributor.metrics.distributions_total, 0);
+        assert_eq!(transport.in_flight(), 0);
+    });
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    process.finish(0);
+    assert_eq!(std::fs::metadata(path).unwrap().len(), initial_length);
+}
