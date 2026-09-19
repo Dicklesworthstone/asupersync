@@ -53,7 +53,6 @@ use rdkafka::{
 use std::future::Future;
 #[cfg(feature = "kafka")]
 use std::pin::Pin;
-#[cfg(feature = "kafka")]
 use std::sync::Arc;
 #[cfg(feature = "kafka")]
 use std::task::{Context, Poll, Waker};
@@ -474,7 +473,7 @@ fn build_producer(
         .map_err(|err| map_rdkafka_error(&err, None))
 }
 
-#[cfg(feature = "kafka")]
+#[cfg(any(feature = "kafka", test))]
 async fn run_kafka_blocking<F, T>(cx: &Cx, f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
@@ -485,14 +484,6 @@ where
     }
 
     crate::runtime::spawn_blocking::spawn_blocking_on_thread(f).await
-}
-
-#[cfg(feature = "kafka")]
-async fn run_kafka_transaction_op<F>(cx: &Cx, f: F) -> Result<(), KafkaError>
-where
-    F: FnOnce() -> Result<(), RdKafkaError> + Send + 'static,
-{
-    run_kafka_blocking(cx, move || f().map_err(|err| map_rdkafka_error(&err, None))).await
 }
 
 #[cfg(feature = "kafka")]
@@ -1604,7 +1595,7 @@ enum TransactionPhase {
     Idle,
     Active,
     #[allow(dead_code)]
-    // Transaction lifecycle state machine — used by mark_transaction_finalizing
+    // Also used while a native initialization or recovery owns the producer.
     Finalizing,
     NeedsAbortRecovery,
 }
@@ -1612,6 +1603,9 @@ enum TransactionPhase {
 #[derive(Debug, Default)]
 struct TransactionalProducerState {
     phase: TransactionPhase,
+    generation: u64,
+    operation_in_flight: bool,
+    abandoned: bool,
     #[cfg(feature = "kafka")]
     initialized: bool,
     #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
@@ -1977,7 +1971,7 @@ impl TransactionalConfig {
 /// delivery.
 pub struct TransactionalProducer {
     config: TransactionalConfig,
-    state: Mutex<TransactionalProducerState>,
+    state: Arc<Mutex<TransactionalProducerState>>,
     #[cfg(feature = "kafka")]
     producer: ThreadedProducer<KafkaContext>,
 }
@@ -2008,7 +2002,7 @@ impl TransactionalProducer {
 
         Ok(Self {
             config,
-            state: Mutex::new(TransactionalProducerState::default()),
+            state: Arc::new(Mutex::new(TransactionalProducerState::default())),
             #[cfg(feature = "kafka")]
             producer,
         })
@@ -2029,7 +2023,7 @@ impl TransactionalProducer {
         {
             return Err(KafkaError::FeatureDisabled);
         }
-        self.activate_transaction()?;
+        let generation = self.activate_transaction()?;
 
         // br-asupersync-tx3wq9: guard the window between activate_transaction()
         // (Idle→Active) and the constructed Transaction taking over the
@@ -2039,24 +2033,30 @@ impl TransactionalProducer {
         // and it stays wedged in Active forever — every later begin_transaction
         // then returns "transaction already active", and recover_abandoned_
         // transaction (which only heals NeedsAbortRecovery) can never fix it.
-        // The armed guard's Drop moves Active→NeedsAbortRecovery on cancel
-        // (soft-cancel may have completed begin on the broker, so abort-recovery,
-        // not Idle), which the next begin's recover_abandoned_transaction heals.
-        // Mirrors Transaction::Drop.
+        // While native work runs, Drop only marks this generation abandoned.
+        // The operation guard publishes recovery after it actually finishes.
+        // If completion wins first, the activation guard poisons only its own
+        // Active generation. A discarded, never-started begin restores Idle.
         let mut activation = TransactionActivationGuard::armed(self);
 
         #[cfg(feature = "kafka")]
-        if let Err(err) = run_kafka_transaction_op(cx, {
-            let producer = self.producer.clone();
-            move || producer.begin_transaction()
-        })
-        .await
         {
-            // begin failed on the broker: nothing started there, so Idle (not
-            // abort-recovery). Disarm first so the guard's Drop does not override.
-            activation.disarm();
-            self.mark_transaction_idle();
-            return Err(err);
+            let operation = TransactionOperationGuard::claim(
+                &self.state,
+                generation,
+                TransactionOperation::Begin,
+            )?;
+            let producer = self.producer.clone();
+            if let Err(err) = run_owned_transaction_op(cx, operation, move || {
+                producer
+                    .begin_transaction()
+                    .map_err(|err| map_rdkafka_error(&err, None))
+            })
+            .await
+            {
+                activation.disarm();
+                return Err(err);
+            }
         }
 
         // Success: the returned Transaction owns the lifecycle from here (its own
@@ -2064,6 +2064,7 @@ impl TransactionalProducer {
         activation.disarm();
         Ok(Transaction {
             producer: self,
+            generation,
             finished: false,
         })
     }
@@ -2080,15 +2081,18 @@ impl TransactionalProducer {
         &self.config
     }
 
-    fn activate_transaction(&self) -> Result<(), KafkaError> {
+    fn activate_transaction(&self) -> Result<u64, KafkaError> {
         let mut state = self.state.lock();
         match state.phase {
             TransactionPhase::Idle => {
+                state.generation = state.generation.checked_add(1).ok_or_else(|| {
+                    KafkaError::Transaction("transaction generation exhausted".to_string())
+                })?;
                 state.phase = TransactionPhase::Active;
+                state.abandoned = false;
                 #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
                 state.staged_records.clear();
-                drop(state);
-                Ok(())
+                Ok(state.generation)
             }
             TransactionPhase::Active => Err(KafkaError::Transaction(
                 "transaction already active".to_string(),
@@ -2102,8 +2106,13 @@ impl TransactionalProducer {
         }
     }
 
-    fn ensure_active_transaction(&self) -> Result<(), KafkaError> {
+    fn ensure_active_transaction(&self, generation: u64) -> Result<(), KafkaError> {
         let state = self.state.lock();
+        if state.generation != generation {
+            return Err(KafkaError::Transaction(
+                "stale transaction owner".to_string(),
+            ));
+        }
         match state.phase {
             TransactionPhase::Active => Ok(()),
             TransactionPhase::Idle => {
@@ -2118,31 +2127,26 @@ impl TransactionalProducer {
         }
     }
 
-    #[allow(dead_code)] // Transaction lifecycle state machine
-    fn mark_transaction_finalizing(&self) {
+    #[cfg(any(not(feature = "kafka"), test))]
+    fn mark_transaction_idle(&self, generation: u64) {
         let mut state = self.state.lock();
-        if state.phase == TransactionPhase::Active {
-            state.phase = TransactionPhase::Finalizing;
+        if state.generation != generation || state.operation_in_flight {
+            return;
         }
-    }
-
-    fn mark_transaction_idle(&self) {
-        let mut state = self.state.lock();
         state.phase = TransactionPhase::Idle;
         #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         state.staged_records.clear();
     }
 
-    #[allow(dead_code)] // Transaction lifecycle state machine
-    fn mark_transaction_needs_abort(&self) {
+    fn mark_transaction_dropped(&self, generation: u64) {
         let mut state = self.state.lock();
-        state.phase = TransactionPhase::NeedsAbortRecovery;
-        #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
-        state.staged_records.clear();
-    }
-
-    fn mark_transaction_dropped(&self) {
-        let mut state = self.state.lock();
+        if state.generation != generation {
+            return;
+        }
+        if state.operation_in_flight {
+            state.abandoned = true;
+            return;
+        }
         if matches!(
             state.phase,
             TransactionPhase::Active | TransactionPhase::Finalizing
@@ -2155,19 +2159,34 @@ impl TransactionalProducer {
 
     #[cfg(feature = "kafka")]
     async fn ensure_initialized(&self, cx: &Cx) -> Result<(), KafkaError> {
-        if self.state.lock().initialized {
-            return Ok(());
-        }
-
-        run_kafka_transaction_op(cx, {
-            let producer = self.producer.clone();
-            let timeout = self.config.transaction_timeout;
-            move || producer.init_transactions(timeout)
+        let operation = {
+            let mut state = self.state.lock();
+            if state.initialized {
+                return Ok(());
+            }
+            if state.operation_in_flight || state.phase != TransactionPhase::Idle {
+                return Err(KafkaError::Transaction(
+                    "transaction finalization in progress".to_string(),
+                ));
+            }
+            state.operation_in_flight = true;
+            state.phase = TransactionPhase::Finalizing;
+            TransactionOperationGuard {
+                state: Arc::clone(&self.state),
+                generation: state.generation,
+                operation: TransactionOperation::Initialize,
+                started: false,
+                completed: false,
+            }
+        };
+        let producer = self.producer.clone();
+        let timeout = self.config.transaction_timeout;
+        run_owned_transaction_op(cx, operation, move || {
+            producer
+                .init_transactions(timeout)
+                .map_err(|err| map_rdkafka_error(&err, None))
         })
-        .await?;
-
-        self.state.lock().initialized = true;
-        Ok(())
+        .await
     }
 
     #[cfg(not(feature = "kafka"))]
@@ -2176,45 +2195,197 @@ impl TransactionalProducer {
         Ok(())
     }
 
+    fn claim_recovery(&self) -> Option<TransactionOperationGuard> {
+        let mut state = self.state.lock();
+        if state.phase != TransactionPhase::NeedsAbortRecovery {
+            return None;
+        }
+        // Claim before releasing the lock; another begin must not queue a
+        // second abort or reuse this producer before recovery completes.
+        state.phase = TransactionPhase::Finalizing;
+        state.operation_in_flight = true;
+        Some(TransactionOperationGuard {
+            state: Arc::clone(&self.state),
+            generation: state.generation,
+            operation: TransactionOperation::Recover,
+            #[cfg(any(feature = "kafka", test))]
+            started: false,
+            completed: false,
+        })
+    }
+
     #[allow(clippy::unused_async)]
     async fn recover_abandoned_transaction(&self, cx: &Cx) -> Result<(), KafkaError> {
-        if self.state.lock().phase != TransactionPhase::NeedsAbortRecovery {
+        let Some(operation) = self.claim_recovery() else {
             return Ok(());
-        }
+        };
 
         #[cfg(not(feature = "kafka"))]
         let _ = cx;
 
         #[cfg(feature = "kafka")]
-        run_kafka_transaction_op(cx, {
+        return run_owned_transaction_op(cx, operation, {
             let producer = self.producer.clone();
             let timeout = self.config.transaction_timeout;
-            move || producer.abort_transaction(timeout)
+            move || {
+                producer
+                    .abort_transaction(timeout)
+                    .map_err(|err| map_rdkafka_error(&err, None))
+            }
         })
-        .await?;
+        .await;
 
-        self.mark_transaction_idle();
-        Ok(())
+        #[cfg(not(feature = "kafka"))]
+        operation.complete(Ok(()))
     }
+}
+
+#[derive(Clone, Copy)]
+enum TransactionOperation {
+    #[cfg(feature = "kafka")]
+    Initialize,
+    #[cfg(any(feature = "kafka", test))]
+    Begin,
+    #[cfg(any(feature = "kafka", test))]
+    Finalize,
+    Recover,
+}
+
+/// Owns the occupied phase even if the async waiter disappears. Its Drop also
+/// covers a queued closure that is discarded, submission failure, and panic.
+struct TransactionOperationGuard {
+    state: Arc<Mutex<TransactionalProducerState>>,
+    generation: u64,
+    operation: TransactionOperation,
+    #[cfg(any(feature = "kafka", test))]
+    started: bool,
+    completed: bool,
+}
+
+impl TransactionOperationGuard {
+    #[cfg(any(feature = "kafka", test))]
+    fn claim(
+        owner: &Arc<Mutex<TransactionalProducerState>>,
+        generation: u64,
+        operation: TransactionOperation,
+    ) -> Result<Self, KafkaError> {
+        let mut state = owner.lock();
+        let expected = match operation {
+            TransactionOperation::Recover => TransactionPhase::NeedsAbortRecovery,
+            #[cfg(feature = "kafka")]
+            TransactionOperation::Initialize => TransactionPhase::Idle,
+            TransactionOperation::Begin | TransactionOperation::Finalize => {
+                TransactionPhase::Active
+            }
+        };
+        if state.generation != generation || state.operation_in_flight || state.phase != expected {
+            return Err(KafkaError::Transaction(
+                "transaction finalization in progress".to_string(),
+            ));
+        }
+        state.operation_in_flight = true;
+        state.phase = TransactionPhase::Finalizing;
+        Ok(Self {
+            state: Arc::clone(owner),
+            generation,
+            operation,
+            started: false,
+            completed: false,
+        })
+    }
+
+    fn complete(mut self, result: Result<(), KafkaError>) -> Result<(), KafkaError> {
+        {
+            let mut state = self.state.lock();
+            if state.generation == self.generation && state.operation_in_flight {
+                state.phase = match self.operation {
+                    #[cfg(feature = "kafka")]
+                    TransactionOperation::Initialize => {
+                        state.initialized = result.is_ok();
+                        TransactionPhase::Idle
+                    }
+                    #[cfg(any(feature = "kafka", test))]
+                    TransactionOperation::Begin if result.is_ok() => {
+                        if state.abandoned {
+                            TransactionPhase::NeedsAbortRecovery
+                        } else {
+                            TransactionPhase::Active
+                        }
+                    }
+                    #[cfg(any(feature = "kafka", test))]
+                    TransactionOperation::Begin => TransactionPhase::Idle,
+                    _ if result.is_ok() => TransactionPhase::Idle,
+                    _ => TransactionPhase::NeedsAbortRecovery,
+                };
+                state.operation_in_flight = false;
+                #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
+                if state.phase != TransactionPhase::Active {
+                    state.staged_records.clear();
+                }
+            }
+        }
+        self.completed = true;
+        result
+    }
+}
+
+impl Drop for TransactionOperationGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut state = self.state.lock();
+        if state.generation != self.generation || !state.operation_in_flight {
+            return;
+        }
+        state.operation_in_flight = false;
+        state.phase = match self.operation {
+            #[cfg(feature = "kafka")]
+            TransactionOperation::Initialize => TransactionPhase::Idle,
+            #[cfg(any(feature = "kafka", test))]
+            TransactionOperation::Begin if !self.started => TransactionPhase::Idle,
+            _ => TransactionPhase::NeedsAbortRecovery,
+        };
+    }
+}
+
+#[cfg(any(feature = "kafka", test))]
+async fn run_owned_transaction_op<F>(
+    cx: &Cx,
+    mut operation: TransactionOperationGuard,
+    f: F,
+) -> Result<(), KafkaError>
+where
+    F: FnOnce() -> Result<(), KafkaError> + Send + 'static,
+{
+    run_kafka_blocking(cx, move || {
+        operation.started = true;
+        let result = f();
+        operation.complete(result)
+    })
+    .await
 }
 
 /// RAII guard for the `activate_transaction()`→`Transaction` handoff window in
 /// `begin_transaction` (br-asupersync-tx3wq9).
 ///
-/// While armed, its `Drop` resets an `Active`/`Finalizing` phase to
-/// `NeedsAbortRecovery` (via [`TransactionalProducer::mark_transaction_dropped`]).
+/// While armed, its `Drop` marks its generation abandoned. An in-flight
+/// operation keeps ownership until completion; otherwise an Active generation
+/// moves to NeedsAbortRecovery.
 /// `begin_transaction` disarms it on both the error and success paths, so the
 /// guard fires only when the `begin` future is dropped mid-flight (cancellation)
 /// before either path runs — the case that previously wedged the phase in
 /// `Active`. This mirrors [`Transaction`]'s own `Drop`.
 struct TransactionActivationGuard<'a> {
     producer: Option<&'a TransactionalProducer>,
+    generation: u64,
 }
 
 impl<'a> TransactionActivationGuard<'a> {
     fn armed(producer: &'a TransactionalProducer) -> Self {
         Self {
             producer: Some(producer),
+            generation: producer.state.lock().generation,
         }
     }
 
@@ -2226,7 +2397,7 @@ impl<'a> TransactionActivationGuard<'a> {
 impl Drop for TransactionActivationGuard<'_> {
     fn drop(&mut self) {
         if let Some(producer) = self.producer {
-            producer.mark_transaction_dropped();
+            producer.mark_transaction_dropped(self.generation);
         }
     }
 }
@@ -2238,6 +2409,7 @@ impl Drop for TransactionActivationGuard<'_> {
 #[derive(Debug)]
 pub struct Transaction<'a> {
     producer: &'a TransactionalProducer,
+    generation: u64,
     finished: bool,
 }
 
@@ -2252,7 +2424,7 @@ impl Transaction<'_> {
         payload: &[u8],
     ) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        self.producer.ensure_active_transaction()?;
+        self.producer.ensure_active_transaction(self.generation)?;
         validate_topic(topic)?;
 
         if payload.len() > self.producer.config.producer.max_message_size {
@@ -2283,7 +2455,7 @@ impl Transaction<'_> {
         #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         {
             let mut state = self.producer.state.lock();
-            if state.phase != TransactionPhase::Active {
+            if state.phase != TransactionPhase::Active || state.generation != self.generation {
                 return Err(KafkaError::Transaction(
                     "transaction is not available for sends".to_string(),
                 ));
@@ -2308,33 +2480,39 @@ impl Transaction<'_> {
     /// Commit the transaction.
     ///
     /// Atomically publishes all messages sent within this transaction.
+    /// Once the broker operation starts, dropping this future does not undo it.
+    /// The producer remains occupied until background completion; cancellation
+    /// is not evidence that the transaction was aborted.
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn commit(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        self.producer.ensure_active_transaction()?;
+        self.producer.ensure_active_transaction(self.generation)?;
 
         #[cfg(feature = "kafka")]
         {
-            self.producer.mark_transaction_finalizing();
-            let result = run_kafka_transaction_op(cx, {
+            let operation = TransactionOperationGuard::claim(
+                &self.producer.state,
+                self.generation,
+                TransactionOperation::Finalize,
+            )?;
+            self.finished = true; // The operation guard now owns cleanup.
+            run_owned_transaction_op(cx, operation, {
                 let producer = self.producer.producer.clone();
                 let timeout = self.producer.config.transaction_timeout;
-                move || producer.commit_transaction(timeout)
+                move || {
+                    producer
+                        .commit_transaction(timeout)
+                        .map_err(|err| map_rdkafka_error(&err, None))
+                }
             })
-            .await;
-            self.finished = true;
-            if let Err(err) = result {
-                self.producer.mark_transaction_needs_abort();
-                return Err(err);
-            }
-            self.producer.mark_transaction_idle();
+            .await?;
         }
 
         #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         {
             let staged = {
                 let mut state = self.producer.state.lock();
-                if state.phase != TransactionPhase::Active {
+                if state.phase != TransactionPhase::Active || state.generation != self.generation {
                     return Err(KafkaError::Transaction(
                         "transaction is not active".to_string(),
                     ));
@@ -2344,12 +2522,12 @@ impl Transaction<'_> {
             };
 
             let _metadata = deterministic_broker_publish_batch(staged);
-            self.producer.mark_transaction_idle();
+            self.producer.mark_transaction_idle(self.generation);
             self.finished = true;
         }
         #[cfg(all(not(feature = "kafka"), not(any(test, feature = "test-internals"))))]
         {
-            self.producer.mark_transaction_idle();
+            self.producer.mark_transaction_idle(self.generation);
             self.finished = true;
             Err(KafkaError::FeatureDisabled)
         }
@@ -2363,31 +2541,36 @@ impl Transaction<'_> {
     /// Abort the transaction.
     ///
     /// Discards all messages sent within this transaction.
+    /// Once the broker operation starts, dropping this future does not undo it.
+    /// The producer remains occupied until the background abort completes.
     #[allow(unused_variables, clippy::unused_async)]
     pub async fn abort(mut self, cx: &Cx) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        self.producer.ensure_active_transaction()?;
+        self.producer.ensure_active_transaction(self.generation)?;
 
         #[cfg(feature = "kafka")]
         {
-            self.producer.mark_transaction_finalizing();
-            let result = run_kafka_transaction_op(cx, {
+            let operation = TransactionOperationGuard::claim(
+                &self.producer.state,
+                self.generation,
+                TransactionOperation::Finalize,
+            )?;
+            self.finished = true;
+            run_owned_transaction_op(cx, operation, {
                 let producer = self.producer.producer.clone();
                 let timeout = self.producer.config.transaction_timeout;
-                move || producer.abort_transaction(timeout)
+                move || {
+                    producer
+                        .abort_transaction(timeout)
+                        .map_err(|err| map_rdkafka_error(&err, None))
+                }
             })
-            .await;
-            self.finished = true;
-            if let Err(err) = result {
-                self.producer.mark_transaction_needs_abort();
-                return Err(err);
-            }
-            self.producer.mark_transaction_idle();
+            .await?;
         }
 
         #[cfg(not(feature = "kafka"))]
         {
-            self.producer.mark_transaction_idle();
+            self.producer.mark_transaction_idle(self.generation);
             self.finished = true;
         }
 
@@ -2398,7 +2581,7 @@ impl Transaction<'_> {
 impl Drop for Transaction<'_> {
     fn drop(&mut self) {
         if !self.finished {
-            self.producer.mark_transaction_dropped();
+            self.producer.mark_transaction_dropped(self.generation);
         }
     }
 }
@@ -3513,10 +3696,406 @@ mod tests {
         let producer = TransactionalProducer::new(tc).unwrap();
         producer.state.lock().phase = TransactionPhase::Finalizing;
 
-        let err = producer.ensure_active_transaction().unwrap_err();
+        let err = producer.ensure_active_transaction(0).unwrap_err();
         assert!(
             matches!(err, KafkaError::Transaction(msg) if msg.contains("finalization in progress"))
         );
+    }
+
+    fn poll_transaction_test<F: std::future::Future>(
+        future: std::pin::Pin<&mut F>,
+    ) -> std::task::Poll<F::Output> {
+        future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    fn wait_transaction_test(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
+    fn transaction_test_producer() -> TransactionalProducer {
+        TransactionalProducer::new(TransactionalConfig::new(
+            ProducerConfig::default(),
+            "owned-operation-test".into(),
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn transaction_owned_running_finalization_blocks_recovery_after_waiter_drop() {
+        let producer = transaction_test_producer();
+        let generation = producer.activate_transaction().unwrap();
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let operation = TransactionOperationGuard::claim(
+            &producer.state,
+            generation,
+            TransactionOperation::Finalize,
+        )
+        .unwrap();
+        let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+            let _ = entered_tx.send(());
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|e| KafkaError::Transaction(e.to_string()))?;
+            Ok(())
+        }));
+        let pending = poll_transaction_test(future.as_mut()).is_pending();
+        let entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        drop(future);
+        let occupied = producer.state.lock().phase;
+        let recovery = producer.claim_recovery();
+        let activation = producer.activate_transaction();
+        let _ = release_tx.send(());
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(pending && entered && stopped);
+        assert_eq!(occupied, TransactionPhase::Finalizing);
+        assert!(recovery.is_none());
+        assert!(activation.is_err());
+        assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+    }
+
+    #[test]
+    fn transaction_owned_completed_unpolled_waiter_cannot_poison_new_generation() {
+        let producer = transaction_test_producer();
+        let generation = producer.activate_transaction().unwrap();
+        let stale_activation = TransactionActivationGuard::armed(&producer);
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut future = Box::pin(async {
+            let mut transaction = Transaction {
+                producer: &producer,
+                generation,
+                finished: false,
+            };
+            let operation = TransactionOperationGuard::claim(
+                &producer.state,
+                generation,
+                TransactionOperation::Finalize,
+            )?;
+            transaction.finished = true;
+            run_owned_transaction_op(&cx, operation, move || {
+                release_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|e| KafkaError::Transaction(e.to_string()))?;
+                Ok(())
+            })
+            .await
+        });
+        let pending = poll_transaction_test(future.as_mut()).is_pending();
+        let _ = release_tx.send(());
+        let completed =
+            wait_transaction_test(|| producer.state.lock().phase == TransactionPhase::Idle);
+        let next = producer.activate_transaction();
+        drop(future);
+        drop(stale_activation);
+        // A stale externally retained transaction must be harmless too.
+        drop(Transaction {
+            producer: &producer,
+            generation,
+            finished: false,
+        });
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(pending && completed && stopped);
+        assert_eq!(next.unwrap(), generation + 1);
+        assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+    }
+
+    #[test]
+    fn transaction_owned_begin_waiter_drop_defers_recovery_until_native_completion() {
+        let producer = transaction_test_producer();
+        let generation = producer.activate_transaction().unwrap();
+        let activation = TransactionActivationGuard::armed(&producer);
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let operation = TransactionOperationGuard::claim(
+            &producer.state,
+            generation,
+            TransactionOperation::Begin,
+        )
+        .unwrap();
+        let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+            let _ = entered_tx.send(());
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|e| KafkaError::Transaction(e.to_string()))?;
+            Ok(())
+        }));
+        let pending = poll_transaction_test(future.as_mut()).is_pending();
+        let entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        drop(future);
+        drop(activation);
+        let occupied = producer.state.lock().phase;
+        let recovery = producer.claim_recovery();
+        let _ = release_tx.send(());
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(pending && entered && stopped);
+        assert_eq!(occupied, TransactionPhase::Finalizing);
+        assert!(recovery.is_none());
+        assert_eq!(
+            producer.state.lock().phase,
+            TransactionPhase::NeedsAbortRecovery
+        );
+    }
+
+    #[test]
+    fn transaction_owned_recovery_has_one_claimant() {
+        let producer = Arc::new(transaction_test_producer());
+        let generation = producer.activate_transaction().unwrap();
+        producer.mark_transaction_dropped(generation);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut threads = Vec::new();
+        for _ in 0..2 {
+            let producer = Arc::clone(&producer);
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                producer.claim_recovery()
+            }));
+        }
+        barrier.wait();
+        let mut claims = Vec::new();
+        for thread in threads {
+            if let Some(claim) = thread.join().unwrap() {
+                claims.push(claim);
+            }
+        }
+        let count = claims.len();
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut completed = true;
+        for claim in claims {
+            let calls = Arc::clone(&calls);
+            let mut future = Box::pin(run_owned_transaction_op(&cx, claim, move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+            completed &= wait_transaction_test(|| {
+                matches!(
+                    poll_transaction_test(future.as_mut()),
+                    std::task::Poll::Ready(Ok(()))
+                )
+            });
+        }
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(completed && stopped);
+        assert_eq!(count, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+    }
+
+    #[test]
+    fn transaction_owned_completed_begin_still_requires_waiter_handoff() {
+        let producer = transaction_test_producer();
+        let generation = producer.activate_transaction().unwrap();
+        let activation = TransactionActivationGuard::armed(&producer);
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let operation = TransactionOperationGuard::claim(
+            &producer.state,
+            generation,
+            TransactionOperation::Begin,
+        )
+        .unwrap();
+        let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|e| KafkaError::Transaction(e.to_string()))?;
+            Ok(())
+        }));
+        let pending = poll_transaction_test(future.as_mut()).is_pending();
+        let _ = release_tx.send(());
+        let completed = wait_transaction_test(|| !producer.state.lock().operation_in_flight);
+        let phase_before_drop = producer.state.lock().phase;
+        drop(future);
+        drop(activation);
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(pending && completed && stopped);
+        assert_eq!(phase_before_drop, TransactionPhase::Active);
+        assert_eq!(
+            producer.state.lock().phase,
+            TransactionPhase::NeedsAbortRecovery
+        );
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn transaction_owned_initialization_remains_exclusive_after_waiter_drop() {
+        let producer = transaction_test_producer();
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let operation =
+            TransactionOperationGuard::claim(&producer.state, 0, TransactionOperation::Initialize)
+                .unwrap();
+        let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+            let _ = entered_tx.send(());
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|e| KafkaError::Transaction(e.to_string()))?;
+            Ok(())
+        }));
+        let pending = poll_transaction_test(future.as_mut()).is_pending();
+        let entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        drop(future);
+        let second =
+            TransactionOperationGuard::claim(&producer.state, 0, TransactionOperation::Initialize);
+        let activation = producer.activate_transaction();
+        let _ = release_tx.send(());
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(pending && entered && stopped);
+        assert!(second.is_err());
+        assert!(activation.is_err());
+        assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+        assert!(producer.state.lock().initialized);
+    }
+
+    #[test]
+    fn transaction_owned_queued_cancellation_releases_begin_and_preserves_abort_need() {
+        for kind in [
+            TransactionOperation::Begin,
+            TransactionOperation::Finalize,
+            TransactionOperation::Recover,
+            #[cfg(feature = "kafka")]
+            TransactionOperation::Initialize,
+        ] {
+            let producer = transaction_test_producer();
+            let generation = producer.activate_transaction().unwrap();
+            let activation = matches!(kind, TransactionOperation::Begin)
+                .then(|| TransactionActivationGuard::armed(&producer));
+            if matches!(kind, TransactionOperation::Recover) {
+                producer.mark_transaction_dropped(generation);
+            }
+            #[cfg(feature = "kafka")]
+            if matches!(kind, TransactionOperation::Initialize) {
+                producer.mark_transaction_idle(generation);
+            }
+            let pool = crate::runtime::BlockingPool::new(1, 1);
+            let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let _blocker = pool.spawn(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            });
+            let entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+            let operation =
+                TransactionOperationGuard::claim(&producer.state, generation, kind).unwrap();
+            let ran = Arc::new(AtomicBool::new(false));
+            let worker_ran = Arc::clone(&ran);
+            let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+                worker_ran.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+            let pending = poll_transaction_test(future.as_mut()).is_pending();
+            drop(future);
+            drop(activation);
+            let _ = release_tx.send(());
+            let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+            assert!(entered && pending && stopped);
+            assert!(!ran.load(Ordering::SeqCst));
+            assert!(!producer.state.lock().operation_in_flight);
+            assert_eq!(
+                producer.state.lock().phase,
+                match kind {
+                    TransactionOperation::Begin => TransactionPhase::Idle,
+                    #[cfg(feature = "kafka")]
+                    TransactionOperation::Initialize => TransactionPhase::Idle,
+                    _ => TransactionPhase::NeedsAbortRecovery,
+                }
+            );
+            #[cfg(feature = "kafka")]
+            assert!(!producer.state.lock().initialized);
+        }
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn transaction_owned_completed_initialization_has_no_late_waiter_write() {
+        let producer = transaction_test_producer();
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let operation =
+            TransactionOperationGuard::claim(&producer.state, 0, TransactionOperation::Initialize)
+                .unwrap();
+        let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+            release_rx
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|e| KafkaError::Transaction(e.to_string()))?;
+            Ok(())
+        }));
+        let pending = poll_transaction_test(future.as_mut()).is_pending();
+        let _ = release_tx.send(());
+        let completed = wait_transaction_test(|| producer.state.lock().initialized);
+        let next = producer.activate_transaction();
+        drop(future);
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(pending && completed && stopped);
+        assert_eq!(next.unwrap(), 1);
+        assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+        assert!(producer.state.lock().initialized);
+    }
+
+    #[test]
+    fn transaction_owned_error_and_panic_leave_recoverable_state() {
+        for panic in [false, true] {
+            let producer = transaction_test_producer();
+            let generation = producer.activate_transaction().unwrap();
+            let pool = crate::runtime::BlockingPool::new(1, 1);
+            let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
+            let operation = TransactionOperationGuard::claim(
+                &producer.state,
+                generation,
+                TransactionOperation::Finalize,
+            )
+            .unwrap();
+            let mut future = Box::pin(run_owned_transaction_op(&cx, operation, move || {
+                assert!(!panic, "injected native operation panic");
+                Err(KafkaError::Transaction("injected native error".into()))
+            }));
+            let mut outcome = None;
+            let finished = wait_transaction_test(|| {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    poll_transaction_test(future.as_mut())
+                })) {
+                    Ok(std::task::Poll::Pending) => false,
+                    other => {
+                        outcome = Some(other);
+                        true
+                    }
+                }
+            });
+            drop(future);
+            let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+            assert!(finished && stopped);
+            assert_eq!(matches!(outcome, Some(Err(_))), panic);
+            if !panic {
+                assert!(matches!(
+                    outcome,
+                    Some(Ok(std::task::Poll::Ready(Err(KafkaError::Transaction(_)))))
+                ));
+            }
+            assert_eq!(
+                producer.state.lock().phase,
+                TransactionPhase::NeedsAbortRecovery
+            );
+            assert!(!producer.state.lock().operation_in_flight);
+        }
     }
 
     #[test]
@@ -3525,14 +4104,14 @@ mod tests {
         let producer = TransactionalProducer::new(tc).unwrap();
 
         producer.state.lock().phase = TransactionPhase::Finalizing;
-        producer.mark_transaction_dropped();
+        producer.mark_transaction_dropped(0);
         assert_eq!(
             producer.state.lock().phase,
             TransactionPhase::NeedsAbortRecovery
         );
 
         producer.state.lock().phase = TransactionPhase::Active;
-        producer.mark_transaction_dropped();
+        producer.mark_transaction_dropped(0);
         assert_eq!(
             producer.state.lock().phase,
             TransactionPhase::NeedsAbortRecovery
@@ -3548,6 +4127,7 @@ mod tests {
         {
             let tx = Transaction {
                 producer: &producer,
+                generation: 0,
                 finished: false,
             };
             drop(tx);
@@ -3567,8 +4147,7 @@ mod tests {
         // leave it wedged in Active — the pre-fix bug, where every later begin
         // returned "transaction already active" and recover_abandoned_transaction
         // (which only heals NeedsAbortRecovery) could never fire.
-        let tc =
-            TransactionalConfig::new(ProducerConfig::default(), "tx-activation-guard".into());
+        let tc = TransactionalConfig::new(ProducerConfig::default(), "tx-activation-guard".into());
         let producer = TransactionalProducer::new(tc).unwrap();
 
         producer.activate_transaction().unwrap();
@@ -3585,7 +4164,7 @@ mod tests {
 
         // A disarmed guard (begin_transaction's success/error paths) must not
         // touch the phase.
-        producer.mark_transaction_idle();
+        producer.mark_transaction_idle(1);
         producer.activate_transaction().unwrap();
         {
             let mut g = TransactionActivationGuard::armed(&producer);
