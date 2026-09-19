@@ -211,3 +211,46 @@ mod tests {
         assert!(state.lock().stamp(&NodeId::new("worker")).is_none());
     }
 }
+
+/// Register the same V1 capability with checked runtime-owned lease settlement.
+///
+/// This is an alternative to `register_membership_service`, not another wire
+/// protocol. The existing certificate-bound peer policy and client remain in
+/// force. The controller issues local checked aborts before returning an accepted
+/// statement; the reply is still not a remote-quiescence or arena-drain receipt.
+/// Start the controller's expiry driver in a separately owned application task.
+/// No driver or other background work is spawned by this registration.
+pub fn register_owned_membership_service(
+    registry: &mut RemoteComputationRegistry,
+    controller: super::owned::OwnedMembershipController,
+) -> Result<(), ComputationSchemaRegistryError> {
+    registry.register::<MembershipRequest, MembershipResponse, _, _>(
+        MEMBERSHIP_SERVICE_COMPUTATION,
+        move |cx, invocation| {
+            let controller = controller.clone();
+            async move {
+                if cx.checkpoint().is_err() {
+                    return Ok(cx.cancel_reason().map_or_else(
+                        || RemoteOutcome::Failed("membership checkpoint refused".to_owned()),
+                        RemoteOutcome::Cancelled,
+                    ));
+                }
+                let bytes = invocation.request().input.data();
+                if !(73..=MAX_MEMBERSHIP_UPDATE_BYTES).contains(&bytes.len()) {
+                    return Ok(RemoteOutcome::Failed("invalid membership statement size".to_owned()));
+                }
+                let result = controller.apply_authenticated(invocation.peer_node(), bytes);
+                if cx.is_cancel_requested() {
+                    return Ok(cx.cancel_reason().map_or_else(
+                        || RemoteOutcome::Failed("membership cancellation observed after admission".to_owned()),
+                        RemoteOutcome::Cancelled,
+                    ));
+                }
+                Ok(match result {
+                    Ok(_) => RemoteOutcome::Success(bytes.to_vec()),
+                    Err(error) => RemoteOutcome::Failed(error.to_string()),
+                })
+            }
+        },
+    )
+}

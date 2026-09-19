@@ -102,6 +102,7 @@ struct Entry {
     token: Option<ObligationToken>,
     signal: Arc<Signal>,
     notification: Option<Arc<ObligationGateway>>,
+    settlement_accepted: bool,
 }
 struct State {
     policy: MembershipLeaseController,
@@ -159,21 +160,25 @@ fn alive(state: &State, node: &NodeId, incarnation: u64) -> bool {
 }
 fn remove(state: &mut State, id: u64, status: OwnedLeaseStatus) -> Option<Entry> {
     let entry = state.entries.remove(&id)?;
+    Some(retire(entry, status))
+}
+fn retire(mut entry: Entry, status: OwnedLeaseStatus) -> Entry {
+    // Choose the checked terminal BEFORE publishing local invalidation. A holder
+    // may observe status without waiting for a wake and immediately complete.
+    // Deferred settlement runs no callback and is safe under the owner lock.
+    let token = entry.token.take().expect("owned unsettled token");
+    let (accepted, notification) = if status == OwnedLeaseStatus::Released { token.commit_deferred() }
+        else { token.abort_deferred(ObligationAbortReason::Cancel) };
+    entry.settlement_accepted = accepted;
+    entry.notification = notification;
     entry.signal.status.store(status as u8, Ordering::Release);
-    Some(entry)
+    entry
 }
 
 // All decisions/posts precede all callbacks. One hostile notifier must not
 // prevent other already-retired owners from posting or waking their waiters.
-fn finish(shared: &Shared, mut entries: Vec<Entry>, commit: bool) -> usize {
-    let mut accepted = 0;
-    for entry in &mut entries {
-        let token = entry.token.take().expect("owned unsettled token");
-        let (won, notification) = if commit { token.commit_deferred() }
-            else { token.abort_deferred(ObligationAbortReason::Cancel) };
-        accepted += usize::from(won);
-        entry.notification = notification;
-    }
+fn finish(shared: &Shared, entries: Vec<Entry>) -> usize {
+    let accepted = entries.iter().filter(|entry| entry.settlement_accepted).count();
     let mut panic = None;
     for entry in &entries {
         for callback in [false, true] {
@@ -246,7 +251,7 @@ impl OwnedMembershipController {
         for (id, reason) in ids { retired.push(remove(&mut state, id, reason).expect("selected lease")); }
         let count = retired.len();
         drop(state);
-        finish(&self.shared, retired, false);
+        finish(&self.shared, retired);
         Ok(match result { MembershipApplied::Applied { .. } => MembershipApplied::Applied { revoked: count }, other => other })
     }
 
@@ -280,7 +285,7 @@ impl OwnedMembershipController {
         if now >= deadline || !alive(&state, node, incarnation) { return Err(MembershipControlError::GrantDenied.into()); }
         let ticket = registration.token.as_ref().expect("registered token").ticket();
         state.entries.insert(id, Entry { node: node.clone(), incarnation, deadline,
-            token: registration.token.take(), signal: Arc::clone(&signal), notification: None });
+            token: registration.token.take(), signal: Arc::clone(&signal), notification: None, settlement_accepted: false });
         state.pending -= 1; state.accepted += 1; registration.pending = false;
         drop(state);
         let lease = OwnedMembershipLease { shared: Arc::clone(&self.shared), id, signal, ticket };
@@ -297,7 +302,7 @@ impl OwnedMembershipController {
         let mut retired = Vec::with_capacity(ids.len());
         for id in ids { retired.push(remove(&mut state, id, OwnedLeaseStatus::Expired).expect("due lease")); }
         let count = retired.len(); drop(state);
-        if count != 0 { finish(&self.shared, retired, false); }
+        if count != 0 { finish(&self.shared, retired); }
         Ok(count)
     }
 
@@ -308,9 +313,9 @@ impl OwnedMembershipController {
         let mut retired = Vec::with_capacity(state.entries.len());
         state.closed = true;
         for (_, entry) in std::mem::take(&mut state.entries) {
-            entry.signal.status.store(OwnedLeaseStatus::Closed as u8, Ordering::Release); retired.push(entry);
+            retired.push(retire(entry, OwnedLeaseStatus::Closed));
         }
-        drop(state); finish(&self.shared, retired, false);
+        drop(state); finish(&self.shared, retired);
     }
 
     /// Drive real expiry timers in the calling task, without spawning work.
@@ -369,7 +374,7 @@ impl OwnedMembershipLease {
         let Some(entry) = state.entries.get_mut(&self.id) else { return Err(OwnedMembershipError::Ended(self.status())); };
         if now >= entry.deadline {
             let retired = vec![remove(&mut state, self.id, OwnedLeaseStatus::Expired).expect("expired")];
-            drop(state); finish(&self.shared, retired, false);
+            drop(state); finish(&self.shared, retired);
             return Err(OwnedMembershipError::Ended(OwnedLeaseStatus::Expired));
         }
         if duration.is_zero() || now + duration <= now { return Err(MembershipControlError::GrantDenied.into()); }
@@ -386,7 +391,7 @@ impl OwnedMembershipLease {
         let status = if expired { OwnedLeaseStatus::Expired } else { OwnedLeaseStatus::Released };
         let retired = vec![remove(&mut state, self.id, status).expect("released")];
         drop(state);
-        let won = finish(&self.shared, retired, !expired);
+        let won = finish(&self.shared, retired);
         if expired { Err(OwnedMembershipError::Ended(status)) }
         else if won == 1 { Ok(()) } else { Err(OwnedMembershipError::SettlementLost) }
     }
@@ -397,9 +402,12 @@ impl Drop for OwnedMembershipLease {
         let mut retired = Vec::with_capacity(1);
         if let Some(entry) = remove(&mut state, self.id, OwnedLeaseStatus::Dropped) { retired.push(entry); }
         drop(state);
-        if !retired.is_empty() { finish(&self.shared, retired, false); }
+        if !retired.is_empty() { finish(&self.shared, retired); }
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+/// Execute protected work with independent subtree cancellation and drain receipts.
+pub mod work;

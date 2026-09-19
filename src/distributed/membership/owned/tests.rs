@@ -210,3 +210,18 @@ fn bad_authority_or_mac_cannot_retire_real_leases() {
     assert_eq!(lease.status(), OwnedLeaseStatus::Active);
     lease.release().unwrap(); f.drain(); assert_eq!(f.mailbox.stats().aborted, 0);
 }
+
+#[test]
+fn invalidation_publishes_checked_terminal_before_holder_can_finish() {
+    let mut f = Fixture::new(8, 8); let lease = f.grant(100); f.drain();
+    let mut state = f.controller.shared.state.lock();
+    let retired = remove(&mut state, lease.id, OwnedLeaseStatus::Revoked).unwrap();
+    assert_eq!(lease.status(), OwnedLeaseStatus::Revoked);
+    assert!(retired.settlement_accepted);
+    assert_eq!(f.mailbox.stats().posted, 2, "abort must be posted before terminal status is observable");
+    assert!(retired.token.is_none());
+    drop(state);
+    finish(&f.controller.shared, vec![retired]);
+    drop(lease); f.drain();
+    assert_eq!(f.mailbox.stats().aborted, 1); assert_eq!(f.mailbox.stats().leaked, 0);
+}
