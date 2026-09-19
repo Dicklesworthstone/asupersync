@@ -114,7 +114,7 @@ fn encoded_effect_storage_and_component_bounds_are_independent() {
 fn unknown_tags_reserved_fields_and_versions_are_rejected_with_valid_checksums() {
     let encoded = recorded_exchange().to_canonical_bytes(131_072).unwrap();
     let start = order_start(encoded.as_ref());
-    for (offset, value) in [(8, 2), (start, 255), (start + 9, 1)] {
+    for (offset, value) in [(8, 255), (start, 255), (start + 9, 1)] {
         let mut bytes = encoded.as_ref().to_vec(); bytes[offset] = value; resign(&mut bytes);
         assert!(matches!(OrderedRecordedSession::from_canonical_bytes(&bytes, limits()), Err(OrderedSessionTapeError::Format)));
     }
