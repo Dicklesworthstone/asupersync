@@ -15,6 +15,7 @@
 
 pub mod error;
 mod exports;
+pub mod local;
 pub mod types;
 
 pub use exports::{
@@ -196,8 +197,24 @@ fn cleanup_released_websockets() {
 }
 
 fn cleanup_released_host_state() {
-    cleanup_released_fetches();
-    cleanup_released_websockets();
+    // A Rust destructor or observer can unwind. Retire every released owner
+    // before resuming a callback panic; no family may strand another family.
+    let cleanups: [fn(); 3] = [
+        local::cleanup_released,
+        cleanup_released_fetches,
+        cleanup_released_websockets,
+    ];
+    let mut panics = Vec::new();
+    for cleanup in cleanups {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup)) {
+            panics.push(payload);
+        }
+    }
+    if !panics.is_empty() {
+        let first = panics.remove(0);
+        drop(panics);
+        std::panic::resume_unwind(first);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -473,6 +490,7 @@ fn finalize_websocket_handle(
     outcome: WasmAbiOutcomeEnvelope,
     consumer_version: Option<WasmAbiVersion>,
 ) -> Result<WasmAbiOutcomeEnvelope, String> {
+    local::reject_external_join(handle)?;
     with_dispatcher(|dispatcher| dispatcher.task_join(handle, outcome, consumer_version))
 }
 
@@ -480,6 +498,9 @@ fn cancel_websocket_handle(
     request: &WasmTaskCancelRequest,
     consumer_version: Option<WasmAbiVersion>,
 ) -> Result<WasmAbiOutcomeEnvelope, String> {
+    // A task-kind handle is not necessarily a WebSocket. In particular this
+    // route must not terminalize a Rust future without retiring its owner.
+    local::reject_external_join(&request.task)?;
     with_dispatcher(|dispatcher| dispatcher.task_cancel(request, consumer_version))
 }
 
@@ -832,6 +853,8 @@ fn close_browser_websocket_socket(
 
 /// Reset helper for host-side deterministic tests.
 pub fn reset_dispatcher_for_tests() {
+    local::ensure_reset_allowed()
+        .expect("close local Rust task owners before resetting the dispatcher");
     DISPATCHER.with(|dispatcher| {
         *dispatcher.borrow_mut() = WasmExportDispatcher::new();
     });
@@ -883,6 +906,7 @@ fn runtime_close_impl(
 ) -> Result<String, String> {
     let handle: WasmHandleRef = parse_json(&handle_json, "runtime_close.request")?;
     let consumer_version = parse_consumer_version(consumer_version_json)?;
+    local::ensure_close_allowed()?;
     let outcome =
         with_dispatcher(|dispatcher| dispatcher.runtime_close(&handle, consumer_version))?;
     cleanup_released_host_state();
@@ -905,6 +929,7 @@ fn scope_close_impl(
 ) -> Result<String, String> {
     let handle: WasmHandleRef = parse_json(&handle_json, "scope_close.request")?;
     let consumer_version = parse_consumer_version(consumer_version_json)?;
+    local::ensure_close_allowed()?;
     let outcome = with_dispatcher(|dispatcher| dispatcher.scope_close(&handle, consumer_version))?;
     cleanup_released_host_state();
     encode_json(&outcome, "scope_close.response")
@@ -928,6 +953,7 @@ fn task_join_impl(
     let handle: WasmHandleRef = parse_json(&handle_json, "task_join.request.handle")?;
     let outcome: WasmAbiOutcomeEnvelope = parse_json(&outcome_json, "task_join.request.outcome")?;
     let consumer_version = parse_consumer_version(consumer_version_json)?;
+    local::reject_external_join(&handle)?;
     let joined =
         with_dispatcher(|dispatcher| dispatcher.task_join(&handle, outcome, consumer_version))?;
     encode_json(&joined, "task_join.response")
@@ -939,7 +965,9 @@ fn task_cancel_impl(
 ) -> Result<String, String> {
     let request: WasmTaskCancelRequest = parse_json(&request_json, "task_cancel.request")?;
     let consumer_version = parse_consumer_version(consumer_version_json)?;
+    local::ensure_cancellable(&request.task)?;
     let outcome = with_dispatcher(|dispatcher| dispatcher.task_cancel(&request, consumer_version))?;
+    local::cancel_registered(&request);
 
     #[cfg(target_arch = "wasm32")]
     if let Some(controller) = take_inflight_fetch(&request.task) {
