@@ -94,7 +94,7 @@ impl PendingInput<'_, '_> {
                 Self::Vectored(bufs) => {
                     for buf in bufs {
                         hash.update(u64::try_from(buf.len()).ok()?.to_le_bytes());
-                        hash.update(buf.as_ref());
+                        hash.update(&buf[..]);
                     }
                 }
                 _ => unreachable!("write request checked"),
