@@ -70,19 +70,10 @@ fn mtls_death_wakes_parked_holder_and_settles_its_actual_runtime_lease() {
         let close = Close { controller: controller.clone(), service: operator.clone() };
         let diagnostics = server.diagnostics();
         let (tx, rx) = mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let mut client = Join(Some(std::thread::spawn(move || {
             let _close = close; // A failing client still wakes and retires the owner.
-            let (region, holder) = rx.recv_timeout(Duration::from_secs(5)).expect("lease waiter reached Pending");
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                let held = diagnostics.explain_region_open(region).reasons.iter().any(|reason| {
-                    matches!(reason, Reason::ObligationHeld { holder_task, obligation_type, .. }
-                        if *holder_task == holder && obligation_type == "Lease")
-                });
-                if held { break; }
-                assert!(Instant::now() < deadline, "checked reservation was never projected into the real runtime");
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            ready_rx.recv_timeout(Duration::from_secs(10)).expect("runtime verified the parked lease");
             let runtime = RuntimeBuilder::current_thread().build().unwrap();
             runtime.block_on(async {
                 let cx = Cx::current().unwrap();
@@ -115,6 +106,29 @@ fn mtls_death_wakes_parked_holder_and_settles_its_actual_runtime_lease() {
                 assert!(matches!(guard.release(), Err(OwnedMembershipError::Ended(OwnedLeaseStatus::Revoked))));
                 status
             }).unwrap();
+            // Diagnostics can be non-Send with the full feature set. Inspect
+            // it on the runtime owner, and send only readiness to the client.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (region, holder_id) = loop {
+                match rx.try_recv() {
+                    Ok(ids) => break ids,
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => panic!("lease holder stopped before parking"),
+                }
+                assert!(Instant::now() < deadline, "lease waiter never reached Pending");
+                asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            };
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                let held = diagnostics.explain_region_open(region).reasons.iter().any(|reason| {
+                    matches!(reason, Reason::ObligationHeld { holder_task, obligation_type, .. }
+                        if *holder_task == holder_id && obligation_type == "Lease")
+                });
+                if held { break; }
+                assert!(Instant::now() < deadline, "checked reservation was never projected into the real runtime");
+                asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            }
+            ready_tx.try_send(()).expect("mTLS client is waiting for readiness");
             let report = asupersync::time::timeout(cx.now(), Duration::from_secs(12), service.run(&cx)).await;
             controller.close();
             let status = asupersync::time::timeout(cx.now(), Duration::from_secs(3), holder.join(&cx)).await;
