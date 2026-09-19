@@ -1728,9 +1728,14 @@ impl Connection {
     ) -> Result<Option<ReceivedFrame>, H2Error> {
         let increment = i32::try_from(frame.increment)
             .map_err(|_| H2Error::flow_control("window increment too large"))?;
+        // RFC 9113 §5.1 forbids WINDOW_UPDATE on an idle stream regardless
+        // of its increment. Validate state before choosing the error scope.
+        if frame.stream_id != 0 && self.streams.is_idle_stream_id(frame.stream_id) {
+            return Err(H2Error::protocol("WINDOW_UPDATE received on idle stream"));
+        }
         // RFC 9113 §6.9.1: increment of 0 on the connection flow-control
         // window (stream 0) MUST be treated as a connection error of type
-        // PROTOCOL_ERROR.  On any other stream it MUST be a stream error.
+        // PROTOCOL_ERROR. On an existing stream it is a stream error.
         if increment == 0 {
             if frame.stream_id == 0 {
                 return Err(H2Error::protocol("WINDOW_UPDATE with zero increment"));
@@ -1751,11 +1756,6 @@ impl Connection {
             self.send_window = new_window as i32;
         } else {
             // Stream-level window update
-            // RFC 7540 §5.1: receiving WINDOW_UPDATE on an idle stream
-            // MUST be treated as a connection error of type PROTOCOL_ERROR.
-            if self.streams.is_idle_stream_id(frame.stream_id) {
-                return Err(H2Error::protocol("WINDOW_UPDATE received on idle stream"));
-            }
             if let Some(stream) = self.streams.get_mut(frame.stream_id) {
                 stream.update_send_window(increment)?;
             }
@@ -6484,8 +6484,19 @@ mod tests {
         // — the listener's process-time path then resets only that stream
         // instead of tearing down every sibling with a GOAWAY.
         let mut conn = Connection::server(Settings::default());
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+            .unwrap();
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            test_request_headers("/window"),
+            false,
+            true,
+        )))
+        .unwrap();
+        assert!(!conn.streams.is_idle_stream_id(1));
+        assert_eq!(conn.active_stream_count(), 1);
         let connection_level = conn
-            .process_window_update(WindowUpdateFrame::new(0, 0))
+            .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(0, 0)))
             .expect_err("a zero increment on stream 0 must be rejected");
         assert_eq!(connection_level.code, ErrorCode::ProtocolError);
         assert_eq!(
@@ -6494,7 +6505,7 @@ mod tests {
         );
 
         let stream_level = conn
-            .process_window_update(WindowUpdateFrame::new(1, 0))
+            .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(1, 0)))
             .expect_err("a zero increment on a stream must be rejected");
         assert_eq!(stream_level.code, ErrorCode::ProtocolError);
         assert_eq!(
@@ -6502,6 +6513,22 @@ mod tests {
             Some(1),
             "a stream-scoped zero increment must reset only that stream, not GOAWAY"
         );
+    }
+
+    #[test]
+    fn window_update_on_idle_stream_is_connection_error_for_zero_and_nonzero_increment() {
+        for increment in [0, 1] {
+            let mut conn = Connection::server(Settings::default());
+            conn.process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+                .unwrap();
+            assert!(conn.streams.is_idle_stream_id(3));
+            let error = conn
+                .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(3, increment)))
+                .expect_err("an idle stream cannot receive WINDOW_UPDATE");
+            assert_eq!(error.code, ErrorCode::ProtocolError);
+            assert_eq!(error.stream_id, None, "idle-stream errors require GOAWAY");
+            assert_eq!(conn.active_stream_count(), 0);
+        }
     }
 
     /// br-asupersync-lcvdj0 — Regression guard: a SETTINGS first

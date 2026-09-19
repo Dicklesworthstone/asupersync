@@ -3011,15 +3011,10 @@ where
                         }
                     } else {
                         pending_requests.insert(stream_id, (headers, Vec::new()));
-                        // br-asupersync-x8re31: a half-open stream (HEADERS
-                        // without END_STREAM) that stalls has no per-stream
-                        // deadline unless stream_idle_timeout is set, and the
-                        // connection idle_timeout never arms while any stream is
-                        // pending — a per-stream slowloris. Fall back to the
-                        // connection idle_timeout as the reclamation deadline; a
-                        // stream that makes progress re-arms it on its next DATA
-                        // (below) and is never reaped.
-                        if let Some(timeout) = stream_idle_timeout.or(idle_timeout) {
+                        // Stream reclamation is opt-in. The connection idle
+                        // budget applies only once all streams are quiescent;
+                        // it must not override an explicitly disabled stream timer.
+                        if let Some(timeout) = stream_idle_timeout {
                             pending_stream_idle_deadlines
                                 .insert(stream_id, (time_getter)() + timeout);
                         }
@@ -3036,10 +3031,8 @@ where
                     let pending_body_total: usize =
                         pending_requests.values().map(|(_, body)| body.len()).sum();
                     if let Some((_, body)) = pending_requests.get_mut(&stream_id) {
-                        // br-asupersync-x8re31: progress re-arms the reclamation
-                        // deadline (falling back to the connection idle_timeout),
-                        // so a stream that keeps sending DATA is never reaped.
-                        if let Some(timeout) = stream_idle_timeout.or(idle_timeout) {
+                        // Progress re-arms the configured per-stream deadline.
+                        if let Some(timeout) = stream_idle_timeout {
                             pending_stream_idle_deadlines
                                 .insert(stream_id, (time_getter)() + timeout);
                         }

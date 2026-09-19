@@ -28,7 +28,7 @@ use asupersync::codec::Decoder as _;
 use asupersync::http::h1::server::HostPolicy;
 use asupersync::http::h1::types::Response;
 use asupersync::http::h2::connection::CLIENT_PREFACE;
-use asupersync::http::h2::frame::{Frame, HeadersFrame, SettingsFrame};
+use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame, PingFrame, SettingsFrame};
 use asupersync::http::h2::listener::{Http2Listener, Http2ListenerConfig};
 use asupersync::http::h2::{FrameCodec, Header, HpackDecoder, HpackEncoder};
 use asupersync::runtime::RuntimeBuilder;
@@ -63,6 +63,15 @@ fn h2_blocking_client(
     path: &'static str,
     read_to_eof: bool,
 ) -> std::thread::JoinHandle<H2ClientOutcome> {
+    h2_blocking_client_with_body_pause(addr, path, read_to_eof, None)
+}
+
+fn h2_blocking_client_with_body_pause(
+    addr: SocketAddr,
+    path: &'static str,
+    read_to_eof: bool,
+    mut body_pause: Option<Duration>,
+) -> std::thread::JoinHandle<H2ClientOutcome> {
     std::thread::spawn(move || {
         let mut outcome = H2ClientOutcome::default();
         let mut stream = std::net::TcpStream::connect(addr).expect("client connect");
@@ -87,9 +96,19 @@ fn h2_blocking_client(
             ],
             &mut block,
         );
-        Frame::Headers(HeadersFrame::new(1, block.freeze(), true, true))
-            .encode(&mut out)
-            .expect("encode request HEADERS");
+        Frame::Headers(HeadersFrame::new(
+            1,
+            block.freeze(),
+            body_pause.is_none(),
+            true,
+        ))
+        .encode(&mut out)
+        .expect("encode request HEADERS");
+        if body_pause.is_some() {
+            Frame::Ping(PingFrame::new(*b"bodywait"))
+                .encode(&mut out)
+                .expect("encode body pause barrier");
+        }
         stream.write_all(&out).expect("write request");
         stream.flush().expect("flush request");
 
@@ -100,6 +119,20 @@ fn h2_blocking_client(
         loop {
             loop {
                 match codec.decode(&mut read_buf) {
+                    Ok(Some(Frame::Ping(ping))) if ping.ack && ping.opaque_data == *b"bodywait" => {
+                        if let Some(pause) = body_pause.take() {
+                            // The server acknowledged a frame after HEADERS,
+                            // so the request is pending before the pause starts.
+                            std::thread::sleep(pause);
+                            let mut data = BytesMut::new();
+                            Frame::Data(DataFrame::new(1, b"body".as_slice().into(), true))
+                                .encode(&mut data)
+                                .expect("encode delayed request body");
+                            if stream.write_all(&data).is_err() {
+                                return outcome;
+                            }
+                        }
+                    }
                     Ok(Some(Frame::Settings(settings))) if !settings.ack => {
                         let mut ack = BytesMut::new();
                         Frame::Settings(SettingsFrame::ack())
@@ -245,5 +278,41 @@ fn h2_active_connection_not_reclaimed_during_handler() {
 
         assert!(manager.begin_drain(Duration::from_secs(5)));
         let _ = run_handle.await.expect("listener run result");
+    });
+}
+
+#[test]
+fn h2_disabled_stream_timeout_preserves_paused_request_body() {
+    let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+    let handle = runtime.handle();
+    runtime.block_on(async move {
+        let listener = Http2Listener::bind_with_config(
+            "127.0.0.1:0",
+            |req| async move { Response::new(200, "OK", req.body) },
+            idle_config(Duration::from_millis(300)).stream_idle_timeout(None),
+        )
+        .await
+        .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let manager = listener.connection_manager().clone();
+        let run = handle
+            .clone()
+            .try_spawn(async move { listener.run(&handle).await })
+            .unwrap();
+        let client = h2_blocking_client_with_body_pause(
+            addr,
+            "/paused-body",
+            true,
+            Some(Duration::from_millis(900)),
+        );
+        let outcome = client.join().unwrap();
+        assert!(manager.begin_drain(Duration::from_secs(5)));
+        let _ = run.await.unwrap();
+        assert_eq!(outcome.status.as_deref(), Some("200"), "{outcome:?}");
+        assert_eq!(outcome.body, b"body", "{outcome:?}");
+        assert!(
+            !outcome.goaway_last_stream_ids.is_empty(),
+            "connection idle timeout must still reclaim the completed stream: {outcome:?}"
+        );
     });
 }
