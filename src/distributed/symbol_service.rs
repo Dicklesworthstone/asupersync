@@ -139,3 +139,11 @@ impl SymbolReplicaStore {
 
 #[cfg(test)]
 mod tests;
+
+mod service;
+pub use service::{SYMBOL_SERVICE_COMPUTATION, register_symbol_service};
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+mod native;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub use native::{RemoteSymbolError, RemoteSymbolTransport};

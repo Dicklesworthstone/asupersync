@@ -125,7 +125,7 @@ fn admitted(count: usize, payload: usize, limits: SymbolBatchLimits) -> Result<u
     if size > limits.max_encoded_bytes { return Err(SymbolStoreError::Limit("encoded bytes")); }
     Ok(size)
 }
-fn key(object_id: ObjectId, bytes: &[u8]) -> SymbolBatchKey {
+pub(super) fn key(object_id: ObjectId, bytes: &[u8]) -> SymbolBatchKey {
     let mut hash = Sha256::new();
     hash.update(b"asupersync.symbol-batch.v1");
     hash.update(bytes);

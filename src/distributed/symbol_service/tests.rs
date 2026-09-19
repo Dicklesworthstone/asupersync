@@ -2,19 +2,19 @@ use super::*;
 use crate::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
 use crate::types::symbol::{ObjectId, Symbol, SymbolId, SymbolKind};
 
-fn limits() -> SymbolBatchLimits {
+pub(super) fn limits() -> SymbolBatchLimits {
     SymbolBatchLimits { max_encoded_bytes: 8192, max_symbols: 16, max_payload_bytes: 4096, max_decoded_bytes: 8192 }
 }
-fn storage() -> SymbolStoreLimits {
+pub(super) fn storage() -> SymbolStoreLimits {
     SymbolStoreLimits { max_batches: 4, max_bytes: 32768, max_batches_per_peer: 2, max_bytes_per_peer: 16384 }
 }
-fn symbols(object: u128, payload: &[u8]) -> Vec<AuthenticatedSymbol> {
+pub(super) fn symbols(object: u128, payload: &[u8]) -> Vec<AuthenticatedSymbol> {
     let security = SecurityContext::new(AuthKey::from_seed(42));
     [2, 0, 1].into_iter().map(|esi| security.sign_symbol(&Symbol::new(
         SymbolId::new(ObjectId::from_u128(object), 0, esi), payload.to_vec(), SymbolKind::Source,
     ))).collect()
 }
-fn encoded(object: u128) -> EncodedSymbolBatch {
+pub(super) fn encoded(object: u128) -> EncodedSymbolBatch {
     encode_symbol_batch(&symbols(object, b"retained payload"), limits()).unwrap()
 }
 fn store(bounds: SymbolStoreLimits) -> SymbolReplicaStore {
