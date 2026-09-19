@@ -2284,9 +2284,13 @@ where
 {
     guard.arm_transport();
     loop {
+        // br-asupersync-sse7kp2: the live step is heartbeat-aware when the
+        // stream sets a heartbeat_interval (and its source overrides
+        // poll_next_event to idle), and is otherwise identical to
+        // send_next_h1_chunk.
         match guard
             .stream
-            .send_next_h1_chunk(&guard.cx, &mut sender)
+            .send_next_h1_chunk_live(&guard.cx, &mut sender)
             .await
         {
             Ok(StreamingSseTransportStep::Sent { .. }) => {}
