@@ -15,6 +15,7 @@
 
 pub mod error;
 mod exports;
+pub mod fetch;
 pub mod local;
 pub mod types;
 
@@ -174,26 +175,33 @@ fn dispatcher_handle_is_live(handle: &WasmHandleRef) -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn cleanup_released_fetches() {
-    INFLIGHT_FETCHES.with(|inflight| {
-        inflight.borrow_mut().retain(|handle, controller| {
-            let keep = dispatcher_handle_is_live(handle);
-            if !keep {
-                controller.abort();
-            }
-            keep
-        });
+    let retired = INFLIGHT_FETCHES.with(|inflight| {
+        let mut inflight = inflight.borrow_mut();
+        let handles: Vec<_> = inflight.keys().copied()
+            .filter(|handle| !dispatcher_handle_is_live(handle)).collect();
+        handles.into_iter().filter_map(|handle| inflight.remove(&handle))
+            .collect::<Vec<_>>()
     });
+    // Abort dispatches synchronous host listeners. A listener can reenter this
+    // boundary and admit another fetch; it must never see a borrowed registry.
+    for controller in retired {
+        controller.abort();
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 const fn cleanup_released_fetches() {}
 
 fn cleanup_released_websockets() {
-    INFLIGHT_WEBSOCKETS.with(|sockets| {
-        sockets
-            .borrow_mut()
-            .retain(|handle, _| dispatcher_handle_is_live(handle));
+    let retired = INFLIGHT_WEBSOCKETS.with(|sockets| {
+        let mut sockets = sockets.borrow_mut();
+        let handles: Vec<_> = sockets.keys().copied()
+            .filter(|handle| !dispatcher_handle_is_live(handle)).collect();
+        handles.into_iter().filter_map(|handle| sockets.remove(&handle))
+            .collect::<Vec<_>>()
     });
+    // Socket destruction calls the host too; detach before invoking it.
+    drop(retired);
 }
 
 fn cleanup_released_host_state() {
