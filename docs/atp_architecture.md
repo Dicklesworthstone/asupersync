@@ -304,6 +304,19 @@ code must account for: sparse files, preallocation, atomic rename, fsync
 durability, path length, case sensitivity, symlink behavior, socket buffers,
 IPv6, router assist, and service manager support.
 
+The opt-in sparse-file receiver in
+`src/net/atp/transport_common/metadata.rs` reconstructs fresh, pre-sized files
+by seeking over zero runs of at least 4096 bytes and writing the other bytes.
+It does not punch holes in existing extents or depend on `SEEK_HOLE`,
+`SEEK_DATA`, or macOS `F_PUNCHHOLE`. This same reconstruction path applies on
+macOS; the destination filesystem determines the physical allocation and hole
+layout. Exact logical length and byte contents are preserved, but identical
+extent boundaries or allocated-block counts across APFS, ext4, and other
+filesystems are not promised. `tests/atp_tcp_metadata_fidelity.rs` checks a real
+sparse TCP round-trip, including trailing zeros, byte equality, and reduced
+allocation; `tests/atp_cross_platform_capability.rs` probes host sparse-file
+support. A Linux pass does not establish APFS acceptance.
+
 `src/runtime/scheduler/autotuner.rs` is a pressure-feedback surface. ATP should
 feed transfer hot-path observations into scheduler tuning through explicit
 metrics rather than adding transfer-local scheduling heuristics.

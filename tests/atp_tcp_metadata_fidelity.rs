@@ -505,6 +505,8 @@ fn sparse_file_round_trips_and_stays_sparse() {
         f.seek(std::io::SeekFrom::Start(ISLAND_OFFSET)).unwrap();
         f.write_all(&[0xABu8; ISLAND]).unwrap();
         f.set_len(TOTAL).unwrap(); // trailing hole
+        // Finish delayed allocation before inspecting filesystem block counts.
+        f.sync_all().unwrap();
     }
     let src_meta = std::fs::metadata(&sparse).unwrap();
     assert_eq!(src_meta.len(), TOTAL);
@@ -524,6 +526,13 @@ fn sparse_file_round_trips_and_stays_sparse() {
 
     let out = dst_dir.join("project").join("disk.img");
     let out_meta = std::fs::metadata(&out).expect("sparse file present");
+    eprintln!(
+        "sparse round-trip: os={} path={} logical={TOTAL} source_allocated={} destination_allocated={}",
+        std::env::consts::OS,
+        root.display(),
+        src_meta.blocks() * 512,
+        out_meta.blocks() * 512,
+    );
     assert_eq!(out_meta.len(), TOTAL, "logical size preserved");
     assert_eq!(
         std::fs::read(&out).unwrap(),
