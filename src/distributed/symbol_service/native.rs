@@ -13,7 +13,6 @@ use crate::remote::{
 use crate::security::{AuthKey, AuthenticatedSymbol};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::future::Future;
 use std::sync::Arc;
 
 mod admission;
@@ -186,22 +185,20 @@ impl RemoteSymbolTransport {
 }
 
 impl DistributorTransport for RemoteSymbolTransport {
-    fn send_symbols(
+    async fn send_symbols(
         &self, replica_id: &str, symbols: Vec<AuthenticatedSymbol>,
-    ) -> impl Future<Output = Result<ReplicaAck, ReplicaFailure>> + Send {
-        async move {
-            self.send(replica_id, symbols).await.map_err(|error| {
-                let error_kind = match &error {
-                    RemoteSymbolError::Configuration => ErrorKind::ConfigError,
-                    RemoteSymbolError::UnknownReplica => ErrorKind::NodeUnavailable,
-                    RemoteSymbolError::Cancelled => ErrorKind::Cancelled,
-                    RemoteSymbolError::Batch(_) => ErrorKind::ProtocolError,
-                    RemoteSymbolError::Client(_) => ErrorKind::ConnectionLost,
-                    RemoteSymbolError::Refused | RemoteSymbolError::Admission => ErrorKind::AdmissionDenied,
-                };
-                ReplicaFailure { replica_id: replica_id.to_owned(), error: error.to_string(), error_kind }
-            })
-        }
+    ) -> Result<ReplicaAck, ReplicaFailure> {
+        self.send(replica_id, symbols).await.map_err(|error| {
+            let error_kind = match &error {
+                RemoteSymbolError::Configuration => ErrorKind::ConfigError,
+                RemoteSymbolError::UnknownReplica => ErrorKind::NodeUnavailable,
+                RemoteSymbolError::Cancelled => ErrorKind::Cancelled,
+                RemoteSymbolError::Batch(_) => ErrorKind::ProtocolError,
+                RemoteSymbolError::Client(_) => ErrorKind::ConnectionLost,
+                RemoteSymbolError::Refused | RemoteSymbolError::Admission => ErrorKind::AdmissionDenied,
+            };
+            ReplicaFailure { replica_id: replica_id.to_owned(), error: error.to_string(), error_kind }
+        })
     }
 }
 
