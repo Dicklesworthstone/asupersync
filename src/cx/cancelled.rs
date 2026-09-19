@@ -89,11 +89,7 @@ impl<Caps> Cancelled<'_, Caps> {
             .is_some_and(|registered| registered.waker.will_wake(waker));
         // Waker clone and retirement are user callbacks. Keep our own strong
         // owner until the Cx registry has released its lock in both cases.
-        let incoming = if unchanged {
-            None
-        } else {
-            Some(waker.clone())
-        };
+        let incoming = if unchanged { None } else { Some(waker.clone()) };
         let previous = self.registration.as_ref().map(|entry| entry.token);
         let token = self.cx.refresh_cancel_waker(previous, waker);
         let retired = if let Some(waker) = incoming {
@@ -291,6 +287,9 @@ mod tests {
             cx: Cx,
             retired_unlocked: Arc<AtomicBool>,
         }
+        // The owned waker payload must run the reentrant destructor below;
+        // Waker::noop() would remove the behavior this regression checks.
+        #[allow(clippy::manual_noop_waker)]
         impl Wake for ReenterDrop {
             fn wake(self: Arc<Self>) {}
         }

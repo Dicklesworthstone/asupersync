@@ -105,6 +105,9 @@ mod tests {
             calls: Arc<AtomicUsize>,
             panic: bool,
         }
+        // A static no-op waker cannot exercise the reentrant, panicking
+        // payload destructor that this cancellation regression requires.
+        #[allow(clippy::manual_noop_waker)]
         impl Wake for DropWake {
             fn wake(self: Arc<Self>) {}
         }
