@@ -17,11 +17,22 @@ use std::time::Duration;
 use super::assignment::{AssignmentStrategy, SymbolAssigner};
 use super::encoding::{EncodedState, EncodingConfig, PathQualitySnapshot};
 
+mod driver;
+#[cfg(test)]
+mod fanout_tests;
+
 // ---------------------------------------------------------------------------
 // DistributorTransport
 // ---------------------------------------------------------------------------
 
 /// Transport interface for distributing symbols.
+///
+/// The returned future owns one send attempt. Implementations must release its
+/// local resources when dropped (including on timeout or caller cancellation),
+/// must not detach work, and must keep each poll nonblocking. Already transmitted
+/// bytes cannot be rolled back: failures do not prove that the replica received
+/// nothing. Authentication of the peer and acknowledgement is the transport's
+/// responsibility; the distributor additionally validates replica ID and count.
 pub trait DistributorTransport: Sync {
     /// Sends a batch of symbols to a replica.
     fn send_symbols(
@@ -40,9 +51,9 @@ pub trait DistributorTransport: Sync {
 pub struct DistributionConfig {
     /// Consistency level for distribution.
     pub consistency: ConsistencyLevel,
-    /// Timeout for replica acknowledgement.
+    /// Per-admitted-replica acknowledgement timeout. Zero refuses without sending.
     pub ack_timeout: Duration,
-    /// Maximum concurrent distributions.
+    /// Maximum in-flight send attempts per call. Zero denies all replica admission.
     pub max_concurrent: usize,
     /// Whether to use hedged requests.
     pub hedge_enabled: bool,
@@ -53,6 +64,7 @@ pub struct DistributionConfig {
 }
 
 impl Default for DistributionConfig {
+    /// Creates the default distribution configuration.
     fn default() -> Self {
         Self {
             consistency: ConsistencyLevel::Quorum,
@@ -181,7 +193,15 @@ impl SymbolDistributor {
 
     /// Distributes symbols to replicas using the provided transport.
     ///
-    /// This orchestrates the assignment, signing, and transmission of symbols.
+    /// Signs only admitted batches, polls at most `max_concurrent` sends per
+    /// turn, and waits for all eligible replicas to finish or time out. Results
+    /// retain assignment order, not completion order. Cancellation stops new
+    /// admission and drops every owned attempt before returning unresolved peers
+    /// as `Cancelled` failures. This observes requests without acknowledging the
+    /// runtime cancellation protocol or claiming remote rollback/quiescence.
+    /// A transport must obey the ownership contract of [`DistributorTransport`].
+    /// Pending sends require an explicit `cx.timer_driver()`; otherwise they
+    /// fail with `ConfigError` instead of acquiring ambient timer authority.
     ///
     /// br-asupersync-307rnt: the start/end timestamps used to compute
     /// `DistributionResult.duration` are read through `cx.timer_driver()`
@@ -198,59 +218,29 @@ impl SymbolDistributor {
         transport: &T,
         auth_context: &SecurityContext,
     ) -> DistributionResult {
-        let start = cx
-            .timer_driver()
-            .map_or_else(crate::time::wall_now, |d| d.now());
+        let timer = cx.timer_driver();
+        let start = driver::now(timer.as_ref());
         let assignments =
             Self::compute_assignments_with_auth(encoded, replicas, auth_context, None);
-        let mut outcomes = Vec::with_capacity(assignments.len());
-        let mut symbols_sent_total = 0_u64;
-        for assignment in assignments {
-            let symbols_for_replica: Vec<AuthenticatedSymbol> = assignment
-                .symbol_indices
-                .iter()
-                .map(|&idx| {
-                    let sym = &encoded.symbols[idx]; // ubs:ignore - index from assignment plan bounded by symbols.len()
-                    auth_context.sign_symbol(sym)
-                })
-                .collect();
+        let fanout = driver::run(
+            &self.config, cx, encoded, assignments, transport, auth_context, timer.clone(),
+        ).await;
+        let duration = Duration::from_nanos(driver::now(timer.as_ref()).duration_since(start));
 
-            if symbols_for_replica.is_empty() {
-                continue;
-            }
-
-            symbols_sent_total =
-                symbols_sent_total.saturating_add(symbols_for_replica.len() as u64);
-            let result = transport
-                .send_symbols(&assignment.replica_id, symbols_for_replica)
-                .await;
-
-            outcomes.push(match result {
-                Ok(ack) => Outcome::Ok(ack),
-                Err(fail) => Outcome::Err(fail),
-            });
-        }
-
-        let end = cx
-            .timer_driver()
-            .map_or_else(crate::time::wall_now, |d| d.now());
-        let duration = Duration::from_nanos(end.duration_since(start));
-
-        // Authorization and empty-assignment filtering happen before transport
-        // attempts. Quorum must therefore be computed over the replicas that
-        // were actually eligible and contacted, not the original untrusted
-        // input slice. Otherwise filtered replicas make a reachable quorum look
-        // impossible. Keep zero eligible non-Local distributions fail-closed:
-        // `All` over an empty eligible set must not report successful delivery.
-        let attempted_replica_count = outcomes.len();
-        let required =
-            if attempted_replica_count == 0 && self.config.consistency != ConsistencyLevel::Local {
-                1
-            } else {
-                Self::required_acks(self.config.consistency, attempted_replica_count)
-            };
-
-        self.evaluate_outcomes_with_sent(encoded, required, outcomes, symbols_sent_total, duration)
+        // Fix the denominator before admission. Cancellation, limits, timeouts,
+        // and invalid acknowledgements must not make the requested quorum easier.
+        // Unauthorized/empty assignments are excluded and repeated identities
+        // contribute at most one vote. Empty non-Local delivery stays fail-closed.
+        let required = if fanout.eligible_replicas == 0
+            && self.config.consistency != ConsistencyLevel::Local
+        {
+            1
+        } else {
+            Self::required_acks(self.config.consistency, fanout.eligible_replicas)
+        };
+        self.evaluate_outcomes_with_sent(
+            encoded, required, fanout.outcomes, fanout.symbols_attempted, duration,
+        )
     }
 
     /// Computes the required acknowledgement count for the given consistency
@@ -551,8 +541,8 @@ mod tests {
         // Only 2 of 3 respond.
         let outcomes = vec![
             Outcome::Ok(make_ack("r0", 10)),
-            Outcome::Ok(make_ack("r1", 10)),
-            Outcome::Err(make_failure("r2")),
+            Outcome::Err(make_failure("r1")),
+            Outcome::Ok(make_ack("r2", 10)),
         ];
 
         let result =
