@@ -54,7 +54,9 @@
 //!
 //! - [`Cx`]: The capability context token
 //! - [`Scope`]: API for spawning tasks and creating child regions
+//! - [`Cancelled`]: An owned wake registration for observing cancellation
 
+pub mod cancelled;
 pub mod cap;
 pub mod capacity_ticket;
 pub mod child_region;
@@ -65,6 +67,7 @@ pub mod scope;
 pub mod scoped_cpu;
 pub mod wrappers;
 
+pub use cancelled::Cancelled;
 pub use cap::{
     All as AllCaps, CapMask, CapSet, CapSetRuntimeMask, HasIo, HasRandom, HasRemote, HasSpawn,
     HasTime, None as NoCaps, SubsetOf,
