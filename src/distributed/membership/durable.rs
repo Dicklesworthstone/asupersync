@@ -355,3 +355,6 @@ impl<F: JournalIo> Journal<F> {
 
 #[cfg(test)]
 mod tests;
+
+mod runtime;
+pub use runtime::{PersistentMembershipController, PersistentMembershipError, register_persistent_membership_service};
