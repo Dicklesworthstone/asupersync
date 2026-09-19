@@ -366,3 +366,6 @@ async fn drive_replay<F: Future>(
 
 #[cfg(test)]
 mod tests;
+
+mod codec;
+pub use codec::{PolledDecodeLimits, PolledSessionBytes, PolledTapeError};

@@ -17,7 +17,7 @@ impl Wake for Notice {
 }
 
 // Unlike an unconditional polling loop, this driver refuses a missing wakeup.
-fn drive<F: Future>(future: F) -> Result<F::Output, &'static str> {
+pub(super) fn drive<F: Future>(future: F) -> Result<F::Output, &'static str> {
     let notice = Arc::new(Notice(AtomicBool::new(false)));
     let waker = Waker::from(Arc::clone(&notice));
     let mut cx = Context::from_waker(&waker);
@@ -99,7 +99,7 @@ fn session(io: Choppy) -> OrderedRecordingSession<Choppy, VirtualClock> {
         }, 1024).unwrap()
 }
 
-async fn receive<I, E, C>(io: &mut I, entropy: &E, clock: &C) -> Result<(Vec<u8>, Vec<(Time, u64)>), io::ErrorKind>
+pub(super) async fn receive<I, E, C>(io: &mut I, entropy: &E, clock: &C) -> Result<(Vec<u8>, Vec<(Time, u64)>), io::ErrorKind>
 where I: AsyncRead + Unpin, E: EntropySource + ?Sized, C: TimeSource + ?Sized {
     let mut out = Vec::new();
     let mut observations = Vec::new();
@@ -115,7 +115,7 @@ where I: AsyncRead + Unpin, E: EntropySource + ?Sized, C: TimeSource + ?Sized {
         out.extend_from_slice(&byte[..n]);
     }
 }
-fn capture() -> PolledRecordedSession {
+pub(super) fn capture() -> PolledRecordedSession {
     let (original, _, tape) = drive(session(Choppy::new()).record_polls(bounds(), |p| {
         Box::pin(receive(p.io, p.entropy, p.clock))
     })).unwrap();
@@ -323,6 +323,35 @@ fn pending_digest_and_payload_are_not_in_debug_output() {
     assert!(!debug.contains("yes"));
     assert!(!debug.contains("digest"));
     assert!(!debug.contains("Choppy"));
+}
+
+pub(super) fn empty() -> PolledRecordedSession {
+    drive(session(Choppy::new()).record_polls(bounds(), |_| Box::pin(async {}))).unwrap().2.unwrap()
+}
+
+struct YieldOnce { yielded: bool, dropped: Arc<AtomicUsize> }
+impl Future for YieldOnce {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if self.yielded { Poll::Ready(()) }
+        else { self.yielded = true; cx.waker().wake_by_ref(); Poll::Pending }
+    }
+}
+impl Drop for YieldOnce {
+    fn drop(&mut self) { self.dropped.fetch_add(1, Ordering::SeqCst); }
+}
+#[test]
+fn dropping_a_suspended_replay_destroys_its_consumer_once_without_a_result() {
+    let recorded_drop = Arc::new(AtomicUsize::new(0)); let seen = Arc::clone(&recorded_drop);
+    let ((), _, tape) = drive(session(Choppy::new()).record_polls(bounds(), move |_| {
+        Box::pin(YieldOnce { yielded: false, dropped: seen })
+    })).unwrap();
+    assert_eq!(recorded_drop.load(Ordering::SeqCst), 1);
+    let replay_drop = Arc::new(AtomicUsize::new(0)); let seen = Arc::clone(&replay_drop);
+    let mut driver = Box::pin(tape.unwrap().run(128, move |_| Box::pin(YieldOnce { yielded: false, dropped: seen })));
+    assert!(driver.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+    drop(driver);
+    assert_eq!(replay_drop.load(Ordering::SeqCst), 1);
 }
 
 #[test]
