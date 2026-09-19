@@ -411,3 +411,8 @@ mod tests;
 
 /// Execute protected work with independent subtree cancellation and drain receipts.
 pub mod work;
+
+// br-asupersync-l1ekl5: re-export the work types that consumers import via the
+// `owned::` path (durable/runtime.rs). The work-submodule split in 8fb795b7e
+// moved these here but omitted the re-export, breaking the default lib build.
+pub use work::{MembershipWorkError, MembershipWorkReport};
