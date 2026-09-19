@@ -39,9 +39,9 @@ use std::task::{Context, Poll};
 
 #[path = "restoration.rs"]
 mod restoration;
+use super::receiver_journal::shared::JournaledSession;
 pub use restoration::ResumeSessionInit;
 use restoration::{ServiceInit, ServiceReceiver};
-use super::receiver_journal::shared::JournaledSession;
 
 #[path = "revocation.rs"]
 mod revocation;
@@ -819,20 +819,25 @@ impl<W: super::LiveStreamCommitSink + Unpin + Send + 'static> ResumableService<W
                         Some(receiver) => receiver,
                         None => {
                             authorize(&child).map_err(ResumeServiceRejection::Factory)?;
+                            let initialization_cx = &child;
+                            let initialization_capacity = &_capacity;
                             bounded(
                                 &child,
                                 config.operation_timeout,
                                 "resume sink creation",
-                                async {
-                                    let initialized = factory(child.clone(), key).await?;
-                                    initialized.initialize(
-                                        &child,
-                                        key,
-                                        acceptor,
-                                        config,
-                                        maximum,
-                                        Arc::clone(&_capacity),
-                                    ).await
+                                async move {
+                                    let initialized =
+                                        factory(initialization_cx.clone(), key).await?;
+                                    initialized
+                                        .initialize(
+                                            initialization_cx,
+                                            key,
+                                            acceptor,
+                                            config,
+                                            maximum,
+                                            Arc::clone(initialization_capacity),
+                                        )
+                                        .await
                                 },
                             )
                             .await
