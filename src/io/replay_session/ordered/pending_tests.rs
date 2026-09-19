@@ -143,9 +143,7 @@ pub(super) fn recorded_exchange() -> OrderedRecordedSession {
     recording.into_parts().1.unwrap()
 }
 
-fn race_read<'a, I: AsyncRead + Unpin>(
-    io: &'a mut I,
-) -> ReplayConsumerFuture<'a, io::Result<bool>> {
+fn race_read<I: AsyncRead + Unpin>(io: &mut I) -> ReplayConsumerFuture<'_, io::Result<bool>> {
     Box::pin(async move {
         let mut bytes = [0; 2];
         let io_won = poll_fn(|cx| {
