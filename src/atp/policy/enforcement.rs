@@ -358,10 +358,23 @@ impl PolicyEnforcer {
         None
     }
 
-    /// Check if a path contains traversal attempts.
+    /// Check if a path contains a traversal component (`..` or `.`).
+    ///
+    /// br-asupersync-tph5ac: the previous body was
+    /// `contains("..") || contains("//") || starts_with('/')`. Every `AtpPath`
+    /// is absolute, so `starts_with('/')` was ALWAYS true and this denied every
+    /// path-scoped access as `PathTraversal` — path-scoped capabilities were
+    /// entirely non-functional (and it masked the scope-exclusion fix in
+    /// br-asupersync-2ykdhb, since a path request never reached the scope
+    /// grant). The `contains("..")` substring also over-denied legitimate
+    /// filenames like `/my..file`. `AtpPath::from_str` already rejects `..`,
+    /// `.`, empty components and non-absolute paths, so a constructed `AtpPath`
+    /// cannot encode traversal; this defensive check is now anchored on path
+    /// COMPONENTS — never a substring, never the leading `/`.
     fn is_path_traversal_attempt(&self, path: &AtpPath) -> bool {
-        let path_str = path.as_str();
-        path_str.contains("..") || path_str.contains("//") || path_str.starts_with('/')
+        path.as_str()
+            .split('/')
+            .any(|component| component == ".." || component == ".")
     }
 
     /// Select the best capability from matching ones (most restrictive).
@@ -554,6 +567,78 @@ mod tests {
                 ..
             } => {}
             other => panic!("Expected NoCapability denial, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_enforcer_path_scope_grants_in_scope_and_denies_excluded_and_out_of_scope() {
+        // br-asupersync-tph5ac + br-asupersync-2ykdhb: end-to-end path-scoped
+        // authorization. Before the fixes EVERY path request was denied as
+        // PathTraversal (is_path_traversal_attempt flagged all absolute paths),
+        // so the whole feature was dead and no enforcer test covered
+        // AccessResource::Path. With both fixes: an in-scope path is granted,
+        // while a path inside a literal exclusion (2ykdhb) and a fully
+        // out-of-scope path are DENIED — proving access is still gated by the
+        // scope, not opened up.
+        use crate::atp::policy::scope::{AtpPath, PathScope};
+
+        let mut enforcer = PolicyEnforcer::new();
+        let peer = PeerId::test(1);
+        let mut actions = HashSet::new();
+        actions.insert(CapabilityAction::Read);
+        let mut exclusions = HashSet::new();
+        exclusions.insert("/data/secret".to_string()); // literal, non-glob exclusion
+
+        let capability = Capability::new(
+            "path-grant".to_string(),
+            peer,
+            peer,
+            ResourceScope::Path(PathScope::with_exclusions(
+                "/data".to_string(),
+                true,
+                exclusions,
+            )),
+            actions,
+            TemporalScope::expires_in(Duration::from_secs(3600)),
+            ScopeConstraints::default(),
+        );
+        enforcer.add_capability(capability);
+
+        let request_for = |path: &str| AccessRequest {
+            peer,
+            resource: AccessResource::Path(AtpPath::from_str(path).expect("valid path")),
+            action: CapabilityAction::Read,
+            transfer_size: None,
+            client_ip: None,
+            context: RequestContext::default(),
+        };
+
+        // In-scope path: granted (proves path requests are no longer blanket-denied).
+        match enforcer
+            .evaluate_access(&request_for("/data/public/file.txt"))
+            .decision
+        {
+            CapabilityDecision::Granted { .. } => {}
+            other => panic!("in-scope path must be granted, got {other:?}"),
+        }
+
+        // Descendant of a literal exclusion: denied (proves the 2ykdhb scope fix
+        // in the full flow — the excluded subtree is not covered).
+        match enforcer
+            .evaluate_access(&request_for("/data/secret/private.txt"))
+            .decision
+        {
+            CapabilityDecision::Denied { .. } => {}
+            other => panic!("excluded-subtree path must be denied, got {other:?}"),
+        }
+
+        // Fully out-of-scope path: denied.
+        match enforcer
+            .evaluate_access(&request_for("/other/file.txt"))
+            .decision
+        {
+            CapabilityDecision::Denied { .. } => {}
+            other => panic!("out-of-scope path must be denied, got {other:?}"),
         }
     }
 

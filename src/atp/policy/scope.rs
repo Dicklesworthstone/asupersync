@@ -228,12 +228,19 @@ impl PathScope {
     pub fn matches(&self, path: &AtpPath) -> bool {
         let path_str = path.as_str();
 
-        // Check exclusions first
-        if self
-            .exclusions
-            .iter()
-            .any(|exc| path_pattern_match(exc, path_str))
-        {
+        // Check exclusions first. A literal exclusion covers its whole subtree,
+        // mirroring the recursive inclusion below: without this the deny-list
+        // was matched more strictly than the allow-list (literal exclusions
+        // matched the exact path only), so an operator carve-out failed open on
+        // every descendant of the excluded path (br-asupersync-2ykdhb). Glob
+        // exclusions keep going through path_pattern_match; path_is_same_or_
+        // descendant enforces the '/' boundary so a prefix sibling (e.g.
+        // "/data/secretstuff" vs an exclusion of "/data/secret") is not
+        // over-denied.
+        if self.exclusions.iter().any(|exc| {
+            path_pattern_match(exc, path_str)
+                || (!contains_path_wildcard(exc) && path_is_same_or_descendant(exc, path_str))
+        }) {
             return false;
         }
 
@@ -629,6 +636,45 @@ mod tests {
 
         assert!(scope.matches(&allowed));
         assert!(!scope.matches(&excluded));
+    }
+
+    #[test]
+    fn path_scope_literal_exclusion_covers_excluded_subtree() {
+        // br-asupersync-2ykdhb: a LITERAL (non-glob) exclusion must deny the
+        // whole excluded subtree, not just the exact path. Previously the
+        // exclusion check used exact-only literal matching while the recursive
+        // inclusion covered descendants, so an operator carve-out silently
+        // failed open below the excluded root (fail-open authorization bypass:
+        // a recursive grant of /data excluding /data/secret still granted
+        // /data/secret/private.txt). The prior test only exercised the glob
+        // form (/data/secret/**), which masked the literal case.
+        let mut exclusions = HashSet::new();
+        exclusions.insert("/data/secret".to_string()); // literal, no wildcard
+
+        let scope = PathScope::with_exclusions("/data".to_string(), true, exclusions);
+
+        let allowed = AtpPath::from_str("/data/public/file.txt").expect("path");
+        let excluded_exact = AtpPath::from_str("/data/secret").expect("path");
+        let excluded_descendant = AtpPath::from_str("/data/secret/private.txt").expect("path");
+        let excluded_deep = AtpPath::from_str("/data/secret/sub/dir/key.pem").expect("path");
+        // A sibling that merely shares the excluded prefix as a string must NOT
+        // be over-denied — segment-boundary correctness, mirroring inclusion.
+        let sibling_prefix = AtpPath::from_str("/data/secretstuff/file.txt").expect("path");
+
+        assert!(scope.matches(&allowed), "unexcluded subtree stays granted");
+        assert!(!scope.matches(&excluded_exact), "exact excluded path denied");
+        assert!(
+            !scope.matches(&excluded_descendant),
+            "descendant of a literal exclusion must be denied (was fail-open)"
+        );
+        assert!(
+            !scope.matches(&excluded_deep),
+            "deep descendant of a literal exclusion must be denied"
+        );
+        assert!(
+            scope.matches(&sibling_prefix),
+            "prefix sibling of the exclusion must not be over-denied"
+        );
     }
 
     #[test]
