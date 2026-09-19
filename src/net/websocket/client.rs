@@ -833,6 +833,13 @@ where
     async fn flush_write_buf_with_cx(&mut self, op_cx: Option<&Cx>) -> Result<(), WsError> {
         use std::future::poll_fn;
 
+        // br-asupersync-2k3o9x: wake a write parked on a stalled (non-reading)
+        // peer when an external cancel fires, instead of only noticing it on the
+        // next self-poll. Effective cx = the explicit op_cx, else the ambient Cx.
+        let ambient = op_cx.is_none().then(crate::cx::Cx::current).flatten();
+        let cx_for_wake: Option<&Cx> = op_cx.or(ambient.as_ref());
+        let mut cancel_wake = cx_for_wake.map(WsCancelWakerGuard::new);
+
         while !self.write_buf.is_empty() {
             let is_open = self.close_handshake.is_open();
             let n = poll_fn(|task_cx| {
@@ -841,6 +848,11 @@ where
                         io::ErrorKind::Interrupted,
                         "cancelled",
                     )));
+                }
+                if is_open {
+                    if let Some(guard) = cancel_wake.as_mut() {
+                        guard.refresh(task_cx.waker());
+                    }
                 }
                 Pin::new(&mut self.io).poll_write(task_cx, &self.write_buf[..])
             })
@@ -858,6 +870,11 @@ where
         poll_fn(|task_cx| {
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if is_open {
+                if let Some(guard) = cancel_wake.as_mut() {
+                    guard.refresh(task_cx.waker());
+                }
             }
             Pin::new(&mut self.io).poll_flush(task_cx)
         })
@@ -877,10 +894,20 @@ where
             return Ok(());
         }
 
+        // br-asupersync-2k3o9x: wake a write parked on a stalled peer on cancel.
+        let ambient = op_cx.is_none().then(crate::cx::Cx::current).flatten();
+        let cx_for_wake: Option<&Cx> = op_cx.or(ambient.as_ref());
+        let mut cancel_wake = cx_for_wake.map(WsCancelWakerGuard::new);
+
         let is_open = self.close_handshake.is_open();
         let n = poll_fn(|task_cx| {
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if is_open {
+                if let Some(guard) = cancel_wake.as_mut() {
+                    guard.refresh(task_cx.waker());
+                }
             }
             Pin::new(&mut self.io).poll_write(task_cx, &buf[..])
         })
@@ -910,6 +937,11 @@ where
         poll_fn(|task_cx| {
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if is_open {
+                if let Some(guard) = cancel_wake.as_mut() {
+                    guard.refresh(task_cx.waker());
+                }
             }
             Pin::new(&mut self.io).poll_flush(task_cx)
         })
