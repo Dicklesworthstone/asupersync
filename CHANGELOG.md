@@ -16,6 +16,12 @@ crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 
 ## Version Timeline
 
+- **v0.6.0 Release**: durable ATP sender/receiver journaling and resume across
+  process loss, targeted resume-client revocation without peer restart, QUIC
+  protected close and post-close accounting shutdown, bounded clock capture and
+  replay, and an HTTP/1 fix that answers a rejected request head with
+  `400`/`413`/`431` instead of a silent close. Also documents the `Outcome<T, E>`
+  conditional-`Debug` migration that landed in 0.5.0.
 - **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
   retirement, QUIC connection reclamation, and buffered I/O recovery.
@@ -74,6 +80,93 @@ crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 ---
 
 ## [Unreleased]
+
+## [v0.6.0] - 2026-09-18
+
+250 commits since v0.5.0. The theme is **durability**: ATP transfers now survive
+a process dying mid-send or mid-receive, QUIC closes cleanly and stops accounting
+afterwards, and the clock can be captured and replayed within bounded windows.
+
+### Migration note — `Outcome<T, E>` and conditionally derived `Debug`
+
+This is not new in 0.6.0; it landed in **0.5.0** and is documented here because
+it is a silent, source-breaking change for downstream crates that only surfaces
+under `--all-targets`, so it tends to be discovered in test code.
+
+`Outcome<T, E>` derives `Debug`:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome<T, E> { Ok(T), Err(E), Cancelled(CancelReason), Panicked(PanicPayload) }
+```
+
+A derived `Debug` is **conditional**: `Outcome<T, E>: Debug` holds only when
+`T: Debug` and `E: Debug`. Code that debug-formats a whole `Outcome` whose `Ok`
+type is not `Debug` therefore stops compiling.
+
+- **Symptom:** `E0277`, "`...` doesn't implement `Debug`", pointing at a
+  `{:?}` of an entire `Outcome`, typically inside a test or an `expect`/`panic!`.
+- **Cause:** the `Ok` type is not `Debug`. Pooled connection handles, raw socket
+  wrappers and similar opaque types commonly are not.
+- **Fix:** match the variants instead of formatting the whole enum. This also
+  preserves more diagnostic detail than the original:
+
+```rust
+match outcome {
+    Outcome::Ok(value) => value,
+    Outcome::Err(error) => panic!("operation failed: {error:?}"),
+    Outcome::Cancelled(reason) => panic!("operation cancelled: {reason:?}"),
+    Outcome::Panicked(payload) => panic!("operation panicked: {payload:?}"),
+}
+```
+
+The derive itself is correct and is not changing. Thanks to the
+`mcp_agent_mail_rust` maintainers for reporting the concrete breakage.
+
+### Durable ATP resume and journaling
+
+- Sender checkpoints are persisted in bounded, append-only journals before EOF,
+  so a sender process lost before EOF resumes instead of restarting the transfer.
+  Final checkpoints are stored in private, create-only files, and EOF intent is
+  recorded before the final publication request.
+- Receiver epochs are journaled before writes and acknowledgments, receiver WAL
+  is paired with exclusive resumable data files, and journaled receiver sessions
+  restore on the shared authenticated port without rebinding.
+- A committed `Proof` can be recovered from verified durable receipts and from
+  application-validated commit history, including after the source is gone and
+  after both peers have exited.
+- Shared file publication is gated on durable session history, and retained
+  inbox growth is bounded across admission and restart.
+- Resume journals, checkpoints and revocation now live in one store, reachable
+  through a polled store interface.
+- One resume client's authority can be revoked without stopping its peers, and
+  protected client revocations reload without restarting healthy peers.
+- Concurrent retained resume sessions are served on a single port with delivery
+  isolation and bounded retirement, behind strict explicit TLS.
+
+### QUIC connection close
+
+- Endpoint shutdown sends a protected close, commits a local close without
+  further congestion work after drain, and caches one encrypted local close for
+  bounded UDP retries.
+- Trailing frames after a peer `CONNECTION_CLOSE` are ignored, and ATP QUIC
+  accounting stops after a native `CONNECTION_CLOSE`.
+- Endpoint I/O is retired if shutdown is cancelled or dropped, caller idle pacing
+  is preserved after UDP close expiry, and close/clock intervals are subtracted
+  with checked `Instant` math.
+
+### Time capture and replay
+
+- Bounded clock observation windows can be captured and replayed, and replay
+  tapes persist with bounded canonical decoding.
+
+### Fixed
+
+- HTTP/1 answers a rejected request head with `400`/`413`/`431` instead of
+  closing the connection silently, so clients see why a request was refused.
+- The scheduler polls the I/O driver every 64 busy dispatches, so I/O readiness
+  is not starved by a hot dispatch loop.
+- A V3 peer lease is bounded to 24 hours for expiry enforcement.
 
 ### Native QUIC key updates (RFC 9001 §6.3/§6.5/§6.6)
 
