@@ -204,3 +204,6 @@ impl DistributorTransport for RemoteSymbolTransport {
         }
     }
 }
+
+/// Bounded replica collection and authenticated snapshot reconstruction.
+pub mod recovery;
