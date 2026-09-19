@@ -72,3 +72,6 @@ pub use wire::{
 
 /// Authenticated incarnation decisions and fenced local lease admission.
 pub mod authority;
+
+/// Named-computation transport for explicitly authorized membership decisions.
+pub mod service;
