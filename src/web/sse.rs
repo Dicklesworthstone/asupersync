@@ -30,11 +30,13 @@
 use std::collections::VecDeque;
 use std::fmt::{self, Write};
 use std::num::NonZeroUsize;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::bytes::Bytes;
 use crate::cx::Cx;
 use crate::http::h1::codec::HttpError;
+use crate::time::{timeout, wall_now};
 use crate::http::h1::stream::{OutgoingBodySender, StreamingResponse};
 use crate::http::h1::types as h1_types;
 
@@ -320,6 +322,33 @@ pub trait StreamingSseSource {
     /// or [`StreamingSseError::Producer`] for source-specific failures.
     fn next_event(&mut self, cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError>;
 
+    /// Poll for the next event without blocking (br-asupersync-sse7kp2).
+    ///
+    /// Returns [`Poll::Ready`] with an event, `Ok(None)` at stream completion,
+    /// or an error — same outcomes as [`next_event`](Self::next_event). Returns
+    /// [`Poll::Pending`] to indicate "no event yet, keep the stream open"; the
+    /// implementation must then register `task_cx`'s waker so the transport is
+    /// re-polled when an event becomes available. This is the only signal a
+    /// live source has to stay idle-but-open (the synchronous `next_event`'s
+    /// `Ok(None)` means *complete*), and it lets the server emit keep-alive
+    /// heartbeats during idle and detect a dead peer.
+    ///
+    /// The default delegates to the blocking [`next_event`](Self::next_event)
+    /// and is always `Ready`, so existing sources are unchanged and never idle;
+    /// a live source overrides this to return `Pending` while it has no event.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`next_event`](Self::next_event).
+    fn poll_next_event(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<SseEvent>, StreamingSseError>> {
+        let _ = task_cx;
+        Poll::Ready(self.next_event(cx))
+    }
+
     /// Cancel producer-side state after request cancellation or disconnect.
     fn cancel(&mut self) {}
 }
@@ -380,6 +409,9 @@ pub struct StreamingSse<S = VecSseSource> {
     /// Serialized event retained until a chunk API returns it or H1 commits it.
     pending_event_chunk: Option<PreparedEventChunk>,
     heartbeat_comment: String,
+    /// Emit a keep-alive heartbeat when the source produces no event within
+    /// this interval; `None` disables idle heartbeats (br-asupersync-sse7kp2).
+    heartbeat_interval: Option<Duration>,
     closed: bool,
 }
 
@@ -439,6 +471,7 @@ impl<S: StreamingSseSource> StreamingSse<S> {
             bytes_emitted: 0,
             pending_event_chunk: None,
             heartbeat_comment: "keep-alive".to_string(),
+            heartbeat_interval: None,
             closed: false,
         }
     }
@@ -482,6 +515,21 @@ impl<S: StreamingSseSource> StreamingSse<S> {
     #[must_use]
     pub fn heartbeat_comment(mut self, comment: impl Into<String>) -> Self {
         self.heartbeat_comment = comment.into();
+        self
+    }
+
+    /// Emit a keep-alive heartbeat comment when the source yields no event
+    /// within `interval` (br-asupersync-sse7kp2).
+    ///
+    /// This only takes effect for a source that overrides
+    /// [`StreamingSseSource::poll_next_event`] to return [`Poll::Pending`] while
+    /// idle; a source using the default (blocking) `next_event` never reports an
+    /// idle moment, so no heartbeat is emitted regardless of this setting.
+    /// `None` (the default) disables idle heartbeats and preserves the prior
+    /// blocking behavior exactly.
+    #[must_use]
+    pub fn heartbeat_interval(mut self, interval: Option<Duration>) -> Self {
+        self.heartbeat_interval = interval;
         self
     }
 
@@ -605,6 +653,96 @@ impl<S: StreamingSseSource> StreamingSse<S> {
         }
     }
 
+    /// Send the next SSE event, or a keep-alive heartbeat if the source yields
+    /// no event within `heartbeat_interval` (br-asupersync-sse7kp2).
+    ///
+    /// Races the source's non-blocking
+    /// [`poll_next_event`](StreamingSseSource::poll_next_event) against a
+    /// heartbeat deadline: an event commits as usual; stream completion
+    /// finishes the body; a source with no event within the interval emits one
+    /// heartbeat comment and returns so the caller can loop. A source using the
+    /// default (blocking) `poll_next_event` is always `Ready`, so it behaves
+    /// like [`send_next_h1_chunk`](Self::send_next_h1_chunk) and never triggers
+    /// the heartbeat branch.
+    ///
+    /// # Errors
+    ///
+    /// As [`send_next_h1_chunk`](Self::send_next_h1_chunk) /
+    /// [`send_h1_heartbeat`](Self::send_h1_heartbeat).
+    pub async fn send_next_h1_chunk_with_heartbeat(
+        &mut self,
+        cx: &Cx,
+        sender: &mut OutgoingBodySender,
+        heartbeat_interval: Duration,
+    ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
+        let now = cx
+            .timer_driver()
+            .map_or_else(wall_now, |timer| timer.now());
+        let prepared = timeout(
+            now,
+            heartbeat_interval,
+            std::future::poll_fn(|task_cx| self.poll_prepare_next_event_chunk(cx, task_cx)),
+        )
+        .await;
+
+        match prepared {
+            // No event within the interval → keep-alive heartbeat.
+            Err(_elapsed) => self.send_h1_heartbeat(cx, sender).await,
+            // Stream complete.
+            Ok(Ok(false)) => {
+                sender
+                    .finish(cx)
+                    .map_err(StreamingSseTransportError::Transport)?;
+                Ok(StreamingSseTransportStep::Complete)
+            }
+            // Source error.
+            Ok(Err(error)) => Err(StreamingSseTransportError::Stream(error)),
+            // Event prepared → commit it (mirrors send_next_h1_chunk's commit).
+            Ok(Ok(true)) => {
+                let body_bytes = Bytes::copy_from_slice(
+                    &self
+                        .pending_event_chunk
+                        .as_ref()
+                        .expect("prepared event remains pending until H1 commit")
+                        .bytes,
+                );
+                let bytes = body_bytes.len();
+                match sender.send_bytes(cx, body_bytes).await {
+                    Ok(()) => {
+                        let committed = self.commit_pending_event();
+                        debug_assert_eq!(committed.len(), bytes);
+                        Ok(StreamingSseTransportStep::Sent {
+                            bytes,
+                            total_bytes: self.bytes_emitted,
+                        })
+                    }
+                    Err(error) => Err(self.handle_h1_transport_error(cx, error)),
+                }
+            }
+        }
+    }
+
+    /// One live host-loop step: heartbeat-aware when `heartbeat_interval` is
+    /// configured, otherwise byte-for-byte identical to
+    /// [`send_next_h1_chunk`](Self::send_next_h1_chunk) (br-asupersync-sse7kp2).
+    ///
+    /// # Errors
+    ///
+    /// As [`send_next_h1_chunk`](Self::send_next_h1_chunk).
+    pub async fn send_next_h1_chunk_live(
+        &mut self,
+        cx: &Cx,
+        sender: &mut OutgoingBodySender,
+    ) -> Result<StreamingSseTransportStep, StreamingSseTransportError> {
+        match self.heartbeat_interval {
+            Some(interval) => {
+                self.send_next_h1_chunk_with_heartbeat(cx, sender, interval)
+                    .await
+            }
+            None => self.send_next_h1_chunk(cx, sender).await,
+        }
+    }
+
     /// Commit one heartbeat/comment chunk to an HTTP/1 outgoing body channel.
     ///
     /// # Errors
@@ -697,6 +835,49 @@ impl<S: StreamingSseSource> StreamingSse<S> {
                 Err(StreamingSseError::Cancelled)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Poll variant of [`prepare_next_event_chunk`](Self::prepare_next_event_chunk)
+    /// using the source's non-blocking [`StreamingSseSource::poll_next_event`]
+    /// (br-asupersync-sse7kp2). `Ready(Ok(true))` prepared an event,
+    /// `Ready(Ok(false))` is stream completion, `Pending` means the source has
+    /// no event yet (and registered `task_cx`'s waker).
+    fn poll_prepare_next_event_chunk(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<Result<bool, StreamingSseError>> {
+        if self.closed {
+            return Poll::Ready(Ok(false));
+        }
+        if let Err(error) = self.checkpoint(cx) {
+            return Poll::Ready(Err(error));
+        }
+        if let Some(pending) = self.pending_event_chunk.as_ref() {
+            // Honor a cap lowered while a prior send future was pending, exactly
+            // as the blocking prepare does.
+            return Poll::Ready(self.validate_event_chunk_len(pending.bytes.len()).map(|()| true));
+        }
+
+        match self.source.poll_next_event(cx, task_cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(Some(event))) => match self.serialize_event(&event) {
+                Ok(chunk) => {
+                    self.pending_event_chunk = Some(chunk);
+                    Poll::Ready(Ok(true))
+                }
+                Err(error) => Poll::Ready(Err(error)),
+            },
+            Poll::Ready(Ok(None)) => {
+                self.closed = true;
+                Poll::Ready(Ok(false))
+            }
+            Poll::Ready(Err(StreamingSseError::Cancelled)) => {
+                self.cancel_source();
+                Poll::Ready(Err(StreamingSseError::Cancelled))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
         }
     }
 
