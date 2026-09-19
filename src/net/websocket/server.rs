@@ -684,6 +684,11 @@ where
     async fn flush_write_buf_with_cx(&mut self, op_cx: Option<&Cx>) -> Result<(), WsError> {
         use std::future::poll_fn;
 
+        // br-asupersync-2k3o9x: wake a write parked on a stalled peer on cancel.
+        let ambient = op_cx.is_none().then(crate::cx::Cx::current).flatten();
+        let cx_for_wake: Option<&Cx> = op_cx.or(ambient.as_ref());
+        let mut cancel_wake = cx_for_wake.map(WsCancelWakerGuard::new);
+
         while !self.write_buf.is_empty() {
             let is_open = self.close_handshake.is_open();
             let n = poll_fn(|task_cx| {
@@ -692,6 +697,11 @@ where
                         io::ErrorKind::Interrupted,
                         "cancelled",
                     )));
+                }
+                if is_open {
+                    if let Some(guard) = cancel_wake.as_mut() {
+                        guard.refresh(task_cx.waker());
+                    }
                 }
                 Pin::new(&mut self.io).poll_write(task_cx, &self.write_buf[..])
             })
@@ -709,6 +719,11 @@ where
         poll_fn(|task_cx| {
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if is_open {
+                if let Some(guard) = cancel_wake.as_mut() {
+                    guard.refresh(task_cx.waker());
+                }
             }
             Pin::new(&mut self.io).poll_flush(task_cx)
         })
@@ -728,10 +743,20 @@ where
             return Ok(());
         }
 
+        // br-asupersync-2k3o9x: wake a write parked on a stalled peer on cancel.
+        let ambient = op_cx.is_none().then(crate::cx::Cx::current).flatten();
+        let cx_for_wake: Option<&Cx> = op_cx.or(ambient.as_ref());
+        let mut cancel_wake = cx_for_wake.map(WsCancelWakerGuard::new);
+
         let is_open = self.close_handshake.is_open();
         let n = poll_fn(|task_cx| {
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if is_open {
+                if let Some(guard) = cancel_wake.as_mut() {
+                    guard.refresh(task_cx.waker());
+                }
             }
             Pin::new(&mut self.io).poll_write(task_cx, &buf[..])
         })
@@ -761,6 +786,11 @@ where
         poll_fn(|task_cx| {
             if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            if is_open {
+                if let Some(guard) = cancel_wake.as_mut() {
+                    guard.refresh(task_cx.waker());
+                }
             }
             Pin::new(&mut self.io).poll_flush(task_cx)
         })
@@ -1871,5 +1901,99 @@ mod tests {
                 "close must still reply to ping frames received during the handshake"
             );
         });
+    }
+
+    #[test]
+    fn write_external_cancel_wakes_a_parked_write() {
+        // br-asupersync-2k3o9x: the server write path (flush_write_buf_with_cx /
+        // write_buf_to_io_with_cx) parked on a stalled reader — a client that
+        // connects then stops reading, so its TCP receive window fills and
+        // poll_write never completes — must be woken by an external cancel, not
+        // hang until the OS TCP timeout. NeverWritableIo returns Pending forever
+        // WITHOUT self-waking, so the CancelWakerGuard's registered Waker is the
+        // only thing that can re-poll the block_on task. (The existing
+        // with_pending_first_write mock calls wake_by_ref before returning
+        // Pending, so it only exercises the self-poll checkpoint, never this
+        // truly-parked cross-thread cancel path.) client.rs has the identical
+        // write path, fixed in 8947b2263.
+        struct NeverWritableIo;
+        impl AsyncRead for NeverWritableIo {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+        }
+        impl AsyncWrite for NeverWritableIo {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Poll::Pending
+            }
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let canceller = cx.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::Builder::new()
+            .name("ws-parked-writer".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let result = future::block_on(async {
+                    let accept = AcceptResponse {
+                        accept_key: String::new(),
+                        protocol: None,
+                        extensions: Vec::new(),
+                    };
+                    let mut ws = ServerWebSocket::from_upgraded(
+                        NeverWritableIo,
+                        WebSocketConfig::default(),
+                        accept,
+                        &[],
+                    );
+                    assert!(ws.is_open(), "connection should start open");
+                    // Buffer bytes so the flush loop must call poll_write, which
+                    // parks forever on NeverWritableIo.
+                    ws.write_buf.extend_from_slice(b"a parked frame the stalled reader never drains");
+                    ws.flush_write_buf_with_cx(Some(&cx)).await
+                });
+                let _ = done_tx.send((result, started.elapsed()));
+            })
+            .expect("spawn writer thread");
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        canceller.cancel_with(
+            crate::types::CancelKind::User,
+            Some("external cancel while ws write is parked"),
+        );
+
+        let (result, elapsed) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("cancel must wake the parked write; the write never returned");
+        writer.join().expect("writer thread");
+        assert!(
+            matches!(result, Err(WsError::Io(ref e)) if e.kind() == io::ErrorKind::Interrupted),
+            "expected an Interrupted cancel from a parked write, got {result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancel must wake the parked write promptly, took {elapsed:?}"
+        );
     }
 }
