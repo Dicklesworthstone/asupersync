@@ -58,6 +58,11 @@ use std::time::Duration;
 /// `BlockingPoolHandle` would drop the pool immediately and put the
 /// handle into permanent shutdown state.
 static SQLITE_POOL: OnceLock<BlockingPool> = OnceLock::new();
+// Consumer-paced streams can retain a worker while their bounded channel is
+// full. They must not occupy the workers needed by execute/open/rollback.
+// This isolates ordinary operations; it does not resolve dependencies among
+// streams when every stream worker is occupied, or SQLite database-lock cycles.
+static SQLITE_STREAM_POOL: OnceLock<BlockingPool> = OnceLock::new();
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_STATEMENT_CACHE_CAPACITY: usize = 64;
 const SQLITE_ROW_STREAM_CHANNEL_CAPACITY: usize = 1;
@@ -116,6 +121,12 @@ fn wal_checkpoint_i64(row: &SqliteRow, column: &str) -> Result<i64, SqliteError>
 
 fn get_sqlite_pool() -> BlockingPoolHandle {
     SQLITE_POOL.get_or_init(|| BlockingPool::new(1, 4)).handle()
+}
+
+fn get_sqlite_stream_pool() -> BlockingPoolHandle {
+    SQLITE_STREAM_POOL
+        .get_or_init(|| BlockingPool::new(0, 4))
+        .handle()
 }
 
 fn configure_connection_defaults(
@@ -2605,6 +2616,9 @@ pub struct SqliteConnection {
     inner: Arc<Mutex<SqliteConnectionInner>>,
     /// Handle to the blocking pool.
     pool: BlockingPoolHandle,
+    /// Lazily selected producer pool, separate from ordinary operations.
+    /// Opening a connection alone does not allocate or start stream workers.
+    stream_pool: Option<BlockingPoolHandle>,
     /// Mutex-guarded transaction state to prevent concurrency races.
     transaction_state: Arc<Mutex<TransactionState>>,
     /// Generation of the physical transaction currently owned by a managed
@@ -3049,6 +3063,7 @@ impl SqliteConnection {
                 Outcome::Ok(Self {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool_clone,
+                    stream_pool: None,
                     transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
                     transaction_generation: Arc::new(AtomicU64::new(0)),
                     interrupt,
@@ -3839,7 +3854,8 @@ impl SqliteConnection {
         let phase = Arc::new(Mutex::new(SqliteConnectionOpPhase::Queued));
         let worker_phase = Arc::clone(&phase);
 
-        let handle = self.pool.spawn(move || {
+        let stream_pool = self.stream_pool.get_or_insert_with(get_sqlite_stream_pool);
+        let handle = stream_pool.spawn(move || {
             /// SQLite VM instructions between deadline checks — see
             /// `run_connection_op`.
             const TIMEOUT_PROGRESS_OPS: i32 = 1000;
