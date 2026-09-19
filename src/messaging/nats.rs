@@ -16,7 +16,7 @@
 
 use crate::channel::{mpsc, oneshot};
 use crate::combinator::select::{Either, Select};
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::runtime::TaskHandle;
@@ -36,7 +36,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::Poll;
+use std::task::{Poll, Waker};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 
@@ -1612,6 +1612,42 @@ impl fmt::Debug for NatsConnection {
     }
 }
 
+/// Registers one cancellation-Waker on the ambient `Cx` for the lifetime of a
+/// socket read loop (br-asupersync-r8n4qx). A read parked on a silent NATS
+/// server is never re-polled on its own, so without this an external
+/// `cancel_with` went unnoticed until the server answered or the OS TCP timeout.
+/// Owned-`Cx` variant matching this module's ambient (`Cx::with_current`) idiom;
+/// mirrors the mysql/redis/postgres guard.
+struct NatsCancelWakerGuard {
+    cx: Option<Cx>,
+    token: Option<CancelWakerToken>,
+}
+
+impl NatsCancelWakerGuard {
+    fn new() -> Self {
+        Self {
+            cx: Cx::current(),
+            token: None,
+        }
+    }
+
+    fn refresh(&mut self, waker: &Waker) {
+        if let Some(cx) = &self.cx {
+            self.token = Some(cx.refresh_cancel_waker(self.token, waker));
+        }
+    }
+}
+
+impl Drop for NatsCancelWakerGuard {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            if let Some(cx) = &self.cx {
+                cx.clear_cancel_waker(token);
+            }
+        }
+    }
+}
+
 impl NatsConnection {
     /// Connect with explicit configuration.
     pub async fn connect_with_config(cx: &Cx, config: NatsConfig) -> Result<Self, NatsError> {
@@ -2059,6 +2095,12 @@ impl NatsConnection {
     /// Read more data from the stream.
     pub(crate) async fn read_more(&mut self) -> Result<(), NatsError> {
         let mut tmp = [0u8; 4096];
+        // br-asupersync-r8n4qx: wake a read parked on a silent NATS server when
+        // an external cancel fires, instead of only noticing it on the next
+        // self-poll (mirrors the mysql/redis cancel-waker fix). read_more is the
+        // single central read path, so this covers every NATS read. Ambient-Cx
+        // variant (this loop uses Cx::with_current, not a threaded &Cx).
+        let mut cancel_wake = NatsCancelWakerGuard::new();
         let n = std::future::poll_fn(|task_cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(std::io::Error::new(
@@ -2066,6 +2108,7 @@ impl NatsConnection {
                     "cancelled",
                 )));
             }
+            cancel_wake.refresh(task_cx.waker());
             let mut read_buf = ReadBuf::new(&mut tmp);
             match Pin::new(&mut self.stream).poll_read(task_cx, &mut read_buf) {
                 Poll::Pending => Poll::Pending,

@@ -31,7 +31,7 @@ use super::frame::{Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{AcceptResponse, HandshakeError, HttpRequest, ServerHandshake};
 use crate::bytes::BytesMut;
 use crate::codec::{Decoder, Encoder};
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use std::io;
 use std::pin::Pin;
@@ -820,6 +820,34 @@ where
 }
 
 /// Read some bytes from an I/O stream.
+/// Registers one cancellation-Waker on the read's `Cx` for the lifetime of a
+/// parked socket read (br-asupersync-r8n4qx). A websocket read parked waiting
+/// for the next frame from a silent peer is never re-polled on its own, so
+/// without this an external `cancel_with` went unnoticed until a frame finally
+/// arrived (or the OS TCP timeout). Mirrors the mysql/redis/nats guard.
+struct WsCancelWakerGuard<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
+
+impl<'a> WsCancelWakerGuard<'a> {
+    fn new(cx: &'a Cx) -> Self {
+        Self { cx, token: None }
+    }
+
+    fn refresh(&mut self, waker: &std::task::Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+}
+
+impl Drop for WsCancelWakerGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
 async fn read_some_io<IO: AsyncRead + Unpin>(
     cx: &Cx,
     io: &mut IO,
@@ -828,12 +856,18 @@ async fn read_some_io<IO: AsyncRead + Unpin>(
 ) -> Result<usize, WsError> {
     use std::future::poll_fn;
 
+    // br-asupersync-r8n4qx: wake a read parked on a silent peer when an external
+    // cancel fires, instead of only noticing it on the next self-poll.
+    let mut cancel_wake = WsCancelWakerGuard::new(cx);
     poll_fn(|poll_cx| {
         if is_open && cx.checkpoint().is_err() {
             return Poll::Ready(Err(WsError::Io(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             ))));
+        }
+        if is_open {
+            cancel_wake.refresh(poll_cx.waker());
         }
         let mut read_buf = ReadBuf::new(buf);
         match Pin::new(&mut *io).poll_read(poll_cx, &mut read_buf) {

@@ -27,7 +27,7 @@ use super::frame::{CloseCode, Frame, FrameCodec, Opcode, WsError};
 use super::handshake::{ClientHandshake, HandshakeError, HttpResponse, WsUrl};
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::Decoder;
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::util::{EntropySource, OsEntropy};
@@ -975,6 +975,34 @@ where
 }
 
 /// Read some bytes from an I/O stream.
+/// Registers one cancellation-Waker on the read's `Cx` for the lifetime of a
+/// parked socket read (br-asupersync-r8n4qx). A websocket read parked waiting
+/// for the next frame from a silent peer is never re-polled on its own, so
+/// without this an external `cancel_with` went unnoticed until a frame finally
+/// arrived (or the OS TCP timeout). Mirrors the mysql/redis/nats guard.
+struct WsCancelWakerGuard<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
+
+impl<'a> WsCancelWakerGuard<'a> {
+    fn new(cx: &'a Cx) -> Self {
+        Self { cx, token: None }
+    }
+
+    fn refresh(&mut self, waker: &std::task::Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+}
+
+impl Drop for WsCancelWakerGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
 async fn read_some_io<IO: AsyncRead + Unpin>(
     cx: &Cx,
     io: &mut IO,
@@ -983,12 +1011,18 @@ async fn read_some_io<IO: AsyncRead + Unpin>(
 ) -> Result<usize, WsError> {
     use std::future::poll_fn;
 
+    // br-asupersync-r8n4qx: wake a read parked on a silent peer when an external
+    // cancel fires, instead of only noticing it on the next self-poll.
+    let mut cancel_wake = WsCancelWakerGuard::new(cx);
     poll_fn(|poll_cx| {
         if is_open && cx.checkpoint().is_err() {
             return Poll::Ready(Err(WsError::Io(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
             ))));
+        }
+        if is_open {
+            cancel_wake.refresh(poll_cx.waker());
         }
         let mut read_buf = ReadBuf::new(buf);
         match Pin::new(&mut *io).poll_read(poll_cx, &mut read_buf) {
@@ -2366,5 +2400,61 @@ mod tests {
 
             assert_eq!(&ws.io.written[2..6], &[0xAA, 0xBB, 0xCC, 0xDD]);
         });
+    }
+
+    #[test]
+    fn read_some_io_external_cancel_wakes_a_parked_read() {
+        // br-asupersync-r8n4qx: read_some_io parked on a silent stream (a peer
+        // that sends no frame) must be woken by an external cancel, not hang
+        // until a frame finally arrives. NeverReadyIo returns Pending forever;
+        // the cancel is set from another thread WHILE the read is parked, so the
+        // CancelWakerGuard's registered Waker is the only thing that can re-poll
+        // the block_on task. Without it, block_on never returns and recv_timeout
+        // turns the hang into a failure. server.rs has the identical read_some_io.
+        struct NeverReadyIo;
+        impl AsyncRead for NeverReadyIo {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let canceller = cx.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::Builder::new()
+            .name("ws-parked-reader".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let result = future::block_on(async {
+                    let mut io = NeverReadyIo;
+                    let mut buf = [0u8; 16];
+                    read_some_io(&cx, &mut io, &mut buf, true).await
+                });
+                let _ = done_tx.send((result, started.elapsed()));
+            })
+            .expect("spawn reader thread");
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        canceller.cancel_with(
+            crate::types::CancelKind::User,
+            Some("external cancel while ws read is parked"),
+        );
+
+        let (result, elapsed) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("cancel must wake the parked read; the read never returned");
+        reader.join().expect("reader thread");
+        assert!(
+            matches!(result, Err(WsError::Io(ref e)) if e.kind() == io::ErrorKind::Interrupted),
+            "expected an Interrupted cancel from a parked read, got {result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancel must wake the parked read promptly, took {elapsed:?}"
+        );
     }
 }
