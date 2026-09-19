@@ -175,14 +175,15 @@ fn failed_last_symbol_authentication_cannot_publish_a_prefix() {
 fn racing_writers_cannot_oversubscribe_capacity() {
     let store = Arc::new(store(SymbolStoreLimits { max_batches: 1, ..storage() }));
     let gate = Arc::new(std::sync::Barrier::new(2));
-    let threads: Vec<_> = [1, 2].into_iter().map(|object| {
+    // Array::map starts both writers before joining either barrier participant.
+    let threads = [1, 2].map(|object| {
         let store = Arc::clone(&store); let gate = Arc::clone(&gate);
         std::thread::spawn(move || {
             let bytes = encoded(object);
             gate.wait();
             store.put(&NodeId::new("a"), bytes.as_ref()).is_ok()
         })
-    }).collect();
+    });
     let accepted = threads.into_iter().map(|thread| usize::from(thread.join().unwrap())).sum::<usize>();
     assert_eq!(accepted, 1);
     assert_eq!(store.stats().batches, 1);

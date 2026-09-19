@@ -90,7 +90,7 @@ fn exercise(case: Case) {
             transport.send_symbols("replica-a", signed).await.unwrap();
             assert_eq!(transport.in_flight(), 0);
             assert_eq!(store.stats().batches, 1);
-            drop(snapshot); drop(encoded); drop(encoder); drop(security);
+            drop(snapshot); drop(encoded); drop(security);
             let requests = [
                 ReplicaFetch { replica_id: "unavailable".into(), key: batch_key },
                 ReplicaFetch { replica_id: "replica-a".into(), key: batch_key },

@@ -106,7 +106,7 @@ impl Future for Sending<'_> {
             drop(old);
             return Poll::Pending;
         }
-        if mode == 5 { panic!("transport poll sentinel"); }
+        assert!(mode != 5, "transport poll sentinel");
         let id = format!("r{}", self.index);
         if mode == 2 { return Poll::Ready(Err(failure(&id, ErrorKind::ConnectionLost, "replica refused"))); }
         Poll::Ready(Ok(super::super::ReplicaAck {

@@ -26,7 +26,6 @@ use asupersync::tls::{
 };
 use asupersync::types::symbol::{ObjectParams, Symbol};
 use asupersync::{Cx, types::Time};
-use std::future::Future;
 use std::io::{self, BufRead, Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
@@ -208,16 +207,14 @@ struct Observed {
 struct Credit<'a>(&'a AtomicUsize);
 impl Drop for Credit<'_> { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::SeqCst); } }
 impl DistributorTransport for Observed {
-    fn send_symbols(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>)
-        -> impl Future<Output = Result<ReplicaAck, ReplicaFailure>> + Send
+    async fn send_symbols(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>)
+        -> Result<ReplicaAck, ReplicaFailure>
     {
-        async move {
-            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-            let _credit = Credit(&self.active);
-            self.peak.fetch_max(active, Ordering::SeqCst);
-            self.started.lock().unwrap().push(replica.to_owned());
-            self.inner.send_symbols(replica, symbols).await
-        }
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        let _credit = Credit(&self.active);
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        self.started.lock().unwrap().push(replica.to_owned());
+        self.inner.send_symbols(replica, symbols).await
     }
 }
 
