@@ -4386,6 +4386,11 @@ impl SqliteConnection {
     /// Closes the connection.
     ///
     /// Returns an error if WAL checkpoint fails to ensure no data loss.
+    ///
+    /// This synchronous method waits for any active connection operation and
+    /// performs rollback and WAL checkpoint work on the calling thread,
+    /// including busy-handler waits and checkpoint retry delays. Async callers
+    /// should use [`Self::close_async`] to keep that work off runtime workers.
     pub fn close(&self) -> Result<(), SqliteError> {
         let mut guard = self.inner.lock();
         if let Some(conn) = guard.conn.as_ref() {
@@ -4422,6 +4427,9 @@ impl SqliteConnection {
 
     /// Closes the connection and classifies cleanup failures without changing
     /// [`Self::close`].
+    ///
+    /// Like [`Self::close`], this method can block the calling thread. Async
+    /// callers should use [`Self::close_async_diagnosed`].
     pub fn close_diagnosed(&self) -> Result<(), SqliteOperationError> {
         {
             let guard = self.inner.lock();
@@ -4491,6 +4499,13 @@ impl SqliteConnection {
     }
 
     /// Returns true if the connection is open.
+    ///
+    /// This synchronous inspection acquires the connection mutex and can wait
+    /// for an active operation to finish. It is not a nonblocking readiness
+    /// probe and should not be polled from a runtime worker while another
+    /// operation is using the connection. A true result does not prevent a
+    /// concurrent caller from closing the connection immediately afterward;
+    /// operations still report [`SqliteError::ConnectionClosed`] if necessary.
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.inner.lock().conn.is_some()
