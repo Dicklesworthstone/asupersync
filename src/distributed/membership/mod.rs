@@ -75,3 +75,6 @@ pub mod authority;
 
 /// Named-computation transport for explicitly authorized membership decisions.
 pub mod service;
+
+/// Checked runtime ownership and owner-driven expiry for membership leases.
+pub mod owned;
