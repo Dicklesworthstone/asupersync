@@ -1959,9 +1959,22 @@ where
                 }
                 Err(body_error) => {
                     record_incoming_body_failure(&body_error);
-                    if let Some(mut response) =
-                        incoming_body_failure_response(request_version, &body_error)
-                    {
+                    // br-asupersync-hw83se: mirror the buffered path — a
+                    // DrainLimitExceeded body error (mapped to None by
+                    // incoming_body_failure_response) still owes the client an
+                    // explicit 413 + close rather than a bare I/O error.
+                    let refusal = incoming_body_failure_response(request_version, &body_error)
+                        .or_else(|| {
+                            matches!(body_error, IncomingBodyError::DrainLimitExceeded { .. })
+                                .then(|| {
+                                    hop_error_response(
+                                        request_version,
+                                        413,
+                                        "[ASUP-E505] request body exceeds the configured limit",
+                                    )
+                                })
+                        });
+                    if let Some(mut response) = refusal {
                         add_connection_close(&mut response);
                         if request_method == Method::Head {
                             suppress_response_body_for_head(&mut response);
@@ -2059,6 +2072,7 @@ where
             producer,
             policy == ProducedResponsePolicy::Generic,
             config.request_drain_grace,
+            config.idle_timeout,
             &head_committed,
         )
         .await
@@ -2378,6 +2392,9 @@ async fn drive_produced_response<T>(
     mut producer: Http1ProducedResponseFuture,
     allow_trailers: bool,
     drain_grace: Duration,
+    // br-asupersync-hw83se: bounds every socket write/flush below so a client
+    // that stops reading cannot pin the produced/streaming body indefinitely.
+    idle_timeout: Option<Duration>,
     head_committed: &AtomicBool,
 ) -> Result<(), HttpError>
 where
@@ -2990,6 +3007,57 @@ impl Drop for InFlightRequestGuard {
 /// and pin the connection, its in-flight slot, and its buffers (slowloris-read
 /// DoS). A `None` timeout leaves the write unbounded, matching the read side; a
 /// fired timeout yields a `TimedOut` I/O error so the caller closes the socket.
+/// Bound a single `write_all` on a raw socket by `idle_timeout`
+/// (br-asupersync-hw83se), for the streaming/produced response paths that write
+/// directly rather than through a `Framed`. A fired timeout becomes a `TimedOut`
+/// I/O error so a slow-reading client cannot pin the connection mid-body.
+async fn write_all_within_idle<T: AsyncWrite + Unpin>(
+    io: &mut T,
+    bytes: &[u8],
+    idle_timeout: Option<Duration>,
+) -> std::io::Result<()> {
+    match idle_timeout {
+        Some(idle) => {
+            let now = Cx::current()
+                .and_then(|cx| cx.timer_driver())
+                .map_or_else(wall_now, |timer| timer.now());
+            timeout(now, idle, io.write_all(bytes))
+                .await
+                .unwrap_or_else(|_elapsed| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "response write timed out",
+                    ))
+                })
+        }
+        None => io.write_all(bytes).await,
+    }
+}
+
+/// Bound a single `flush` on a raw socket by `idle_timeout`. See
+/// [`write_all_within_idle`].
+async fn flush_within_idle<T: AsyncWrite + Unpin>(
+    io: &mut T,
+    idle_timeout: Option<Duration>,
+) -> std::io::Result<()> {
+    match idle_timeout {
+        Some(idle) => {
+            let now = Cx::current()
+                .and_then(|cx| cx.timer_driver())
+                .map_or_else(wall_now, |timer| timer.now());
+            timeout(now, idle, io.flush())
+                .await
+                .unwrap_or_else(|_elapsed| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "response flush timed out",
+                    ))
+                })
+        }
+        None => io.flush().await,
+    }
+}
+
 async fn write_within_idle_timeout<F>(
     idle_timeout: Option<Duration>,
     write: F,
