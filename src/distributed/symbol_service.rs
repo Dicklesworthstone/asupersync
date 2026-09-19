@@ -147,3 +147,6 @@ pub use service::{SYMBOL_SERVICE_COMPUTATION, register_symbol_service};
 mod native;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use native::{RemoteSymbolError, RemoteSymbolTransport};
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub use native::recovery;
