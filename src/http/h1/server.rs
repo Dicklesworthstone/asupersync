@@ -1286,7 +1286,7 @@ where
             // Write response
             framed.send(resp)?;
             // `Framed::send` only encodes into the internal write buffer; flush to the socket.
-            let flush = poll_fn(|cx| {
+            let raw_flush = poll_fn(|cx| {
                 if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
@@ -1295,6 +1295,9 @@ where
                 }
                 framed.poll_flush(cx).map_err(HttpError::Io)
             });
+            // br-asupersync-hw83se: bound the flush by idle_timeout so a client
+            // that stops reading cannot pin this connection forever.
+            let flush = write_within_idle_timeout(self.config.idle_timeout, raw_flush);
             let Some(flush_result) = race_force_close(self.shutdown_signal.as_ref(), flush).await
             else {
                 return Err(HttpError::Io(std::io::Error::new(
@@ -2943,6 +2946,36 @@ impl Drop for InFlightRequestGuard {
 /// Returns `None` when force-close interrupts the future (the future is
 /// dropped — drop is the cancellation backstop for shutdown). With no
 /// signal attached the future simply runs to completion.
+/// Bound a response-write future by `idle_timeout` — the same budget the read
+/// side already applies (br-asupersync-hw83se). A client that stops reading its
+/// socket (its TCP receive window full) would otherwise park the write forever
+/// and pin the connection, its in-flight slot, and its buffers (slowloris-read
+/// DoS). A `None` timeout leaves the write unbounded, matching the read side; a
+/// fired timeout yields a `TimedOut` I/O error so the caller closes the socket.
+async fn write_within_idle_timeout<F>(
+    idle_timeout: Option<Duration>,
+    write: F,
+) -> Result<(), HttpError>
+where
+    F: Future<Output = Result<(), HttpError>>,
+{
+    match idle_timeout {
+        Some(idle) => {
+            let now = Cx::current()
+                .and_then(|cx| cx.timer_driver())
+                .map_or_else(wall_now, |timer| timer.now());
+            match timeout(now, idle, write).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "response write timed out",
+                ))),
+            }
+        }
+        None => write.await,
+    }
+}
+
 async fn race_force_close<F: Future>(signal: Option<&ShutdownSignal>, fut: F) -> Option<F::Output> {
     let Some(signal) = signal else {
         return Some(fut.await);
