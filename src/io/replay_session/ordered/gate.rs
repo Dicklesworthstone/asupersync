@@ -64,7 +64,9 @@ pub enum OrderReplayMismatch {
 
 /// Sticky session-wide ordering failure, without captured values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("ordered replay diverged at effect {index}: {reason:?}, expected {expected:?}, actual {actual:?}")]
+#[error(
+    "ordered replay diverged at effect {index}: {reason:?}, expected {expected:?}, actual {actual:?}"
+)]
 pub struct OrderReplayError {
     /// Zero-based order index, including pending I/O in poll-aware sessions.
     pub index: usize,
@@ -113,8 +115,12 @@ impl OrderTape {
                 return false;
             }
             if let Some(request) = &entry.pending {
-                let OrderedEffect::Io(operation) = entry.effect else { return false };
-                if !self.poll_aware || !request.valid_for(operation) { return false; }
+                let OrderedEffect::Io(operation) = entry.effect else {
+                    return false;
+                };
+                if !self.poll_aware || !request.valid_for(operation) {
+                    return false;
+                }
                 // Pending attempts have no completed result in the I/O tape.
                 continue;
             }
@@ -124,7 +130,9 @@ impl OrderTape {
                 OrderedEffect::Entropy(source) if source < sources => entropy += 1,
                 OrderedEffect::Fork(source) if source < sources && entry.child == sources => {
                     entropy += 1;
-                    let Some(next) = sources.checked_add(1) else { return false };
+                    let Some(next) = sources.checked_add(1) else {
+                        return false;
+                    };
                     sources = next;
                 }
                 OrderedEffect::Entropy(_) | OrderedEffect::Fork(_) => return false,
@@ -156,11 +164,20 @@ impl RecordOrder {
         Self::with_pending(limit, None)
     }
 
-    pub(super) fn with_pending(limit: usize, pending_limits: Option<PendingIoCaptureLimits>) -> Self {
+    pub(super) fn with_pending(
+        limit: usize,
+        pending_limits: Option<PendingIoCaptureLimits>,
+    ) -> Self {
         Self(Mutex::new(RecordState {
-            pending_limits, pending_polls: 0, pending_bytes: 0,
-            entries: Vec::new(), limit, sources: 1, active: false,
-            finished: false, failure: None,
+            pending_limits,
+            pending_polls: 0,
+            pending_bytes: 0,
+            entries: Vec::new(),
+            limit,
+            sources: 1,
+            active: false,
+            finished: false,
+            failure: None,
         }))
     }
 
@@ -174,14 +191,21 @@ impl RecordOrder {
             return None;
         }
         state.active = true;
-        Some(RecordGuard { order: self, completed: false })
+        Some(RecordGuard {
+            order: self,
+            completed: false,
+        })
     }
 
     pub(super) fn finish(&self) -> Result<OrderTape, OrderCaptureError> {
         let mut state = self.0.lock();
-        if state.finished { return Err(OrderCaptureError::Finished); }
+        if state.finished {
+            return Err(OrderCaptureError::Finished);
+        }
         state.finished = true;
-        if state.active { state.failure.get_or_insert(OrderCaptureError::InFlight); }
+        if state.active {
+            state.failure.get_or_insert(OrderCaptureError::InFlight);
+        }
         let tape = OrderTape {
             entries: std::mem::take(&mut state.entries),
             poll_aware: state.pending_limits.is_some(),
@@ -212,7 +236,11 @@ impl RecordGuard<'_> {
         let extent = self.admit_pending(input);
         let pending = extent.and_then(|extent| input.snapshot(extent));
         if extent.is_some() && pending.is_none() {
-            self.order.0.lock().failure.get_or_insert(OrderCaptureError::InconsistentWindow);
+            self.order
+                .0
+                .lock()
+                .failure
+                .get_or_insert(OrderCaptureError::InconsistentWindow);
         }
         self.finish_entry(effect, pending.is_some(), pending);
     }
@@ -220,14 +248,18 @@ impl RecordGuard<'_> {
     fn admit_pending(&self, input: PendingInput<'_, '_>) -> Option<usize> {
         let mut state = self.order.0.lock();
         let limits = state.pending_limits?;
-        if state.finished || state.failure.is_some() { return None; }
+        if state.finished || state.failure.is_some() {
+            return None;
+        }
         let failure = if state.entries.len() == state.limit {
             Some(OrderCaptureError::Limit)
         } else if state.pending_polls >= limits.max_polls {
             Some(OrderCaptureError::PendingLimit("polls"))
         } else if input.slices() > limits.max_vectored_slices {
             Some(OrderCaptureError::PendingLimit("vectored slices"))
-        } else { None };
+        } else {
+            None
+        };
         if let Some(error) = failure {
             state.failure = Some(error);
             return None;
@@ -246,11 +278,18 @@ impl RecordGuard<'_> {
         Some(extent)
     }
 
-    fn finish_entry(mut self, effect: OrderedEffect, ready: bool, pending: Option<PendingRequest>) -> usize {
+    fn finish_entry(
+        mut self,
+        effect: OrderedEffect,
+        ready: bool,
+        pending: Option<PendingRequest>,
+    ) -> usize {
         let mut state = self.order.0.lock();
         state.active = false;
         self.completed = true;
-        if !ready || state.finished || state.failure.is_some() { return 0; }
+        if !ready || state.finished || state.failure.is_some() {
+            return 0;
+        }
         if state.entries.len() == state.limit {
             state.failure = Some(OrderCaptureError::Limit);
             return 0;
@@ -270,8 +309,14 @@ impl RecordGuard<'_> {
             };
             state.sources = next;
             child
-        } else { 0 };
-        state.entries.push(Entry { effect, child, pending });
+        } else {
+            0
+        };
+        state.entries.push(Entry {
+            effect,
+            child,
+            pending,
+        });
         child
     }
 }
@@ -299,14 +344,22 @@ impl ReplayState {
         *self.failure.get_or_insert(OrderReplayError {
             index: self.index,
             expected: self.tape.entries.get(self.index).map(|entry| entry.effect),
-            actual, reason,
+            actual,
+            reason,
         })
     }
 
     fn check(&mut self, actual: OrderedEffect) -> Result<Entry, OrderReplayError> {
-        if let Some(error) = self.failure { return Err(error); }
-        if self.active { return Err(self.refuse(actual, OrderReplayMismatch::Overlap)); }
-        self.tape.entries.get(self.index).cloned()
+        if let Some(error) = self.failure {
+            return Err(error);
+        }
+        if self.active {
+            return Err(self.refuse(actual, OrderReplayMismatch::Overlap));
+        }
+        self.tape
+            .entries
+            .get(self.index)
+            .cloned()
             .ok_or_else(|| self.refuse(actual, OrderReplayMismatch::Exhausted))
     }
 }
@@ -316,7 +369,11 @@ pub(super) struct ReplayOrder(Mutex<ReplayState>);
 impl ReplayOrder {
     pub(super) fn new(tape: OrderTape) -> Self {
         Self(Mutex::new(ReplayState {
-            tape, index: 0, active: false, failure: None, waiters: [None, None],
+            tape,
+            index: 0,
+            active: false,
+            failure: None,
+            waiters: [None, None],
         }))
     }
 
@@ -324,17 +381,28 @@ impl ReplayOrder {
         let result = {
             let mut state = self.0.lock();
             match state.check(actual) {
-                Ok(entry) if entry.effect == actual => { state.active = true; Ok(entry) }
+                Ok(entry) if entry.effect == actual => {
+                    state.active = true;
+                    Ok(entry)
+                }
                 Ok(_) => Err(state.refuse(actual, OrderReplayMismatch::Effect)),
                 Err(error) => Err(error),
             }
         };
-        if result.is_err() { self.wake_waiters(); }
-        result.map(|entry| ReplayGuard { order: self, entry, completed: false })
+        if result.is_err() {
+            self.wake_waiters();
+        }
+        result.map(|entry| ReplayGuard {
+            order: self,
+            entry,
+            completed: false,
+        })
     }
 
     pub(super) fn enter_io(
-        &self, cx: &mut Context<'_>, operation: IoOperation,
+        &self,
+        cx: &mut Context<'_>,
+        operation: IoOperation,
     ) -> Poll<Result<ReplayGuard<'_>, OrderReplayError>> {
         // Clone/drop/wake callbacks MUST stay outside the order mutex. Keep the
         // guard alive before dropping a candidate, so unwinding poisons admission.
@@ -357,12 +425,18 @@ impl ReplayOrder {
                 Err(error) => Poll::Ready(Err(error)),
             }
         };
-        let result = result.map(|result| result.map(|entry| ReplayGuard {
-            order: self, entry, completed: false,
-        }));
+        let result = result.map(|result| {
+            result.map(|entry| ReplayGuard {
+                order: self,
+                entry,
+                completed: false,
+            })
+        });
         drop(old);
         drop(candidate);
-        if matches!(&result, Poll::Ready(Err(_))) { self.wake_waiters(); }
+        if matches!(&result, Poll::Ready(Err(_))) {
+            self.wake_waiters();
+        }
         result
     }
 
@@ -384,16 +458,22 @@ impl ReplayOrder {
 
     pub(super) fn verify(&self) -> Result<(), OrderCompletionError> {
         let state = self.0.lock();
-        if let Some(error) = state.failure { return Err(OrderCompletionError::Diverged(error)); }
+        if let Some(error) = state.failure {
+            return Err(OrderCompletionError::Diverged(error));
+        }
         let remaining = state.tape.entries.len() - state.index;
-        if remaining != 0 { return Err(OrderCompletionError::Remaining { remaining }); }
+        if remaining != 0 {
+            return Err(OrderCompletionError::Remaining { remaining });
+        }
         Ok(())
     }
 }
 
 fn can_wait(actual: IoOperation, expected: OrderedEffect) -> bool {
     match expected {
-        OrderedEffect::Io(operation) => (actual == IoOperation::Read) != (operation == IoOperation::Read),
+        OrderedEffect::Io(operation) => {
+            (actual == IoOperation::Read) != (operation == IoOperation::Read)
+        }
         _ => true,
     }
 }
@@ -405,7 +485,9 @@ pub(super) struct ReplayGuard<'a> {
 }
 
 impl ReplayGuard<'_> {
-    pub(super) fn child(&self) -> usize { self.entry.child }
+    pub(super) fn child(&self) -> usize {
+        self.entry.child
+    }
 
     pub(super) fn pending_request(&self) -> Option<&PendingRequest> {
         self.entry.pending.as_ref()
@@ -415,10 +497,15 @@ impl ReplayGuard<'_> {
         let result = {
             let mut state = self.order.0.lock();
             state.active = false;
-            if !valid { state.refuse(self.entry.effect, OrderReplayMismatch::Component); }
+            if !valid {
+                state.refuse(self.entry.effect, OrderReplayMismatch::Component);
+            }
             match state.failure {
                 Some(error) => Err(error),
-                None => { state.index += 1; Ok(()) }
+                None => {
+                    state.index += 1;
+                    Ok(())
+                }
             }
         };
         self.completed = true;

@@ -24,7 +24,11 @@ impl PendingIoCaptureLimits {
     /// Set the extra poll, hashing, and vector-shape bounds explicitly.
     #[must_use]
     pub const fn new(max_polls: usize, max_write_bytes: usize, max_vectored_slices: usize) -> Self {
-        Self { max_polls, max_write_bytes, max_vectored_slices }
+        Self {
+            max_polls,
+            max_write_bytes,
+            max_vectored_slices,
+        }
     }
 }
 
@@ -49,14 +53,19 @@ impl PendingInput<'_, '_> {
     }
 
     pub(super) fn slices(self) -> usize {
-        match self { Self::Vectored(bufs) => bufs.len(), _ => 0 }
+        match self {
+            Self::Vectored(bufs) => bufs.len(),
+            _ => 0,
+        }
     }
 
     pub(super) fn extent(self) -> Option<usize> {
         match self {
             Self::Read(capacity) => Some(capacity),
             Self::Write(bytes) => Some(bytes.len()),
-            Self::Vectored(bufs) => bufs.iter().try_fold(0usize, |n, buf| n.checked_add(buf.len())),
+            Self::Vectored(bufs) => bufs
+                .iter()
+                .try_fold(0usize, |n, buf| n.checked_add(buf.len())),
             Self::Flush | Self::Shutdown => Some(0),
         }
     }
@@ -69,7 +78,11 @@ impl PendingInput<'_, '_> {
     // vector count is checked BEFORE walking vector lengths, and the aggregate
     // offered byte count is checked BEFORE hashing any payload.
     pub(super) fn snapshot(self, extent: usize) -> Option<PendingRequest> {
-        let mut request = PendingRequest { extent, slices: self.slices(), digest: [0; 32] };
+        let mut request = PendingRequest {
+            extent,
+            slices: self.slices(),
+            digest: [0; 32],
+        };
         if self.is_write() {
             let mut hash = Sha256::new();
             hash.update(b"asupersync.pending-io.v1");
@@ -110,7 +123,9 @@ impl fmt::Debug for PendingRequest {
 }
 
 impl Drop for PendingRequest {
-    fn drop(&mut self) { self.digest.zeroize(); }
+    fn drop(&mut self) {
+        self.digest.zeroize();
+    }
 }
 
 impl PendingRequest {
