@@ -15,11 +15,15 @@
 //! body read calls, including empty chunks and EOF. They do not bound browser
 //! network buffers, an already-delivered JS chunk, allocator overhead, the
 //! caller's preexisting request storage, concurrent calls, or elapsed time.
+//! [`FetchBytesClient`] adds explicit shared in-flight admission across clones.
 //! A stalled network still needs owner cancellation; this is not a deadline.
 //! Host abort cannot undo a server-side effect that has already happened.
 
 use asupersync::types::{WasmAbiVersion, WasmFetchRequest};
 use std::fmt;
+
+pub mod client;
+pub use client::{ClientFetch, FetchBytesClient};
 
 #[cfg(target_arch = "wasm32")]
 mod browser;
@@ -114,6 +118,11 @@ pub enum FetchBytesError {
     /// Another body read would exceed the explicit read-work budget.
     ReadLimit {
         /// Configured maximum body read calls.
+        limit: usize,
+    },
+    /// A shared client has no available admission slot. No host work starts.
+    InFlightLimit {
+        /// Configured maximum simultaneous requests across client clones.
         limit: usize,
     },
     /// Response-length arithmetic cannot represent the next complete chunk.

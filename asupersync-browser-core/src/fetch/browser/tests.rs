@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::future::{Future, poll_fn};
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Waker};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen_test::*;
 
@@ -309,4 +309,28 @@ async fn dropping_during_a_pending_body_read_releases_the_real_reader_lock() {
     assert!(!crate::dispatcher_handle_is_live(&handle));
     // This is a constructed stream fixture, not a network-backed Fetch stream.
     JsFuture::from(stream.cancel()).await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn client_clones_share_real_network_admission_and_dropped_fetch_returns_capacity() {
+    let owners = Owners::new();
+    let client = crate::fetch::FetchBytesClient::new(limits(), 1);
+    let clone = client.clone();
+    let before = registrations();
+    let mut first = Box::pin(client.fetch(owners.request(), None));
+    assert_eq!(client.in_flight(), 0, "construction is lazy");
+    assert!(first.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+    let (handle, controller) = new_registration(&before);
+    assert_eq!(clone.in_flight(), 1);
+    let mut refused = Box::pin(clone.fetch(owners.request(), None));
+    assert_eq!(refused.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        std::task::Poll::Ready(Err(FetchBytesError::InFlightLimit { limit: 1 })));
+    assert_eq!(new_registration(&before).0, handle, "refusal cannot admit another request");
+    drop(first);
+    assert!(controller.signal().aborted());
+    assert_eq!(client.in_flight(), 0);
+    assert!(!crate::dispatcher_handle_is_live(&handle));
+    let response = clone.fetch(owners.request(), None).await.unwrap();
+    assert!(!response.body.is_empty());
+    assert_eq!(client.in_flight(), 0);
 }
