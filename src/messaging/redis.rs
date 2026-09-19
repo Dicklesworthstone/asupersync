@@ -4,7 +4,8 @@
 //! (REdis Serialization Protocol) with Cx integration for cancel-correct
 //! command execution.
 
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
+use std::task::Waker;
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::sync::{GenericPool, Pool as _, PoolConfig, PoolError, PooledResource};
@@ -2536,6 +2537,40 @@ enum Resp3PushHandling {
     ReturnToPubSubCaller,
 }
 
+/// Registers exactly one cancellation-Waker on a `Cx` for the lifetime of a
+/// socket read loop (br-asupersync-r8n4qx).
+///
+/// The in-poll `cx.checkpoint()` guard in `read_response_with_push_handling`
+/// only observes cancellation when the task is polled, but a read parked on a
+/// socket with no bytes arriving is never re-polled on its own — so an external
+/// `cancel_with` (a deadline monitor, a region cancel, a sibling) went unnoticed
+/// until the redis server finally answered (or the OS TCP timeout, minutes).
+/// Registering the task's Waker with the `Cx` makes the cancel wake the parked
+/// poll, after which the checkpoint guard returns `RedisError::Cancelled`. Same
+/// owned-token pattern shipped in `postgres.rs`/`mysql.rs`.
+struct CancelWakerGuard<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
+
+impl<'a> CancelWakerGuard<'a> {
+    fn new(cx: &'a Cx) -> Self {
+        Self { cx, token: None }
+    }
+
+    fn refresh(&mut self, waker: &Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+}
+
+impl Drop for CancelWakerGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
 impl RedisConnection {
     async fn connect(
         config: RedisConfig,
@@ -2716,6 +2751,10 @@ impl RedisConnection {
         cx: &Cx,
         push_handling: Resp3PushHandling,
     ) -> Result<RespValue, RedisError> {
+        // br-asupersync-r8n4qx: wake a read parked on a silent socket (a stalled
+        // or slow redis server) when an external cancel fires, instead of only
+        // noticing it on the next self-poll. Spans every read iteration below.
+        let mut cancel_wake = CancelWakerGuard::new(cx);
         loop {
             cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
@@ -2787,6 +2826,7 @@ impl RedisConnection {
                         "cancelled",
                     )));
                 }
+                cancel_wake.refresh(task_cx.waker());
                 let mut read_buf = ReadBuf::new(&mut tmp);
                 match Pin::new(&mut self.stream).poll_read(task_cx, &mut read_buf) {
                     std::task::Poll::Pending => std::task::Poll::Pending,
