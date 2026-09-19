@@ -2371,6 +2371,118 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_paused_streams_do_not_starve_cross_connection_execute() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Waker};
+        use std::time::Instant;
+
+        // Deliberate bounded polling also works when no executor or timer can
+        // progress. A timeout must release the streams, not strand pool workers.
+        fn poll_bounded<F: Future>(future: &mut Pin<Box<F>>) -> Option<F::Output> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut context = Context::from_waker(Waker::noop());
+            loop {
+                if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+                    return Some(value);
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        let pool = BlockingPool::new(4, 4);
+        let cx = create_test_cx();
+        // Construct real independent databases without using the process-global
+        // pool: parallel tests cannot occupy this regression's four worker slots.
+        let result = (|| -> Result<bool, String> {
+            let mut connections = Vec::new();
+            for _ in 0..5 {
+                let conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
+                conn.execute_batch("CREATE TABLE destination (value INTEGER)")
+                    .map_err(|e| e.to_string())?;
+                let interrupt = Arc::new(conn.get_interrupt_handle());
+                connections.push(SqliteConnection {
+                    inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
+                    pool: pool.handle(),
+                    transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+                    transaction_generation: Arc::new(AtomicU64::new(0)),
+                    interrupt,
+                    statement_timeout_override: None,
+                });
+            }
+            let (sources, destinations) = connections.split_at_mut(4);
+            let destination = &destinations[0];
+            let mut streams = Vec::new();
+            for source in sources {
+                let mut start = Box::pin(source.query_stream(
+                    &cx,
+                    "SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4",
+                    &[],
+                ));
+                match poll_bounded(&mut start) {
+                    Some(Outcome::Ok(stream)) => streams.push(stream),
+                    other => return Err(format!("stream admission failed: {other:?}")),
+                }
+            }
+            for stream in &mut streams {
+                match poll_bounded(&mut Box::pin(stream.next(&cx))) {
+                    Some(Outcome::Ok(Some(row))) if matches!(row.get_i64("value"), Ok(1)) => {}
+                    other => return Err(format!("first row failed: {other:?}")),
+                }
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if streams.iter().all(|stream| {
+                    let stats = stream.stats();
+                    stats.rows_stepped >= 3 && stats.rows_yielded == 1 && stats.buffered_rows == 1
+                }) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err("four producers did not reach backpressure".into());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
+            let mut insert = Box::pin(destination.execute(
+                &cx,
+                "INSERT INTO destination (value) VALUES (7)",
+                &[],
+            ));
+            let before_cleanup = poll_bounded(&mut insert);
+            let completed_while_paused = matches!(before_cleanup, Some(Outcome::Ok(1)));
+            // Every assertion is outside this closure. In particular, the old
+            // implementation must release all four workers before failing.
+            drop(streams);
+            let completion = before_cleanup.or_else(|| poll_bounded(&mut insert));
+            drop(insert);
+            if !matches!(completion, Some(Outcome::Ok(1))) {
+                return Err(format!("dependent insert did not recover: {completion:?}"));
+            }
+            let mut query = Box::pin(destination.query(
+                &cx,
+                "SELECT COUNT(*) AS count FROM destination WHERE value = 7",
+                &[],
+            ));
+            match poll_bounded(&mut query) {
+                Some(Outcome::Ok(rows))
+                    if rows.len() == 1 && matches!(rows[0].get_i64("count"), Ok(1)) => {}
+                other => return Err(format!("insert verification failed: {other:?}")),
+            }
+            Ok(completed_while_paused)
+        })();
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(stopped, "stream cleanup must release the isolated pool");
+        assert!(
+            result.as_ref().is_ok_and(|completed| *completed),
+            "paused streams starved a cross-connection execute: {result:?}"
+        );
+    }
+
+    #[test]
     fn sqlite_query_stream_drop_finalizes_statement_and_returns_connection() {
         let cx = create_test_cx();
 
