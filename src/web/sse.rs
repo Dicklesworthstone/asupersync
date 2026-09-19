@@ -2315,4 +2315,93 @@ mod tests {
         let resp = Sse::new(events).into_response();
         assert_eq!(resp.status, StatusCode::OK);
     }
+
+    /// A source that overrides `poll_next_event` to stay idle forever.
+    struct IdleForeverSource;
+    impl StreamingSseSource for IdleForeverSource {
+        fn next_event(&mut self, _cx: &Cx) -> Result<Option<SseEvent>, StreamingSseError> {
+            // Never reached via the poll path; a defensive completion if a
+            // caller uses the blocking API directly.
+            Ok(None)
+        }
+        fn poll_next_event(
+            &mut self,
+            _cx: &Cx,
+            _task_cx: &mut Context<'_>,
+        ) -> Poll<Result<Option<SseEvent>, StreamingSseError>> {
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn poll_next_event_default_delegates_and_override_can_idle() {
+        // br-asupersync-sse7kp2: the default poll_next_event delegates to the
+        // blocking next_event, so existing sources are always Ready (never idle)
+        // — backwards-compatible; a source that overrides it can report Pending
+        // to stay idle-but-open, which is the capability the fix adds.
+        let cx = Cx::for_testing();
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        // Default (non-overriding) source: VecSseSource defines only next_event.
+        let mut default_stream = StreamingSse::new(vec![SseEvent::default().data("x")]);
+        assert!(
+            matches!(
+                default_stream.poll_prepare_next_event_chunk(&cx, &mut task_cx),
+                Poll::Ready(Ok(true))
+            ),
+            "a default source must poll Ready with its event, exactly like the blocking path"
+        );
+
+        // Overriding source: idle → Pending (open), not Ok(None) (complete).
+        let mut idle_stream = StreamingSse::from_source(IdleForeverSource);
+        assert!(
+            idle_stream
+                .poll_prepare_next_event_chunk(&cx, &mut task_cx)
+                .is_pending(),
+            "an idle source's poll-prepare must be Pending (keep the stream open), not complete"
+        );
+        assert!(
+            idle_stream.heartbeat_interval.is_none(),
+            "heartbeat_interval defaults to None (blocking behavior preserved)"
+        );
+    }
+
+    #[test]
+    fn idle_source_emits_a_heartbeat_after_the_interval() {
+        // br-asupersync-sse7kp2: a source that stays idle (poll_next_event
+        // Pending) with a heartbeat_interval must emit a keep-alive comment
+        // rather than block the task, so the stream stays open and a dead peer
+        // is detected on the flush. Uses the native runtime so the timeout's
+        // Sleep is driven by a real timer driver.
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a Cx with a timer driver");
+            let mut stream = StreamingSse::from_source(IdleForeverSource)
+                .heartbeat_interval(Some(Duration::from_millis(20)));
+            let (response, mut sender) = stream.h1_chunked_response(&cx, 2);
+            let mut body = response.body;
+
+            let step = stream
+                .send_next_h1_chunk_with_heartbeat(&cx, &mut sender, Duration::from_millis(20))
+                .await
+                .expect("an idle source must emit a heartbeat, not block or error");
+            assert!(
+                matches!(step, StreamingSseTransportStep::Sent { .. }),
+                "a heartbeat is a Sent step, got {step:?}"
+            );
+
+            let frame = poll_body(&mut body)
+                .expect("a heartbeat frame must be committed")
+                .expect("heartbeat frame ok");
+            let bytes = frame.into_data().expect("data frame").chunk().to_vec();
+            let text = String::from_utf8_lossy(&bytes);
+            assert!(
+                text.contains("keep-alive"),
+                "the heartbeat must be a keep-alive comment, got {text:?}"
+            );
+        });
+    }
 }
