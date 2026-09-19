@@ -2408,7 +2408,7 @@ where
     // subsequent failure therefore closes the connection without a fallback
     // status or a clean chunk terminator.
     head_committed.store(true, Ordering::Release);
-    if let Err(error) = io.write_all(encoded_head.as_ref()).await {
+    if let Err(error) = write_all_within_idle(io, encoded_head.as_ref(), idle_timeout).await {
         record_h1_body_diagnostic(
             WebBodyDiagnostic::ClientAbort,
             "client transport failed while writing the response head",
@@ -2417,7 +2417,7 @@ where
             .await;
         return Err(HttpError::Io(error));
     }
-    if let Err(error) = io.flush().await {
+    if let Err(error) = flush_within_idle(io, idle_timeout).await {
         record_h1_body_diagnostic(
             WebBodyDiagnostic::ClientAbort,
             "client transport failed while flushing the response head",
@@ -2463,14 +2463,14 @@ where
             }
             let mut final_chunk = BytesMut::new();
             encoder.finalize(None, &mut final_chunk);
-            if let Err(error) = io.write_all(final_chunk.as_ref()).await {
+            if let Err(error) = write_all_within_idle(io, final_chunk.as_ref(), idle_timeout).await {
                 record_h1_body_diagnostic(
                     WebBodyDiagnostic::ClientAbort,
                     "client transport failed while writing the terminal chunk",
                 );
                 return Err(HttpError::Io(error));
             }
-            if let Err(error) = io.flush().await {
+            if let Err(error) = flush_within_idle(io, idle_timeout).await {
                 record_h1_body_diagnostic(
                     WebBodyDiagnostic::ClientAbort,
                     "client transport failed while flushing the terminal chunk",
@@ -2535,7 +2535,9 @@ where
                 debug_assert!(sender.is_finished());
                 encoder.finalize(Some(&trailers), &mut encoded_frame);
 
-                if let Err(error) = io.write_all(encoded_frame.as_ref()).await {
+                if let Err(error) =
+                    write_all_within_idle(io, encoded_frame.as_ref(), idle_timeout).await
+                {
                     record_h1_body_diagnostic(
                         WebBodyDiagnostic::ClientAbort,
                         "client transport failed while writing response trailers",
@@ -2546,7 +2548,7 @@ where
                     );
                     return Err(HttpError::Io(error));
                 }
-                if let Err(error) = io.flush().await {
+                if let Err(error) = flush_within_idle(io, idle_timeout).await {
                     record_h1_body_diagnostic(
                         WebBodyDiagnostic::ClientAbort,
                         "client transport failed while flushing response trailers",
@@ -2566,10 +2568,10 @@ where
         // current write and flush complete. Transport-error cleanup below is
         // the sole exception: it polls under cancellation for a bounded drain.
         let write_result = async {
-            io.write_all(encoded_frame.as_ref())
+            write_all_within_idle(io, encoded_frame.as_ref(), idle_timeout)
                 .await
                 .map_err(HttpError::Io)?;
-            io.flush().await.map_err(HttpError::Io)
+            flush_within_idle(io, idle_timeout).await.map_err(HttpError::Io)
         }
         .await;
 
