@@ -150,3 +150,6 @@ pub use native::{RemoteSymbolError, RemoteSymbolTransport};
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use native::recovery;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod durable;
