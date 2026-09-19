@@ -29,7 +29,7 @@
 //!
 //! [`Cx`]: crate::cx::Cx
 
-use crate::cx::Cx;
+use crate::cx::{CancelWakerToken, Cx};
 use crate::database::transaction::trace_database_transaction;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
@@ -41,7 +41,7 @@ use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Poll, Waker};
 
 // ============================================================================
 // Error Types
@@ -2017,17 +2017,67 @@ fn contains_sql_token(sql_lower: &str, pattern: &str) -> bool {
 /// Keeping the loop generic over the stream gives deterministic tests a narrow
 /// seam for injecting cancellation from inside `poll_read`, after the guard has
 /// run but before the empty-read classification below.
+/// Registers exactly one cancellation-Waker on the ambient `Cx` for the
+/// lifetime of a socket poll loop (br-asupersync-w9k2rp).
+///
+/// The in-poll `checkpoint()` guards in `read_exact_from` / `write_all` only
+/// observe cancellation when the task is polled, but a read parked on a socket
+/// with no bytes arriving is never re-polled on its own — so an external
+/// `cancel_with` (the deadline monitor, a region cancel, a sibling thread) went
+/// unnoticed until the server finally answered. On MariaDB, whose server lacks
+/// `max_execution_time`, `apply_statement_timeout` names these client-side
+/// checkpoints as the *only* enforcement mechanism, so a query against a stalled
+/// server ran until the OS TCP timeout. Registering the task's Waker with the
+/// `Cx` makes the cancel wake the parked poll, after which the checkpoint guard
+/// returns `Interrupted` (mapped to `MySqlError::Cancelled`). This mirrors the
+/// twin `CancelWakerGuard` already shipped in `postgres.rs`; it captures an
+/// owned `Cx` handle once (matching this module's ambient-`Cx` idiom) so the
+/// refresh and the drop-time clear always target the same context.
+struct CancelWakerGuard {
+    cx: Option<Cx>,
+    token: Option<CancelWakerToken>,
+}
+
+impl CancelWakerGuard {
+    fn new() -> Self {
+        Self {
+            cx: Cx::current(),
+            token: None,
+        }
+    }
+
+    fn refresh(&mut self, waker: &Waker) {
+        if let Some(cx) = &self.cx {
+            self.token = Some(cx.refresh_cancel_waker(self.token, waker));
+        }
+    }
+}
+
+impl Drop for CancelWakerGuard {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            if let Some(cx) = &self.cx {
+                cx.clear_cancel_waker(token);
+            }
+        }
+    }
+}
+
 async fn read_exact_from<R>(stream: &mut R, buf: &mut [u8]) -> Result<(), MySqlError>
 where
     R: AsyncRead + Unpin,
 {
     let mut pos = 0;
+    // br-asupersync-w9k2rp: wake a read parked on a silent socket when an
+    // external cancel fires, instead of only noticing it on the next poll.
+    let mut cancel_wake = CancelWakerGuard::new();
     while pos < buf.len() {
         let mut read_buf = ReadBuf::new(&mut buf[pos..]);
         std::future::poll_fn(|task_cx| {
             if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
+            cancel_wake.refresh(task_cx.waker());
             Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf)
         })
         .await
@@ -4967,6 +5017,10 @@ impl MySqlConnection {
     /// Write data to the stream.
     async fn write_all(&mut self, data: &[u8]) -> Result<(), MySqlError> {
         let mut pos = 0;
+        // br-asupersync-w9k2rp: as with read_exact_from, wake a write parked on
+        // a full socket (a client whose peer has stopped reading) when an
+        // external cancel fires, instead of only on the next poll.
+        let mut cancel_wake = CancelWakerGuard::new();
         while pos < data.len() {
             let written = std::future::poll_fn(|cx| {
                 if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
@@ -4975,6 +5029,7 @@ impl MySqlConnection {
                         "cancelled",
                     )));
                 }
+                cancel_wake.refresh(cx.waker());
                 Pin::new(&mut self.inner.stream).poll_write(cx, &data[pos..])
             })
             .await

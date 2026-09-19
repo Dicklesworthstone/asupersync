@@ -5257,4 +5257,80 @@ mod tests {
         println!("  - MariaDB ANSI_QUOTES compatibility: PASS");
         println!("  - Transaction state flag preservation: PASS");
     }
+
+    // ================================================================
+    // br-asupersync-w9k2rp: an external cancel must WAKE a read parked
+    // on a silent socket, not just be noticed on the next self-poll.
+    //
+    // This is distinct from the xwanb4 tests above: those pre-set the
+    // cancel so the in-poll checkpoint fires immediately and the read
+    // never actually parks. Here the read parks on a stream that never
+    // yields bytes and never wakes its reader, and the cancel is set
+    // from another thread AFTER the read is already parked — so the fix
+    // under test (registering the task Waker with the Cx via
+    // CancelWakerGuard) is the ONLY thing that can re-poll the task.
+    // Without it, block_on never returns and recv_timeout turns the
+    // hang into a failure instead of a stuck suite.
+    // ================================================================
+
+    /// A stream that never has bytes and never wakes its reader on its
+    /// own — the shape of a socket waiting on `SELECT SLEEP(30)`.
+    struct NeverReadyStream;
+
+    impl AsyncRead for NeverReadyStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _task_cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn mysql_external_cancel_wakes_a_read_parked_on_a_silent_stream() {
+        use std::time::Instant;
+
+        let cx = Cx::for_testing();
+        let canceller = cx.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let reader = std::thread::Builder::new()
+            .name("mysql-parked-reader".into())
+            .spawn(move || {
+                // Install our cancellable Cx as the ambient context so the
+                // read's CancelWakerGuard (Cx::current()) registers against it.
+                // futures_lite::block_on runs on this thread and does not
+                // install its own root Cx (unlike the asupersync runtime),
+                // so the ambient Cx stays the one we can cancel.
+                let _guard = Cx::set_current(Some(cx));
+                let started = Instant::now();
+                let result = futures_lite::future::block_on(async {
+                    let mut stream = NeverReadyStream;
+                    let mut buf = [0u8; 8];
+                    read_exact_from(&mut stream, &mut buf).await
+                });
+                let _ = done_tx.send((result, started.elapsed()));
+            })
+            .expect("spawn reader thread");
+
+        // Let the read genuinely park on the silent stream before cancelling.
+        std::thread::sleep(Duration::from_millis(150));
+        canceller.cancel_with(
+            CancelKind::User,
+            Some("external cancel while mysql read is parked"),
+        );
+
+        let (result, elapsed) = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("cancel must wake the parked read; the read never returned");
+        reader.join().expect("reader thread");
+        assert!(
+            matches!(result, Err(MySqlError::Cancelled(ref reason)) if reason.kind == CancelKind::User),
+            "expected Cancelled(User), got {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cancel must short-circuit the parked read promptly, took {elapsed:?}"
+        );
+    }
 }
