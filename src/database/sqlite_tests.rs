@@ -2394,6 +2394,7 @@ mod tests {
         }
 
         let pool = BlockingPool::new(4, 4);
+        let stream_pool = BlockingPool::new(4, 4);
         let cx = create_test_cx();
         // Construct real independent databases without using the process-global
         // pool: parallel tests cannot occupy this regression's four worker slots.
@@ -2407,6 +2408,7 @@ mod tests {
                 connections.push(SqliteConnection {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool.handle(),
+                    stream_pool: Some(stream_pool.handle()),
                     transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
                     transaction_generation: Arc::new(AtomicU64::new(0)),
                     interrupt,
@@ -2475,7 +2477,15 @@ mod tests {
             Ok(completed_while_paused)
         })();
         let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
-        assert!(stopped, "stream cleanup must release the isolated pool");
+        let streams_stopped = stream_pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(
+            stopped,
+            "dependent operations must release the isolated pool"
+        );
+        assert!(
+            streams_stopped,
+            "stream cleanup must release the isolated pool"
+        );
         assert!(
             result.as_ref().is_ok_and(|completed| *completed),
             "paused streams starved a cross-connection execute: {result:?}"
@@ -3200,6 +3210,7 @@ mod tests {
         let conn = SqliteConnection {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
+            stream_pool: Some(pool.handle()),
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -3264,6 +3275,7 @@ mod tests {
         let conn = SqliteConnection {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
+            stream_pool: Some(pool.handle()),
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -3327,6 +3339,7 @@ mod tests {
         let conn = SqliteConnection {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
+            stream_pool: Some(pool.handle()),
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -3407,6 +3420,7 @@ mod tests {
         let conn = SqliteConnection {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
+            stream_pool: Some(pool.handle()),
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -3511,6 +3525,7 @@ mod tests {
             let conn = SqliteConnection {
                 inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
                 pool: pool.handle(),
+                stream_pool: Some(pool.handle()),
                 transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
                 transaction_generation: Arc::new(AtomicU64::new(0)),
                 interrupt,
@@ -4461,6 +4476,7 @@ mod tests {
         let conn = SqliteConnection {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
+            stream_pool: Some(pool.handle()),
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
