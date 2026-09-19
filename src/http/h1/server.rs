@@ -1590,9 +1590,23 @@ where
                     }
                     Err(body_error) => {
                         record_incoming_body_failure(&body_error);
-                        if let Some(mut response) =
-                            incoming_body_failure_response(request_version, &body_error)
-                        {
+                        // br-asupersync-hw83se: incoming_body_failure_response maps
+                        // DrainLimitExceeded to None; deliver an explicit 413 +
+                        // close for it instead of dropping the client's response.
+                        // Genuinely client-gone errors (ClientAborted /
+                        // ConsumerDropped) still write nothing.
+                        let refusal = incoming_body_failure_response(request_version, &body_error)
+                            .or_else(|| {
+                                matches!(body_error, IncomingBodyError::DrainLimitExceeded { .. })
+                                    .then(|| {
+                                        hop_error_response(
+                                            request_version,
+                                            413,
+                                            "[ASUP-E505] request body exceeds the configured limit",
+                                        )
+                                    })
+                            });
+                        if let Some(mut response) = refusal {
                             add_connection_close(&mut response);
                             if request_method == Method::Head {
                                 suppress_response_body_for_head(&mut response);
@@ -1605,11 +1619,6 @@ where
                         break;
                     }
                 };
-            if validate_unread_drain(writer.drain_progress(), &self.config).is_err() {
-                state.phase = ConnectionPhase::Closing;
-                break;
-            }
-
             let mut forced_close = false;
             let mut response = match hop {
                 ServerHopOutcome::Ok(response) => response,
@@ -1626,6 +1635,15 @@ where
                     hop_error_response(request_version, 503, HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC)
                 }
             };
+            // br-asupersync-hw83se: an unread-body drain overrun still owes the
+            // client its already-computed response. Deliver it with Connection:
+            // close (force close) rather than dropping the response and closing
+            // silently (RFC 9112 §9.6). The connection cannot be reused — the
+            // undrained request body would corrupt the next request — so this is
+            // a forced close, not keep-alive.
+            if validate_unread_drain(writer.drain_progress(), &self.config).is_err() {
+                forced_close = true;
+            }
             if request_method == Method::Head {
                 suppress_response_body_for_head(&mut response);
             }
@@ -1957,9 +1975,29 @@ where
                     )));
                 }
             };
-        validate_unread_drain(writer.drain_progress(), &config).map_err(|error| {
-            HttpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-        })?;
+        // br-asupersync-hw83se: an unread-body drain overrun owes the client a
+        // status before the (unreusable) connection closes, instead of dropping
+        // it and returning an I/O error. incoming_body_failure_response maps
+        // DrainTimeout to 408 but DrainLimitExceeded to None, so fall back to an
+        // explicit 413 + Connection: close. The produced streaming body is
+        // intentionally not started.
+        if let Err(error) = validate_unread_drain(writer.drain_progress(), &config) {
+            record_incoming_body_failure(&error);
+            let mut response =
+                incoming_body_failure_response(request_version, &error).unwrap_or_else(|| {
+                    hop_error_response(
+                        request_version,
+                        413,
+                        "[ASUP-E505] request body exceeds the configured limit",
+                    )
+                });
+            add_connection_close(&mut response);
+            if request_method == Method::Head {
+                suppress_response_body_for_head(&mut response);
+            }
+            head_committed.store(true, Ordering::Release);
+            return write_streaming_response(&request_cx, &mut io, response).await;
+        }
 
         let rejected_method = match policy {
             ProducedResponsePolicy::Sse => {
@@ -6434,8 +6472,39 @@ mod tests {
             })
             .expect("drain-limit close is a clean connection outcome");
 
-        assert_eq!(state.requests_served, 0);
-        assert!(written.lock().unwrap().is_empty());
+        // br-asupersync-hw83se: an unread-body drain overrun surfaces here as a
+        // DrainLimitExceeded body error (the handler's own response is not
+        // available on that path), which incoming_body_failure_response maps to
+        // None. Instead of dropping it and closing silently, the client now
+        // receives an explicit 413 with Connection: close (RFC 9112 §9.6). The
+        // connection still cannot be reused — the undrained request body would
+        // corrupt the next request — so the pipelined /second request is never
+        // served.
+        assert_eq!(state.requests_served, 1);
+        let written = String::from_utf8(written.lock().unwrap().clone())
+            .expect("response should be valid utf8");
+        assert!(
+            written.starts_with("HTTP/1.1 413 "),
+            "a drain overrun must return 413, wrote {written:?}"
+        );
+        assert!(
+            written
+                .to_ascii_lowercase()
+                .contains("\r\nconnection: close\r\n"),
+            "a drain-overrun response must force the connection closed, wrote {written:?}"
+        );
+        assert!(
+            written.contains("[ASUP-E505]"),
+            "the 413 must carry the diagnostic token, wrote {written:?}"
+        );
+        assert!(
+            !written.contains("must not commit"),
+            "the handler body must not leak on the drain-overrun path"
+        );
+        assert!(
+            !written.contains("/second"),
+            "the pipelined request must not be served after a forced close"
+        );
         assert_eq!(state.phase, ConnectionPhase::Closing);
     }
 
@@ -6932,6 +7001,74 @@ mod tests {
                 .headers
                 .iter()
                 .any(|(name, value)| name == "content-type" && value.starts_with("text/plain"))
+        );
+    }
+
+    #[test]
+    fn buffered_response_write_times_out_when_client_stops_reading() {
+        // br-asupersync-hw83se: a client that stops reading its socket (TCP
+        // receive window full) must not pin the connection. Before the fix the
+        // response flush parked forever with no write-side timeout; now it is
+        // bounded by idle_timeout — the same budget reads already use — so the
+        // connection closes with a TimedOut error instead of hanging. WriteParkIo
+        // models the stuck reader: it delivers the request, then parks every
+        // write (the timer fires independently of the parked write).
+        struct WriteParkIo {
+            request: Vec<u8>,
+            read_pos: usize,
+        }
+        impl AsyncRead for WriteParkIo {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let this = self.get_mut();
+                if this.read_pos >= this.request.len() {
+                    return Poll::Ready(Ok(())); // clean EOF after the request
+                }
+                let n = buf.remaining().min(this.request.len() - this.read_pos);
+                buf.put_slice(&this.request[this.read_pos..this.read_pos + n]);
+                this.read_pos += n;
+                Poll::Ready(Ok(()))
+            }
+        }
+        impl AsyncWrite for WriteParkIo {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                Poll::Pending // the client never drains its receive window
+            }
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Pending
+            }
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let io = WriteParkIo {
+            request: b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            read_pos: 0,
+        };
+        let server = Http1Server::with_config(
+            move |_req| async move { Response::new(200, "OK", b"hello") },
+            localhost_server_config().idle_timeout(Some(Duration::from_millis(50))),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        let result = runtime.block_on(async { server.serve(io).await });
+        let err = result.expect_err("a client that stops reading must not pin the connection");
+        assert!(
+            matches!(err, HttpError::Io(ref e) if e.kind() == io::ErrorKind::TimedOut),
+            "expected a write timeout, got {err:?}"
         );
     }
 
