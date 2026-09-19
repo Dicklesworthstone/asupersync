@@ -6395,4 +6395,61 @@ mod tests {
         // ✅ Error messages are actionable for debugging
         // ✅ Truncated input correctly detected as incomplete (Ok(None))
     }
+
+    #[test]
+    fn redis_external_cancel_wakes_a_read_parked_on_a_silent_server() {
+        // br-asupersync-r8n4qx: a RedisConnection read parked waiting for a reply
+        // from a stalled/silent server must be woken by an external cancel
+        // (deadline/region), not hang until the server answers or the OS TCP
+        // timeout. read_response_with_push_handling registers the task Waker via
+        // CancelWakerGuard; without it the parked poll_read is never re-polled and
+        // the cancel goes unnoticed. Real loopback socket: the server accepts but
+        // never replies; an OS thread cancels while the read is parked; the read
+        // must return Cancelled promptly (not the Io error it would surface only
+        // once the silent server finally closes).
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            // Accept and hold the connection open, never sending a reply.
+            let (_stream, _peer) = listener.accept().expect("accept client");
+            thread::sleep(Duration::from_secs(2));
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut conn = RedisConnection::connect(config, None)
+                .await
+                .expect("connect to the silent server (TCP only, no handshake read)");
+
+            // Cancel from an OS thread while the read below is parked. Cx is
+            // Send + Clone; cancel_with wakes the guard's registered waker on the
+            // runtime task.
+            let cancel_cx = cx.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(150));
+                cancel_cx.cancel_with(
+                    crate::types::CancelKind::User,
+                    Some("external cancel while redis read is parked"),
+                );
+            });
+
+            let started = std::time::Instant::now();
+            let result = conn.read_response(&cx).await;
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(result, Err(RedisError::Cancelled)),
+                "expected Cancelled from a parked read woken by external cancel, got {result:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "cancel must wake the parked read promptly, took {elapsed:?}"
+            );
+        });
+
+        server.join().ok();
+    }
 }
