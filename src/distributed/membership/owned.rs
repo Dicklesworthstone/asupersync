@@ -252,7 +252,7 @@ impl OwnedMembershipController {
         let count = retired.len();
         drop(state);
         finish(&self.shared, retired);
-        Ok(match result { MembershipApplied::Applied { .. } => MembershipApplied::Applied { revoked: count }, other => other })
+        Ok(match result { MembershipApplied::Applied { .. } => MembershipApplied::Applied { revoked: count }, MembershipApplied::Duplicate => MembershipApplied::Duplicate })
     }
 
     /// Reserve a checked runtime obligation only for an accepted Alive incarnation.

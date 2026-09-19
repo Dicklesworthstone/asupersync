@@ -358,8 +358,8 @@ impl MembershipLeaseController {
         &mut self, node: &NodeId, incarnation: u64, lease: Lease, now: Time,
     ) -> Result<MembershipLeaseId, RejectedMembershipLease> {
         let error = if now < self.now { Some(MembershipControlError::Clock) }
-            else if !lease.is_active(now) { Some(MembershipControlError::GrantDenied) }
-            else if self.stamp(node).is_none_or(|stamp| stamp.incarnation != incarnation || stamp.kind != MembershipKind::Alive) {
+            else if !lease.is_active(now)
+                || self.stamp(node).is_none_or(|stamp| stamp.incarnation != incarnation || stamp.kind != MembershipKind::Alive) {
                 Some(MembershipControlError::GrantDenied)
             } else if self.seen_leases.contains(&lease.obligation_id()) { Some(MembershipControlError::ReusedLease) }
             else if self.seen_leases.len() >= self.limits.max_lease_ids { Some(MembershipControlError::Capacity) }

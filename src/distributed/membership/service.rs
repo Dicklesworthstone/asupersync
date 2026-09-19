@@ -124,6 +124,7 @@ mod native {
 
     /// Deliver one explicitly signed decision using an already provisioned mTLS
     /// client. No discovery, destination changes, new retry policy or task spawn.
+    ///
     /// The existing client's finite deadlines and pre-delivery retry rules apply.
     /// Success means the exact decision was admitted, NOT that revoked obligations
     /// have drained or that the member is currently reachable. Statement signing
