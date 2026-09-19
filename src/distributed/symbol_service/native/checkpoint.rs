@@ -285,3 +285,7 @@ mod tests;
 
 mod workflow;
 pub use workflow::{CheckpointAuthority, CheckpointConfig, CheckpointError, ReplicatedCheckpoint};
+
+
+/// Explicit application-state continuation capture, validation and execution.
+pub mod continuation;
