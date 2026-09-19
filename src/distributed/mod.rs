@@ -34,6 +34,7 @@ pub mod encoding;
 pub mod membership;
 pub mod recovery;
 pub mod snapshot;
+pub mod symbol_service;
 
 pub use adaptive_layout::{AdaptiveLayoutConfig, BlockLayoutChoice, PathQuality};
 pub use anti_entropy::{DiffKind, DiffReport, KeyDiff, MerkleRangeTree};
