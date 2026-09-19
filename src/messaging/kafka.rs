@@ -2031,6 +2031,20 @@ impl TransactionalProducer {
         }
         self.activate_transaction()?;
 
+        // br-asupersync-tx3wq9: guard the window between activate_transaction()
+        // (Idle→Active) and the constructed Transaction taking over the
+        // lifecycle. If the ambient Cx is cancelled while the begin op below is
+        // in flight, this whole future is DROPPED: neither the Err reset nor the
+        // `Ok(Transaction { .. })` below runs, so nothing would reset the phase
+        // and it stays wedged in Active forever — every later begin_transaction
+        // then returns "transaction already active", and recover_abandoned_
+        // transaction (which only heals NeedsAbortRecovery) can never fix it.
+        // The armed guard's Drop moves Active→NeedsAbortRecovery on cancel
+        // (soft-cancel may have completed begin on the broker, so abort-recovery,
+        // not Idle), which the next begin's recover_abandoned_transaction heals.
+        // Mirrors Transaction::Drop.
+        let mut activation = TransactionActivationGuard::armed(self);
+
         #[cfg(feature = "kafka")]
         if let Err(err) = run_kafka_transaction_op(cx, {
             let producer = self.producer.clone();
@@ -2038,10 +2052,16 @@ impl TransactionalProducer {
         })
         .await
         {
+            // begin failed on the broker: nothing started there, so Idle (not
+            // abort-recovery). Disarm first so the guard's Drop does not override.
+            activation.disarm();
             self.mark_transaction_idle();
             return Err(err);
         }
 
+        // Success: the returned Transaction owns the lifecycle from here (its own
+        // Drop resets the phase if it is neither committed nor aborted).
+        activation.disarm();
         Ok(Transaction {
             producer: self,
             finished: false,
@@ -2175,6 +2195,39 @@ impl TransactionalProducer {
 
         self.mark_transaction_idle();
         Ok(())
+    }
+}
+
+/// RAII guard for the `activate_transaction()`→`Transaction` handoff window in
+/// `begin_transaction` (br-asupersync-tx3wq9).
+///
+/// While armed, its `Drop` resets an `Active`/`Finalizing` phase to
+/// `NeedsAbortRecovery` (via [`TransactionalProducer::mark_transaction_dropped`]).
+/// `begin_transaction` disarms it on both the error and success paths, so the
+/// guard fires only when the `begin` future is dropped mid-flight (cancellation)
+/// before either path runs — the case that previously wedged the phase in
+/// `Active`. This mirrors [`Transaction`]'s own `Drop`.
+struct TransactionActivationGuard<'a> {
+    producer: Option<&'a TransactionalProducer>,
+}
+
+impl<'a> TransactionActivationGuard<'a> {
+    fn armed(producer: &'a TransactionalProducer) -> Self {
+        Self {
+            producer: Some(producer),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.producer = None;
+    }
+}
+
+impl Drop for TransactionActivationGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(producer) = self.producer {
+            producer.mark_transaction_dropped();
+        }
     }
 }
 
@@ -3504,6 +3557,81 @@ mod tests {
             producer.state.lock().phase,
             TransactionPhase::NeedsAbortRecovery
         );
+    }
+
+    #[test]
+    fn begin_transaction_cancelled_activation_leaves_a_recoverable_phase() {
+        // br-asupersync-tx3wq9: begin_transaction arms a TransactionActivationGuard
+        // across the activate→begin window. A cancel there DROPS the future, so
+        // the guard's Drop must move Active→NeedsAbortRecovery (recoverable), NOT
+        // leave it wedged in Active — the pre-fix bug, where every later begin
+        // returned "transaction already active" and recover_abandoned_transaction
+        // (which only heals NeedsAbortRecovery) could never fire.
+        let tc =
+            TransactionalConfig::new(ProducerConfig::default(), "tx-activation-guard".into());
+        let producer = TransactionalProducer::new(tc).unwrap();
+
+        producer.activate_transaction().unwrap();
+        assert_eq!(producer.state.lock().phase, TransactionPhase::Active);
+        {
+            // An armed guard dropped without disarm == the begin future cancelled.
+            let _guard = TransactionActivationGuard::armed(&producer);
+        }
+        assert_eq!(
+            producer.state.lock().phase,
+            TransactionPhase::NeedsAbortRecovery,
+            "a cancelled activation must leave a recoverable phase, not a wedged Active"
+        );
+
+        // A disarmed guard (begin_transaction's success/error paths) must not
+        // touch the phase.
+        producer.mark_transaction_idle();
+        producer.activate_transaction().unwrap();
+        {
+            let mut g = TransactionActivationGuard::armed(&producer);
+            g.disarm();
+        }
+        assert_eq!(
+            producer.state.lock().phase,
+            TransactionPhase::Active,
+            "a disarmed guard must leave the phase untouched"
+        );
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn begin_transaction_recovers_after_a_cancelled_activation() {
+        // br-asupersync-tx3wq9: end-to-end — after a cancelled activation leaves
+        // the phase in NeedsAbortRecovery, the NEXT begin_transaction must heal it
+        // (via recover_abandoned_transaction) and succeed. Pre-fix the phase was
+        // wedged in Active and this begin returned "transaction already active".
+        let _broker = deterministic_broker_guard();
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let producer = TransactionalProducer::new(TransactionalConfig::new(
+                ProducerConfig::default(),
+                "tx-activation-recovery".to_string(),
+            ))
+            .unwrap();
+
+            // Simulate a cancelled activation exactly as begin_transaction's
+            // dropped future would: activate, then drop an armed guard.
+            producer.activate_transaction().unwrap();
+            {
+                let _guard = TransactionActivationGuard::armed(&producer);
+            }
+            assert_eq!(
+                producer.state.lock().phase,
+                TransactionPhase::NeedsAbortRecovery
+            );
+
+            // The next begin must recover and succeed, not return "already active".
+            let tx = producer
+                .begin_transaction(&cx)
+                .await
+                .expect("begin_transaction must recover an abandoned activation");
+            tx.commit(&cx).await.unwrap();
+            assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
+        });
     }
 
     #[cfg(not(feature = "kafka"))]
