@@ -1167,15 +1167,14 @@ impl WindowUpdateFrame {
             | ((u32::from(payload[2])) << 8)
             | u32::from(payload[3]);
 
-        if increment == 0 {
-            // RFC 7540 §6.9: zero increment on a stream is a stream error;
-            // on the connection (stream 0) it is a connection error.
-            return Err(invalid_window_update_increment_error(
-                header.stream_id,
-                "WINDOW_UPDATE with zero increment",
-            ));
-        }
-
+        // br-asupersync-x8re31: a zero increment is NOT rejected here. Framing
+        // only extracts the value; rejection (with the correct connection-vs-
+        // stream scoping per RFC 9113 §6.9.1) belongs to
+        // Connection::process_window_update, which sees the connection state.
+        // Rejecting at frame-decode time forced every zero increment — even a
+        // stream-scoped one — through the decode-error path, which the listener
+        // escalates to a whole-connection GOAWAY, tearing down every sibling
+        // stream on a multiplexed connection instead of resetting just the one.
         Ok(Self {
             stream_id: header.stream_id,
             increment,
@@ -2252,8 +2251,12 @@ mod tests {
     }
 
     #[test]
-    fn test_window_update_zero_increment_rejected() {
-        // Connection-level (stream 0): connection error per RFC 7540 §6.9
+    fn test_window_update_zero_increment_parses_and_defers_rejection() {
+        // br-asupersync-x8re31: parse no longer rejects a zero increment; it
+        // frames the value and defers rejection (with the correct
+        // connection-vs-stream scoping) to Connection::process_window_update, so
+        // a stream-scoped zero increment can be RST_STREAM'd instead of
+        // escalating to a whole-connection GOAWAY. Connection-level (stream 0):
         let header = FrameHeader {
             length: 4,
             frame_type: FrameType::WindowUpdate as u8,
@@ -2261,15 +2264,17 @@ mod tests {
             stream_id: 0,
         };
         let payload = Bytes::from_static(&[0, 0, 0, 0]);
-
-        let err = WindowUpdateFrame::parse(&header, &payload).unwrap_err();
-        assert_eq!(err.code, ErrorCode::ProtocolError);
-        assert_eq!(err.stream_id, None); // connection error
+        let frame = WindowUpdateFrame::parse(&header, &payload)
+            .expect("parse defers zero-increment rejection to processing");
+        assert_eq!(frame.increment, 0);
+        assert_eq!(frame.stream_id, 0);
     }
 
     #[test]
-    fn test_window_update_zero_increment_stream_level_is_stream_error() {
-        // Stream-level (stream != 0): stream error per RFC 7540 §6.9
+    fn test_window_update_zero_increment_stream_level_parses() {
+        // Stream-level (stream != 0) also parses now; process_window_update
+        // scopes the rejection to that one stream (covered in connection.rs by
+        // process_window_update_zero_increment_is_correctly_scoped).
         let header = FrameHeader {
             length: 4,
             frame_type: FrameType::WindowUpdate as u8,
@@ -2277,10 +2282,10 @@ mod tests {
             stream_id: 3,
         };
         let payload = Bytes::from_static(&[0, 0, 0, 0]);
-
-        let err = WindowUpdateFrame::parse(&header, &payload).unwrap_err();
-        assert_eq!(err.code, ErrorCode::ProtocolError);
-        assert_eq!(err.stream_id, Some(3)); // stream error, not connection
+        let frame = WindowUpdateFrame::parse(&header, &payload)
+            .expect("parse defers zero-increment rejection to processing");
+        assert_eq!(frame.increment, 0);
+        assert_eq!(frame.stream_id, 3);
     }
 
     #[test]

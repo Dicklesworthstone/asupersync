@@ -6475,6 +6475,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn process_window_update_zero_increment_is_correctly_scoped() {
+        // br-asupersync-x8re31: with the redundant parse-time rejection removed,
+        // process_window_update owns zero-increment rejection with RFC 9113
+        // §6.9.1 scoping: a connection-level (stream 0) zero increment is a
+        // connection error (GOAWAY), while a stream-level one is a stream error
+        // — the listener's process-time path then resets only that stream
+        // instead of tearing down every sibling with a GOAWAY.
+        let mut conn = Connection::server(Settings::default());
+        let connection_level = conn
+            .process_window_update(WindowUpdateFrame::new(0, 0))
+            .expect_err("a zero increment on stream 0 must be rejected");
+        assert_eq!(connection_level.code, ErrorCode::ProtocolError);
+        assert_eq!(
+            connection_level.stream_id, None,
+            "stream 0 zero increment is a connection error"
+        );
+
+        let stream_level = conn
+            .process_window_update(WindowUpdateFrame::new(1, 0))
+            .expect_err("a zero increment on a stream must be rejected");
+        assert_eq!(stream_level.code, ErrorCode::ProtocolError);
+        assert_eq!(
+            stream_level.stream_id,
+            Some(1),
+            "a stream-scoped zero increment must reset only that stream, not GOAWAY"
+        );
+    }
+
     /// br-asupersync-lcvdj0 — Regression guard: a SETTINGS first
     /// frame is accepted (handshake completes) and subsequent
     /// non-SETTINGS frames flow through normally.
