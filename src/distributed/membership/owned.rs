@@ -408,3 +408,6 @@ impl Drop for OwnedMembershipLease {
 
 #[cfg(test)]
 mod tests;
+
+/// Execute protected work with independent subtree cancellation and drain receipts.
+pub mod work;
