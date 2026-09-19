@@ -13,6 +13,8 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+mod hedge;
+
 type SendResult = Result<ReplicaAck, ReplicaFailure>;
 type SendFuture<'a> = Pin<Box<dyn Future<Output = SendResult> + Send + 'a>>;
 
@@ -125,6 +127,9 @@ pub(super) async fn run<T: DistributorTransport>(
     let assignments: Vec<_> = assignments.into_iter().filter(|assignment| {
         !assignment.symbol_indices.is_empty() && seen.insert(assignment.replica_id.clone())
     }).collect();
+    if config.hedge_enabled {
+        return hedge::run(config, cx, encoded, assignments, transport, auth_context, timer).await;
+    }
     let count = assignments.len();
     let mut outcomes: Vec<Option<Outcome<ReplicaAck, ReplicaFailure>>> =
         (0..count).map(|_| None).collect();
