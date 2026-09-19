@@ -18,6 +18,9 @@
 //! are unaffected by any in-lib `#[cfg(test)]` breakage.
 
 #![cfg(feature = "test-internals")]
+// The TLS-enabled listener nests runtime and request-region futures deeply
+// enough to exceed the default auto-trait solver recursion budget.
+#![recursion_limit = "256"]
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
