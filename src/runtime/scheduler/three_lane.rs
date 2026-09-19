@@ -7082,6 +7082,12 @@ impl ThreeLaneWorker {
         if self.busy_turns_since_io == BUSY_IO_POLL_INTERVAL {
             self.busy_turns_since_io = 0;
             if let Some(io) = &self.io_driver {
+                // With no registered I/O there is nothing to wake. Recheck on
+                // the next bounded turn if a concurrent task registers a source.
+                // In particular, yield-only work must not issue empty syscalls.
+                if io.is_empty() {
+                    return;
+                }
                 // Never wait for I/O or its polling leader while runnable work
                 // remains. Driver locks are released before readiness wakes tasks.
                 let _ = io.try_turn_with(Some(Duration::ZERO), |_, _| {});
