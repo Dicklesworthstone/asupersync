@@ -121,18 +121,16 @@ impl ReplicatedCheckpoint {
 // bytes that were never sent. It does not replace the inner authenticated receipt.
 struct CheckedTransport<'a> { inner: &'a RemoteSymbolTransport, key: SymbolBatchKey }
 impl DistributorTransport for CheckedTransport<'_> {
-    fn send_symbols(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>)
-        -> impl Future<Output = Result<ReplicaAck, ReplicaFailure>> + Send
+    async fn send_symbols(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>)
+        -> Result<ReplicaAck, ReplicaFailure>
     {
-        async move {
-            let matches = encode_symbol_batch(&symbols, self.inner.limits)
-                .is_ok_and(|batch| batch.key() == self.key);
-            if !matches {
-                return Err(ReplicaFailure { replica_id: replica.to_owned(),
-                    error: "checkpoint outgoing batch changed after validation".into(), error_kind: ErrorKind::ProtocolError });
-            }
-            self.inner.send_symbols(replica, symbols).await
+        let matches = encode_symbol_batch(&symbols, self.inner.limits)
+            .is_ok_and(|batch| batch.key() == self.key);
+        if !matches {
+            return Err(ReplicaFailure { replica_id: replica.to_owned(),
+                error: "checkpoint outgoing batch changed after validation".into(), error_kind: ErrorKind::ProtocolError });
         }
+        self.inner.send_symbols(replica, symbols).await
     }
 }
 
@@ -277,7 +275,7 @@ fn seal(
 async fn before_deadline<F: Future>(
     cx: &Cx, timer: TimerDriverHandle, deadline: Time, future: F,
 ) -> Result<F::Output, CheckpointError> {
-    let result = {
+    {
         let mut work = Box::pin(future);
         let mut cancelled = std::pin::pin!(cx.cancelled());
         let mut timeout = std::pin::pin!(Sleep::with_timer_driver(deadline, timer.clone()));
@@ -291,8 +289,7 @@ async fn before_deadline<F: Future>(
             if timer.now() >= deadline { return Poll::Ready(Err(CheckpointError::Deadline)); }
             result.map(Ok)
         }).await
-    };
-    result
+    }
 }
 
 #[cfg(test)]
