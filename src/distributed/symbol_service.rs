@@ -153,3 +153,6 @@ pub use native::recovery;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod durable;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use service::{DurableSymbolServiceHandle, register_durable_symbol_service};

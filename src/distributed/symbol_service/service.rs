@@ -157,3 +157,8 @@ pub(super) fn validate_receipt(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod durable;
+#[cfg(not(target_arch = "wasm32"))]
+pub use durable::{DurableSymbolServiceHandle, register_durable_symbol_service};
