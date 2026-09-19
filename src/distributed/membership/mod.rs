@@ -78,3 +78,7 @@ pub mod service;
 
 /// Checked runtime ownership and owner-driven expiry for membership leases.
 pub mod owned;
+
+/// Restart-safe authenticated membership decisions in caller-owned files.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod durable;
