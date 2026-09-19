@@ -526,3 +526,31 @@ impl Drop for ReplayGuard<'_> {
         }
     }
 }
+
+// Read-only checkpoints and shared failure propagation for the opt-in poll
+// driver. Pending I/O does NOT consume an entry in the completed-effect order.
+impl RecordOrder {
+    pub(super) fn effect_position(&self) -> usize { self.0.lock().entries.len() }
+}
+impl ReplayOrder {
+    pub(super) fn effect_position(&self) -> usize { self.0.lock().index }
+
+    pub(super) fn check_polled_io(&self, operation: IoOperation) -> Result<(), OrderReplayError> {
+        let result = {
+            let mut state = self.0.lock();
+            if let Some(error) = state.failure { Err(error) }
+            else if state.active { Err(state.refuse(OrderedEffect::Io(operation), OrderReplayMismatch::Overlap)) }
+            else { Ok(()) }
+        };
+        if result.is_err() { self.wake_waiters(); }
+        result
+    }
+
+    pub(super) fn refuse_polled_io(&self, operation: IoOperation) {
+        {
+            let mut state = self.0.lock();
+            state.refuse(OrderedEffect::Io(operation), OrderReplayMismatch::Component);
+        }
+        self.wake_waiters();
+    }
+}

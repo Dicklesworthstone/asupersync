@@ -711,3 +711,6 @@ pub use send::OrderedSendConsumerFuture;
 
 #[cfg(test)]
 mod pending_tests;
+
+/// Single-consumer poll-level capture and playback.
+pub mod poll;
