@@ -69,3 +69,6 @@ pub use view::MembershipView;
 pub use wire::{
     DEFAULT_MTU, EncodedDatagram, WIRE_VERSION, WireError, decode_packet, encode_packet,
 };
+
+/// Authenticated incarnation decisions and fenced local lease admission.
+pub mod authority;
