@@ -3771,6 +3771,14 @@ impl SqliteConnection {
     /// prevents a second operation from waiting behind a statement whose row
     /// delivery is itself waiting for the stream consumer.
     ///
+    /// Row producers share a bounded pool separate from ordinary SQLite
+    /// operations. A paused stream retains its producer worker. If every
+    /// producer is paused while its consumer awaits another row stream, the
+    /// nested producers cannot start, even on different connections. Drain or
+    /// drop an outer stream before awaiting a dependent stream; use bounded
+    /// batches when rows must drive further streaming queries. The separate
+    /// pool does not remove SQLite transaction or database-lock dependencies.
+    ///
     /// ```compile_fail
     /// use asupersync::database::SqliteConnection;
     /// use asupersync::{Cx, Outcome};
@@ -3797,6 +3805,9 @@ impl SqliteConnection {
 
     /// Execute a trusted raw SQL query and stream rows through a bounded
     /// async receiver.
+    ///
+    /// The connection ownership and producer-capacity constraints documented
+    /// on [`Self::query_stream`] also apply here.
     pub async fn query_stream_unchecked<'connection>(
         &'connection mut self,
         cx: &Cx,
