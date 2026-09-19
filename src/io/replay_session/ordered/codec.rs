@@ -107,9 +107,9 @@ fn decode_entry(bytes: &[u8]) -> Result<Entry, OrderedSessionTapeError> {
     if (bytes[0] < 6 && source != 0) || (bytes[0] != 7 && child != 0) {
         return Err(OrderedSessionTapeError::Format);
     }
-    Ok(Entry { effect, child })
+    Ok(Entry { effect, child, pending: None })
 }
-fn encode_entry(out: &mut Vec<u8>, entry: Entry) -> Result<(), OrderedSessionTapeError> {
+fn encode_entry(out: &mut Vec<u8>, entry: &Entry) -> Result<(), OrderedSessionTapeError> {
     let (tag, source) = match entry.effect {
         OrderedEffect::Io(IoOperation::Read) => (0, 0),
         OrderedEffect::Io(IoOperation::Write) => (1, 0),
@@ -139,6 +139,7 @@ impl OrderedRecordedSession {
     /// An independent-session decoder refuses this magic; it cannot silently
     /// turn an ordered capture into a weaker independent replay.
     pub fn to_canonical_bytes(&self, max_encoded_bytes: usize) -> Result<OrderedSessionBytes, OrderedSessionTapeError> {
+        if self.order.poll_aware { return Err(OrderedSessionTapeError::Format); }
         if !self.order.covers(&self.components) { return Err(OrderedSessionTapeError::Coverage); }
         let overhead = add(HEADER + CHECKSUM, mul(self.order.entries.len(), ENTRY_BYTES)?)?;
         let remaining = max_encoded_bytes.checked_sub(overhead).ok_or(OrderedSessionTapeError::Limit("encoded bytes"))?;
@@ -151,7 +152,7 @@ impl OrderedRecordedSession {
         put(&mut out.0, components.as_ref().len())?;
         put(&mut out.0, self.order.entries.len())?;
         out.0.extend_from_slice(components.as_ref());
-        for entry in &self.order.entries { encode_entry(&mut out.0, *entry)?; }
+        for entry in &self.order.entries { encode_entry(&mut out.0, entry)?; }
         let mut digest = checksum(&out.0);
         out.0.extend_from_slice(&digest); digest.zeroize();
         debug_assert_eq!(out.0.len(), length);
@@ -190,7 +191,7 @@ impl OrderedRecordedSession {
         let raw_order = &bytes[order_start..body_end];
         for chunk in raw_order.chunks_exact(ENTRY_BYTES) { decode_entry(chunk)?; }
         let components = RecordedSession::from_canonical_bytes(&bytes[HEADER..order_start], limits.components)?;
-        let mut order = OrderTape { entries: Vec::new() };
+        let mut order = OrderTape { entries: Vec::new(), poll_aware: false };
         order.entries.try_reserve_exact(count).map_err(|_| OrderedSessionTapeError::Allocation)?;
         for chunk in raw_order.chunks_exact(ENTRY_BYTES) { order.entries.push(decode_entry(chunk)?); }
         if !order.covers(&components) { return Err(OrderedSessionTapeError::Coverage); }

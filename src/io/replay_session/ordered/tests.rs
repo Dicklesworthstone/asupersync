@@ -322,7 +322,7 @@ fn zero_poll_budget_refuses_before_factory_and_unused_effects_refuse_output() {
 
 #[test]
 fn interrupted_replay_admission_is_sticky_and_unconsumed() {
-    let order = ReplayOrder::new(OrderTape { entries: vec![gate::Entry { effect: OrderedEffect::Clock, child: 0 }] });
+    let order = ReplayOrder::new(OrderTape { entries: vec![gate::Entry { effect: OrderedEffect::Clock, child: 0, pending: None }], poll_aware: false });
     drop(order.enter(OrderedEffect::Clock).unwrap());
     let error = match order.enter(OrderedEffect::Clock) { Err(error) => error, Ok(_) => panic!("poisoned admission") };
     assert_eq!(error.index, 0);

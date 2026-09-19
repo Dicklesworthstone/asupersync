@@ -9,8 +9,12 @@
 //!
 //! Live provider results remain unchanged. Overlapping/reentrant provider calls
 //! invalidate capture rather than guessing a cross-thread linearization. Pending
-//! I/O polls consume no order entries. This is completed-effect ordering, NOT
-//! scheduler, readiness, cancellation, or arbitrary concurrent-program replay.
+//! I/O polls consume no order entries in the default mode. Opt in with
+//! [`OrderedRecordingSession::new_with_pending_io`] to retain pending attempts
+//! and enforce every I/O poll's order/shape. Replaying a recorded pending poll
+//! returns `Pending` and requests one immediate re-poll, not its original host
+//! wake timing. Neither mode captures a task schedule, wake counts, elapsed
+//! readiness delays, cancellation, or arbitrary concurrent-program execution.
 //! Owners must drain their users before finishing and use their runtime's own
 //! deadline/cancellation to bound a parked consumer. No live fallback is used.
 //!
@@ -21,7 +25,7 @@ use super::{
     RecordedSession, RecordingSession, ReplayConsumerFuture, ReplaySession,
     SessionCaptureError, SessionCaptureLimits, SessionReplayError,
 };
-use crate::io::replay::{IoOperation, RecordingIo, ReplayIo};
+use crate::io::replay::{RecordingIo, ReplayIo};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::time::replay::{RecordingTimeSource, ReplayTimeSource};
 use crate::time::TimeSource;
@@ -34,6 +38,10 @@ use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
+
+mod pending;
+use pending::PendingInput;
+pub use pending::PendingIoCaptureLimits;
 
 mod gate;
 use gate::{OrderTape, RecordOrder, ReplayOrder};
@@ -102,9 +110,31 @@ impl<T: AsyncWrite, S: TimeSource + ?Sized> OrderedRecordingSession<T, S> {
         io: T, entropy: Arc<dyn EntropySource>, clock: Arc<S>,
         limits: SessionCaptureLimits, max_effects: usize,
     ) -> Result<Self, EntropyCaptureError> {
+        Self::with_order(io, entropy, clock, limits, RecordOrder::new(max_effects))
+    }
+
+    /// Record every pending I/O attempt as well as completed effects.
+    ///
+    /// `max_effects` bounds ALL order entries; `pending` independently bounds
+    /// extra poll storage and write hashing. Live results and wakeups are never
+    /// changed. Replay requires exact I/O poll order, capacities, scalar bytes,
+    /// and vector shapes, including attempts that were subsequently dropped.
+    /// A recorded pending poll yields and requests one immediate continuation;
+    /// original wake timing/counts and time inside a poll are not reproduced.
+    pub fn new_with_pending_io(
+        io: T, entropy: Arc<dyn EntropySource>, clock: Arc<S>,
+        limits: SessionCaptureLimits, max_effects: usize, pending: PendingIoCaptureLimits,
+    ) -> Result<Self, EntropyCaptureError> {
+        Self::with_order(io, entropy, clock, limits, RecordOrder::with_pending(max_effects, Some(pending)))
+    }
+
+    fn with_order(
+        io: T, entropy: Arc<dyn EntropySource>, clock: Arc<S>,
+        limits: SessionCaptureLimits, order: RecordOrder,
+    ) -> Result<Self, EntropyCaptureError> {
         let RecordingSession { io, entropy: recorder, clock } =
             RecordingSession::new(io, entropy, clock, limits)?;
-        let order = Arc::new(RecordOrder::new(max_effects));
+        let order = Arc::new(order);
         let source: Arc<dyn EntropySource> = recorder.clone();
         Ok(Self {
             io: OrderedRecordingIo { inner: io, order: Arc::clone(&order) },
@@ -170,9 +200,19 @@ impl fmt::Debug for OrderedRecordedSession {
 }
 
 impl OrderedRecordedSession {
-    /// Number of completed effects, including forks, empty I/O and repeated time.
+    /// Number of order entries, including pending attempts in poll-aware mode.
     #[must_use]
     pub fn effects(&self) -> usize { self.order.entries.len() }
+
+    /// Whether every I/O poll must be reproduced, not just completed results.
+    #[must_use]
+    pub fn is_poll_aware(&self) -> bool { self.order.poll_aware }
+
+    /// Number of recorded pending I/O attempts, without revealing requests.
+    #[must_use]
+    pub fn pending_io_polls(&self) -> usize {
+        self.order.entries.iter().filter(|entry| entry.pending.is_some()).count()
+    }
 
     /// Reconstruct exclusively offline providers with shared ordering authority.
     #[must_use]
@@ -237,7 +277,7 @@ impl OrderedReplaySession {
     ///
     /// Panics propagate. Application errors remain ordinary output, but swallowed
     /// order/component divergence refuses that output. The poll bound does not
-    /// invent readiness, bound time inside `poll`, or replace an owner deadline
+    /// bound time inside `poll` or replace an owner deadline
     /// for parked work. Zero refuses before invoking the factory. The consumer
     /// must drain any tasks it creates; this driver owns only its returned future.
     pub async fn run<T, F>(mut self, max_polls: usize, consumer: F) -> Result<T, OrderedRunError>
@@ -270,33 +310,33 @@ impl<T> fmt::Debug for OrderedRecordingIo<T> {
 }
 impl<T> OrderedRecordingIo<T> {
     fn poll_with<R>(
-        &mut self, cx: &mut Context<'_>, operation: IoOperation,
+        &mut self, cx: &mut Context<'_>, input: PendingInput<'_, '_>,
         poll: impl FnOnce(&mut RecordingIo<T>, &mut Context<'_>) -> Poll<io::Result<R>>,
     ) -> Poll<io::Result<R>> {
         let guard = self.order.begin();
         let result = poll(&mut self.inner, cx);
-        if let Some(guard) = guard { guard.finish(OrderedEffect::Io(operation), result.is_ready()); }
+        if let Some(guard) = guard { guard.finish_io(input, result.is_ready()); }
         result
     }
 }
 impl<T: AsyncRead + Unpin> AsyncRead for OrderedRecordingIo<T> {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, IoOperation::Read, |io, cx| Pin::new(io).poll_read(cx, buf))
+        self.get_mut().poll_with(cx, PendingInput::Read(buf.remaining()), |io, cx| Pin::new(io).poll_read(cx, buf))
     }
 }
 impl<T: AsyncWrite + Unpin> AsyncWrite for OrderedRecordingIo<T> {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        self.get_mut().poll_with(cx, IoOperation::Write, |io, cx| Pin::new(io).poll_write(cx, buf))
+        self.get_mut().poll_with(cx, PendingInput::Write(buf), |io, cx| Pin::new(io).poll_write(cx, buf))
     }
     fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
-        self.get_mut().poll_with(cx, IoOperation::WriteVectored, |io, cx| Pin::new(io).poll_write_vectored(cx, bufs))
+        self.get_mut().poll_with(cx, PendingInput::Vectored(bufs), |io, cx| Pin::new(io).poll_write_vectored(cx, bufs))
     }
     fn is_write_vectored(&self) -> bool { self.inner.is_write_vectored() }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, IoOperation::Flush, |io, cx| Pin::new(io).poll_flush(cx))
+        self.get_mut().poll_with(cx, PendingInput::Flush, |io, cx| Pin::new(io).poll_flush(cx))
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, IoOperation::Shutdown, |io, cx| Pin::new(io).poll_shutdown(cx))
+        self.get_mut().poll_with(cx, PendingInput::Shutdown, |io, cx| Pin::new(io).poll_shutdown(cx))
     }
 }
 
@@ -353,13 +393,24 @@ impl fmt::Debug for OrderedReplayIo {
 }
 impl OrderedReplayIo {
     fn poll_with<R>(
-        &mut self, cx: &mut Context<'_>, operation: IoOperation,
+        &mut self, cx: &mut Context<'_>, input: PendingInput<'_, '_>,
         poll: impl FnOnce(&mut ReplayIo, &mut Context<'_>) -> Poll<io::Result<R>>,
     ) -> Poll<io::Result<R>> {
-        let guard = match ready!(self.order.enter_io(cx, operation)) {
+        let guard = match ready!(self.order.enter_io(cx, input.operation())) {
             Ok(guard) => guard,
             Err(error) => return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error))),
         };
+        if let Some(expected) = guard.pending_request() {
+            let matches = expected.matches(input);
+            if let Err(error) = guard.finish(matches) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
+            }
+            // The transcript, not a live provider, requests the next poll. This
+            // preserves the Pending boundary, not original wake timing. No lock
+            // or active admission is held across this arbitrary callback.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cx.waker().wake_by_ref()));
+            return Poll::Pending;
+        }
         let result = poll(&mut self.inner, cx);
         // An admitted I/O turn must be satisfiable by its component immediately.
         // A malformed cross-projection cannot become a permanently parked replay.
@@ -374,22 +425,22 @@ impl Drop for OrderedReplayIo {
 }
 impl AsyncRead for OrderedReplayIo {
     fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, IoOperation::Read, |io, cx| Pin::new(io).poll_read(cx, buf))
+        self.get_mut().poll_with(cx, PendingInput::Read(buf.remaining()), |io, cx| Pin::new(io).poll_read(cx, buf))
     }
 }
 impl AsyncWrite for OrderedReplayIo {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-        self.get_mut().poll_with(cx, IoOperation::Write, |io, cx| Pin::new(io).poll_write(cx, buf))
+        self.get_mut().poll_with(cx, PendingInput::Write(buf), |io, cx| Pin::new(io).poll_write(cx, buf))
     }
     fn poll_write_vectored(self: Pin<&mut Self>, cx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
-        self.get_mut().poll_with(cx, IoOperation::WriteVectored, |io, cx| Pin::new(io).poll_write_vectored(cx, bufs))
+        self.get_mut().poll_with(cx, PendingInput::Vectored(bufs), |io, cx| Pin::new(io).poll_write_vectored(cx, bufs))
     }
     fn is_write_vectored(&self) -> bool { self.inner.is_write_vectored() }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, IoOperation::Flush, |io, cx| Pin::new(io).poll_flush(cx))
+        self.get_mut().poll_with(cx, PendingInput::Flush, |io, cx| Pin::new(io).poll_flush(cx))
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_with(cx, IoOperation::Shutdown, |io, cx| Pin::new(io).poll_shutdown(cx))
+        self.get_mut().poll_with(cx, PendingInput::Shutdown, |io, cx| Pin::new(io).poll_shutdown(cx))
     }
 }
 
@@ -468,3 +519,6 @@ pub use codec::{OrderedSessionBytes, OrderedSessionDecodeLimits, OrderedSessionT
 mod send;
 pub use send::OrderedSendConsumerFuture;
 
+
+#[cfg(test)]
+mod pending_tests;
