@@ -1368,7 +1368,20 @@ impl KafkaConsumer {
             crate::runtime::spawn_blocking::spawn_blocking_on_thread(move || {
                 let _guard = broker_ops.lock();
                 if assignment_list.is_empty() {
-                    consumer.unassign().map_err(map_consumer_error)
+                    if matches!(
+                        consumer.rebalance_protocol(),
+                        rdkafka::consumer::RebalanceProtocol::Cooperative
+                    ) {
+                        // Cooperative consumers reject eager unassign. Unlike close(),
+                        // this path has not left the group and drained revoke callbacks,
+                        // so it must explicitly remove the actual native assignment.
+                        let current = consumer.assignment().map_err(map_consumer_error)?;
+                        consumer
+                            .incremental_unassign(&current)
+                            .map_err(map_consumer_error)
+                    } else {
+                        consumer.unassign().map_err(map_consumer_error)
+                    }
                 } else {
                     let mut tpl = TopicPartitionList::new();
                     for tpo in &assignment_list {
@@ -2735,6 +2748,89 @@ mod tests {
                 matches!(err, KafkaError::Config(msg) if msg.contains("topic cannot be empty"))
             );
         });
+    }
+
+    #[cfg(feature = "kafka")]
+    fn check_native_empty_rebalance(strategy: &str, expected_protocol: KafkaRebalanceProtocol) {
+        // This exercises librdkafka's real client against its in-process test
+        // broker, including group negotiation; it is not live-broker proof.
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let topic = "empty-rebalance";
+        cluster.create_topic(topic, 1, 1).unwrap();
+        let config =
+            ConsumerConfig::new(vec![cluster.bootstrap_servers()], "empty-rebalance-group")
+                .force_real_kafka(true)
+                .with_property("group.protocol", "classic")
+                .with_property("partition.assignment.strategy", strategy)
+                .with_property("enable.auto.commit", "false");
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(config).unwrap();
+            consumer.subscribe(&cx, &[topic]).await.unwrap();
+            let started = std::time::Instant::now();
+            while consumer.assigned_partitions().is_empty()
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                consumer
+                    .poll(&cx, Duration::from_millis(100))
+                    .await
+                    .unwrap();
+            }
+            let previous = consumer.assigned_partitions();
+            let protocol = consumer.rebalance_protocol();
+            let generation = consumer.rebalance_generation();
+            let (native, broker_ops) = consumer.broker_backend().unwrap();
+            let native_before = {
+                let _guard = broker_ops.lock();
+                native.assignment().unwrap().count()
+            };
+            let result = consumer.rebalance(&cx, &[]).await;
+            // Inspect before another poll can reconcile wrapper state or drive
+            // callbacks: a no-op that clears only the wrapper must fail here.
+            let native_after = {
+                let _guard = broker_ops.lock();
+                native.assignment().unwrap().count()
+            };
+            let wrapper_after = consumer.assigned_partitions();
+            let subscriptions = consumer.subscriptions();
+            let repeated = consumer.rebalance(&cx, &[]).await;
+            let native_after_repeat = {
+                let _guard = broker_ops.lock();
+                native.assignment().unwrap().count()
+            };
+            let close_result = consumer.close(&cx).await;
+
+            assert_eq!(protocol, expected_protocol, "group protocol not negotiated");
+            assert_eq!(previous, vec![(topic.to_string(), 0)]);
+            assert_eq!(native_before, 1, "native assignment was not established");
+            let result = result.expect("empty rebalance must revoke native assignment");
+            assert!(result.assigned.is_empty());
+            assert_eq!(result.revoked, previous);
+            assert_eq!(result.generation, generation + 1);
+            assert_eq!(
+                native_after, 0,
+                "native ownership must actually be released"
+            );
+            assert!(wrapper_after.is_empty());
+            assert_eq!(subscriptions, vec![topic.to_string()]);
+            let repeated = repeated.expect("repeated empty rebalance must succeed");
+            assert!(repeated.assigned.is_empty());
+            assert!(repeated.revoked.is_empty());
+            assert_eq!(repeated.generation, result.generation + 1);
+            assert_eq!(native_after_repeat, 0);
+            close_result.unwrap();
+        });
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn native_empty_rebalance_cooperative_releases_assignment() {
+        check_native_empty_rebalance("cooperative-sticky", KafkaRebalanceProtocol::Cooperative);
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn native_empty_rebalance_eager_releases_assignment() {
+        check_native_empty_rebalance("range", KafkaRebalanceProtocol::Eager);
     }
 
     #[test]
