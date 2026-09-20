@@ -67,6 +67,7 @@ pub mod macaroon;
 pub mod registry;
 pub mod scope;
 pub mod scoped_cpu;
+pub mod supervisor_service;
 pub mod wrappers;
 
 pub use cancelled::Cancelled;
