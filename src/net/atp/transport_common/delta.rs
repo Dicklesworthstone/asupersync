@@ -123,6 +123,119 @@ where
     Ok(filled)
 }
 
+/// Content-defined (FastCDC) chunking for delta-object manifests
+/// (br-asupersync-sizeku).
+///
+/// Ported from the proven CLI chunker (`src/bin/atp.rs`, br-asupersync-iz269u)
+/// into the library so both transport delta builders (RQ + TCP) can produce
+/// content-defined boundaries instead of fixed-size chunks. Fixed-size chunking
+/// re-chunks every byte after an insertion, so all later content ids change and
+/// the inserted region gets no delta reuse; content-defined boundaries
+/// re-synchronize a few tens of bytes past an edit, so an insert costs ~one new
+/// chunk and the shifted tail keeps its content ids. Wired into the delta
+/// manifest builders in a later sizeku slice; landed as a standalone, unit-tested
+/// primitive first.
+#[allow(dead_code)] // wired into the delta manifest builders in a later sizeku slice
+pub(crate) mod cdc {
+    /// Minimum content-defined chunk size.
+    pub(crate) const MIN_CHUNK_BYTES: usize = 16 * 1024;
+    /// Target average content-defined chunk size (tracks the mask bits).
+    pub(crate) const AVG_CHUNK_BYTES: usize = 32 * 1024;
+    /// Maximum content-defined chunk size (hard cut).
+    pub(crate) const MAX_CHUNK_BYTES: usize = 64 * 1024;
+
+    /// Gear boundary mask: `log2(AVG)=15` bits in the TOP of the hash. The
+    /// gear's low bits carry only the last few bytes (and freeze on runs of
+    /// equal bytes) while the high bits accumulate ~64 bytes through the
+    /// shift-add carries; masking the top bits finds boundaries on structured
+    /// data where a low-bit mask degenerates to max-cap-only chunks
+    /// (br-asupersync-iz269u).
+    const BOUNDARY_MASK_BITS: u32 = 15;
+    const BOUNDARY_MASK: u64 =
+        ((1u64 << BOUNDARY_MASK_BITS) - 1) << (64 - BOUNDARY_MASK_BITS);
+    const _: () = assert!(
+        AVG_CHUNK_BYTES == 1usize << BOUNDARY_MASK_BITS,
+        "boundary mask bits must track the average chunk size",
+    );
+
+    /// FastCDC-style gear hash: `hash = (hash << 1) + T[byte]`. No explicit
+    /// window: the shift ages old bytes out of the masked top bits and the
+    /// add's carry mixes across bit positions. The rolling state is continuous
+    /// across chunk boundaries by design — content-defined resync depends only
+    /// on the last ~64 bytes, so the hash re-aligns a few tens of bytes past an
+    /// edit (a per-chunk reset would defeat resynchronization).
+    struct Gear {
+        hash: u64,
+    }
+
+    impl Gear {
+        fn new() -> Self {
+            Self { hash: 0 }
+        }
+        fn update(&mut self, byte: u8) {
+            self.hash = (self.hash << 1).wrapping_add(gear_value(byte));
+        }
+        fn hash(&self) -> u64 {
+            self.hash
+        }
+    }
+
+    const fn gear_value(byte: u8) -> u64 {
+        splitmix64((byte as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+    }
+
+    const fn splitmix64(mut value: u64) -> u64 {
+        value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut mixed = value;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        mixed ^ (mixed >> 31)
+    }
+
+    /// Content-defined chunk boundaries over `bytes`, returned as `(offset,
+    /// len)` spans that exactly tile `[0, bytes.len())` in order. A
+    /// sub-minimum final span is merged into the previous span when that keeps
+    /// it within the max, so every span except possibly a lone final one is in
+    /// `MIN_CHUNK_BYTES..=MAX_CHUNK_BYTES`. Deterministic: identical bytes
+    /// always yield identical spans, so a sender and receiver chunking an
+    /// identical file agree on boundaries (and thus content ids) with no shared
+    /// state.
+    pub(crate) fn chunk_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        if bytes.is_empty() {
+            return spans;
+        }
+        let mut gear = Gear::new();
+        let mut chunk_start = 0usize;
+        for (index, &byte) in bytes.iter().enumerate() {
+            gear.update(byte);
+            let end = index + 1;
+            let chunk_len = end - chunk_start;
+            if chunk_len < MIN_CHUNK_BYTES {
+                continue;
+            }
+            if chunk_len >= MAX_CHUNK_BYTES || (gear.hash() & BOUNDARY_MASK) == 0 {
+                spans.push((chunk_start, chunk_len));
+                chunk_start = end;
+            }
+        }
+        if chunk_start < bytes.len() {
+            let tail_len = bytes.len() - chunk_start;
+            let merge = spans.last().is_some_and(|&(_, prev_len)| {
+                tail_len < MIN_CHUNK_BYTES && prev_len + tail_len <= MAX_CHUNK_BYTES
+            });
+            if merge {
+                if let Some(last) = spans.last_mut() {
+                    last.1 += tail_len;
+                }
+            } else {
+                spans.push((chunk_start, tail_len));
+            }
+        }
+        spans
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +380,95 @@ mod tests {
             serde_json::to_value(decoded).expect("encode legacy delta manifest fixture"),
             fixture
         );
+    }
+
+    // --- br-asupersync-sizeku: content-defined delta chunker (cdc) ---
+
+    fn cdc_fixture(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|idx| {
+                state = state
+                    .wrapping_mul(1_664_525)
+                    .wrapping_add(1_013_904_223)
+                    .wrapping_add(u32::try_from(idx & 0xffff).expect("masked index fits"));
+                (state >> 16) as u8
+            })
+            .collect()
+    }
+
+    fn cdc_chunks(data: &[u8]) -> Vec<Vec<u8>> {
+        cdc::chunk_spans(data)
+            .into_iter()
+            .map(|(offset, len)| data[offset..offset + len].to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn cdc_spans_tile_the_input_and_stay_in_bounds() {
+        let data = cdc_fixture(512 * 1024, 0x5eed);
+        let chunks = cdc_chunks(&data);
+        assert_eq!(chunks.concat(), data, "spans must exactly tile the input");
+        assert!(chunks.len() > 2, "256KiB fixed chunks would give only two");
+        let nonfinal = chunks.len().saturating_sub(1);
+        assert!(
+            chunks
+                .iter()
+                .take(nonfinal)
+                .all(|c| c.len() >= cdc::MIN_CHUNK_BYTES && c.len() <= cdc::MAX_CHUNK_BYTES),
+            "every non-final chunk must be within [MIN, MAX]"
+        );
+        assert!(
+            chunks.iter().any(|c| c.len() < cdc::MAX_CHUNK_BYTES),
+            "gear hash should find a content boundary before the hard cap"
+        );
+    }
+
+    #[test]
+    fn cdc_resynchronizes_after_insert() {
+        // The insert win: an inserted region costs ~one new chunk; the shifted
+        // tail re-synchronizes and keeps its content (fixed-size chunking would
+        // change every later chunk).
+        let mut data = cdc_fixture(768 * 1024, 0xfeed);
+        let original = cdc_chunks(&data);
+        data.splice(96 * 1024..96 * 1024, [0xA5; 257]);
+        let shifted = cdc_chunks(&data);
+
+        let original_set: std::collections::BTreeSet<Vec<u8>> = original.iter().cloned().collect();
+        let shared = shifted.iter().filter(|c| original_set.contains(*c)).count();
+        assert!(
+            shared * 2 >= original.len(),
+            "CDC must resync after a small insert (shared={shared}, original={})",
+            original.len()
+        );
+    }
+
+    #[test]
+    fn cdc_localizes_a_same_length_edit() {
+        let original_data = cdc_fixture(2 * 1024 * 1024, 0xabcd);
+        let mut edited_data = original_data.clone();
+        let (edit_start, edit_len) = (1024 * 1024, 100 * 1024);
+        for (offset, byte) in edited_data[edit_start..edit_start + edit_len]
+            .iter_mut()
+            .enumerate()
+        {
+            *byte = ((offset * 73 + 19) % 251) as u8;
+        }
+        let original_set: std::collections::BTreeSet<Vec<u8>> =
+            cdc_chunks(&original_data).into_iter().collect();
+        let missing_bytes: usize = cdc_chunks(&edited_data)
+            .into_iter()
+            .filter(|c| !original_set.contains(c))
+            .map(|c| c.len())
+            .sum();
+        assert!(
+            missing_bytes <= 192 * 1024,
+            "a 100KiB same-length edit dirtied {missing_bytes} bytes of chunks"
+        );
+    }
+
+    #[test]
+    fn cdc_empty_input_yields_no_spans() {
+        assert!(cdc::chunk_spans(&[]).is_empty());
     }
 }
