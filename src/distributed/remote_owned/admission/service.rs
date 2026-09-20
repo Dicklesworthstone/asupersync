@@ -6,7 +6,8 @@
 //! the handler and drains its descendants. Dropping the dispatch waiter requests
 //! coordinator cancellation rather than making its admission immediately reusable.
 
-use super::{RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor, RemotePeerLimits};
+use super::{RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
+    RemotePeerLimits, RemoteQueueLimits, RemoteQueueUsage, RemoteReserveError};
 use crate::cx::{ChildRegionSpec, Cx};
 use crate::distributed::{ComputationSchemaRegistryError, HasSchema};
 use crate::remote::{NodeId, RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteOutcome};
@@ -16,6 +17,7 @@ use std::fmt;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::task::Poll;
+use std::time::Duration;
 
 /// Shared inbound execution and original-input-byte limits for registered handlers.
 ///
@@ -56,6 +58,25 @@ impl RemoteServiceAdmission {
         I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
     {
         Ok(Self { budget: RemoteExecutor::new(limits, peers)? })
+    }
+
+    /// Explicitly enable bounded waiting. All immediate and waiting registrations
+    /// share active counters; only register_waiting uses the bounded wait queue.
+    pub fn new_queued<I>(limits: RemoteAdmissionLimits, peers: I, queue: RemoteQueueLimits)
+        -> Result<Self, RemoteAdmissionError>
+    where I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
+    {
+        Ok(Self { budget: RemoteExecutor::new_queued(limits, peers, queue)? })
+    }
+
+    /// Current waiting charges, separate from active execution usage.
+    #[must_use]
+    pub fn queue_usage(&self) -> RemoteQueueUsage { self.budget.queue_usage() }
+
+    /// Waiting charges selected by the authenticated peer, never request origin.
+    #[must_use]
+    pub fn peer_queue_usage(&self, peer: &NodeId) -> Option<RemoteQueueUsage> {
+        self.budget.peer_queue_usage(peer)
     }
 
     /// Execution charges, including admitted work whose network waiter disappeared.
@@ -106,6 +127,45 @@ impl RemoteServiceAdmission {
         F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
     {
+        self.register_policy::<I, O, F, Fut>(registry, name, child, None, handler)
+    }
+
+    /// Register a handler with explicit cancellation-aware bounded backpressure.
+    ///
+    /// Requires new_queued and a positive wait interval plus context timer. A
+    /// queued invocation retains its original input charge but invokes no user
+    /// factory and creates no extra coordinator. Cancellation, disconnect/drop,
+    /// closure or wait expiry removes it without execution. Once admitted it uses
+    /// the SAME coordinator and retains active quota through subtree cleanup.
+    ///
+    /// FIFO is per authenticated peer, oldest feasible peer heads globally. This
+    /// is not a priority protocol. V3 renewal/cancel and cached replies bypass
+    /// execution admission as before. Queue refusals/timeouts are Failed outcomes
+    /// and may be retained by V2/V3 idempotency; no retry policy changes. Queue wait
+    /// is separate from, and cannot extend, the service's original lease/deadlines.
+    pub fn register_waiting<I, O, F, Fut>(
+        &self, registry: &mut RemoteComputationRegistry, name: impl Into<String>,
+        child: ChildRegionSpec, wait_timeout: Duration, handler: F,
+    ) -> Result<(), ComputationSchemaRegistryError>
+    where
+        I: HasSchema,
+        O: HasSchema,
+        F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
+    {
+        self.register_policy::<I, O, F, Fut>(registry, name, child, Some(wait_timeout), handler)
+    }
+
+    fn register_policy<I, O, F, Fut>(
+        &self, registry: &mut RemoteComputationRegistry, name: impl Into<String>,
+        child: ChildRegionSpec, wait_timeout: Option<Duration>, handler: F,
+    ) -> Result<(), ComputationSchemaRegistryError>
+    where
+        I: HasSchema,
+        O: HasSchema,
+        F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
+    {
         let budget = self.budget.clone();
         let handler = Arc::new(handler);
         registry.register::<I, O, _, _>(name, move |cx, invocation| {
@@ -114,9 +174,17 @@ impl RemoteServiceAdmission {
             let spec = child.clone();
             async move {
                 if cx.checkpoint().is_err() { return Ok(cancelled(&cx)); }
-                let permit = match budget.acquire(invocation.peer_node(), invocation.request().input.len()) {
-                    Ok(permit) => permit,
-                    Err(error) => return Ok(RemoteOutcome::Failed(format!("remote service admission refused: {error}"))),
+                let permit = if let Some(timeout) = wait_timeout {
+                    match budget.reserve(&cx, invocation.peer_node(), invocation.request().input.len(), timeout).await {
+                        Ok(reservation) => reservation.permit,
+                        Err(RemoteReserveError::Cancelled) => return Ok(cancelled(&cx)),
+                        Err(error) => return Ok(RemoteOutcome::Failed(format!("remote service admission refused: {error}"))),
+                    }
+                } else {
+                    match budget.acquire(invocation.peer_node(), invocation.request().input.len()) {
+                        Ok(permit) => permit,
+                        Err(error) => return Ok(RemoteOutcome::Failed(format!("remote service admission refused: {error}"))),
+                    }
                 };
                 // The complete coordinator future is destroyed before its charge.
                 // Dropping the waiter aborts the coordinator, whose own
