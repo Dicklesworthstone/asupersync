@@ -54,6 +54,7 @@ mod cap_tests;
 mod copy;
 pub mod ext;
 mod lines;
+mod owned_split;
 mod read;
 mod read_buf;
 mod read_line;
@@ -76,6 +77,7 @@ pub use ext::{
     AsyncWriteExt, Buf, Flush, Shutdown, Write, WriteAll, WriteAllBuf, WriteI8, WriteU8,
     WriteVectored,
 };
+pub use owned_split::{OwnedReadHalf, OwnedReuniteError, OwnedWriteHalf, split_owned};
 pub use read::{AsyncRead, AsyncReadVectored, Chain, Take};
 pub use read_buf::ReadBuf;
 pub use seek::AsyncSeek;
