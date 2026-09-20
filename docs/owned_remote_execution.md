@@ -121,3 +121,51 @@ runs only after the per-invocation ownership assertions.
 
 These are authored tests until executed. They are not compiler, native pass,
 performance, cross-process failure, or arbitrary-transport quiescence evidence.
+
+## Shared per-peer admission
+
+`RemoteExecutor` adds opt-in aggregate and per-logical-peer admission around the
+same runner. Configure `RemoteAdmissionLimits` (peer count, total invocations,
+total original input bytes) and a fixed set of `RemotePeerLimits` (per-peer
+invocations, aggregate input bytes, and per-request input bytes). No limits are
+implicitly unbounded. Zero invocation capacity disables that admission; zero
+byte capacity can still admit an empty request when an invocation slot exists.
+Unknown or duplicate peers refuse instead of adding or replacing policy.
+
+`executor.run(&cx, node, computation, input, config).await` uses the caller's
+existing remote capability and the same `RemoteRunReport`. Creating its future
+does not reserve anything. On first poll, all counters are checked together,
+without wrapping, before child-region admission or remote dispatch. Saturation
+returns a typed `RemoteAdmissionError`; there is no request queue, auto-retry,
+priority scheduling, or hidden wait. `usage()` and `peer_usage()` expose current
+logical charges, and `close_admission()` permanently prevents new admissions
+across every clone without cancelling existing calls or closing their transport.
+
+An admitted call owns one reference-counted charge shared by the calling scope
+and the actual region-owned proxy. The scope retains its share through the
+child's close/finalizer receipt. The proxy's share is destroyed AFTER its future,
+remote handle and checked lease. Whichever owner finishes last releases the
+charge. In particular, dropping or timing out a caller cannot recycle its peer
+slot while its still-owned proxy waits for remote terminal collection. Cancellation
+and terminal collection do not acquire a second credit, so a saturated data plane
+cannot block those operations at this admission layer. Backend control-channel
+and transport liveness requirements remain unchanged.
+
+These are logical outbound quotas, not exact process memory or inbound peer
+admission. Count original input lengths, not caller copies, serialization or TLS
+expansion, responses, runtime metadata or backend caches; retain the transport's
+own independent limits. Different labels for the same physical host have separate
+quotas. Operators must provision meaningful labels. Separately constructed
+executors have separate budgets, and direct `run_remote` / `spawn_remote` calls
+bypass this opt-in layer. No new address, certificate, membership or route authority
+is acquired. The generic per-peer transport/priority/async-admission work remains
+broader than this outbound implementation.
+
+Additional focused tests cover exact/zero/overflow limits, fixed configuration,
+thread contention, reentrant callbacks, scope/proxy drop ordering, setup refusal,
+and cancelled or dropped callers awaiting a delayed terminal. The four added
+native V3 scenarios run the same actual mTLS journey through `RemoteExecutor`,
+retain request-byte charges through deliberately withheld remote cleanup, reject
+same-peer saturation without dispatch, and allow a second logical destination to
+progress on the same listener. That alias is not a separate physical host or PKI
+identity. All earlier unbounded-runner scenarios remain selected as well.

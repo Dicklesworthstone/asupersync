@@ -207,6 +207,24 @@ impl Drop for CheckedLease {
 }
 struct Exchange { remote: RemoteHandle, lease: CheckedLease }
 
+// Field drop order retires the complete proxy future (including remote handle
+// and checked token) before its share of outbound admission. The calling scope
+// independently retains the other share through child-region close.
+#[pin_project::pin_project]
+struct AdmittedProxy<F> {
+    #[pin]
+    future: F,
+    _admission: Option<admission::Permit>,
+}
+
+impl<F: Future> Future for AdmittedProxy<F> {
+    type Output = F::Output;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        self.project().future.poll(cx)
+    }
+}
+
 async fn execute(
     cx: Cx, node: NodeId, computation: ComputationName, input: RemoteInput,
     clock: TimerDriverHandle, deadline: Time,
@@ -278,6 +296,13 @@ pub async fn run_remote(
     cx: &Cx, node: NodeId, computation: ComputationName, input: RemoteInput,
     config: RemoteRunConfig,
 ) -> Result<RemoteRunReport, RemoteRunError> {
+    run_admitted(cx, node, computation, input, config, None).await
+}
+
+async fn run_admitted(
+    cx: &Cx, node: NodeId, computation: ComputationName, input: RemoteInput,
+    config: RemoteRunConfig, admission: Option<admission::Permit>,
+) -> Result<RemoteRunReport, RemoteRunError> {
     if cx.is_cancel_requested() { return Err(RemoteRunError::Cancelled); }
     let cap = cx.remote().ok_or(RemoteRunError::NoCapability)?;
     if cap.runtime().is_none() { return Err(RemoteRunError::NoRemoteRuntime); }
@@ -292,7 +317,11 @@ pub async fn run_remote(
     let mut trigger = stopped(cx, &clock, deadline);
     if trigger.is_none() {
         let timer = clock.clone();
-        match child.cx().spawn(move |task| execute(task, node, computation, input, timer, deadline)) {
+        let proxy_admission = admission.clone();
+        match child.cx().spawn(move |task| AdmittedProxy {
+            future: execute(task, node, computation, input, timer, deadline),
+            _admission: proxy_admission,
+        }) {
             Ok(task) => handle = Some(task),
             Err(error) => {
                 result = Some(Err(RemoteRunTaskError::Spawn(error)));
@@ -339,8 +368,16 @@ pub async fn run_remote(
     if matches!(trigger, RemoteRunTrigger::Finished) {
         if let Some(stop) = stopped(cx, &clock, deadline) { trigger = stop; }
     }
-    Ok(RemoteRunReport { trigger, task: result.expect("terminal classification"), close, cancel_error })
+    let report = RemoteRunReport { trigger, task: result.expect("terminal classification"), close, cancel_error };
+    drop(admission);
+    Ok(report)
 }
+
+mod admission;
+pub use admission::{
+    RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
+    RemoteExecutorError, RemotePeerLimits,
+};
 
 #[cfg(test)]
 mod tests;
