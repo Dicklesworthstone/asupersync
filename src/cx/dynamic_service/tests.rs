@@ -59,8 +59,9 @@ fn report<E>(exit: DynamicServiceExit<E>) -> DynamicSupervisorReport<E> {
 }
 
 #[test]
-fn detached_and_zero_request_capacity_refuse_without_fake_readiness() {
-    let cx = Cx::detached_cancel_context();
+fn missing_runtime_and_zero_request_capacity_refuse_without_fake_readiness() {
+    // Match the API's Cx<All> type without attaching a runtime gateway.
+    let cx = Cx::for_testing();
     assert!(matches!(cx.spawn_dynamic_supervisor_service::<()>(DynamicServiceConfig::new(2, 0)),
         Err(DynamicControlError::Configuration)));
     assert!(matches!(cx.spawn_dynamic_supervisor_service::<()>(DynamicServiceConfig::new(2, 1)),
@@ -255,7 +256,7 @@ fn closing_wakes_dequeued_requests_not_just_queued_ones() {
         signal: Arc::new(Signal::default()),
     });
     let client = DynamicSupervisorClient { shared: Arc::clone(&shared) };
-    let cx = Cx::detached_cancel_context();
+    let cx = Cx::for_testing();
     let mut wait = client.submit(&cx, Operation::Ready).unwrap();
     let dequeued = shared.mailbox.lock().queue.pop_front().unwrap();
     let counter = Arc::new(CountWake::default());
