@@ -5,9 +5,9 @@ use crate::cx::{ChildRegionSpec, Cx};
 use crate::distributed::membership::authority::{
     MAX_MEMBERSHIP_UPDATE_BYTES, MembershipApplied, MembershipControlError, MembershipStamp,
 };
+use crate::distributed::membership::owned::work::{MembershipWorkError, MembershipWorkReport};
 use crate::distributed::membership::owned::{
-    MembershipWorkError, MembershipWorkReport, OwnedMembershipController, OwnedMembershipError,
-    OwnedMembershipLease,
+    OwnedMembershipController, OwnedMembershipError, OwnedMembershipLease,
 };
 use crate::distributed::membership::service::MEMBERSHIP_SERVICE_COMPUTATION;
 use crate::distributed::{ComputationSchemaRegistryError, HasSchema, SchemaDescriptor};
