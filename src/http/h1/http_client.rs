@@ -1918,7 +1918,31 @@ impl HttpClient {
         body: &[u8],
         request_target: Option<String>,
         proxy_authorization: Option<&str>,
-        origin: &ParsedUrl,
+    ) -> Request {
+        self.build_request_with_origin(
+            method,
+            parsed,
+            extra_headers,
+            body,
+            request_target,
+            proxy_authorization,
+            None,
+        )
+    }
+
+    /// Like `build_request`, but `origin` (the ORIGINAL request URL) lets the
+    /// redirect path strip security-sensitive client-wide default headers when
+    /// the current `parsed` target is a different origin (br-asupersync-u957g0).
+    /// `origin = None` (the plain `build_request`) never strips.
+    fn build_request_with_origin(
+        &self,
+        method: &Method,
+        parsed: &ParsedUrl,
+        extra_headers: &[(String, String)],
+        body: &[u8],
+        request_target: Option<String>,
+        proxy_authorization: Option<&str>,
+        origin: Option<&ParsedUrl>,
     ) -> Request {
         let default_headers = &self.config.default_headers;
         // br-asupersync-u957g0: on a cross-origin redirect target, do NOT forward
@@ -1929,7 +1953,7 @@ impl HttpClient {
         // `strip_sensitive_headers_on_redirect` for per-request headers. `origin` is
         // the ORIGINAL request URL (== `parsed` on the initial request), so a
         // same-origin redirect keeps its credentials.
-        let cross_origin = !same_origin(origin, parsed);
+        let cross_origin = origin.is_some_and(|o| !same_origin(o, parsed));
         // A cross-origin target's default Cookie is stripped, but the host-scoped
         // cookie jar must still supply the CORRECT cookie for the new host — so a
         // stripped default Cookie/Proxy-Authorization must not suppress the jar/proxy
