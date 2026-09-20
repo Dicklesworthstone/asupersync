@@ -1,8 +1,13 @@
 //! Panic isolation framework for structured concurrency runtime.
 //!
-//! This module provides comprehensive panic isolation that prevents individual
-//! task panics from corrupting runtime state or crashing the entire system.
-//! It leverages region boundaries for isolation and enables graceful degradation.
+//! Isolates unwinding operation panics and preserves their original context even
+//! when reporting callbacks or panic-payload destructors also panic. Reporting
+//! failures are counted independently rather than recursively reported.
+//!
+//! This cannot contain aborting panics, panicking panic hooks, double panics
+//! during unwinding, or callbacks/destructors that never return. If destroying a
+//! caught payload panics, the secondary payload is deliberately forgotten: one
+//! destructor attempt bounds the work, but may leak that secondary payload.
 
 use crate::observability::metrics::MetricsProvider;
 use crate::types::{ObligationId, Outcome, RegionId, TaskId, outcome::PanicPayload};
@@ -182,6 +187,8 @@ pub struct PanicIsolator {
     config: PanicIsolationConfig,
     metrics: Arc<dyn MetricsProvider>,
     region_panic_counts: Mutex<BTreeMap<RegionId, u32>>,
+    suppressed_observer_panics: AtomicU64,
+    suppressed_payload_drop_panics: AtomicU64,
 }
 
 impl PanicIsolator {
@@ -191,7 +198,29 @@ impl PanicIsolator {
             config,
             metrics,
             region_panic_counts: Mutex::new(BTreeMap::new()),
+            suppressed_observer_panics: AtomicU64::new(0),
+            suppressed_payload_drop_panics: AtomicU64::new(0),
         }
+    }
+
+    /// Number of unwinding logging/metrics callback panics contained here.
+    ///
+    /// Read directly rather than through the potentially failing observer. This
+    /// diagnostic counter does not synchronize runtime state or count toward a
+    /// region's primary-operation panic threshold.
+    #[must_use]
+    pub fn suppressed_observer_panics(&self) -> u64 {
+        self.suppressed_observer_panics.load(Ordering::Relaxed)
+    }
+
+    /// Number of caught panic payloads whose destruction also panicked.
+    ///
+    /// Each such failure forgets the secondary payload without trying its
+    /// destructor. This bounds disposal work per failure, not aggregate leaked
+    /// memory when user code repeatedly supplies hostile payloads.
+    #[must_use]
+    pub fn suppressed_payload_drop_panics(&self) -> u64 {
+        self.suppressed_payload_drop_panics.load(Ordering::Relaxed)
     }
 
     /// Isolate panic-prone task execution.
@@ -312,34 +341,56 @@ impl PanicIsolator {
     {
         if let Some((reason, context)) = self.skip_context_for_threshold(&location) {
             if self.config.enable_panic_logging {
-                self.report_skip(&reason, &context);
+                self.run_observer(|| self.report_skip(&reason, &context));
             }
             return PanicIsolationResult::Skipped { reason, context };
         }
 
         match std::panic::catch_unwind(AssertUnwindSafe(operation)) {
             Ok(result) => PanicIsolationResult::Success(result),
-            Err(panic_payload) => {
-                // br-asupersync-h0pfb4: Relaxed suffices for unique-counter
-                // semantics — the returned id is not used as a fence for
-                // any other shared state. Saves a full memory barrier on
-                // weakly-ordered architectures (aarch64, RISC-V).
-                let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let context = self.create_panic_context(panic_id, location, &panic_payload);
-                self.record_region_panic(&context);
+            Err(panic_payload) => self.handle_panic(location, panic_payload),
+        }
+    }
 
-                // Report panic to observability system
-                if self.config.enable_panic_logging {
-                    self.report_panic(&context);
-                }
+    fn handle_panic<T>(
+        &self,
+        location: PanicLocation,
+        panic_payload: Box<dyn std::any::Any + Send>,
+    ) -> PanicIsolationResult<T> {
+        // Relaxed suffices for unique-counter semantics; IDs are not fences.
+        let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let context = self.create_panic_context(panic_id, location, &panic_payload);
+        self.record_region_panic(&context);
 
-                // Update metrics — UFCS to disambiguate from the trait
-                // `MetricsProvider::record_panic(&'static str)` that was
-                // added in br-asupersync-zcu3c4.
-                MetricsProviderPanicExt::record_panic(&*self.metrics, &context);
+        // Commit the original context/count before running any foreign code.
+        // No region-counter guard survives into disposal or observer dispatch.
+        self.discard_panic_payload(panic_payload);
+        if self.config.enable_panic_logging {
+            self.run_observer(|| self.report_panic(&context));
+        }
+        // A logging failure must not suppress the independent metrics attempt.
+        // UFCS distinguishes this adapter from MetricsProvider::record_panic.
+        self.run_observer(|| MetricsProviderPanicExt::record_panic(&*self.metrics, &context));
 
-                PanicIsolationResult::Panicked(context)
-            }
+        PanicIsolationResult::Panicked(context)
+    }
+
+    fn run_observer(&self, observer: impl FnOnce()) {
+        if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(observer)) {
+            self.suppressed_observer_panics
+                .fetch_add(1, Ordering::Relaxed);
+            // Reporting this through the same observer could recurse forever.
+            self.discard_panic_payload(payload);
+        }
+    }
+
+    fn discard_panic_payload(&self, payload: Box<dyn std::any::Any + Send>) {
+        if let Err(secondary) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+            self.suppressed_payload_drop_panics
+                .fetch_add(1, Ordering::Relaxed);
+            // Arbitrary payload destructors can panic with another instance of
+            // themselves. Never recursively dispose that secondary payload.
+            std::mem::forget(secondary);
         }
     }
 
@@ -602,6 +653,7 @@ mod tests {
 
     #[derive(Default)]
     struct CapturingMetrics {
+        on_panic: Option<Box<dyn Fn(&'static str) + Send + Sync>>,
         panics: StdMutex<Vec<&'static str>>,
         tasks_spawned: StdMutex<Vec<(RegionId, TaskId)>>,
         tasks_completed: StdMutex<
@@ -780,6 +832,9 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(location);
+            if let Some(observer) = &self.on_panic {
+                observer(location);
+            }
         }
     }
 
@@ -1279,5 +1334,188 @@ mod tests {
             cancellation_requests[0],
             (region_id, crate::types::CancelKind::User)
         );
+    }
+
+    fn quiet_isolator(metrics: Arc<dyn MetricsProvider>) -> PanicIsolator {
+        PanicIsolator::new(
+            PanicIsolationConfig {
+                capture_backtraces: false,
+                enable_panic_logging: false,
+                panic_threshold_per_region: Some(2),
+                ..Default::default()
+            },
+            metrics,
+        )
+    }
+
+    struct PanickingPayload(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Drop for PanickingPayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            panic!("payload destructor panic");
+        }
+    }
+
+    #[test]
+    fn panicking_metrics_preserve_primary_context_and_region_accounting() {
+        let metrics = Arc::new(CapturingMetrics {
+            on_panic: Some(Box::new(|_| panic!("metrics observer panic"))),
+            ..Default::default()
+        });
+        let isolator = quiet_isolator(metrics.clone());
+        let task = TaskId::from_arena(ArenaIndex::new(11, 0));
+        let region = RegionId::from_arena(ArenaIndex::new(12, 0));
+
+        let result = isolator.isolate_task_execution(task, region, 1, || {
+            panic!("original task panic");
+        });
+        let context = result.panic_context().expect("original panic is retained");
+        assert_eq!(context.panic_message.as_deref(), Some("original task panic"));
+        assert_eq!(context.task_id, Some(task));
+        assert_eq!(context.region_id, Some(region));
+        assert_eq!(metrics.panics_captured(), vec!["task_execution"]);
+        assert_eq!(isolator.suppressed_observer_panics(), 1);
+        assert_eq!(isolator.suppressed_payload_drop_panics(), 0);
+        assert_eq!(isolator.region_panic_counts.lock().get(&region), Some(&1));
+        // A secondary metrics panic must not exhaust the two-panic threshold.
+        assert_eq!(
+            isolator
+                .isolate_task_execution(task, region, 2, || 7)
+                .into_success(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn payload_destructor_panic_does_not_escape_or_suppress_metrics() {
+        let metrics = Arc::new(CapturingMetrics::default());
+        let isolator = quiet_isolator(metrics.clone());
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let payload = PanickingPayload(drops.clone());
+        let region = RegionId::from_arena(ArenaIndex::new(13, 0));
+        let result = isolator.isolate_finalizer_execution(region, FinalizerType::Sync, || {
+            std::panic::panic_any(payload);
+        });
+
+        assert!(result.is_panicked());
+        assert_eq!(
+            result.panic_context().unwrap().panic_message.as_deref(),
+            Some("Non-string panic payload")
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(metrics.panics_captured(), vec!["finalizer_execution"]);
+        assert_eq!(isolator.suppressed_observer_panics(), 0);
+        assert_eq!(isolator.suppressed_payload_drop_panics(), 1);
+        assert_eq!(isolator.region_panic_counts.lock().get(&region), Some(&1));
+    }
+
+    #[test]
+    fn observer_payload_destructor_panic_is_also_contained() {
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observer_drops = drops.clone();
+        let metrics = Arc::new(CapturingMetrics {
+            on_panic: Some(Box::new(move |_| {
+                std::panic::panic_any(PanickingPayload(observer_drops.clone()));
+            })),
+            ..Default::default()
+        });
+        let isolator = quiet_isolator(metrics);
+        let result = isolator.isolate_scheduler_operation(None, "poll".into(), || {
+            panic!("primary scheduler panic");
+        });
+
+        assert_eq!(
+            result.panic_context().unwrap().panic_message.as_deref(),
+            Some("primary scheduler panic")
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(isolator.suppressed_observer_panics(), 1);
+        assert_eq!(isolator.suppressed_payload_drop_panics(), 1);
+    }
+
+    #[test]
+    fn recursively_panicking_payload_gets_only_one_destructor_attempt() {
+        struct RecursivePayload(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for RecursivePayload {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                std::panic::panic_any(Self(self.0.clone()));
+            }
+        }
+
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let isolator = quiet_isolator(Arc::new(NoOpMetrics));
+        let payload = RecursivePayload(drops.clone());
+        let caught = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            isolator.isolate_scheduler_operation(None, "poll".into(), || {
+                std::panic::panic_any(payload);
+            })
+        }));
+        let result = match caught {
+            Ok(result) => result,
+            Err(escaped) => {
+                // Keep the negative control from aborting the test process by
+                // dropping this intentionally self-reproducing panic payload.
+                std::mem::forget(escaped);
+                panic!("payload destructor escaped panic isolation");
+            }
+        };
+        assert!(result.is_panicked());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(isolator.suppressed_payload_drop_panics(), 1);
+    }
+
+    #[test]
+    fn failed_observer_does_not_prevent_independent_observer_dispatch() {
+        let isolator = quiet_isolator(Arc::new(NoOpMetrics));
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        isolator.run_observer(|| panic!("first observer"));
+        isolator.run_observer(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(isolator.suppressed_observer_panics(), 1);
+        assert!(isolator.region_panic_counts.lock().is_empty());
+    }
+
+    #[test]
+    fn metrics_observer_can_reenter_after_primary_accounting_is_published() {
+        let slot = Arc::new(StdMutex::new(std::sync::Weak::<PanicIsolator>::new()));
+        let observer_slot = slot.clone();
+        let region = RegionId::from_arena(ArenaIndex::new(14, 0));
+        let metrics = Arc::new(CapturingMetrics {
+            on_panic: Some(Box::new(move |_| {
+                let isolator = observer_slot.lock().unwrap().upgrade().unwrap();
+                {
+                    let counts = isolator
+                        .region_panic_counts
+                        .try_lock()
+                        .expect("observer must not run under the counter lock");
+                    assert_eq!(counts.get(&region), Some(&1));
+                }
+                assert_eq!(
+                    isolator
+                        .isolate_region_cleanup(region, CleanupPhase::ResourceCleanup, || 9)
+                        .into_success(),
+                    Some(9)
+                );
+            })),
+            ..Default::default()
+        });
+        let isolator = Arc::new(quiet_isolator(metrics.clone()));
+        *slot.lock().unwrap() = Arc::downgrade(&isolator);
+        let result = isolator.isolate_task_execution(
+            TaskId::from_arena(ArenaIndex::new(15, 0)),
+            region,
+            1,
+            || panic!("primary"),
+        );
+        assert!(result.is_panicked());
+        assert_eq!(metrics.panics_captured(), vec!["task_execution"]);
+        // Assertions inside observers must not be silently swallowed by the
+        // boundary being tested.
+        assert_eq!(isolator.suppressed_observer_panics(), 0);
+        assert_eq!(isolator.suppressed_payload_drop_panics(), 0);
     }
 }
