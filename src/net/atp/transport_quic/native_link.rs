@@ -8434,9 +8434,11 @@ async fn run_sender_session(
                     peer: link.peer,
                 });
             }
-            super::DeltaWireMode::DeltaChunks => unreachable!(
-                "validate_quic_delta_request rejects missing-chunk mode in this rollout"
-            ),
+            super::DeltaWireMode::DeltaChunks => {
+                return Err(QuicTransportError::Control(
+                    "QUIC missing-chunk mode passed strict request validation".to_string(),
+                ));
+            }
         }
     }
     if let Some(source_stream) = source_stream {
@@ -10839,9 +10841,11 @@ async fn run_receiver_session(
                     peer: link.peer,
                 });
             }
-            super::DeltaWireMode::DeltaChunks => unreachable!(
-                "build_quic_receiver_delta_request never emits missing-chunk mode in this rollout"
-            ),
+            super::DeltaWireMode::DeltaChunks => {
+                return Err(QuicTransportError::Control(
+                    "QUIC receiver selected unsupported missing-chunk mode".to_string(),
+                ));
+            }
         }
     }
 
