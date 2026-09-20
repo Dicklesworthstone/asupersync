@@ -193,12 +193,12 @@ struct Reply<E> {
     waker: Option<Waker>,
     abandoned: bool,
     received: bool,
+    credit: Option<Credit>,
 }
 
 struct Request<E> {
     reply: Mutex<Reply<E>>,
     signal: Arc<Signal>,
-    _credit: Credit,
 }
 impl<E> Request<E> {
     fn disposition(&self) -> (bool, bool) {
@@ -236,18 +236,24 @@ impl<E> Future for RequestWait<'_, E> {
             return Poll::Ready(Err(cancelled(this.cx)));
         }
         let replacement = cx.waker().clone();
-        let (value, old) = {
+        let (value, old, credit) = {
             let mut reply = this.request.reply.lock();
             let value = reply.value.take();
             if value.is_some() { reply.received = true; }
+            let credit = if value.is_some() { reply.credit.take() } else { None };
             let old = if value.is_none() {
                 reply.waker.replace(replacement)
             } else {
                 // Retire the unused clone after releasing the reply lock.
                 Some(replacement)
             };
-            (value, old)
+            (value, old, credit)
         };
+        // A claimed response is no longer outstanding, even if the controller
+        // retains its delivery Arc until its next poll. Return capacity before
+        // Ready so the caller can immediately submit the next bounded request.
+        // Abandoned/unclaimed starts retain their credit until cleanup finishes.
+        drop(credit);
         callback(|| drop(old));
         if let Some(value) = value {
             this.finished = true;
@@ -374,8 +380,8 @@ impl<E> DynamicSupervisorClient<E> {
         if self.is_closed() { return Err(DynamicControlError::Closed); }
         let credit = Credit::acquire(&self.shared.credits)?;
         let request = Arc::new(Request {
-            reply: Mutex::new(Reply { value: None, waker: None, abandoned: false, received: false }),
-            signal: Arc::clone(&self.shared.signal), _credit: credit,
+            reply: Mutex::new(Reply { value: None, waker: None, abandoned: false, received: false, credit: Some(credit) }),
+            signal: Arc::clone(&self.shared.signal),
         });
         // Build the abandonment guard before publication, including unwind paths.
         let wait = RequestWait { request: Arc::clone(&request), cx, cancel_waker: None, finished: false };

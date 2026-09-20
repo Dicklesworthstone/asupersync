@@ -129,6 +129,7 @@ fn saturated_wait_capacity_cannot_block_the_stop_needed_by_the_wait() {
         assert!(completion.close.is_ok());
         eventually(|| client.children().is_empty() && client.outstanding_requests() == 0).await;
         let replacement = client.start_worker(&cx, "worker", config(), parked).await.unwrap();
+        assert_eq!(client.outstanding_requests(), 0, "claimed admission returns credit before Ready");
         assert_ne!(replacement, id);
         assert!(matches!(client.request_stop(&id), Err(DynamicControlError::StaleChild)));
         stopped(client.terminate_child(&cx, &replacement).await.unwrap());
@@ -170,6 +171,7 @@ fn abandoned_unclaimed_start_is_drained_and_returns_all_credit_without_another_c
         drop(wait);
         eventually(|| client.children().is_empty() && client.outstanding_requests() == 0).await;
         let id = client.start_worker(&cx, "replacement", config(), parked).await.unwrap();
+        assert_eq!(client.outstanding_requests(), 0, "claimed admission returns credit before Ready");
         stopped(client.terminate_child(&cx, &id).await.unwrap());
         report(service.shutdown().await);
     });
