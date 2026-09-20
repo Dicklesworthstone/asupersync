@@ -1305,7 +1305,7 @@ impl HttpClient {
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
-        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0, 0);
+        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, None, 0, 0);
         drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
     }
 
@@ -1330,7 +1330,7 @@ impl HttpClient {
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let parsed = ParsedUrl::parse(url)?;
-        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, 0, 0);
+        let fut = self.execute_with_redirects(cx, method, parsed, extra_headers, body, None, 0, 0);
         drive_with_budget_deadline(cx, self.config.request_timeout, Some(timeout), fut).await
     }
 
@@ -1362,7 +1362,8 @@ impl HttpClient {
         // The budget deadline bounds the exchange through the response
         // head; streaming the body afterwards is governed by the budget
         // through the caller's own checkpoints.
-        let fut = self.execute_with_redirects_streaming(cx, method, parsed, extra_headers, body, 0);
+        let fut =
+            self.execute_with_redirects_streaming(cx, method, parsed, extra_headers, body, None, 0);
         drive_with_budget_deadline(cx, self.config.request_timeout, None, fut).await
     }
 
@@ -1412,6 +1413,7 @@ impl HttpClient {
         parsed: ParsedUrl,
         extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
+        origin: Option<ParsedUrl>,
         redirect_count: u32,
         retry_count: u32,
     ) -> std::pin::Pin<
@@ -1419,8 +1421,15 @@ impl HttpClient {
     > {
         Box::pin(async move {
             check_cx(cx)?;
-            let resp =
-                Box::pin(self.execute_single(cx, &method, &parsed, &extra_headers, &body)).await?;
+            let resp = Box::pin(self.execute_single(
+                cx,
+                &method,
+                &parsed,
+                &extra_headers,
+                &body,
+                origin.as_ref(),
+            ))
+            .await?;
 
             // Check for redirect
             if is_redirect(resp.status) {
@@ -1461,6 +1470,12 @@ impl HttpClient {
                                 extra_headers,
                             );
 
+                            // Pin the credential origin to the first request's
+                            // URL for the whole chain, so client-wide default
+                            // Authorization/Cookie headers are re-attached only
+                            // when a later hop lands back on that exact origin.
+                            let next_origin = Some(origin.unwrap_or_else(|| parsed.clone()));
+
                             return self
                                 .execute_with_redirects(
                                     cx,
@@ -1468,6 +1483,7 @@ impl HttpClient {
                                     next_parsed,
                                     next_headers,
                                     next_body,
+                                    next_origin,
                                     redirect_count.saturating_add(1),
                                     retry_count,
                                 )
@@ -1490,6 +1506,7 @@ impl HttpClient {
                         parsed,
                         extra_headers,
                         body,
+                        origin,
                         redirect_count,
                         retry_count.saturating_add(1),
                     )
@@ -1508,6 +1525,7 @@ impl HttpClient {
         parsed: ParsedUrl,
         extra_headers: Vec<(String, String)>,
         body: Vec<u8>,
+        origin: Option<ParsedUrl>,
         redirect_count: u32,
     ) -> std::pin::Pin<
         Box<
@@ -1519,7 +1537,7 @@ impl HttpClient {
         Box::pin(async move {
             check_cx(cx)?;
             let resp = self
-                .execute_single_streaming(cx, &method, &parsed, &extra_headers, &body)
+                .execute_single_streaming(cx, &method, &parsed, &extra_headers, &body, origin.as_ref())
                 .await?;
 
             // Check for redirect
@@ -1565,6 +1583,10 @@ impl HttpClient {
                                 extra_headers,
                             );
 
+                            // Pin the credential origin to the first request's
+                            // URL for the whole chain (see the buffered path).
+                            let next_origin = Some(origin.unwrap_or_else(|| parsed.clone()));
+
                             return self
                                 .execute_with_redirects_streaming(
                                     cx,
@@ -1572,6 +1594,7 @@ impl HttpClient {
                                     next_parsed,
                                     next_headers,
                                     next_body,
+                                    next_origin,
                                     redirect_count.saturating_add(1),
                                 )
                                 .await;
@@ -1592,15 +1615,17 @@ impl HttpClient {
         parsed: &ParsedUrl,
         extra_headers: &[(String, String)],
         body: &[u8],
+        origin: Option<&ParsedUrl>,
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         if let Some(proxy_url) = self.config.proxy_url.as_deref() {
             return self
-                .execute_single_with_proxy(cx, method, parsed, extra_headers, body, proxy_url)
+                .execute_single_with_proxy(cx, method, parsed, extra_headers, body, proxy_url, origin)
                 .await;
         }
 
-        let req = self.build_request(method, parsed, extra_headers, body, None, None);
+        let req =
+            self.build_request_with_origin(method, parsed, extra_headers, body, None, None, origin);
         let request_forbids_reuse = request_forbids_connection_reuse(&req.headers);
 
         let key = parsed.pool_key();
@@ -1651,6 +1676,7 @@ impl HttpClient {
                             parsed,
                             extra_headers,
                             body,
+                            origin,
                         )
                         .await;
                 }
@@ -1667,8 +1693,10 @@ impl HttpClient {
         parsed: &ParsedUrl,
         extra_headers: &[(String, String)],
         body: &[u8],
+        origin: Option<&ParsedUrl>,
     ) -> Result<Response, ClientError> {
-        let req = self.build_request(method, parsed, extra_headers, body, None, None);
+        let req =
+            self.build_request_with_origin(method, parsed, extra_headers, body, None, None, origin);
         let request_forbids_reuse = request_forbids_connection_reuse(&req.headers);
         let key = parsed.pool_key();
         let acquired = self.acquire_connection(cx, parsed).await?;
@@ -1712,6 +1740,7 @@ impl HttpClient {
         parsed: &ParsedUrl,
         extra_headers: &[(String, String)],
         body: &[u8],
+        origin: Option<&ParsedUrl>,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         check_cx(cx)?;
         if let Some(proxy_url) = self.config.proxy_url.as_deref() {
@@ -1723,11 +1752,13 @@ impl HttpClient {
                     extra_headers,
                     body,
                     proxy_url,
+                    origin,
                 )
                 .await;
         }
 
-        let req = self.build_request(method, parsed, extra_headers, body, None, None);
+        let req =
+            self.build_request_with_origin(method, parsed, extra_headers, body, None, None, origin);
 
         let stream = self.connect_io(cx, parsed).await?;
         check_cx(cx)?;
@@ -1749,6 +1780,7 @@ impl HttpClient {
         extra_headers: &[(String, String)],
         body: &[u8],
         proxy_url: &str,
+        origin: Option<&ParsedUrl>,
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let proxy = parse_proxy_endpoint(proxy_url)?;
@@ -1759,13 +1791,14 @@ impl HttpClient {
         } else {
             None
         };
-        let req = self.build_request(
+        let req = self.build_request_with_origin(
             method,
             parsed,
             extra_headers,
             body,
             request_target,
             proxy_conn.proxy_authorization.as_deref(),
+            origin,
         );
         let (response, _io, _body_withheld) = if let Some(max_body_size) = self.config.max_body_size
         {
@@ -1787,6 +1820,7 @@ impl HttpClient {
         extra_headers: &[(String, String)],
         body: &[u8],
         proxy_url: &str,
+        origin: Option<&ParsedUrl>,
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         check_cx(cx)?;
         let proxy = parse_proxy_endpoint(proxy_url)?;
@@ -1797,13 +1831,14 @@ impl HttpClient {
         } else {
             None
         };
-        let req = self.build_request(
+        let req = self.build_request_with_origin(
             method,
             parsed,
             extra_headers,
             body,
             request_target,
             proxy_conn.proxy_authorization.as_deref(),
+            origin,
         );
         let resp = if let Some(max_body_size) = self.config.max_body_size {
             Http1Client::request_streaming_with_max_body_size(proxy_conn.io, req, max_body_size)
@@ -4795,6 +4830,112 @@ mod tests {
         assert_eq!(
             get_header(&req.headers, "proxy-authorization"),
             Some("Basic Y2xpZW50".to_string())
+        );
+    }
+
+    #[test]
+    fn build_request_with_origin_strips_default_credentials_cross_origin() {
+        // br-asupersync-u957g0: client-wide DEFAULT sensitive headers
+        // (Authorization / Cookie / Proxy-Authorization) are re-applied on every
+        // hop by `build_request`. Without an origin check they leak to a redirect
+        // target of a DIFFERENT origin (a different host, or an https->http
+        // downgrade). They must be stripped cross-origin, but survive the initial
+        // request and a same-origin redirect. Non-sensitive default headers are
+        // always forwarded.
+        let client = HttpClient::builder()
+            .default_header("Authorization", "Bearer super-secret")
+            .default_header("Cookie", "session=leak-me")
+            .default_header("Proxy-Authorization", "Basic ZGVmYXVsdA==")
+            .default_header("X-Trace-Id", "keep-me")
+            .build();
+
+        let origin = ParsedUrl::parse("https://api.example.com/start").expect("valid URL");
+
+        // Case 1: the initial request (origin = None) keeps every default header.
+        let initial = ParsedUrl::parse("https://api.example.com/start").expect("valid URL");
+        let req =
+            client.build_request_with_origin(&Method::Get, &initial, &[], &[], None, None, None);
+        assert_eq!(
+            get_header(&req.headers, "authorization"),
+            Some("Bearer super-secret".to_string())
+        );
+        assert_eq!(
+            get_header(&req.headers, "cookie"),
+            Some("session=leak-me".to_string())
+        );
+        assert_eq!(
+            get_header(&req.headers, "proxy-authorization"),
+            Some("Basic ZGVmYXVsdA==".to_string())
+        );
+        assert_eq!(
+            get_header(&req.headers, "x-trace-id"),
+            Some("keep-me".to_string())
+        );
+
+        // Case 2: a same-origin redirect target keeps every default header.
+        let same = ParsedUrl::parse("https://api.example.com/next").expect("valid URL");
+        let req = client
+            .build_request_with_origin(&Method::Get, &same, &[], &[], None, None, Some(&origin));
+        assert_eq!(
+            get_header(&req.headers, "authorization"),
+            Some("Bearer super-secret".to_string())
+        );
+        assert_eq!(
+            get_header(&req.headers, "cookie"),
+            Some("session=leak-me".to_string())
+        );
+        assert_eq!(
+            get_header(&req.headers, "proxy-authorization"),
+            Some("Basic ZGVmYXVsdA==".to_string())
+        );
+
+        // Case 3: a different host is cross-origin — strip the sensitive default
+        // headers, but still forward the non-sensitive one.
+        let evil = ParsedUrl::parse("https://evil.test/callback").expect("valid URL");
+        let req = client
+            .build_request_with_origin(&Method::Get, &evil, &[], &[], None, None, Some(&origin));
+        assert_eq!(
+            get_header(&req.headers, "authorization"),
+            None,
+            "Authorization must not leak to a cross-origin redirect target"
+        );
+        assert_eq!(
+            get_header(&req.headers, "cookie"),
+            None,
+            "Cookie must not leak to a cross-origin redirect target"
+        );
+        assert_eq!(
+            get_header(&req.headers, "proxy-authorization"),
+            None,
+            "Proxy-Authorization must not leak to a cross-origin redirect target"
+        );
+        assert_eq!(
+            get_header(&req.headers, "x-trace-id"),
+            Some("keep-me".to_string()),
+            "a non-sensitive default header is still forwarded cross-origin"
+        );
+
+        // Case 4: an https->http downgrade to the SAME host is a different origin
+        // and must strip the same sensitive default headers.
+        let downgrade = ParsedUrl::parse("http://api.example.com/start").expect("valid URL");
+        let req = client.build_request_with_origin(
+            &Method::Get,
+            &downgrade,
+            &[],
+            &[],
+            None,
+            None,
+            Some(&origin),
+        );
+        assert_eq!(
+            get_header(&req.headers, "authorization"),
+            None,
+            "an https->http downgrade must strip Authorization"
+        );
+        assert_eq!(
+            get_header(&req.headers, "cookie"),
+            None,
+            "an https->http downgrade must strip Cookie"
         );
     }
 
