@@ -244,3 +244,6 @@ impl Drop for Charge {
 
 #[cfg(test)]
 mod tests;
+
+mod service;
+pub use service::RemoteServiceAdmission;
