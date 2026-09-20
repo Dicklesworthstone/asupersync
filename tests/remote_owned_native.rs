@@ -76,7 +76,7 @@ fn exercise(workers: usize, case: Case) {
 }
 
 async fn invoke(
-    executor: &Option<RemoteExecutor>, cx: &Cx, destination: &str, name: &str,
+    executor: Option<&RemoteExecutor>, cx: &Cx, destination: &str, name: &str,
     input: RemoteInput, config: RemoteRunConfig,
 ) -> Result<RemoteRunReport, RemoteExecutorError> {
     match executor {
@@ -160,14 +160,14 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
         let work_input = if bounded { vec![1; 8] } else { Vec::new() };
 
         if matches!(case, Case::Success) {
-            let report = invoke(&executor, &cx, "worker", "echo",
+            let report = invoke(executor.as_ref(), &cx, "worker", "echo",
                 RemoteInput::new(b"native-secret".to_vec()), config()).await.unwrap();
             assert!(report.is_success(), "{report:?}");
             assert!(!format!("{report:?}").contains("native-secret"));
             assert!(matches!(report.task.unwrap().outcome, Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == b"native-secret"));
             assert_eq!(remote.active_operations(), 0);
         } else if matches!(case, Case::Drop) {
-            let mut running = Box::pin(invoke(&executor, &cx, "worker", "wait", RemoteInput::new(work_input), config()));
+            let mut running = Box::pin(invoke(executor.as_ref(), &cx, "worker", "wait", RemoteInput::new(work_input), config()));
             let mut started = std::pin::pin!(witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire)));
             asupersync::time::timeout(cx.now(), Duration::from_secs(5), poll_fn(|task| {
                 assert!(running.as_mut().poll(task).is_pending()); started.as_mut().poll(task)
@@ -198,7 +198,7 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
             if matches!(case, Case::Deadline) { bounds.timeout = Duration::from_secs(2); }
             let owned_admission = executor.clone();
             let mut invocation = cx.spawn(move |owner| async move {
-                let result = invoke(&owned_admission, &owner, "worker", "wait", RemoteInput::new(work_input), bounds).await;
+                let result = invoke(owned_admission.as_ref(), &owner, "worker", "wait", RemoteInput::new(work_input), bounds).await;
                 let _ = owner.checkpoint(); // Preserve the explicit cancellation report.
                 result
             }).unwrap();
@@ -217,7 +217,7 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
             // cancelling one scope never calls global begin_drain/close.
             if let Some(executor) = &executor { assert_peer_still_charged(executor, &cx).await; }
             let destination = if bounded { "other" } else { "worker" };
-            let other = invoke(&executor, &cx, destination, "echo",
+            let other = invoke(executor.as_ref(), &cx, destination, "echo",
                 RemoteInput::new(b"unrelated".to_vec()), config()).await.unwrap();
             assert!(other.is_success()); assert_eq!(remote.active_operations(), 1);
             witness.release.store(true, Ordering::Release); witness.changed.notify_waiters();

@@ -9,7 +9,7 @@ use asupersync::remote::{ComputationName, IdempotencyKey, NodeId, RemoteComputat
     RemoteComputationClientConfig, RemoteComputationRegistry, RemoteComputationService,
     RemoteComputationServiceConfig, RemoteComputationServiceHandle, RemoteComputationSessionStart,
     RemoteInput, RemoteOutcome, RemotePeerAdmissionPolicy, RemotePeerHello, RemoteProtocolVersion,
-    RemoteServiceSessionCommand, RemoteServiceSessionEvent, RemoteServiceWireOutcome,
+    RemoteServiceSessionEvent, RemoteServiceWireOutcome,
     RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId, SpawnRequest};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::sync::Notify;
@@ -147,12 +147,14 @@ fn exercise(workers: usize, case: Case) {
         let mut first = match client.start_session(&cx, &wire(&cx, &a, "wait", &[1; 8], 1)).await.unwrap() {
             RemoteComputationSessionStart::Running(session) => session,
             RemoteComputationSessionStart::Terminal(response) => panic!("first session: {response:?}"),
+            _ => panic!("unexpected session start variant"),
         };
         asupersync::time::timeout(cx.now(), Duration::from_secs(3),
             witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire))).await.expect("parked live handler");
         let second = match client.start_session(&cx, &wire(&cx, &a, "echo", b"queued", 2)).await.unwrap() {
             RemoteComputationSessionStart::Running(session) => session,
             RemoteComputationSessionStart::Terminal(response) => panic!("queued session: {response:?}"),
+            _ => panic!("unexpected session start variant"),
         };
         let mut second = Some(second);
         queue_count(&cx, &admission, 1).await;
@@ -182,13 +184,12 @@ fn exercise(workers: usize, case: Case) {
                     assert_eq!(witness.factories.load(Ordering::SeqCst), 2);
                     witness.release(); cancelled(cancel.await.unwrap());
                 }
-                let event = second.as_mut().unwrap().exchange_event::<RemoteServiceSessionCommand>(&cx, None).await.unwrap();
-                let RemoteServiceSessionEvent::Terminal { response } = event else { panic!("expected queued terminal") };
+                let response = second.take().unwrap().wait(&cx).await.unwrap();
                 success(response, b"queued");
                 assert_eq!(witness.factories.load(Ordering::SeqCst), 3);
             }
             Case::CancelQueued => {
-                cancelled(second.as_mut().unwrap().cancel(&cx, CancelReason::user("cancel queued only")).await.unwrap());
+                cancelled(second.take().unwrap().cancel(&cx, CancelReason::user("cancel queued only")).await.unwrap());
                 queue_count(&cx, &admission, 0).await;
                 assert_eq!(witness.factories.load(Ordering::SeqCst), 2);
                 assert!(!witness.cancelled.load(Ordering::Acquire));
@@ -202,8 +203,7 @@ fn exercise(workers: usize, case: Case) {
                 witness.release(); cancelled(first.cancel(&cx, CancelReason::user("finish primary")).await.unwrap());
             }
             Case::DeadlineQueued => {
-                let event = second.as_mut().unwrap().exchange_event::<RemoteServiceSessionCommand>(&cx, None).await.unwrap();
-                let RemoteServiceSessionEvent::Terminal { response } = event else { panic!("expected queue timeout") };
+                let response = second.take().unwrap().wait(&cx).await.unwrap();
                 refused(response, "remote service admission refused: remote reservation deadline reached");
                 assert_eq!(admission.queue_usage(), RemoteQueueUsage::default());
                 assert_eq!(witness.factories.load(Ordering::SeqCst), 2);

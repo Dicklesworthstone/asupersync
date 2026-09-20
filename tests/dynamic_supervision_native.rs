@@ -9,7 +9,7 @@ use asupersync::runtime::RuntimeBuilder;
 use asupersync::supervision::{
     BackoffStrategy, ManagedGeneration, ManagedRestartMode, RestartPolicy, SupervisionConfig,
 };
-use asupersync::types::{Budget, Outcome};
+use asupersync::types::Outcome;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -29,8 +29,8 @@ fn native_journey(parallel: bool) {
     } else {
         RuntimeBuilder::current_thread().build().unwrap()
     };
-    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-    runtime.block_on_with_cx(cx.clone(), async move {
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("runtime root context");
         let mut controller = cx.spawn(|cx| async move {
             let mut owner = cx.open_dynamic_supervisor::<&'static str>(
                 DynamicSupervisorConfig::new(2),

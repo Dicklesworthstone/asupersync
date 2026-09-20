@@ -51,9 +51,7 @@ impl AsyncRead for TestStream {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.polls.set(this.polls.get() + 1);
-        if std::mem::take(&mut this.panic_read) {
-            panic!("inner read panic sentinel");
-        }
+        assert!(!std::mem::take(&mut this.panic_read), "inner read panic sentinel");
         if this.pending_read {
             return Poll::Pending;
         }

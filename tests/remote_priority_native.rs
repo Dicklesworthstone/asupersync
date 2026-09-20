@@ -11,7 +11,7 @@ use asupersync::remote::{ComputationName, IdempotencyKey, NodeId, RemoteComputat
     RemoteComputationClientConfig, RemoteComputationInvocation, RemoteComputationRegistry,
     RemoteComputationService, RemoteComputationServiceConfig, RemoteComputationServiceHandle,
     RemoteComputationSessionStart, RemoteError, RemoteInput, RemoteOutcome, RemotePeerAdmissionPolicy,
-    RemotePeerHello, RemoteProtocolVersion, RemoteServiceSessionCommand, RemoteServiceSessionEvent,
+    RemotePeerHello, RemoteProtocolVersion, RemoteServiceSessionEvent,
     RemoteServiceWireOutcome, RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId, SpawnRequest};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::sync::Notify;
@@ -175,6 +175,7 @@ fn exercise(workers: usize, ordering: bool) {
             let session = match client.start_session(&cx, &wire(&cx, &hello, name, id, 100 + u128::from(id))).await.unwrap() {
                 RemoteComputationSessionStart::Running(session) => session,
                 RemoteComputationSessionStart::Terminal(response) => panic!("expected accepted session: {response:?}"),
+                _ => panic!("unexpected session start variant"),
             };
             sessions.push(Some(session));
             if id == 0 { parked(&cx, &witness, 0).await; }
@@ -201,23 +202,19 @@ fn exercise(workers: usize, ordering: bool) {
                     let extra = match client.start_session(&cx, &wire(&cx, &hello, "urgent", 5, 105)).await.unwrap() {
                         RemoteComputationSessionStart::Running(session) => session,
                         RemoteComputationSessionStart::Terminal(response) => panic!("expected queued urgent: {response:?}"),
+                        _ => panic!("unexpected session start variant"),
                     };
                     sessions.push(Some(extra)); queued(&cx, &admission, 3).await;
                 }
                 witness.release(id);
-                let event = sessions[usize::from(id)].as_mut().unwrap()
-                    .exchange_event::<RemoteServiceSessionCommand>(&cx, None).await.unwrap();
-                match event {
-                    RemoteServiceSessionEvent::Terminal { response } => success(response, id),
-                    other => panic!("expected exact terminal: {other:?}"),
-                }
-                drop(sessions[usize::from(id)].take());
+                let response = sessions[usize::from(id)].take().unwrap().wait(&cx).await.unwrap();
+                success(response, id);
             }
             assert_eq!(witness.dropped.load(Ordering::SeqCst), 6);
         } else {
             assert!(matches!(sessions[2].as_mut().unwrap().renew_lease(&cx, Duration::from_secs(30)).await.unwrap(),
                 RemoteServiceSessionEvent::LeaseRenewed { .. }));
-            let response = sessions[2].as_mut().unwrap().cancel(&cx, CancelReason::user("queued urgent cancelled")).await.unwrap();
+            let response = sessions[2].take().unwrap().cancel(&cx, CancelReason::user("queued urgent cancelled")).await.unwrap();
             assert!(matches!(response, RemoteServiceWireResponse::Outcome { outcome: RemoteServiceWireOutcome::Cancelled(_), .. }));
             drop(sessions[2].take()); queued(&cx, &admission, 2).await;
             drop(sessions[3].take()); queued(&cx, &admission, 1).await; // Actual TLS disconnect.
@@ -225,13 +222,8 @@ fn exercise(workers: usize, ordering: bool) {
             assert_eq!(admission.usage().in_flight, 1);
             for id in [0_u8, 1] {
                 parked(&cx, &witness, id).await; witness.release(id);
-                match sessions[usize::from(id)].as_mut().unwrap()
-                    .exchange_event::<RemoteServiceSessionCommand>(&cx, None).await.unwrap()
-                {
-                    RemoteServiceSessionEvent::Terminal { response } => success(response, id),
-                    other => panic!("expected terminal: {other:?}"),
-                }
-                drop(sessions[usize::from(id)].take());
+                let response = sessions[usize::from(id)].take().unwrap().wait(&cx).await.unwrap();
+                success(response, id);
             }
             assert_eq!(*witness.order.lock(), [0, 1]); assert_eq!(witness.dropped.load(Ordering::SeqCst), 2);
         }

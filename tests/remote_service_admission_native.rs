@@ -177,6 +177,7 @@ fn exercise(workers: usize, case: Case) {
                 let mut session = match client.start_session(&cx, &request).await.unwrap() {
                     RemoteComputationSessionStart::Running(session) => session,
                     RemoteComputationSessionStart::Terminal(response) => panic!("expected running V3 session: {response:?}"),
+                    _ => panic!("unexpected session start variant"),
                 };
                 asupersync::time::timeout(cx.now(), Duration::from_secs(3),
                     witness.changed.wait_until(|| witness.parked.load(Ordering::Acquire))).await.expect("actual parked handler");
