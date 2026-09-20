@@ -4,9 +4,9 @@
 //! protocol glue:
 //!
 //! - [`ReaderStream`]: `AsyncRead` -> `Stream<Item = io::Result<Vec<u8>>>`
-//! - [`StreamReader`]: `Stream<Item = io::Result<Vec<u8>>>` -> `AsyncRead`
+//! - [`StreamReader`]: `Stream<Item = io::Result<Vec<u8>>>` -> `AsyncRead` / `AsyncBufRead`
 
-use super::{AsyncRead, ReadBuf};
+use super::{AsyncBufRead, AsyncRead, ReadBuf};
 use crate::stream::Stream;
 use std::io;
 use std::pin::Pin;
@@ -93,7 +93,14 @@ impl<R: AsyncRead + Unpin> Stream for ReaderStream<R> {
     }
 }
 
-/// Adapts a byte stream into an [`AsyncRead`] implementation.
+/// Adapts a byte stream into [`AsyncRead`] and [`AsyncBufRead`] implementations.
+///
+/// Buffered reads borrow the current chunk without copying or consuming it.
+/// [`super::copy_buf`] consumes those bytes only after a successful write, so a
+/// dropped copy future leaves unwritten data in this adapter for a later retry.
+/// Keep the adapter itself alive: dropping it or calling `into_inner` discards
+/// any buffered remainder and deferred error. Empty chunks are not EOF; only
+/// the underlying stream's `None` ends the byte stream.
 #[derive(Debug)]
 pub struct StreamReader<S> {
     stream: S,
@@ -220,6 +227,64 @@ where
         }
     }
 }
+
+impl<S> AsyncBufRead for StreamReader<S>
+where
+    S: Stream<Item = io::Result<Vec<u8>>> + Unpin,
+{
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+        let this = self.get_mut();
+        if this.offset < this.current.len() {
+            return Poll::Ready(Ok(&this.current[this.offset..]));
+        }
+        // AsyncRead can observe an error after copying a prefix into its caller's
+        // buffer. Switching interfaces must not skip or reorder that error.
+        if let Some(error) = this.pending_error.take() {
+            return Poll::Ready(Err(error));
+        }
+        if this.done {
+            return Poll::Ready(Ok(&[]));
+        }
+
+        // A producer of immediately-ready empty chunks must not monopolize a
+        // worker. We have no bytes to report, so yield with a registered wake
+        // rather than returning an empty slice (which would falsely signal EOF).
+        for _ in 0..32 {
+            match Pin::new(&mut this.stream).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    this.done = true;
+                    return Poll::Ready(Ok(&[]));
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
+                Poll::Ready(Some(Ok(chunk))) => {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    this.current = chunk;
+                    this.offset = 0;
+                    return Poll::Ready(Ok(&this.current));
+                }
+            }
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    fn consume(self: Pin<&mut Self>, amount: usize) {
+        let this = self.get_mut();
+        // Clamp before addition to avoid overflow or consuming a future chunk.
+        this.offset += amount.min(this.current.len() - this.offset);
+        if this.offset == this.current.len() {
+            this.current.clear();
+            this.offset = 0;
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "stream_reader_buf_tests.rs"]
+mod buffered_tests;
 
 #[cfg(test)]
 mod tests {
