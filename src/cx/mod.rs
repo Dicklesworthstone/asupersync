@@ -61,6 +61,7 @@ pub mod cap;
 pub mod capacity_ticket;
 pub mod child_region;
 pub mod cx;
+pub mod dynamic_supervisor;
 pub mod macaroon;
 pub mod registry;
 pub mod scope;
@@ -82,6 +83,11 @@ pub(crate) use cx::CancelWakerToken;
 pub use cx::{
     BudgetStats, CapabilityLayerSnapshot, CapabilitySnapshot, CostBudgetStats, Cx,
     DeadlineBudgetStats, PollBudgetStats, SpanGuard,
+};
+pub use dynamic_supervisor::{
+    DynamicChildCompletion, DynamicChildId, DynamicChildInfo, DynamicChildState,
+    DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
+    DynamicSupervisorReport,
 };
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
