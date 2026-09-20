@@ -5013,8 +5013,15 @@ async fn maybe_attach_rq_delta_manifest(
     {
         return Ok(());
     }
-    let chunk_size_u64 = u64::try_from(RQ_DELTA_CHUNK_SIZE).unwrap_or(u64::MAX);
-    if manifest_entry.size.div_ceil(chunk_size_u64) > RQ_DELTA_MAX_MANIFEST_CHUNKS {
+    // br-asupersync-sizeku: content-defined chunks are as small as CDC min, so
+    // bound the chunk-count pre-check by CDC min (not RQ_DELTA_CHUNK_SIZE); else
+    // a large file passes here and then exceeds RQ_DELTA_MAX_MANIFEST_CHUNKS at
+    // build/validate time. This caps the max delta-eligible file at
+    // RQ_DELTA_MAX_MANIFEST_CHUNKS * CDC min.
+    let min_chunk_u64 =
+        u64::try_from(crate::net::atp::transport_common::delta::cdc::MIN_CHUNK_BYTES)
+            .unwrap_or(u64::MAX);
+    if manifest_entry.size.div_ceil(min_chunk_u64) > RQ_DELTA_MAX_MANIFEST_CHUNKS {
         return Ok(());
     }
     let delta = build_rq_delta_manifest_for_file(
@@ -6964,6 +6971,12 @@ fn validate_rq_delta_manifest(manifest: &TransferManifest) -> Result<(), RqError
         )));
     }
     let max_chunk_size = u64::try_from(delta.chunk_size).unwrap_or(u64::MAX);
+    // br-asupersync-sizeku: content-defined chunks are variable-size, so bound
+    // non-final chunks by [CDC min, CDC max] instead of exact == chunk_size. The
+    // merkle recommit below is the real integrity gate over the chunk content.
+    let min_chunk_size =
+        u64::try_from(crate::net::atp::transport_common::delta::cdc::MIN_CHUNK_BYTES)
+            .unwrap_or(u64::MAX);
     let mut planner_chunks = Vec::with_capacity(delta.chunks.len());
     let mut expected_offset = 0u64;
     for (position, chunk) in delta.chunks.iter().enumerate() {
@@ -6977,7 +6990,7 @@ fn validate_rq_delta_manifest(manifest: &TransferManifest) -> Result<(), RqError
             || chunk.stream_offset != expected_offset
             || chunk.size_bytes == 0
             || chunk.size_bytes > max_chunk_size
-            || (!is_final && chunk.size_bytes != max_chunk_size)
+            || (!is_final && chunk.size_bytes < min_chunk_size)
         {
             return Err(RqError::Frame(format!(
                 "malformed RQ delta chunk at position {position}"
