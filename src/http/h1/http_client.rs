@@ -1945,6 +1945,12 @@ impl HttpClient {
         }
     }
 
+    /// Convenience wrapper preserving the pre-u957g0 six-argument signature.
+    /// Production request paths call [`Self::build_request_with_origin`] directly
+    /// so they can pass the redirect origin; only the inline unit tests exercise
+    /// this shorthand, hence `#[cfg(test)]` (keeps it out of the non-test
+    /// `dead_code` frontier under `-D warnings`; br-asupersync-u957g0).
+    #[cfg(test)]
     fn build_request(
         &self,
         method: &Method,
@@ -3085,8 +3091,11 @@ fn redirect_policy_allows_target(
 /// strip below and the default-header filter in `build_request`
 /// (br-asupersync-u957g0).
 fn is_sensitive_redirect_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower == "authorization" || lower == "cookie" || lower == "proxy-authorization"
+    // `eq_ignore_ascii_case` avoids the per-header `String` allocation that
+    // `to_ascii_lowercase` would incur on every default header (br-asupersync-u957g0).
+    name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("cookie")
+        || name.eq_ignore_ascii_case("proxy-authorization")
 }
 
 /// Strip security-sensitive headers when redirecting to a different origin.
