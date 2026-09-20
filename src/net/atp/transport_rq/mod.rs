@@ -4884,70 +4884,57 @@ async fn build_rq_delta_manifest_for_file(
     expected_sha256_hex: &str,
     chunk_size: usize,
 ) -> Result<DeltaManifestWire, RqError> {
-    const OBJECT_DATA_HEADER_BYTES: usize = 12;
-    let max_chunk_size = usize::try_from(MAX_FRAME_SIZE)
-        .unwrap_or(usize::MAX)
-        .saturating_sub(OBJECT_DATA_HEADER_BYTES);
-    let chunk_size = chunk_size.max(1).min(max_chunk_size);
+    // br-asupersync-sizeku: content-defined (CDC) chunking. Boundaries come from
+    // the shared `delta::cdc` primitive over the whole file, so an insertion
+    // costs ~one new chunk and the shifted tail keeps its content ids (fixed-size
+    // chunking re-chunked every later byte). The `chunk_size` parameter is
+    // retained for signature stability; the wire chunk_size is the CDC max and
+    // boundaries derive from baked CDC constants (so sender and receiver agree
+    // without any wire-carried parameter).
+    let _ = chunk_size;
     let mut file = crate::fs::File::open(path)
         .await
         .map_err(|error| RqError::Source(format!("{}: {error}", path.display())))?;
-    let mut buf = vec![0u8; chunk_size];
-    let mut chunks = Vec::new();
-    let mut planner_chunks = Vec::new();
-    let mut offset = 0u64;
-    let mut index = 0u32;
-    let mut sha256 = Sha256::new();
-    let mut whole_content_id = ContentId::streaming();
+    // CDC needs the full byte stream to find content-defined boundaries. The
+    // file is bounded by the delta eligibility ceiling
+    // (RQ_DELTA_MAX_MANIFEST_CHUNKS * cdc::MIN_CHUNK_BYTES), so reading it whole
+    // is bounded. (A streaming CDC with a bounded carry buffer is a follow-up.)
+    let mut data: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; 128 * 1024];
     loop {
         cx.checkpoint().map_err(|_| RqError::Cancelled)?;
-        // A whole `chunk_size` chunk per iteration (asupersync-u4j7sr): one
-        // read of `crate::fs::File` returns at most 128 KiB.
         let read = crate::net::atp::transport_common::delta::read_full_chunk(&mut file, &mut buf)
             .await
             .map_err(|error| RqError::Source(format!("{}: {error}", path.display())))?;
         if read == 0 {
             break;
         }
-        let bytes = &buf[..read];
-        sha256.update(bytes);
-        whole_content_id.update(bytes);
-        let size_bytes = u64::try_from(read)
-            .map_err(|_| RqError::Control("RQ delta chunk size overflow".to_string()))?;
-        let content_id = ContentId::from_bytes(bytes);
-        planner_chunks.push(CasChunkRef {
-            index,
-            byte_offset: offset,
-            size_bytes,
-            content_id: content_id.clone(),
-        });
-        chunks.push(DeltaChunkWire {
-            index,
-            entry_index,
-            rel_path: rel_path.to_string(),
-            entry_offset: offset,
-            stream_offset: offset,
-            size_bytes,
-            content_id_hex: content_id.to_hex(),
-        });
-        index = index
-            .checked_add(1)
-            .ok_or_else(|| RqError::Control("RQ delta chunk index overflow".to_string()))?;
-        offset = offset
-            .checked_add(size_bytes)
-            .ok_or_else(|| RqError::Control("RQ delta chunk offset overflow".to_string()))?;
+        data.extend_from_slice(&buf[..read]);
+        if u64::try_from(data.len()).unwrap_or(u64::MAX) > expected_size {
+            return Err(RqError::Source(format!(
+                "{} grew while building RQ delta manifest (expected {expected_size} bytes)",
+                path.display()
+            )));
+        }
     }
-    if offset != expected_size {
+    if u64::try_from(data.len()).unwrap_or(u64::MAX) != expected_size {
         return Err(RqError::Source(format!(
-            "{} changed while building RQ delta manifest (read {offset} bytes, expected {expected_size})",
-            path.display()
+            "{} changed while building RQ delta manifest (read {} bytes, expected {expected_size})",
+            path.display(),
+            data.len()
         )));
     }
-    let content_sha256: [u8; 32] = sha256.finalize().into();
+
+    // Whole-file digests: identical to the previous incremental computation
+    // (a streaming hash is chunking-independent), so the tree_id / sha256
+    // guards below stay byte-for-byte equivalent.
+    let content_sha256: [u8; 32] = Sha256::digest(&data).into();
+    let mut whole_content_id = ContentId::streaming();
+    whole_content_id.update(&data);
     if hex_encode(&content_sha256) != expected_sha256_hex
         || flat_merkle_root_from_digests(&[EntryDigest {
             rel_path: rel_path.to_string(),
-            size: offset,
+            size: expected_size,
             content_id: crate::atp::object::ObjectId::content(whole_content_id.finalize()),
             content_sha256,
         }]) != tree_id
@@ -4957,12 +4944,41 @@ async fn build_rq_delta_manifest_for_file(
             path.display()
         )));
     }
+
+    let spans = crate::net::atp::transport_common::delta::cdc::chunk_spans(&data);
+    let mut chunks = Vec::with_capacity(spans.len());
+    let mut planner_chunks = Vec::with_capacity(spans.len());
+    for (position, &(offset, len)) in spans.iter().enumerate() {
+        let index = u32::try_from(position)
+            .map_err(|_| RqError::Control("RQ delta chunk index overflow".to_string()))?;
+        let byte_offset = u64::try_from(offset)
+            .map_err(|_| RqError::Control("RQ delta chunk offset overflow".to_string()))?;
+        let size_bytes = u64::try_from(len)
+            .map_err(|_| RqError::Control("RQ delta chunk size overflow".to_string()))?;
+        let content_id = ContentId::from_bytes(&data[offset..offset + len]);
+        planner_chunks.push(CasChunkRef {
+            index,
+            byte_offset,
+            size_bytes,
+            content_id: content_id.clone(),
+        });
+        chunks.push(DeltaChunkWire {
+            index,
+            entry_index,
+            rel_path: rel_path.to_string(),
+            entry_offset: byte_offset,
+            stream_offset: byte_offset,
+            size_bytes,
+            content_id_hex: content_id.to_hex(),
+        });
+    }
+
     let planner = PersistentChunkManifest::new(tree_id.to_string(), planner_chunks)
         .map_err(|error| RqError::Control(format!("build RQ delta manifest: {error}")))?;
     Ok(DeltaManifestWire {
         schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
         tree_id: tree_id.to_string(),
-        chunk_size,
+        chunk_size: crate::net::atp::transport_common::delta::cdc::MAX_CHUNK_BYTES,
         total_size_bytes: planner.total_size_bytes,
         merkle_root_hex: planner.merkle_root.to_hex(),
         chunks,
