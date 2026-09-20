@@ -219,10 +219,10 @@ impl<E> Child<E> {
         match &self.joined {
             Some(Ok(report)) => {
                 (report.region.is_none() || report.region_outcome.is_some())
-                    && !report.cleanup_outcome.as_ref().is_some_and(|outcome| !outcome.is_ok())
+                    && report.cleanup_outcome.as_ref().is_none_or(|outcome| outcome.is_ok())
                     && report.children.iter().all(|child| {
                         child.region_outcome.is_some()
-                            && !child.cleanup_outcome.as_ref().is_some_and(|outcome| !outcome.is_ok())
+                            && child.cleanup_outcome.as_ref().is_none_or(|outcome| outcome.is_ok())
                     })
             }
             // A before-first-poll cancellation may have no managed report.

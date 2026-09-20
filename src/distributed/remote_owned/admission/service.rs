@@ -294,18 +294,17 @@ where
     let child = cx.open_child_region(spec).await
         .map_err(|_| setup_error("remote service child-region admission refused"))?;
     let mut task = None;
-    let mut result = None;
-    if cx.checkpoint().is_err() {
-        result = Some(Ok(cancelled(&cx)));
+    let mut result = if cx.checkpoint().is_err() {
+        Some(Ok(cancelled(&cx)))
     } else {
         match child.cx().spawn(move |body| async move {
             if body.checkpoint().is_err() { return Ok(cancelled(&body)); }
             handler(body, invocation).await
         }) {
-            Ok(handle) => task = Some(handle),
-            Err(_) => result = Some(Err(setup_error("remote service handler admission refused"))),
+            Ok(handle) => { task = Some(handle); None }
+            Err(_) => Some(Err(setup_error("remote service handler admission refused"))),
         }
-    }
+    };
     if let Some(task) = task.as_mut() {
         let mut stop = std::pin::pin!(cx.cancelled());
         poll_fn(|context| {

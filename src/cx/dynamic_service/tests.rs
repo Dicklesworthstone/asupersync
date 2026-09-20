@@ -51,11 +51,20 @@ where
     assert!(lab.run_until_quiescent_with_report().lab_test_passed());
 }
 
-fn report<E>(exit: DynamicServiceExit<E>) -> DynamicSupervisorReport<E> {
+fn report<E>(exit: DynamicServiceExit<E>) {
     assert!(matches!(exit.task_outcome, Ok(()) | Err(JoinError::Cancelled(_))));
     let report = exit.report.expect("controller published actual shutdown").unwrap();
     assert!(report.close.is_ok());
-    report
+    assert!(report.children.is_empty());
+}
+
+fn stopped<E>(completion: DynamicChildCompletion<E>) {
+    assert!(completion.close.is_ok());
+    assert!(completion.stop_requested);
+    match completion.supervisor {
+        Ok(report) => assert!(matches!(report.outcome, Outcome::Ok(()) | Outcome::Cancelled(_))),
+        Err(error) => assert!(matches!(error, JoinError::Cancelled(_))),
+    }
 }
 
 #[test]
@@ -98,7 +107,7 @@ fn separate_tasks_admit_workers_and_receive_exact_typed_results() {
         }
         for mut producer in producers { producer.join(&cx).await.unwrap(); }
         eventually(|| client.children().is_empty() && client.outstanding_requests() == 0).await;
-        assert!(report(service.shutdown().await).children.is_empty());
+        report(service.shutdown().await);
         assert!(client.is_closed());
     });
 }
@@ -122,7 +131,7 @@ fn saturated_wait_capacity_cannot_block_the_stop_needed_by_the_wait() {
         let replacement = client.start_worker(&cx, "worker", config(), parked).await.unwrap();
         assert_ne!(replacement, id);
         assert!(matches!(client.request_stop(&id), Err(DynamicControlError::StaleChild)));
-        client.terminate_child(&cx, &replacement).await.unwrap();
+        stopped(client.terminate_child(&cx, &replacement).await.unwrap());
         report(service.shutdown().await);
     });
 }
@@ -161,7 +170,7 @@ fn abandoned_unclaimed_start_is_drained_and_returns_all_credit_without_another_c
         drop(wait);
         eventually(|| client.children().is_empty() && client.outstanding_requests() == 0).await;
         let id = client.start_worker(&cx, "replacement", config(), parked).await.unwrap();
-        client.terminate_child(&cx, &id).await.unwrap();
+        stopped(client.terminate_child(&cx, &id).await.unwrap());
         report(service.shutdown().await);
     });
 }

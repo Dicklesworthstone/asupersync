@@ -322,6 +322,7 @@ impl<E> Shared<E> {
 }
 
 /// Cloneable bounded control capability. It neither owns nor detaches the service.
+///
 /// Possession delegates the service owner's worker-admission authority. A method's
 /// caller Cx controls that request's cancellation, not the service's capabilities.
 pub struct DynamicSupervisorClient<E> {

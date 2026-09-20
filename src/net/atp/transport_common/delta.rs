@@ -138,11 +138,11 @@ where
 #[allow(dead_code)] // wired into the delta manifest builders in a later sizeku slice
 pub(crate) mod cdc {
     /// Minimum content-defined chunk size.
-    pub(crate) const MIN_CHUNK_BYTES: usize = 16 * 1024;
+    pub const MIN_CHUNK_BYTES: usize = 16 * 1024;
     /// Target average content-defined chunk size (tracks the mask bits).
-    pub(crate) const AVG_CHUNK_BYTES: usize = 32 * 1024;
+    pub const AVG_CHUNK_BYTES: usize = 32 * 1024;
     /// Maximum content-defined chunk size (hard cut).
-    pub(crate) const MAX_CHUNK_BYTES: usize = 64 * 1024;
+    pub const MAX_CHUNK_BYTES: usize = 64 * 1024;
 
     /// Gear boundary mask: `log2(AVG)=15` bits in the TOP of the hash. The
     /// gear's low bits carry only the last few bytes (and freeze on runs of
@@ -200,7 +200,7 @@ pub(crate) mod cdc {
     /// always yield identical spans, so a sender and receiver chunking an
     /// identical file agree on boundaries (and thus content ids) with no shared
     /// state.
-    pub(crate) fn chunk_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
+    pub fn chunk_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
         let mut spans: Vec<(usize, usize)> = Vec::new();
         if bytes.is_empty() {
             return spans;
