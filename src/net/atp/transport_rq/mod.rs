@@ -8218,12 +8218,8 @@ pub async fn send_path(
         && rq_delta_control_auth_context(&config).is_some()
         && !is_directory
         && raw_entries.len() == 1
-        // br-asupersync-sizeku: content-defined chunks are as small as CDC min,
-        // so bound the chunk-count pre-check by CDC min (see build_rq_delta_manifest).
-        && preflight_total_bytes.div_ceil(
-            u64::try_from(crate::net::atp::transport_common::delta::cdc::MIN_CHUNK_BYTES)
-                .unwrap_or(u64::MAX),
-        ) <= RQ_DELTA_MAX_MANIFEST_CHUNKS;
+        && preflight_total_bytes.div_ceil(u64::try_from(RQ_DELTA_CHUNK_SIZE).unwrap_or(u64::MAX))
+            <= RQ_DELTA_MAX_MANIFEST_CHUNKS;
     let prefer_control_source_stream =
         control_source_stream_eligible(preflight_total_bytes, &config)
             && !delta_hash_first_candidate;
