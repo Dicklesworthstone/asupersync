@@ -79,7 +79,7 @@ impl<const REV: u32> RestorableWorkload for Writer<REV> {
                 if u64::from_le_bytes(ack) != state.next { return Err(io::ErrorKind::InvalidData.into()); }
                 state.next += 1; // Checkpoint advances only after the peer's exact acknowledgement.
             }
-            stream.shutdown().await?;
+            AsyncWriteExt::shutdown(&mut stream).await?;
             drop(stream);
             Ok(state)
         })

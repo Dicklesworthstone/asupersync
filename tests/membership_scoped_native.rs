@@ -164,7 +164,7 @@ fn mtls_revocation_drains_remote_handler_and_closes_its_actually_parked_tcp_stre
         let address = service.local_addr().unwrap(); let operator = service.handle();
         let config = RemoteComputationClientConfig::new().with_max_attempts(1)
             .with_connect_timeout(Duration::from_secs(2)).with_attempt_timeout(Duration::from_secs(10));
-        let work_client = RemoteComputationClient::new(address, "localhost", connector.clone(), config.clone()).unwrap();
+        let work_client = RemoteComputationClient::new(address, "localhost", connector.clone(), config).unwrap();
         let authority_client = RemoteComputationClient::new(address, "localhost", connector, config).unwrap();
         let caller_cleanup = Close(Some((owner.clone(), operator.clone()))); let completion = Arc::clone(&reported);
         let mut caller = Join(Some(thread::spawn(move || {

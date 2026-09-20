@@ -619,7 +619,9 @@ mod tests {
             .decision
         {
             CapabilityDecision::Granted { .. } => {}
-            other => panic!("in-scope path must be granted, got {other:?}"),
+            other @ CapabilityDecision::Denied { .. } => {
+                panic!("in-scope path must be granted, got {other:?}");
+            }
         }
 
         // Descendant of a literal exclusion: denied (proves the 2ykdhb scope fix
@@ -629,7 +631,9 @@ mod tests {
             .decision
         {
             CapabilityDecision::Denied { .. } => {}
-            other => panic!("excluded-subtree path must be denied, got {other:?}"),
+            other @ CapabilityDecision::Granted { .. } => {
+                panic!("excluded-subtree path must be denied, got {other:?}");
+            }
         }
 
         // Fully out-of-scope path: denied.
@@ -638,7 +642,9 @@ mod tests {
             .decision
         {
             CapabilityDecision::Denied { .. } => {}
-            other => panic!("out-of-scope path must be denied, got {other:?}"),
+            other @ CapabilityDecision::Granted { .. } => {
+                panic!("out-of-scope path must be denied, got {other:?}");
+            }
         }
     }
 

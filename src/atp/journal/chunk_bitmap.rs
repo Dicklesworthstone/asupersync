@@ -400,17 +400,17 @@ impl ChunkBitmap {
 
         let mut ranges = Vec::new();
         let mut start = offsets[0];
-        let mut end = start + self.chunk_size;
+        let mut end = start.saturating_add(self.chunk_size).min(self.total_size);
 
         for &offset in offsets.iter().skip(1) {
             if offset == end {
                 // Contiguous chunk
-                end += self.chunk_size;
+                end = offset.saturating_add(self.chunk_size).min(self.total_size);
             } else {
                 // Gap found, finalize current range
                 ranges.push(SparseRange::new(start, end));
                 start = offset;
-                end = offset + self.chunk_size;
+                end = offset.saturating_add(self.chunk_size).min(self.total_size);
             }
         }
 
@@ -969,6 +969,37 @@ mod tests {
 
         // Second range: 400-500 (chunk 400)
         assert_eq!(verified_ranges[1], SparseRange::new(400, 500));
+    }
+
+    #[test]
+    fn decoded_large_chunk_ranges_do_not_overflow() {
+        let chunk_size = 1_u64 << 63;
+        let mut bitmap = ChunkBitmap::new("large".to_string(), u64::MAX, chunk_size, 1);
+        bitmap.initialize_wanted_chunks(2);
+        assert!(bitmap.update_chunk_state(chunk_size, ChunkState::Verified, 3, None));
+        let decoded = ChunkBitmap::deserialize_from_bytes(&bitmap.serialize_to_bytes()).unwrap();
+        assert_eq!(
+            decoded.get_ranges_in_state(ChunkState::Verified),
+            vec![SparseRange::new(chunk_size, u64::MAX)]
+        );
+        assert_eq!(
+            decoded.get_ranges_in_states(&[ChunkState::Wanted, ChunkState::Verified]),
+            vec![SparseRange::new(0, u64::MAX)]
+        );
+
+        // Exercise a gap before the overflowing final chunk as well.
+        let chunk_size = 1_u64 << 62;
+        let mut sparse = ChunkBitmap::new("sparse-large".to_string(), u64::MAX, chunk_size, 1);
+        assert!(sparse.update_chunk_state(0, ChunkState::Verified, 2, None));
+        assert!(sparse.update_chunk_state(3 * chunk_size, ChunkState::Verified, 2, None));
+        let decoded = ChunkBitmap::deserialize_from_bytes(&sparse.serialize_to_bytes()).unwrap();
+        assert_eq!(
+            decoded.get_ranges_in_state(ChunkState::Verified),
+            vec![
+                SparseRange::new(0, chunk_size),
+                SparseRange::new(3 * chunk_size, u64::MAX),
+            ]
+        );
     }
 
     #[test]

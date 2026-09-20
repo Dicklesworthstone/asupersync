@@ -184,7 +184,7 @@ async fn probe(cx: &Cx, client: &RemoteComputationClient, hello: &RemotePeerHell
     match client.call(cx, &wire).await.expect("real authenticated probe response") {
         RemoteServiceWireResponse::Outcome { outcome: RemoteServiceWireOutcome::Success(bytes), .. } => { assert_eq!(bytes, b"ran"); true }
         RemoteServiceWireResponse::Outcome { .. } => false,
-        other => panic!("unexpected probe response: {other:?}"),
+        other @ RemoteServiceWireResponse::Rejected { .. } => panic!("unexpected probe response: {other:?}"),
     }
 }
 

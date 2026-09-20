@@ -29,7 +29,6 @@ use parking_lot::Mutex;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::Poll;
 use std::time::Duration;
 
 struct Request;
