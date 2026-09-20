@@ -5157,6 +5157,145 @@ async fn build_rq_receiver_delta_request(
     })
 }
 
+/// Content-id set-diff plan for receiver-driven DeltaChunks (br-asupersync-sizeku).
+///
+/// Diffs the sender's advertised chunk manifest against the receiver's manifest
+/// of its existing destination file BY `content_id_hex`, never by offset:
+/// content-defined chunking keeps a chunk's content id stable even when an edit
+/// shifts every later boundary, so a set diff is what yields the append/insert
+/// win (an inserted region is one new chunk; the shifted tail keeps its ids and
+/// is reused from local content). A content id present once on the receiver can
+/// satisfy any number of sender references to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // wired into build_rq_receiver_delta_request in a later sizeku slice
+struct RqDeltaChunkPlan {
+    /// Sender chunks whose content id the receiver does not already hold.
+    missing_chunks: Vec<DeltaChunkWire>,
+    /// Count of sender chunks the receiver can reuse from local content.
+    shared_chunks: u64,
+    /// Count of receiver-held chunks the sender no longer references.
+    stale_chunks: u64,
+    /// Total bytes the sender must ship (sum of `missing_chunks` sizes).
+    missing_bytes: u64,
+}
+
+#[allow(dead_code)] // wired into build_rq_receiver_delta_request in a later sizeku slice
+fn rq_plan_delta_chunks(
+    sender_chunks: &[DeltaChunkWire],
+    receiver_chunks: &[DeltaChunkWire],
+) -> RqDeltaChunkPlan {
+    let receiver_ids: std::collections::HashSet<&str> = receiver_chunks
+        .iter()
+        .map(|chunk| chunk.content_id_hex.as_str())
+        .collect();
+    let sender_ids: std::collections::HashSet<&str> = sender_chunks
+        .iter()
+        .map(|chunk| chunk.content_id_hex.as_str())
+        .collect();
+
+    let mut missing_chunks = Vec::new();
+    let mut shared_chunks: u64 = 0;
+    let mut missing_bytes: u64 = 0;
+    for chunk in sender_chunks {
+        if receiver_ids.contains(chunk.content_id_hex.as_str()) {
+            shared_chunks = shared_chunks.saturating_add(1);
+        } else {
+            missing_bytes = missing_bytes.saturating_add(chunk.size_bytes);
+            missing_chunks.push(chunk.clone());
+        }
+    }
+    let stale_chunks = receiver_chunks
+        .iter()
+        .filter(|chunk| !sender_ids.contains(chunk.content_id_hex.as_str()))
+        .count();
+
+    RqDeltaChunkPlan {
+        missing_chunks,
+        shared_chunks,
+        stale_chunks: u64::try_from(stale_chunks).unwrap_or(u64::MAX),
+        missing_bytes,
+    }
+}
+
+#[cfg(test)]
+mod sizeku_plan_tests {
+    use super::*;
+
+    fn chunk(content_id: &str, size: u64) -> DeltaChunkWire {
+        DeltaChunkWire {
+            index: 0,
+            entry_index: 0,
+            rel_path: "f".to_string(),
+            entry_offset: 0,
+            stream_offset: 0,
+            size_bytes: size,
+            content_id_hex: content_id.to_string(),
+        }
+    }
+
+    fn missing_ids(plan: &RqDeltaChunkPlan) -> Vec<String> {
+        plan.missing_chunks
+            .iter()
+            .map(|c| c.content_id_hex.clone())
+            .collect()
+    }
+
+    #[test]
+    fn append_ships_only_the_new_tail_chunk() {
+        let sender = [chunk("A", 10), chunk("B", 20), chunk("C", 30)];
+        let receiver = [chunk("A", 10), chunk("B", 20)];
+        let plan = rq_plan_delta_chunks(&sender, &receiver);
+        assert_eq!(missing_ids(&plan), vec!["C"]);
+        assert_eq!(plan.shared_chunks, 2);
+        assert_eq!(plan.stale_chunks, 0);
+        assert_eq!(plan.missing_bytes, 30);
+    }
+
+    #[test]
+    fn insert_ships_only_the_inserted_chunk_shifted_tail_is_reused() {
+        // Content-defined chunking: inserting X keeps A,B,C ids stable.
+        let sender = [chunk("A", 10), chunk("X", 5), chunk("B", 20), chunk("C", 30)];
+        let receiver = [chunk("A", 10), chunk("B", 20), chunk("C", 30)];
+        let plan = rq_plan_delta_chunks(&sender, &receiver);
+        assert_eq!(missing_ids(&plan), vec!["X"]);
+        assert_eq!(plan.shared_chunks, 3);
+        assert_eq!(plan.stale_chunks, 0);
+        assert_eq!(plan.missing_bytes, 5);
+    }
+
+    #[test]
+    fn small_edit_ships_the_changed_chunk_and_marks_the_old_stale() {
+        let sender = [chunk("A", 10), chunk("Bx", 20), chunk("C", 30)];
+        let receiver = [chunk("A", 10), chunk("B", 20), chunk("C", 30)];
+        let plan = rq_plan_delta_chunks(&sender, &receiver);
+        assert_eq!(missing_ids(&plan), vec!["Bx"]);
+        assert_eq!(plan.shared_chunks, 2); // A, C
+        assert_eq!(plan.stale_chunks, 1); // old B
+        assert_eq!(plan.missing_bytes, 20);
+    }
+
+    #[test]
+    fn identical_manifests_ship_nothing() {
+        let both = [chunk("A", 10), chunk("B", 20), chunk("C", 30)];
+        let plan = rq_plan_delta_chunks(&both, &both);
+        assert!(plan.missing_chunks.is_empty());
+        assert_eq!(plan.shared_chunks, 3);
+        assert_eq!(plan.stale_chunks, 0);
+        assert_eq!(plan.missing_bytes, 0);
+    }
+
+    #[test]
+    fn duplicate_content_is_served_from_one_local_copy() {
+        // Receiver holds A once; both sender references to A are shared.
+        let sender = [chunk("A", 10), chunk("A", 10)];
+        let receiver = [chunk("A", 10)];
+        let plan = rq_plan_delta_chunks(&sender, &receiver);
+        assert!(plan.missing_chunks.is_empty());
+        assert_eq!(plan.shared_chunks, 2);
+        assert_eq!(plan.missing_bytes, 0);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RqSourceDirectory {
     rel_path: String,
