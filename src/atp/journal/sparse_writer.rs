@@ -475,7 +475,11 @@ impl SparseWriter {
         Outcome::ok(())
     }
 
-    /// Commit the written data atomically to final destination
+    /// Commit the written data atomically to final destination.
+    ///
+    /// On Unix, durability-enabled policies sync the destination directory after
+    /// publication. A sync error can occur after the destination becomes visible;
+    /// callers must not interpret an error as proof that publication did not occur.
     pub async fn commit(&self, _cx: &Cx) -> Outcome<PathBuf, SparseWriterError> {
         {
             let state = self.lock_state();
@@ -503,6 +507,11 @@ impl SparseWriter {
             Outcome::Panicked(payload) => return Outcome::panicked(payload),
         };
 
+        // Make the published destination durable before discarding staging data.
+        if let Err(error) = self.sync_commit_destination(&final_path) {
+            return Outcome::Err(error);
+        }
+
         // Clean up temp file
         match self.cleanup_temp_file().await {
             Ok(()) => {}
@@ -510,6 +519,36 @@ impl SparseWriter {
         }
 
         Outcome::ok(final_path)
+    }
+
+    fn sync_commit_destination(&self, final_path: &Path) -> Result<(), SparseWriterError> {
+        if self.config.fsync_policy == super::FsyncPolicy::Never {
+            return Ok(());
+        }
+
+        // A copy creates a different inode, so syncing the staging file does not
+        // make the copied destination durable. Non-Unix link mode also copies.
+        if self.config.commit_policy == CommitPolicy::CopyAndVerify
+            || (cfg!(not(unix)) && self.config.commit_policy == CommitPolicy::LinkAndUnlink)
+        {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(final_path)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| SparseWriterError::SyncFailed(error.to_string()))?;
+        }
+
+        #[cfg(unix)]
+        {
+            let parent = final_path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| SparseWriterError::SyncFailed(error.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Cancel the write operation and clean up
@@ -1272,6 +1311,65 @@ mod tests {
             assert_eq!(committed_path, final_path);
             assert_eq!(std::fs::read(&committed_path).unwrap(), content);
             std::fs::remove_file(&committed_path).ok();
+        });
+    }
+
+    #[test]
+    fn durable_commit_policies_preserve_verified_bytes() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let content = b"durable destination bytes";
+            for commit_policy in [
+                CommitPolicy::AtomicRename,
+                CommitPolicy::CopyAndVerify,
+                CommitPolicy::LinkAndUnlink,
+            ] {
+                let (object_id, manifest) = manifest_for_content(content);
+                let destination = unique_temp_path("durable_commit");
+                let writer = SparseWriter::new(
+                    &cx,
+                    object_id,
+                    &destination,
+                    SparseWriterConfig {
+                        commit_policy,
+                        fsync_policy: super::super::FsyncPolicy::BeforeCommit,
+                        ..SparseWriterConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                writer.set_expected_size(content.len() as u64).unwrap();
+                writer
+                    .write_chunk(&cx, 0, content, WriteOptions::default())
+                    .await
+                    .unwrap();
+                writer.verify(&cx, &manifest).await.unwrap();
+                assert_eq!(writer.commit(&cx).await.unwrap(), destination);
+                assert_eq!(std::fs::read(destination).unwrap(), content);
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_errors_propagate_and_never_policy_skips_sync() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let mut writer = SparseWriter::new(
+                &cx,
+                test_object_id("sync_error"),
+                unique_temp_path("sync_error"),
+                SparseWriterConfig::default(),
+            )
+            .await
+            .unwrap();
+            let missing_parent = unique_temp_path("missing_sync_parent").join("file");
+            assert!(matches!(
+                writer.sync_commit_destination(&missing_parent),
+                Err(SparseWriterError::SyncFailed(_))
+            ));
+            writer.config.fsync_policy = super::super::FsyncPolicy::Never;
+            writer.sync_commit_destination(&missing_parent).unwrap();
         });
     }
 
