@@ -376,7 +376,7 @@ async fn run_admitted(
 mod admission;
 pub use admission::{
     RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
-    RemoteExecutorError, RemotePeerLimits,
+    RemoteExecutorError, RemotePeerLimits, RemoteServiceAdmission,
 };
 
 #[cfg(test)]

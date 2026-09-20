@@ -134,6 +134,7 @@ impl RemoteServiceAdmission {
                 let result = match first {
                     Some(result) => result,
                     None => {
+                        let _ = cx.checkpoint(); // Acknowledge before asynchronous drain.
                         coordinator.cancel();
                         let result = coordinator.task.join(&cx).await;
                         let _ = cx.checkpoint();
@@ -211,6 +212,7 @@ where
     // Cancellation is independent of the parent; close also cancels remaining
     // descendants after ordinary body completion. Neither path detaches cleanup.
     let cancel_error = if cx.is_cancel_requested() {
+        let _ = cx.checkpoint(); // Cleanup may legitimately cross further Pending polls.
         child.cancel(cx.cancel_reason().unwrap_or_else(CancelReason::parent_cancelled)).err()
     } else { None };
     let close = child.close_with_outcome().await;
