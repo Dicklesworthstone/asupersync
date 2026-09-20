@@ -30,13 +30,14 @@ use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::net::atp::quic::{AtpPacketProtection, AtpPacketProtectionConfig};
 use crate::net::quic_core::{ConnectionId, ProtectedHeaderPrefix, TransportParameters};
+use crate::net::quic_native::PacketProtectionSpace;
 use crate::time::timeout;
 
 use super::connection::{NativeQuicConnectionConfig, NativeQuicConnectionError};
 use super::connection_manager::{
     ConnectionRouterError, PROTECTED_1RTT_MAX_PACKET_BYTES, RoutedOutgoingPacket,
     assemble_protected_1rtt_packet_inner, generate_congestion_admitted_1rtt_frames,
-    is_ack_eliciting, protected_1rtt_packet_len, unprotect_1rtt_packet,
+    is_ack_eliciting, protected_1rtt_packet_len, unprotect_1rtt_packet_with_connection,
 };
 use super::endpoint::{
     OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig, QuicUdpEndpointError, ReceivedPacket,
@@ -409,7 +410,7 @@ impl NativeQuicUdpConnection {
             return Err(NativeQuicUdpConnectionError::Cancelled);
         }
         let mut endpoint = endpoint;
-        if let Err(error) = client_handshake_over_udp(
+        let early_one_rtt_packets = match client_handshake_over_udp(
             cx,
             &mut endpoint,
             peer_addr,
@@ -419,12 +420,15 @@ impl NativeQuicUdpConnection {
         )
         .await
         {
-            return if cx.checkpoint().is_err() {
-                Err(NativeQuicUdpConnectionError::Cancelled)
-            } else {
-                Err(NativeQuicUdpConnectionError::Handshake(error))
-            };
-        }
+            Ok(packets) => packets,
+            Err(error) => {
+                return if cx.checkpoint().is_err() {
+                    Err(NativeQuicUdpConnectionError::Cancelled)
+                } else {
+                    Err(NativeQuicUdpConnectionError::Handshake(error))
+                };
+            }
+        };
         Self::from_completed_handshake(
             cx,
             endpoint,
@@ -434,7 +438,7 @@ impl NativeQuicUdpConnection {
             connection_config,
             required_alpn,
             StreamRole::Client,
-            Vec::new(),
+            early_one_rtt_packets,
         )
     }
 
@@ -567,6 +571,13 @@ impl NativeQuicUdpConnection {
                     "peer decode failed: {error}"
                 ))
             })?;
+        if peer_parameters.unknown.iter().any(|parameter| {
+            parameter.id == 0x0f && parameter.value.as_slice() != peer_cid.as_bytes()
+        }) {
+            return Err(NativeQuicUdpConnectionError::TransportParameters(
+                "peer initial_source_connection_id does not match authenticated peer CID".into(),
+            ));
+        }
         let bound =
             bind_transport_parameters(connection_config, &local_parameters, &peer_parameters);
 
@@ -822,6 +833,25 @@ impl NativeQuicUdpConnection {
         self.connection
             .inner_mut()
             .set_one_rtt_frame_budget(max_frame_bytes);
+        if self.connection.inner().can_send_1rtt()
+            && self
+                .protection
+                .confidentiality_key_update_due(PacketProtectionSpace::OneRtt)
+            && self.connection.inner().tls().local_key_phase()
+                == self.connection.inner().tls().remote_key_phase()
+        {
+            let next_phase = !self.connection.inner().tls().local_key_phase();
+            if self
+                .protection
+                .ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, next_phase)
+                .is_ok()
+            {
+                self.connection.inner_mut().request_local_key_update(cx)?;
+                self.connection.inner_mut().commit_local_key_update(cx)?;
+                self.protection
+                    .note_local_key_update(PacketProtectionSpace::OneRtt);
+            }
+        }
         // Retry retained output before admitting more application work.
         let packet_budget = if self.pending_outgoing.is_empty() {
             MAX_PACKETS_PER_FLUSH
@@ -1066,21 +1096,42 @@ impl NativeQuicUdpConnection {
                 progress.packets_dropped = progress.packets_dropped.saturating_add(1);
                 continue;
             }
-            let unprotected =
-                match unprotect_1rtt_packet(cx, self.local_cid, &mut self.protection, &packet.data)
-                    .await
-                {
-                    Ok(unprotected) => unprotected,
-                    Err(ConnectionRouterError::Cancelled) => {
-                        return Err(NativeQuicUdpConnectionError::Cancelled);
+            let unprotected = match unprotect_1rtt_packet_with_connection(
+                cx,
+                self.local_cid,
+                &mut self.protection,
+                Some(self.connection.inner()),
+                &packet.data,
+            )
+            .await
+            {
+                Ok(unprotected) => unprotected,
+                Err(ConnectionRouterError::Cancelled) => {
+                    return Err(NativeQuicUdpConnectionError::Cancelled);
+                }
+                Err(_err) => {
+                    if self.protection.integrity_limit_reached(PacketProtectionSpace::OneRtt) {
+                        return Err(NativeQuicUdpConnectionError::Packet(
+                            "1-RTT AEAD integrity limit reached".to_string(),
+                        ));
                     }
-                    Err(_) => {
-                        progress.packets_dropped = progress.packets_dropped.saturating_add(1);
-                        continue;
-                    }
-                };
+                    progress.packets_dropped = progress.packets_dropped.saturating_add(1);
+                    continue;
+                }
+            };
             let header = unprotected.header;
             let plaintext = unprotected.plaintext;
+            if unprotected.peer_key_update {
+                self.connection
+                    .inner_mut()
+                    .on_peer_key_phase_pn(cx, header.key_phase, header.packet_number)?;
+                self.protection.note_peer_key_update(PacketProtectionSpace::OneRtt);
+                if self.connection.inner().tls().local_key_phase() != header.key_phase {
+                    self.connection.inner_mut().request_local_key_update(cx)?;
+                    self.connection.inner_mut().commit_local_key_update(cx)?;
+                    self.protection.note_local_key_update(PacketProtectionSpace::OneRtt);
+                }
+            }
             self.connection
                 .inner_mut()
                 .on_datagram_received(cx, packet.data.len() as u64)?;

@@ -139,6 +139,11 @@ impl PrioritizedFrame {
             QuicFrame::PathChallenge { .. } => (100, true, true),
             QuicFrame::PathResponse { .. } => (100, true, true),
 
+            // Connection ID management & tokens
+            QuicFrame::NewConnectionId { .. } => (130, true, true),
+            QuicFrame::RetireConnectionId { .. } => (130, true, true),
+            QuicFrame::NewToken { .. } => (130, true, true),
+
             // Application data
             QuicFrame::Stream { .. } => (80, true, true),
 
@@ -203,6 +208,11 @@ impl PrioritizedFrame {
             }
             QuicFrame::HandshakeDone => 1, // Just type
             QuicFrame::Datagram { data } => 4 + data.len(), // Type + length + data
+            QuicFrame::NewConnectionId { connection_id, .. } => {
+                1 + 8 + 8 + 1 + connection_id.len() + 16
+            }
+            QuicFrame::RetireConnectionId { .. } => 1 + 8,
+            QuicFrame::NewToken { token } => 1 + 8 + token.len(),
         }
     }
 

@@ -23,6 +23,7 @@
 
 use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::net::atp::protocol::varint::{VarInt, VarIntError};
+use crate::net::quic_core::ConnectionId;
 use crate::types::outcome::Outcome;
 
 /// QUIC frame type constants as defined in RFC 9000
@@ -268,6 +269,30 @@ pub enum QuicFrame {
     Datagram {
         /// Opaque datagram payload (e.g. a RaptorQ symbol).
         data: Bytes,
+    },
+
+    /// NEW_CONNECTION_ID frame (RFC 9000 §19.15)
+    NewConnectionId {
+        /// Sequence number of the connection ID
+        sequence_number: VarInt,
+        /// Connection IDs with sequence numbers less than this should be retired
+        retire_prior_to: VarInt,
+        /// Connection ID (1..=20 bytes)
+        connection_id: ConnectionId,
+        /// 16-byte stateless reset token
+        stateless_reset_token: [u8; 16],
+    },
+
+    /// RETIRE_CONNECTION_ID frame (RFC 9000 §19.16)
+    RetireConnectionId {
+        /// Sequence number of the connection ID being retired
+        sequence_number: VarInt,
+    },
+
+    /// NEW_TOKEN frame (RFC 9000 §19.7)
+    NewToken {
+        /// Token data
+        token: Bytes,
     },
 }
 
@@ -591,6 +616,35 @@ impl QuicFrame {
                 }
                 buf.put_slice(data);
             }
+
+            QuicFrame::NewConnectionId {
+                sequence_number,
+                retire_prior_to,
+                connection_id,
+                stateless_reset_token,
+            } => {
+                QuicFrameType::NewConnectionId
+                    .to_varint()
+                    .encode_to_buf(buf)?;
+                sequence_number.encode_to_buf(buf)?;
+                retire_prior_to.encode_to_buf(buf)?;
+                buf.put_u8(connection_id.len() as u8);
+                buf.put_slice(connection_id.as_bytes());
+                buf.put_slice(stateless_reset_token);
+            }
+
+            QuicFrame::RetireConnectionId { sequence_number } => {
+                QuicFrameType::RetireConnectionId
+                    .to_varint()
+                    .encode_to_buf(buf)?;
+                sequence_number.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::NewToken { token } => {
+                QuicFrameType::NewToken.to_varint().encode_to_buf(buf)?;
+                VarInt::from_u64_unchecked(token.len() as u64).encode_to_buf(buf)?;
+                buf.put_slice(token);
+            }
         }
 
         Ok(())
@@ -714,6 +768,17 @@ impl QuicFrame {
                 Ok(Some(QuicFrame::Crypto { offset, data }))
             }
 
+            0x07 => {
+                // NEW_TOKEN
+                let length = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let len = length.value() as usize;
+                if buf.remaining() < len {
+                    return Err(QuicFrameError::UnexpectedEof);
+                }
+                let token = copy_to_bytes_from_buf(buf, len);
+                Ok(Some(QuicFrame::NewToken { token }))
+            }
+
             ft if QuicFrameType::is_stream_frame(ft) => {
                 // STREAM frame
                 let has_off = (ft & 0x04) != 0;
@@ -825,6 +890,50 @@ impl QuicFrame {
                     maximum_streams,
                     bidirectional: false,
                 }))
+            }
+
+            0x18 => {
+                // NEW_CONNECTION_ID
+                let sequence_number =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let retire_prior_to =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                if retire_prior_to.value() > sequence_number.value() {
+                    return Err(QuicFrameError::InvalidFormat(
+                        "retire_prior_to > sequence_number".to_string(),
+                    ));
+                }
+                if !buf.has_remaining() {
+                    return Err(QuicFrameError::UnexpectedEof);
+                }
+                let cid_len = buf.get_u8() as usize;
+                if cid_len == 0 || cid_len > ConnectionId::MAX_LEN {
+                    return Err(QuicFrameError::InvalidFormat(format!(
+                        "invalid connection ID length: {cid_len}"
+                    )));
+                }
+                if buf.remaining() < cid_len + 16 {
+                    return Err(QuicFrameError::UnexpectedEof);
+                }
+                let mut cid_bytes = [0u8; 20];
+                buf.copy_to_slice(&mut cid_bytes[..cid_len]);
+                let connection_id = ConnectionId::new(&cid_bytes[..cid_len])
+                    .map_err(|e| QuicFrameError::InvalidFormat(e.to_string()))?;
+                let mut stateless_reset_token = [0u8; 16];
+                buf.copy_to_slice(&mut stateless_reset_token);
+                Ok(Some(QuicFrame::NewConnectionId {
+                    sequence_number,
+                    retire_prior_to,
+                    connection_id,
+                    stateless_reset_token,
+                }))
+            }
+
+            0x19 => {
+                // RETIRE_CONNECTION_ID
+                let sequence_number =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::RetireConnectionId { sequence_number }))
             }
 
             0x1a => {
@@ -1217,5 +1326,52 @@ mod tests {
             QuicFrame::decode(&mut decode_buf).unwrap().unwrap(),
             QuicFrame::Ping
         );
+    }
+
+    #[test]
+    fn test_new_connection_id_frame_roundtrip() {
+        let cid = ConnectionId::new(b"test-cid-1234").unwrap();
+        let frame = QuicFrame::NewConnectionId {
+            sequence_number: VarInt::from_u64_unchecked(1),
+            retire_prior_to: VarInt::from_u64_unchecked(0),
+            connection_id: cid,
+            stateless_reset_token: [0x42; 16],
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_new_connection_id_retire_prior_to_validation() {
+        let cid = ConnectionId::new(b"test-cid").unwrap();
+        let frame = QuicFrame::NewConnectionId {
+            sequence_number: VarInt::from_u64_unchecked(1),
+            retire_prior_to: VarInt::from_u64_unchecked(2), // invalid: retire_prior_to > sequence_number
+            connection_id: cid,
+            stateless_reset_token: [0x42; 16],
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let err = QuicFrame::decode(&mut decode_buf).unwrap_err();
+        assert!(matches!(err, QuicFrameError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_retire_connection_id_frame_roundtrip() {
+        let frame = QuicFrame::RetireConnectionId {
+            sequence_number: VarInt::from_u64_unchecked(5),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
     }
 }
