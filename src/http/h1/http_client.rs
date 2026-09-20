@@ -1918,12 +1918,28 @@ impl HttpClient {
         body: &[u8],
         request_target: Option<String>,
         proxy_authorization: Option<&str>,
+        origin: &ParsedUrl,
     ) -> Request {
         let default_headers = &self.config.default_headers;
-        let has_cookie_header =
-            has_header(extra_headers, "cookie") || has_header(default_headers, "cookie");
-        let has_proxy_authorization = has_header(extra_headers, "proxy-authorization")
-            || has_header(default_headers, "proxy-authorization");
+        // br-asupersync-u957g0: on a cross-origin redirect target, do NOT forward
+        // security-sensitive client-wide DEFAULT headers (Authorization / Cookie /
+        // Proxy-Authorization). `build_request` re-applies `default_headers` on every
+        // hop, so without this a client-wide default bearer token / cookie leaks to a
+        // redirect target of a different origin (or an https->http downgrade). Mirrors
+        // `strip_sensitive_headers_on_redirect` for per-request headers. `origin` is
+        // the ORIGINAL request URL (== `parsed` on the initial request), so a
+        // same-origin redirect keeps its credentials.
+        let cross_origin = !same_origin(origin, parsed);
+        // A cross-origin target's default Cookie is stripped, but the host-scoped
+        // cookie jar must still supply the CORRECT cookie for the new host — so a
+        // stripped default Cookie/Proxy-Authorization must not suppress the jar/proxy
+        // fallback path below.
+        let default_cookie_applies = has_header(default_headers, "cookie") && !cross_origin;
+        let default_proxy_auth_applies =
+            has_header(default_headers, "proxy-authorization") && !cross_origin;
+        let has_cookie_header = has_header(extra_headers, "cookie") || default_cookie_applies;
+        let has_proxy_authorization =
+            has_header(extra_headers, "proxy-authorization") || default_proxy_auth_applies;
         let has_user_agent_header =
             has_header(extra_headers, "user-agent") || has_header(default_headers, "user-agent");
         let request_target = request_target.unwrap_or_else(|| parsed.path.clone());
@@ -1949,7 +1965,9 @@ impl HttpClient {
                 default_headers
                     .iter()
                     .filter(|(name, _)| {
-                        !name.eq_ignore_ascii_case("host") && !has_header(extra_headers, name)
+                        !name.eq_ignore_ascii_case("host")
+                            && !has_header(extra_headers, name)
+                            && !(cross_origin && is_sensitive_redirect_header(name))
                     })
                     .cloned(),
             )
@@ -3001,11 +3019,18 @@ fn redirect_policy_allows_target(
     }
 }
 
+/// Security-sensitive headers that must not cross an origin boundary. Per RFC
+/// 9110 and common HTTP client practice (curl, reqwest, browsers),
+/// `Authorization`, `Cookie`, and `Proxy-Authorization` must not be forwarded to
+/// a different origin, to prevent credential leakage. Shared by the per-request
+/// strip below and the default-header filter in `build_request`
+/// (br-asupersync-u957g0).
+fn is_sensitive_redirect_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "authorization" || lower == "cookie" || lower == "proxy-authorization"
+}
+
 /// Strip security-sensitive headers when redirecting to a different origin.
-///
-/// Per RFC 9110 and common HTTP client practice (curl, reqwest, browsers),
-/// `Authorization`, `Cookie`, and `Proxy-Authorization` headers must not be
-/// forwarded to a different origin to prevent credential leakage.
 fn strip_sensitive_headers_on_redirect(
     from: &ParsedUrl,
     to: &ParsedUrl,
@@ -3016,10 +3041,7 @@ fn strip_sensitive_headers_on_redirect(
     }
     headers
         .into_iter()
-        .filter(|(name, _)| {
-            let lower = name.to_ascii_lowercase();
-            lower != "authorization" && lower != "cookie" && lower != "proxy-authorization"
-        })
+        .filter(|(name, _)| !is_sensitive_redirect_header(name))
         .collect()
 }
 
