@@ -1425,6 +1425,17 @@ impl AppendJournal {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         };
 
+        // CRC detects corruption but does not authenticate durable progress.
+        // Reject the whole summary rather than deriving progress from a subset.
+        if entries
+            .iter()
+            .any(|entry| !entry.record.verify_signature(&self.auth_key))
+        {
+            return Outcome::Err(JournalError::Deserialization(
+                "resume journal record authentication failed".to_string(),
+            ));
+        }
+
         match Self::build_resume_summary(transfer_id, &entries) {
             Ok(summary) => Outcome::Ok(summary),
             Err(err) => Outcome::Err(err),
@@ -2539,6 +2550,50 @@ mod tests {
         );
         assert_eq!(rolled_back.durable_bytes, 0);
         assert!(!rolled_back.is_resumable());
+    }
+
+    #[test]
+    fn resume_summary_rejects_crc_valid_records_signed_with_wrong_key() {
+        let config = JournalConfig {
+            base_dir: unique_temp_dir("test_resume_summary_wrong_key"),
+            ..Default::default()
+        };
+        {
+            let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+            journal
+                .append(JournalRecord::ChunkVerified {
+                    transfer_id: "wrong_key".to_string(),
+                    chunk_offset: 0,
+                    chunk_size: 4096,
+                    verified_hash: [7; 32],
+                    timestamp: 1,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+            journal
+                .append(JournalRecord::ChunkWritten {
+                    transfer_id: "wrong_key".to_string(),
+                    chunk_offset: 0,
+                    chunk_size: 4096,
+                    file_path: "stage/0".to_string(),
+                    timestamp: 2,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+            journal.flush().unwrap();
+        }
+        let trusted = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+        assert_eq!(trusted.get_resume_summary("wrong_key").unwrap().durable_bytes, 4096);
+        let untrusted = AppendJournal::new(config, AuthKey::from_seed(43)).unwrap();
+        let entries = untrusted.get_transfer_entries("wrong_key").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(JournalEntry::validate_checksum));
+        match untrusted.get_resume_summary("wrong_key") {
+            Outcome::Err(JournalError::Deserialization(message)) => {
+                assert!(message.contains("authentication failed"));
+            }
+            other => panic!("expected unauthenticated progress rejection, got {other:?}"),
+        }
     }
 
     #[test]
