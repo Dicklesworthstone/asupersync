@@ -97,8 +97,10 @@ async fn wait_count(counter: &AtomicUsize, expected: usize) {
 }
 
 #[test]
-fn detached_owner_refuses_without_minting_a_fake_supervisor() {
-    let cx = Cx::detached_cancel_context();
+fn owner_without_runtime_refuses_without_minting_a_fake_supervisor() {
+    // This API requires Cx<All>; the test fixture has those type capabilities
+    // but no runtime gateway that could mint a real child region.
+    let cx = Cx::for_testing();
     let mut opening = std::pin::pin!(cx.open_dynamic_supervisor::<()>(DynamicSupervisorConfig::new(1)));
     let mut task_cx = Context::from_waker(std::task::Waker::noop());
     assert!(matches!(opening.as_mut().poll(&mut task_cx),
