@@ -852,6 +852,13 @@ impl JournalRecord {
                 let chunk_offset = cursor.read_u64()?;
                 let chunk_size = cursor.read_u64()?;
                 let source_count = cursor.read_len()?;
+                // Bound allocation by bytes actually present, not the untrusted
+                // count in a potentially corrupt recovery record.
+                if source_count > (cursor.data.len() - cursor.offset) / 8 {
+                    return Err(JournalError::Deserialization(
+                        "repair source count exceeds remaining payload".to_string(),
+                    ));
+                }
                 let mut source_chunks = Vec::with_capacity(source_count);
                 for _ in 0..source_count {
                     source_chunks.push(cursor.read_u64()?);
@@ -2068,6 +2075,41 @@ mod tests {
             .expect_err("oversized fields must become serialization errors");
         assert!(matches!(err, JournalError::Serialization(_)));
         assert!(err.to_string().contains("source_chunks"));
+    }
+
+    #[test]
+    fn repair_decode_rejects_unbacked_source_count_before_allocation() {
+        for count in [1024_u32, u32::MAX] {
+            let mut payload = vec![5];
+            put_string(&mut payload, "repair");
+            put_u64(&mut payload, 0);
+            put_u64(&mut payload, 4096);
+            payload.extend_from_slice(&count.to_le_bytes());
+            let err = JournalRecord::decode_payload(&payload).unwrap_err();
+            assert!(matches!(err, JournalError::Deserialization(_)));
+            assert!(
+                err.to_string()
+                    .contains("source count exceeds remaining payload")
+            );
+        }
+    }
+
+    #[test]
+    fn repair_decode_preserves_valid_empty_and_nonempty_sources() {
+        for source_chunks in [vec![], vec![0, 4096, u64::MAX]] {
+            let record = JournalRecord::RepairDecode {
+                transfer_id: "repair".to_string(),
+                chunk_offset: 8192,
+                chunk_size: 4096,
+                source_chunks,
+                timestamp: 42,
+                auth_tag: unsigned_tag(),
+            };
+            let payload = record.encode_payload();
+            let decoded = JournalRecord::decode_payload(&payload).unwrap();
+            assert_eq!(decoded.encode_payload(), payload);
+            assert!(JournalRecord::decode_payload(&payload[..payload.len() - 1]).is_err());
+        }
     }
 
     #[test]
