@@ -73,3 +73,6 @@ pub use snapshot::{BudgetSnapshot, RegionSnapshot, SnapshotError, TaskSnapshot, 
 
 #[cfg(test)]
 mod tests;
+
+/// Checked child-region ownership for ordinary named remote invocations.
+pub mod remote_owned;
