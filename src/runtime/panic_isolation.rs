@@ -140,11 +140,14 @@ pub enum CleanupPhase {
 /// Result of panic isolation attempt.
 #[derive(Debug, Clone)]
 pub enum PanicIsolationResult<T> {
+    /// Operation invocation or retirement of a skipped operation panicked and was isolated.
+    Panicked(PanicContext),
     /// Operation completed successfully
     Success(T),
-    /// Operation panicked and was isolated
-    Panicked(PanicContext),
-    /// Operation was skipped due to previous panic threshold
+    /// Operation invocation was skipped due to the region's panic threshold.
+    ///
+    /// Captured values were dropped inside the isolation boundary. If that
+    /// retirement unwinds, the result is `Panicked` rather than `Skipped`.
     Skipped {
         /// Reason for skipping the operation
         reason: String,
@@ -340,6 +343,12 @@ impl PanicIsolator {
         F: FnOnce() -> T,
     {
         if let Some((reason, context)) = self.skip_context_for_threshold(&location) {
+            // Rejected work still owns captures. Retire them inside a boundary
+            // without invoking the operation or holding the region-counter lock.
+            // A cleanup failure is a real primary panic, not a successful skip.
+            if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(|| drop(operation))) {
+                return self.handle_panic(location, payload);
+            }
             if self.config.enable_panic_logging {
                 self.run_observer(|| self.report_skip(&reason, &context));
             }
@@ -1517,5 +1526,270 @@ mod tests {
         // boundary being tested.
         assert_eq!(isolator.suppressed_observer_panics(), 0);
         assert_eq!(isolator.suppressed_payload_drop_panics(), 0);
+    }
+
+    #[test]
+    fn threshold_skip_releases_captures_without_running_operation() {
+        struct Capture(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let metrics = Arc::new(CapturingMetrics::default());
+        let mut isolator = quiet_isolator(metrics.clone());
+        isolator.config.panic_threshold_per_region = Some(0);
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let capture = Capture(drops.clone());
+        let invoked = std::sync::atomic::AtomicBool::new(false);
+        let result = isolator.isolate_task_execution(
+            TaskId::from_arena(ArenaIndex::new(16, 0)),
+            RegionId::from_arena(ArenaIndex::new(17, 0)),
+            1,
+            || {
+                invoked.store(true, Ordering::SeqCst);
+                drop(capture);
+                42
+            },
+        );
+        assert!(matches!(result, PanicIsolationResult::Skipped { .. }));
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(metrics.panics_captured().is_empty());
+        assert!(isolator.region_panic_counts.lock().is_empty());
+    }
+
+    #[test]
+    fn threshold_skip_contains_capture_drop_panics_at_each_region_entrypoint() {
+        let task_id = TaskId::from_arena(ArenaIndex::new(18, 0));
+        let region_id = RegionId::from_arena(ArenaIndex::new(19, 0));
+        let obligation_id = ObligationId::from_arena(ArenaIndex::new(20, 0));
+        let cases = [
+            (
+                PanicLocation::TaskExecution {
+                    task_id,
+                    region_id,
+                    poll_attempt: 3,
+                },
+                "task_execution",
+            ),
+            (
+                PanicLocation::FinalizerExecution {
+                    region_id,
+                    finalizer_type: FinalizerType::Sync,
+                },
+                "finalizer_execution",
+            ),
+            (
+                PanicLocation::RegionCleanup {
+                    region_id,
+                    cleanup_phase: CleanupPhase::ResourceCleanup,
+                },
+                "region_cleanup",
+            ),
+            (
+                PanicLocation::ObligationHandling {
+                    obligation_id,
+                    region_id,
+                },
+                "obligation_handling",
+            ),
+        ];
+        for (location, tag) in cases {
+            let metrics = Arc::new(CapturingMetrics::default());
+            let mut isolator = quiet_isolator(metrics.clone());
+            isolator.config.panic_threshold_per_region = Some(0);
+            let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let capture = PanickingPayload(drops.clone());
+            let invoked = std::sync::atomic::AtomicBool::new(false);
+            let operation = || {
+                invoked.store(true, Ordering::SeqCst);
+                drop(capture);
+                42
+            };
+            let result = match &location {
+                PanicLocation::TaskExecution { poll_attempt, .. } => {
+                    isolator.isolate_task_execution(task_id, region_id, *poll_attempt, operation)
+                }
+                PanicLocation::FinalizerExecution { finalizer_type, .. } => {
+                    isolator.isolate_finalizer_execution(region_id, finalizer_type.clone(), operation)
+                }
+                PanicLocation::RegionCleanup { cleanup_phase, .. } => {
+                    isolator.isolate_region_cleanup(region_id, cleanup_phase.clone(), operation)
+                }
+                PanicLocation::ObligationHandling { .. } => {
+                    isolator.isolate_obligation_handling(obligation_id, region_id, operation)
+                }
+                PanicLocation::SchedulerInternal { .. } => unreachable!(),
+            };
+            assert!(
+                result.is_panicked(),
+                "capture cleanup must not escape or be hidden as skipped"
+            );
+            let context = result.panic_context().unwrap();
+            assert_eq!(context.location, location);
+            assert_eq!(context.region_id, Some(region_id));
+            assert_eq!(
+                context.panic_message.as_deref(),
+                Some("payload destructor panic")
+            );
+            assert!(!invoked.load(Ordering::SeqCst));
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            assert_eq!(metrics.panics_captured(), vec![tag]);
+            assert_eq!(isolator.region_panic_counts.lock().get(&region_id), Some(&1));
+            assert_eq!(isolator.suppressed_observer_panics(), 0);
+            // The capture panicked; its resulting string payload did not.
+            assert_eq!(isolator.suppressed_payload_drop_panics(), 0);
+        }
+    }
+
+    #[test]
+    fn reached_threshold_counts_cleanup_failure_without_affecting_other_regions() {
+        let metrics = Arc::new(CapturingMetrics::default());
+        let mut isolator = quiet_isolator(metrics.clone());
+        isolator.config.panic_threshold_per_region = Some(1);
+        let task = TaskId::from_arena(ArenaIndex::new(21, 0));
+        let region = RegionId::from_arena(ArenaIndex::new(22, 0));
+        assert!(
+            isolator
+                .isolate_task_execution(task, region, 1, || panic!("first"))
+                .is_panicked()
+        );
+
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let capture = PanickingPayload(drops.clone());
+        let invoked = std::sync::atomic::AtomicBool::new(false);
+        let result = isolator.isolate_region_cleanup(region, CleanupPhase::ResourceCleanup, || {
+            invoked.store(true, Ordering::SeqCst);
+            drop(capture);
+        });
+        assert!(result.is_panicked());
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(isolator.region_panic_counts.lock().get(&region), Some(&2));
+        assert_eq!(
+            metrics.panics_captured(),
+            vec!["task_execution", "region_cleanup"]
+        );
+        let healthy_region = RegionId::from_arena(ArenaIndex::new(23, 0));
+        assert_eq!(
+            isolator
+                .isolate_task_execution(task, healthy_region, 1, || 7)
+                .into_success(),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn skipped_capture_cleanup_contains_compound_payload_and_observer_failures() {
+        struct Capture {
+            drops: Arc<std::sync::atomic::AtomicUsize>,
+            payload_drops: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                std::panic::panic_any(PanickingPayload(self.payload_drops.clone()));
+            }
+        }
+
+        let metrics = Arc::new(CapturingMetrics {
+            on_panic: Some(Box::new(|_| panic!("observer failed too"))),
+            ..Default::default()
+        });
+        let mut isolator = quiet_isolator(metrics.clone());
+        isolator.config.panic_threshold_per_region = Some(0);
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let payload_drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let capture = Capture {
+            drops: drops.clone(),
+            payload_drops: payload_drops.clone(),
+        };
+        let region = RegionId::from_arena(ArenaIndex::new(24, 0));
+        let invoked = std::sync::atomic::AtomicBool::new(false);
+        let result = isolator.isolate_finalizer_execution(region, FinalizerType::Sync, || {
+            invoked.store(true, Ordering::SeqCst);
+            drop(capture);
+        });
+        assert!(result.is_panicked());
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert_eq!(
+            result.panic_context().unwrap().panic_message.as_deref(),
+            Some("Non-string panic payload")
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(payload_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(metrics.panics_captured(), vec!["finalizer_execution"]);
+        assert_eq!(isolator.region_panic_counts.lock().get(&region), Some(&1));
+        assert_eq!(isolator.suppressed_payload_drop_panics(), 1);
+        assert_eq!(isolator.suppressed_observer_panics(), 1);
+    }
+
+    #[test]
+    fn skipped_capture_can_reenter_without_region_counter_lock() {
+        struct Capture {
+            isolator: Arc<PanicIsolator>,
+            drops: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl Drop for Capture {
+            fn drop(&mut self) {
+                {
+                    let counts = self
+                        .isolator
+                        .region_panic_counts
+                        .try_lock()
+                        .expect("capture retirement must be outside the region counter lock");
+                    assert!(counts.is_empty());
+                }
+                assert_eq!(
+                    self.isolator
+                        .isolate_scheduler_operation(None, "capture cleanup".into(), || 9)
+                        .into_success(),
+                    Some(9)
+                );
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let mut isolator = quiet_isolator(Arc::new(NoOpMetrics));
+        isolator.config.panic_threshold_per_region = Some(0);
+        let isolator = Arc::new(isolator);
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let capture = Capture {
+            isolator: isolator.clone(),
+            drops: drops.clone(),
+        };
+        let result = isolator.isolate_region_cleanup(
+            RegionId::from_arena(ArenaIndex::new(25, 0)),
+            CleanupPhase::ResourceCleanup,
+            || drop(capture),
+        );
+        // A swallowed assertion in the capture destructor must fail this test.
+        assert!(matches!(result, PanicIsolationResult::Skipped { .. }));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(isolator.region_panic_counts.lock().is_empty());
+    }
+
+    #[test]
+    fn disabled_isolation_still_bypasses_zero_threshold() {
+        let mut isolator = quiet_isolator(Arc::new(NoOpMetrics));
+        isolator.config.panic_threshold_per_region = Some(0);
+        isolator.config.isolate_task_panics = false;
+        isolator.config.isolate_finalizer_panics = false;
+        let task = TaskId::from_arena(ArenaIndex::new(26, 0));
+        let region = RegionId::from_arena(ArenaIndex::new(27, 0));
+        assert_eq!(
+            isolator.isolate_task_execution(task, region, 1, || 5).into_success(),
+            Some(5)
+        );
+        assert_eq!(
+            isolator.isolate_finalizer_execution(region, FinalizerType::Sync, || 6).into_success(),
+            Some(6)
+        );
+        let propagated = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            isolator.isolate_task_execution(task, region, 2, || panic!("not isolated"))
+        }));
+        assert!(propagated.is_err());
+        assert!(isolator.region_panic_counts.lock().is_empty());
     }
 }
