@@ -85,9 +85,9 @@ pub use cx::{
     DeadlineBudgetStats, PollBudgetStats, SpanGuard,
 };
 pub use dynamic_supervisor::{
-    DynamicChildCompletion, DynamicChildId, DynamicChildInfo, DynamicChildState,
+    DynamicChildCompletion, DynamicChildId, DynamicChildInfo, DynamicChildResult, DynamicChildState,
     DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
-    DynamicSupervisorReport,
+    DynamicSupervisorReport, DynamicWorkerConfig,
 };
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,

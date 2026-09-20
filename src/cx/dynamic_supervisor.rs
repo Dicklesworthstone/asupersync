@@ -110,8 +110,8 @@ pub struct DynamicRegionOutcome {
     pub cleanup_outcome: Option<TaskOutcome>,
 }
 
-impl From<RegionCloseOutcome> for DynamicRegionOutcome {
-    fn from(value: RegionCloseOutcome) -> Self {
+impl DynamicRegionOutcome {
+    fn from_close(value: RegionCloseOutcome) -> Self {
         Self { outcome: value.outcome, cleanup_outcome: value.cleanup_outcome }
     }
 }
@@ -143,6 +143,10 @@ pub struct DynamicSupervisorReport<E> {
     pub close: Result<DynamicRegionOutcome, Arc<ChildRegionError>>,
 }
 
+/// One child result in a multi-child termination, in the requested order.
+/// Failed cleanup retains that child's reservation for explicit owner shutdown.
+pub type DynamicChildResult<E> = Result<DynamicChildCompletion<E>, DynamicSupervisorError>;
+
 /// Fail-closed lifecycle refusal. No refusal fabricates a started worker.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -165,6 +169,12 @@ pub enum DynamicSupervisorError {
     /// The ID belongs to another owner, was reaped, or names an older admission.
     #[error("unknown or stale dynamic child identity")]
     StaleChild,
+    /// A group operation named the same child more than once; no stop was sent.
+    #[error("duplicate child identity in group termination")]
+    DuplicateChild,
+    /// A direct worker's restart/topology configuration failed before admission.
+    #[error("invalid dynamic worker configuration: {0:?}")]
+    WorkerConfiguration(crate::supervision::ManagedSupervisorBindError),
     /// No wrapped admission sequence is ever reused.
     #[error("dynamic child admission generation exhausted")]
     GenerationExhausted,
@@ -245,7 +255,7 @@ impl<E> Child<E> {
             };
             let result = std::task::ready!(terminal);
             self.joined = Some(result);
-            self.handle.take();
+            drop(self.handle.take());
         }
         if self.closed.is_none() {
             if self.closing.is_none() {
@@ -255,8 +265,8 @@ impl<E> Child<E> {
             let result = std::task::ready!(
                 self.closing.as_mut().expect("retained close future").as_mut().poll(cx)
             );
-            self.closed = Some(result.map(DynamicRegionOutcome::from).map_err(Arc::new));
-            self.closing.take();
+            self.closed = Some(result.map(DynamicRegionOutcome::from_close).map_err(Arc::new));
+            drop(self.closing.take());
         }
         Poll::Ready(())
     }
@@ -363,6 +373,20 @@ impl<E> DynamicSupervisor<E> {
         }
     }
 
+    fn check_admission(&mut self, name: &ChildName) -> Result<(), DynamicSupervisorError> {
+        if self.sealed { return Err(DynamicSupervisorError::Closing); }
+        if self.owner.checkpoint().is_err() {
+            self.begin_shutdown();
+            return Err(DynamicSupervisorError::Cancelled(
+                self.owner.cancel_reason().unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
+            ));
+        }
+        if name.is_empty() || name.len() > 255 { return Err(DynamicSupervisorError::InvalidName); }
+        if self.children.contains_key(name.as_str()) { return Err(DynamicSupervisorError::DuplicateName); }
+        if self.children.len() >= self.max_children { return Err(DynamicSupervisorError::Capacity); }
+        Ok(())
+    }
+
     /// Idempotently request a stop for exactly this admission, never a reused name.
     /// Call `wait_child` or `terminate_child` to observe actual quiescence.
     pub fn request_stop(&mut self, id: &DynamicChildId) -> Result<(), DynamicSupervisorError> {
@@ -389,17 +413,8 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     pub async fn start_child(
         &mut self, name: impl Into<ChildName>, supervisor: ManagedSupervisor<E>,
     ) -> Result<DynamicChildId, DynamicSupervisorError> {
-        if self.sealed { return Err(DynamicSupervisorError::Closing); }
-        if self.owner.checkpoint().is_err() {
-            self.begin_shutdown();
-            return Err(DynamicSupervisorError::Cancelled(
-                self.owner.cancel_reason().unwrap_or_else(|| CancelReason::user("dynamic owner cancelled")),
-            ));
-        }
         let name = name.into();
-        if name.is_empty() || name.len() > 255 { return Err(DynamicSupervisorError::InvalidName); }
-        if self.children.contains_key(name.as_str()) { return Err(DynamicSupervisorError::DuplicateName); }
-        if self.children.len() >= self.max_children { return Err(DynamicSupervisorError::Capacity); }
+        self.check_admission(&name)?;
         let generation = self.generation.checked_add(1)
             .ok_or(DynamicSupervisorError::GenerationExhausted)?;
         self.generation = generation;
@@ -469,6 +484,43 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
         self.wait_child(id).await
     }
 
+    /// Stop a selected group, then drive every controller and boundary close together.
+    ///
+    /// All IDs (including uniqueness) are validated BEFORE any stop request.
+    /// A stale/foreign/duplicate ID therefore cannot partially stop a group.
+    /// All stop requests precede all awaits, and every close is polled even when
+    /// another is Pending, allowing interdependent finalizers to make progress.
+    ///
+    /// The returned vector follows `ids` order. Each child has its own result:
+    /// successful reaps release capacity, failed cleanup remains quarantined.
+    /// Dropping the future retains ALL selected children and their current drain
+    /// state; it does not undo stop requests or discard completed reports.
+    /// The temporary owner-side work is bounded by the admitted child ceiling.
+    pub async fn terminate_children(
+        &mut self, ids: &[DynamicChildId],
+    ) -> Result<Vec<DynamicChildResult<E>>, DynamicSupervisorError> {
+        let mut unique = std::collections::BTreeSet::new();
+        for id in ids {
+            self.child(id)?;
+            if !unique.insert(id.name.as_str()) {
+                return Err(DynamicSupervisorError::DuplicateChild);
+            }
+        }
+        for id in ids {
+            self.children.get_mut(id.name.as_str()).expect("validated group member").stop();
+        }
+        poll_fn(|cx| {
+            self.observe_cancellation(cx);
+            let mut all_ready = true;
+            for id in ids {
+                let child = self.children.get_mut(id.name.as_str()).expect("retained group member");
+                if child.poll_terminal(cx).is_pending() { all_ready = false; }
+            }
+            if all_ready { Poll::Ready(()) } else { Poll::Pending }
+        }).await;
+        Ok(ids.iter().map(|id| self.reap(id)).collect())
+    }
+
     /// Wait for a reaped completion; an empty collection returns None immediately.
     /// Ready ties use lexical name order. Each poll scans at most the configured
     /// child ceiling. Every pending join/close registers the current waker.
@@ -493,11 +545,17 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
     /// cancellation, panic and explicit cleanup failures separately.
     pub async fn shutdown(mut self) -> DynamicSupervisorReport<E> {
         self.begin_shutdown();
-        for child in self.children.values_mut() {
-            poll_fn(|cx| child.poll_terminal(cx)).await;
-        }
+        poll_fn(|cx| {
+            let mut all_ready = true;
+            for child in self.children.values_mut() {
+                // Never short-circuit on Pending: another boundary's finalizer
+                // may be the event this one needs in order to finish closing.
+                if child.poll_terminal(cx).is_pending() { all_ready = false; }
+            }
+            if all_ready { Poll::Ready(()) } else { Poll::Pending }
+        }).await;
         let root = self.root.take().expect("owned dynamic root");
-        let close = root.close_with_outcome().await.map(DynamicRegionOutcome::from).map_err(Arc::new);
+        let close = root.close_with_outcome().await.map(DynamicRegionOutcome::from_close).map_err(Arc::new);
         let children = std::mem::take(&mut self.children).into_values().map(Child::into_completion).collect();
         DynamicSupervisorReport { region: self.region, children, close }
     }
@@ -511,6 +569,9 @@ impl<E> Drop for DynamicSupervisor<E> {
         // completion; only the runtime's parent-region barrier supplies that.
     }
 }
+
+mod worker;
+pub use worker::DynamicWorkerConfig;
 
 #[cfg(test)]
 mod tests;

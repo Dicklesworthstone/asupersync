@@ -222,3 +222,6 @@ fn dropping_an_owner_keeps_children_under_the_enclosing_region_barrier() {
         assert_eq!(stopped.load(Ordering::SeqCst), 1, "the parent barrier must drain the real worker");
     });
 }
+
+#[path = "lifecycle_tests.rs"]
+mod lifecycle;
