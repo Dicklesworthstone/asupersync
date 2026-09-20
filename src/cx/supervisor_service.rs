@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll};
 
 /// Submission/observation failure, distinct from a child's application outcome.
@@ -83,10 +84,13 @@ struct Command<E> {
 /// Retain a client while child handles are still intended to run.
 pub struct DynamicSupervisorClient<E> {
     sender: mpsc::Sender<Command<E>>,
+    control: Arc<Control>,
 }
 
 impl<E> Clone for DynamicSupervisorClient<E> {
-    fn clone(&self) -> Self { Self { sender: self.sender.clone() } }
+    fn clone(&self) -> Self {
+        Self { sender: self.sender.clone(), control: Arc::clone(&self.control) }
+    }
 }
 
 impl<E> fmt::Debug for DynamicSupervisorClient<E> {
@@ -177,6 +181,9 @@ impl<E: Send + 'static> DynamicSupervisorClient<E> {
         -> Result<DynamicAdmission<E>, DynamicServiceError>
     {
         if cx.checkpoint().is_err() { return Err(cancellation(cx)); }
+        if self.control.mode.load(Ordering::Acquire) != RUNNING {
+            return Err(DynamicServiceError::Closed);
+        }
         if name.is_empty() || name.len() > 255 {
             return Err(DynamicSupervisorError::InvalidName.into());
         }
@@ -228,6 +235,7 @@ type ReportSlot<E> = Arc<Mutex<Option<Result<DynamicSupervisorReport<E>, Dynamic
 pub struct DynamicSupervisorService<E> {
     task: TaskHandle<()>,
     report: ReportSlot<E>,
+    control: Arc<Control>,
 }
 
 impl<E> fmt::Debug for DynamicSupervisorService<E> {
@@ -240,7 +248,20 @@ impl<E> fmt::Debug for DynamicSupervisorService<E> {
 impl<E> DynamicSupervisorService<E> {
     /// Request service cancellation, sealing admission and stopping all children.
     /// This does not wait for quiescence or consume the final report.
-    pub fn abort(&self) { self.task.abort(); }
+    pub fn abort(&self) {
+        self.control.request(STOPPING);
+        self.task.abort();
+    }
+
+    /// Seal admission and let already-dispatched children finish naturally.
+    ///
+    /// Queued requests that have not been dispatched are refused. An admission
+    /// already being processed may finish and belongs to this drain. Requesters
+    /// racing with this call must still inspect their admission receipts.
+    /// Existing children are NOT stopped. Permanent workers can therefore keep
+    /// a drain pending indefinitely; `abort` escalates it to cancellation.
+    /// Neither this signal nor `abort` waits for the actual root close.
+    pub fn begin_drain(&self) { self.control.request(DRAINING); }
 
     /// Await the actual service task terminal, then return its retained report.
     /// Caller cancellation does not bypass the child/root drain. Dropping this
@@ -259,7 +280,7 @@ impl<E> DynamicSupervisorService<E> {
 }
 
 impl<E> Drop for DynamicSupervisorService<E> {
-    fn drop(&mut self) { self.task.abort(); }
+    fn drop(&mut self) { self.abort(); }
 }
 
 impl Cx {
@@ -274,13 +295,36 @@ impl Cx {
         if mailbox_capacity == 0 { return Err(DynamicServiceError::InvalidCapacity); }
         if self.checkpoint().is_err() { return Err(cancellation(self)); }
         let (sender, receiver) = mpsc::channel(mailbox_capacity);
+        let (notify, control_rx) = mpsc::channel(1);
+        let control = Arc::new(Control { mode: AtomicU8::new(RUNNING), notify });
+        let driver_control = Arc::clone(&control);
         let report = Arc::new(Mutex::new(None));
         let publication = Arc::clone(&report);
         let task = self.spawn(move |cx| async move {
-            let result = drive(cx, config, receiver).await;
+            let result = drive(cx, config, receiver, driver_control, control_rx).await;
             *publication.lock() = Some(result);
         }).map_err(DynamicServiceError::Spawn)?;
-        Ok((DynamicSupervisorClient { sender }, DynamicSupervisorService { task, report }))
+        Ok((DynamicSupervisorClient { sender, control: Arc::clone(&control) },
+            DynamicSupervisorService { task, report, control }))
+    }
+}
+
+const RUNNING: u8 = 0;
+const DRAINING: u8 = 1;
+const STOPPING: u8 = 2;
+
+struct Control {
+    mode: AtomicU8,
+    notify: mpsc::Sender<()>,
+}
+
+impl Control {
+    fn request(&self, mode: u8) {
+        // Publish monotone state before its coalescible wake. A full notification
+        // channel already contains a wake; the driver reads the newest mode
+        // after consuming it. A concurrent consume leaves space for this wake.
+        self.mode.fetch_max(mode, Ordering::AcqRel);
+        let _ = self.notify.try_send(());
     }
 }
 
@@ -344,6 +388,7 @@ fn poll_children<E: Send + 'static>(
 
 async fn drive<E: Send + 'static>(
     cx: Cx, config: DynamicSupervisorConfig, receiver: mpsc::Receiver<Command<E>>,
+    control: Arc<Control>, mut control_rx: mpsc::Receiver<()>,
 ) -> Result<DynamicSupervisorReport<E>, DynamicSupervisorError> {
     let mut owner = cx.open_dynamic_supervisor::<E>(config).await?;
     let mut cancellation = Cancellation { cx: cx.clone(), token: None, observed: false };
@@ -352,10 +397,30 @@ async fn drive<E: Send + 'static>(
     loop {
         let command = poll_fn(|task_cx| {
             if cancellation.requested(task_cx) || owner.is_closing() {
-                owner.begin_shutdown();
-                // Dropping queued commands closes their admission receipts and
-                // releases retained factories without invoking them.
+                control.mode.fetch_max(STOPPING, Ordering::AcqRel);
+            }
+            // Drain one coalesced notification, then register for the next.
+            // Never poll a cancellation-rejecting receiver once stopping: that
+            // would manufacture perpetual readiness while cleanup is Pending.
+            if control.mode.load(Ordering::Acquire) != STOPPING {
+                match control_rx.poll_recv(&cx, task_cx) {
+                    Poll::Ready(Ok(())) => match control_rx.poll_recv(&cx, task_cx) {
+                        Poll::Ready(Ok(())) => task_cx.waker().wake_by_ref(),
+                        Poll::Ready(Err(_)) => {
+                            control.mode.fetch_max(STOPPING, Ordering::AcqRel);
+                        }
+                        Poll::Pending => {}
+                    },
+                    Poll::Ready(Err(_)) => {
+                        control.mode.fetch_max(STOPPING, Ordering::AcqRel);
+                    }
+                    Poll::Pending => {}
+                }
+            }
+            let mode = control.mode.load(Ordering::Acquire);
+            if mode != RUNNING {
                 drop(receiver.take());
+                if mode == STOPPING { owner.begin_shutdown(); }
             }
             poll_children(&mut owner, &mut tickets, task_cx);
             let Some(incoming) = &mut receiver else {
@@ -364,6 +429,7 @@ async fn drive<E: Send + 'static>(
             match incoming.poll_recv(&cx, task_cx) {
                 Poll::Ready(Ok(command)) => Poll::Ready(Some(command)),
                 Poll::Ready(Err(_)) => {
+                    control.mode.fetch_max(STOPPING, Ordering::AcqRel);
                     owner.begin_shutdown();
                     drop(receiver.take());
                     // Stop was published after this sweep: rescan to register
