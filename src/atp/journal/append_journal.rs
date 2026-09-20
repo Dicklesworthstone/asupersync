@@ -2583,7 +2583,13 @@ mod tests {
             journal.flush().unwrap();
         }
         let trusted = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
-        assert_eq!(trusted.get_resume_summary("wrong_key").unwrap().durable_bytes, 4096);
+        assert_eq!(
+            trusted
+                .get_resume_summary("wrong_key")
+                .unwrap()
+                .durable_bytes,
+            4096
+        );
         let untrusted = AppendJournal::new(config, AuthKey::from_seed(43)).unwrap();
         let entries = untrusted.get_transfer_entries("wrong_key").unwrap();
         assert_eq!(entries.len(), 2);
