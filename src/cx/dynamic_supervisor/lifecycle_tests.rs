@@ -109,7 +109,9 @@ fn group_termination_validates_all_ids_before_stopping_any_member() {
         assert!(!owner.is_closing(), "group termination does not shut down the owner");
         assert!(owner.terminate_children(&[]).await.unwrap().is_empty());
         let new = owner.start_child("new", done()).await.unwrap();
-        owner.wait_child(&new).await.unwrap();
+        let completion = owner.wait_child(&new).await.unwrap();
+        assert!(completion.close.is_ok());
+        assert!(completion.supervisor.unwrap().outcome.is_ok());
         assert!(owner.shutdown().await.close.is_ok());
     });
 }
@@ -202,7 +204,9 @@ fn dropped_waits_retain_a_joined_report_and_one_pending_boundary_finalizer() {
         assert_ne!(replacement.region_id(), id.region_id());
         assert!(replacement.generation() > id.generation());
         assert!(matches!(owner.request_stop(&id), Err(DynamicSupervisorError::StaleChild)));
-        owner.wait_child(&replacement).await.unwrap();
+        let replacement_completion = owner.wait_child(&replacement).await.unwrap();
+        assert!(replacement_completion.close.is_ok());
+        assert!(replacement_completion.supervisor.unwrap().outcome.is_ok());
         let shutdown = owner.shutdown().await;
         *returned.lock() = Some((completion, shutdown));
     }).unwrap();

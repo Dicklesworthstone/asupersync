@@ -175,7 +175,9 @@ fn completed_unreaped_names_hold_capacity_and_stale_ids_cannot_stop_replacements
         let mut foreign = cx.open_dynamic_supervisor::<String>(DynamicSupervisorConfig::new(1)).await.unwrap();
         assert!(matches!(foreign.request_stop(&replacement), Err(DynamicSupervisorError::StaleChild)));
         assert!(foreign.shutdown().await.close.is_ok());
-        owner.wait_child(&replacement).await.unwrap();
+        let completion = owner.wait_child(&replacement).await.unwrap();
+        assert!(completion.close.is_ok());
+        assert!(completion.supervisor.unwrap().outcome.is_ok());
         assert!(owner.shutdown().await.close.is_ok());
     });
 }
