@@ -80,7 +80,7 @@ merely because a cancellation request was sent. Existing V3 control operations
 and retained terminal replay do not enter this queue. Admission timeouts/refusals
 are Failed outcomes subject to existing idempotency retention, not automatic retry.
 
-Order is FIFO within a logical peer and oldest currently feasible peer head
+With `new_queued`, order is FIFO within a logical peer and oldest feasible head
 across peers. A peer blocked by its own active quota does not block another peer.
 A byte-heavy head blocks later requests for its own peer, but another peer may
 progress. No priority/control-authority promotion or starvation bound is promised.
@@ -100,14 +100,57 @@ are separately explicit; no new interval extends the inbound service lease.
 `queue_usage()` / `peer_queue_usage()` report waiting charges separately from
 active `usage()`. Direct unwrapped APIs still bypass this opt-in budget.
 
+## Locally assigned priority with bounded bypass
+
+Construct `RemoteServiceAdmission::new_prioritized(limits, peers, queue_limits,
+RemotePriorityPolicy { max_bypass: 2 })` to enable `Background`, `Normal`, and
+`Urgent` application classes. Register selected computations using
+`register_waiting_with_priority(..., child_spec, wait_timeout, priority, handler)`.
+The operator chooses the class once at registration. The class is never parsed
+from a client's payload, request origin, or new wire field. Existing computation
+grants determine which registered handlers a peer may call. There is no Control
+class: application priority does not confer protocol-control authority.
+
+Priority mode uses FIFO within each peer/class, then chooses the highest-priority
+feasible head with enrollment-order ties. It may overtake earlier work in another
+class for the same peer. Every other successful queued admission increments a
+waiting request's bounded bypass count, including while that request is not
+feasible. Once its count reaches `max_bypass`, the oldest feasible promoted head
+outranks every ordinary class. Polling, waking, cancellation and completion do
+not themselves advance that count. The count saturates rather than wrapping.
+Zero promotes immediately. With only Normal requests the existing FIFO selection
+is preserved; old `new_queued` constructors never opt into priorities silently.
+
+For example, with one execution slot and `max_bypass: 2`, Background can be passed
+by two newly admitted Urgent requests; once promoted and feasible, a younger
+Urgent cannot pass it again. Older feasible promoted heads can still precede it.
+This is an admission-order bound, NOT a wall-clock bound or a claim of fairness
+for requests that cannot currently fit. An unpolled selected waiter, a larger
+same-class head, or an indefinitely retained active reservation can delay work.
+One bounded queue scan selects a head; one bounded pass ages remaining entries
+per queued admission. No performance improvement is claimed without measurements.
+
+Immediate, ordinary waiting and priority registrations share the SAME active and
+waiting ceilings. Urgent cannot overbook, evade byte bounds, reserve a control
+slot, extend a deadline, preempt a handler, or recycle capacity before drain.
+Existing V3 renewal/cancellation and cached replies remain outside this application
+queue. Non-normal use without priority-enabled construction refuses explicitly.
+
+Outbound executors offer the same constructor and `reserve_with_priority(&cx,
+&node, input_len, wait_timeout, priority)`, plus `run_waiting_with_priority`.
+Ordinary reserve/run_waiting select Normal on a priority-enabled executor.
+Reservation delivery rechecks cancellation and deadline after notifying other
+waiters: even a safe wake callback cannot turn an expired/cancelled claim into a
+delivered reservation. The existing issued-reservation and drain rules still apply.
+
 ## Limits and validation
 
 This is execution admission AFTER TLS/framing/idempotency dispatch, not protection
 against all unauthenticated resource use. Keep the listener's connection, frame,
 handshake, first-frame and retained-record bounds. Charges exclude prior input
 copies, serialization expansion, outputs, TLS buffers, and application memory.
-There is no output-byte reservation, bounded priority queue, or global cross-
-process fairness claim. Existing unwrapped registry handlers bypass this gate.
+There is no output-byte reservation or global cross-process fairness claim.
+Existing unwrapped registry handlers bypass this gate.
 
 The focused tests drive real local runtime tasks through public registry dispatch.
 The native tests use actual V3 mTLS sessions without the outbound executor. They
@@ -117,6 +160,11 @@ Other cases cover independent byte/peer refusals and retained-idempotency replay
 The queue tests additionally witness actual queued count/bytes before cancellation,
 disconnect, deadline or active-handler retirement; queued input must not execute
 early, overflow must refuse, and another authenticated peer must progress.
+Priority tests drive actual mTLS sessions to queued ownership, then require the
+exact factory order across mixed existing/priority registrations. A newly arriving
+Urgent must not bypass an older promoted Background. Urgent overflow and unknown
+peers refuse before factories; queued urgent cancellation/disconnect and renewal
+must progress without displacing the active handler or consuming extra credit.
 Logical test identities share a fixture certificate; this is not a production
 PKI-separation claim. Tests are authored until these commands execute:
 
@@ -124,4 +172,5 @@ PKI-separation claim. Tests are authored until these commands execute:
 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --lib distributed::remote_owned::admission::
 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features tls,test-internals --test remote_service_admission_native -- --nocapture
 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features tls,test-internals --test remote_queue_native -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features tls,test-internals --test remote_priority_native -- --nocapture
 ```

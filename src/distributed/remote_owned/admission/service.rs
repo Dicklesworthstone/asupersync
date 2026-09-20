@@ -7,7 +7,7 @@
 //! coordinator cancellation rather than making its admission immediately reusable.
 
 use super::{RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
-    RemotePeerLimits, RemoteQueueLimits, RemoteQueueUsage, RemoteReserveError};
+    RemotePeerLimits, RemotePriority, RemotePriorityPolicy, RemoteQueueLimits, RemoteQueueUsage, RemoteReserveError};
 use crate::cx::{ChildRegionSpec, Cx};
 use crate::distributed::{ComputationSchemaRegistryError, HasSchema};
 use crate::remote::{NodeId, RemoteComputationInvocation, RemoteComputationRegistry, RemoteError, RemoteOutcome};
@@ -67,6 +67,17 @@ impl RemoteServiceAdmission {
     where I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
     {
         Ok(Self { budget: RemoteExecutor::new_queued(limits, peers, queue)? })
+    }
+
+    /// Enable locally assigned application priorities with bounded-bypass promotion.
+    /// Every registered class shares the same global/per-peer active and waiting
+    /// ceilings. This changes no TLS grants, wire schemas or lifecycle-control lane.
+    pub fn new_prioritized<I>(limits: RemoteAdmissionLimits, peers: I,
+        queue: RemoteQueueLimits, priority: RemotePriorityPolicy,
+    ) -> Result<Self, RemoteAdmissionError>
+    where I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
+    {
+        Ok(Self { budget: RemoteExecutor::new_prioritized(limits, peers, queue, priority)? })
     }
 
     /// Current waiting charges, separate from active execution usage.
@@ -138,8 +149,9 @@ impl RemoteServiceAdmission {
     /// closure or wait expiry removes it without execution. Once admitted it uses
     /// the SAME coordinator and retains active quota through subtree cleanup.
     ///
-    /// FIFO is per authenticated peer, oldest feasible peer heads globally. This
-    /// is not a priority protocol. V3 renewal/cancel and cached replies bypass
+    /// Ordinary queues use FIFO per authenticated peer and oldest feasible heads
+    /// globally. Priority-enabled queues assign this handler Normal. V3 renewal/
+    /// cancel and cached replies bypass
     /// execution admission as before. Queue refusals/timeouts are Failed outcomes
     /// and may be retained by V2/V3 idempotency; no retry policy changes. Queue wait
     /// is separate from, and cannot extend, the service's original lease/deadlines.
@@ -153,12 +165,39 @@ impl RemoteServiceAdmission {
         F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
     {
-        self.register_policy::<I, O, F, Fut>(registry, name, child, Some(wait_timeout), handler)
+        self.register_policy::<I, O, F, Fut>(registry, name, child,
+            Some((wait_timeout, RemotePriority::Normal)), handler)
+    }
+
+    /// Register a computation with an operator-selected application priority.
+    ///
+    /// The class is captured at registration, never read from the request, its
+    /// asserted origin or the client's payload. Only an authenticated peer granted
+    /// this computation can reach its class. Non-normal classes require an
+    /// explicitly priority-enabled constructor; otherwise dispatch refuses before
+    /// invoking the factory. This is scheduling policy, not extra capacity or a
+    /// protocol-control capability. Running handlers are never preempted.
+    ///
+    /// All classes share the same counters/coordinator/drain path. FIFO holds
+    /// within each authenticated peer/class; promoted feasible heads outrank all
+    /// ordinary classes. Cancellation and the original lease/queue deadline remain
+    /// dominant. Existing V2/V3 idempotency may retain admission refusals as before.
+    pub fn register_waiting_with_priority<I, O, F, Fut>(
+        &self, registry: &mut RemoteComputationRegistry, name: impl Into<String>,
+        child: ChildRegionSpec, wait_timeout: Duration, priority: RemotePriority, handler: F,
+    ) -> Result<(), ComputationSchemaRegistryError>
+    where
+        I: HasSchema,
+        O: HasSchema,
+        F: Fn(Cx, RemoteComputationInvocation) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<RemoteOutcome, RemoteError>> + Send + 'static,
+    {
+        self.register_policy::<I, O, F, Fut>(registry, name, child, Some((wait_timeout, priority)), handler)
     }
 
     fn register_policy<I, O, F, Fut>(
         &self, registry: &mut RemoteComputationRegistry, name: impl Into<String>,
-        child: ChildRegionSpec, wait_timeout: Option<Duration>, handler: F,
+        child: ChildRegionSpec, wait: Option<(Duration, RemotePriority)>, handler: F,
     ) -> Result<(), ComputationSchemaRegistryError>
     where
         I: HasSchema,
@@ -174,8 +213,9 @@ impl RemoteServiceAdmission {
             let spec = child.clone();
             async move {
                 if cx.checkpoint().is_err() { return Ok(cancelled(&cx)); }
-                let permit = if let Some(timeout) = wait_timeout {
-                    match budget.reserve(&cx, invocation.peer_node(), invocation.request().input.len(), timeout).await {
+                let permit = if let Some((timeout, priority)) = wait {
+                    match budget.reserve_with_priority(&cx, invocation.peer_node(),
+                        invocation.request().input.len(), timeout, priority).await {
                         Ok(reservation) => reservation.permit,
                         Err(RemoteReserveError::Cancelled) => return Ok(cancelled(&cx)),
                         Err(error) => return Ok(RemoteOutcome::Failed(format!("remote service admission refused: {error}"))),
