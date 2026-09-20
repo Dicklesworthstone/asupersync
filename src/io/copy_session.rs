@@ -1,7 +1,7 @@
 //! Resumable byte copying with caller-owned read-ahead and progress.
 //!
 //! [`CopySession::run`] borrows its session. Dropping that future, observing
-//! cooperative cancellation, or returning an I/O error leaves unread-ahead bytes
+//! cooperative cancellation, or returning an I/O error leaves read-ahead bytes
 //! and committed-write counters in the session. Calling `run` again resumes at
 //! the first byte not yet accepted by the writer. Unlike `copy`, the disposable
 //! future owns no transfer buffer. No background task or executor is created.
@@ -289,6 +289,9 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> CopySession<R, W> {
         }).await
     }
 }
+
+mod bidirectional;
+pub use bidirectional::{BidirectionalCopyProgress, BidirectionalCopySession};
 
 #[cfg(test)]
 mod tests;

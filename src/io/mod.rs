@@ -40,6 +40,10 @@
 //! - `copy_bidirectional` is **not drop-cancel-safe**: either direction can
 //!   discard one private buffer while its peer writer is pending.
 //!
+//! - `CopySession::run` and `BidirectionalCopySession::run` retain read-ahead
+//!   and committed progress in their caller-owned sessions when a run is dropped.
+//!   Retain the session, or extract its endpoints AND pending bytes for recovery.
+//!
 //! The unbuffered futures separately perform a bounded best-effort drain when
 //! cooperative `Cx` cancellation is observed on a later poll. A race/select
 //! that drops the future without polling it again cannot run that drain.
@@ -69,7 +73,9 @@ pub use copy::{
     AsyncBufRead, Copy, CopyBidirectional, CopyBuf, CopyWithProgress, copy, copy_bidirectional,
     copy_buf, copy_with_progress,
 };
-pub use copy_session::{CopySession, CopySessionProgress};
+pub use copy_session::{
+    BidirectionalCopyProgress, BidirectionalCopySession, CopySession, CopySessionProgress,
+};
 pub use ext::{
     AsyncReadExt, AsyncReadVectoredExt, Read, ReadExact, ReadI8, ReadToEnd, ReadToString, ReadU8,
     ReadVectored,
