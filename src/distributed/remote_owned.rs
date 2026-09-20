@@ -378,6 +378,7 @@ pub use admission::{
     RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
     RemoteExecutorError, RemotePeerLimits, RemoteServiceAdmission,
     RemoteQueueLimits, RemoteQueueUsage, RemoteReservation, RemoteReserveError,
+    RemotePriority, RemotePriorityPolicy,
 };
 
 #[cfg(test)]

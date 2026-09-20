@@ -290,4 +290,5 @@ mod service;
 pub use service::RemoteServiceAdmission;
 
 mod queue;
-pub use queue::{RemoteQueueLimits, RemoteQueueUsage, RemoteReservation, RemoteReserveError};
+pub use queue::{RemotePriority, RemotePriorityPolicy, RemoteQueueLimits, RemoteQueueUsage,
+    RemoteReservation, RemoteReserveError};

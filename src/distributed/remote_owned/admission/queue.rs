@@ -3,8 +3,9 @@
 //! Waiting reserves only bounded metadata and an original-input-byte charge;
 //! it starts no task or network operation. FIFO is per logical peer. Across
 //! peers the oldest currently feasible head wins, avoiding a blocked peer's
-//! head-of-line stall. This is not priority scheduling or a starvation bound
-//! for differently sized requests. All callbacks run outside the budget lock.
+//! head-of-line stall. Explicit priority mode uses FIFO within each peer/class,
+//! with admission-count promotion rather than a wall-clock starvation promise.
+//! All callbacks run outside the budget lock.
 
 use super::{Permit, RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage,
     RemoteExecutor, RemotePeerLimits, Shared, State, charge, next_usage};
@@ -42,6 +43,41 @@ pub struct RemoteQueueUsage {
     pub input_bytes: usize,
 }
 
+/// Locally selected application scheduling class, never protocol-control authority.
+///
+/// These classes share every active and waiting quota. No class can reserve
+/// extra capacity, bypass authentication, preempt running work, or impersonate
+/// cancellation/renewal traffic. Inbound registration fixes the class locally;
+/// never derive it from an untrusted request field without an authorization policy.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RemotePriority {
+    /// Deferrable application work, still eligible for bounded-bypass promotion.
+    Background,
+    /// Class used by the existing reserve/run_waiting entry points.
+    #[default]
+    Normal,
+    /// Latency-sensitive application work, not a privileged control lane.
+    Urgent,
+}
+
+impl RemotePriority {
+    const fn index(self) -> usize {
+        match self { Self::Background => 0, Self::Normal => 1, Self::Urgent => 2 }
+    }
+}
+
+/// Explicit scheduling policy for a newly constructed priority-enabled queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemotePriorityPolicy {
+    /// After this many other queued admissions, prefer the oldest feasible
+    /// promoted head over all ordinary priorities. Zero immediately promotes.
+    /// Counts admissions, not polls, completions, bytes, or wall-clock time.
+    /// A continuously feasible head cannot be overtaken by younger work after
+    /// promotion; older promoted heads may still precede it. Blocked requests,
+    /// unpolled selected waiters and indefinitely held permits have no time bound.
+    pub max_bypass: usize,
+}
+
 /// Typed refusal with no input bytes or peer labels in diagnostics.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -52,6 +88,9 @@ pub enum RemoteReserveError {
     /// Waiting must be explicitly enabled at executor construction.
     #[error("remote executor has no wait queue")]
     Disabled,
+    /// A non-normal class requires explicit priority-mode construction.
+    #[error("remote executor has no priority scheduling policy")]
+    PriorityDisabled,
     /// Aggregate or per-peer waiting count/bytes cannot fit another request.
     #[error("remote wait queue limit reached: {0}")]
     QueueLimit(&'static str),
@@ -75,37 +114,58 @@ pub enum RemoteReserveError {
     Run(#[from] RemoteRunError),
 }
 
-struct Entry { peer: usize, bytes: usize }
-struct Peer { usage: RemoteQueueUsage, head: Option<u64> }
+struct Entry { peer: usize, bytes: usize, priority: RemotePriority, bypasses: usize }
+struct Peer { usage: RemoteQueueUsage, heads: [Option<u64>; 3] }
 pub(super) struct QueueState {
     limits: RemoteQueueLimits,
     entries: BTreeMap<u64, Entry>,
     peers: Vec<Peer>,
     total: RemoteQueueUsage,
     next: u64,
+    priority: Option<RemotePriorityPolicy>,
 }
 
 impl QueueState {
     fn new(limits: RemoteQueueLimits, peers: usize) -> Result<Self, RemoteAdmissionError> {
         let mut usage = Vec::new();
         usage.try_reserve_exact(peers).map_err(|_| RemoteAdmissionError::Allocation)?;
-        usage.resize_with(peers, || Peer { usage: RemoteQueueUsage::default(), head: None });
+        usage.resize_with(peers, || Peer { usage: RemoteQueueUsage::default(), heads: [None; 3] });
         Ok(Self { limits, entries: BTreeMap::new(), peers: usage,
-            total: RemoteQueueUsage::default(), next: 0 })
+            total: RemoteQueueUsage::default(), next: 0, priority: None })
     }
 
+    #[cfg(test)]
     fn insert(&mut self, peer: usize, bytes: usize) -> Result<u64, RemoteReserveError> {
+        self.insert_priority(peer, bytes, RemotePriority::Normal)
+    }
+
+    fn insert_priority(&mut self, peer: usize, bytes: usize, priority: RemotePriority)
+        -> Result<u64, RemoteReserveError>
+    {
+        if self.priority.is_none() && priority != RemotePriority::Normal {
+            return Err(RemoteReserveError::PriorityDisabled);
+        }
         let total = queued_next(self.total, bytes, self.limits.max_waiters,
             self.limits.max_input_bytes, "waiters", "input bytes")?;
         let usage = queued_next(self.peers[peer].usage, bytes, self.limits.max_waiters_per_peer,
             self.limits.max_input_bytes_per_peer, "peer waiters", "peer input bytes")?;
         let id = self.next.checked_add(1).ok_or(RemoteReserveError::SequenceExhausted)?;
-        self.entries.insert(id, Entry { peer, bytes });
+        self.entries.insert(id, Entry { peer, bytes, priority, bypasses: 0 });
         self.next = id;
         self.total = total;
         self.peers[peer].usage = usage;
-        self.peers[peer].head.get_or_insert(id);
+        self.peers[peer].heads[priority.index()].get_or_insert(id);
         Ok(id)
+    }
+
+    fn admitted(&mut self) {
+        if let Some(policy) = self.priority {
+            // One bounded pass per queued admission. Saturation preserves the
+            // promotion predicate even at usize::MAX; polling does not age work.
+            for entry in self.entries.values_mut() {
+                entry.bypasses = entry.bypasses.saturating_add(1).min(policy.max_bypass);
+            }
+        }
     }
 
     fn remove(&mut self, id: u64) {
@@ -114,9 +174,11 @@ impl QueueState {
             self.total.input_bytes -= entry.bytes;
             self.peers[entry.peer].usage.waiters -= 1;
             self.peers[entry.peer].usage.input_bytes -= entry.bytes;
-            if self.peers[entry.peer].head == Some(id) {
-                self.peers[entry.peer].head = self.entries.iter()
-                    .find(|(_, next)| next.peer == entry.peer).map(|(&next, _)| next);
+            let head = &mut self.peers[entry.peer].heads[entry.priority.index()];
+            if *head == Some(id) {
+                *head = self.entries.iter()
+                    .find(|(_, next)| next.peer == entry.peer && next.priority == entry.priority)
+                    .map(|(&next, _)| next);
             }
         }
     }
@@ -133,19 +195,29 @@ fn queued_next(current: RemoteQueueUsage, bytes: usize, count_limit: usize,
     })
 }
 
-// One bounded ordered scan; a blocked head prevents only later work for its peer.
+// One bounded ordered scan. Ordinary queues retain their per-peer FIFO; explicit
+// priority queues have one FIFO head per peer/class. Promoted heads outrank every
+// ordinary class, in enrollment order. Capacity is always checked independently.
 fn selected(shared: &Shared, state: &State) -> Option<u64> {
     let queue = state.queue.as_ref()?;
-    queue.entries.iter().find(|(id, entry)| {
-        queue.peers[entry.peer].head == Some(**id)
-            && next_usage(shared.limits, shared.peers[entry.peer], state.total,
-                state.peers[entry.peer], entry.bytes).is_ok()
-    }).map(|(&id, _)| id)
+    let mut candidate = None;
+    for (&id, entry) in &queue.entries {
+        if queue.peers[entry.peer].heads[entry.priority.index()] != Some(id)
+            || next_usage(shared.limits, shared.peers[entry.peer], state.total,
+                state.peers[entry.peer], entry.bytes).is_err()
+        { continue; }
+        let Some(policy) = queue.priority else { return Some(id); };
+        if entry.bypasses >= policy.max_bypass { return Some(id); }
+        if candidate.is_none_or(|(_, priority)| entry.priority > priority) {
+            candidate = Some((id, entry.priority));
+        }
+    }
+    candidate.map(|(id, _)| id)
 }
 
 pub(super) fn blocks_immediate(shared: &Shared, state: &State, peer: usize) -> bool {
     state.queue.as_ref().is_some_and(|queue| {
-        queue.peers[peer].head.is_some() || selected(shared, state).is_some()
+        queue.peers[peer].heads.iter().any(Option::is_some) || selected(shared, state).is_some()
     })
 }
 
@@ -197,7 +269,9 @@ impl Ticket {
         let (peer, bytes) = (entry.peer, entry.bytes);
         // Allocation precedes count publication; removal contains no callbacks.
         let permit = charge(&self.shared, &mut state, peer, bytes)?;
-        state.queue.as_mut().expect("enabled queue").remove(id);
+        let queue = state.queue.as_mut().expect("enabled queue");
+        queue.remove(id);
+        queue.admitted();
         self.id = None;
         drop(state);
         self.shared.notify_queue();
@@ -228,6 +302,22 @@ impl RemoteExecutor {
         Ok(executor)
     }
 
+    /// Opt into three application priorities plus admission-count promotion.
+    /// All classes use the same active and waiting counters. Existing immediate
+    /// calls and ordinary reservations on this executor also share that domain.
+    /// Same-peer work may overtake across classes, never within one class.
+    /// Ordinary new_queued construction retains its original per-peer FIFO.
+    pub fn new_prioritized<I>(limits: RemoteAdmissionLimits, peers: I,
+        queue: RemoteQueueLimits, priority: RemotePriorityPolicy,
+    ) -> Result<Self, RemoteAdmissionError>
+    where I: IntoIterator<Item = (NodeId, RemotePeerLimits)>,
+    {
+        let mut executor = Self::new_queued(limits, peers, queue)?;
+        let shared = Arc::get_mut(&mut executor.shared).expect("new unique executor");
+        shared.state.get_mut().queue.as_mut().expect("enabled queue").priority = Some(priority);
+        Ok(executor)
+    }
+
     /// Logical waiting charges, independent of usage()'s active reservations.
     #[must_use]
     pub fn queue_usage(&self) -> RemoteQueueUsage {
@@ -249,7 +339,8 @@ impl RemoteExecutor {
     /// readiness ties and destroy the ticket. Drop removes it without dispatch.
     /// Close wakes waiters to refusal but preserves already-delivered reservations.
     ///
-    /// FIFO holds within a peer, oldest feasible heads across peers. An earlier
+    /// Ordinary queues retain FIFO within a peer, oldest feasible heads across
+    /// peers. On a priority-enabled executor this uses Normal. An earlier
     /// byte-heavy head may wait while another peer progresses; no starvation or
     /// wall-clock fairness guarantee is implied. Input stays with the caller;
     /// byte accounting is declared here and checked again by reservation.run.
@@ -257,8 +348,22 @@ impl RemoteExecutor {
     pub async fn reserve(&self, cx: &Cx, node: &NodeId, bytes: usize, timeout: Duration)
         -> Result<RemoteReservation, RemoteReserveError>
     {
+        self.reserve_with_priority(cx, node, bytes, timeout, RemotePriority::Normal).await
+    }
+
+    /// Reserve with an explicitly authorized local application priority.
+    /// A non-normal priority refuses on an ordinary queue rather than silently
+    /// changing its FIFO contract. Priority affects selection only after enqueue;
+    /// it never preempts issued reservations, relaxes quotas or extends deadlines.
+    pub async fn reserve_with_priority(&self, cx: &Cx, node: &NodeId, bytes: usize,
+        timeout: Duration, priority: RemotePriority,
+    ) -> Result<RemoteReservation, RemoteReserveError>
+    {
         if cx.checkpoint().is_err() { return Err(RemoteReserveError::Cancelled); }
         let notify = self.shared.queue_notify.as_ref().ok_or(RemoteReserveError::Disabled)?;
+        if priority != RemotePriority::Normal
+            && self.shared.state.lock().queue.as_ref().expect("enabled queue").priority.is_none()
+        { return Err(RemoteReserveError::PriorityDisabled); }
         let clock = cx.timer_driver().ok_or(RemoteReserveError::NoTimer)?;
         let now = clock.now();
         let deadline = now + timeout;
@@ -278,7 +383,7 @@ impl RemoteExecutor {
         {
             let mut state = self.shared.state.lock();
             if state.closed { return Err(RemoteAdmissionError::Closed.into()); }
-            ticket.id = Some(state.queue.as_mut().expect("enabled queue").insert(peer, bytes)?);
+            ticket.id = Some(state.queue.as_mut().expect("enabled queue").insert_priority(peer, bytes, priority)?);
         }
         let mut cancelled = std::pin::pin!(cx.cancelled());
         let mut timer = std::pin::pin!(Sleep::with_timer_driver(deadline, clock.clone()));
@@ -299,6 +404,11 @@ impl RemoteExecutor {
             if cx.checkpoint().is_err() { return Err(RemoteReserveError::Cancelled); }
             if clock.now() >= deadline { return Err(RemoteReserveError::Deadline); }
             if let Some(permit) = ticket.claim()? {
+                // claim notifies other waiters outside the mutex. Those safe
+                // callbacks may cancel this caller or advance its clock before
+                // delivery, just as callbacks during immediate admission can.
+                if cx.checkpoint().is_err() { return Err(RemoteReserveError::Cancelled); }
+                if clock.now() >= deadline { return Err(RemoteReserveError::Deadline); }
                 return Ok(RemoteReservation { node: node.clone(), bytes, permit });
             }
         }
@@ -313,7 +423,20 @@ impl RemoteExecutor {
         self.reserve(cx, &node, input.len(), wait_timeout).await?
             .run(cx, computation, input, config).await
     }
+
+    /// Priority-aware counterpart of run_waiting, using the same checked proxy
+    /// and scope ownership. Wait and execution budgets remain separate intervals.
+    pub async fn run_waiting_with_priority(&self, cx: &Cx, node: NodeId,
+        computation: ComputationName, input: RemoteInput, wait_timeout: Duration,
+        priority: RemotePriority, config: RemoteRunConfig,
+    ) -> Result<RemoteRunReport, RemoteReserveError> {
+        self.reserve_with_priority(cx, &node, input.len(), wait_timeout, priority).await?
+            .run(cx, computation, input, config).await
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod priority_tests;
