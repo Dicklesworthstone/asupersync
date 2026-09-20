@@ -140,10 +140,10 @@ pub enum CleanupPhase {
 /// Result of panic isolation attempt.
 #[derive(Debug, Clone)]
 pub enum PanicIsolationResult<T> {
-    /// Operation invocation or retirement of a skipped operation panicked and was isolated.
-    Panicked(PanicContext),
     /// Operation completed successfully
     Success(T),
+    /// Operation invocation or retirement of a skipped operation panicked and was isolated.
+    Panicked(PanicContext),
     /// Operation invocation was skipped due to the region's panic threshold.
     ///
     /// Captured values were dropped inside the isolation boundary. If that

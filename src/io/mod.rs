@@ -52,6 +52,7 @@ pub mod cap;
 #[cfg(test)]
 mod cap_tests;
 mod copy;
+pub mod copy_session;
 pub mod ext;
 mod lines;
 mod owned_split;
@@ -68,6 +69,7 @@ pub use copy::{
     AsyncBufRead, Copy, CopyBidirectional, CopyBuf, CopyWithProgress, copy, copy_bidirectional,
     copy_buf, copy_with_progress,
 };
+pub use copy_session::{CopySession, CopySessionProgress};
 pub use ext::{
     AsyncReadExt, AsyncReadVectoredExt, Read, ReadExact, ReadI8, ReadToEnd, ReadToString, ReadU8,
     ReadVectored,
