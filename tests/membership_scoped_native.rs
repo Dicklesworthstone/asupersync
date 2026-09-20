@@ -187,20 +187,13 @@ fn mtls_revocation_drains_remote_handler_and_closes_its_actually_parked_tcp_stre
             assert!(client_runtime.shutdown_timeout(Duration::from_secs(3)));
         })));
         let diagnostics = runtime.diagnostics(); let authority_owner = owner.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let failure_close = Close(Some((owner.clone(), operator.clone())));
         let mut authority = Join(Some(thread::spawn(move || {
             // On failure, retire owners so the waiting RPC and effect peer can end.
             // On success, the caller's response owns orderly listener shutdown.
             let mut failure_close = failure_close;
-            let ((region, holder), _child) = parked_rx.recv_timeout(Duration::from_secs(8)).expect("actual TCP read Pending");
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while !diagnostics.explain_region_open(region).reasons.iter().any(|reason| {
-                matches!(reason, Reason::ObligationHeld { holder_task, obligation_type, .. }
-                    if *holder_task == holder && obligation_type == "Lease")
-            }) {
-                assert!(Instant::now() < deadline, "real checked lease was never projected");
-                thread::sleep(Duration::from_millis(1));
-            }
+            ready_rx.recv_timeout(Duration::from_secs(13)).expect("runtime verified parked TCP effect and lease");
             let client_runtime = RuntimeBuilder::current_thread().build().unwrap();
             client_runtime.block_on(async {
                 let cx = Cx::current().unwrap();
@@ -217,7 +210,31 @@ fn mtls_revocation_drains_remote_handler_and_closes_its_actually_parked_tcp_stre
         })));
         let result = runtime.block_on(async {
             let cx = Cx::current().unwrap();
-            asupersync::time::timeout(cx.now(), Duration::from_secs(25), service.run(&cx)).await
+            // Diagnostics stays on its runtime owner; service polling must
+            // continue while the real remote handler reaches its parked read.
+            let observe = async {
+                let deadline = Instant::now() + Duration::from_secs(8);
+                let ((region, holder), _child) = loop {
+                    match parked_rx.try_recv() {
+                        Ok(ids) => break ids,
+                        Err(mpsc::TryRecvError::Empty) => {}
+                        Err(mpsc::TryRecvError::Disconnected) => panic!("TCP effect stopped before parking"),
+                    }
+                    assert!(Instant::now() < deadline, "actual TCP read never reached Pending");
+                    asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                };
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !diagnostics.explain_region_open(region).reasons.iter().any(|reason| {
+                    matches!(reason, Reason::ObligationHeld { holder_task, obligation_type, .. }
+                        if *holder_task == holder && obligation_type == "Lease")
+                }) {
+                    assert!(Instant::now() < deadline, "real checked lease was never projected");
+                    asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                }
+                ready_tx.try_send(()).expect("authority is waiting for readiness");
+            };
+            asupersync::time::timeout(cx.now(), Duration::from_secs(25),
+                futures_lite::future::zip(observe, service.run(&cx))).await.map(|(_, report)| report)
         });
         owner.close(); let _ = operator.begin_drain();
         authority.finish(); caller.finish(); effect_peer.finish();
