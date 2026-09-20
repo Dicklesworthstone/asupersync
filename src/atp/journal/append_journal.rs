@@ -1897,15 +1897,20 @@ impl AppendJournal {
         let mut corrupted = false;
 
         loop {
-            // Read length prefix
+            // EOF before a prefix is clean. EOF inside its four bytes is a
+            // torn record: recovery must rotate rather than append behind it.
             let mut length_bytes = [0u8; 4];
-            match reader.read_exact(&mut length_bytes) {
+            match reader.read_exact(&mut length_bytes[..1]) {
                 Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(_) => {
                     corrupted = true;
                     break;
                 }
+            }
+            if reader.read_exact(&mut length_bytes[1..]).is_err() {
+                corrupted = true;
+                break;
             }
 
             let length = u32::from_le_bytes(length_bytes) as usize;
@@ -2232,6 +2237,53 @@ mod tests {
         let recovered_stats = recovered.get_stats();
         assert_eq!(recovered_stats.sequence, 1);
         assert_eq!(recovered_stats.recent_entries_count, 1);
+    }
+
+    #[test]
+    fn torn_length_prefix_rotates_and_preserves_later_appends_across_restarts() {
+        for prefix_len in 0..4 {
+            let config = JournalConfig {
+                base_dir: unique_temp_dir("torn_length_prefix"),
+                ..Default::default()
+            };
+            let record = |peer: &str| JournalRecord::Accept {
+                transfer_id: "torn-prefix".to_string(),
+                peer_id: peer.to_string(),
+                timestamp: 42,
+                auth_tag: unsigned_tag(),
+            };
+            {
+                let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+                assert_eq!(journal.append(record("before")).unwrap(), 0);
+                journal.flush().unwrap();
+            }
+            let original = journal_file_path(&config.base_dir, 0);
+            {
+                let mut file = OpenOptions::new().append(true).open(&original).unwrap();
+                file.write_all(&128_u32.to_le_bytes()[..prefix_len])
+                    .unwrap();
+                file.sync_all().unwrap();
+            }
+            let original_bytes = std::fs::read(&original).unwrap();
+            {
+                let mut recovered = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+                assert_eq!(recovered.get_stats().generation, u64::from(prefix_len != 0));
+                assert_eq!(recovered.append(record("after")).unwrap(), 1);
+                recovered.flush().unwrap();
+            }
+            if prefix_len != 0 {
+                assert_eq!(std::fs::read(&original).unwrap(), original_bytes);
+            }
+            let recovered = AppendJournal::new(config, test_auth_key()).unwrap();
+            let entries = recovered.get_transfer_entries("torn-prefix").unwrap();
+            assert_eq!(entries.len(), 2, "prefix length {prefix_len}");
+            assert_eq!(entries[0].sequence, 0);
+            assert_eq!(entries[1].sequence, 1);
+            assert_eq!(
+                entries[1].record,
+                record("after").with_signature(&test_auth_key())
+            );
+        }
     }
 
     #[test]
