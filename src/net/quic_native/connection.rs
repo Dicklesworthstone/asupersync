@@ -2582,7 +2582,10 @@ impl NativeQuicConnection {
                 }
                 Ok(())
             }
-            QuicFrame::MaxStreams { .. }
+            QuicFrame::NewToken { .. }
+            | QuicFrame::NewConnectionId { .. }
+            | QuicFrame::RetireConnectionId { .. }
+            | QuicFrame::MaxStreams { .. }
             | QuicFrame::DataBlocked { .. }
             | QuicFrame::StreamsBlocked { .. } => Ok(()),
         }

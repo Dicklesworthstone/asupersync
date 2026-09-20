@@ -6456,7 +6456,7 @@ async fn connect(
     )
     .await
     {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         Ok(Err(err)) => return Err(map_tls_error(err)),
         Err(_elapsed) => {
             return Err(QuicTransportError::Timeout {

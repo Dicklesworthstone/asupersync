@@ -837,6 +837,18 @@ impl QuicHandshakeDriver {
     /// `Ok` when at least one packet authenticated, otherwise the first
     /// packet's error.
     pub fn recv_handshake_packet(&mut self, datagram: &[u8]) -> Result<ConnectionId, QuicTlsError> {
+        self.recv_handshake_packet_with_consumed(datagram)
+            .map(|(cid, _)| cid)
+    }
+
+    /// Feed one received UDP datagram to the handshake, returning the authenticated
+    /// peer CID and the byte count of long-header packets consumed from `datagram`.
+    /// Any unconsumed trailing bytes (e.g. coalesced 1-RTT packet) can be handed off
+    /// to the data plane by the caller.
+    pub fn recv_handshake_packet_with_consumed(
+        &mut self,
+        datagram: &[u8],
+    ) -> Result<(ConnectionId, usize), QuicTlsError> {
         if datagram.is_empty() {
             return Err(handshake_failure("packet_header_decode"));
         }
@@ -885,7 +897,7 @@ impl QuicHandshakeDriver {
             }
         }
         match (accepted, skipped) {
-            (Some(peer_cid), _) => Ok(peer_cid),
+            (Some(peer_cid), _) => Ok((peer_cid, offset)),
             (None, Some(err)) => Err(err),
             (None, None) => Err(handshake_failure("expected_long_header")),
         }
@@ -1335,8 +1347,10 @@ async fn retransmit_handshake_flight(
 ///
 /// This talks to `server_addr`. The connect-side handshake derives Initial keys from
 /// the client's original `dcid`, sends the ClientHello, and exchanges flights until
-/// the handshake completes. On success the driver holds 1-RTT keys ready to be
-/// handed to the data plane.
+/// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`.
+///
+/// Returns any early 1-RTT packets buffered during the handshake flight so
+/// they can be processed by the application-data connection.
 pub async fn client_handshake_over_udp(
     cx: &Cx,
     endpoint: &mut QuicUdpEndpoint,
@@ -1344,7 +1358,7 @@ pub async fn client_handshake_over_udp(
     driver: &mut QuicHandshakeDriver,
     dcid: ConnectionId,
     client_scid: ConnectionId,
-) -> Result<(), QuicTlsError> {
+) -> Result<Vec<ReceivedPacket>, QuicTlsError> {
     driver.install_initial_keys(dcid.as_bytes())?;
     let mut packet_number = 0u64;
     let mut last_flight = driver
@@ -1362,6 +1376,7 @@ pub async fn client_handshake_over_udp(
     // deflates) the sample; consumers min-fold or treat it as an upper
     // bound, which is the safe direction for an in-flight cap.
     let mut flight_sent_at = Instant::now();
+    let mut early_one_rtt = Vec::new();
 
     for _ in 0..HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
@@ -1370,7 +1385,7 @@ pub async fn client_handshake_over_udp(
             // observe the evidence (the server's retransmitted long-header
             // flight). See `QuicHandshakeDriver::final_flight`.
             driver.final_flight = last_flight;
-            return Ok(());
+            return Ok(early_one_rtt);
         }
         let received = match crate::time::timeout(
             cx.now(),
@@ -1392,9 +1407,19 @@ pub async fn client_handshake_over_udp(
         // Pump after EACH packet: e.g. after the server's Initial (ServerHello)
         // the client must pump to install Handshake keys BEFORE it can unprotect
         // the server's Handshake-level flight that may arrive in the same batch.
-        for packet in &received {
-            let peer_dcid = match driver.recv_handshake_packet(&packet.data) {
-                Ok(peer_scid) => {
+        for packet in received {
+            if packet.data.first().is_none_or(|byte| byte & 0x80 == 0) {
+                if packet.src_addr != server_addr {
+                    continue;
+                }
+                if early_one_rtt.len() >= MAX_EARLY_ONE_RTT_PACKETS {
+                    return Err(handshake_failure("early_one_rtt_queue_exhausted"));
+                }
+                early_one_rtt.push(packet);
+                continue;
+            }
+            let (peer_dcid, consumed) = match driver.recv_handshake_packet_with_consumed(&packet.data) {
+                Ok(res) => {
                     // RFC 9000 section 7.2: after authenticating the server's
                     // first flight, address subsequent client handshake packets
                     // to the server-selected source CID, not the original DCID.
@@ -1405,7 +1430,7 @@ pub async fn client_handshake_over_udp(
                             u64::try_from(flight_sent_at.elapsed().as_micros()).unwrap_or(u64::MAX),
                         );
                     }
-                    peer_scid
+                    res
                 }
                 Err(err) if is_stale_handshake_packet_error(&err) => {
                     let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
@@ -1417,6 +1442,18 @@ pub async fn client_handshake_over_udp(
                 Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
                 Err(err) => return Err(err),
             };
+            if consumed < packet.data.len()
+                && packet.src_addr == server_addr
+                && packet.data[consumed..].iter().any(|&b| b != 0)
+                && early_one_rtt.len() < MAX_EARLY_ONE_RTT_PACKETS
+            {
+                early_one_rtt.push(ReceivedPacket {
+                    src_addr: packet.src_addr,
+                    data: packet.data[consumed..].to_vec(),
+                    receive_time: packet.receive_time,
+                    transmit_time: packet.transmit_time,
+                });
+            }
             let sent = driver
                 .send_pending_flight(
                     cx,
@@ -1437,7 +1474,7 @@ pub async fn client_handshake_over_udp(
 
     if driver.is_complete() {
         driver.final_flight = last_flight;
-        Ok(())
+        Ok(early_one_rtt)
     } else {
         Err(handshake_failure("client_handshake_incomplete"))
     }
@@ -1534,8 +1571,8 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                 }
                 continue;
             }
-            let peer_scid = match driver.recv_handshake_packet(&packet.data) {
-                Ok(peer_scid) => peer_scid,
+            let (peer_scid, consumed) = match driver.recv_handshake_packet_with_consumed(&packet.data) {
+                Ok(res) => res,
                 Err(err) if is_stale_handshake_packet_error(&err) => {
                     if peer.is_some() {
                         let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
@@ -1548,6 +1585,17 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                 Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
                 Err(err) => return Err(err),
             };
+            if consumed < packet.data.len()
+                && packet.data[consumed..].iter().any(|&b| b != 0)
+                && early_one_rtt.len() < MAX_EARLY_ONE_RTT_PACKETS
+            {
+                early_one_rtt.push(ReceivedPacket {
+                    src_addr: packet.src_addr,
+                    data: packet.data[consumed..].to_vec(),
+                    receive_time: packet.receive_time,
+                    transmit_time: packet.transmit_time,
+                });
+            }
             if peer.is_none() {
                 peer = Some((packet.src_addr, peer_scid));
             }

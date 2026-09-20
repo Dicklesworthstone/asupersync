@@ -653,8 +653,40 @@ impl ConnectionRouter {
                         cx,
                         connection_id,
                         &mut protection.protection,
+                        Some(&handle.connection),
                         &packet.data,
                     )?;
+                    if unprotected.peer_key_update {
+                        handle
+                            .connection
+                            .on_peer_key_phase_pn(
+                                cx,
+                                unprotected.header.key_phase,
+                                unprotected.header.packet_number,
+                            )
+                            .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                connection_id,
+                                reason: error.to_string(),
+                            })?;
+                        protection.protection.note_peer_key_update(PacketProtectionSpace::OneRtt);
+                        if handle.connection.tls().local_key_phase() != unprotected.header.key_phase {
+                            handle
+                                .connection
+                                .request_local_key_update(cx)
+                                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                    connection_id,
+                                    reason: error.to_string(),
+                                })?;
+                            handle
+                                .connection
+                                .commit_local_key_update(cx)
+                                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                    connection_id,
+                                    reason: error.to_string(),
+                                })?;
+                            protection.protection.note_local_key_update(PacketProtectionSpace::OneRtt);
+                        }
+                    }
                     handle
                         .connection
                         .on_datagram_received(cx, packet.data.len() as u64)
@@ -716,13 +748,45 @@ impl ConnectionRouter {
                     let packet_protection = handle.packet_protection.as_mut().ok_or(
                         ConnectionRouterError::PacketProtectionUnavailable { connection_id },
                     )?;
-                    let unprotected = unprotect_1rtt_packet(
+                    let unprotected = unprotect_1rtt_packet_with_connection(
                         cx,
                         connection_id,
                         &mut packet_protection.protection,
+                        Some(&handle.connection),
                         &packet.data,
                     )
                     .await?;
+                    if unprotected.peer_key_update {
+                        handle
+                            .connection
+                            .on_peer_key_phase_pn(
+                                cx,
+                                unprotected.header.key_phase,
+                                unprotected.header.packet_number,
+                            )
+                            .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                connection_id,
+                                reason: error.to_string(),
+                            })?;
+                        packet_protection.protection.note_peer_key_update(PacketProtectionSpace::OneRtt);
+                        if handle.connection.tls().local_key_phase() != unprotected.header.key_phase {
+                            handle
+                                .connection
+                                .request_local_key_update(cx)
+                                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                    connection_id,
+                                    reason: error.to_string(),
+                                })?;
+                            handle
+                                .connection
+                                .commit_local_key_update(cx)
+                                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                    connection_id,
+                                    reason: error.to_string(),
+                                })?;
+                            packet_protection.protection.note_local_key_update(PacketProtectionSpace::OneRtt);
+                        }
+                    }
                     (unprotected.header.packet_number, unprotected.plaintext)
                 } else {
                     plaintext_packet_payload(connection_id, &packet.data)?
@@ -2053,11 +2117,13 @@ pub(crate) async fn assemble_protected_1rtt_packet_inner(
 }
 
 /// One authenticated 1-RTT packet: the unmasked short header (with the full,
-/// reconstructed packet number) and the plaintext payload.
+/// reconstructed packet number), the plaintext payload, and whether this
+/// packet was accepted as a genuine peer key update under next-generation keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Unprotected1RttPacket {
     pub(crate) header: ShortHeader,
     pub(crate) plaintext: Vec<u8>,
+    pub(crate) peer_key_update: bool,
 }
 
 /// Remove header protection from a received 1-RTT datagram addressed to
@@ -2068,7 +2134,19 @@ pub(crate) async fn unprotect_1rtt_packet(
     packet_protection: &mut AtpPacketProtection,
     packet: &[u8],
 ) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
-    unprotect_1rtt_packet_now(cx, connection_id, packet_protection, packet)
+    unprotect_1rtt_packet_now(cx, connection_id, packet_protection, None, packet)
+}
+
+/// Remove header protection and authenticate a 1-RTT datagram with connection
+/// context to accurately disambiguate peer key updates (RFC 9001 §6.3).
+pub(crate) async fn unprotect_1rtt_packet_with_connection(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    packet_protection: &mut AtpPacketProtection,
+    connection: Option<&NativeQuicConnection>,
+    packet: &[u8],
+) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
+    unprotect_1rtt_packet_now(cx, connection_id, packet_protection, connection, packet)
 }
 
 /// Recognize an authenticated, standalone Handshake ACK without mistaking it
@@ -2166,6 +2244,7 @@ fn unprotect_1rtt_packet_now(
     cx: &Cx,
     connection_id: ConnectionId,
     packet_protection: &mut AtpPacketProtection,
+    connection: Option<&NativeQuicConnection>,
     packet: &[u8],
 ) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
     let failed = |reason: String| ConnectionRouterError::PacketProcessingFailed {
@@ -2231,6 +2310,25 @@ fn unprotect_1rtt_packet_now(
         .map_err(|err| failed(format!("1-RTT packet number: {err}")))?;
     let key_phase = unmasked[0] & 0b0000_0100 != 0;
 
+    let peer_key_update = match connection {
+        Some(conn) => {
+            key_phase != conn.tls().remote_key_phase()
+                && conn.can_send_1rtt()
+                && conn.tls().peer_key_phase_is_new_update(key_phase, packet_number)
+        }
+        None => {
+            !packet_protection.next_gen_keys_installed(PacketProtectionSpace::OneRtt, key_phase)
+        }
+    };
+
+    if peer_key_update {
+        if let Outcome::Err(err) =
+            packet_protection.ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, key_phase)
+        {
+            return Err(failed(format!("1-RTT key update derivation failed: {err:?}")));
+        }
+    }
+
     let tag_offset = unmasked.len() - PROTECTED_1RTT_TAG_LEN;
     let tag: [u8; PROTECTED_1RTT_TAG_LEN] = unmasked[tag_offset..]
         .try_into()
@@ -2276,7 +2374,11 @@ fn unprotect_1rtt_packet_now(
         return Err(failed("1-RTT header length mismatch".to_string()));
     }
     header.packet_number = packet_number;
-    Ok(Unprotected1RttPacket { header, plaintext })
+    Ok(Unprotected1RttPacket {
+        header,
+        plaintext,
+        peer_key_update,
+    })
 }
 
 pub(crate) const PROTECTED_1RTT_MAX_PACKET_BYTES: usize = 1_200;
