@@ -264,6 +264,12 @@ impl SparseWriter {
         let sparse_range = SparseRange { start: offset, end };
 
         let mut state = self.lock_state();
+        if state.expected_size.is_some_and(|expected| end > expected) {
+            return Outcome::Err(SparseWriterError::InvalidRange {
+                offset,
+                size: chunk_size,
+            });
+        }
         if let Err(error) = self.ensure_temp_file_open_locked(&mut state) {
             return Outcome::Err(error);
         }
@@ -1058,6 +1064,64 @@ mod tests {
                 .unwrap();
 
             assert!(writer.is_complete());
+        });
+    }
+
+    #[test]
+    fn out_of_object_writes_leave_file_and_progress_unchanged() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let content = b"abcdefgh";
+            let (object_id, manifest) = manifest_for_content(content);
+            let writer = SparseWriter::new(
+                &cx,
+                object_id,
+                unique_temp_path("range_rejection"),
+                SparseWriterConfig {
+                    enable_preallocation: false,
+                    ..SparseWriterConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            writer.set_expected_size(8).unwrap();
+
+            for offset in [7, 8, 9] {
+                assert!(matches!(
+                    writer
+                        .write_chunk(&cx, offset, b"xx", WriteOptions::default())
+                        .await,
+                    Outcome::Err(SparseWriterError::InvalidRange { .. })
+                ));
+                let state = writer.lock_state();
+                assert!(state.temp_file.is_none());
+                assert!(state.temp_path.is_none());
+                assert!(state.written_chunks.is_empty());
+            }
+
+            writer
+                .write_chunk(&cx, 0, &content[..4], WriteOptions::default())
+                .await
+                .unwrap();
+            assert!(matches!(
+                writer
+                    .write_chunk(&cx, 7, b"xx", WriteOptions::default())
+                    .await,
+                Outcome::Err(SparseWriterError::InvalidRange { .. })
+            ));
+            let temp_path = writer.lock_state().temp_path.clone().unwrap();
+            assert_eq!(std::fs::read(&temp_path).unwrap(), &content[..4]);
+            assert_eq!(writer.get_stats().total_bytes_written, 4);
+            assert_eq!(writer.get_stats().chunk_count, 1);
+
+            // A rejected write must not prevent an exact-end write or verification.
+            writer
+                .write_chunk(&cx, 4, &content[4..], WriteOptions::default())
+                .await
+                .unwrap();
+            assert!(writer.is_complete());
+            writer.verify(&cx, &manifest).await.unwrap();
+            assert_eq!(std::fs::read(&temp_path).unwrap(), content);
         });
     }
 

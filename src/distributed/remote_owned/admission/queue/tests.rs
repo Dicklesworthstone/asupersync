@@ -166,7 +166,7 @@ fn exact_deadline_wins_a_simultaneously_released_slot() {
     let node = NodeId::new("alpha"); let held = executor.acquire(&node, 8).unwrap();
     let mut wait = Box::pin(executor.reserve(&cx, &node, 8, WAIT));
     assert!(poll(wait.as_mut()).is_pending());
-    clock.advance_to(Time::from_nanos(10_000_000_000)); timer.process_timers(); drop(held);
+    clock.advance_to(Time::from_nanos(10_000_000_000)); assert_eq!(timer.process_timers(), 1); drop(held);
     assert!(matches!(ready(wait.as_mut()), Err(RemoteReserveError::Deadline)));
     assert_eq!(executor.queue_usage().waiters, 0); assert_eq!(executor.usage().in_flight, 0);
     assert_eq!(timer.pending_count(), 0);

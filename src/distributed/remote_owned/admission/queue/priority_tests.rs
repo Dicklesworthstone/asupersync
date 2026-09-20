@@ -193,7 +193,7 @@ fn deadline_dominates_priority_and_promotion() {
     let held = executor.acquire(&node, 1).unwrap();
     let mut high = Box::pin(executor.reserve_with_priority(&cx, &node, 1, WAIT, RemotePriority::Urgent));
     assert!(poll(high.as_mut()).is_pending());
-    clock.advance_to(Time::from_nanos(10_000_000_000)); timer.process_timers(); drop(held);
+    clock.advance_to(Time::from_nanos(10_000_000_000)); assert_eq!(timer.process_timers(), 1); drop(held);
     assert!(matches!(ready(high.as_mut()), Err(RemoteReserveError::Deadline))); empty(&executor, &timer);
 }
 
