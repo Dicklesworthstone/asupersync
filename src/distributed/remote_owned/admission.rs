@@ -3,7 +3,7 @@
 //! Bounds are charged before region admission and retained by both the calling
 //! scope and its actual proxy task. Cancelling or dropping the caller cannot
 //! release capacity while the proxy is still collecting the remote terminal.
-//! No request queue, retry, route discovery, or new transport is introduced.
+//! Waiting is explicitly opt-in; no retry, route discovery, or transport is added.
 
 use super::{RemoteRunConfig, RemoteRunError, RemoteRunReport, run_admitted};
 use crate::cx::Cx;
@@ -81,6 +81,9 @@ pub enum RemoteAdmissionError {
     /// Admission has been explicitly closed; existing invocations still drain.
     #[error("remote executor admission is closed")]
     Closed,
+    /// An explicitly enabled queue has an earlier eligible or same-peer waiter.
+    #[error("remote admission is reserved for queued work")]
+    Queued,
 }
 
 /// Admission refusal or the existing owned-execution setup failure.
@@ -99,12 +102,27 @@ struct State {
     total: RemoteAdmissionUsage,
     peers: Vec<RemoteAdmissionUsage>,
     closed: bool,
+    queue: Option<queue::QueueState>,
 }
 struct Shared {
     limits: RemoteAdmissionLimits,
     index: BTreeMap<NodeId, usize>,
     peers: Vec<RemotePeerLimits>,
     state: Mutex<State>,
+    queue_notify: Option<crate::sync::Notify>,
+}
+impl Shared {
+    fn notify_queue(&self) {
+        if let Some(notify) = &self.queue_notify {
+            // Notify already isolates its fanout. During another unwind, do not
+            // turn a hostile wake callback into a double-panic process abort.
+            if std::thread::panicking() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notify.notify_waiters()));
+            } else {
+                notify.notify_waiters();
+            }
+        }
+    }
 }
 
 /// Cloneable, bounded admission in front of the existing `run_remote` workflow.
@@ -116,7 +134,8 @@ struct Shared {
 /// labels accordingly. Separately constructed executors have separate budgets.
 /// Direct `run_remote` / `spawn_remote` calls do not acquire this opt-in budget.
 ///
-/// There is no hidden queue or fairness/priority policy: saturation refuses.
+/// The existing constructor/run refuse saturation. `new_queued` and `reserve`
+/// opt into bounded waiting on these SAME counters; no hidden queue is created.
 /// Cancellation and terminal collection do not require another admission credit.
 /// Charged payload size excludes caller copies, serialization expansion, replies,
 /// task/region metadata and backend buffers; retain the backend's own limits.
@@ -159,7 +178,8 @@ impl RemoteExecutor {
             usage.push(RemoteAdmissionUsage::default());
         }
         Ok(Self { shared: Arc::new(Shared { limits, index, peers: policies,
-            state: Mutex::new(State { total: RemoteAdmissionUsage::default(), peers: usage, closed: false }),
+            state: Mutex::new(State { total: RemoteAdmissionUsage::default(), peers: usage, closed: false, queue: None }),
+            queue_notify: None,
         }) })
     }
 
@@ -175,10 +195,15 @@ impl RemoteExecutor {
     }
 
     /// Permanently refuse later admissions through every clone. Does not cancel
-    /// current invocations or close their shared remote runtime. Returns true once.
+    /// current invocations or issued reservations. Queued callers wake to refusal.
+    /// Their waiting bytes remain accounted until those futures retire.
     pub fn close_admission(&self) -> bool {
-        let mut state = self.shared.state.lock();
-        !std::mem::replace(&mut state.closed, true)
+        let changed = {
+            let mut state = self.shared.state.lock();
+            !std::mem::replace(&mut state.closed, true)
+        };
+        if changed { self.shared.notify_queue(); }
+        changed
     }
 
     fn acquire(&self, node: &NodeId, bytes: usize) -> Result<Permit, RemoteAdmissionError> {
@@ -187,25 +212,10 @@ impl RemoteExecutor {
         if bytes > policy.max_request_bytes { return Err(RemoteAdmissionError::RequestBytes); }
         let mut state = self.shared.state.lock();
         if state.closed { return Err(RemoteAdmissionError::Closed); }
-        let peer = state.peers[index];
-        let next_peer = RemoteAdmissionUsage {
-            in_flight: peer.in_flight.checked_add(1).filter(|n| *n <= policy.max_in_flight)
-                .ok_or(RemoteAdmissionError::PeerInFlight)?,
-            input_bytes: peer.input_bytes.checked_add(bytes).filter(|n| *n <= policy.max_input_bytes)
-                .ok_or(RemoteAdmissionError::PeerBytes)?,
-        };
-        let next_total = RemoteAdmissionUsage {
-            in_flight: state.total.in_flight.checked_add(1).filter(|n| *n <= self.shared.limits.max_in_flight)
-                .ok_or(RemoteAdmissionError::TotalInFlight)?,
-            input_bytes: state.total.input_bytes.checked_add(bytes).filter(|n| *n <= self.shared.limits.max_input_bytes)
-                .ok_or(RemoteAdmissionError::TotalBytes)?,
-        };
-        // Allocate ownership before publishing counts; no callback or fallible
-        // operation follows these assignments while the counters are locked.
-        let permit = Permit { _charge: Arc::new(Charge { shared: Arc::clone(&self.shared), index, bytes }) };
-        state.peers[index] = next_peer;
-        state.total = next_total;
-        Ok(permit)
+        if queue::blocks_immediate(&self.shared, &state, index) {
+            return Err(RemoteAdmissionError::Queued);
+        }
+        charge(&self.shared, &mut state, index, bytes)
     }
 
     /// Acquire shared admission on the FIRST poll, before opening a child region,
@@ -227,6 +237,34 @@ impl RemoteExecutor {
     }
 }
 
+fn next_usage(limits: RemoteAdmissionLimits, policy: RemotePeerLimits,
+    total: RemoteAdmissionUsage, peer: RemoteAdmissionUsage, bytes: usize,
+) -> Result<(RemoteAdmissionUsage, RemoteAdmissionUsage), RemoteAdmissionError> {
+    let next_peer = RemoteAdmissionUsage {
+        in_flight: peer.in_flight.checked_add(1).filter(|n| *n <= policy.max_in_flight)
+            .ok_or(RemoteAdmissionError::PeerInFlight)?,
+        input_bytes: peer.input_bytes.checked_add(bytes).filter(|n| *n <= policy.max_input_bytes)
+            .ok_or(RemoteAdmissionError::PeerBytes)?,
+    };
+    let next_total = RemoteAdmissionUsage {
+        in_flight: total.in_flight.checked_add(1).filter(|n| *n <= limits.max_in_flight)
+            .ok_or(RemoteAdmissionError::TotalInFlight)?,
+        input_bytes: total.input_bytes.checked_add(bytes).filter(|n| *n <= limits.max_input_bytes)
+            .ok_or(RemoteAdmissionError::TotalBytes)?,
+    };
+    Ok((next_peer, next_total))
+}
+
+fn charge(shared: &Arc<Shared>, state: &mut State, index: usize, bytes: usize)
+    -> Result<Permit, RemoteAdmissionError>
+{
+    let (next_peer, next_total) = next_usage(shared.limits, shared.peers[index], state.total, state.peers[index], bytes)?;
+    let permit = Permit { _charge: Arc::new(Charge { shared: Arc::clone(shared), index, bytes }) };
+    state.peers[index] = next_peer;
+    state.total = next_total;
+    Ok(permit)
+}
+
 // Clones are two references to ONE charge, not new admissions. Root ownership
 // covers local close; the task copy covers an abandoned caller's pending drain.
 #[derive(Clone)]
@@ -234,11 +272,14 @@ pub(super) struct Permit { _charge: Arc<Charge> }
 struct Charge { shared: Arc<Shared>, index: usize, bytes: usize }
 impl Drop for Charge {
     fn drop(&mut self) {
-        let mut state = self.shared.state.lock();
-        state.total.in_flight -= 1;
-        state.total.input_bytes -= self.bytes;
-        state.peers[self.index].in_flight -= 1;
-        state.peers[self.index].input_bytes -= self.bytes;
+        {
+            let mut state = self.shared.state.lock();
+            state.total.in_flight -= 1;
+            state.total.input_bytes -= self.bytes;
+            state.peers[self.index].in_flight -= 1;
+            state.peers[self.index].input_bytes -= self.bytes;
+        }
+        self.shared.notify_queue();
     }
 }
 
@@ -247,3 +288,6 @@ mod tests;
 
 mod service;
 pub use service::RemoteServiceAdmission;
+
+mod queue;
+pub use queue::{RemoteQueueLimits, RemoteQueueUsage, RemoteReservation, RemoteReserveError};

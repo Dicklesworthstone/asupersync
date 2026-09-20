@@ -377,6 +377,7 @@ mod admission;
 pub use admission::{
     RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
     RemoteExecutorError, RemotePeerLimits, RemoteServiceAdmission,
+    RemoteQueueLimits, RemoteQueueUsage, RemoteReservation, RemoteReserveError,
 };
 
 #[cfg(test)]
