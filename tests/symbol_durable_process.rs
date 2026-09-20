@@ -383,3 +383,7 @@ fn invalid_snapshot_key_never_publishes_a_checkpoint_to_a_live_replica() {
     process.finish(0);
     assert_eq!(std::fs::metadata(path).unwrap().len(), initial_length);
 }
+
+
+#[path = "symbol_durable_process/continuation.rs"]
+mod continuation;

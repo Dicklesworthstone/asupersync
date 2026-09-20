@@ -338,3 +338,6 @@ impl<W: RestorableWorkload> PreparedContinuation<W> {
 
 #[cfg(test)]
 mod tests;
+
+mod network;
+pub use network::ContinuationRecoveryError;

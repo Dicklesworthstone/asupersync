@@ -90,3 +90,52 @@ authored until executed, not proof of current compilation or native behavior.
 ```sh
 RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features tls --lib distributed::symbol_service::native::checkpoint::continuation::
 ```
+
+## Restore from actual replicas, then execute
+
+`RemoteSymbolTransport::recover_workload` composes an imported `RecoveryManifest`
+with the existing bounded mTLS fetch, symbol authentication, RaptorQ decoder and
+snapshot key checks, followed by continuation validation. Pass network limits,
+decoder limits, continuation limits, the independent snapshot key and a locally
+compiled `Arc<W>`. It rejects a manifest object larger than the continuation's
+snapshot byte ceiling before dispatch. Its overall recovery deadline includes
+serialization and state decoding, checked before and after nonpreemptible codec
+calls. It returns prepared state, not an already-running task or a new lease.
+
+Publication remains the existing explicit journey: checkpoint application state,
+encode that signed snapshot with `StateEncoder`, call `replicate_checkpoint`, and
+persist the returned authenticated manifest in a caller-owned durable location.
+The source checkpoint/future/encoder and batch parameters can then be discarded
+according to the application's commit protocol. After restart, independently
+validate manifest identity/origin, recover the workload state, and run it under
+fresh local membership and capabilities. No automatic registry, discovery,
+checkpoint upgrade, source shutdown or remote transaction is implied.
+
+The native continuation cases reuse the existing `symbol_durable_process`
+executable and real replica-store subprocess helper. The main journey executes
+steps 0–4 against an independent TCP receiver, captures the acknowledged next
+step, replicates/persists its snapshot and manifest, drops the original runtime
+and state owners, kills the storing replica only after acknowledgement, and
+reopens the journal in a fresh process. Only the manifest and independent
+identity/credentials/provisioned effect destination cross the restart boundary.
+A fresh workload instance recovers and executes steps 5–11 under reopened,
+persisted membership policy. The receiver rejects duplicate or out-of-order
+steps, so a restarted-at-zero implementation cannot pass. Both current-thread
+and multithread destination runtimes are exercised.
+
+The test's TCP effect protocol is a small explicit fixture, not a production
+authenticated/idempotent service. It deliberately checkpoints after an exact
+acknowledgement. It does not prove recovery from the ambiguous interval between
+an external side effect and checkpoint publication, or power-loss durability.
+Its persistent symbol store uses the production mTLS computation protocol.
+
+Negative cases require workload-revision/byte-limit refusal without running the
+effect factory, and membership revocation while a restored TCP read is genuinely
+Pending. The latter must close/drain its child and expose non-success; the silent
+effect peer must actually observe EOF. All child processes and helper threads
+have owned cleanup paths, and files remain retained rather than auto-deleted.
+These are authored regressions until run, not current native execution evidence.
+
+```sh
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --features tls,test-internals --test symbol_durable_process continuation:: -- --nocapture
+```
