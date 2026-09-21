@@ -55,12 +55,14 @@
 //! - [`server`]: Server infrastructure
 //! - [`client`]: Client infrastructure
 //! - [`health`]: gRPC Health Checking Protocol
+//! - [`health_rpc`]: Authenticated, bounded Check/Watch registered RPC adapter
 //! - [`interceptor`]: Interceptor middleware and layers
 //! - [`web`]: gRPC-Web protocol support (HTTP/1.1, base64 text mode)
 
 pub mod client;
 pub mod codec;
 pub mod health;
+pub mod health_rpc;
 pub mod interceptor;
 pub mod protobuf;
 pub mod reflection;
@@ -96,6 +98,7 @@ pub use health::{
     HealthCheckRequest, HealthCheckResponse, HealthReporter, HealthService, HealthServiceBuilder,
     HealthWatchStream, HealthWatcher, ServingStatus,
 };
+pub use health_rpc::HealthRpcService;
 pub use interceptor::{
     BearerAuthInterceptor, BearerAuthValidator, FnInterceptor, InterceptorLayer,
     LoggingInterceptor, MetadataPropagator, RateLimitInterceptor, TimeoutInterceptor,
