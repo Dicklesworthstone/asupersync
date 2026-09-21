@@ -65,6 +65,7 @@ pub mod dynamic_service;
 pub mod dynamic_supervisor;
 pub mod macaroon;
 pub mod registry;
+pub mod resource_bracket;
 pub mod scope;
 pub mod scoped_cpu;
 pub mod supervisor_service;
