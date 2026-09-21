@@ -271,6 +271,7 @@ run_v044_downstream_cancel_compatibility() {
     fi
 }
 
+run_suite() {
 echo "=== Asupersync Proof Verification Suite (bd-2rhiq) ==="
 echo "Artifacts: $ARTIFACTS_DIR"
 echo ""
@@ -279,9 +280,17 @@ echo ""
 
 run_check "Native parked-task cancellation boundary" "integration-proofs" \
     run_native_parked_task_cancellation
+if (( FAILED != 0 )); then
+    echo "Stopping: native cancellation prerequisite failed; later checks were not attempted." >&2
+    return 0 # Generate the failure manifest before exiting nonzero below.
+fi
 
 run_check "Published v0.4.4 downstream cancellation compatibility" "integration-proofs" \
     run_v044_downstream_cancel_compatibility
+if (( FAILED != 0 )); then
+    echo "Stopping: downstream cancellation prerequisite failed; later checks were not attempted." >&2
+    return 0
+fi
 
 # ---- Category: Rust Proof Tests ----
 
@@ -338,6 +347,10 @@ else
     echo
     RESULTS+=("{\"name\":\"Lean proof build\",\"category\":\"lean-proofs\",\"status\":\"skip\",\"elapsed_s\":0,\"log\":\"\"}")
 fi
+
+}
+
+run_suite
 
 # ---- Generate manifest ----
 

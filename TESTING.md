@@ -57,6 +57,11 @@ first proof check, before its broader Rust and integration proofs, and
 `tests/proof_lane_manifest_contract.rs` fails if that wiring or the runner's
 remote-only policy disappears. This order is intentional: a later unrelated
 fail-fast must not prevent the cancellation contract from running.
+If this native prerequisite or the following published cancellation compatibility
+canary fails, the runner stops before launching broader builds and writes a
+non-passing manifest containing only the checks attempted. Fix the prerequisite
+and rerun the complete suite; unattempted checks provide no evidence. Passing
+both prerequisites retains the full existing proof-check schedule.
 
 The GitHub workflow also runs this target directly on its native Linux runner.
 That is supplementary platform regression coverage, not remote RCH proof. The
