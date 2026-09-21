@@ -20,11 +20,18 @@
 //! guarantee. Capacity bounds items, not their payload bytes or waiting futures.
 //!
 //! Keep a receiver outside restartable workers. Dropping the LAST receiver is
-//! explicit abandonment: queued items are destroyed outside the lock, pending
-//! sends fail, and outstanding deliveries are destroyed rather than redelivered.
+//! explicit abandonment: tracked items return to their producer receipts and
+//! untracked items are destroyed outside the lock. Pending sends fail; outstanding
+//! deliveries are likewise abandoned rather than redelivered.
 //! Closing admission is different: existing reservations can still publish, and
 //! receivers continue until every reservation and delivery has settled.
+//!
+//! [`Sender::send_tracked`] also returns a single-owner [`Receipt`]. Only an
+//! explicit ack publishes `Acknowledged`; rejection and receiver abandonment
+//! return the payload with a distinct terminal disposition. An unread receipt
+//! owns its result outside queue capacity. There is no internal result history.
 
+use crate::channel::oneshot;
 use crate::cx::{CancelWakerToken, Cx};
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken, ObligationTransferError};
@@ -63,6 +70,9 @@ pub enum QueueError {
     /// No wrapped item identity is issued.
     #[error("acknowledged work queue item sequence exhausted")]
     SequenceExhausted,
+    /// At least one accepted item was explicitly returned to its producer.
+    #[error("acknowledged work was rejected, not all work was acknowledged")]
+    Rejected,
 }
 
 /// A send refused before publication, retaining the original caller-owned value.
@@ -95,6 +105,8 @@ pub struct QueueStats {
     pub admission_closed: bool,
     /// At least one queued or nacked item was destroyed after receiver abandonment.
     pub abandoned: bool,
+    /// At least one tracked item was negatively settled rather than acknowledged.
+    pub rejected: bool,
 }
 
 impl QueueStats {
@@ -103,7 +115,13 @@ impl QueueStats {
     pub const fn unfinished(&self) -> usize { self.queued + self.reserved + self.in_flight }
 }
 
-struct Item<T> { value: T, sequence: u64, attempts: u64 }
+struct Item<T> {
+    value: T,
+    sequence: u64,
+    attempts: u64,
+    deliveries: u64,
+    receipt: Option<oneshot::Sender<Settlement<T>>>,
+}
 struct State<T> {
     ready: VecDeque<Item<T>>,
     reserved: usize,
@@ -113,6 +131,7 @@ struct State<T> {
     sealed: bool,
     sequence: u64,
     abandoned: bool,
+    rejected: bool,
 }
 struct Shared<T> { state: Mutex<State<T>>, changed: Notify, capacity: usize }
 
@@ -141,7 +160,7 @@ impl<T> Shared<T> {
             capacity: self.capacity, queued: state.ready.len(), reserved: state.reserved,
             in_flight: state.in_flight,
             admission_closed: state.sealed || state.senders == 0 || state.receivers == 0,
-            abandoned: state.abandoned,
+            abandoned: state.abandoned, rejected: state.rejected,
         }
     }
 
@@ -156,6 +175,7 @@ impl<T> Shared<T> {
             if !state.ready.is_empty() || state.reserved != 0 || state.in_flight != 0 {
                 Err(QueueError::Empty)
             } else if state.abandoned { Err(QueueError::Abandoned) }
+            else if state.rejected { Err(QueueError::Rejected) }
             else { Ok(()) }
         }).await
     }
@@ -192,7 +212,7 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             ready: VecDeque::with_capacity(capacity), reserved: 0, in_flight: 0,
-            senders: 1, receivers: 1, sealed: false, sequence: 0, abandoned: false,
+            senders: 1, receivers: 1, sealed: false, sequence: 0, abandoned: false, rejected: false,
         }),
         changed: Notify::new(), capacity,
     });
@@ -245,8 +265,9 @@ impl<T> Drop for Receiver<T> {
             } else { None }
         };
         let _wake = WakeAfter(&self.shared.changed);
-        // Payload destructors can reenter the queue. No queue lock is held.
-        drop(abandoned);
+        // Publish every abandonment even if an unrelated payload destructor
+        // panics. No queue lock is held while notifying or retiring values.
+        if let Some(items) = abandoned { receipt::abandon_items(items); }
     }
 }
 
@@ -258,7 +279,8 @@ impl<T> Sender<T> {
     pub fn close(&self) { self.shared.close(); }
 
     /// Wait until ready items, reservations and deliveries have all settled.
-    /// An abandoned item makes the result `Abandoned`, never successful drain.
+    /// An abandoned item yields `Abandoned`; a rejected item yields `Rejected`.
+    /// Neither can become successful drain by consuming its producer receipt.
     /// Without `close`, this is only a point-in-time empty observation. This
     /// barrier does not join worker tasks or wait for runtime ledger projection;
     /// the owning region remains the authoritative task/obligation close barrier.
@@ -344,6 +366,8 @@ impl<T> Receiver<T> {
         let mut delivery = Delivery { shared: Arc::clone(&self.shared), item: Some(item), obligation: None };
         delivery.obligation = cx.try_register_obligation_checked(ObligationKind::Ack, cx.task_id())?;
         if cx.checkpoint().is_err() { return Err(QueueError::Cancelled); }
+        let item = delivery.item.as_mut().expect("admitted delivery");
+        item.deliveries = item.deliveries.saturating_add(1);
         Ok(delivery)
     }
 
@@ -403,8 +427,12 @@ impl<T> SendPermit<T> {
 
     /// Commit without a cancellation checkpoint. Closing admission does not
     /// revoke this credit, but last-receiver abandonment returns the value.
-    pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
-        let mut item = Some(Item { value, sequence: self.sequence, attempts: 0 });
+    pub fn send(self, value: T) -> Result<(), SendError<T>> {
+        self.publish(value, None)
+    }
+
+    fn publish(mut self, value: T, receipt: Option<oneshot::Sender<Settlement<T>>>) -> Result<(), SendError<T>> {
+        let mut item = Some(Item { value, sequence: self.sequence, attempts: 0, deliveries: 0, receipt });
         {
             let mut state = self.shared.state.lock();
             state.reserved -= 1;
@@ -465,14 +493,45 @@ impl<T> Delivery<T> {
     /// Physical delivery attempts, including refused Ack admissions; saturates at u64::MAX.
     #[must_use]
     pub fn attempts(&self) -> u64 { self.item.as_ref().expect("live delivery").attempts }
+    /// Number of deliveries actually issued to workers, excluding admission refusals.
+    /// Saturates at u64::MAX independently of the physical attempt count.
+    #[must_use]
+    pub fn deliveries(&self) -> u64 { self.item.as_ref().expect("live delivery").deliveries }
     /// Commit consumption, release capacity, and return the acknowledged value.
+    /// A tracked producer receives metadata, not a duplicate of this value.
     /// No cancellation checkpoint can undo this explicit terminal transition.
     pub fn ack(mut self) -> T {
-        let item = self.item.take().expect("live delivery");
+        let Item { value, sequence, attempts, deliveries, receipt, .. } = self.item.take().expect("live delivery");
         self.shared.state.lock().in_flight -= 1;
         let _wake = WakeAfter(&self.shared.changed);
+        // Retain terminal publication across a panicking ledger notification.
+        // This receipt certifies the queue transition, not ledger projection.
+        let _publication = receipt::Publication::new(receipt, Settlement {
+            sequence, attempts, deliveries, outcome: SettlementOutcome::Acknowledged,
+        });
         if let Some(token) = self.obligation.take() { let _ = token.commit(); }
-        item.value
+        value
+    }
+
+    /// Negatively settle tracked work and return its owned payload to its producer.
+    ///
+    /// The queue latches `Rejected` and frees the item credit. An untracked item
+    /// returns this guard unchanged; no work is discarded by that refusal.
+    /// Dropping the producer's receipt explicitly relinquishes the returned value.
+    /// This does not roll back payload mutations or external side effects.
+    #[allow(clippy::result_large_err)]
+    pub fn reject(mut self) -> Result<(), Self> {
+        if self.item.as_ref().expect("live delivery").receipt.is_none() { return Err(self); }
+        let item = self.item.take().expect("tracked delivery");
+        {
+            let mut state = self.shared.state.lock();
+            state.in_flight -= 1;
+            state.rejected = true;
+        }
+        let _wake = WakeAfter(&self.shared.changed);
+        let _publication = receipt::Publication::returned(item, SettlementOutcome::Rejected);
+        if let Some(token) = self.obligation.take() { let _ = token.abort(ObligationAbortReason::Explicit); }
+        Ok(())
     }
     /// Return the value to the ready tail without releasing its capacity credit.
     pub fn nack(self) { drop(self); }
@@ -495,14 +554,21 @@ impl<T> Drop for Delivery<T> {
                 else { state.abandoned = true; }
             }
             let _wake = WakeAfter(&self.shared.changed);
+            let _publication = receipt::AbandonedItem(abandoned);
             if let Some(token) = self.obligation.take() { let _ = token.abort(ObligationAbortReason::Cancel); }
-            drop(abandoned);
         }
     }
 }
 
+mod receipt;
+pub use receipt::{Receipt, ReceiptError, Settlement, SettlementOutcome};
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "ack/receipt_tests.rs"]
+mod receipt_tests;
 
 #[cfg(test)]
 #[path = "ack/lifecycle_tests.rs"]
