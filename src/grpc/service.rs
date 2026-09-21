@@ -11,6 +11,9 @@ use crate::cx::Cx;
 use super::status::Status;
 use super::streaming::{Metadata, Request, Response, Streaming};
 
+mod server_stream;
+pub use server_stream::{RegisteredServerStream, ServiceStreamingFuture};
+
 /// A gRPC service method.
 pub trait Method: Send + Sync + 'static {
     /// The request type.
@@ -240,6 +243,29 @@ pub trait ServiceHandler: Send + Sync {
         _trailing_metadata: Metadata,
     ) -> ServiceHandlerFuture<'a> {
         let message = format!("registered service has no callable unary handler for '{path}'");
+        Box::pin(async move { Err(Status::unimplemented(message)) })
+    }
+
+    /// Create an owned response stream for one decoded request.
+    ///
+    /// Native server-streaming dispatch resolves the exact descriptor path and
+    /// admits only unary-input, server-streaming methods here. The factory runs
+    /// in the live response-producer context, not a context retained from an
+    /// earlier HTTP handler. Request trailers remain separate from the initial
+    /// request metadata.
+    ///
+    /// The default keeps existing implementations source-compatible and fails
+    /// closed with `UNIMPLEMENTED`. Successful application trailers belong on
+    /// the returned [`RegisteredServerStream`], not in the initial headers.
+    fn call_server_streaming<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        path: &'a str,
+        _request: Request<Bytes>,
+        _trailing_metadata: Metadata,
+    ) -> ServiceStreamingFuture<'a> {
+        let message =
+            format!("registered service has no callable server-streaming handler for '{path}'");
         Box::pin(async move { Err(Status::unimplemented(message)) })
     }
 }
