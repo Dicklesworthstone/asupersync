@@ -2309,8 +2309,7 @@ mod tests {
                 std::fs::create_dir(&journal_path).unwrap();
             }
             let bitmap_path = bitmap_dir.join("transfer_existing.bitmap");
-            let bytes = ChunkBitmap::new("existing".to_string(), 1024, 512, 1)
-                .serialize_to_bytes();
+            let bytes = ChunkBitmap::new("existing".to_string(), 1024, 512, 1).serialize_to_bytes();
             std::fs::write(&bitmap_path, &bytes).unwrap();
             let runtime = RuntimeBuilder::current_thread()
                 .blocking_threads(1, 1)
@@ -2318,13 +2317,9 @@ mod tests {
                 .unwrap();
             runtime.block_on(async {
                 let cx = crate::Cx::current().expect("native root context");
-                let result = recover_journal_and_bitmap(
-                    &cx,
-                    &journal_path,
-                    &bitmap_dir,
-                    &test_auth_key(),
-                )
-                .await;
+                let result =
+                    recover_journal_and_bitmap(&cx, &journal_path, &bitmap_dir, &test_auth_key())
+                        .await;
                 let quarantine_path = bitmap_path.with_extension("bitmap.stale");
                 if unreadable_generation {
                     assert!(matches!(result, Err(RecoveryError::JournalCorrupted(_))));
