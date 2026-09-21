@@ -86,18 +86,24 @@ pub struct Receipt<T> {
 
 impl<T> fmt::Debug for Receipt<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AckReceipt").field("sequence", &self.sequence).finish_non_exhaustive()
+        f.debug_struct("AckReceipt")
+            .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
     }
 }
 
 impl<T> Receipt<T> {
     /// Queue-local identity assigned by the original send reservation.
     #[must_use]
-    pub const fn sequence(&self) -> u64 { self.sequence }
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
 
     /// The immutable policy selected at publication, including the initial delivery.
     #[must_use]
-    pub const fn retry_policy(&self) -> RetryPolicy { self.retry }
+    pub const fn retry_policy(&self) -> RetryPolicy {
+        self.retry
+    }
 
     /// Take a ready settlement without waiting. `None` means still unresolved.
     pub fn try_take(&mut self) -> Result<Option<Settlement<T>>, ReceiptError> {
@@ -120,7 +126,10 @@ impl<T> Receipt<T> {
     /// Observe the same terminal result without a caller-cancellation shortcut.
     /// Dropping this borrowing future still preserves the receipt and its value.
     pub async fn wait_uninterruptible(&mut self) -> Result<Settlement<T>, ReceiptError> {
-        self.receiver.recv_uninterruptible().await.map_err(|_| ReceiptError::Closed)
+        self.receiver
+            .recv_uninterruptible()
+            .await
+            .map_err(|_| ReceiptError::Closed)
     }
 }
 
@@ -138,19 +147,30 @@ pub struct RetryPolicy {
 impl RetryPolicy {
     /// Keep redelivering until a worker acknowledges or explicitly rejects the item.
     #[must_use]
-    pub const fn unlimited() -> Self { Self { max_deliveries: None } }
+    pub const fn unlimited() -> Self {
+        Self {
+            max_deliveries: None,
+        }
+    }
 
     /// Return the item after this many issued deliveries end without acknowledgement.
     /// The nonzero type prevents a job from being refused before its first attempt.
     #[must_use]
-    pub const fn limited(max_deliveries: NonZeroU64) -> Self { Self { max_deliveries: Some(max_deliveries) } }
+    pub const fn limited(max_deliveries: NonZeroU64) -> Self {
+        Self {
+            max_deliveries: Some(max_deliveries),
+        }
+    }
 
     /// Maximum issued deliveries, including the initial one; None means unlimited.
     #[must_use]
-    pub const fn max_deliveries(self) -> Option<NonZeroU64> { self.max_deliveries }
+    pub const fn max_deliveries(self) -> Option<NonZeroU64> {
+        self.max_deliveries
+    }
 
     pub(super) fn exhausted(self, deliveries: u64) -> bool {
-        self.max_deliveries.is_some_and(|limit| deliveries >= limit.get())
+        self.max_deliveries
+            .is_some_and(|limit| deliveries >= limit.get())
     }
 }
 
@@ -163,7 +183,12 @@ impl<T> Sender<T> {
 
     /// Publish with an explicit delivery allowance and payload-return receipt.
     /// A retry limit is not a deadline, backoff policy, or external-effect rollback.
-    pub fn try_send_tracked_with_policy(&self, cx: &Cx, value: T, retry: RetryPolicy) -> Result<Receipt<T>, SendError<T>> {
+    pub fn try_send_tracked_with_policy(
+        &self,
+        cx: &Cx,
+        value: T,
+        retry: RetryPolicy,
+    ) -> Result<Receipt<T>, SendError<T>> {
         match self.try_reserve(cx) {
             Ok(permit) => permit.send_tracked_with_policy(value, retry),
             Err(error) => Err(SendError { error, value }),
@@ -174,12 +199,18 @@ impl<T> Sender<T> {
     /// Before publication this owning future has the same value-drop semantics as
     /// `Sender::send`; reserve first to keep that value outside the waiting future.
     pub async fn send_tracked(&self, cx: &Cx, value: T) -> Result<Receipt<T>, SendError<T>> {
-        self.send_tracked_with_policy(cx, value, RetryPolicy::unlimited()).await
+        self.send_tracked_with_policy(cx, value, RetryPolicy::unlimited())
+            .await
     }
 
     /// Wait for capacity and publish with an explicit issued-delivery allowance.
     /// Dropping before publication drops the caller-owned value, as with `send`.
-    pub async fn send_tracked_with_policy(&self, cx: &Cx, value: T, retry: RetryPolicy) -> Result<Receipt<T>, SendError<T>> {
+    pub async fn send_tracked_with_policy(
+        &self,
+        cx: &Cx,
+        value: T,
+        retry: RetryPolicy,
+    ) -> Result<Receipt<T>, SendError<T>> {
         match self.reserve(cx).await {
             Ok(permit) => permit.send_tracked_with_policy(value, retry),
             Err(error) => Err(SendError { error, value }),
@@ -196,11 +227,19 @@ impl<T> SendPermit<T> {
 
     /// Commit a preissued credit with an explicit retry limit and recovery receipt.
     /// Exhaustion is a negative settlement and cannot become successful drain.
-    pub fn send_tracked_with_policy(self, value: T, retry: RetryPolicy) -> Result<Receipt<T>, SendError<T>> {
+    pub fn send_tracked_with_policy(
+        self,
+        value: T,
+        retry: RetryPolicy,
+    ) -> Result<Receipt<T>, SendError<T>> {
         let sequence = self.sequence;
         let (sender, receiver) = oneshot::channel();
         self.publish(value, Some(sender), retry)?;
-        Ok(Receipt { sequence, receiver, retry })
+        Ok(Receipt {
+            sequence,
+            receiver,
+            retry,
+        })
     }
 }
 
@@ -213,13 +252,34 @@ pub(super) struct Publication<T> {
 }
 
 impl<T> Publication<T> {
-    pub(super) fn new(sender: Option<oneshot::Sender<Settlement<T>>>, settlement: Settlement<T>) -> Self {
-        Self { sender, settlement: Some(settlement) }
+    pub(super) fn new(
+        sender: Option<oneshot::Sender<Settlement<T>>>,
+        settlement: Settlement<T>,
+    ) -> Self {
+        Self {
+            sender,
+            settlement: Some(settlement),
+        }
     }
 
     pub(super) fn returned(item: Item<T>, disposition: fn(T) -> SettlementOutcome<T>) -> Self {
-        let Item { value, sequence, attempts, deliveries, receipt, .. } = item;
-        Self::new(receipt, Settlement { sequence, attempts, deliveries, outcome: disposition(value) })
+        let Item {
+            value,
+            sequence,
+            attempts,
+            deliveries,
+            receipt,
+            ..
+        } = item;
+        Self::new(
+            receipt,
+            Settlement {
+                sequence,
+                attempts,
+                deliveries,
+                outcome: disposition(value),
+            },
+        )
     }
 }
 
@@ -231,8 +291,11 @@ impl<T> Drop for Publication<T> {
         // retirement panics so that this cannot skip ledger settlement or the
         // queue's remaining wake fanout, including during worker unwinding.
         if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if let Some(sender) = sender { drop(sender.send_blocking(settlement)); }
-            else { drop(settlement); }
+            if let Some(sender) = sender {
+                drop(sender.send_blocking(settlement));
+            } else {
+                drop(settlement);
+            }
         })) {
             std::mem::forget(payload);
         }
@@ -241,7 +304,9 @@ impl<T> Drop for Publication<T> {
 
 pub(super) struct AbandonedItem<T>(pub(super) Option<Item<T>>);
 impl<T> Drop for AbandonedItem<T> {
-    fn drop(&mut self) { abandon_items(self.0.take()); }
+    fn drop(&mut self) {
+        abandon_items(self.0.take());
+    }
 }
 
 // Last-receiver teardown must notify every tracked item, even when an unrelated
@@ -252,13 +317,21 @@ pub(super) fn abandon_items<T>(items: impl IntoIterator<Item = Item<T>>) {
     let mut first = None;
     for item in items {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if item.receipt.is_some() { drop(Publication::returned(item, SettlementOutcome::Abandoned)); }
-            else { drop(item); }
+            if item.receipt.is_some() {
+                drop(Publication::returned(item, SettlementOutcome::Abandoned));
+            } else {
+                drop(item);
+            }
         }));
         if let Err(payload) = result {
-            if !unwinding && first.is_none() { first = Some(payload); }
-            else { std::mem::forget(payload); }
+            if !unwinding && first.is_none() {
+                first = Some(payload);
+            } else {
+                std::mem::forget(payload);
+            }
         }
     }
-    if let Some(payload) = first { std::panic::resume_unwind(payload); }
+    if let Some(payload) = first {
+        std::panic::resume_unwind(payload);
+    }
 }

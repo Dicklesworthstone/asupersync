@@ -8,7 +8,9 @@ use std::task::{Context, Wake, Waker};
 #[derive(Default)]
 struct Counter(AtomicUsize);
 impl Wake for Counter {
-    fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
 }
 fn wake_counter() -> (Arc<Counter>, Waker) {
     let counter = Arc::new(Counter::default());
@@ -24,7 +26,15 @@ fn capacity_includes_reservations_and_unacknowledged_items() {
     tx.try_send(&cx, 7).unwrap();
     let delivery = rx.try_recv_with_ack(&cx).unwrap();
     let stats = tx.stats();
-    assert_eq!((stats.queued, stats.reserved, stats.in_flight, stats.unfinished()), (0, 1, 1, 2));
+    assert_eq!(
+        (
+            stats.queued,
+            stats.reserved,
+            stats.in_flight,
+            stats.unfinished()
+        ),
+        (0, 1, 1, 2)
+    );
     assert_eq!(tx.try_send(&cx, 9).unwrap_err().error, QueueError::Full);
     assert_eq!(delivery.ack(), 7);
     tx.try_send(&cx, 9).unwrap();
@@ -42,7 +52,8 @@ fn nonclone_send_only_payload_returns_with_identity_and_mutations() {
     send_sync::<Receiver<Job>>();
     let cx = Cx::for_testing();
     let (tx, rx) = channel(1);
-    tx.try_send(&cx, Job(Cell::new(4))).unwrap_or_else(|_| panic!("send job"));
+    tx.try_send(&cx, Job(Cell::new(4)))
+        .unwrap_or_else(|_| panic!("send job"));
     let first = rx.try_recv_with_ack(&cx).unwrap();
     let sequence = first.sequence();
     first.0.set(8);
@@ -95,7 +106,10 @@ fn aborting_last_reservation_wakes_receiver_to_true_eof() {
     assert!(receiving.as_mut().poll(&mut context).is_pending());
     permit.abort();
     assert!(counter.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(receiving.as_mut().poll(&mut context), Poll::Ready(Err(QueueError::Closed))));
+    assert!(matches!(
+        receiving.as_mut().poll(&mut context),
+        Poll::Ready(Err(QueueError::Closed))
+    ));
     drop(receiving);
     assert_eq!(rx.shared.changed.waiter_count(), 0);
 }
@@ -114,7 +128,10 @@ fn parked_sends_and_receives_observe_task_cancellation_and_retire_waits() {
             assert_eq!(tx.shared.changed.waiter_count(), 1);
             cx.cancel_fast(CancelKind::User);
             assert!(counter.0.load(Ordering::SeqCst) > 0);
-            assert!(matches!(pending.as_mut().poll(&mut context), Poll::Ready(Err(QueueError::Cancelled))));
+            assert!(matches!(
+                pending.as_mut().poll(&mut context),
+                Poll::Ready(Err(QueueError::Cancelled))
+            ));
             drop(pending);
             assert_eq!(tx.stats().queued, 1);
             assert_eq!(tx.stats().reserved, 0);
@@ -124,7 +141,10 @@ fn parked_sends_and_receives_observe_task_cancellation_and_retire_waits() {
             assert_eq!(tx.shared.changed.waiter_count(), 1);
             cx.cancel_fast(CancelKind::User);
             assert!(counter.0.load(Ordering::SeqCst) > 0);
-            assert!(matches!(pending.as_mut().poll(&mut context), Poll::Ready(Err(QueueError::Cancelled))));
+            assert!(matches!(
+                pending.as_mut().poll(&mut context),
+                Poll::Ready(Err(QueueError::Cancelled))
+            ));
             drop(pending);
             assert_eq!(tx.stats().unfinished(), 0);
         }
@@ -171,11 +191,17 @@ fn send_refusals_and_abandoned_receiver_return_the_original_payload() {
     assert_eq!(tx.stats().unfinished(), 0);
 }
 
-struct Probe { shared: Arc<OnceLock<Weak<Shared<Probe>>>>, drops: Arc<AtomicUsize> }
+struct Probe {
+    shared: Arc<OnceLock<Weak<Shared<Probe>>>>,
+    drops: Arc<AtomicUsize>,
+}
 impl Drop for Probe {
     fn drop(&mut self) {
         if let Some(shared) = self.shared.get().and_then(Weak::upgrade) {
-            assert!(shared.state.try_lock().is_some(), "payload retired under queue lock");
+            assert!(
+                shared.state.try_lock().is_some(),
+                "payload retired under queue lock"
+            );
         }
         self.drops.fetch_add(1, Ordering::SeqCst);
     }
@@ -188,8 +214,14 @@ fn last_receiver_and_outstanding_delivery_destroy_payloads_outside_lock() {
     assert!(shared.set(Arc::downgrade(&tx.shared)).is_ok());
     let drops = Arc::new(AtomicUsize::new(0));
     for _ in 0..2 {
-        tx.try_send(&cx, Probe { shared: Arc::clone(&shared), drops: Arc::clone(&drops) })
-            .unwrap_or_else(|_| panic!("probe enqueue"));
+        tx.try_send(
+            &cx,
+            Probe {
+                shared: Arc::clone(&shared),
+                drops: Arc::clone(&drops),
+            },
+        )
+        .unwrap_or_else(|_| panic!("probe enqueue"));
     }
     let delivery = rx.try_recv_with_ack(&cx).unwrap();
     drop(rx);
@@ -202,7 +234,9 @@ fn last_receiver_and_outstanding_delivery_destroy_payloads_outside_lock() {
 
 struct PanickingWake;
 impl Wake for PanickingWake {
-    fn wake(self: Arc<Self>) { panic!("hostile notification"); }
+    fn wake(self: Arc<Self>) {
+        panic!("hostile notification");
+    }
 }
 #[test]
 fn panicking_waiter_cannot_hide_published_item_or_strand_peer() {
@@ -212,8 +246,18 @@ fn panicking_waiter_cannot_hide_published_item_or_strand_peer() {
     let (counter, good) = wake_counter();
     let mut first = Box::pin(rx.recv_with_ack(&cx));
     let mut second = Box::pin(rx.recv_with_ack(&cx));
-    assert!(first.as_mut().poll(&mut Context::from_waker(&bad)).is_pending());
-    assert!(second.as_mut().poll(&mut Context::from_waker(&good)).is_pending());
+    assert!(
+        first
+            .as_mut()
+            .poll(&mut Context::from_waker(&bad))
+            .is_pending()
+    );
+    assert!(
+        second
+            .as_mut()
+            .poll(&mut Context::from_waker(&good))
+            .is_pending()
+    );
     tx.try_send(&cx, 19).unwrap();
     assert!(counter.0.load(Ordering::SeqCst) > 0);
     assert_eq!(rx.try_recv_with_ack(&cx).unwrap().ack(), 19);
@@ -224,7 +268,10 @@ fn exhausted_sequence_refuses_without_leaking_a_slot() {
     let cx = Cx::for_testing();
     let (tx, rx) = channel::<u8>(1);
     tx.shared.state.lock().sequence = u64::MAX;
-    assert!(matches!(tx.try_reserve(&cx), Err(QueueError::SequenceExhausted)));
+    assert!(matches!(
+        tx.try_reserve(&cx),
+        Err(QueueError::SequenceExhausted)
+    ));
     assert_eq!(rx.stats().unfinished(), 0);
 }
 
@@ -241,8 +288,11 @@ fn multi_producer_multi_worker_redelivery_never_duplicates_acknowledgement() {
             loop {
                 match futures_lite::future::block_on(rx.recv_with_ack(&cx)) {
                     Ok(item) => {
-                        if item.attempts() == 1 { item.nack(); }
-                        else { acknowledged.lock().push(item.ack()); }
+                        if item.attempts() == 1 {
+                            item.nack();
+                        } else {
+                            acknowledged.lock().push(item.ack());
+                        }
                     }
                     Err(QueueError::Closed) => break,
                     Err(error) => panic!("unexpected receive error: {error}"),
@@ -262,8 +312,12 @@ fn multi_producer_multi_worker_redelivery_never_duplicates_acknowledgement() {
         }));
     }
     drop(tx);
-    for producer in producers { producer.join().unwrap(); }
-    for worker in workers { worker.join().unwrap(); }
+    for producer in producers {
+        producer.join().unwrap();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
     let mut acknowledged = acknowledged.lock();
     acknowledged.sort_unstable();
     assert_eq!(*acknowledged, (0..128).collect::<Vec<_>>());

@@ -38,7 +38,9 @@
 use crate::channel::oneshot;
 use crate::cx::{CancelWakerToken, Cx};
 use crate::record::{ObligationAbortReason, ObligationKind};
-use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken, ObligationTransferError};
+use crate::runtime::obligation_mailbox::{
+    ObligationAdmissionError, ObligationToken, ObligationTransferError,
+};
 use crate::sync::Notify;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -89,7 +91,9 @@ pub struct SendError<T> {
 }
 
 impl<T> fmt::Display for SendError<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(&self.error, f) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
 }
 impl<T: fmt::Debug> std::error::Error for SendError<T> {}
 
@@ -116,7 +120,9 @@ pub struct QueueStats {
 impl QueueStats {
     /// Total item credits still owned by the queue, producers or workers.
     #[must_use]
-    pub const fn unfinished(&self) -> usize { self.queued + self.reserved + self.in_flight }
+    pub const fn unfinished(&self) -> usize {
+        self.queued + self.reserved + self.in_flight
+    }
 }
 
 struct Item<T> {
@@ -138,23 +144,36 @@ struct State<T> {
     abandoned: bool,
     rejected: bool,
 }
-struct Shared<T> { state: Mutex<State<T>>, changed: Notify, capacity: usize }
+struct Shared<T> {
+    state: Mutex<State<T>>,
+    changed: Notify,
+    capacity: usize,
+}
 
 // Never let a notification panic hide a committed queue transition. Notify
 // completes its broadcast fanout before resuming the first callback panic.
 fn notify(changed: &Notify) {
-    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| changed.notify_waiters())) {
+    if let Err(payload) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| changed.notify_waiters()))
+    {
         std::mem::forget(payload);
     }
 }
 struct WakeAfter<'a>(&'a Notify);
 impl Drop for WakeAfter<'_> {
-    fn drop(&mut self) { notify(self.0); }
+    fn drop(&mut self) {
+        notify(self.0);
+    }
 }
-struct Cancellation<'a> { cx: &'a Cx, token: Option<CancelWakerToken> }
+struct Cancellation<'a> {
+    cx: &'a Cx,
+    token: Option<CancelWakerToken>,
+}
 impl Drop for Cancellation<'_> {
     fn drop(&mut self) {
-        if let Some(token) = self.token.take() { self.cx.clear_cancel_waker(token); }
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
     }
 }
 
@@ -162,10 +181,13 @@ impl<T> Shared<T> {
     fn stats(&self) -> QueueStats {
         let state = self.state.lock();
         QueueStats {
-            capacity: self.capacity, queued: state.ready.len(), reserved: state.reserved,
+            capacity: self.capacity,
+            queued: state.ready.len(),
+            reserved: state.reserved,
             in_flight: state.in_flight,
             admission_closed: state.sealed || state.senders == 0 || state.receivers == 0,
-            abandoned: state.abandoned, rejected: state.rejected,
+            abandoned: state.abandoned,
+            rejected: state.rejected,
         }
     }
 
@@ -179,30 +201,44 @@ impl<T> Shared<T> {
             let state = self.state.lock();
             if !state.ready.is_empty() || state.reserved != 0 || state.in_flight != 0 {
                 Err(QueueError::Empty)
-            } else if state.abandoned { Err(QueueError::Abandoned) }
-            else if state.rejected { Err(QueueError::Rejected) }
-            else { Ok(()) }
-        }).await
+            } else if state.abandoned {
+                Err(QueueError::Abandoned)
+            } else if state.rejected {
+                Err(QueueError::Rejected)
+            } else {
+                Ok(())
+            }
+        })
+        .await
     }
 
-    async fn wait<R>(&self, cx: &Cx, mut attempt: impl FnMut() -> Result<R, QueueError>) -> Result<R, QueueError> {
+    async fn wait<R>(
+        &self,
+        cx: &Cx,
+        mut attempt: impl FnMut() -> Result<R, QueueError>,
+    ) -> Result<R, QueueError> {
         let mut cancellation = Cancellation { cx, token: None };
         let mut notified = self.changed.notified();
         poll_fn(|task| {
             cancellation.token = Some(cx.refresh_cancel_waker(cancellation.token, task.waker()));
-            if cx.checkpoint().is_err() { return Poll::Ready(Err(QueueError::Cancelled)); }
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(QueueError::Cancelled));
+            }
             // Register BEFORE inspecting/mutating queue state. A broadcast in
             // the gap either wakes this waiter or makes the condition ready.
             // At most two notification polls per delivered poll, even in a flood.
             if Pin::new(&mut notified).poll(task).is_ready() {
                 notified = self.changed.notified();
-                if Pin::new(&mut notified).poll(task).is_ready() { task.waker().wake_by_ref(); }
+                if Pin::new(&mut notified).poll(task).is_ready() {
+                    task.waker().wake_by_ref();
+                }
             }
             match attempt() {
                 Err(QueueError::Full | QueueError::Empty) => Poll::Pending,
                 result => Poll::Ready(result),
             }
-        }).await
+        })
+        .await
     }
 }
 
@@ -216,30 +252,58 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "acknowledged queue capacity must be nonzero");
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
-            ready: VecDeque::with_capacity(capacity), reserved: 0, in_flight: 0,
-            senders: 1, receivers: 1, sealed: false, sequence: 0, abandoned: false, rejected: false,
+            ready: VecDeque::with_capacity(capacity),
+            reserved: 0,
+            in_flight: 0,
+            senders: 1,
+            receivers: 1,
+            sealed: false,
+            sequence: 0,
+            abandoned: false,
+            rejected: false,
         }),
-        changed: Notify::new(), capacity,
+        changed: Notify::new(),
+        capacity,
     });
-    (Sender { shared: Arc::clone(&shared) }, Receiver { shared })
+    (
+        Sender {
+            shared: Arc::clone(&shared),
+        },
+        Receiver { shared },
+    )
 }
 
 /// Cloneable producer. A permit can outlive the producer which obtained it.
-pub struct Sender<T> { shared: Arc<Shared<T>> }
+pub struct Sender<T> {
+    shared: Arc<Shared<T>>,
+}
 /// Cloneable worker endpoint. Retain one outside restartable worker tasks.
-pub struct Receiver<T> { shared: Arc<Shared<T>> }
+pub struct Receiver<T> {
+    shared: Arc<Shared<T>>,
+}
 
 impl<T> fmt::Debug for Sender<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.debug_struct("AckSender").field("stats", &self.stats()).finish() }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AckSender")
+            .field("stats", &self.stats())
+            .finish()
+    }
 }
 impl<T> fmt::Debug for Receiver<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.debug_struct("AckReceiver").field("stats", &self.stats()).finish() }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AckReceiver")
+            .field("stats", &self.stats())
+            .finish()
+    }
 }
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
         let shared = Arc::clone(&self.shared);
         let mut state = shared.state.lock();
-        state.senders = state.senders.checked_add(1).expect("producer count exhausted");
+        state.senders = state
+            .senders
+            .checked_add(1)
+            .expect("producer count exhausted");
         drop(state);
         Self { shared }
     }
@@ -248,7 +312,10 @@ impl<T> Clone for Receiver<T> {
     fn clone(&self) -> Self {
         let shared = Arc::clone(&self.shared);
         let mut state = shared.state.lock();
-        state.receivers = state.receivers.checked_add(1).expect("worker count exhausted");
+        state.receivers = state
+            .receivers
+            .checked_add(1)
+            .expect("worker count exhausted");
         drop(state);
         Self { shared }
     }
@@ -267,21 +334,29 @@ impl<T> Drop for Receiver<T> {
             if state.receivers == 0 {
                 state.abandoned |= !state.ready.is_empty();
                 Some(std::mem::take(&mut state.ready))
-            } else { None }
+            } else {
+                None
+            }
         };
         let _wake = WakeAfter(&self.shared.changed);
         // Publish every abandonment even if an unrelated payload destructor
         // panics. No queue lock is held while notifying or retiring values.
-        if let Some(items) = abandoned { receipt::abandon_items(items); }
+        if let Some(items) = abandoned {
+            receipt::abandon_items(items);
+        }
     }
 }
 
 impl<T> Sender<T> {
     /// Inspect queued, reserved and delivered item credits atomically.
     #[must_use]
-    pub fn stats(&self) -> QueueStats { self.shared.stats() }
+    pub fn stats(&self) -> QueueStats {
+        self.shared.stats()
+    }
     /// Seal new reservations. Already issued permits retain their send right.
-    pub fn close(&self) { self.shared.close(); }
+    pub fn close(&self) {
+        self.shared.close();
+    }
 
     /// Wait until ready items, reservations and deliveries have all settled.
     /// An abandoned item yields `Abandoned`; a rejected item yields `Rejected`.
@@ -297,29 +372,46 @@ impl<T> Sender<T> {
     /// Preissued permits still need to send or abort. Dropping/cancelling this
     /// wait does not reopen admission; repeat `wait_drained` to observe progress.
     pub async fn close_and_drain(&self, cx: &Cx) -> Result<(), QueueError> {
-        if cx.checkpoint().is_err() { return Err(QueueError::Cancelled); }
+        if cx.checkpoint().is_err() {
+            return Err(QueueError::Cancelled);
+        }
         self.close();
         self.wait_drained(cx).await
     }
 
     /// Reserve without waiting, using checked runtime obligation admission.
     pub fn try_reserve(&self, cx: &Cx) -> Result<SendPermit<T>, QueueError> {
-        if cx.checkpoint().is_err() { return Err(QueueError::Cancelled); }
+        if cx.checkpoint().is_err() {
+            return Err(QueueError::Cancelled);
+        }
         let sequence = {
             let mut state = self.shared.state.lock();
-            if state.sealed || state.receivers == 0 { return Err(QueueError::Closed); }
+            if state.sealed || state.receivers == 0 {
+                return Err(QueueError::Closed);
+            }
             if state.ready.len() + state.reserved + state.in_flight == self.shared.capacity {
                 return Err(QueueError::Full);
             }
-            let sequence = state.sequence.checked_add(1).ok_or(QueueError::SequenceExhausted)?;
+            let sequence = state
+                .sequence
+                .checked_add(1)
+                .ok_or(QueueError::SequenceExhausted)?;
             state.sequence = sequence;
             state.reserved += 1;
             sequence
         };
         // Own physical rollback before runtime admission can notify or unwind.
-        let mut permit = SendPermit { shared: Arc::clone(&self.shared), sequence, live: true, obligation: None };
-        permit.obligation = cx.try_register_obligation_checked(ObligationKind::SendPermit, cx.task_id())?;
-        if cx.checkpoint().is_err() { return Err(QueueError::Cancelled); }
+        let mut permit = SendPermit {
+            shared: Arc::clone(&self.shared),
+            sequence,
+            live: true,
+            obligation: None,
+        };
+        permit.obligation =
+            cx.try_register_obligation_checked(ObligationKind::SendPermit, cx.task_id())?;
+        if cx.checkpoint().is_err() {
+            return Err(QueueError::Cancelled);
+        }
         Ok(permit)
     }
 
@@ -350,27 +442,46 @@ impl<T> Sender<T> {
 impl<T> Receiver<T> {
     /// Inspect queued, reserved and delivered item credits atomically.
     #[must_use]
-    pub fn stats(&self) -> QueueStats { self.shared.stats() }
+    pub fn stats(&self) -> QueueStats {
+        self.shared.stats()
+    }
     /// Seal producer admission without abandoning queued or delivered work.
-    pub fn close(&self) { self.shared.close(); }
+    pub fn close(&self) {
+        self.shared.close();
+    }
 
     /// Take one item with a checked Ack obligation, or leave/requeue it on refusal.
     /// An empty queue is not EOF while a delivery or send reservation can return work.
     pub fn try_recv_with_ack(&self, cx: &Cx) -> Result<Delivery<T>, QueueError> {
-        if cx.checkpoint().is_err() { return Err(QueueError::Cancelled); }
+        if cx.checkpoint().is_err() {
+            return Err(QueueError::Cancelled);
+        }
         let mut item = {
             let mut state = self.shared.state.lock();
             if let Some(item) = state.ready.pop_front() {
                 state.in_flight += 1;
                 item
-            } else if (state.sealed || state.senders == 0) && state.reserved == 0 && state.in_flight == 0 {
+            } else if (state.sealed || state.senders == 0)
+                && state.reserved == 0
+                && state.in_flight == 0
+            {
                 return Err(QueueError::Closed);
-            } else { return Err(QueueError::Empty); }
+            } else {
+                return Err(QueueError::Empty);
+            }
         };
         item.attempts = item.attempts.saturating_add(1);
-        let mut delivery = Delivery { shared: Arc::clone(&self.shared), item: Some(item), obligation: None, issued: false };
-        delivery.obligation = cx.try_register_obligation_checked(ObligationKind::Ack, cx.task_id())?;
-        if cx.checkpoint().is_err() { return Err(QueueError::Cancelled); }
+        let mut delivery = Delivery {
+            shared: Arc::clone(&self.shared),
+            item: Some(item),
+            obligation: None,
+            issued: false,
+        };
+        delivery.obligation =
+            cx.try_register_obligation_checked(ObligationKind::Ack, cx.task_id())?;
+        if cx.checkpoint().is_err() {
+            return Err(QueueError::Cancelled);
+        }
         let item = delivery.item.as_mut().expect("admitted delivery");
         item.deliveries = item.deliveries.saturating_add(1);
         delivery.issued = true;
@@ -395,14 +506,24 @@ pub struct TransferFailure<G> {
     pub guard: G,
 }
 impl<G> fmt::Display for TransferFailure<G> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(&self.error, f) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
 }
 impl<G: fmt::Debug> std::error::Error for TransferFailure<G> {}
 
-fn transfer<Caps>(slot: &mut Option<ObligationToken>, destination: &Cx<Caps>) -> Result<(), ObligationTransferError> {
-    let token = slot.take().ok_or(ObligationTransferError::SourceNotChecked)?;
+fn transfer<Caps>(
+    slot: &mut Option<ObligationToken>,
+    destination: &Cx<Caps>,
+) -> Result<(), ObligationTransferError> {
+    let token = slot
+        .take()
+        .ok_or(ObligationTransferError::SourceNotChecked)?;
     match token.try_transfer(destination) {
-        Ok(next) => { *slot = Some(next); Ok(()) }
+        Ok(next) => {
+            *slot = Some(next);
+            Ok(())
+        }
         Err(failure) => {
             let (error, original) = failure.into_parts();
             *slot = Some(original);
@@ -414,17 +535,27 @@ fn transfer<Caps>(slot: &mut Option<ObligationToken>, destination: &Cx<Caps>) ->
 /// Owned send credit. Drop/abort releases capacity and aborts its tracked obligation.
 #[must_use = "send a value or abort the reservation"]
 pub struct SendPermit<T> {
-    shared: Arc<Shared<T>>, sequence: u64, live: bool, obligation: Option<ObligationToken>,
+    shared: Arc<Shared<T>>,
+    sequence: u64,
+    live: bool,
+    obligation: Option<ObligationToken>,
 }
 impl<T> fmt::Debug for SendPermit<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.debug_struct("AckSendPermit").field("sequence", &self.sequence).finish_non_exhaustive() }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AckSendPermit")
+            .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
+    }
 }
 impl<T> SendPermit<T> {
     /// Transfer runtime liability to an actual live task in the same runtime.
     /// Refusal retains this exact credit; untracked guards refuse explicitly.
     /// A notification panic follows the runtime's transfer contract and Drop
     /// releases the physical reservation. It never fabricates a delivered value.
-    pub fn try_transfer<Caps>(mut self, destination: &Cx<Caps>) -> Result<Self, TransferFailure<Self>> {
+    pub fn try_transfer<Caps>(
+        mut self,
+        destination: &Cx<Caps>,
+    ) -> Result<Self, TransferFailure<Self>> {
         match transfer(&mut self.obligation, destination) {
             Ok(()) => Ok(self),
             Err(error) => Err(TransferFailure { error, guard: self }),
@@ -437,25 +568,50 @@ impl<T> SendPermit<T> {
         self.publish(value, None, RetryPolicy::unlimited())
     }
 
-    fn publish(mut self, value: T, receipt: Option<oneshot::Sender<Settlement<T>>>, retry: RetryPolicy) -> Result<(), SendError<T>> {
-        let mut item = Some(Item { value, sequence: self.sequence, attempts: 0, deliveries: 0, receipt, retry });
+    fn publish(
+        mut self,
+        value: T,
+        receipt: Option<oneshot::Sender<Settlement<T>>>,
+        retry: RetryPolicy,
+    ) -> Result<(), SendError<T>> {
+        let mut item = Some(Item {
+            value,
+            sequence: self.sequence,
+            attempts: 0,
+            deliveries: 0,
+            receipt,
+            retry,
+        });
         {
             let mut state = self.shared.state.lock();
             state.reserved -= 1;
             self.live = false;
-            if state.receivers != 0 { state.ready.push_back(item.take().expect("owned unpublished item")); }
+            if state.receivers != 0 {
+                state
+                    .ready
+                    .push_back(item.take().expect("owned unpublished item"));
+            }
         }
         let _wake = WakeAfter(&self.shared.changed);
         if let Some(item) = item {
-            if let Some(token) = self.obligation.take() { let _ = token.abort(ObligationAbortReason::Error); }
-            Err(SendError { error: QueueError::Closed, value: item.value })
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort(ObligationAbortReason::Error);
+            }
+            Err(SendError {
+                error: QueueError::Closed,
+                value: item.value,
+            })
         } else {
-            if let Some(token) = self.obligation.take() { let _ = token.commit(); }
+            if let Some(token) = self.obligation.take() {
+                let _ = token.commit();
+            }
             Ok(())
         }
     }
     /// Release an unused credit. No queue payload has been published.
-    pub fn abort(self) { drop(self); }
+    pub fn abort(self) {
+        drop(self);
+    }
 }
 impl<T> Drop for SendPermit<T> {
     fn drop(&mut self) {
@@ -463,7 +619,9 @@ impl<T> Drop for SendPermit<T> {
             self.live = false;
             self.shared.state.lock().reserved -= 1;
             let _wake = WakeAfter(&self.shared.changed);
-            if let Some(token) = self.obligation.take() { let _ = token.abort(ObligationAbortReason::Cancel); }
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort(ObligationAbortReason::Cancel);
+            }
         }
     }
 }
@@ -485,7 +643,10 @@ pub struct Delivery<T> {
 }
 impl<T> fmt::Debug for Delivery<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Delivery").field("sequence", &self.sequence()).field("attempts", &self.attempts()).finish_non_exhaustive()
+        f.debug_struct("Delivery")
+            .field("sequence", &self.sequence())
+            .field("attempts", &self.attempts())
+            .finish_non_exhaustive()
     }
 }
 impl<T> Delivery<T> {
@@ -493,7 +654,10 @@ impl<T> Delivery<T> {
     /// Queue item identity, payload, attempt count and capacity remain unchanged.
     /// Refusal returns the original guard. A notification panic aborts any
     /// unreturned destination obligation and this guard's Drop requeues the item.
-    pub fn try_transfer<Caps>(mut self, destination: &Cx<Caps>) -> Result<Self, TransferFailure<Self>> {
+    pub fn try_transfer<Caps>(
+        mut self,
+        destination: &Cx<Caps>,
+    ) -> Result<Self, TransferFailure<Self>> {
         match transfer(&mut self.obligation, destination) {
             Ok(()) => Ok(self),
             Err(error) => Err(TransferFailure { error, guard: self }),
@@ -502,30 +666,53 @@ impl<T> Delivery<T> {
 
     /// Queue-local item identity, preserved through every retry; gaps are allowed.
     #[must_use]
-    pub fn sequence(&self) -> u64 { self.item.as_ref().expect("live delivery").sequence }
+    pub fn sequence(&self) -> u64 {
+        self.item.as_ref().expect("live delivery").sequence
+    }
     /// Physical delivery attempts, including refused Ack admissions; saturates at u64::MAX.
     #[must_use]
-    pub fn attempts(&self) -> u64 { self.item.as_ref().expect("live delivery").attempts }
+    pub fn attempts(&self) -> u64 {
+        self.item.as_ref().expect("live delivery").attempts
+    }
     /// Number of deliveries actually issued to workers, excluding admission refusals.
     /// Saturates at u64::MAX independently of the physical attempt count.
     #[must_use]
-    pub fn deliveries(&self) -> u64 { self.item.as_ref().expect("live delivery").deliveries }
+    pub fn deliveries(&self) -> u64 {
+        self.item.as_ref().expect("live delivery").deliveries
+    }
     /// The producer's immutable retry policy for this exact item.
     #[must_use]
-    pub fn retry_policy(&self) -> RetryPolicy { self.item.as_ref().expect("live delivery").retry }
+    pub fn retry_policy(&self) -> RetryPolicy {
+        self.item.as_ref().expect("live delivery").retry
+    }
     /// Commit consumption, release capacity, and return the acknowledged value.
     /// A tracked producer receives metadata, not a duplicate of this value.
     /// No cancellation checkpoint can undo this explicit terminal transition.
     pub fn ack(mut self) -> T {
-        let Item { value, sequence, attempts, deliveries, receipt, .. } = self.item.take().expect("live delivery");
+        let Item {
+            value,
+            sequence,
+            attempts,
+            deliveries,
+            receipt,
+            ..
+        } = self.item.take().expect("live delivery");
         self.shared.state.lock().in_flight -= 1;
         let _wake = WakeAfter(&self.shared.changed);
         // Retain terminal publication across a panicking ledger notification.
         // This receipt certifies the queue transition, not ledger projection.
-        let _publication = receipt::Publication::new(receipt, Settlement {
-            sequence, attempts, deliveries, outcome: SettlementOutcome::Acknowledged,
-        });
-        if let Some(token) = self.obligation.take() { let _ = token.commit(); }
+        let _publication = receipt::Publication::new(
+            receipt,
+            Settlement {
+                sequence,
+                attempts,
+                deliveries,
+                outcome: SettlementOutcome::Acknowledged,
+            },
+        );
+        if let Some(token) = self.obligation.take() {
+            let _ = token.commit();
+        }
         value
     }
 
@@ -537,7 +724,9 @@ impl<T> Delivery<T> {
     /// This does not roll back payload mutations or external side effects.
     #[allow(clippy::result_large_err)]
     pub fn reject(mut self) -> Result<(), Self> {
-        if self.item.as_ref().expect("live delivery").receipt.is_none() { return Err(self); }
+        if self.item.as_ref().expect("live delivery").receipt.is_none() {
+            return Err(self);
+        }
         let item = self.item.take().expect("tracked delivery");
         {
             let mut state = self.shared.state.lock();
@@ -546,20 +735,28 @@ impl<T> Delivery<T> {
         }
         let _wake = WakeAfter(&self.shared.changed);
         let _publication = receipt::Publication::returned(item, SettlementOutcome::Rejected);
-        if let Some(token) = self.obligation.take() { let _ = token.abort(ObligationAbortReason::Explicit); }
+        if let Some(token) = self.obligation.take() {
+            let _ = token.abort(ObligationAbortReason::Explicit);
+        }
         Ok(())
     }
     /// Return the value to the ready tail while its delivery allowance remains.
     /// At an opted-in limit, return it through the producer receipt instead.
     /// A live delivery is never preempted or stolen by the retry policy.
-    pub fn nack(self) { drop(self); }
+    pub fn nack(self) {
+        drop(self);
+    }
 }
 impl<T> Deref for Delivery<T> {
     type Target = T;
-    fn deref(&self) -> &T { &self.item.as_ref().expect("live delivery").value }
+    fn deref(&self) -> &T {
+        &self.item.as_ref().expect("live delivery").value
+    }
 }
 impl<T> DerefMut for Delivery<T> {
-    fn deref_mut(&mut self) -> &mut T { &mut self.item.as_mut().expect("live delivery").value }
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.item.as_mut().expect("live delivery").value
+    }
 }
 impl<T> Drop for Delivery<T> {
     fn drop(&mut self) {
@@ -570,19 +767,32 @@ impl<T> Drop for Delivery<T> {
             {
                 let mut state = self.shared.state.lock();
                 state.in_flight -= 1;
-                if state.receivers == 0 { state.abandoned = true; }
-                else if exhausted {
+                if state.receivers == 0 {
+                    state.abandoned = true;
+                } else if exhausted {
                     state.rejected = true;
                     returned = abandoned.take();
-                } else { state.ready.push_back(abandoned.take().expect("owned retry")); }
+                } else {
+                    state
+                        .ready
+                        .push_back(abandoned.take().expect("owned retry"));
+                }
             }
-            let reason = if returned.is_some() { ObligationAbortReason::Error } else { ObligationAbortReason::Cancel };
+            let reason = if returned.is_some() {
+                ObligationAbortReason::Error
+            } else {
+                ObligationAbortReason::Cancel
+            };
             let _wake = WakeAfter(&self.shared.changed);
             // Own both terminal publications before arbitrary ledger callbacks.
             // Returning a poison item frees physical capacity, not success.
             let _abandoned = receipt::AbandonedItem(abandoned);
-            let _returned = returned.map(|item| receipt::Publication::returned(item, SettlementOutcome::RetryExhausted));
-            if let Some(token) = self.obligation.take() { let _ = token.abort(reason); }
+            let _returned = returned.map(|item| {
+                receipt::Publication::returned(item, SettlementOutcome::RetryExhausted)
+            });
+            if let Some(token) = self.obligation.take() {
+                let _ = token.abort(reason);
+            }
         }
     }
 }
