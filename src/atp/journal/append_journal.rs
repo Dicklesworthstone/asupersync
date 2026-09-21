@@ -1285,10 +1285,9 @@ impl AppendJournal {
         // Try to recover from existing journal
         match journal.recover_from_disk() {
             Outcome::Ok(()) => {}
-            Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
-                journal.generation = 0;
-                journal.sequence = 0;
-            }
+            Outcome::Err(error) => return Outcome::Err(error),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         Outcome::Ok(journal)
@@ -1611,7 +1610,7 @@ impl AppendJournal {
         // Find the latest generation
         let entries = match std::fs::read_dir(&self.config.base_dir) {
             Ok(entries) => entries,
-            Err(_) => return Outcome::Ok(()), // Directory doesn't exist yet
+            Err(error) => return Outcome::Err(JournalError::DirectoryRead(error.to_string())),
         };
 
         for entry in entries {
@@ -1903,14 +1902,15 @@ impl AppendJournal {
             match reader.read_exact(&mut length_bytes[..1]) {
                 Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(_) => {
+                Err(error) => return Outcome::Err(JournalError::ReadFailure(error.to_string())),
+            }
+            match reader.read_exact(&mut length_bytes[1..]) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
                     corrupted = true;
                     break;
                 }
-            }
-            if reader.read_exact(&mut length_bytes[1..]).is_err() {
-                corrupted = true;
-                break;
+                Err(error) => return Outcome::Err(JournalError::ReadFailure(error.to_string())),
             }
 
             let length = u32::from_le_bytes(length_bytes) as usize;
@@ -1923,9 +1923,13 @@ impl AppendJournal {
 
             // Read entry data
             let mut entry_data = vec![0u8; length];
-            if reader.read_exact(&mut entry_data).is_err() {
-                corrupted = true;
-                break;
+            match reader.read_exact(&mut entry_data) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    corrupted = true;
+                    break;
+                }
+                Err(error) => return Outcome::Err(JournalError::ReadFailure(error.to_string())),
             }
 
             // Deserialize entry
@@ -2237,6 +2241,56 @@ mod tests {
         let recovered_stats = recovered.get_stats();
         assert_eq!(recovered_stats.sequence, 1);
         assert_eq!(recovered_stats.recent_entries_count, 1);
+    }
+
+    #[test]
+    fn recovery_io_failure_refuses_reopen_without_resetting_existing_progress() {
+        let config = JournalConfig {
+            base_dir: unique_temp_dir("journal_recovery_io_failure"),
+            ..Default::default()
+        };
+        {
+            let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+            journal
+                .append(JournalRecord::Accept {
+                    transfer_id: "existing".to_string(),
+                    peer_id: "peer".to_string(),
+                    timestamp: 1,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+            journal.flush().unwrap();
+        }
+        let original_path = journal_file_path(&config.base_dir, 0);
+        let original = std::fs::read(&original_path).unwrap();
+        // A directory at a generation path causes a real open/read error,
+        // including when tests run as root (unlike permission-bit fixtures).
+        let unreadable = journal_file_path(&config.base_dir, 1);
+        std::fs::create_dir(&unreadable).unwrap();
+        assert!(matches!(
+            AppendJournal::new(config.clone(), test_auth_key()),
+            Outcome::Err(JournalError::FileOpen(_) | JournalError::ReadFailure(_))
+        ));
+        assert_eq!(std::fs::read(&original_path).unwrap(), original);
+        assert!(unreadable.is_dir());
+        assert!(!journal_file_path(&config.base_dir, 2).exists());
+    }
+
+    #[test]
+    fn recovery_directory_scan_failure_is_not_an_empty_journal() {
+        let config = JournalConfig {
+            base_dir: unique_temp_dir("journal_recovery_scan_failure"),
+            ..Default::default()
+        };
+        let mut journal = AppendJournal::new(config, test_auth_key()).unwrap();
+        let non_directory = journal.config.base_dir.join("not_a_directory");
+        std::fs::write(&non_directory, b"preserve").unwrap();
+        journal.config.base_dir = non_directory.clone();
+        assert!(matches!(
+            journal.recover_from_disk(),
+            Outcome::Err(JournalError::DirectoryRead(_))
+        ));
+        assert_eq!(std::fs::read(non_directory).unwrap(), b"preserve");
     }
 
     #[test]
