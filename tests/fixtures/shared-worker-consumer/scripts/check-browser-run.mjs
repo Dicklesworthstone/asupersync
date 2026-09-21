@@ -48,9 +48,7 @@ function contentTypeFor(filePath) {
 }
 
 function resolveRequestPath(urlPathname) {
-  const normalized = decodeURIComponent(
-    urlPathname === "/" ? "/index.html" : urlPathname,
-  );
+  const normalized = decodeURIComponent(urlPathname === "/" ? "/index.html" : urlPathname);
   const resolved = path.resolve(distDir, `.${normalized}`);
   const relative = path.relative(distDir, resolved);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -120,9 +118,9 @@ async function waitForFixtureState(page) {
     try {
       const parsed = JSON.parse(text);
       return (
-        parsed.phase === "closed"
-        || parsed.phase === "fallback_complete"
-        || parsed.phase === "error"
+        parsed.phase === "closed" ||
+        parsed.phase === "fallback_complete" ||
+        parsed.phase === "error"
       );
     } catch {
       return false;
@@ -236,8 +234,7 @@ try {
     `expected reuse page one to stay on shared_worker, got ${reuseOneState.selection?.selectedMode ?? "missing"}`,
   );
   assert(
-    reuseOneState.support?.directExecutionReasonCode
-      === "shared_worker_direct_runtime_not_shipped",
+    reuseOneState.support?.directExecutionReasonCode === "shared_worker_direct_runtime_not_shipped",
     `unexpected reuse page one direct execution reason: ${reuseOneState.support?.directExecutionReasonCode ?? "missing"}`,
   );
   assert(
@@ -245,8 +242,7 @@ try {
     `expected reuse page two to stay on shared_worker, got ${reuseTwoState.selection?.selectedMode ?? "missing"}`,
   );
   assert(
-    reuseTwoState.support?.directExecutionReasonCode
-      === "shared_worker_direct_runtime_not_shipped",
+    reuseTwoState.support?.directExecutionReasonCode === "shared_worker_direct_runtime_not_shipped",
     `unexpected reuse page two direct execution reason: ${reuseTwoState.support?.directExecutionReasonCode ?? "missing"}`,
   );
   assert(
@@ -269,20 +265,20 @@ try {
     `expected reuse page two to observe 2 clients, got ${reuseTwoSnapshot?.clientCount ?? "missing"}`,
   );
   assert(
-    Array.isArray(reuseOneSnapshot?.clientIds)
-      && reuseOneSnapshot.clientIds.includes("page-one")
-      && reuseOneSnapshot.clientIds.includes("page-two"),
+    Array.isArray(reuseOneSnapshot?.clientIds) &&
+      reuseOneSnapshot.clientIds.includes("page-one") &&
+      reuseOneSnapshot.clientIds.includes("page-two"),
     "reuse page one snapshot must include both page-one and page-two",
   );
   assert(
-    Array.isArray(reuseTwoSnapshot?.clientIds)
-      && reuseTwoSnapshot.clientIds.includes("page-one")
-      && reuseTwoSnapshot.clientIds.includes("page-two"),
+    Array.isArray(reuseTwoSnapshot?.clientIds) &&
+      reuseTwoSnapshot.clientIds.includes("page-one") &&
+      reuseTwoSnapshot.clientIds.includes("page-two"),
     "reuse page two snapshot must include both page-one and page-two",
   );
   assert(
-    reuseOneSnapshot?.workerName === "shared-worker-reuse-cluster"
-      && reuseTwoSnapshot?.workerName === "shared-worker-reuse-cluster",
+    reuseOneSnapshot?.workerName === "shared-worker-reuse-cluster" &&
+      reuseTwoSnapshot?.workerName === "shared-worker-reuse-cluster",
     "reuse pages must observe the same coordinator worker name",
   );
   assert(
@@ -307,8 +303,7 @@ try {
     `unexpected mismatch fallback lane id: ${mismatchState.selection?.fallbackLaneId ?? "missing"}`,
   );
   assert(
-    mismatchState.support?.directExecutionReasonCode
-      === "shared_worker_direct_runtime_not_shipped",
+    mismatchState.support?.directExecutionReasonCode === "shared_worker_direct_runtime_not_shipped",
     `unexpected mismatch direct execution reason: ${mismatchState.support?.directExecutionReasonCode ?? "missing"}`,
   );
   assert(
@@ -329,8 +324,7 @@ try {
     `unexpected crash fallback lane id: ${crashState.selection?.fallbackLaneId ?? "missing"}`,
   );
   assert(
-    crashState.support?.directExecutionReasonCode
-      === "shared_worker_direct_runtime_not_shipped",
+    crashState.support?.directExecutionReasonCode === "shared_worker_direct_runtime_not_shipped",
     `unexpected crash direct execution reason: ${crashState.support?.directExecutionReasonCode ?? "missing"}`,
   );
   assert(
@@ -343,8 +337,7 @@ try {
     `expected churn scenario to rejoin on shared_worker, got ${churnState.selection?.selectedMode ?? "missing"}`,
   );
   assert(
-    churnState.support?.directExecutionReasonCode
-      === "shared_worker_direct_runtime_not_shipped",
+    churnState.support?.directExecutionReasonCode === "shared_worker_direct_runtime_not_shipped",
     `unexpected churn direct execution reason: ${churnState.support?.directExecutionReasonCode ?? "missing"}`,
   );
   assert(
@@ -356,9 +349,9 @@ try {
     `expected churn topology to observe one live client after detach cleanup, got ${churnState.topology_snapshot?.clientCount ?? "missing"}`,
   );
   assert(
-    Array.isArray(churnState.topology_snapshot?.clientIds)
-      && churnState.topology_snapshot.clientIds.length === 1
-      && churnState.topology_snapshot.clientIds[0] === "page-three",
+    Array.isArray(churnState.topology_snapshot?.clientIds) &&
+      churnState.topology_snapshot.clientIds.length === 1 &&
+      churnState.topology_snapshot.clientIds[0] === "page-three",
     `unexpected churn client ids: ${JSON.stringify(churnState.topology_snapshot?.clientIds ?? null)}`,
   );
   assert(
@@ -375,8 +368,7 @@ try {
     `expected crash recovery scenario to reconnect on shared_worker, got ${recoveryState.selection?.selectedMode ?? "missing"}`,
   );
   assert(
-    recoveryState.support?.directExecutionReasonCode
-      === "shared_worker_direct_runtime_not_shipped",
+    recoveryState.support?.directExecutionReasonCode === "shared_worker_direct_runtime_not_shipped",
     `unexpected crash recovery direct execution reason: ${recoveryState.support?.directExecutionReasonCode ?? "missing"}`,
   );
   assert(
@@ -388,9 +380,9 @@ try {
     `expected crash recovery topology to observe one live client, got ${recoveryState.topology_snapshot?.clientCount ?? "missing"}`,
   );
   assert(
-    Array.isArray(recoveryState.topology_snapshot?.clientIds)
-      && recoveryState.topology_snapshot.clientIds.length === 1
-      && recoveryState.topology_snapshot.clientIds[0] === "crash-recovery",
+    Array.isArray(recoveryState.topology_snapshot?.clientIds) &&
+      recoveryState.topology_snapshot.clientIds.length === 1 &&
+      recoveryState.topology_snapshot.clientIds[0] === "crash-recovery",
     `unexpected crash recovery client ids: ${JSON.stringify(recoveryState.topology_snapshot?.clientIds ?? null)}`,
   );
   assert(
@@ -406,13 +398,15 @@ try {
     {
       scenario_id: "shared_worker_attach_baseline",
       failure_family: "baseline",
-      expected_outcome: "browser page attaches to the SharedWorker coordinator on the supported path",
+      expected_outcome:
+        "browser page attaches to the SharedWorker coordinator on the supported path",
       artifact_keys: ["browser_run"],
     },
     {
       scenario_id: "shared_worker_multi_page_reuse",
       failure_family: "reuse",
-      expected_outcome: "two same-origin pages observe one coordinator topology with both clients present",
+      expected_outcome:
+        "two same-origin pages observe one coordinator topology with both clients present",
       artifact_keys: ["browser_run"],
     },
     {
@@ -430,19 +424,22 @@ try {
     {
       scenario_id: "shared_worker_client_detach_cleanup",
       failure_family: "cleanup",
-      expected_outcome: "browser-side clients close explicitly and report terminated lifecycle state",
+      expected_outcome:
+        "browser-side clients close explicitly and report terminated lifecycle state",
       artifact_keys: ["browser_run"],
     },
     {
       scenario_id: "shared_worker_client_churn_rejoin",
       failure_family: "client_churn",
-      expected_outcome: "a fresh same-origin client reattaches cleanly after earlier clients detach",
+      expected_outcome:
+        "a fresh same-origin client reattaches cleanly after earlier clients detach",
       artifact_keys: ["browser_run"],
     },
     {
       scenario_id: "shared_worker_crash_recovery_reconnect",
       failure_family: "recovery",
-      expected_outcome: "after a crash-before-handshake downgrade, a later attach can start a fresh coordinator on the same worker name",
+      expected_outcome:
+        "after a crash-before-handshake downgrade, a later attach can start a fresh coordinator on the same worker name",
       artifact_keys: ["browser_run"],
     },
   ];
@@ -458,32 +455,26 @@ try {
     reuse_page_two_attach_count: reuseTwoSnapshot.attachCount,
     reuse_worker_name: reuseOneSnapshot.workerName,
     reuse_client_ids: reuseOneSnapshot.clientIds,
-    reuse_page_one_direct_execution_reason_code:
-      reuseOneState.support.directExecutionReasonCode,
-    reuse_page_two_direct_execution_reason_code:
-      reuseTwoState.support.directExecutionReasonCode,
+    reuse_page_one_direct_execution_reason_code: reuseOneState.support.directExecutionReasonCode,
+    reuse_page_two_direct_execution_reason_code: reuseTwoState.support.directExecutionReasonCode,
     mismatch_mode: mismatchState.selection.selectedMode,
     mismatch_reason: mismatchState.selection.reason,
     mismatch_fallback_lane_id: mismatchState.selection.fallbackLaneId,
-    mismatch_direct_execution_reason_code:
-      mismatchState.support.directExecutionReasonCode,
+    mismatch_direct_execution_reason_code: mismatchState.support.directExecutionReasonCode,
     crash_mode: crashState.selection.selectedMode,
     crash_reason: crashState.selection.reason,
     crash_fallback_lane_id: crashState.selection.fallbackLaneId,
-    crash_direct_execution_reason_code:
-      crashState.support.directExecutionReasonCode,
+    crash_direct_execution_reason_code: crashState.support.directExecutionReasonCode,
     churn_mode: churnState.selection.selectedMode,
     churn_worker_name: churnState.topology_snapshot.workerName,
     churn_client_ids: churnState.topology_snapshot.clientIds,
     churn_attach_count: churnState.topology_snapshot.attachCount,
-    churn_direct_execution_reason_code:
-      churnState.support.directExecutionReasonCode,
+    churn_direct_execution_reason_code: churnState.support.directExecutionReasonCode,
     recovery_mode: recoveryState.selection.selectedMode,
     recovery_worker_name: recoveryState.topology_snapshot.workerName,
     recovery_client_ids: recoveryState.topology_snapshot.clientIds,
     recovery_attach_count: recoveryState.topology_snapshot.attachCount,
-    recovery_direct_execution_reason_code:
-      recoveryState.support.directExecutionReasonCode,
+    recovery_direct_execution_reason_code: recoveryState.support.directExecutionReasonCode,
     close_lifecycle_states: [
       reuseOneState.close_lifecycle_state,
       reuseTwoState.close_lifecycle_state,

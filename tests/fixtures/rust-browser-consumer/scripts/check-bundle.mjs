@@ -20,12 +20,12 @@ if (!fs.existsSync(assetDir)) {
 const assets = fs.readdirSync(assetDir);
 const jsAssets = assets.filter((name) => name.endsWith(".js") || name.endsWith(".mjs"));
 const wasmAssets = assets.filter((name) => name.endsWith(".wasm"));
-const jsContents = jsAssets.map((name) =>
-  fs.readFileSync(path.join(assetDir, name), "utf8"),
-);
+const jsContents = jsAssets.map((name) => fs.readFileSync(path.join(assetDir, name), "utf8"));
 
 if (jsAssets.length < 2) {
-  throw new Error("Expected at least two JavaScript assets in dist/assets for main-thread + worker bundles");
+  throw new Error(
+    "Expected at least two JavaScript assets in dist/assets for main-thread + worker bundles",
+  );
 }
 
 if (wasmAssets.length === 0) {

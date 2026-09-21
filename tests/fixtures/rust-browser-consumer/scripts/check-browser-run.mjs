@@ -52,10 +52,7 @@ function resolveRequestPath(urlPathname) {
   const normalized = decodeURIComponent(urlPathname === "/" ? "/index.html" : urlPathname);
   const resolved = path.resolve(distDir, `.${normalized}`);
   const relative = path.relative(distDir, resolved);
-  if (
-    relative.startsWith("..") ||
-    path.isAbsolute(relative)
-  ) {
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new Error(`refusing to serve path outside dist: ${urlPathname}`);
   }
   return resolved;
@@ -95,10 +92,7 @@ function assertLifecycle(label, lifecycle, expectedCapabilities) {
     lifecycle?.completed_task_outcome === "ok",
     `${label} completed task must resolve with ok`,
   );
-  assert(
-    lifecycle?.cancel_event_count === 1,
-    `${label} must emit exactly one cancellation event`,
-  );
+  assert(lifecycle?.cancel_event_count === 1, `${label} must emit exactly one cancellation event`);
   assert(
     Number.isInteger(lifecycle?.dispatch_count) && lifecycle.dispatch_count >= 6,
     `${label} dispatch count must stay >= 6`,
@@ -146,10 +140,7 @@ function assertLadder(label, ladder, expected) {
     ladder?.reason_code === expected.reason_code,
     `${label} reason code drifted: ${ladder?.reason_code ?? "missing"}`,
   );
-  assert(
-    Array.isArray(ladder?.candidates),
-    `${label} candidates must remain an array`,
-  );
+  assert(Array.isArray(ladder?.candidates), `${label} candidates must remain an array`);
 }
 
 function assertCandidateReason(label, ladder, laneId, reasonCode) {
@@ -164,10 +155,7 @@ function assertCandidateReason(label, ladder, laneId, reasonCode) {
 }
 
 function assertBrowserSelection(label, selection, expected) {
-  assert(
-    selection?.supported === expected.supported,
-    `${label} supported flag drifted`,
-  );
+  assert(selection?.supported === expected.supported, `${label} supported flag drifted`);
   assert(
     selection?.selected_lane === expected.selected_lane,
     `${label} selected unexpected lane: ${selection?.selected_lane ?? "missing"}`,
@@ -187,14 +175,8 @@ function assertBrowserSelection(label, selection, expected) {
     );
   }
   if (expected.runtime_available) {
-    assert(
-      selection?.scope_close_outcome === "ok",
-      `${label} scope close must return ok`,
-    );
-    assert(
-      selection?.runtime_close_outcome === "ok",
-      `${label} runtime close must return ok`,
-    );
+    assert(selection?.scope_close_outcome === "ok", `${label} scope close must return ok`);
+    assert(selection?.runtime_close_outcome === "ok", `${label} runtime close must return ok`);
     assert(
       Number.isInteger(selection?.dispatch_count) && selection.dispatch_count >= 4,
       `${label} dispatch count must stay >= 4`,
@@ -212,10 +194,7 @@ function assertBrowserSelection(label, selection, expected) {
 }
 
 function assertWorkerSupport(label, support, expected) {
-  assert(
-    support?.supported === expected.supported,
-    `${label} supported flag drifted`,
-  );
+  assert(support?.supported === expected.supported, `${label} supported flag drifted`);
   assert(
     support?.contract_id === expected.contract_id,
     `${label} contract id drifted: ${support?.contract_id ?? "missing"}`,
@@ -252,10 +231,7 @@ function assertWorkerSupport(label, support, expected) {
     support?.direct_execution_reason_code === expected.direct_execution_reason_code,
     `${label} direct execution reason drifted: ${support?.direct_execution_reason_code ?? "missing"}`,
   );
-  assert(
-    Array.isArray(support?.downgrade_order),
-    `${label} downgrade order must remain an array`,
-  );
+  assert(Array.isArray(support?.downgrade_order), `${label} downgrade order must remain an array`);
 }
 
 function startStaticServer() {
@@ -343,8 +319,14 @@ try {
   if (parsed.support_lane !== "repository_maintained_rust_browser_fixture") {
     throw new Error(`unexpected support lane: ${parsed.support_lane ?? "missing"}`);
   }
-  assert(parsed.harness_mode === "matrix", `unexpected harness mode: ${parsed.harness_mode ?? "missing"}`);
-  assert(parsed.matrix_version === 2, `unexpected matrix version: ${parsed.matrix_version ?? "missing"}`);
+  assert(
+    parsed.harness_mode === "matrix",
+    `unexpected harness mode: ${parsed.harness_mode ?? "missing"}`,
+  );
+  assert(
+    parsed.matrix_version === 2,
+    `unexpected matrix version: ${parsed.matrix_version ?? "missing"}`,
+  );
 
   const mainThread = parsed.main_thread;
   const dedicatedWorker = parsed.dedicated_worker;
@@ -417,16 +399,12 @@ try {
     preferredDedicatedWorker?.preferred_lane === DEDICATED_WORKER_LANE,
     `preferred dedicated-worker lane must be requested, got ${preferredDedicatedWorker?.preferred_lane ?? "missing"}`,
   );
-  assertBrowserSelection(
-    "main-thread browser selection",
-    mainThreadBrowserSelection,
-    {
-      supported: true,
-      selected_lane: MAIN_THREAD_LANE,
-      reason_code: "supported",
-      runtime_available: true,
-    },
-  );
+  assertBrowserSelection("main-thread browser selection", mainThreadBrowserSelection, {
+    supported: true,
+    selected_lane: MAIN_THREAD_LANE,
+    reason_code: "supported",
+    runtime_available: true,
+  });
   assertBrowserSelection(
     "preferred dedicated-worker browser selection",
     preferredDedicatedWorkerBrowserSelection,
@@ -458,16 +436,12 @@ try {
     MAIN_THREAD_LANE,
     "candidate_prerequisite_missing",
   );
-  assertBrowserSelection(
-    "downgrade browser selection",
-    downgradeBrowserSelection,
-    {
-      supported: false,
-      selected_lane: UNSUPPORTED_LANE,
-      reason_code: "missing_webassembly",
-      runtime_available: false,
-    },
-  );
+  assertBrowserSelection("downgrade browser selection", downgradeBrowserSelection, {
+    supported: false,
+    selected_lane: UNSUPPORTED_LANE,
+    reason_code: "missing_webassembly",
+    runtime_available: false,
+  });
 
   assertLadder("service-worker fail-closed ladder", serviceWorkerFailClosed, {
     supported: false,
@@ -598,16 +572,12 @@ try {
     preferredMainThread?.preferred_lane === MAIN_THREAD_LANE,
     `preferred main-thread worker lane must be requested, got ${preferredMainThread?.preferred_lane ?? "missing"}`,
   );
-  assertBrowserSelection(
-    "dedicated-worker browser selection",
-    workerBrowserSelection,
-    {
-      supported: true,
-      selected_lane: DEDICATED_WORKER_LANE,
-      reason_code: "supported",
-      runtime_available: true,
-    },
-  );
+  assertBrowserSelection("dedicated-worker browser selection", workerBrowserSelection, {
+    supported: true,
+    selected_lane: DEDICATED_WORKER_LANE,
+    reason_code: "supported",
+    runtime_available: true,
+  });
   assertBrowserSelection(
     "preferred main-thread worker browser selection",
     preferredMainThreadBrowserSelection,
@@ -629,10 +599,10 @@ try {
     "dedicated worker guarded capability snapshot must keep localStorage unavailable",
   );
   assert(
-    typeof guardedCapabilities?.main_thread_indexed_db === "boolean"
-      && typeof guardedCapabilities?.dedicated_worker_indexed_db === "boolean"
-      && typeof guardedCapabilities?.main_thread_web_transport === "boolean"
-      && typeof guardedCapabilities?.dedicated_worker_web_transport === "boolean",
+    typeof guardedCapabilities?.main_thread_indexed_db === "boolean" &&
+      typeof guardedCapabilities?.dedicated_worker_indexed_db === "boolean" &&
+      typeof guardedCapabilities?.main_thread_web_transport === "boolean" &&
+      typeof guardedCapabilities?.dedicated_worker_web_transport === "boolean",
     "guarded capability snapshot must preserve boolean advanced-capability fields",
   );
 

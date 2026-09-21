@@ -74,9 +74,7 @@ function contentTypeFor(filePath) {
 }
 
 function resolveRequestPath(urlPathname) {
-  const normalized = decodeURIComponent(
-    urlPathname === "/" ? "/index.html" : urlPathname,
-  );
+  const normalized = decodeURIComponent(urlPathname === "/" ? "/index.html" : urlPathname);
   const resolved = path.resolve(distDir, `.${normalized}`);
   const relative = path.relative(distDir, resolved);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {

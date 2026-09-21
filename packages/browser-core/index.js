@@ -16,13 +16,7 @@ import initWasm, {
   websocket_send as rawWebSocketSend,
 } from "./asupersync.js";
 
-const HANDLE_KINDS = new Set([
-  "runtime",
-  "region",
-  "task",
-  "cancel_token",
-  "fetch_request",
-]);
+const HANDLE_KINDS = new Set(["runtime", "region", "task", "cancel_token", "fetch_request"]);
 
 const HANDLE_OWNER_TOKEN = Symbol("asupersync.handleOwnerToken");
 const MIN_I64 = -(1n << 63n);
@@ -53,21 +47,9 @@ const ERROR_CODES = Object.freeze([
   "internal_failure",
 ]);
 
-const RECOVERABILITY_LEVELS = Object.freeze([
-  "transient",
-  "permanent",
-  "unknown",
-]);
+const RECOVERABILITY_LEVELS = Object.freeze(["transient", "permanent", "unknown"]);
 
-const FETCH_METHODS = new Set([
-  "GET",
-  "POST",
-  "PUT",
-  "PATCH",
-  "DELETE",
-  "HEAD",
-  "OPTIONS",
-]);
+const FETCH_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
 export const abiMetadata = Object.freeze({
   abi_version: Object.freeze({
@@ -162,8 +144,8 @@ function normalizeFetchAuthority(authority = {}) {
   const allowedOrigins = authority.allowedOrigins ?? [];
   const allowedMethods = authority.allowedMethods ?? [];
   if (
-    !Array.isArray(allowedOrigins)
-    || allowedOrigins.some((origin) => typeof origin !== "string" || origin.length === 0)
+    !Array.isArray(allowedOrigins) ||
+    allowedOrigins.some((origin) => typeof origin !== "string" || origin.length === 0)
   ) {
     throw new TypeError(
       "FetchAuthority.allowedOrigins must be an array of non-empty absolute origins",
@@ -257,9 +239,7 @@ function normalizeOwnerToken(value, label) {
   } else if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
     token = BigInt(value);
   } else {
-    throw new TypeError(
-      label + " must be a non-negative bigint, decimal string, or safe integer",
-    );
+    throw new TypeError(label + " must be a non-negative bigint, decimal string, or safe integer");
   }
 
   if (token < 0n || token > MAX_U64) {
@@ -279,9 +259,7 @@ function handleJson(handle, label, expectedKind) {
   const normalized = normHandle(handle, label, expectedKind);
   const ownerToken = ownerTokenOf(handle, label);
   const base = JSON.stringify(normalized);
-  return ownerToken === null
-    ? base
-    : base.slice(0, -1) + ',"owner_token":' + ownerToken + "}";
+  return ownerToken === null ? base : base.slice(0, -1) + ',"owner_token":' + ownerToken + "}";
 }
 
 function requestJsonWithHandle(key, handle, label, expectedKind, fields = {}) {
@@ -357,9 +335,10 @@ function reviveAbiInteger(rawValue) {
     throw new TypeError(`Outcome ${rawValue.kind} value must be an exact integer`);
   }
 
-  const inRange = rawValue.kind === "i64"
-    ? integer >= MIN_I64 && integer <= MAX_I64
-    : integer >= 0n && integer <= MAX_U64;
+  const inRange =
+    rawValue.kind === "i64"
+      ? integer >= MIN_I64 && integer <= MAX_I64
+      : integer >= 0n && integer <= MAX_U64;
   if (!inRange) {
     throw new RangeError(`Outcome ${rawValue.kind} value is outside its 64-bit range`);
   }
@@ -516,11 +495,7 @@ function encodeOutcomeEnvelope(outcome, label) {
 
 function encodeValueJson(value, label) {
   if (value instanceof BaseHandle || isRawHandle(value)) {
-    return (
-      '{"kind":"handle","value":' +
-      handleJson(value, label) +
-      "}"
-    );
+    return '{"kind":"handle","value":' + handleJson(value, label) + "}";
   }
   const encoded = encodeValue(value, label);
   if (encoded.kind === "i64" || encoded.kind === "u64") {
@@ -532,11 +507,7 @@ function encodeValueJson(value, label) {
 function encodeOutcomeEnvelopeJson(outcome, label) {
   const encoded = encodeOutcomeEnvelope(outcome, label);
   if (outcome.outcome === "ok") {
-    return (
-      '{"outcome":"ok","value":' +
-      encodeValueJson(outcome.value, label + ".value") +
-      "}"
-    );
+    return '{"outcome":"ok","value":' + encodeValueJson(outcome.value, label + ".value") + "}";
   }
   if (outcome.outcome === "cancelled") {
     if (!outcome.cancellation || typeof outcome.cancellation !== "object") {
@@ -975,9 +946,7 @@ export class BaseHandle {
       generation: this.generation,
     };
     const ownerToken = this[HANDLE_OWNER_TOKEN];
-    return ownerToken === null
-      ? handle
-      : { ...handle, owner_token: ownerToken };
+    return ownerToken === null ? handle : { ...handle, owner_token: ownerToken };
   }
 }
 
@@ -1071,10 +1040,7 @@ export function runtime_create(options = {}, consumerVersion = null) {
 
 export function runtime_close(runtimeHandle, consumerVersion = null) {
   const outcome = invokeOutcomeOperation("runtime_close", () =>
-    rawRuntimeClose(
-      handleJson(runtimeHandle, "runtimeHandle", "runtime"),
-      vjson(consumerVersion),
-    ),
+    rawRuntimeClose(handleJson(runtimeHandle, "runtimeHandle", "runtime"), vjson(consumerVersion)),
   );
   if (outcome.outcome === "ok") {
     cleanupRuntimeOwnedHostState(runtimeHandle);
@@ -1099,10 +1065,7 @@ export function scope_enter(request, consumerVersion = null) {
 
 export function scope_close(regionHandle, consumerVersion = null) {
   const outcome = invokeOutcomeOperation("scope_close", () =>
-    rawScopeClose(
-      handleJson(regionHandle, "regionHandle", "region"),
-      vjson(consumerVersion),
-    ),
+    rawScopeClose(handleJson(regionHandle, "regionHandle", "region"), vjson(consumerVersion)),
   );
   if (outcome.outcome === "ok") {
     cleanupScopeOwnedHostState(regionHandle);
@@ -1310,9 +1273,7 @@ export function webtransport_send(request, _consumerVersion = null) {
     );
   }
   try {
-    state.pendingWrites.push(
-      encodeWebTransportDatagram(request.value, "request.value"),
-    );
+    state.pendingWrites.push(encodeWebTransportDatagram(request.value, "request.value"));
   } catch (error) {
     return failOut(
       "compatibility_rejected",
@@ -1466,9 +1427,4 @@ export const rawBindings = Object.freeze({
   abi_fingerprint: rawAbiFingerprint,
 });
 
-export {
-  BUDGET_BOUNDS,
-  CANCELLATION_PHASE_ORDER,
-  ERROR_CODES,
-  RECOVERABILITY_LEVELS,
-};
+export { BUDGET_BOUNDS, CANCELLATION_PHASE_ORDER, ERROR_CODES, RECOVERABILITY_LEVELS };

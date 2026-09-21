@@ -109,7 +109,8 @@ function buildScenarioInventory(bootstrap, preferredCandidate, prerequisiteLossC
     {
       scenario_id: "worker_loss_fail_closed_demotion",
       failure_family: "worker_loss",
-      expected_outcome: "exhausted retry budget demotes fail-closed instead of silently falling through",
+      expected_outcome:
+        "exhausted retry budget demotes fail-closed instead of silently falling through",
       artifact_keys: ["browser_run"],
       observed: {
         lane_health_status: bootstrap.laneHealthDemotion.status,
@@ -242,7 +243,9 @@ try {
 
   const parsed = JSON.parse(statusText);
   if (parsed.phase === "worker_error") {
-    throw new Error(`fixture rendered worker_error payload: ${parsed.error_message ?? "unknown error"}`);
+    throw new Error(
+      `fixture rendered worker_error payload: ${parsed.error_message ?? "unknown error"}`,
+    );
   }
   if (parsed.scenario_id !== "DEDICATED-WORKER-CONSUMER") {
     throw new Error(`unexpected scenario_id: ${parsed.scenario_id ?? "missing"}`);
@@ -261,13 +264,31 @@ try {
       (candidate) => candidate.laneId === DEDICATED_WORKER_LANE,
     );
 
-  assert(parsed.phase === "shutdown_complete", `expected final phase shutdown_complete, got ${parsed.phase}`);
-  assert(parsed.shutdown_reason === "fixture-handoff-complete", `unexpected shutdown_reason: ${parsed.shutdown_reason ?? "missing"}`);
+  assert(
+    parsed.phase === "shutdown_complete",
+    `expected final phase shutdown_complete, got ${parsed.phase}`,
+  );
+  assert(
+    parsed.shutdown_reason === "fixture-handoff-complete",
+    `unexpected shutdown_reason: ${parsed.shutdown_reason ?? "missing"}`,
+  );
   assert(Array.isArray(parsed.events), "expected rendered worker events");
-  assert(parsed.events.some((event) => event.type === "worker-bootstrap"), "worker-bootstrap event missing from rendered state");
-  assert(parsed.events.some((event) => event.type === "worker-shutdown-complete"), "worker-shutdown-complete event missing from rendered state");
-  assert(bootstrap.support.runtimeContext === "dedicated_worker", `unexpected runtime context: ${bootstrap.support.runtimeContext ?? "missing"}`);
-  assert(bootstrap.runtimeSelectionBaseline.supported === true, "baseline runtime selection must stay supported");
+  assert(
+    parsed.events.some((event) => event.type === "worker-bootstrap"),
+    "worker-bootstrap event missing from rendered state",
+  );
+  assert(
+    parsed.events.some((event) => event.type === "worker-shutdown-complete"),
+    "worker-shutdown-complete event missing from rendered state",
+  );
+  assert(
+    bootstrap.support.runtimeContext === "dedicated_worker",
+    `unexpected runtime context: ${bootstrap.support.runtimeContext ?? "missing"}`,
+  );
+  assert(
+    bootstrap.runtimeSelectionBaseline.supported === true,
+    "baseline runtime selection must stay supported",
+  );
   assert(
     bootstrap.runtimeSelectionBaseline.selectedLane === DEDICATED_WORKER_LANE,
     `baseline selection chose unexpected lane: ${bootstrap.runtimeSelectionBaseline.selectedLane ?? "missing"}`,
@@ -384,7 +405,10 @@ try {
     bootstrap.runtimeSelectionDemoted.health.demotedToLaneId === UNSUPPORTED_LANE,
     `demoted runtime selection must preserve fail-closed demoted lane ${UNSUPPORTED_LANE}, got ${bootstrap.runtimeSelectionDemoted.health?.demotedToLaneId ?? "missing"}`,
   );
-  assert(preferredCandidate?.reasonCode === "candidate_lane_unhealthy", "demoted candidate matrix must preserve candidate_lane_unhealthy for the worker lane");
+  assert(
+    preferredCandidate?.reasonCode === "candidate_lane_unhealthy",
+    "demoted candidate matrix must preserve candidate_lane_unhealthy for the worker lane",
+  );
   assert(
     bootstrap.prerequisiteLossSimulation?.simulated === true,
     `prerequisite-loss simulation must run, got ${bootstrap.prerequisiteLossSimulation?.simulated ?? "missing"}`,
@@ -443,25 +467,24 @@ try {
   );
   const fetchAuthority = bootstrap.fetchAuthorityExercise;
   assert(
-    fetchAuthority?.defaultDeniedCode === "capability_denied"
-      && fetchAuthority?.unlistedDeniedCode === "capability_denied"
-      && fetchAuthority?.credentialsDeniedCode === "capability_denied",
+    fetchAuthority?.defaultDeniedCode === "capability_denied" &&
+      fetchAuthority?.unlistedDeniedCode === "capability_denied" &&
+      fetchAuthority?.credentialsDeniedCode === "capability_denied",
     `fetch authority denials drifted: ${JSON.stringify(fetchAuthority ?? null)}`,
   );
   assert(
-    fetchAuthority?.hostCallsAfterDefaultDeny === 0
-      && fetchAuthority?.hostCallsAfterPolicyDenials === 0,
+    fetchAuthority?.hostCallsAfterDefaultDeny === 0 &&
+      fetchAuthority?.hostCallsAfterPolicyDenials === 0,
     "default, unlisted-origin, and credential denials must not invoke host fetch",
   );
   assert(
-    fetchAuthority?.allowedOutcome === "ok"
-      && fetchAuthority?.hostFetchCount === 1,
+    fetchAuthority?.allowedOutcome === "ok" && fetchAuthority?.hostFetchCount === 1,
     `listed fetch must invoke host fetch exactly once: ${JSON.stringify(fetchAuthority ?? null)}`,
   );
   assert(
-    fetchAuthority?.hostCall?.url === "https://api.example.com/records?limit=1"
-      && fetchAuthority?.hostCall?.method === "GET"
-      && fetchAuthority?.hostCall?.credentials === "omit",
+    fetchAuthority?.hostCall?.url === "https://api.example.com/records?limit=1" &&
+      fetchAuthority?.hostCall?.method === "GET" &&
+      fetchAuthority?.hostCall?.credentials === "omit",
     `authorized fetch must use the exact canonical URL and explicit credential mode: ${JSON.stringify(fetchAuthority?.hostCall ?? null)}`,
   );
   assert(
@@ -474,10 +497,10 @@ try {
     `blocked IndexedDB upgrade must emit one progress callback, got ${blockedUpgrade?.blockedCount ?? "missing"}`,
   );
   assert(
-    blockedUpgrade?.blockedProgress?.reason === "blocked_upgrade"
-      && blockedUpgrade?.blockedProgress?.dbName === "asupersync-blocked-upgrade-fixture"
-      && blockedUpgrade?.blockedProgress?.storeName === "blocked-upgrade-v2"
-      && blockedUpgrade?.blockedProgress?.version === 2,
+    blockedUpgrade?.blockedProgress?.reason === "blocked_upgrade" &&
+      blockedUpgrade?.blockedProgress?.dbName === "asupersync-blocked-upgrade-fixture" &&
+      blockedUpgrade?.blockedProgress?.storeName === "blocked-upgrade-v2" &&
+      blockedUpgrade?.blockedProgress?.version === 2,
     `blocked IndexedDB progress metadata drifted: ${JSON.stringify(blockedUpgrade?.blockedProgress ?? null)}`,
   );
   assert(
@@ -485,13 +508,12 @@ try {
     "blocked IndexedDB upgrade must remain pending until the older connection closes",
   );
   assert(
-    blockedUpgrade?.terminalState === "resolved"
-      && blockedUpgrade?.terminalCount === 1,
+    blockedUpgrade?.terminalState === "resolved" && blockedUpgrade?.terminalCount === 1,
     `blocked IndexedDB upgrade must resolve exactly once, got ${blockedUpgrade?.terminalState ?? "missing"}/${blockedUpgrade?.terminalCount ?? "missing"}`,
   );
   assert(
-    blockedUpgrade?.upgradedStoreRoundtrip === true
-      && blockedUpgrade?.upgradedStoresPresent === true,
+    blockedUpgrade?.upgradedStoreRoundtrip === true &&
+      blockedUpgrade?.upgradedStoresPresent === true,
     "blocked IndexedDB upgrade must run the schema migration and preserve its stored value",
   );
   assert(
@@ -643,7 +665,8 @@ try {
     "worker artifact export must not retain bytes outside persisted typed-array subviews",
   );
   assert(
-    bootstrap.artifactExercise?.downloadFailureCode === "ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED",
+    bootstrap.artifactExercise?.downloadFailureCode ===
+      "ASUPERSYNC_BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED",
     `unexpected worker artifact download failure code: ${bootstrap.artifactExercise?.downloadFailureCode ?? "missing"}`,
   );
   assert(
@@ -696,24 +719,20 @@ try {
     demoted_reason_code: bootstrap.runtimeSelectionDemoted.reasonCode,
     demoted_outcome: bootstrap.runtimeSelectionDemoted.outcome,
     demoted_health_last_trigger: bootstrap.runtimeSelectionDemoted.health.lastTrigger,
-    demoted_health_demoted_to_lane_id:
-      bootstrap.runtimeSelectionDemoted.health.demotedToLaneId,
+    demoted_health_demoted_to_lane_id: bootstrap.runtimeSelectionDemoted.health.demotedToLaneId,
     demoted_worker_candidate_reason: preferredCandidate?.reasonCode ?? null,
     prerequisite_loss_simulated: bootstrap.prerequisiteLossSimulation?.simulated ?? false,
-    prerequisite_loss_skipped_reason:
-      bootstrap.prerequisiteLossSimulation?.skippedReason ?? null,
+    prerequisite_loss_skipped_reason: bootstrap.prerequisiteLossSimulation?.skippedReason ?? null,
     prerequisite_loss_selected_lane:
       bootstrap.runtimeSelectionPrerequisiteLoss?.selectedLane ?? null,
-    prerequisite_loss_reason_code:
-      bootstrap.runtimeSelectionPrerequisiteLoss?.reasonCode ?? null,
+    prerequisite_loss_reason_code: bootstrap.runtimeSelectionPrerequisiteLoss?.reasonCode ?? null,
     prerequisite_loss_health_status:
       bootstrap.runtimeSelectionPrerequisiteLoss?.health?.status ?? null,
     prerequisite_loss_health_last_trigger:
       bootstrap.runtimeSelectionPrerequisiteLoss?.health?.lastTrigger ?? null,
     prerequisite_loss_health_demoted_to_lane_id:
       bootstrap.runtimeSelectionPrerequisiteLoss?.health?.demotedToLaneId ?? null,
-    prerequisite_loss_worker_candidate_reason:
-      prerequisiteLossCandidate?.reasonCode ?? null,
+    prerequisite_loss_worker_candidate_reason: prerequisiteLossCandidate?.reasonCode ?? null,
     recovered_status: bootstrap.laneHealthReset.status,
     recovered_selected_lane: bootstrap.runtimeSelectionRecovered.selectedLane,
     recovered_outcome: bootstrap.runtimeSelectionRecovered.outcome,

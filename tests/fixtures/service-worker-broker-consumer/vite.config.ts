@@ -8,16 +8,11 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: path.resolve(__dirname, "index.html"),
-        service_worker: path.resolve(
-          __dirname,
-          "src/service-worker.ts",
-        ),
+        service_worker: path.resolve(__dirname, "src/service-worker.ts"),
       },
       output: {
         entryFileNames: (chunkInfo) =>
-          chunkInfo.name === "service_worker"
-            ? "service-worker.js"
-            : "assets/[name]-[hash].js",
+          chunkInfo.name === "service_worker" ? "service-worker.js" : "assets/[name]-[hash].js",
         chunkFileNames: "assets/[name]-[hash].js",
         assetFileNames: "assets/[name]-[hash][extname]",
       },

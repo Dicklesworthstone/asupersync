@@ -25,7 +25,7 @@ if (jsAssets.length === 0) {
 }
 
 const indexHtml = fs.readFileSync(indexPath, "utf8");
-if (!indexHtml.includes("<script type=\"module\"")) {
+if (!indexHtml.includes('<script type="module"')) {
   throw new Error("Built index.html must include a module script tag");
 }
 

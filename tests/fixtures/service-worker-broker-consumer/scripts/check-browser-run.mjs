@@ -47,9 +47,7 @@ function contentTypeFor(filePath) {
 }
 
 function resolveRequestPath(urlPathname) {
-  const normalized = decodeURIComponent(
-    urlPathname === "/" ? "/index.html" : urlPathname,
-  );
+  const normalized = decodeURIComponent(urlPathname === "/" ? "/index.html" : urlPathname);
   const resolved = path.resolve(distDir, `.${normalized}`);
   const relative = path.relative(distDir, resolved);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -151,9 +149,7 @@ try {
 
   const parsed = JSON.parse(statusText);
   if (parsed.phase === "error") {
-    throw new Error(
-      `fixture rendered error payload: ${parsed.error_message ?? "unknown error"}`,
-    );
+    throw new Error(`fixture rendered error payload: ${parsed.error_message ?? "unknown error"}`);
   }
   if (parsed.scenario_id !== "SERVICE-WORKER-BROKER-CONSUMER") {
     throw new Error(`unexpected scenario_id: ${parsed.scenario_id ?? "missing"}`);
@@ -208,11 +204,20 @@ try {
   );
 
   assert(Array.isArray(broker.pendingWork), "pendingWork must be an array");
-  assert(broker.pendingWork.length === 1, `expected one pending work record, got ${broker.pendingWork.length}`);
-  assert(firstWork?.requestedLane === SERVICE_WORKER_BROKER_LANE, "pending work requested lane drifted");
+  assert(
+    broker.pendingWork.length === 1,
+    `expected one pending work record, got ${broker.pendingWork.length}`,
+  );
+  assert(
+    firstWork?.requestedLane === SERVICE_WORKER_BROKER_LANE,
+    "pending work requested lane drifted",
+  );
 
   assert(Array.isArray(broker.handoffs), "handoffs must be an array");
-  assert(broker.handoffs.length === 1, `expected one handoff record, got ${broker.handoffs.length}`);
+  assert(
+    broker.handoffs.length === 1,
+    `expected one handoff record, got ${broker.handoffs.length}`,
+  );
   assert(
     firstHandoff?.targetLaneId === DEDICATED_WORKER_LANE,
     `unexpected handoff target lane: ${firstHandoff?.targetLaneId ?? "missing"}`,
@@ -235,10 +240,7 @@ try {
     `unexpected reopened handoff count: ${broker.reopened?.handoffCount ?? "missing"}`,
   );
 
-  assert(
-    broker.mismatch?.supported === false,
-    "mismatch diagnostics must fail closed",
-  );
+  assert(broker.mismatch?.supported === false, "mismatch diagnostics must fail closed");
   assert(
     broker.mismatch?.reason === "broker_protocol_version_mismatch",
     `unexpected mismatch reason: ${broker.mismatch?.reason ?? "missing"}`,

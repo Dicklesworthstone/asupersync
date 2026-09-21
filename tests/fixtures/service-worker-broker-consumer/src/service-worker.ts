@@ -13,23 +13,19 @@ const APP_VERSION_MAJOR = 1;
 const ARTIFACT_NAMESPACE = "service-worker-broker-artifacts";
 const BROKER_PROTOCOL_VERSION = 1;
 const BROKER_WORK_ID = "service-worker-broker-work-1";
-const CAPABILITY_MANIFEST_VERSION =
-  "service-worker-broker-capability-manifest-v1";
+const CAPABILITY_MANIFEST_VERSION = "service-worker-broker-capability-manifest-v1";
 const DIRECT_EXECUTION_REASON_CODE = "service_worker_direct_runtime_not_shipped";
 const IDEMPOTENCY_KEY = "service-worker-broker-idempotency-key-1";
 const RUN_PROFILE = "restartable";
 const SOURCE_EVENT_KIND = "message";
 const STORE_NAMESPACE = "service_worker_broker_fixture";
 
-const SERVICE_WORKER_BROKER_BOOTSTRAP_MARKER =
-  "service-worker-broker-bootstrap";
-const SERVICE_WORKER_BROKER_REGISTRATION_MARKER =
-  "service-worker-broker-registration";
+const SERVICE_WORKER_BROKER_BOOTSTRAP_MARKER = "service-worker-broker-bootstrap";
+const SERVICE_WORKER_BROKER_REGISTRATION_MARKER = "service-worker-broker-registration";
 const SERVICE_WORKER_BROKER_WORK_MARKER = "service-worker-broker-work";
 const SERVICE_WORKER_BROKER_HANDOFF_MARKER = "service-worker-broker-handoff";
 const SERVICE_WORKER_BROKER_REOPEN_MARKER = "service-worker-broker-reopen";
-const SERVICE_WORKER_BROKER_MISMATCH_MARKER =
-  "service-worker-broker-mismatch";
+const SERVICE_WORKER_BROKER_MISMATCH_MARKER = "service-worker-broker-mismatch";
 const SERVICE_WORKER_BROKER_CLEANUP_MARKER = "service-worker-broker-cleanup";
 
 type ServiceWorkerBrokerRunMessage = {
@@ -79,9 +75,7 @@ function supportOptions() {
   };
 }
 
-function summarizeSupport(
-  support: ReturnType<typeof detectBrowserServiceWorkerBrokerSupport>,
-) {
+function summarizeSupport(support: ReturnType<typeof detectBrowserServiceWorkerBrokerSupport>) {
   return {
     marker: SERVICE_WORKER_BROKER_BOOTSTRAP_MARKER,
     supported: support.supported,
@@ -100,9 +94,7 @@ function summarizeRegistration(
   marker: string,
   registration: NonNullable<
     Awaited<
-      ReturnType<
-        ReturnType<typeof createBrowserServiceWorkerBrokerStore>["readRegistration"]
-      >
+      ReturnType<ReturnType<typeof createBrowserServiceWorkerBrokerStore>["readRegistration"]>
     >
   >,
 ) {
@@ -122,9 +114,7 @@ function summarizeRegistration(
 
 function summarizePendingWork(
   descriptor: Awaited<
-    ReturnType<
-      ReturnType<typeof createBrowserServiceWorkerBrokerStore>["persistBrokerWork"]
-    >
+    ReturnType<ReturnType<typeof createBrowserServiceWorkerBrokerStore>["persistBrokerWork"]>
   >,
 ) {
   return {
@@ -134,18 +124,14 @@ function summarizePendingWork(
     fallbackLaneId: descriptor.fallbackLaneId,
     sourceEventKind: descriptor.sourceEventKind,
     metadataMarker:
-      typeof descriptor.metadata?.marker === "string"
-        ? descriptor.metadata.marker
-        : null,
+      typeof descriptor.metadata?.marker === "string" ? descriptor.metadata.marker : null,
     updatedAtMs: descriptor.updatedAtMs,
   };
 }
 
 function summarizeHandoff(
   handoff: Awaited<
-    ReturnType<
-      ReturnType<typeof createBrowserServiceWorkerBrokerStore>["persistDurableHandoff"]
-    >
+    ReturnType<ReturnType<typeof createBrowserServiceWorkerBrokerStore>["persistDurableHandoff"]>
   >,
 ) {
   return {
@@ -156,10 +142,7 @@ function summarizeHandoff(
     targetLaneId: handoff.targetLaneId,
     reason: handoff.reason,
     sourceEventKind: handoff.sourceEventKind,
-    metadataMarker:
-      typeof handoff.metadata?.marker === "string"
-        ? handoff.metadata.marker
-        : null,
+    metadataMarker: typeof handoff.metadata?.marker === "string" ? handoff.metadata.marker : null,
     recordedAtMs: handoff.recordedAtMs,
   };
 }
@@ -259,10 +242,7 @@ async function runBrokerDemo(event: ExtendableMessageEvent): Promise<void> {
           registration:
             reopenedRegistration === null
               ? null
-              : summarizeRegistration(
-                  SERVICE_WORKER_BROKER_REOPEN_MARKER,
-                  reopenedRegistration,
-                ),
+              : summarizeRegistration(SERVICE_WORKER_BROKER_REOPEN_MARKER, reopenedRegistration),
           pendingWorkCount: reopenedPendingWork.length,
           handoffCount: reopenedHandoffs.length,
         },
@@ -280,10 +260,8 @@ async function runBrokerDemo(event: ExtendableMessageEvent): Promise<void> {
           pendingWorkCount: postCleanupPendingWork.length,
           handoffCount: postCleanupHandoffs.length,
         },
-        directRuntimeReasonMarker:
-          DIRECT_EXECUTION_REASON_CODE,
-        serviceWorkerBrokerCleanupMarker:
-          SERVICE_WORKER_BROKER_CLEANUP_MARKER,
+        directRuntimeReasonMarker: DIRECT_EXECUTION_REASON_CODE,
+        serviceWorkerBrokerCleanupMarker: SERVICE_WORKER_BROKER_CLEANUP_MARKER,
       },
     });
   } catch (error) {

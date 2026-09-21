@@ -6,27 +6,27 @@
  */
 
 import {
-  BROWSER_UNSUPPORTED_RUNTIME_CODE,
-  createBrowserRuntime,
-  formatOutcomeFailure,
-  detectBrowserRuntimeSupport,
   type AbiVersion,
+  BROWSER_UNSUPPORTED_RUNTIME_CODE,
   type BrowserRuntime,
   type BrowserRuntimeOptions,
   type BrowserRuntimeSupportDiagnostics,
+  createBrowserRuntime,
+  detectBrowserRuntimeSupport,
+  formatOutcomeFailure,
   type RegionHandle,
 } from "@asupersync/browser";
 import {
-  createElement,
   createContext,
+  createElement,
+  type ReactElement,
+  type ReactNode,
   useCallback,
   useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ReactElement,
-  type ReactNode,
 } from "react";
 
 export * from "@asupersync/browser";
@@ -63,8 +63,7 @@ export interface ReactScopeState {
   close(): void;
 }
 
-export const REACT_UNSUPPORTED_RUNTIME_CODE =
-  "ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME";
+export const REACT_UNSUPPORTED_RUNTIME_CODE = "ASUPERSYNC_REACT_UNSUPPORTED_RUNTIME";
 
 export function detectReactRuntimeSupport(
   globalObject: Record<string, unknown> | undefined = undefined,
@@ -143,8 +142,8 @@ export function ReactRuntimeProvider({
   const [runtime, setRuntime] = useState<BrowserRuntime | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [reloadNonce, setReloadNonce] = useState(0);
-  const [diagnostics, setDiagnostics] = useState<ReactRuntimeSupportDiagnostics>(
-    () => detectReactRuntimeSupport(globalObject),
+  const [diagnostics, setDiagnostics] = useState<ReactRuntimeSupportDiagnostics>(() =>
+    detectReactRuntimeSupport(globalObject),
   );
   const runtimeRef = useRef<BrowserRuntime | null>(null);
   const epochRef = useRef(0);
@@ -237,9 +236,7 @@ export function ReactRuntimeProvider({
 export function useReactRuntimeContext(): ReactRuntimeContextValue {
   const context = useContext(ReactRuntimeContext);
   if (!context) {
-    throw new Error(
-      "ReactRuntimeProvider is required before calling useReactRuntimeContext().",
-    );
+    throw new Error("ReactRuntimeProvider is required before calling useReactRuntimeContext().");
   }
   return context;
 }
@@ -315,14 +312,7 @@ export function useReactScope(options: ReactScopeOptions = {}): ReactScopeState 
     return () => {
       close();
     };
-  }, [
-    close,
-    options.consumerVersion,
-    options.label,
-    runtime,
-    runtimeError,
-    runtimeStatus,
-  ]);
+  }, [close, options.consumerVersion, options.label, runtime, runtimeError, runtimeStatus]);
 
   return useMemo(
     () => ({
@@ -335,6 +325,4 @@ export function useReactScope(options: ReactScopeOptions = {}): ReactScopeState 
   );
 }
 
-export {
-  BROWSER_UNSUPPORTED_RUNTIME_CODE,
-};
+export { BROWSER_UNSUPPORTED_RUNTIME_CODE };

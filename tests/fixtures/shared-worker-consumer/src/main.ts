@@ -1,9 +1,9 @@
 import {
-  createBrowserSharedWorkerCoordinatorSelection,
-  detectBrowserSharedWorkerCoordinatorSupport,
+  type BrowserRuntimeSelectionResult,
   type BrowserSharedWorkerCoordinatorAttachDiagnostics,
   type BrowserSharedWorkerCoordinatorSelectionResult,
-  type BrowserRuntimeSelectionResult,
+  createBrowserSharedWorkerCoordinatorSelection,
+  detectBrowserSharedWorkerCoordinatorSupport,
 } from "@asupersync/browser";
 import SharedWorkerFixture from "./shared-worker.ts?sharedworker";
 
@@ -17,12 +17,9 @@ const SHARED_WORKER_SELECTION_BASELINE_MARKER = "shared-worker-selection-baselin
 const SHARED_WORKER_SELECTION_REUSE_MARKER = "shared-worker-selection-reuse";
 const SHARED_WORKER_SELECTION_PROTOCOL_MISMATCH_MARKER =
   "shared-worker-selection-protocol-mismatch";
-const SHARED_WORKER_SELECTION_CRASH_FALLBACK_MARKER =
-  "shared-worker-selection-crash-fallback";
-const SHARED_WORKER_SELECTION_CLIENT_CHURN_MARKER =
-  "shared-worker-selection-client-churn";
-const SHARED_WORKER_SELECTION_CRASH_RECOVERY_MARKER =
-  "shared-worker-selection-crash-recovery";
+const SHARED_WORKER_SELECTION_CRASH_FALLBACK_MARKER = "shared-worker-selection-crash-fallback";
+const SHARED_WORKER_SELECTION_CLIENT_CHURN_MARKER = "shared-worker-selection-client-churn";
+const SHARED_WORKER_SELECTION_CRASH_RECOVERY_MARKER = "shared-worker-selection-crash-recovery";
 
 type FixtureTopologySnapshot = {
   marker: string;
@@ -52,16 +49,12 @@ if (!statusElement) {
 const params = new URLSearchParams(window.location.search);
 const clientId = params.get("clientId") ?? "page-a";
 const pageScenario = params.get("scenario") ?? "shared-worker-baseline";
-const expectedClients = Math.max(
-  1,
-  Number.parseInt(params.get("expectedClients") ?? "1", 10) || 1,
-);
+const expectedClients = Math.max(1, Number.parseInt(params.get("expectedClients") ?? "1", 10) || 1);
 const workerName = params.get("workerName") ?? "asupersync-shared-worker-fixture";
 const requestedCoordinatorProtocolVersion = Math.max(
   1,
   Number.parseInt(
-    params.get("coordinatorProtocolVersion")
-      ?? String(COORDINATOR_PROTOCOL_VERSION),
+    params.get("coordinatorProtocolVersion") ?? String(COORDINATOR_PROTOCOL_VERSION),
     10,
   ) || COORDINATOR_PROTOCOL_VERSION,
 );
@@ -94,9 +87,7 @@ const render = () => {
   statusElement.textContent = JSON.stringify(state, null, 2);
 };
 
-function summarizeOutcome(
-  outcome: BrowserRuntimeSelectionResult["outcome"] | null,
-): {
+function summarizeOutcome(outcome: BrowserRuntimeSelectionResult["outcome"] | null): {
   outcome: string | null;
   failureCode: string | null;
   failureMessage: string | null;
@@ -210,18 +201,16 @@ function closeFallbackRuntime(selection: BrowserRuntimeSelectionResult | null): 
   selection?.runtime?.close();
 }
 
-function isTopologySnapshotResponse(
-  value: unknown,
-): value is FixtureTopologySnapshotResponse {
+function isTopologySnapshotResponse(value: unknown): value is FixtureTopologySnapshotResponse {
   if (typeof value !== "object" || value === null) {
     return false;
   }
   const candidate = value as Partial<FixtureTopologySnapshotResponse>;
   return (
-    candidate.type === "fixture.topology.snapshot.response"
-    && typeof candidate.requestId === "string"
-    && typeof candidate.snapshot === "object"
-    && candidate.snapshot !== null
+    candidate.type === "fixture.topology.snapshot.response" &&
+    typeof candidate.requestId === "string" &&
+    typeof candidate.snapshot === "object" &&
+    candidate.snapshot !== null
   );
 }
 
@@ -249,11 +238,7 @@ async function requestSingleTopologySnapshot(
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       cleanup();
-      reject(
-        new Error(
-          `timed out waiting for topology snapshot after ${timeoutMs}ms`,
-        ),
-      );
+      reject(new Error(`timed out waiting for topology snapshot after ${timeoutMs}ms`));
     }, timeoutMs);
 
     const cleanup = () => {
@@ -301,11 +286,7 @@ async function waitForExpectedTopology(
 
   while (Date.now() < deadline) {
     const remaining = Math.max(100, deadline - Date.now());
-    lastSnapshot = await requestSingleTopologySnapshot(
-      port,
-      selection,
-      Math.min(remaining, 1000),
-    );
+    lastSnapshot = await requestSingleTopologySnapshot(port, selection, Math.min(remaining, 1000));
     if (lastSnapshot.clientCount >= expectedCount) {
       return lastSnapshot;
     }
@@ -324,9 +305,7 @@ async function run(): Promise<void> {
         ? new SharedWorkerFixture()
         : new SharedWorkerFixture({ name: resolvedWorkerName });
     worker.addEventListener("error", (event) => {
-      state.events.push(
-        `shared-worker-factory-error:${event.message || "unknown-worker-error"}`,
-      );
+      state.events.push(`shared-worker-factory-error:${event.message || "unknown-worker-error"}`);
       render();
     });
     capturedPort = worker.port;
@@ -369,16 +348,11 @@ async function run(): Promise<void> {
   render();
 
   if (selectionHandle.selectedMode === "fallback") {
-    state.fallback_runtime = summarizeRuntimeSelection(
-      selectionHandle.runtimeSelection,
-    );
+    state.fallback_runtime = summarizeRuntimeSelection(selectionHandle.runtimeSelection);
     if (selectionHandle.reason === "coordinator_protocol_version_mismatch") {
       state.events.push(SHARED_WORKER_SELECTION_PROTOCOL_MISMATCH_MARKER);
     }
-    if (
-      forceCrashBeforeHandshake
-      && selectionHandle.reason === "coordinator_bootstrap_failure"
-    ) {
+    if (forceCrashBeforeHandshake && selectionHandle.reason === "coordinator_bootstrap_failure") {
       state.events.push(SHARED_WORKER_SELECTION_CRASH_FALLBACK_MARKER);
     }
     state.phase = "fallback_complete";

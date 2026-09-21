@@ -17,4 +17,3 @@ export interface Budget {
   costQuota?: number;
   priority?: number;
 }
-

@@ -10,7 +10,15 @@ export const runtime_create: (a: number, b: number, c: number) => void;
 export const scope_close: (a: number, b: number, c: number, d: number, e: number) => void;
 export const scope_enter: (a: number, b: number, c: number, d: number, e: number) => void;
 export const task_cancel: (a: number, b: number, c: number, d: number, e: number) => void;
-export const task_join: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const task_join: (
+  a: number,
+  b: number,
+  c: number,
+  d: number,
+  e: number,
+  f: number,
+  g: number,
+) => void;
 export const task_spawn: (a: number, b: number, c: number, d: number, e: number) => void;
 export const websocket_cancel: (a: number, b: number, c: number, d: number, e: number) => void;
 export const websocket_close: (a: number, b: number, c: number, d: number, e: number) => void;

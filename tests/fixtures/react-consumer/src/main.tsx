@@ -1,11 +1,11 @@
-import React from "react";
-import { createRoot } from "react-dom/client";
 import {
   ReactRuntimeProvider,
   useReactRuntimeContext,
   useReactRuntimeDiagnostics,
   useReactScope,
 } from "@asupersync/react";
+import React from "react";
+import { createRoot } from "react-dom/client";
 
 function RuntimeProbe(): JSX.Element {
   const context = useReactRuntimeContext();
@@ -19,9 +19,7 @@ function RuntimeProbe(): JSX.Element {
       <h1>Asupersync React Fixture</h1>
       <p data-testid="runtime-status">runtime:{context.status}</p>
       <p data-testid="scope-status">scope:{scope.status}</p>
-      <p data-testid="support-status">
-        supported:{diagnostics.supported ? "yes" : "no"}
-      </p>
+      <p data-testid="support-status">supported:{diagnostics.supported ? "yes" : "no"}</p>
     </section>
   );
 }

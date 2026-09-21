@@ -1,9 +1,6 @@
 "use client";
 
-import {
-  createNextBootstrapAdapter,
-  detectNextRuntimeSupport,
-} from "@asupersync/next";
+import { createNextBootstrapAdapter, detectNextRuntimeSupport } from "@asupersync/next";
 import { useEffect, useRef, useState } from "react";
 
 function pretty(value) {
@@ -46,9 +43,7 @@ export default function ClientRuntimePanel() {
     } catch (error) {
       syncFromAdapter();
       setStatus("error");
-      setFailure(
-        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      );
+      setFailure(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
     }
   }
 
@@ -59,9 +54,7 @@ export default function ClientRuntimePanel() {
     } catch (error) {
       syncFromAdapter();
       setStatus("error");
-      setFailure(
-        error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-      );
+      setFailure(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
     }
   }
 
@@ -92,9 +85,9 @@ export default function ClientRuntimePanel() {
     >
       <h2 style={{ marginTop: 0 }}>Client runtime panel</h2>
       <p>
-        This client component owns the direct-runtime path. It hydrates,
-        initializes the Browser Edition runtime, and records bootstrap events so
-        you can inspect the lifecycle boundaries explicitly.
+        This client component owns the direct-runtime path. It hydrates, initializes the Browser
+        Edition runtime, and records bootstrap events so you can inspect the lifecycle boundaries
+        explicitly.
       </p>
 
       <div style={{ display: "flex", gap: "12px", flexWrap: "wrap", marginBottom: "16px" }}>
@@ -157,9 +150,7 @@ export default function ClientRuntimePanel() {
       <pre id="client-bootstrap-snapshot">{pretty(snapshot)}</pre>
       <pre id="client-bootstrap-events">{pretty(events)}</pre>
 
-      {failure ? (
-        <pre id="client-bootstrap-failure">{failure}</pre>
-      ) : null}
+      {failure ? <pre id="client-bootstrap-failure">{failure}</pre> : null}
     </section>
   );
 }

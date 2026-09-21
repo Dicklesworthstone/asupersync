@@ -58,9 +58,7 @@ for (const assetPath of jsAssets) {
   sawReopenMarker ||= content.includes("service-worker-broker-reopen");
   sawMismatchMarker ||= content.includes("service-worker-broker-mismatch");
   sawCleanupMarker ||= content.includes("service-worker-broker-cleanup");
-  sawDirectRuntimeReasonMarker ||= content.includes(
-    "service_worker_direct_runtime_not_shipped",
-  );
+  sawDirectRuntimeReasonMarker ||= content.includes("service_worker_direct_runtime_not_shipped");
 }
 
 if (!sawBootstrapMarker) {
@@ -68,9 +66,7 @@ if (!sawBootstrapMarker) {
 }
 
 if (!sawRegistrationMarker) {
-  throw new Error(
-    "Built bundle must retain the service-worker-broker-registration marker",
-  );
+  throw new Error("Built bundle must retain the service-worker-broker-registration marker");
 }
 
 if (!sawWorkMarker) {
@@ -94,9 +90,7 @@ if (!sawCleanupMarker) {
 }
 
 if (!sawDirectRuntimeReasonMarker) {
-  throw new Error(
-    "Built bundle must retain the service_worker_direct_runtime_not_shipped marker",
-  );
+  throw new Error("Built bundle must retain the service_worker_direct_runtime_not_shipped marker");
 }
 
 console.log(
