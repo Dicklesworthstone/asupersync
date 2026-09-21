@@ -86,6 +86,7 @@
 //! - [`broadcast`]: Multi-producer, multi-consumer broadcast channel
 //! - [`watch`]: Single-producer, multi-consumer state observation
 
+pub mod ack;
 pub mod broadcast;
 pub mod clock_skew;
 pub mod crash;
