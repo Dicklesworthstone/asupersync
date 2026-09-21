@@ -342,6 +342,7 @@ if command -v lake &>/dev/null; then
     run_check "Lean proof build" "lean-proofs" \
         lake --dir formal/lean build
 else
+    TOTAL=$((TOTAL + 1))
     echo "=== [skip] Lean proof build (lake not installed) ==="
     echo "  Install elan/lean4 to enable: curl -sSf https://raw.githubusercontent.com/leanprover/elan/main/elan-init.sh | sh"
     echo

@@ -68,10 +68,12 @@ fn proof_runner_stops_at_failed_prerequisites_without_dropping_success_checks() 
             r#"set -euo pipefail
 FAILED=0
 CALLS=0
+TOTAL=0
 ARTIFACTS_DIR=dispatch-test-only
 RESULTS=()
 run_check() {{
     CALLS=$((CALLS + 1))
+    TOTAL=$((TOTAL + 1))
     printf 'DISPATCH:%s\n' "$1"
     if (( CALLS == {fail_at} )); then FAILED=$((FAILED + 1)); fi
 }}
@@ -81,6 +83,7 @@ command() {{ return {lean_status}; }}
 run_suite() {{
 {suite}
 printf 'FAILURES:%s\n' "$FAILED"
+printf 'TOTAL:%s\n' "$TOTAL"
 "#
         );
         let output = std::process::Command::new("bash")
@@ -95,6 +98,11 @@ printf 'FAILURES:%s\n' "$FAILED"
             .filter_map(|line| line.strip_prefix("DISPATCH:"))
             .collect();
         assert_eq!(checks, expected[..expected_count], "{stdout}");
+        let expected_total = if fail_at == 0 { 15 } else { expected_count };
+        assert!(
+            stdout.contains(&format!("TOTAL:{expected_total}\n")),
+            "{stdout}"
+        );
         assert!(stdout.contains(if fail_at == 0 {
             "FAILURES:0"
         } else {
@@ -166,6 +174,18 @@ fn validate_manifest(manifest: &Value) -> Vec<String> {
     // Checks array
     match manifest.get("checks") {
         Some(Value::Array(checks)) => {
+            if manifest.get("total").and_then(Value::as_u64) != Some(checks.len() as u64) {
+                errors.push("total does not match checks array length".to_string());
+            }
+            for (field, status) in [("passed", "pass"), ("failed", "fail"), ("skipped", "skip")] {
+                let count = checks
+                    .iter()
+                    .filter(|check| check.get("status").and_then(Value::as_str) == Some(status))
+                    .count() as u64;
+                if manifest.get(field).and_then(Value::as_u64) != Some(count) {
+                    errors.push(format!("{field} does not match checks array statuses"));
+                }
+            }
             for (i, check) in checks.iter().enumerate() {
                 let check_required_strings = ["name", "category", "status", "log"];
                 for field in &check_required_strings {
@@ -317,6 +337,34 @@ fn manifest_rejects_bad_arithmetic() {
         errors.iter().any(|e| e.contains("total")),
         "should detect arithmetic mismatch: {errors:?}"
     );
+}
+
+#[test]
+fn manifest_rejects_omitted_skip_and_misclassified_counts() {
+    let valid = serde_json::json!({
+        "version": "1.0.0", "bead": "bd-test",
+        "started_at": "2026-09-21T00:00:00Z", "finished_at": "2026-09-21T00:00:01Z",
+        "git_sha": "abc1234", "git_branch": "main", "status": "pass",
+        "total": 1, "passed": 0, "failed": 0, "skipped": 1,
+        "checks": [{"name": "Lean proof build", "category": "lean-proofs",
+                    "status": "skip", "elapsed_s": 0, "log": ""}]
+    });
+    assert!(validate_manifest(&valid).is_empty());
+
+    // Arithmetic alone accepts both corruptions: the row census must disagree.
+    let mut omitted = valid.clone();
+    omitted["total"] = 0.into();
+    omitted["skipped"] = 0.into();
+    let errors = validate_manifest(&omitted);
+    assert!(errors.iter().any(|error| error.contains("array length")));
+    assert!(errors.iter().any(|error| error.contains("skipped")));
+
+    let mut misclassified = valid;
+    misclassified["passed"] = 1.into();
+    misclassified["skipped"] = 0.into();
+    let errors = validate_manifest(&misclassified);
+    assert!(errors.iter().any(|error| error.contains("passed")));
+    assert!(errors.iter().any(|error| error.contains("skipped")));
 }
 
 #[test]
