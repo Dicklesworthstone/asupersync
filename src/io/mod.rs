@@ -127,3 +127,6 @@ pub use std::io::SeekFrom;
 
 pub mod replay;
 pub mod replay_session;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod replay_archive;
