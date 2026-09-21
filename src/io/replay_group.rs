@@ -507,6 +507,12 @@ impl fmt::Debug for ReplayGroupIo {
 }
 impl ReplayGroupIo {
     fn poll_with<O>(&mut self, cx: &mut Context<'_>, operation: IoOperation, poll: impl FnOnce(&mut ReplayIo, &mut Context<'_>) -> Poll<io::Result<O>>) -> Poll<io::Result<O>> {
+        // Exhausting one stream is already divergence, even while another
+        // stream still has work. Do not park an impossible extra operation.
+        if self.inner.consumed_operations() == self.operations {
+            let error = self.shared.fail(IoGroupReplayError::Exhausted(self.id));
+            return Poll::Ready(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
+        }
         let turn = ready!(self.shared.enter(self.index, operation, cx))?;
         let mut guard = ReplayPoll { shared: &self.shared, id: self.id, armed: true };
         let result = poll(&mut self.inner, cx);
@@ -553,3 +559,6 @@ impl AsyncWrite for ReplayGroupIo {
 
 #[cfg(test)]
 mod tests;
+
+mod codec;
+pub use codec::{IoGroupBytes, IoGroupDecodeLimits, IoGroupTapeError};

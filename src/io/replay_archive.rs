@@ -327,3 +327,6 @@ impl AsRef<[u8]> for EncryptedReplayArchive {
 
 #[cfg(test)]
 mod tests;
+
+mod io_group;
+pub use io_group::IoGroupArchiveError;
