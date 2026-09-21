@@ -204,7 +204,6 @@ fn exercise(workers: usize, case: Case) {
                     assert!(matches!(response, RemoteServiceWireResponse::Outcome {
                         outcome: RemoteServiceWireOutcome::Cancelled(_), ..
                     }), "late handler Success must not escape cancellation");
-                    drop(session);
                 } else {
                     drop(session); // Close actual TCP/TLS ownership, not a mock signal.
                     asupersync::time::timeout(cx.now(), Duration::from_secs(3),

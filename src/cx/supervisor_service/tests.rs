@@ -46,7 +46,7 @@ fn clean(lab: &mut LabRuntime, root: RegionId) {
 
 #[test]
 fn invalid_capacity_detached_authority_and_cancellation_refuse() {
-    let cx = Cx::detached_cancel_context();
+    let cx = Cx::for_testing();
     assert!(matches!(cx.spawn_dynamic_supervisor_mailbox::<()>(DynamicSupervisorConfig::new(1), 0),
         Err(DynamicServiceError::InvalidCapacity)));
     assert!(matches!(cx.spawn_dynamic_supervisor_mailbox::<()>(DynamicSupervisorConfig::new(1), 1),
@@ -335,7 +335,7 @@ fn cancelled_admission_observation_preserves_the_receipt_for_a_later_wait() {
             DynamicSupervisorConfig::new(1), 1).unwrap();
         let mut pending = client.submit_worker(&cx, "retained", worker_config(),
             |_: Cx, _: ManagedGeneration| async { Outcome::Ok(()) }).unwrap();
-        let cancelled = Cx::detached_cancel_context();
+        let cancelled = Cx::for_testing();
         cancelled.cancel_with(CancelKind::User, Some("pause this wait"));
         assert!(matches!(pending.admitted(&cancelled).await, Err(DynamicServiceError::Cancelled(_))));
         let mut child = pending.admitted(&cx).await.unwrap();
@@ -388,7 +388,7 @@ fn observed_cancellation_does_not_register_fresh_wakers_while_cleanup_waits() {
     impl std::task::Wake for CountWake {
         fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
     }
-    let cx = Cx::detached_cancel_context();
+    let cx = Cx::for_testing();
     cx.cancel_with(CancelKind::User, Some("already observed"));
     let mut cancellation = Cancellation { cx, token: None, observed: false };
     assert!(cancellation.requested(&Context::from_waker(std::task::Waker::noop())));
