@@ -2537,6 +2537,157 @@ mod tests {
         );
     }
 
+    /// br-asupersync-gq84an.1 (RESIDUAL nested-stream producer-pool deadlock).
+    ///
+    /// Four paused row-stream producers retain all four stream-pool workers.
+    /// A fifth *nested* producer stream, opened while the four siblings are
+    /// paused at backpressure, currently cannot obtain a worker, so its first
+    /// row never arrives — a deadlock. This is the residual that the parent
+    /// gq84an (ordinary-operation isolation) intentionally did not resolve:
+    /// ordinary `execute`/`open`/`rollback` moved to a different capacity
+    /// domain, but a fifth *producer* still cannot start.
+    ///
+    /// The bead's bounded fix must preserve the public API and cancellation and
+    /// must not add unbounded threads, wait-for-capacity cycles, new public
+    /// error variants, or buffering — i.e. the nested producer must genuinely
+    /// make progress rather than hang. This regression asserts exactly that:
+    /// the nested stream's first `next()` must RESOLVE within the bound while
+    /// its siblings are paused. It is red on the current (unfixed) tree, so it
+    /// is `#[ignore]`d to keep the suite green until the bounded fix lands —
+    /// un-ignore it together with that fix (old-red / new-green receipt).
+    ///
+    /// Determinism: bounded polling with a `Waker::noop` (no executor or timer
+    /// needed); backpressure confirmed via producer stats AND
+    /// `stream_pool.busy_threads() == 4`; isolated pools so parallel tests
+    /// cannot occupy the four slots; recovery verified by freeing one worker.
+    #[ignore = "gq84an.1: nested-stream producer-pool deadlock; un-ignore with the bounded fix"]
+    #[test]
+    fn sqlite_paused_streams_do_not_starve_nested_producer_stream() {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Waker};
+        use std::time::Instant;
+
+        fn poll_bounded<F: Future>(future: &mut Pin<Box<F>>) -> Option<F::Output> {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut context = Context::from_waker(Waker::noop());
+            loop {
+                if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+                    return Some(value);
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        let pool = BlockingPool::new(4, 4);
+        let stream_pool = BlockingPool::new(4, 4);
+        let cx = create_test_cx();
+        // Independent in-memory databases on isolated pools: parallel tests
+        // cannot occupy this regression's four producer-worker slots.
+        let result = (|| -> Result<bool, String> {
+            let mut connections = Vec::new();
+            for _ in 0..5 {
+                let conn = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
+                conn.execute_batch("CREATE TABLE destination (value INTEGER)")
+                    .map_err(|e| e.to_string())?;
+                let interrupt = Arc::new(conn.get_interrupt_handle());
+                connections.push(SqliteConnection {
+                    inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
+                    pool: pool.handle(),
+                    stream_pool: Some(stream_pool.handle()),
+                    transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
+                    transaction_generation: Arc::new(AtomicU64::new(0)),
+                    interrupt,
+                    statement_timeout_override: None,
+                });
+            }
+            let (sources, destinations) = connections.split_at_mut(4);
+            let destination = &mut destinations[0];
+
+            // Park four producers at backpressure so every stream worker is held.
+            let mut streams = Vec::new();
+            for source in sources {
+                let mut start = Box::pin(source.query_stream(
+                    &cx,
+                    "SELECT 1 AS value UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4",
+                    &[],
+                ));
+                match poll_bounded(&mut start) {
+                    Some(Outcome::Ok(stream)) => streams.push(stream),
+                    other => return Err(format!("producer admission failed: {other:?}")),
+                }
+            }
+            for stream in &mut streams {
+                match poll_bounded(&mut Box::pin(stream.next(&cx))) {
+                    Some(Outcome::Ok(Some(row))) if matches!(row.get_i64("value"), Ok(1)) => {}
+                    other => return Err(format!("producer first row failed: {other:?}")),
+                }
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let backpressured = streams.iter().all(|stream| {
+                    let stats = stream.stats();
+                    stats.rows_stepped >= 3 && stats.rows_yielded == 1 && stats.buffered_rows == 1
+                });
+                if backpressured && stream_pool.busy_threads() == 4 {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "four producers did not reach backpressure (busy_threads={})",
+                        stream_pool.busy_threads()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
+            // A fifth *nested* producer stream. Admission may succeed (the worker
+            // is only queued), but its first row cannot arrive while all four
+            // workers are held — that stall is the gq84an.1 deadlock.
+            let mut nested = match poll_bounded(&mut Box::pin(destination.query_stream(
+                &cx,
+                "SELECT 1 AS value UNION ALL SELECT 2",
+                &[],
+            ))) {
+                Some(Outcome::Ok(stream)) => stream,
+                other => return Err(format!("nested admission failed: {other:?}")),
+            };
+            let nested_started_while_siblings_paused = matches!(
+                poll_bounded(&mut Box::pin(nested.next(&cx))),
+                Some(Outcome::Ok(Some(_)))
+            );
+
+            // Recovery: freeing one worker (drop one paused producer) must let the
+            // nested producer make progress, proving it was starved, not broken.
+            let _ = streams.pop();
+            match poll_bounded(&mut Box::pin(nested.next(&cx))) {
+                Some(Outcome::Ok(Some(_))) => {}
+                other => {
+                    return Err(format!(
+                        "nested stream did not recover after freeing a worker: {other:?}"
+                    ));
+                }
+            }
+            drop(nested);
+            drop(streams);
+            Ok(nested_started_while_siblings_paused)
+        })();
+        let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
+        let streams_stopped = stream_pool.shutdown_and_wait(Duration::from_secs(5));
+        assert!(stopped, "dependent operations must release the isolated pool");
+        assert!(
+            streams_stopped,
+            "stream cleanup must release the isolated pool"
+        );
+        assert!(
+            result.as_ref().is_ok_and(|started| *started),
+            "gq84an.1: a nested producer stream starved while sibling producers were paused: {result:?}"
+        );
+    }
+
     #[test]
     fn sqlite_query_stream_drop_finalizes_statement_and_returns_connection() {
         let cx = create_test_cx();
