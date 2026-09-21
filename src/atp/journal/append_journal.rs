@@ -1585,7 +1585,14 @@ impl AppendJournal {
 
         let cutoff_generation = self.generation - self.config.max_generations as u64;
 
-        for generation_num in 0..cutoff_generation {
+        let generations = match self.discover_generations() {
+            Ok(generations) => generations,
+            Err(error) => return Outcome::Err(error),
+        };
+        for generation_num in generations
+            .into_iter()
+            .take_while(|generation| *generation < cutoff_generation)
+        {
             let old_file = journal_file_path(&self.config.base_dir, generation_num);
             if old_file.exists() {
                 if let Err(e) = std::fs::remove_file(&old_file) {
@@ -1603,28 +1610,33 @@ impl AppendJournal {
         Outcome::Ok(())
     }
 
-    fn recover_from_disk(&mut self) -> Outcome<(), JournalError> {
-        let mut max_generation = 0;
-        let mut max_sequence = 0;
-
-        // Find the latest generation
-        let entries = match std::fs::read_dir(&self.config.base_dir) {
-            Ok(entries) => entries,
-            Err(error) => return Outcome::Err(JournalError::DirectoryRead(error.to_string())),
-        };
-
+    fn discover_generations(&self) -> Result<Vec<u64>, JournalError> {
+        let entries = std::fs::read_dir(&self.config.base_dir)
+            .map_err(|error| JournalError::DirectoryRead(error.to_string()))?;
+        let mut generations = Vec::new();
         for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => return Outcome::Err(JournalError::DirectoryRead(e.to_string())),
-            };
+            let entry = entry.map_err(|error| JournalError::DirectoryRead(error.to_string()))?;
             let file_name = entry.file_name();
             let file_name_str = file_name.to_string_lossy();
 
             if let Some(generation_num) = parse_journal_generation(&file_name_str) {
-                max_generation = max_generation.max(generation_num);
+                generations.push(generation_num);
             }
         }
+        generations.sort_unstable();
+        generations.dedup();
+        Ok(generations)
+    }
+
+    fn recover_from_disk(&mut self) -> Outcome<(), JournalError> {
+        // Retained generations need not be contiguous. Bound filesystem work
+        // by directory contents, not by an untrusted numeric filename suffix.
+        let generations = match self.discover_generations() {
+            Ok(generations) => generations,
+            Err(error) => return Outcome::Err(error),
+        };
+        let max_generation = generations.last().copied().unwrap_or(0);
+        let mut max_sequence = 0;
 
         // Read all valid entries once so recovery rebuilds both the recent-entry
         // window and the transfer-id index used by targeted lookups.
@@ -1633,7 +1645,7 @@ impl AppendJournal {
         let mut found_sequence = false;
         let mut recovered_generation = max_generation;
 
-        for generation in 0..=max_generation {
+        for generation in generations {
             let file_path = journal_file_path(&self.config.base_dir, generation);
 
             if !file_path.exists() {
@@ -1957,8 +1969,16 @@ impl AppendJournal {
     fn read_all_entries_from_disk(&self) -> Outcome<Vec<JournalEntry>, JournalError> {
         let mut all_entries = Vec::new();
 
-        // Read from all generations
-        for generation_num in 0..=self.generation {
+        let generations = match self.discover_generations() {
+            Ok(generations) => generations,
+            Err(error) => return Outcome::Err(error),
+        };
+        // Preserve the journal instance's generation frontier while skipping
+        // absent generations, including gaps left by retention cleanup.
+        for generation_num in generations
+            .into_iter()
+            .take_while(|generation| *generation <= self.generation)
+        {
             let file_path = journal_file_path(&self.config.base_dir, generation_num);
             if file_path.exists() {
                 let (entries, _corrupted) = match self.read_entries_from_file(&file_path) {
@@ -2291,6 +2311,53 @@ mod tests {
             Outcome::Err(JournalError::DirectoryRead(_))
         ));
         assert_eq!(std::fs::read(non_directory).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn sparse_generation_numbers_preserve_recovery_order_and_read_frontier() {
+        let config = JournalConfig {
+            base_dir: unique_temp_dir("sparse_journal_generations"),
+            max_journal_size: u64::MAX,
+            ..Default::default()
+        };
+        let record = |peer: &str| JournalRecord::Accept {
+            transfer_id: "sparse-generations".to_string(),
+            peer_id: peer.to_string(),
+            timestamp: 1,
+            auth_tag: unsigned_tag(),
+        };
+        let mut original = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+        assert_eq!(original.append(record("first")).unwrap(), 0);
+        original.flush().unwrap();
+
+        let high_generation = 1_u64 << 40;
+        std::fs::write(journal_file_path(&config.base_dir, high_generation), []).unwrap();
+        let mut recovered = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+        assert_eq!(recovered.get_stats().generation, high_generation);
+        assert_eq!(recovered.append(record("second")).unwrap(), 1);
+        recovered.flush().unwrap();
+
+        let entries = recovered.read_all_entries_from_disk().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sequence, 0);
+        assert_eq!(entries[1].sequence, 1);
+        assert!(
+            matches!(&entries[0].record, JournalRecord::Accept { peer_id, .. } if peer_id == "first")
+        );
+        assert!(
+            matches!(&entries[1].record, JournalRecord::Accept { peer_id, .. } if peer_id == "second")
+        );
+        // A pre-existing reader does not silently advance its own frontier.
+        assert_eq!(original.read_all_entries_from_disk().unwrap().len(), 1);
+        let reopened = AppendJournal::new(config, test_auth_key()).unwrap();
+        assert_eq!(reopened.get_stats().sequence, 2);
+        assert_eq!(
+            reopened
+                .get_transfer_entries("sparse-generations")
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
