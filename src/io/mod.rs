@@ -130,3 +130,5 @@ pub mod replay_session;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod replay_archive;
+
+pub mod replay_group;
