@@ -1,0 +1,19 @@
+# Strict production replay: remaining parent-module integration.
+# Apply from the repository root after checking the runtime baseline.
+# Expected src/lab/runtime.rs blob: 4bc3c04f32ca38091cb3ec5252dd8d0e1f8a9f0a
+# The implementation and 19 tests remain uncompiled until this is applied.
+# This patch does not itself register the module with Cargo/rustc.
+
+diff --git a/src/lab/runtime.rs b/src/lab/runtime.rs
+--- a/src/lab/runtime.rs
++++ b/src/lab/runtime.rs
+@@ -46,6 +46,9 @@
+ use std::time::Duration;
+ use std::{fmt, future::Future};
+ 
++/// Fail-closed, bounded execution of a production dispatch projection.
++pub mod production_strict;
++
+ const AUTO_ARTIFACTS_ENV: &str = "ASUPERSYNC_AUTO_ARTIFACTS";
+ const TEST_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_TEST_ARTIFACTS_DIR";
+ const LAB_TEST_SEED_ENV: &str = "ASUPERSYNC_LAB_TEST_SEED";

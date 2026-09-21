@@ -204,8 +204,10 @@ where
     /// Each member's terminal state maps to an [`Outcome`]: a returned value is
     /// [`Outcome::Ok`]/[`Outcome::Err`] (from the member's own `Result`), a
     /// cancelled member is [`Outcome::Cancelled`], and a panicked member is
-    /// [`Outcome::Panicked`]. Consuming the set means the awaited members are no
-    /// longer abort-on-drop targets.
+    /// [`Outcome::Panicked`]. Completed members are no longer abort-on-drop
+    /// targets after the drain finishes. Dropping this future before completion
+    /// requests cancellation of every remaining member, including members whose
+    /// join has not yet been polled; region close remains the drain backstop.
     pub async fn join_all(mut self, cx: &Cx) -> Vec<Outcome<T, E>> {
         self.drain_all(cx).await
     }
@@ -295,13 +297,17 @@ where
     }
 
     async fn drain_all(&mut self, cx: &Cx) -> Vec<Outcome<T, E>> {
-        let mut handles = std::mem::take(&mut self.handles);
-        let mut outcomes = Vec::with_capacity(handles.len());
-        for handle in &mut handles {
+        // TaskHandle drop does not cancel its task. Retain every handle in
+        // the cancellation-owning set across each await, so dropping this
+        // drain cannot abandon the not-yet-joined suffix. Iterating in place
+        // also preserves linear work for large spawn-order collections.
+        let mut outcomes = Vec::with_capacity(self.handles.len());
+        for handle in &mut self.handles {
             let outcome = join_to_outcome(handle.join(cx).await);
             self.summary.record(&outcome);
             outcomes.push(outcome);
         }
+        self.handles.clear();
         outcomes
     }
 
@@ -551,12 +557,13 @@ mod tests {
 
         for (index, entry) in spawn_entries.iter().enumerate() {
             let member_index = index.to_string();
-            let active_members = (index + 1).to_string();
+            let region = region.as_str();
 
             assert_eq!(entry.get_field("join_set_id"), Some(set_id.as_str()));
-            assert_eq!(entry.get_field("region"), Some(region.as_str()));
-            assert_eq!(entry.get_field("spawn_kind"), Some("send"));
+            assert_eq!(entry.get_field("region"), Some(region));
             assert_eq!(entry.get_field("member_index"), Some(member_index.as_str()));
+            assert_eq!(entry.get_field("spawn_kind"), Some("send"));
+            let active_members = (index + 1).to_string();
             assert_eq!(
                 entry.get_field("active_members"),
                 Some(active_members.as_str())
@@ -805,6 +812,125 @@ mod tests {
         assert_eq!(observed_sum, (MEMBERS as u64 - 1) * MEMBERS as u64 / 2);
     }
 
+    fn assert_dropped_join_all_cancels_parked_suffix(local: bool, ready_prefix: usize) {
+        const PENDING_MEMBERS: usize = 3;
+
+        struct Retirement(Option<oneshot::Sender<()>>);
+
+        impl Drop for Retirement {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send_blocking(());
+                }
+            }
+        }
+
+        let observed = run_in_runtime(move |cx| async move {
+            let mut set = JoinSet::<(), (), _>::in_cx(&cx);
+            let mut prefix_receipts = Vec::new();
+            for _ in 0..ready_prefix {
+                let (sender, receiver) = oneshot::channel();
+                let factory = move |_: Cx| async move {
+                    sender.send_blocking(()).expect("prefix receipt");
+                    Ok::<(), ()>(())
+                };
+                if local {
+                    set.spawn_local(&cx, factory).expect("local prefix");
+                } else {
+                    set.spawn(&cx, factory).expect("send prefix");
+                }
+                prefix_receipts.push(receiver);
+            }
+            for mut receipt in prefix_receipts {
+                receipt.recv(&cx).await.expect("prefix completed");
+            }
+
+            let mut parked_receipts = Vec::new();
+            let mut release_senders = Vec::new();
+            let mut retirement_receipts = Vec::new();
+            for _ in 0..PENDING_MEMBERS {
+                let (parked_sender, parked_receiver) = oneshot::channel();
+                let (release_sender, mut release_receiver) = oneshot::channel::<()>();
+                let (retired_sender, retired_receiver) = oneshot::channel();
+                let factory = move |member_cx: Cx| async move {
+                    let _retirement = Retirement(Some(retired_sender));
+                    let mut waiting = Box::pin(release_receiver.recv(&member_cx));
+                    std::future::poll_fn(|task_cx| {
+                        assert!(waiting.as_mut().poll(task_cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    parked_sender
+                        .send_blocking(member_cx.clone())
+                        .expect("parked receipt");
+                    let _ = waiting.await;
+                    Ok::<(), ()>(())
+                };
+                if local {
+                    set.spawn_local(&cx, factory).expect("local parked member");
+                } else {
+                    set.spawn(&cx, factory).expect("send parked member");
+                }
+                parked_receipts.push(parked_receiver);
+                release_senders.push(release_sender);
+                retirement_receipts.push(retired_receiver);
+            }
+
+            let mut member_contexts = Vec::new();
+            for mut receipt in parked_receipts {
+                member_contexts.push(receipt.recv(&cx).await.expect("member parked"));
+            }
+            // On this current-thread runtime each receipt is consumed after
+            // the sender's poll returns. Every member has a live Pending recv,
+            // and each prefix task has returned before the drain is polled.
+            assert!(member_contexts.iter().all(|member| !member.is_cancel_requested()));
+            let mut joining = Box::pin(set.join_all(&cx));
+            std::future::poll_fn(|task_cx| {
+                assert!(joining.as_mut().poll(task_cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(joining);
+            let observed = member_contexts
+                .iter()
+                .map(Cx::is_cancel_requested)
+                .collect::<Vec<_>>();
+
+            // Release all waits AFTER freezing the oracle. This keeps a run
+            // against the old implementation finite without masking its
+            // [true, false, false] cancellation-ownership failure.
+            for sender in release_senders {
+                let _ = sender.send_blocking(());
+            }
+            for mut receipt in retirement_receipts {
+                receipt.recv(&cx).await.expect("member future retired");
+            }
+            observed
+        });
+
+        assert_eq!(observed, vec![true; PENDING_MEMBERS]);
+    }
+
+    #[test]
+    fn dropped_join_all_cancels_every_parked_send_member() {
+        assert_dropped_join_all_cancels_parked_suffix(false, 0);
+    }
+
+    #[test]
+    fn dropped_join_all_cancels_send_suffix_after_completed_prefix() {
+        assert_dropped_join_all_cancels_parked_suffix(false, 2);
+    }
+
+    #[test]
+    fn dropped_join_all_cancels_every_parked_local_member() {
+        assert_dropped_join_all_cancels_parked_suffix(true, 0);
+    }
+
+    #[test]
+    fn dropped_join_all_cancels_local_suffix_after_completed_prefix() {
+        assert_dropped_join_all_cancels_parked_suffix(true, 2);
+    }
+
     #[test]
     fn cancel_all_drains_live_members_as_cancelled_outcomes() {
         let (outcomes, summary) = run_in_runtime(|cx| async move {
@@ -840,7 +966,7 @@ mod tests {
             let outcomes = set.cancel_all(&cx).await;
             let mut summary = JoinSummary::default();
             for outcome in &outcomes {
-                summary.record(outcome);
+                summary.record(&outcome);
             }
             (outcomes, summary)
         });
