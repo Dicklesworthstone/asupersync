@@ -6,10 +6,10 @@
 //! trailers are explicit on `RegisteredServerStream`.
 
 use super::{
-    Bytes, BytesMut, CompressionEncoding, Cx, FramedCodec, GrpcError, HostPolicy,
+    Bytes, BytesMut, CallContext, CompressionEncoding, Cx, FramedCodec, GrpcError, HostPolicy,
     Http2Listener, HttpRequest, HttpResponse, Metadata, Response, RuntimeHandle,
-    Server, ServiceHandler, ShutdownStats, Status, grpc_request_trailer_key_is_reserved,
-    poll_with_current_cx,
+    Server, ServerConfig, ServiceHandler, ShutdownStats, Status,
+    grpc_request_trailer_key_is_reserved,
 };
 use crate::grpc::codec::IdentityCodec;
 use crate::grpc::service::RegisteredServerStream;
@@ -18,7 +18,9 @@ use crate::grpc::streaming::{MetadataValue, Request};
 use crate::http::body::{HeaderMap, HeaderName, HeaderValue};
 use crate::http::h1::HttpError;
 use crate::http::h2::listener::{Http2BodySender, Http2ProducedResponse};
-use crate::types::CancelKind;
+use crate::time::{Sleep, TimerDriverHandle};
+use crate::types::{Budget, CancelKind, Time};
+use crate::web::request_region::{RequestBudgetSource, ServerRequestRegion};
 use base64::Engine as _;
 use std::future::{Future, poll_fn};
 use std::io;
@@ -27,7 +29,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Explicit transport-retention and terminal-delivery bounds for server streams.
 #[derive(Debug, Clone, Copy)]
@@ -42,7 +44,8 @@ pub struct ServerStreamingConfig {
     /// bare gRPC status code. This is not an HPACK allocation bound.
     pub max_trailer_bytes: usize,
     /// Additional bounded grace for queuing terminal trailers after the call.
-    /// A peer that never releases flow-control credit cannot hold this forever.
+    /// Bounds queueing, not subsequent wire drain or acknowledgement; those
+    /// remain subject to the H2 transport's own shutdown and timeout policy.
     /// Queueing a trailer is not an acknowledgement that the peer received it.
     pub terminal_timeout: Duration,
 }
@@ -69,6 +72,78 @@ impl ServerStreamingConfig {
 type ProducedGrpcFuture =
     Pin<Box<dyn Future<Output = Http2ProducedResponse> + Send + 'static>>;
 
+/// Freeze the request's absolute deadline before it waits for producer admission.
+/// Keep its clock with it: a later task-local context must not change time domains.
+struct StreamDeadline {
+    at: Option<Time>,
+    clock: Option<TimerDriverHandle>,
+    source: RequestBudgetSource,
+}
+
+impl StreamDeadline {
+    fn capture(cx: &Cx, metadata: &Metadata, config: &ServerConfig) -> Self {
+        let clock = cx.timer_driver();
+        let now = clock
+            .as_ref()
+            .map_or_else(crate::time::wall_now, TimerDriverHandle::now);
+        let wall_now = Instant::now();
+        // Reuse the established parser, malformed-header fallback, and cap
+        // policy rather than maintaining a second grpc-timeout interpretation.
+        let context = CallContext::from_metadata_at_with_max_deadline(
+            metadata.clone(),
+            config.default_timeout,
+            config.max_request_deadline,
+            None,
+            wall_now,
+        );
+        let call_deadline = context
+            .deadline()
+            .map(|_| now + context.remaining_at(wall_now).unwrap_or(Duration::ZERO));
+        let source = if super::grpc_timeout_from_metadata(metadata).is_some() {
+            RequestBudgetSource::HeaderClamped
+        } else if config.default_timeout.is_some() {
+            RequestBudgetSource::ServerConfig
+        } else {
+            RequestBudgetSource::Inherited
+        };
+        Self {
+            at: earlier_deadline(cx.budget().deadline, call_deadline),
+            clock,
+            source,
+        }
+    }
+
+    fn now(&self) -> Time {
+        self.clock
+            .as_ref()
+            .map_or_else(crate::time::wall_now, TimerDriverHandle::now)
+    }
+
+    fn expired(&self) -> bool {
+        self.at.is_some_and(|at| self.now() >= at)
+    }
+
+    fn budget(&self, mut inherited: Budget) -> Budget {
+        inherited.deadline = earlier_deadline(inherited.deadline, self.at);
+        inherited
+    }
+
+    fn timer(&self) -> Option<Sleep> {
+        self.at.map(|at| match &self.clock {
+            Some(clock) => Sleep::with_timer_driver(at, clock.clone()),
+            None => crate::time::sleep_until(at),
+        })
+    }
+}
+
+fn earlier_deadline(first: Option<Time>, second: Option<Time>) -> Option<Time> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(first.min(second)),
+        (Some(at), None) | (None, Some(at)) => Some(at),
+        (None, None) => None,
+    }
+}
+
 impl Server {
     /// Bind registered unary and server-streaming methods to native HTTP/2.
     ///
@@ -83,8 +158,9 @@ impl Server {
     /// receive an empty-message response containing the **terminal trailers**.
     /// Adding a body there is rejected rather than silently ignored. Error hooks
     /// retain the existing dispatch pipeline's behavior.
-    /// As with direct dispatch, the gRPC timeout begins when the producer enters
-    /// that pipeline; this lane does not account for an earlier admission wait.
+    /// The absolute call deadline is captured when the decoded request reaches
+    /// this adapter. Waiting for producer admission cannot restart that budget.
+    /// Earlier request-header/body reception remains the H2 listener's policy.
     ///
     /// The source is pulled one message at a time. H2 drains the bounded channel
     /// only with peer credit. At most the configured channel, one connection
@@ -96,6 +172,9 @@ impl Server {
     /// a partially queued message fails the H2 producer instead of pretending
     /// that truncated framing is a clean gRPC completion. Source destruction
     /// retires local captures; independently spawned tasks remain region-owned.
+    /// Factory, poll and terminal-destruction panics become gRPC `INTERNAL`
+    /// only at a complete-message boundary; uncertain partial framing still
+    /// fails the H2 producer. The process's panic hook is not changed.
     ///
     /// # Errors
     /// Invalid transport or streaming limits and unavailable compression refuse
@@ -202,6 +281,12 @@ impl Server {
                 return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
             }
         };
+        let Some(request_cx) = Cx::current() else {
+            return Http2ProducedResponse::buffered(Self::http2_status_response(
+                &Status::internal("gRPC server streaming requires a runtime context"),
+            ));
+        };
+        let deadline = StreamDeadline::capture(&request_cx, request.metadata(), &self.config);
         let (codec, encoding) = match self.streaming_output_codec() {
             Ok(codec) => codec,
             Err(status) => {
@@ -222,7 +307,7 @@ impl Server {
             config.max_frame_bytes,
             move |cx, sender| async move {
                 self.run_registered_server_stream(
-                    cx, sender, service, path, request, trailers, codec, config,
+                    cx, sender, service, path, request, trailers, codec, config, deadline,
                 )
                 .await
             },
@@ -257,20 +342,37 @@ impl Server {
         trailers: Metadata,
         codec: FramedCodec<IdentityCodec>,
         config: ServerStreamingConfig,
+        deadline: StreamDeadline,
     ) -> Result<Http2BodySender, HttpError> {
+        // Only the live producer supplies cancellation/spawn authority. The
+        // earlier handler contributed a deadline, never an escaped request Cx.
+        // Tighten before canonical dispatch creates its own per-call context,
+        // so even service code inspecting Cx::budget sees the admission delay.
+        let region = ServerRequestRegion::mint_from_connection(
+            "h2-grpc-stream",
+            deadline.budget(cx.budget()),
+            deadline.now(),
+            &cx,
+        );
         let mut partial_frame = false;
         let mut transport_error = None;
         let owner = cx.clone();
         let output = &mut sender;
         let partial = &mut partial_frame;
         let failure = &mut transport_error;
+        let call_deadline = &deadline;
         let dispatch = self.dispatch_unary(request, move |request| async move {
             let call_cx = Cx::current().unwrap_or_else(|| owner.clone());
-            let stream = poll_cancellable(&owner, &call_cx, async {
-                service
-                    .call_server_streaming(&call_cx, &path, request, trailers)
-                    .await
-            })
+            let stream = poll_cancellable(
+                &owner,
+                &call_cx,
+                async {
+                    service
+                        .call_server_streaming(&call_cx, &path, request, trailers)
+                        .await
+                },
+                Some(call_deadline),
+            )
             .await??;
             forward_messages(
                 &owner,
@@ -281,10 +383,29 @@ impl Server {
                 partial,
                 failure,
                 config.max_frame_bytes.get(),
+                call_deadline,
             )
             .await
         });
-        let result = poll_with_current_cx(cx.clone(), dispatch).await;
+        let source = region.instrumented(deadline.source, dispatch);
+        // Catch both user polling and terminal destruction. Catching only the
+        // H2 producer outside this adapter loses gRPC INTERNAL attribution.
+        let mut result = match crate::util::future::catch_unwind(std::panic::AssertUnwindSafe(source))
+            .await
+        {
+            Ok(result) => result,
+            Err(_payload) => {
+                cx.trace("grpc.server_stream.panicked");
+                Err(Status::internal("gRPC server stream panicked"))
+            }
+        };
+        // A synchronous response interceptor may have used the remaining time.
+        // Do not accept its late success merely because no further await ran.
+        if result.is_ok() && deadline.expired() {
+            region.cancel_timeout("gRPC streaming deadline exceeded");
+            result = Err(Status::deadline_exceeded("gRPC stream deadline exceeded"));
+        }
+        region.finish(if result.is_ok() { "ok" } else { "err" });
         if let Some(error) = transport_error {
             return Err(error); // Preserve the actual transport failure.
         }
@@ -323,10 +444,16 @@ fn cancellation_status(cx: &Cx) -> Status {
     }
 }
 
-async fn poll_cancellable<F: Future>(owner: &Cx, call: &Cx, future: F) -> Result<F::Output, Status> {
+async fn poll_cancellable<F: Future>(
+    owner: &Cx,
+    call: &Cx,
+    future: F,
+    deadline: Option<&StreamDeadline>,
+) -> Result<F::Output, Status> {
     let mut owner_cancelled = std::pin::pin!(owner.cancelled());
     let mut call_cancelled = std::pin::pin!(call.cancelled());
     let mut future = std::pin::pin!(future);
+    let mut deadline_timer = std::pin::pin!(deadline.and_then(StreamDeadline::timer));
     poll_fn(|task_cx| {
         if owner.checkpoint().is_err() || owner_cancelled.as_mut().poll(task_cx).is_ready() {
             // The contexts can alias on the no-deadline path. Snapshot the
@@ -341,6 +468,17 @@ async fn poll_cancellable<F: Future>(owner: &Cx, call: &Cx, future: F) -> Result
         }
         if call.checkpoint().is_err() || call_cancelled.as_mut().poll(task_cx).is_ready() {
             return Poll::Ready(Err(cancellation_status(call)));
+        }
+        if deadline.is_some_and(StreamDeadline::expired)
+            || deadline_timer
+                .as_mut()
+                .as_pin_mut()
+                .is_some_and(|timer| timer.poll(task_cx).is_ready())
+        {
+            call.cancel_with(CancelKind::Timeout, Some("gRPC streaming deadline exceeded"));
+            return Poll::Ready(Err(Status::deadline_exceeded(
+                "gRPC stream deadline exceeded",
+            )));
         }
         future.as_mut().poll(task_cx).map(Ok)
     })
@@ -357,6 +495,7 @@ async fn forward_messages(
     partial_frame: &mut bool,
     transport_error: &mut Option<HttpError>,
     max_frame_bytes: usize,
+    deadline: &StreamDeadline,
 ) -> Result<Response<Bytes>, Status> {
     let (mut stream, trailers) = stream.into_parts();
     let mut messages_this_turn = 0;
@@ -365,6 +504,7 @@ async fn forward_messages(
             owner,
             cx,
             poll_fn(|task_cx| stream.as_mut().poll_next(task_cx)),
+            Some(deadline),
         )
         .await?;
         let Some(message) = next else {
@@ -381,7 +521,7 @@ async fn forward_messages(
         // this latch and refuses to append status trailers to truncated framing.
         *partial_frame = true;
         for chunk in frame.chunks(max_frame_bytes) {
-            match poll_cancellable(owner, cx, sender.send_chunk(cx, chunk)).await? {
+            match poll_cancellable(owner, cx, sender.send_chunk(cx, chunk), Some(deadline)).await? {
                 Ok(()) => {}
                 Err(error) => {
                     *transport_error = Some(error);

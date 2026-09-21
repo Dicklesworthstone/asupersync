@@ -13,6 +13,8 @@ use crate::grpc::streaming::Streaming;
 use crate::http::h2::{Header, HpackDecoder};
 use crate::runtime::RuntimeBuilder;
 use crate::server::shutdown::ShutdownSignal;
+use crate::time::VirtualClock;
+use crate::types::{RegionId, TaskId};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +32,7 @@ static DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     methods: METHODS,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Mode {
     Values,
     Empty,
@@ -39,6 +41,11 @@ enum Mode {
     Infinite,
     Oversized,
     ForgedTrailer,
+    FactoryPanic,
+    FuturePanic,
+    PollPanic,
+    LatePollPanic,
+    DropPanic,
 }
 
 struct Probe {
@@ -85,6 +92,7 @@ impl ServiceHandler for FixtureService {
         _trailers: Metadata,
     ) -> ServiceStreamingFuture<'a> {
         self.probe.calls.fetch_add(1, Ordering::SeqCst);
+        assert!(!matches!(self.mode, Mode::FactoryPanic), "private factory panic");
         let stream = FixtureStream {
             probe: Arc::clone(&self.probe),
             cx: cx.clone(),
@@ -92,6 +100,7 @@ impl ServiceHandler for FixtureService {
             index: 0,
         };
         Box::pin(async move {
+            assert!(!matches!(stream.mode, Mode::FuturePanic), "private future panic");
             let mut trailers = Metadata::new();
             assert!(trailers.insert("x-end", "finished"));
             assert!(trailers.insert_bin("x-proof-bin", Bytes::from(vec![0, 255])));
@@ -124,6 +133,8 @@ impl Streaming for FixtureStream {
         let index = self.index;
         self.index += 1;
         match self.mode {
+            Mode::PollPanic => panic!("private source poll panic"),
+            Mode::LatePollPanic if index == 1 => panic!("private late source panic"),
             Mode::Never => Poll::Pending,
             Mode::Empty => Poll::Ready(None),
             Mode::Infinite => Poll::Ready(Some(Ok(Bytes::from(vec![0x33; 4096])))),
@@ -145,6 +156,7 @@ impl Drop for FixtureStream {
     fn drop(&mut self) {
         self.probe.drops.fetch_add(1, Ordering::SeqCst);
         let _ = self.probe.retired.send(());
+        assert!(!matches!(self.mode, Mode::DropPanic), "private source drop panic");
     }
 }
 
@@ -201,6 +213,7 @@ struct Peer {
     socket: TcpStream,
     decoder: HpackDecoder,
     reply: WireReply,
+    stream: u32,
 }
 
 impl Peer {
@@ -213,11 +226,20 @@ impl Peer {
             socket,
             decoder: HpackDecoder::new(),
             reply: WireReply::default(),
+            stream: 0,
         };
         peer.socket.write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n").unwrap();
         let mut settings = vec![0, 4]; // SETTINGS_INITIAL_WINDOW_SIZE
         settings.extend_from_slice(&window.to_be_bytes());
         peer.send(4, 0, 0, &settings);
+        peer.request(1, path, timeout);
+        peer
+    }
+
+    fn request(&mut self, stream: u32, path: &str, timeout: Option<&str>) {
+        assert!(stream > self.stream && stream % 2 == 1);
+        self.stream = stream;
+        self.reply = WireReply::default();
         let mut headers = Vec::new();
         for (name, value) in [
             (":method", "POST"),
@@ -232,9 +254,8 @@ impl Peer {
         if let Some(timeout) = timeout {
             literal(&mut headers, "grpc-timeout", timeout);
         }
-        peer.send(1, 4, 1, &headers); // HEADERS / END_HEADERS
-        peer.send(0, 1, 1, &[0, 0, 0, 0, 0]); // one empty request; END_STREAM
-        peer
+        self.send(1, 4, stream, &headers); // HEADERS / END_HEADERS
+        self.send(0, 1, stream, &[0, 0, 0, 0, 0]); // one empty request; END_STREAM
     }
 
     fn send(&mut self, kind: u8, flags: u8, stream: u32, payload: &[u8]) {
@@ -273,17 +294,17 @@ impl Peer {
             4 if flags & 1 == 0 => self.send(4, 1, 0, &[]),
             6 if flags & 1 == 0 => self.send(6, 1, 0, &payload),
             6 => return (false, payload == b"credit!!"),
-            0 if stream == 1 => {
+            0 if stream == self.stream => {
                 assert_eq!(flags & 8, 0, "fixture server emits unpadded DATA");
                 self.reply.body.extend_from_slice(&payload);
                 return (flags & 1 != 0, false);
             }
-            1 if stream == 1 => {
+            1 if stream == self.stream => {
                 assert_eq!(flags & (8 | 32), 0, "fixture emits plain HEADERS");
                 let mut last_flags = flags;
                 while last_flags & 4 == 0 {
                     let (kind, next_flags, next_stream, next) = self.frame();
-                    assert_eq!((kind, next_stream), (9, 1));
+                    assert_eq!((kind, next_stream), (9, self.stream));
                     payload.extend_from_slice(&next);
                     last_flags = next_flags;
                 }
@@ -298,7 +319,7 @@ impl Peer {
                 }
                 return (flags & 1 != 0, false);
             }
-            3 if stream == 1 => {
+            3 if stream == self.stream => {
                 self.reply.reset = Some(u32::from_be_bytes(payload.try_into().unwrap()));
                 return (true, false);
             }
@@ -318,7 +339,7 @@ impl Peer {
     }
 
     fn reset(&mut self) {
-        self.send(3, 0, 1, &8u32.to_be_bytes());
+        self.send(3, 0, self.stream, &8u32.to_be_bytes());
     }
 }
 
@@ -354,6 +375,23 @@ where
         + Send
         + 'static,
 {
+    let interceptor = deny.then(|| Arc::new(Deny) as Arc<dyn Interceptor>);
+    wire_case_intercepted(mode, window, path, timeout, interceptor, client)
+}
+
+fn wire_case_intercepted<F>(
+    mode: Mode,
+    window: u32,
+    path: &'static str,
+    timeout: Option<&'static str>,
+    interceptor: Option<Arc<dyn Interceptor>>,
+    client: F,
+) -> Arc<Probe>
+where
+    F: FnOnce(&mut Peer, sync_mpsc::Receiver<Cx>, sync_mpsc::Receiver<()>, &Arc<Probe>)
+        + Send
+        + 'static,
+{
     let (started, starts) = sync_mpsc::channel();
     let (retired, retirements) = sync_mpsc::channel();
     let probe = Arc::new(Probe {
@@ -368,8 +406,8 @@ where
         probe: Arc::clone(&probe),
     };
     let mut server = Server::builder().add_service(fixture).build();
-    if deny {
-        server.interceptors.push(Arc::new(Deny));
+    if let Some(interceptor) = interceptor {
+        server.interceptors.push(interceptor);
     }
     server.config.max_send_message_size = 4096;
     let server = Arc::new(server);
@@ -581,6 +619,250 @@ fn native_mixed_listener_preserves_unary_and_refuses_bidi() {
 }
 
 #[test]
+fn native_service_panics_become_internal_and_the_same_connection_recovers() {
+    for mode in [
+        Mode::FactoryPanic,
+        Mode::FuturePanic,
+        Mode::PollPanic,
+        Mode::LatePollPanic,
+        Mode::DropPanic,
+    ] {
+        let probe = wire_case(
+            mode,
+            65_535,
+            "/test.Watch/Values",
+            None,
+            false,
+            move |peer, _, retired, probe| {
+                peer.finish();
+                assert_eq!(peer.reply.reset, None, "panic mode: {mode:?}");
+                assert_eq!(peer.reply.trailer("grpc-status"), Some("13"));
+                assert_eq!(peer.reply.trailer("x-end"), None);
+                assert!(peer.reply.trailers.iter().all(|header| !header.value.contains("private")));
+                let expected = match mode {
+                    Mode::LatePollPanic => vec![vec![0x11; 3000]],
+                    Mode::DropPanic => vec![vec![0x11; 3000], vec![0x22; 3000]],
+                    _ => Vec::new(),
+                };
+                assert_eq!(peer.reply.messages(), expected, "panic mode: {mode:?}");
+                if !matches!(mode, Mode::FactoryPanic) {
+                    retired.recv_timeout(Duration::from_secs(2)).expect("panicked source retired");
+                    assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+                }
+
+                // Keep the TCP connection AND HPACK decoder. A new socket
+                // would not prove that this stream's panic stayed isolated.
+                peer.request(3, "/test.Watch/Echo", None);
+                peer.finish();
+                assert_eq!(peer.reply.reset, None);
+                assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+                assert_eq!(peer.reply.messages(), vec![Vec::<u8>::new()]);
+            },
+        );
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        let expected_drops = usize::from(!matches!(mode, Mode::FactoryPanic));
+        assert_eq!(probe.drops.load(Ordering::SeqCst), expected_drops);
+    }
+}
+
+#[test]
+fn native_time_spent_before_handler_setup_cannot_renew_the_request_budget() {
+    struct HoldFirstDispatch {
+        first: std::sync::atomic::AtomicBool,
+        entered: sync_mpsc::Sender<Cx>,
+        release: parking_lot::Mutex<sync_mpsc::Receiver<()>>,
+    }
+
+    impl Interceptor for HoldFirstDispatch {
+        fn intercept_request(&self, _: &mut Request<Bytes>) -> Result<(), Status> {
+            if self.first.swap(false, Ordering::SeqCst) {
+                // Test-only synchronous gate. Production interceptors must
+                // not block workers; the gate reproduces consumed setup time.
+                self.entered.send(Cx::current().expect("request context"))
+                    .expect("interceptor witness");
+                self.release.lock().recv_timeout(Duration::from_secs(5))
+                    .expect("bounded interceptor release");
+            }
+            Ok(())
+        }
+
+        fn intercept_response(&self, _: &mut Response<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+    }
+
+    let (entered, entry) = sync_mpsc::channel();
+    let (release, released) = sync_mpsc::channel();
+    let interceptor = Arc::new(HoldFirstDispatch {
+        first: std::sync::atomic::AtomicBool::new(true),
+        entered,
+        release: parking_lot::Mutex::new(released),
+    });
+    let probe = wire_case_intercepted(
+        Mode::Values,
+        65_535,
+        "/test.Watch/Values",
+        Some("300m"),
+        Some(interceptor),
+        move |peer, _, _, probe| {
+            let cx = entry.recv_timeout(Duration::from_secs(2))
+                .expect("dispatch reached its pre-factory interceptor");
+            let deadline = cx.budget().deadline
+                .expect("original deadline installed before interceptors");
+            let clock = cx.timer_driver().expect("native timer driver");
+            let watchdog = Instant::now() + Duration::from_secs(2);
+            loop {
+                let now = clock.now();
+                if now >= deadline {
+                    break;
+                }
+                assert!(Instant::now() < watchdog, "native clock did not reach deadline");
+                // Wait for the witnessed absolute deadline, not a guessed
+                // sleep used to assume that handler execution has started.
+                std::thread::park_timeout(Duration::from_nanos(deadline.duration_since(now)));
+            }
+            assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+            release.send(()).expect("release elapsed setup");
+            peer.finish();
+            assert_eq!(peer.reply.reset, None);
+            assert!(peer.reply.body.is_empty());
+            assert_eq!(peer.reply.trailer("grpc-status"), Some("4"));
+            assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "expired service was not invoked");
+
+            peer.request(3, "/test.Watch/Echo", None);
+            peer.finish();
+            assert_eq!(peer.reply.trailer("grpc-status"), Some("0"));
+            assert_eq!(peer.reply.messages(), vec![Vec::<u8>::new()]);
+        },
+    );
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.drops.load(Ordering::SeqCst), 0);
+}
+
+fn virtual_cx(clock: &Arc<VirtualClock>, deadline: Option<Time>, task: u32) -> Cx {
+    let mut budget = Budget::INFINITE;
+    budget.deadline = deadline;
+    Cx::new_with_drivers(
+        RegionId::new_for_test(1, 0),
+        TaskId::new_for_test(task, 0),
+        budget,
+        None,
+        None,
+        None,
+        Some(TimerDriverHandle::with_virtual_clock(Arc::clone(clock))),
+        None,
+    )
+}
+
+#[test]
+fn captured_deadline_preserves_parser_fallback_cap_and_parent_budget() {
+    let server = Server::builder()
+        .default_timeout(Duration::from_secs(5))
+        .max_request_deadline(Duration::from_secs(2))
+        .build();
+    for (header, inherited, expected) in [
+        (None, None, 45),
+        (Some("malformed"), None, 45),
+        (Some("7S"), None, 42),
+        (Some("1S"), None, 41),
+        (Some("0n"), None, 40),
+        (Some("7S"), Some(41), 41),
+        (None, Some(43), 43),
+    ] {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(40)));
+        let cx = virtual_cx(&clock, inherited.map(Time::from_secs), 1);
+        let mut metadata = Metadata::new();
+        if let Some(header) = header {
+            assert!(metadata.insert("grpc-timeout", header));
+        }
+        let captured = StreamDeadline::capture(&cx, &metadata, server.config());
+        assert_eq!(captured.at, Some(Time::from_secs(expected)), "header: {header:?}");
+        clock.advance_to(Time::from_secs(50));
+        assert!(captured.expired());
+        assert_eq!(captured.at, Some(Time::from_secs(expected)), "admission cannot renew deadline");
+    }
+}
+
+#[test]
+fn expired_admission_deadline_never_invokes_service_setup() {
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(40)));
+    let owner = virtual_cx(&clock, None, 1);
+    let mut metadata = Metadata::new();
+    assert!(metadata.insert("grpc-timeout", "1S"));
+    let captured = StreamDeadline::capture(&owner, &metadata, &ServerConfig::default());
+    clock.advance_to(Time::from_secs(41));
+    let call = virtual_cx(&clock, None, 2);
+    let invoked = std::cell::Cell::new(false);
+    let setup = async { invoked.set(true) };
+    let mut execution = Box::pin(poll_cancellable(&owner, &call, setup, Some(&captured)));
+    let mut task = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        execution.as_mut().poll(&mut task),
+        Poll::Ready(Err(status)) if status.code() == Code::DeadlineExceeded
+    ));
+    assert!(!invoked.get(), "an expired request must not call a ready factory");
+    assert!(!owner.is_cancel_requested(), "only the invocation context is cancelled");
+    assert_eq!(call.cancel_reason().unwrap().kind, CancelKind::Timeout);
+}
+
+#[test]
+fn captured_deadline_does_not_restart_between_messages_or_change_clock_domains() {
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+    let owner = virtual_cx(&clock, None, 1);
+    let call = virtual_cx(&clock, None, 2);
+    let mut metadata = Metadata::new();
+    assert!(metadata.insert("grpc-timeout", "2S"));
+    let captured = StreamDeadline::capture(&owner, &metadata, &ServerConfig::default());
+    let polls = std::cell::Cell::new(0);
+    let mut task = Context::from_waker(Waker::noop());
+
+    // A different ambient clock cannot replace the one admitted with this call.
+    let other_clock = Arc::new(VirtualClock::starting_at(Time::from_secs(500)));
+    let unrelated = virtual_cx(&other_clock, None, 3);
+    let _ambient = Cx::set_current(Some(unrelated));
+    clock.advance_to(Time::from_secs(11));
+    let mut first = Box::pin(poll_cancellable(
+        &owner,
+        &call,
+        async { polls.set(polls.get() + 1); 7_u8 },
+        Some(&captured),
+    ));
+    assert!(matches!(first.as_mut().poll(&mut task), Poll::Ready(Ok(7))));
+    drop(first);
+
+    // Exactly at the original deadline, even a ready next message loses.
+    clock.advance_to(Time::from_secs(12));
+    let mut next = Box::pin(poll_cancellable(
+        &owner,
+        &call,
+        async { polls.set(polls.get() + 1); 8_u8 },
+        Some(&captured),
+    ));
+    assert!(matches!(
+        next.as_mut().poll(&mut task),
+        Poll::Ready(Err(status)) if status.code() == Code::DeadlineExceeded
+    ));
+    assert_eq!(polls.get(), 1, "no new message after the admitted deadline");
+}
+
+#[test]
+fn captured_budget_only_tightens_the_live_producer_budget() {
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+    let owner = virtual_cx(&clock, Some(Time::from_secs(15)), 1);
+    let captured = StreamDeadline::capture(&owner, &Metadata::new(), &ServerConfig::default());
+    for existing in [None, Some(Time::from_secs(20)), Some(Time::from_secs(12))] {
+        let mut live = Budget::INFINITE;
+        live.deadline = existing;
+        live.priority = 7;
+        let narrowed = captured.budget(live);
+        assert_eq!(narrowed.deadline, earlier_deadline(existing, Some(Time::from_secs(15))));
+        assert_eq!(narrowed.priority, 7);
+        assert_eq!(narrowed.poll_quota, live.poll_quota);
+        assert_eq!(narrowed.cost_quota, live.cost_quota);
+    }
+}
+
+#[test]
 fn streaming_config_rejects_unbounded_terminal_or_overflowing_retention() {
     let mut config = stream_config();
     assert!(config.validate().is_ok());
@@ -648,7 +930,9 @@ fn owner_cancellation_wakes_pending_source_without_an_io_event() {
     let count = Arc::new(Count(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&count));
     let mut task = Context::from_waker(&waker);
-    let mut future = Box::pin(poll_cancellable(&owner, &call, std::future::pending::<()>()));
+    let mut future = Box::pin(poll_cancellable(
+        &owner, &call, std::future::pending::<()>(), None,
+    ));
     assert!(future.as_mut().poll(&mut task).is_pending());
     owner.cancel_with(CancelKind::User, Some("owner test cancellation"));
     assert!(count.0.load(Ordering::SeqCst) > 0);
@@ -669,7 +953,10 @@ fn aliased_owner_cancellation_keeps_deadline_and_budget_attribution() {
         cx.cancel_with(kind, Some("explicit source"));
         let mut task = Context::from_waker(Waker::noop());
         let mut future = Box::pin(poll_cancellable(
-            &cx, &cx, std::future::pending::<()>(),
+            &cx,
+            &cx,
+            std::future::pending::<()>(),
+            None,
         ));
         match future.as_mut().poll(&mut task) {
             Poll::Ready(Err(status)) => assert_eq!(status.code(), code),
