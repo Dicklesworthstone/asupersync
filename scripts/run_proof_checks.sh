@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2317 # run_check invokes named function callbacks indirectly.
+# shellcheck disable=SC2317,SC2329 # run_check invokes named function callbacks indirectly.
 # Run formal proof verification checks through required remote Cargo lanes
 # (bd-2rhiq). Non-Cargo model/proof tools still run on the invoking host.
 # Mirrors and extends the proof-checks CI job in .github/workflows/ci.yml.
