@@ -211,7 +211,7 @@ fn exercise(workers: usize, case: Case) {
                 witness.release(); cancelled(first.cancel(&cx, CancelReason::user("finish primary")).await.unwrap());
             }
         }
-        drop(second); drop(first);
+        drop(second);
         queue_count(&cx, &admission, 0).await;
         assert!(witness.dropped.load(Ordering::Acquire));
         assert_eq!(admission.usage(), RemoteAdmissionUsage::default());

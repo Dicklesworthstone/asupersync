@@ -220,7 +220,9 @@ fn idle_service_abort_is_a_wake_source_and_retains_shutdown_receipt() {
         // The service has reached its idle receive despite a still-live client.
         service.abort();
         let report = service.join().await.unwrap();
-        assert!(matches!(report.task_outcome, Err(JoinError::Cancelled(_))));
+        // The running controller acknowledges cancellation and returns only
+        // after cleanup; Cx::spawn preserves that acknowledged return value.
+        assert!(report.task_outcome.is_ok(), "{:?}", report.task_outcome);
         assert!(report.supervision.unwrap().close.is_ok());
         assert!(matches!(client.submit_worker(&cx, "late", worker_config(),
             |_: Cx, _: ManagedGeneration| async { Outcome::Ok(()) }), Err(DynamicServiceError::Closed)));
@@ -323,7 +325,9 @@ fn cancellation_escalates_an_incomplete_graceful_drain_without_reopening_admissi
         assert!(completion.close.is_ok());
         assert_eq!(stopped.load(Ordering::SeqCst), 1);
         let report = service.join().await.unwrap();
-        assert!(matches!(report.task_outcome, Err(JoinError::Cancelled(_))));
+        // Cancellation stops the child above, while the controller's completed
+        // cleanup remains a successful, acknowledged Cx::spawn return.
+        assert!(report.task_outcome.is_ok(), "{:?}", report.task_outcome);
         assert!(report.supervision.unwrap().close.is_ok());
     });
 }
