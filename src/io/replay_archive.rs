@@ -24,6 +24,9 @@
 //! caller copies, files and swap remain outside these zeroizing byte owners.
 
 use super::replay_session::{RecordedSession, SessionDecodeLimits, SessionTapeError};
+use super::replay_session::ordered::{
+    OrderedRecordedSession, OrderedSessionDecodeLimits, OrderedSessionTapeError,
+};
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::{Tag, XChaCha20Poly1305, XNonce};
 use std::fmt;
@@ -35,6 +38,7 @@ const HEADER: usize = 112;
 const TAG: usize = 16;
 const OVERHEAD: usize = HEADER + TAG;
 const SESSION: u8 = 1;
+const ORDERED: u8 = 2;
 
 /// Expected external identity of a replay archive. These are public commitments,
 /// not secret values or attestations. Compare against trusted caller metadata,
@@ -84,6 +88,9 @@ pub enum ReplayArchiveError {
     /// Authenticated bytes failed the existing canonical session validator.
     #[error("replay archive session: {0}")]
     Session(#[from] SessionTapeError),
+    /// Authenticated bytes failed the existing ordered/poll-aware validator.
+    #[error("replay archive ordered session: {0}")]
+    Ordered(#[from] OrderedSessionTapeError),
 }
 
 /// Caller-owned dedicated symmetric key, zeroized on drop and omitted from Debug.
@@ -132,6 +139,37 @@ impl ReplayArchiveKey {
     ) -> Result<RecordedSession, ReplayArchiveError> {
         let plaintext = self.open_payload(bytes, expected, SESSION, max_encrypted_bytes, limits.max_encoded_bytes)?;
         Ok(RecordedSession::from_canonical_bytes(&plaintext, limits)?)
+    }
+
+    /// Authenticate an ordered archive without discarding its order or pending polls.
+    ///
+    /// Both existing completed-effect V1 and poll-aware V2 formats remain valid.
+    /// Use `open_poll_aware` when the application REQUIRES pending-poll fidelity.
+    /// The separate authenticated profile refuses an independent session rather
+    /// than silently treating it as an ordered replay. All nested bounds apply.
+    pub fn open_ordered(
+        &self,
+        bytes: &[u8],
+        expected: ReplayArchiveBinding,
+        max_encrypted_bytes: usize,
+        limits: OrderedSessionDecodeLimits,
+    ) -> Result<OrderedRecordedSession, ReplayArchiveError> {
+        let plaintext = self.open_payload(bytes, expected, ORDERED, max_encrypted_bytes, limits.max_encoded_bytes)?;
+        Ok(OrderedRecordedSession::from_canonical_bytes(&plaintext, limits)?)
+    }
+
+    /// Authenticate and REQUIRE poll-aware V2 data. A validly encrypted V1 tape
+    /// is still refused; authentication cannot weaken the caller's fidelity need.
+    /// This retains pending request shapes, not the original wake timing.
+    pub fn open_poll_aware(
+        &self,
+        bytes: &[u8],
+        expected: ReplayArchiveBinding,
+        max_encrypted_bytes: usize,
+        limits: OrderedSessionDecodeLimits,
+    ) -> Result<OrderedRecordedSession, ReplayArchiveError> {
+        let plaintext = self.open_payload(bytes, expected, ORDERED, max_encrypted_bytes, limits.max_encoded_bytes)?;
+        Ok(OrderedRecordedSession::from_poll_aware_bytes(&plaintext, limits)?)
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
@@ -208,6 +246,20 @@ impl ReplayArchiveSealer {
         let limit = self.plaintext_limit(max_encrypted_bytes)?;
         let plaintext = session.to_canonical_bytes(limit)?;
         self.seal_payload(plaintext.as_ref(), binding, SESSION, max_encrypted_bytes)
+    }
+
+    /// Encrypt an ordered or poll-aware capture without changing its canonical
+    /// version, sequencing authority or pending request fingerprints. Ordinary
+    /// and ordered seals share THIS sealer's one nonce counter and key namespace.
+    pub fn seal_ordered(
+        &mut self,
+        session: &OrderedRecordedSession,
+        binding: ReplayArchiveBinding,
+        max_encrypted_bytes: usize,
+    ) -> Result<EncryptedReplayArchive, ReplayArchiveError> {
+        let limit = self.plaintext_limit(max_encrypted_bytes)?;
+        let plaintext = session.to_canonical_bytes(limit)?;
+        self.seal_payload(plaintext.as_ref(), binding, ORDERED, max_encrypted_bytes)
     }
 
     fn plaintext_limit(&self, max_encrypted_bytes: usize) -> Result<usize, ReplayArchiveError> {

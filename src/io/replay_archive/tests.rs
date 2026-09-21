@@ -249,3 +249,134 @@ fn key_sealer_binding_and_archive_debug_never_expose_content() {
     }
     assert!(debug.contains("encrypted_bytes"));
 }
+
+use crate::io::replay_session::ordered::{OrderedRecordingSession, PendingIoCaptureLimits};
+
+// Deliberately return one real Pending before forwarding writes. The caller's
+// wake is preserved by capture; replay must reproduce the pending request too.
+struct PendingPeer { peer: Peer, pending: bool }
+impl AsyncRead for PendingPeer {
+    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().peer).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for PendingPeer {
+    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if std::mem::take(&mut this.pending) { cx.waker().wake_by_ref(); return Poll::Pending; }
+        Pin::new(&mut this.peer).poll_write(cx, bytes)
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().peer).poll_flush(cx)
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().peer).poll_shutdown(cx)
+    }
+}
+fn ordered_limits() -> OrderedSessionDecodeLimits {
+    OrderedSessionDecodeLimits {
+        max_encoded_bytes: 65_536, max_effects: 64, max_order_bytes: 8192, components: limits(),
+    }
+}
+fn captured_ordered(poll_aware: bool) -> (OrderedRecordedSession, (u64, Time, [u8; 4])) {
+    let io = PendingPeer { peer: Peer::default(), pending: true };
+    let entropy = Arc::new(DetEntropy::new(5));
+    let clock = Arc::new(VirtualClock::new());
+    let mut recording = if poll_aware {
+        OrderedRecordingSession::new_with_pending_io(io, entropy, clock, capture_limits(), 64,
+            PendingIoCaptureLimits::new(32, 256, 8)).unwrap()
+    } else { OrderedRecordingSession::new(io, entropy, clock, capture_limits(), 64).unwrap() };
+    let entropy = recording.entropy();
+    let clock = recording.clock();
+    let expected = futures_lite::future::block_on(exchange(recording.io(), entropy.as_ref(), clock.as_ref()));
+    let (_, capture) = recording.into_parts();
+    (capture.unwrap(), expected)
+}
+
+#[test]
+fn encrypted_ordered_and_poll_aware_roundtrips_preserve_exact_inner_formats() {
+    for poll_aware in [false, true] {
+        let (session, expected) = captured_ordered(poll_aware);
+        let plaintext = session.to_canonical_bytes(65_536).unwrap();
+        let bytes = sealer().seal_ordered(&session, BINDING, 65_536).unwrap();
+        drop(session);
+        let key = ReplayArchiveKey::new(KEY);
+        let restored = if poll_aware {
+            key.open_poll_aware(bytes.as_ref(), BINDING, 65_536, ordered_limits()).unwrap()
+        } else { key.open_ordered(bytes.as_ref(), BINDING, 65_536, ordered_limits()).unwrap() };
+        assert_eq!(restored.is_poll_aware(), poll_aware);
+        assert_eq!(restored.pending_io_polls(), usize::from(poll_aware));
+        assert_eq!(restored.to_canonical_bytes(65_536).unwrap().as_ref(), plaintext.as_ref());
+        let output = futures_lite::future::block_on(restored.replay().run(32, |p| {
+            Box::pin(exchange(p.io, p.entropy, p.clock))
+        })).unwrap();
+        assert_eq!(output, expected);
+    }
+}
+
+#[test]
+fn authentic_completed_only_sessions_cannot_downgrade_a_pending_fidelity_requirement() {
+    let (session, _) = captured_ordered(false);
+    let bytes = sealer().seal_ordered(&session, BINDING, 65_536).unwrap();
+    let key = ReplayArchiveKey::new(KEY);
+    assert!(key.open_ordered(bytes.as_ref(), BINDING, 65_536, ordered_limits()).is_ok());
+    assert!(matches!(key.open_poll_aware(bytes.as_ref(), BINDING, 65_536, ordered_limits()), Err(ReplayArchiveError::Ordered(_))));
+    assert!(matches!(key.open_session(bytes.as_ref(), BINDING, 65_536, limits()), Err(ReplayArchiveError::Format)));
+    let (plain, _) = captured();
+    let bytes = sealer().seal_session(&plain, BINDING, 65_536).unwrap();
+    assert!(matches!(key.open_ordered(bytes.as_ref(), BINDING, 65_536, ordered_limits()), Err(ReplayArchiveError::Format)));
+}
+
+#[test]
+fn authenticated_profile_substitution_does_not_reach_the_wrong_decoder() {
+    let (session, _) = captured_ordered(true);
+    let bytes = sealer().seal_ordered(&session, BINDING, 65_536).unwrap();
+    let mut changed = bytes.as_ref().to_vec();
+    changed[12] = SESSION;
+    assert!(matches!(ReplayArchiveKey::new(KEY).open_session(&changed, BINDING, 65_536, limits()), Err(ReplayArchiveError::Authentication)));
+}
+
+#[test]
+fn authenticated_order_and_pending_fingerprint_budgets_remain_enforced() {
+    let (session, _) = captured_ordered(true);
+    let bytes = sealer().seal_ordered(&session, BINDING, 65_536).unwrap();
+    for boundary in 0..3 {
+        let mut bounds = ordered_limits();
+        match boundary {
+            0 => bounds.max_effects = 0,
+            1 => bounds.max_order_bytes = 0,
+            _ => bounds.components.io.capture.max_write_bytes = 0,
+        }
+        assert!(matches!(ReplayArchiveKey::new(KEY).open_poll_aware(bytes.as_ref(), BINDING, 65_536, bounds), Err(ReplayArchiveError::Ordered(_))));
+    }
+}
+
+#[test]
+fn authenticated_order_still_rejects_reordered_consumer_effects() {
+    let (session, _) = captured_ordered(true);
+    let bytes = sealer().seal_ordered(&session, BINDING, 65_536).unwrap();
+    let restored = ReplayArchiveKey::new(KEY).open_poll_aware(bytes.as_ref(), BINDING, 65_536, ordered_limits()).unwrap();
+    let mut replay = restored.replay();
+    // The original consumer draws entropy before observing its clock. Even a
+    // valid archive must not authorize a reordered synchronous effect.
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = replay.inputs().clock.now();
+    }));
+    assert!(failure.is_err());
+    assert!(replay.verify_complete().is_err());
+}
+
+#[test]
+fn both_profiles_share_one_nonce_counter_and_exact_encrypted_bound() {
+    let (plain, _) = captured();
+    let (ordered, _) = captured_ordered(true);
+    let mut sealer = sealer();
+    let first = sealer.seal_session(&plain, BINDING, 65_536).unwrap();
+    let exact = ordered.to_canonical_bytes(65_536).unwrap().as_ref().len() + OVERHEAD;
+    assert!(sealer.seal_ordered(&ordered, BINDING, exact - 1).is_err());
+    let second = sealer.seal_ordered(&ordered, BINDING, exact).unwrap();
+    let third = sealer.seal_session(&plain, BINDING, 65_536).unwrap();
+    for (counter, bytes) in [first, second, third].iter().enumerate() {
+        assert_eq!(&bytes.as_ref()[40..48], &u64::try_from(counter).unwrap().to_le_bytes());
+    }
+}
