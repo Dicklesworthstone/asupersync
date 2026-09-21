@@ -900,6 +900,10 @@ fn poll_recv_uninterruptible_with_waiter<T>(
 }
 
 /// Future returned by `recv_uninterruptible`.
+// Public under test-internals so the exposed `recv_uninterruptible` does not
+// return a private type (fields stay private — tests only await it, never
+// construct it). br-asupersync-ymj7j3.
+#[cfg_attr(feature = "test-internals", visibility::make(pub))]
 pub(crate) struct RecvUninterruptibleFuture<'a, T> {
     receiver: &'a mut Receiver<T>,
     waiter_id: Option<u64>,
@@ -1253,6 +1257,10 @@ impl<T> Receiver<T> {
     /// to uphold structural guarantees, even if the caller's context is cancelled.
     #[must_use]
     #[inline]
+    // Exposed to native integration tests that assert uninterruptible-join
+    // semantics (no cancel-aware public equivalent) under the opt-in
+    // test-internals feature, not the stable public API. br-asupersync-ymj7j3.
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn recv_uninterruptible(&mut self) -> RecvUninterruptibleFuture<'_, T> {
         RecvUninterruptibleFuture {
             receiver: self,

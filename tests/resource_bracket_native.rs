@@ -113,7 +113,9 @@ fn exercise(multithread: bool, drop_handle: bool) {
                         }).await?;
                     }
                     assert_eq!(acknowledgement, *b"!");
-                    socket.shutdown().await?;
+                    // Async write-half shutdown (AsyncWriteExt); the inherent
+                    // TcpStream::shutdown(how) would shadow it. br-asupersync-ymj7j3.
+                    AsyncWriteExt::shutdown(&mut socket).await?;
                     Ok(())
                 }.await;
                 match result {
