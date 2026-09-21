@@ -1653,8 +1653,10 @@ impl AppendJournal {
         for generation in generations {
             let file_path = journal_file_path(&self.config.base_dir, generation);
 
-            if !file_path.exists() {
-                continue;
+            match file_path.try_exists() {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => return Outcome::Err(JournalError::ReadFailure(error.to_string())),
             }
 
             let (entries, corrupted) = match self.read_entries_from_file(&file_path) {
@@ -2008,7 +2010,11 @@ impl AppendJournal {
             .take_while(|generation| *generation <= self.generation)
         {
             let file_path = journal_file_path(&self.config.base_dir, generation_num);
-            if file_path.exists() {
+            let exists = match file_path.try_exists() {
+                Ok(exists) => exists,
+                Err(error) => return Outcome::Err(JournalError::ReadFailure(error.to_string())),
+            };
+            if exists {
                 let (entries, _corrupted) = match self.read_entries_from_file(&file_path) {
                     Outcome::Ok(res) => res,
                     Outcome::Err(e) => return Outcome::Err(e),
@@ -2339,6 +2345,49 @@ mod tests {
             Outcome::Err(JournalError::DirectoryRead(_))
         ));
         assert_eq!(std::fs::read(non_directory).unwrap(), b"preserve");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generation_metadata_errors_are_not_missing_history() {
+        let config = JournalConfig {
+            base_dir: unique_temp_dir("journal_metadata_error"),
+            ..Default::default()
+        };
+        let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+        journal
+            .append(JournalRecord::Accept {
+                transfer_id: "metadata-error".to_string(),
+                peer_id: "peer".to_string(),
+                timestamp: 1,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+        journal.flush().unwrap();
+        let original_path = journal_file_path(&config.base_dir, 0);
+        let original = std::fs::read(&original_path).unwrap();
+        let unreadable_path = journal_file_path(&config.base_dir, 1);
+        // A self-referential symlink produces a real metadata error even for
+        // privileged test runners, unlike a mode-bit permission fixture.
+        std::os::unix::fs::symlink(journal_file_name(1), &unreadable_path).unwrap();
+        assert!(unreadable_path.try_exists().is_err());
+        journal.generation = 1;
+        assert!(matches!(
+            journal.read_all_entries_from_disk(),
+            Outcome::Err(JournalError::ReadFailure(_))
+        ));
+        assert!(matches!(
+            AppendJournal::new(config.clone(), test_auth_key()),
+            Outcome::Err(JournalError::ReadFailure(_))
+        ));
+        assert_eq!(std::fs::read(original_path).unwrap(), original);
+        assert!(
+            std::fs::symlink_metadata(unreadable_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!journal_file_path(&config.base_dir, 2).exists());
     }
 
     #[test]
