@@ -33,6 +33,76 @@
 
 use serde_json::Value;
 
+/// Exercise shell dispatch only: callbacks record their arguments instead of
+/// running proof tools. These assertions are not evidence for any Rust lane.
+#[cfg(unix)]
+#[test]
+fn proof_runner_stops_at_failed_prerequisites_without_dropping_success_checks() {
+    let runner = include_str!("../scripts/run_proof_checks.sh");
+    let suite = runner
+        .split_once("run_suite() {\n")
+        .expect("suite entry point")
+        .1
+        .split_once("# ---- Generate manifest ----")
+        .expect("manifest remains outside the suite")
+        .0;
+    let expected = [
+        "Native parked-task cancellation boundary",
+        "Published v0.4.4 downstream cancellation compatibility",
+        "Certificate verification",
+        "Obligation formal checks",
+        "Lab oracle invariant checks",
+        "Cancellation protocol tests",
+        "Combinator algebraic laws",
+        "TLA+ export smoke test",
+        "Trace canonicalization",
+        "Lease semantics and liveness",
+        "Close quiescence regression",
+        "Refinement conformance",
+        "DPOR exploration",
+        "TLA+ bounded model check",
+        "Lean proof build",
+    ];
+    for (fail_at, lean_status, expected_count) in [(1, 0, 1), (2, 0, 2), (0, 1, 14), (0, 0, 15)] {
+        let script = format!(
+            r#"set -euo pipefail
+FAILED=0
+CALLS=0
+ARTIFACTS_DIR=dispatch-test-only
+RESULTS=()
+run_check() {{
+    CALLS=$((CALLS + 1))
+    printf 'DISPATCH:%s\n' "$1"
+    if (( CALLS == {fail_at} )); then FAILED=$((FAILED + 1)); fi
+}}
+run_check_optional() {{ run_check "$@"; }}
+# Keep the optional Lean branch independent of the test host's installation.
+command() {{ return {lean_status}; }}
+run_suite() {{
+{suite}
+printf 'FAILURES:%s\n' "$FAILED"
+"#
+        );
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("execute shell dispatch regression");
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+        let checks: Vec<_> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("DISPATCH:"))
+            .collect();
+        assert_eq!(checks, expected[..expected_count], "{stdout}");
+        assert!(stdout.contains(if fail_at == 0 {
+            "FAILURES:0"
+        } else {
+            "FAILURES:1"
+        }));
+    }
+}
+
 /// Validate a manifest JSON value against the expected schema.
 fn validate_manifest(manifest: &Value) -> Vec<String> {
     let mut errors = Vec::new();
