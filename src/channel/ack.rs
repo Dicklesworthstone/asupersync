@@ -3,7 +3,8 @@
 //! Unlike an ordinary MPSC receive, taking a [`Delivery`] does not release queue
 //! capacity or remove the item from the unfinished-work count. [`Delivery::ack`]
 //! commits consumption; [`Delivery::nack`] and Drop return the same owned value
-//! to the ready queue. Workers can be cloned and replaced without cloning `T`.
+//! to the ready queue unless an explicit per-item retry limit has been reached.
+//! Workers can be cloned and replaced without cloning `T`.
 //!
 //! Capacity includes ready items, send reservations AND outstanding deliveries.
 //! Redelivery therefore needs no new capacity and never waits for a producer.
@@ -30,6 +31,9 @@
 //! explicit ack publishes `Acknowledged`; rejection and receiver abandonment
 //! return the payload with a distinct terminal disposition. An unread receipt
 //! owns its result outside queue capacity. There is no internal result history.
+//! Opt-in [`RetryPolicy`] limits count only issued deliveries; exhausted work
+//! returns to its producer and frees capacity without claiming acknowledgement.
+//! Existing untracked sends and ordinary tracked sends retain unlimited retries.
 
 use crate::channel::oneshot;
 use crate::cx::{CancelWakerToken, Cx};
@@ -64,13 +68,13 @@ pub enum QueueError {
     /// Runtime obligation admission refused; physical ownership was rolled back.
     #[error("acknowledged work queue obligation refused: {0}")]
     Admission(#[from] ObligationAdmissionError),
-    /// Some unacknowledged work was destroyed after every receiver was dropped.
+    /// Some accepted work lost every receiver before it was acknowledged.
     #[error("acknowledged work was abandoned, not drained successfully")]
     Abandoned,
     /// No wrapped item identity is issued.
     #[error("acknowledged work queue item sequence exhausted")]
     SequenceExhausted,
-    /// At least one accepted item was explicitly returned to its producer.
+    /// At least one accepted item was rejected or exhausted its retry allowance.
     #[error("acknowledged work was rejected, not all work was acknowledged")]
     Rejected,
 }
@@ -103,7 +107,7 @@ pub struct QueueStats {
     pub in_flight: usize,
     /// No new producer reservations can be admitted.
     pub admission_closed: bool,
-    /// At least one queued or nacked item was destroyed after receiver abandonment.
+    /// At least one queued or nacked item lost every receiver before acknowledgement.
     pub abandoned: bool,
     /// At least one tracked item was negatively settled rather than acknowledged.
     pub rejected: bool,
@@ -121,6 +125,7 @@ struct Item<T> {
     attempts: u64,
     deliveries: u64,
     receipt: Option<oneshot::Sender<Settlement<T>>>,
+    retry: RetryPolicy,
 }
 struct State<T> {
     ready: VecDeque<Item<T>>,
@@ -363,11 +368,12 @@ impl<T> Receiver<T> {
             } else { return Err(QueueError::Empty); }
         };
         item.attempts = item.attempts.saturating_add(1);
-        let mut delivery = Delivery { shared: Arc::clone(&self.shared), item: Some(item), obligation: None };
+        let mut delivery = Delivery { shared: Arc::clone(&self.shared), item: Some(item), obligation: None, issued: false };
         delivery.obligation = cx.try_register_obligation_checked(ObligationKind::Ack, cx.task_id())?;
         if cx.checkpoint().is_err() { return Err(QueueError::Cancelled); }
         let item = delivery.item.as_mut().expect("admitted delivery");
         item.deliveries = item.deliveries.saturating_add(1);
+        delivery.issued = true;
         Ok(delivery)
     }
 
@@ -428,11 +434,11 @@ impl<T> SendPermit<T> {
     /// Commit without a cancellation checkpoint. Closing admission does not
     /// revoke this credit, but last-receiver abandonment returns the value.
     pub fn send(self, value: T) -> Result<(), SendError<T>> {
-        self.publish(value, None)
+        self.publish(value, None, RetryPolicy::unlimited())
     }
 
-    fn publish(mut self, value: T, receipt: Option<oneshot::Sender<Settlement<T>>>) -> Result<(), SendError<T>> {
-        let mut item = Some(Item { value, sequence: self.sequence, attempts: 0, deliveries: 0, receipt });
+    fn publish(mut self, value: T, receipt: Option<oneshot::Sender<Settlement<T>>>, retry: RetryPolicy) -> Result<(), SendError<T>> {
+        let mut item = Some(Item { value, sequence: self.sequence, attempts: 0, deliveries: 0, receipt, retry });
         {
             let mut state = self.shared.state.lock();
             state.reserved -= 1;
@@ -466,10 +472,17 @@ impl<T> Drop for SendPermit<T> {
 ///
 /// A delivery has no Clone or value-extraction method except acknowledgement.
 /// Nack/Drop returns the same (possibly mutated) value to the queue tail while
-/// another receiver survives. Resolve before the receiving task exits: moving
+/// another receiver survives and the opted-in retry allowance remains. Exhaustion
+/// returns the payload through its producer receipt. Resolve before task exit: moving
 /// a guard does not automatically transfer its runtime obligation holder.
 #[must_use = "acknowledge after processing; dropping redelivers unfinished work"]
-pub struct Delivery<T> { shared: Arc<Shared<T>>, item: Option<Item<T>>, obligation: Option<ObligationToken> }
+pub struct Delivery<T> {
+    shared: Arc<Shared<T>>,
+    item: Option<Item<T>>,
+    obligation: Option<ObligationToken>,
+    // Refused/cancelled Ack admission is rollback, not a worker attempt.
+    issued: bool,
+}
 impl<T> fmt::Debug for Delivery<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Delivery").field("sequence", &self.sequence()).field("attempts", &self.attempts()).finish_non_exhaustive()
@@ -497,6 +510,9 @@ impl<T> Delivery<T> {
     /// Saturates at u64::MAX independently of the physical attempt count.
     #[must_use]
     pub fn deliveries(&self) -> u64 { self.item.as_ref().expect("live delivery").deliveries }
+    /// The producer's immutable retry policy for this exact item.
+    #[must_use]
+    pub fn retry_policy(&self) -> RetryPolicy { self.item.as_ref().expect("live delivery").retry }
     /// Commit consumption, release capacity, and return the acknowledged value.
     /// A tracked producer receives metadata, not a duplicate of this value.
     /// No cancellation checkpoint can undo this explicit terminal transition.
@@ -533,7 +549,9 @@ impl<T> Delivery<T> {
         if let Some(token) = self.obligation.take() { let _ = token.abort(ObligationAbortReason::Explicit); }
         Ok(())
     }
-    /// Return the value to the ready tail without releasing its capacity credit.
+    /// Return the value to the ready tail while its delivery allowance remains.
+    /// At an opted-in limit, return it through the producer receipt instead.
+    /// A live delivery is never preempted or stolen by the retry policy.
     pub fn nack(self) { drop(self); }
 }
 impl<T> Deref for Delivery<T> {
@@ -546,22 +564,31 @@ impl<T> DerefMut for Delivery<T> {
 impl<T> Drop for Delivery<T> {
     fn drop(&mut self) {
         if let Some(item) = self.item.take() {
+            let exhausted = self.issued && item.retry.exhausted(item.deliveries);
             let mut abandoned = Some(item);
+            let mut returned = None;
             {
                 let mut state = self.shared.state.lock();
                 state.in_flight -= 1;
-                if state.receivers != 0 { state.ready.push_back(abandoned.take().expect("owned retry")); }
-                else { state.abandoned = true; }
+                if state.receivers == 0 { state.abandoned = true; }
+                else if exhausted {
+                    state.rejected = true;
+                    returned = abandoned.take();
+                } else { state.ready.push_back(abandoned.take().expect("owned retry")); }
             }
+            let reason = if returned.is_some() { ObligationAbortReason::Error } else { ObligationAbortReason::Cancel };
             let _wake = WakeAfter(&self.shared.changed);
-            let _publication = receipt::AbandonedItem(abandoned);
-            if let Some(token) = self.obligation.take() { let _ = token.abort(ObligationAbortReason::Cancel); }
+            // Own both terminal publications before arbitrary ledger callbacks.
+            // Returning a poison item frees physical capacity, not success.
+            let _abandoned = receipt::AbandonedItem(abandoned);
+            let _returned = returned.map(|item| receipt::Publication::returned(item, SettlementOutcome::RetryExhausted));
+            if let Some(token) = self.obligation.take() { let _ = token.abort(reason); }
         }
     }
 }
 
 mod receipt;
-pub use receipt::{Receipt, ReceiptError, Settlement, SettlementOutcome};
+pub use receipt::{Receipt, ReceiptError, RetryPolicy, Settlement, SettlementOutcome};
 
 #[cfg(test)]
 mod tests;
@@ -569,6 +596,10 @@ mod tests;
 #[cfg(test)]
 #[path = "ack/receipt_tests.rs"]
 mod receipt_tests;
+
+#[cfg(test)]
+#[path = "ack/retry_tests.rs"]
+mod retry_tests;
 
 #[cfg(test)]
 #[path = "ack/lifecycle_tests.rs"]

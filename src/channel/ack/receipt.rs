@@ -3,6 +3,7 @@
 use super::{Cx, Item, SendError, SendPermit, Sender};
 use crate::channel::oneshot;
 use std::fmt;
+use std::num::NonZeroU64;
 
 /// Actual disposition of one accepted item, not a claim about external effects.
 #[non_exhaustive]
@@ -13,6 +14,9 @@ pub enum SettlementOutcome<T> {
     Rejected(T),
     /// Every receiver disappeared before acknowledgement. The payload is returned.
     Abandoned(T),
+    /// The opted-in issued-delivery limit was reached without acknowledgement.
+    /// The producer regains the possibly mutated payload for explicit recovery.
+    RetryExhausted(T),
 }
 
 impl<T> fmt::Debug for SettlementOutcome<T> {
@@ -21,6 +25,7 @@ impl<T> fmt::Debug for SettlementOutcome<T> {
             Self::Acknowledged => "Acknowledged",
             Self::Rejected(_) => "Rejected(<redacted>)",
             Self::Abandoned(_) => "Abandoned(<redacted>)",
+            Self::RetryExhausted(_) => "RetryExhausted(<redacted>)",
         })
     }
 }
@@ -76,6 +81,7 @@ pub enum ReceiptError {
 pub struct Receipt<T> {
     sequence: u64,
     receiver: oneshot::Receiver<Settlement<T>>,
+    retry: RetryPolicy,
 }
 
 impl<T> fmt::Debug for Receipt<T> {
@@ -88,6 +94,10 @@ impl<T> Receipt<T> {
     /// Queue-local identity assigned by the original send reservation.
     #[must_use]
     pub const fn sequence(&self) -> u64 { self.sequence }
+
+    /// The immutable policy selected at publication, including the initial delivery.
+    #[must_use]
+    pub const fn retry_policy(&self) -> RetryPolicy { self.retry }
 
     /// Take a ready settlement without waiting. `None` means still unresolved.
     pub fn try_take(&mut self) -> Result<Option<Settlement<T>>, ReceiptError> {
@@ -114,12 +124,48 @@ impl<T> Receipt<T> {
     }
 }
 
+/// Per-item delivery allowance, separate from task restart intensity or timeouts.
+///
+/// A limit includes the first delivery. Only a guard actually returned to a
+/// worker spends an attempt; checked-admission refusal and cancellation before
+/// handoff do not. Expiry is checked on nack/Drop, never while a worker owns the
+/// item. Ordinary sends preserve their existing unlimited-redelivery behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    max_deliveries: Option<NonZeroU64>,
+}
+
+impl RetryPolicy {
+    /// Keep redelivering until a worker acknowledges or explicitly rejects the item.
+    #[must_use]
+    pub const fn unlimited() -> Self { Self { max_deliveries: None } }
+
+    /// Return the item after this many issued deliveries end without acknowledgement.
+    /// The nonzero type prevents a job from being refused before its first attempt.
+    #[must_use]
+    pub const fn limited(max_deliveries: NonZeroU64) -> Self { Self { max_deliveries: Some(max_deliveries) } }
+
+    /// Maximum issued deliveries, including the initial one; None means unlimited.
+    #[must_use]
+    pub const fn max_deliveries(self) -> Option<NonZeroU64> { self.max_deliveries }
+
+    pub(super) fn exhausted(self, deliveries: u64) -> bool {
+        self.max_deliveries.is_some_and(|limit| deliveries >= limit.get())
+    }
+}
+
 impl<T> Sender<T> {
     /// Publish without waiting and retain a separate receipt for actual settlement.
     /// A refused send returns the unpublished value, not a fabricated receipt.
     pub fn try_send_tracked(&self, cx: &Cx, value: T) -> Result<Receipt<T>, SendError<T>> {
+        self.try_send_tracked_with_policy(cx, value, RetryPolicy::unlimited())
+    }
+
+    /// Publish with an explicit delivery allowance and payload-return receipt.
+    /// A retry limit is not a deadline, backoff policy, or external-effect rollback.
+    pub fn try_send_tracked_with_policy(&self, cx: &Cx, value: T, retry: RetryPolicy) -> Result<Receipt<T>, SendError<T>> {
         match self.try_reserve(cx) {
-            Ok(permit) => permit.send_tracked(value),
+            Ok(permit) => permit.send_tracked_with_policy(value, retry),
             Err(error) => Err(SendError { error, value }),
         }
     }
@@ -128,8 +174,14 @@ impl<T> Sender<T> {
     /// Before publication this owning future has the same value-drop semantics as
     /// `Sender::send`; reserve first to keep that value outside the waiting future.
     pub async fn send_tracked(&self, cx: &Cx, value: T) -> Result<Receipt<T>, SendError<T>> {
+        self.send_tracked_with_policy(cx, value, RetryPolicy::unlimited()).await
+    }
+
+    /// Wait for capacity and publish with an explicit issued-delivery allowance.
+    /// Dropping before publication drops the caller-owned value, as with `send`.
+    pub async fn send_tracked_with_policy(&self, cx: &Cx, value: T, retry: RetryPolicy) -> Result<Receipt<T>, SendError<T>> {
         match self.reserve(cx).await {
-            Ok(permit) => permit.send_tracked(value),
+            Ok(permit) => permit.send_tracked_with_policy(value, retry),
             Err(error) => Err(SendError { error, value }),
         }
     }
@@ -139,10 +191,16 @@ impl<T> SendPermit<T> {
     /// Commit this reservation and return a receipt. No cancellation recheck is made.
     /// Pre-close credits remain valid. Each tracked item allocates one oneshot.
     pub fn send_tracked(self, value: T) -> Result<Receipt<T>, SendError<T>> {
+        self.send_tracked_with_policy(value, RetryPolicy::unlimited())
+    }
+
+    /// Commit a preissued credit with an explicit retry limit and recovery receipt.
+    /// Exhaustion is a negative settlement and cannot become successful drain.
+    pub fn send_tracked_with_policy(self, value: T, retry: RetryPolicy) -> Result<Receipt<T>, SendError<T>> {
         let sequence = self.sequence;
         let (sender, receiver) = oneshot::channel();
-        self.publish(value, Some(sender))?;
-        Ok(Receipt { sequence, receiver })
+        self.publish(value, Some(sender), retry)?;
+        Ok(Receipt { sequence, receiver, retry })
     }
 }
 
