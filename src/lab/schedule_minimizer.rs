@@ -25,6 +25,9 @@ use super::runtime::{
 };
 use sha2::{Digest, Sha256};
 
+/// Portable minimized schedules and fail-closed downstream replay.
+pub mod reproducer;
+
 /// Stable caller-defined failure identity, normally a domain-separated digest.
 ///
 /// Use the violated invariant/application error, not the whole trace hash or
