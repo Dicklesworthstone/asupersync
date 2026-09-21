@@ -230,7 +230,7 @@ fn exhausted_sequence_refuses_without_leaking_a_slot() {
 
 #[test]
 fn multi_producer_multi_worker_redelivery_never_duplicates_acknowledgement() {
-    let (tx, rx) = channel(3);
+    let (tx, rx) = channel::<i32>(3);
     let acknowledged = Arc::new(Mutex::new(Vec::new()));
     let mut workers = Vec::new();
     for _ in 0..4 {
