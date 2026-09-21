@@ -2294,6 +2294,56 @@ mod tests {
     }
 
     #[test]
+    fn native_recovery_io_refusal_preserves_bitmap_before_quarantine() {
+        use crate::atp::journal::{ChunkBitmap, RecoveryError, recover_journal_and_bitmap};
+        use crate::runtime::RuntimeBuilder;
+
+        for unreadable_generation in [false, true] {
+            let base = unique_temp_dir("native_journal_recovery_io");
+            let journal_dir = base.join("journal");
+            let bitmap_dir = base.join("bitmaps");
+            std::fs::create_dir_all(&journal_dir).unwrap();
+            std::fs::create_dir_all(&bitmap_dir).unwrap();
+            let journal_path = journal_file_path(&journal_dir, 0);
+            if unreadable_generation {
+                std::fs::create_dir(&journal_path).unwrap();
+            }
+            let bitmap_path = bitmap_dir.join("transfer_existing.bitmap");
+            let bytes = ChunkBitmap::new("existing".to_string(), 1024, 512, 1)
+                .serialize_to_bytes();
+            std::fs::write(&bitmap_path, &bytes).unwrap();
+            let runtime = RuntimeBuilder::current_thread()
+                .blocking_threads(1, 1)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let cx = crate::Cx::current().expect("native root context");
+                let result = recover_journal_and_bitmap(
+                    &cx,
+                    &journal_path,
+                    &bitmap_dir,
+                    &test_auth_key(),
+                )
+                .await;
+                let quarantine_path = bitmap_path.with_extension("bitmap.stale");
+                if unreadable_generation {
+                    assert!(matches!(result, Err(RecoveryError::JournalCorrupted(_))));
+                    assert_eq!(std::fs::read(&bitmap_path).unwrap(), bytes);
+                    assert!(!quarantine_path.exists());
+                    assert!(journal_path.is_dir());
+                } else {
+                    let (_, bitmaps) = result.expect("empty journal is valid recovery");
+                    assert!(bitmaps.is_empty());
+                    assert!(!bitmap_path.exists());
+                    assert_eq!(std::fs::read(quarantine_path).unwrap(), bytes);
+                }
+            });
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(3)));
+        }
+    }
+
+    #[test]
     fn torn_length_prefix_rotates_and_preserves_later_appends_across_restarts() {
         for prefix_len in 0..4 {
             let config = JournalConfig {
