@@ -445,3 +445,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+/// Bounded heterogeneous resources with typed access and asynchronous LIFO release.
+pub mod stack;
