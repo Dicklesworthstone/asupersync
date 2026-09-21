@@ -51,7 +51,7 @@ impl SparseRange {
 
     /// Check if this range overlaps with another range
     pub fn overlaps(&self, other: &SparseRange) -> bool {
-        self.start < other.end && self.end > other.start
+        !self.is_empty() && !other.is_empty() && self.start < other.end && self.end > other.start
     }
 
     /// Check if this range is adjacent to another range
@@ -255,11 +255,8 @@ impl RangeTracker {
             return true;
         }
 
-        // Should have exactly one range from 0 to size
-        if self.ranges.len() != 1 {
-            return false;
-        }
-
+        // Stored ranges are coalesced. Later disjoint ranges do not affect
+        // completeness of a prefix covered by the first range.
         if let Some(first_range) = self.ranges.values().next() {
             first_range.start == 0 && first_range.end >= size
         } else {
@@ -288,6 +285,9 @@ impl RangeTracker {
         let mut current_offset = 0;
 
         for range in self.ranges.values() {
+            if current_offset >= total_size || range.start >= total_size {
+                break;
+            }
             if range.start > current_offset {
                 // Gap found
                 gaps.push(SparseRange::new(current_offset, range.start));
@@ -724,5 +724,76 @@ mod tests {
 
         let no_intersection = range1.intersection(&range3);
         assert!(no_intersection.is_none());
+    }
+
+    #[test]
+    fn empty_range_removal_preserves_contiguous_coverage() {
+        let whole = SparseRange::new(0, 10);
+        let mut tracker = RangeTracker::new();
+        tracker.add_range(whole);
+        for empty in [
+            SparseRange::new(0, 0),
+            SparseRange::new(5, 5),
+            SparseRange::new(10, 10),
+            SparseRange { start: 7, end: 3 },
+        ] {
+            assert!(!whole.overlaps(&empty));
+            assert!(!empty.overlaps(&whole));
+            assert!(!tracker.overlaps(&empty));
+            assert!(!tracker.remove_range(&empty));
+            assert_eq!(tracker.get_ranges(), vec![whole]);
+            assert_eq!(tracker.total_bytes(), 10);
+            assert!(tracker.is_contiguous_to(10));
+        }
+        assert!(!ChunkRange::new(5, 0).overlaps(&ChunkRange::new(0, 10)));
+        assert!(tracker.remove_range(&SparseRange::new(4, 6)));
+        assert_eq!(tracker.total_bytes(), 8);
+        assert_eq!(tracker.find_gaps(10), vec![SparseRange::new(4, 6)]);
+        assert!(!tracker.is_contiguous_to(10));
+    }
+
+    #[test]
+    fn prefix_queries_ignore_later_ranges_at_u64_boundary() {
+        let mut tracker = RangeTracker::new();
+        tracker.add_range(SparseRange::new(0, 10));
+        tracker.add_range(SparseRange::new(u64::MAX - 1, u64::MAX));
+        assert!(tracker.is_contiguous_to(10));
+        assert!(!tracker.is_contiguous_to(11));
+        assert!(tracker.find_gaps(0).is_empty());
+        assert!(tracker.find_gaps(10).is_empty());
+        assert_eq!(tracker.find_gaps(11), vec![SparseRange::new(10, 11)]);
+        assert_eq!(
+            tracker.find_gaps(u64::MAX),
+            vec![SparseRange::new(10, u64::MAX - 1)]
+        );
+    }
+
+    #[test]
+    fn bounded_range_queries_match_byte_set_oracle() {
+        for mask in 0_u16..256 {
+            let mut tracker = RangeTracker::new();
+            for offset in (0..8).rev() {
+                if mask & (1 << offset) != 0 {
+                    tracker.add_range(SparseRange::new(offset, offset + 1));
+                }
+            }
+            for size in 0..=10 {
+                let missing: Vec<u64> = (0..size)
+                    .filter(|offset| *offset >= 8 || mask & (1 << offset) == 0)
+                    .collect();
+                let gaps = tracker.find_gaps(size);
+                assert!(
+                    gaps.iter()
+                        .all(|gap| gap.start < gap.end && gap.end <= size)
+                );
+                let reported: Vec<u64> = gaps.iter().flat_map(|gap| gap.start..gap.end).collect();
+                assert_eq!(reported, missing, "mask={mask} size={size}");
+                assert_eq!(
+                    tracker.is_contiguous_to(size),
+                    missing.is_empty(),
+                    "mask={mask} size={size}"
+                );
+            }
+        }
     }
 }
