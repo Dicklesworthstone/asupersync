@@ -1,7 +1,4 @@
-import {
-  createNextServerBridgeAdapter,
-  detectNextRuntimeSupport,
-} from "@asupersync/next";
+import { createNextServerBridgeAdapter, detectNextRuntimeSupport } from "@asupersync/next";
 
 import ClientRuntimePanel from "./client-runtime-panel";
 
@@ -29,10 +26,8 @@ export default function HomePage() {
   );
   const serverResponse = serverBridge.ok({
     directRuntime: false,
-    message:
-      "Server components stay bridge-only and exchange only serializable data.",
-    nextStep:
-      "Create Browser Edition runtime handles from app/client-runtime-panel.jsx instead.",
+    message: "Server components stay bridge-only and exchange only serializable data.",
+    nextStep: "Create Browser Edition runtime handles from app/client-runtime-panel.jsx instead.",
   });
   const edgeDiagnostics = detectNextRuntimeSupport("edge");
 
@@ -63,10 +58,9 @@ export default function HomePage() {
           Next.js maintained example with explicit client and bridge boundaries
         </h1>
         <p style={{ maxWidth: "70ch", color: "#3d444d" }}>
-          This page is a server component. It does not create a Browser Edition
-          runtime directly. Instead, it renders bridge-only diagnostics for
-          server and edge boundaries and delegates direct runtime ownership to a
-          client component.
+          This page is a server component. It does not create a Browser Edition runtime directly.
+          Instead, it renders bridge-only diagnostics for server and edge boundaries and delegates
+          direct runtime ownership to a client component.
         </p>
       </header>
 
@@ -89,8 +83,7 @@ export default function HomePage() {
           <h2 style={{ marginTop: 0 }}>Client direct-runtime lane</h2>
           <p>
             The panel below lives in a client component and uses{" "}
-            <code>createNextBootstrapAdapter(...)</code> to run the hydrated
-            browser path.
+            <code>createNextBootstrapAdapter(...)</code> to run the hydrated browser path.
           </p>
         </article>
 
@@ -104,9 +97,8 @@ export default function HomePage() {
         >
           <h2 style={{ marginTop: 0 }}>Server bridge-only lane</h2>
           <p>
-            Server components stay serialized. This example creates a bridge
-            adapter and sample request/response payload instead of touching the
-            browser runtime directly.
+            Server components stay serialized. This example creates a bridge adapter and sample
+            request/response payload instead of touching the browser runtime directly.
           </p>
         </article>
 
@@ -120,8 +112,8 @@ export default function HomePage() {
         >
           <h2 style={{ marginTop: 0 }}>Edge bridge-only lane</h2>
           <p>
-            Edge paths surface diagnostics explicitly. Direct Browser Edition
-            execution stays disabled there.
+            Edge paths surface diagnostics explicitly. Direct Browser Edition execution stays
+            disabled there.
           </p>
         </article>
       </section>

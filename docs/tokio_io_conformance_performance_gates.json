@@ -222,11 +222,31 @@
     "Gate-C": "Performance regression and throughput budgets"
   },
   "drift_detection": [
-    {"id": "DRIFT-IO-01", "trigger": "New I/O operator added to src/io/", "action": "Add conformance contract row EC-T2-IO-* and update test suite"},
-    {"id": "DRIFT-IO-02", "trigger": "New codec added to src/codec/", "action": "Add codec contract row and round-trip test"},
-    {"id": "DRIFT-IO-03", "trigger": "Performance baseline aged >30 days", "action": "Re-run baseline sourcing from DS-T2 suite"},
-    {"id": "DRIFT-IO-04", "trigger": "Budget threshold change requested", "action": "Document rationale in alarm_rules and update PB-IO-* row"},
-    {"id": "DRIFT-IO-05", "trigger": "Cancellation model changes for any I/O operator", "action": "Re-run EC-T2-IO-09 and update T2.5 proofs"}
+    {
+      "id": "DRIFT-IO-01",
+      "trigger": "New I/O operator added to src/io/",
+      "action": "Add conformance contract row EC-T2-IO-* and update test suite"
+    },
+    {
+      "id": "DRIFT-IO-02",
+      "trigger": "New codec added to src/codec/",
+      "action": "Add codec contract row and round-trip test"
+    },
+    {
+      "id": "DRIFT-IO-03",
+      "trigger": "Performance baseline aged >30 days",
+      "action": "Re-run baseline sourcing from DS-T2 suite"
+    },
+    {
+      "id": "DRIFT-IO-04",
+      "trigger": "Budget threshold change requested",
+      "action": "Document rationale in alarm_rules and update PB-IO-* row"
+    },
+    {
+      "id": "DRIFT-IO-05",
+      "trigger": "Cancellation model changes for any I/O operator",
+      "action": "Re-run EC-T2-IO-09 and update T2.5 proofs"
+    }
   ],
   "summary": {
     "total_conformance_contracts": 10,

@@ -12,11 +12,7 @@ function collectJsFiles(dir) {
       files.push(...collectJsFiles(resolved));
       continue;
     }
-    if (
-      resolved.endsWith(".js")
-      || resolved.endsWith(".mjs")
-      || resolved.endsWith(".ts")
-    ) {
+    if (resolved.endsWith(".js") || resolved.endsWith(".mjs") || resolved.endsWith(".ts")) {
       files.push(resolved);
     }
   }
@@ -55,22 +51,12 @@ for (const assetPath of jsAssets) {
   const content = fs.readFileSync(assetPath, "utf8");
   sawBaselineMarker ||= content.includes("shared-worker-selection-baseline");
   sawReuseMarker ||= content.includes("shared-worker-selection-reuse");
-  sawProtocolMismatchMarker ||= content.includes(
-    "shared-worker-selection-protocol-mismatch",
-  );
-  sawCrashFallbackMarker ||= content.includes(
-    "shared-worker-selection-crash-fallback",
-  );
-  sawClientChurnMarker ||= content.includes(
-    "shared-worker-selection-client-churn",
-  );
-  sawCrashRecoveryMarker ||= content.includes(
-    "shared-worker-selection-crash-recovery",
-  );
+  sawProtocolMismatchMarker ||= content.includes("shared-worker-selection-protocol-mismatch");
+  sawCrashFallbackMarker ||= content.includes("shared-worker-selection-crash-fallback");
+  sawClientChurnMarker ||= content.includes("shared-worker-selection-client-churn");
+  sawCrashRecoveryMarker ||= content.includes("shared-worker-selection-crash-recovery");
   sawAttachMarker ||= content.includes("shared-worker-coordinator-attach");
-  sawTopologyMarker ||= content.includes(
-    "shared-worker-coordinator-topology-snapshot",
-  );
+  sawTopologyMarker ||= content.includes("shared-worker-coordinator-topology-snapshot");
   sawCoordinatorProtocolMismatchMarker ||= content.includes(
     "shared-worker-coordinator-protocol-mismatch",
   );
@@ -89,27 +75,19 @@ if (!sawReuseMarker) {
 }
 
 if (!sawProtocolMismatchMarker) {
-  throw new Error(
-    "Built bundle must retain the shared-worker-selection-protocol-mismatch marker",
-  );
+  throw new Error("Built bundle must retain the shared-worker-selection-protocol-mismatch marker");
 }
 
 if (!sawCrashFallbackMarker) {
-  throw new Error(
-    "Built bundle must retain the shared-worker-selection-crash-fallback marker",
-  );
+  throw new Error("Built bundle must retain the shared-worker-selection-crash-fallback marker");
 }
 
 if (!sawClientChurnMarker) {
-  throw new Error(
-    "Built bundle must retain the shared-worker-selection-client-churn marker",
-  );
+  throw new Error("Built bundle must retain the shared-worker-selection-client-churn marker");
 }
 
 if (!sawCrashRecoveryMarker) {
-  throw new Error(
-    "Built bundle must retain the shared-worker-selection-crash-recovery marker",
-  );
+  throw new Error("Built bundle must retain the shared-worker-selection-crash-recovery marker");
 }
 
 if (!sawAttachMarker) {
@@ -135,9 +113,7 @@ if (!sawCoordinatorCrashMarker) {
 }
 
 if (!sawCoordinatorDetachMarker) {
-  throw new Error(
-    "Built bundle must retain the shared-worker-coordinator-detach marker",
-  );
+  throw new Error("Built bundle must retain the shared-worker-coordinator-detach marker");
 }
 
 console.log(

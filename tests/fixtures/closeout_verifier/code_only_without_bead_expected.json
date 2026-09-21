@@ -47,9 +47,7 @@
     {
       "evidence": {
         "expected_commit": "112233abc",
-        "matched_message_ids": [
-          1004
-        ],
+        "matched_message_ids": [1004],
         "thread_id": "code-only-closeout"
       },
       "row_id": "closeout_mail",

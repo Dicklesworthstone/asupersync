@@ -6,6 +6,7 @@ import {
   BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED_CODE,
   BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE,
   BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE,
+  type BrowserRuntime,
   createBrowserArtifactStore,
   createBrowserRuntimeSelection,
   createBrowserScopeSelection,
@@ -16,7 +17,6 @@ import {
   formatOutcomeFailure,
   reportBrowserLaneUnhealthy,
   resetBrowserLaneHealth,
-  type BrowserRuntime,
 } from "@asupersync/browser";
 
 declare const self: DedicatedWorkerGlobalScope;
@@ -64,9 +64,7 @@ const WORKER_ARTIFACT_CLEANUP_MARKER = "worker-artifact-cleanup";
 let runtimeHandle: BrowserRuntime | null = null;
 let scopeHandle: { close: () => void } | null = null;
 
-function summarizeOutcome(
-  outcome: RuntimeSelection["outcome"] | ScopeSelection["outcome"],
-): {
+function summarizeOutcome(outcome: RuntimeSelection["outcome"] | ScopeSelection["outcome"]): {
   outcome: string | null;
   failureCode: string | null;
   failureMessage: string | null;
@@ -187,9 +185,7 @@ function errorReason(error: unknown): string | null {
   return typeof diagnostics?.reason === "string" ? diagnostics.reason : null;
 }
 
-async function rejectsWithTypeError(
-  operation: () => Promise<unknown>,
-): Promise<boolean> {
+async function rejectsWithTypeError(operation: () => Promise<unknown>): Promise<boolean> {
   try {
     await operation();
     return false;
@@ -208,12 +204,10 @@ function awaitFixtureIndexedDbRequest<T>(request: IDBRequest<T>): Promise<T> {
 function awaitFixtureIndexedDbTransaction(transaction: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(
-      transaction.error ?? new Error("fixture IndexedDB transaction failed"),
-    );
-    transaction.onabort = () => reject(
-      transaction.error ?? new Error("fixture IndexedDB transaction aborted"),
-    );
+    transaction.onerror = () =>
+      reject(transaction.error ?? new Error("fixture IndexedDB transaction failed"));
+    transaction.onabort = () =>
+      reject(transaction.error ?? new Error("fixture IndexedDB transaction aborted"));
   });
 }
 
@@ -239,9 +233,7 @@ async function fixtureIndexedDbKeys(): Promise<string[]> {
   });
 }
 
-async function fixtureIndexedDbKeyAddedBy(
-  operation: () => Promise<void>,
-): Promise<string> {
+async function fixtureIndexedDbKeyAddedBy(operation: () => Promise<void>): Promise<string> {
   const keysBefore = await fixtureIndexedDbKeys();
   await operation();
   const keysAfter = await fixtureIndexedDbKeys();
@@ -282,12 +274,9 @@ function deleteFixtureIndexedDbDatabase(dbName: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const request = self.indexedDB.deleteDatabase(dbName);
     request.onsuccess = () => resolve();
-    request.onerror = () => reject(
-      request.error ?? new Error("fixture IndexedDB deletion failed"),
-    );
-    request.onblocked = () => reject(
-      new Error("fixture IndexedDB deletion was blocked by an orphan connection"),
-    );
+    request.onerror = () => reject(request.error ?? new Error("fixture IndexedDB deletion failed"));
+    request.onblocked = () =>
+      reject(new Error("fixture IndexedDB deletion was blocked by an orphan connection"));
   });
 }
 
@@ -301,9 +290,7 @@ function openFixtureIndexedDbDatabase(
     const request = self.indexedDB.open(dbName, version);
     request.onupgradeneeded = () => onUpgrade(request.result);
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(
-      request.error ?? new Error("fixture IndexedDB open failed"),
-    );
+    request.onerror = () => reject(request.error ?? new Error("fixture IndexedDB open failed"));
     request.onblocked = onBlocked;
   });
 }
@@ -324,15 +311,13 @@ async function exerciseIndexedDbBlockedUpgrade(
     );
 
     let blockedCount = 0;
-    let blockedProgress:
-      | {
-        backend: string;
-        dbName: string;
-        reason: string;
-        storeName: string;
-        version: number;
-      }
-      | null = null;
+    let blockedProgress: {
+      backend: string;
+      dbName: string;
+      reason: string;
+      storeName: string;
+      version: number;
+    } | null = null;
     let releaseBlocked = (): void => {};
     const blockedObserved = new Promise<void>((resolve) => {
       releaseBlocked = resolve;
@@ -387,9 +372,9 @@ async function exerciseIndexedDbBlockedUpgrade(
         postSuccessBlockedCount += 1;
       },
     );
-    const upgradedStoresPresent = versionThree.objectStoreNames.contains(
-      WORKER_BLOCKED_UPGRADE_STORE_V2,
-    ) && versionThree.objectStoreNames.contains(WORKER_BLOCKED_UPGRADE_STORE_V3);
+    const upgradedStoresPresent =
+      versionThree.objectStoreNames.contains(WORKER_BLOCKED_UPGRADE_STORE_V2) &&
+      versionThree.objectStoreNames.contains(WORKER_BLOCKED_UPGRADE_STORE_V3);
     versionThree.close();
     versionThree = null;
 
@@ -427,18 +412,11 @@ async function exerciseFetchAuthority(
   Object.defineProperty(self, "fetch", {
     configurable: true,
     writable: true,
-    value: (
-      input: RequestInfo | URL,
-      init?: RequestInit,
-    ): Promise<Response> => {
+    value: (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       hostCalls.push({
         credentials: init?.credentials,
         method: init?.method,
-        url: typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : input.url,
+        url: typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
       });
       return Promise.resolve(new Response(null, { status: 204 }));
     },
@@ -499,19 +477,14 @@ async function exerciseFetchAuthority(
 
     return {
       allowedOutcome: allowed.outcome,
-      credentialsDeniedCode: credentialsDenied.outcome === "err"
-        ? credentialsDenied.failure.code
-        : null,
-      defaultDeniedCode: defaultDenied.outcome === "err"
-        ? defaultDenied.failure.code
-        : null,
+      credentialsDeniedCode:
+        credentialsDenied.outcome === "err" ? credentialsDenied.failure.code : null,
+      defaultDeniedCode: defaultDenied.outcome === "err" ? defaultDenied.failure.code : null,
       hostCall: hostCalls[0] ?? null,
       hostCallsAfterDefaultDeny,
       hostCallsAfterPolicyDenials,
       hostFetchCount: hostCalls.length,
-      unlistedDeniedCode: unlistedDenied.outcome === "err"
-        ? unlistedDenied.failure.code
-        : null,
+      unlistedDeniedCode: unlistedDenied.outcome === "err" ? unlistedDenied.failure.code : null,
     };
   } finally {
     if (defaultScope?.outcome === "ok") {
@@ -531,11 +504,13 @@ async function exerciseFetchAuthority(
 }
 
 function hasExactCompactBytes(value: unknown, expected: readonly number[]): boolean {
-  return value instanceof Uint8Array
-    && value.byteOffset === 0
-    && value.buffer.byteLength === value.byteLength
-    && value.byteLength === expected.length
-    && expected.every((byte, index) => value[index] === byte);
+  return (
+    value instanceof Uint8Array &&
+    value.byteOffset === 0 &&
+    value.buffer.byteLength === value.byteLength &&
+    value.byteLength === expected.length &&
+    expected.every((byte, index) => value[index] === byte)
+  );
 }
 
 async function withShadowedGlobalProperty<T>(
@@ -651,9 +626,7 @@ async function bootstrap(): Promise<void> {
     healthScopeKey: WORKER_LANE_HEALTH_SCOPE_KEY,
     healthPolicy: laneHealthPolicy,
   });
-  const fetchAuthorityExercise = await exerciseFetchAuthority(
-    workerGlobalObject,
-  );
+  const fetchAuthorityExercise = await exerciseFetchAuthority(workerGlobalObject);
 
   closeRuntimeSelection(runtimeSelectionBaseline);
   closeScopeSelection(scopeSelectionPreferredMainThread);
@@ -666,9 +639,7 @@ async function bootstrap(): Promise<void> {
   let storageExercise: Record<string, unknown> | null = null;
   let artifactExercise: Record<string, unknown> | null = null;
   if (storageSupport.supported) {
-    const blockedUpgradeExercise = await exerciseIndexedDbBlockedUpgrade(
-      workerGlobalObject,
-    );
+    const blockedUpgradeExercise = await exerciseIndexedDbBlockedUpgrade(workerGlobalObject);
     const storage = createBrowserStorage({
       backend: "indexeddb",
       dbName: WORKER_STORAGE_DB_NAME,
@@ -734,24 +705,25 @@ async function bootstrap(): Promise<void> {
     const illFormedNamespaceRejectedBeforeIo = await rejectsWithTypeError(() =>
       noIoStorage.clearNamespace(noIoIllFormedNamespace),
     );
-    const illFormedArtifactPersistRejectedBeforeIo = await rejectsWithTypeError(
-      () => noIoArtifactStore.persistEvidenceArtifact(new Uint8Array([0x02]), {
+    const illFormedArtifactPersistRejectedBeforeIo = await rejectsWithTypeError(() =>
+      noIoArtifactStore.persistEvidenceArtifact(new Uint8Array([0x02]), {
         id: noIoIllFormedArtifactId,
         format: "binary",
       }),
     );
-    const illFormedArtifactExportRejectedBeforeIo = await rejectsWithTypeError(
-      () => noIoArtifactStore.exportArtifact(noIoIllFormedArtifactId),
+    const illFormedArtifactExportRejectedBeforeIo = await rejectsWithTypeError(() =>
+      noIoArtifactStore.exportArtifact(noIoIllFormedArtifactId),
     );
-    const illFormedArtifactDeleteRejectedBeforeIo = await rejectsWithTypeError(
-      () => noIoArtifactStore.deleteArtifact(noIoIllFormedArtifactId),
+    const illFormedArtifactDeleteRejectedBeforeIo = await rejectsWithTypeError(() =>
+      noIoArtifactStore.deleteArtifact(noIoIllFormedArtifactId),
     );
-    const illFormedValidationBeforeIndexedDbAccess = illFormedKeyRejectedBeforeIo
-      && illFormedNamespaceRejectedBeforeIo
-      && illFormedArtifactPersistRejectedBeforeIo
-      && illFormedArtifactExportRejectedBeforeIo
-      && illFormedArtifactDeleteRejectedBeforeIo
-      && indexedDbAccessesDuringIllFormedValidation === 0;
+    const illFormedValidationBeforeIndexedDbAccess =
+      illFormedKeyRejectedBeforeIo &&
+      illFormedNamespaceRejectedBeforeIo &&
+      illFormedArtifactPersistRejectedBeforeIo &&
+      illFormedArtifactExportRejectedBeforeIo &&
+      illFormedArtifactDeleteRejectedBeforeIo &&
+      indexedDbAccessesDuringIllFormedValidation === 0;
     if (!illFormedValidationBeforeIndexedDbAccess) {
       throw new Error(
         `expected ill-formed storage input to reject before IndexedDB access, observed ${indexedDbAccessesDuringIllFormedValidation} accesses`,
@@ -764,27 +736,23 @@ async function bootstrap(): Promise<void> {
 
     const rawKeysBeforeIllFormedArtifactId = await fixtureIndexedDbKeys();
     const illFormedArtifactId = `artifact-${String.fromCharCode(0xd801)}`;
-    const illFormedArtifactPersistRejected = await rejectsWithTypeError(
-      () => artifactStore.persistEvidenceArtifact(new Uint8Array([0xa6]), {
+    const illFormedArtifactPersistRejected = await rejectsWithTypeError(() =>
+      artifactStore.persistEvidenceArtifact(new Uint8Array([0xa6]), {
         id: illFormedArtifactId,
         format: "binary",
       }),
     );
-    const illFormedArtifactExportRejected = await rejectsWithTypeError(
-      () => artifactStore.exportArtifact(illFormedArtifactId),
+    const illFormedArtifactExportRejected = await rejectsWithTypeError(() =>
+      artifactStore.exportArtifact(illFormedArtifactId),
     );
-    const illFormedArtifactDeleteRejected = await rejectsWithTypeError(
-      () => artifactStore.deleteArtifact(illFormedArtifactId),
+    const illFormedArtifactDeleteRejected = await rejectsWithTypeError(() =>
+      artifactStore.deleteArtifact(illFormedArtifactId),
     );
     const rawKeysAfterIllFormedArtifactId = await fixtureIndexedDbKeys();
-    const rawKeysAfterIllFormedArtifactIdSet = new Set(
-      rawKeysAfterIllFormedArtifactId,
-    );
-    const illFormedArtifactIdRawKeysUnchanged = rawKeysBeforeIllFormedArtifactId.length
-      === rawKeysAfterIllFormedArtifactId.length
-      && rawKeysBeforeIllFormedArtifactId.every(
-        (key) => rawKeysAfterIllFormedArtifactIdSet.has(key),
-      );
+    const rawKeysAfterIllFormedArtifactIdSet = new Set(rawKeysAfterIllFormedArtifactId);
+    const illFormedArtifactIdRawKeysUnchanged =
+      rawKeysBeforeIllFormedArtifactId.length === rawKeysAfterIllFormedArtifactId.length &&
+      rawKeysBeforeIllFormedArtifactId.every((key) => rawKeysAfterIllFormedArtifactIdSet.has(key));
     const literalReplacementArtifactId = "artifact-\ufffd";
     const literalReplacementArtifact = await artifactStore.persistEvidenceArtifact(
       new Uint8Array([0xa7]),
@@ -799,15 +767,15 @@ async function bootstrap(): Promise<void> {
     const literalReplacementArtifactDeleted = await artifactStore.deleteArtifact(
       literalReplacementArtifactId,
     );
-    const literalReplacementArtifactAccepted = literalReplacementArtifact.artifact.id
-      === literalReplacementArtifactId
-      && hasExactCompactBytes(literalReplacementArtifactExport.bytes, [0xa7])
-      && literalReplacementArtifactDeleted;
+    const literalReplacementArtifactAccepted =
+      literalReplacementArtifact.artifact.id === literalReplacementArtifactId &&
+      hasExactCompactBytes(literalReplacementArtifactExport.bytes, [0xa7]) &&
+      literalReplacementArtifactDeleted;
     if (
-      !illFormedArtifactPersistRejected
-      || !illFormedArtifactExportRejected
-      || !illFormedArtifactDeleteRejected
-      || !illFormedArtifactIdRawKeysUnchanged
+      !illFormedArtifactPersistRejected ||
+      !illFormedArtifactExportRejected ||
+      !illFormedArtifactDeleteRejected ||
+      !illFormedArtifactIdRawKeysUnchanged
     ) {
       throw new Error("expected ill-formed UTF-16 artifact ids to fail before storage I/O");
     }
@@ -832,11 +800,7 @@ async function bootstrap(): Promise<void> {
     const replacementNamespace = `${WORKER_STORAGE_NAMESPACE}_unicode_\ufffd`;
     const replacementKey = "sentinel-\ufffd";
     await storage.clearNamespace(replacementNamespace);
-    await storage.set(
-      replacementNamespace,
-      replacementKey,
-      new Uint8Array([0xa5]),
-    );
+    await storage.set(replacementNamespace, replacementKey, new Uint8Array([0xa5]));
     const rawKeysBeforeIllFormedInput = await fixtureIndexedDbKeys();
     const illFormedKeyRejected = await rejectsWithTypeError(() =>
       storage.set(
@@ -846,38 +810,20 @@ async function bootstrap(): Promise<void> {
       ),
     );
     const illFormedNamespaceRejected = await rejectsWithTypeError(() =>
-      storage.clearNamespace(
-        `${WORKER_STORAGE_NAMESPACE}_unicode_${String.fromCharCode(0xdc00)}`,
-      ),
+      storage.clearNamespace(`${WORKER_STORAGE_NAMESPACE}_unicode_${String.fromCharCode(0xdc00)}`),
     );
     const rawKeysAfterIllFormedInput = await fixtureIndexedDbKeys();
-    const illFormedInputRawCountUnchanged = rawKeysAfterIllFormedInput.length
-      === rawKeysBeforeIllFormedInput.length;
-    const literalReplacementValue = await storage.get(
-      replacementNamespace,
-      replacementKey,
-    );
-    const literalReplacementPreserved = hasExactCompactBytes(
-      literalReplacementValue,
-      [0xa5],
-    );
+    const illFormedInputRawCountUnchanged =
+      rawKeysAfterIllFormedInput.length === rawKeysBeforeIllFormedInput.length;
+    const literalReplacementValue = await storage.get(replacementNamespace, replacementKey);
+    const literalReplacementPreserved = hasExactCompactBytes(literalReplacementValue, [0xa5]);
     const validSurrogatePairKey = "emoji-\ud83d\ude00";
-    await storage.set(
-      replacementNamespace,
-      validSurrogatePairKey,
-      new Uint8Array([0xf1]),
-    );
-    const validSurrogatePairValue = await storage.get(
-      replacementNamespace,
+    await storage.set(replacementNamespace, validSurrogatePairKey, new Uint8Array([0xf1]));
+    const validSurrogatePairValue = await storage.get(replacementNamespace, validSurrogatePairKey);
+    const validSurrogatePairRoundtrip = hasExactCompactBytes(validSurrogatePairValue, [0xf1]);
+    const validSurrogatePairListed = (await storage.listKeys(replacementNamespace)).includes(
       validSurrogatePairKey,
     );
-    const validSurrogatePairRoundtrip = hasExactCompactBytes(
-      validSurrogatePairValue,
-      [0xf1],
-    );
-    const validSurrogatePairListed = (
-      await storage.listKeys(replacementNamespace)
-    ).includes(validSurrogatePairKey);
     await storage.clearNamespace(replacementNamespace);
     if (!illFormedKeyRejected || !illFormedNamespaceRejected) {
       throw new Error("expected ill-formed UTF-16 storage input to reject with TypeError");
@@ -904,9 +850,8 @@ async function bootstrap(): Promise<void> {
     );
     const rawSubviewValue = await readFixtureIndexedDbValue(rawSubviewKey);
     const subviewWriteCompacted = hasExactCompactBytes(rawSubviewValue, [0x31, 0x32]);
-    const subviewStoredBackingBytes = rawSubviewValue instanceof Uint8Array
-      ? rawSubviewValue.buffer.byteLength
-      : null;
+    const subviewStoredBackingBytes =
+      rawSubviewValue instanceof Uint8Array ? rawSubviewValue.buffer.byteLength : null;
     if (!subviewWriteCompacted) {
       throw new Error("expected BrowserStorage to compact subview backing bytes before IndexedDB");
     }
@@ -917,26 +862,22 @@ async function bootstrap(): Promise<void> {
       new DataView(legacySubviewBacking.buffer, 1, 2),
     );
     const legacyRawSubviewValue = await readFixtureIndexedDbValue(rawSubviewKey);
-    const legacyRawBacking = legacyRawSubviewValue instanceof DataView
-      ? new Uint8Array(legacyRawSubviewValue.buffer)
-      : null;
-    const legacySubviewRawBackingObserved = legacyRawSubviewValue instanceof DataView
-      && legacyRawSubviewValue.byteOffset === 1
-      && legacyRawSubviewValue.byteLength === 2
-      && legacyRawSubviewValue.buffer.byteLength === 4
-      && legacyRawBacking?.[0] === 0xb1
-      && legacyRawBacking[3] === 0xb2;
+    const legacyRawBacking =
+      legacyRawSubviewValue instanceof DataView
+        ? new Uint8Array(legacyRawSubviewValue.buffer)
+        : null;
+    const legacySubviewRawBackingObserved =
+      legacyRawSubviewValue instanceof DataView &&
+      legacyRawSubviewValue.byteOffset === 1 &&
+      legacyRawSubviewValue.byteLength === 2 &&
+      legacyRawSubviewValue.buffer.byteLength === 4 &&
+      legacyRawBacking?.[0] === 0xb1 &&
+      legacyRawBacking[3] === 0xb2;
     if (!legacySubviewRawBackingObserved) {
       throw new Error("expected raw IndexedDB to retain the injected legacy DataView backing");
     }
-    const legacySubviewValue = await storage.get(
-      WORKER_STORAGE_NAMESPACE,
-      "subview",
-    );
-    const legacySubviewReadCompacted = hasExactCompactBytes(
-      legacySubviewValue,
-      [0x41, 0x42],
-    );
+    const legacySubviewValue = await storage.get(WORKER_STORAGE_NAMESPACE, "subview");
+    const legacySubviewReadCompacted = hasExactCompactBytes(legacySubviewValue, [0x41, 0x42]);
     if (!legacySubviewReadCompacted) {
       throw new Error("expected BrowserStorage to compact legacy subview backing bytes on read");
     }
@@ -958,11 +899,7 @@ async function bootstrap(): Promise<void> {
     const subclassBacking = new Uint8Array([0xd1, 0x61, 0x62, 0xd2]);
     const spoofedSubview = new SpoofedSubview(subclassBacking.buffer, 1, 2);
     const rawSpoofedSubviewKey = await fixtureIndexedDbKeyAddedBy(() =>
-      storage.set(
-        WORKER_STORAGE_NAMESPACE,
-        "spoofed-subview",
-        spoofedSubview,
-      ),
+      storage.set(WORKER_STORAGE_NAMESPACE, "spoofed-subview", spoofedSubview),
     );
     const spoofedSubviewWriteCompacted = hasExactCompactBytes(
       await readFixtureIndexedDbValue(rawSpoofedSubviewKey),
@@ -980,11 +917,7 @@ async function bootstrap(): Promise<void> {
       byteOffset: { value: 0 },
     });
     const rawShadowedSubviewKey = await fixtureIndexedDbKeyAddedBy(() =>
-      storage.set(
-        WORKER_STORAGE_NAMESPACE,
-        "shadowed-subview",
-        shadowedSubview,
-      ),
+      storage.set(WORKER_STORAGE_NAMESPACE, "shadowed-subview", shadowedSubview),
     );
     const shadowedSubviewWriteCompacted = hasExactCompactBytes(
       await readFixtureIndexedDbValue(rawShadowedSubviewKey),
@@ -995,29 +928,26 @@ async function bootstrap(): Promise<void> {
     }
 
     const proxyKeysBefore = await fixtureIndexedDbKeys();
-    const proxiedSubview = new Proxy(
-      new Uint8Array([0xf1, 0x81, 0x82, 0xf2]).subarray(1, 3),
-      {},
-    );
+    const proxiedSubview = new Proxy(new Uint8Array([0xf1, 0x81, 0x82, 0xf2]).subarray(1, 3), {});
     let proxiedSubviewRejected = false;
     try {
-      await storage.set(
-        WORKER_STORAGE_NAMESPACE,
-        "proxied-subview",
-        proxiedSubview,
-      );
+      await storage.set(WORKER_STORAGE_NAMESPACE, "proxied-subview", proxiedSubview);
     } catch (error) {
-      proxiedSubviewRejected = error instanceof TypeError
-        && error.message
-          === "browser storage values must be Uint8Array, ArrayBuffer, ArrayBufferView, or byte[]";
+      proxiedSubviewRejected =
+        error instanceof TypeError &&
+        error.message ===
+          "browser storage values must be Uint8Array, ArrayBuffer, ArrayBufferView, or byte[]";
     }
     const proxyKeysAfter = await fixtureIndexedDbKeys();
     const proxyKeysAfterSet = new Set(proxyKeysAfter);
-    const proxiedSubviewFailedClosed = proxiedSubviewRejected
-      && proxyKeysBefore.length === proxyKeysAfter.length
-      && proxyKeysBefore.every((key) => proxyKeysAfterSet.has(key));
+    const proxiedSubviewFailedClosed =
+      proxiedSubviewRejected &&
+      proxyKeysBefore.length === proxyKeysAfter.length &&
+      proxyKeysBefore.every((key) => proxyKeysAfterSet.has(key));
     if (!proxiedSubviewFailedClosed) {
-      throw new Error("expected BrowserStorage to reject proxied typed-array views without writing");
+      throw new Error(
+        "expected BrowserStorage to reject proxied typed-array views without writing",
+      );
     }
 
     const fullArrayBufferKey = await fixtureIndexedDbKeyAddedBy(() =>
@@ -1036,11 +966,7 @@ async function bootstrap(): Promise<void> {
     }
 
     const fullUint8ArrayKey = await fixtureIndexedDbKeyAddedBy(() =>
-      storage.set(
-        WORKER_STORAGE_NAMESPACE,
-        "full-uint8-array",
-        new Uint8Array([0x97, 0x98]),
-      ),
+      storage.set(WORKER_STORAGE_NAMESPACE, "full-uint8-array", new Uint8Array([0x97, 0x98])),
     );
     const fullUint8ArrayStoredExactly = hasExactCompactBytes(
       await readFixtureIndexedDbValue(fullUint8ArrayKey),
@@ -1074,11 +1000,7 @@ async function bootstrap(): Promise<void> {
       byteOffset: { value: 0 },
     });
     const spoofedDataViewKey = await fixtureIndexedDbKeyAddedBy(() =>
-      storage.set(
-        WORKER_STORAGE_NAMESPACE,
-        "spoofed-data-view",
-        spoofedDataView,
-      ),
+      storage.set(WORKER_STORAGE_NAMESPACE, "spoofed-data-view", spoofedDataView),
     );
     const spoofedDataViewWriteCompacted = hasExactCompactBytes(
       await readFixtureIndexedDbValue(spoofedDataViewKey),
@@ -1090,11 +1012,7 @@ async function bootstrap(): Promise<void> {
 
     const emptySubviewBacking = new Uint8Array([0xc5, 0xc6]);
     const emptySubviewKey = await fixtureIndexedDbKeyAddedBy(() =>
-      storage.set(
-        WORKER_STORAGE_NAMESPACE,
-        "empty-subview",
-        emptySubviewBacking.subarray(1, 1),
-      ),
+      storage.set(WORKER_STORAGE_NAMESPACE, "empty-subview", emptySubviewBacking.subarray(1, 1)),
     );
     const emptySubviewWriteCompacted = hasExactCompactBytes(
       await readFixtureIndexedDbValue(emptySubviewKey),
@@ -1123,10 +1041,7 @@ async function bootstrap(): Promise<void> {
     artifactSubviewBacking[artifactSubviewBacking.byteLength - 1] = 0xc2;
     const artifactKeysBeforeSubview = await fixtureIndexedDbKeys();
     const persistedSubviewArtifact = await artifactStore.persistEvidenceArtifact(
-      artifactSubviewBacking.subarray(
-        artifactSubviewOffset,
-        artifactSubviewOffset + 2,
-      ),
+      artifactSubviewBacking.subarray(artifactSubviewOffset, artifactSubviewOffset + 2),
       {
         id: "worker-subview-evidence",
         format: "binary",
@@ -1144,16 +1059,15 @@ async function bootstrap(): Promise<void> {
         `expected one raw IndexedDB artifact payload key, found ${addedArtifactSubviewKeys.length}`,
       );
     }
-    const rawArtifactSubviewValue = await readFixtureIndexedDbValue(
-      addedArtifactSubviewKeys[0],
-    );
+    const rawArtifactSubviewValue = await readFixtureIndexedDbValue(addedArtifactSubviewKeys[0]);
     const artifactSubviewStoredCompacted = hasExactCompactBytes(
       rawArtifactSubviewValue,
       [0x51, 0x52],
     );
-    const artifactSubviewStoredBackingBytes = rawArtifactSubviewValue instanceof Uint8Array
-      ? rawArtifactSubviewValue.buffer.byteLength
-      : null;
+    const artifactSubviewStoredBackingBytes =
+      rawArtifactSubviewValue instanceof Uint8Array
+        ? rawArtifactSubviewValue.buffer.byteLength
+        : null;
     if (!artifactSubviewStoredCompacted) {
       throw new Error("expected artifact retention bytes to match the logical persisted subview");
     }
@@ -1184,18 +1098,15 @@ async function bootstrap(): Promise<void> {
     const quotaSubviewBacking = new Uint8Array(1024 * 1024);
     const quotaSubviewOffset = quotaSubviewBacking.byteLength / 2;
     quotaSubviewBacking.fill(0x71, quotaSubviewOffset, quotaSubviewOffset + 600);
-    const quotaSubview = quotaSubviewBacking.subarray(
-      quotaSubviewOffset,
-      quotaSubviewOffset + 600,
-    );
+    const quotaSubview = quotaSubviewBacking.subarray(quotaSubviewOffset, quotaSubviewOffset + 600);
     const quotaKeysBeforeSubview = await fixtureIndexedDbKeys();
     const persistedQuotaSubview = await quotaStore.persistEvidenceArtifact(quotaSubview, {
       id: "worker-quota-a",
       format: "binary",
       contentType: "application/octet-stream",
     });
-    const quotaReportedLogicalBytes = persistedQuotaSubview.artifact.byteLength === 600
-      && persistedQuotaSubview.totalBytes === 600;
+    const quotaReportedLogicalBytes =
+      persistedQuotaSubview.artifact.byteLength === 600 && persistedQuotaSubview.totalBytes === 600;
     if (!quotaReportedLogicalBytes) {
       throw new Error("expected artifact quota accounting to report exactly 600 logical bytes");
     }
@@ -1210,9 +1121,8 @@ async function bootstrap(): Promise<void> {
       const value = await readFixtureIndexedDbValue(key);
       if (hasExactCompactBytes(value, Array.from(quotaSubview))) {
         quotaSubviewStoredCompacted = true;
-        quotaSubviewStoredBackingBytes = value instanceof Uint8Array
-          ? value.buffer.byteLength
-          : null;
+        quotaSubviewStoredBackingBytes =
+          value instanceof Uint8Array ? value.buffer.byteLength : null;
         break;
       }
     }
@@ -1254,18 +1164,15 @@ async function bootstrap(): Promise<void> {
       await writeFixtureIndexedDbValue(rawKey, new Uint8Array([0xd0 + index]));
     }
     const upperBoundOutsiderRawKey = `${namespaceRawPrefix.slice(0, -1)};`;
-    await writeFixtureIndexedDbValue(
-      upperBoundOutsiderRawKey,
-      new Uint8Array([0xef]),
-    );
+    await writeFixtureIndexedDbValue(upperBoundOutsiderRawKey, new Uint8Array([0xef]));
     const listedKeysAfterMalformed = await storage.listKeys(WORKER_STORAGE_NAMESPACE);
-    const malformedKeysRejected = listedKeysAfterMalformed.length
-      === listedKeysBeforeMalformed.length
-      && listedKeysAfterMalformed.every(
-        (key, index) => key === listedKeysBeforeMalformed[index],
-      );
+    const malformedKeysRejected =
+      listedKeysAfterMalformed.length === listedKeysBeforeMalformed.length &&
+      listedKeysAfterMalformed.every((key, index) => key === listedKeysBeforeMalformed[index]);
     if (!malformedKeysRejected) {
-      throw new Error("expected malformed and noncanonical IndexedDB keys to be excluded from listing");
+      throw new Error(
+        "expected malformed and noncanonical IndexedDB keys to be excluded from listing",
+      );
     }
 
     const preservationNamespace = `${WORKER_STORAGE_NAMESPACE}_preserved`;
@@ -1304,14 +1211,9 @@ async function bootstrap(): Promise<void> {
       }
       return keys;
     };
-    storage.listKeys = (namespace) =>
-      listKeysThroughBarrier(storage, storageListKeys, namespace);
+    storage.listKeys = (namespace) => listKeysThroughBarrier(storage, storageListKeys, namespace);
     concurrentStorage.listKeys = (namespace) =>
-      listKeysThroughBarrier(
-        concurrentStorage,
-        concurrentStorageListKeys,
-        namespace,
-      );
+      listKeysThroughBarrier(concurrentStorage, concurrentStorageListKeys, namespace);
     let concurrentClearResults: number[];
     try {
       concurrentClearResults = await Promise.all([
@@ -1323,8 +1225,8 @@ async function bootstrap(): Promise<void> {
       concurrentStorage.listKeys = concurrentStorageListKeys;
     }
     concurrentClearResults.sort((left, right) => left - right);
-    const concurrentClearSerialized = concurrentClearResults[0] === 0
-      && concurrentClearResults[1] === 2;
+    const concurrentClearSerialized =
+      concurrentClearResults[0] === 0 && concurrentClearResults[1] === 2;
     if (!concurrentClearSerialized) {
       throw new Error(
         `expected concurrent IndexedDB namespace clears to return [0,2], got ${concurrentClearResults.join(",")}`,
@@ -1332,8 +1234,8 @@ async function bootstrap(): Promise<void> {
     }
 
     const rawKeysBeforeClear = await fixtureIndexedDbKeys();
-    const rawNamespaceKeyCountBeforeClear = rawKeysBeforeClear.filter(
-      (key) => key.startsWith(namespaceRawPrefix),
+    const rawNamespaceKeyCountBeforeClear = rawKeysBeforeClear.filter((key) =>
+      key.startsWith(namespaceRawPrefix),
     ).length;
 
     const clearedArtifacts = await artifactStore.clearArtifacts();
@@ -1343,19 +1245,14 @@ async function bootstrap(): Promise<void> {
     const malformedRawKeysCleared = malformedRawKeys.every(
       (rawKey) => !rawKeysAfterClear.includes(rawKey),
     );
-    const namespaceRawKeysCleared = !rawKeysAfterClear.some(
-      (rawKey) => rawKey.startsWith(namespaceRawPrefix),
+    const namespaceRawKeysCleared = !rawKeysAfterClear.some((rawKey) =>
+      rawKey.startsWith(namespaceRawPrefix),
     );
     const clearCountMatchesRawNamespace = clearedKeys === rawNamespaceKeyCountBeforeClear;
     const preservedValue = await storage.get(preservationNamespace, "sentinel");
     const otherNamespacePreserved = hasExactCompactBytes(preservedValue, [0xe1]);
-    const upperBoundOutsiderValue = await readFixtureIndexedDbValue(
-      upperBoundOutsiderRawKey,
-    );
-    const upperBoundOutsiderPreserved = hasExactCompactBytes(
-      upperBoundOutsiderValue,
-      [0xef],
-    );
+    const upperBoundOutsiderValue = await readFixtureIndexedDbValue(upperBoundOutsiderRawKey);
+    const upperBoundOutsiderPreserved = hasExactCompactBytes(upperBoundOutsiderValue, [0xef]);
     await deleteFixtureIndexedDbKey(upperBoundOutsiderRawKey);
     await storage.clearNamespace(preservationNamespace);
     if (clearedArtifacts < 1) {
@@ -1516,10 +1413,7 @@ async function bootstrap(): Promise<void> {
               runtimeSelectionPrerequisiteLoss.runtime !== null,
               false,
             ),
-      laneHealthReset: summarizeLaneHealth(
-        WORKER_LANE_HEALTH_RESET_MARKER,
-        laneHealthReset,
-      ),
+      laneHealthReset: summarizeLaneHealth(WORKER_LANE_HEALTH_RESET_MARKER, laneHealthReset),
       runtimeSelectionRecovered: summarizeSelection(
         WORKER_RUNTIME_SELECTION_RECOVERED_MARKER,
         runtimeSelectionRecovered.executionLadder,

@@ -24,20 +24,14 @@
     {
       "broad_frontier": false,
       "command": "rch exec -- cargo test -p asupersync --lib",
-      "guarantee_ids": [
-        "lib-test-frontier"
-      ],
+      "guarantee_ids": ["lib-test-frontier"],
       "kind": "test_frontier",
       "lane_id": "lib-tests",
-      "matched_paths": [
-        "src/http/h2/frame.rs"
-      ],
+      "matched_paths": ["src/http/h2/frame.rs"],
       "reasons": [
         "runtime source change needs lib-frontier proof plus broad compile/format frontier"
       ],
-      "rule_ids": [
-        "runtime-source"
-      ]
+      "rule_ids": ["runtime-source"]
     }
   ],
   "source": "tests/fixtures/touched_surface_proof_selector/src_change.json",
@@ -58,42 +52,28 @@
     {
       "broad_frontier": true,
       "command": "rch exec -- cargo check -p asupersync --all-targets",
-      "guarantee_ids": [
-        "all-target-compile-frontier"
-      ],
+      "guarantee_ids": ["all-target-compile-frontier"],
       "kind": "compile_frontier",
       "lane_id": "all-targets-check",
-      "matched_paths": [
-        "src/http/h2/frame.rs"
-      ],
+      "matched_paths": ["src/http/h2/frame.rs"],
       "reasons": [
         "runtime source change needs lib-frontier proof plus broad compile/format frontier"
       ],
-      "rule_ids": [
-        "runtime-source"
-      ]
+      "rule_ids": ["runtime-source"]
     },
     {
       "broad_frontier": true,
       "command": "rch exec -- cargo fmt --check",
-      "guarantee_ids": [
-        "rustfmt-frontier"
-      ],
+      "guarantee_ids": ["rustfmt-frontier"],
       "kind": "format_frontier",
       "lane_id": "rustfmt-frontier",
-      "matched_paths": [
-        "src/http/h2/frame.rs"
-      ],
+      "matched_paths": ["src/http/h2/frame.rs"],
       "reasons": [
         "runtime source change needs lib-frontier proof plus broad compile/format frontier"
       ],
-      "rule_ids": [
-        "runtime-source"
-      ]
+      "rule_ids": ["runtime-source"]
     }
   ],
-  "touched_files": [
-    "src/http/h2/frame.rs"
-  ],
+  "touched_files": ["src/http/h2/frame.rs"],
   "unmatched_touched_files": []
 }

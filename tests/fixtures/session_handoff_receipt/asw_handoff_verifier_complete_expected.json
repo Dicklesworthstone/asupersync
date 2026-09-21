@@ -1,9 +1,7 @@
 {
   "active_bead_ids": {
     "in_progress": [],
-    "ready": [
-      "asupersync-oxqrae.10"
-    ],
+    "ready": ["asupersync-oxqrae.10"],
     "stale_in_progress": []
   },
   "agent": "CopperSpring",

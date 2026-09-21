@@ -24,11 +24,7 @@ export interface Budget {
   cleanupQuota: number;
 }
 
-export type CancellationPhase =
-  | "requested"
-  | "cancelling"
-  | "finalizing"
-  | "completed";
+export type CancellationPhase = "requested" | "cancelling" | "finalizing" | "completed";
 
 export type ErrorCode =
   | "capability_denied"
@@ -39,12 +35,7 @@ export type ErrorCode =
 
 export type Recoverability = "transient" | "permanent" | "unknown";
 
-export type HandleKind =
-  | "runtime"
-  | "region"
-  | "task"
-  | "cancel_token"
-  | "fetch_request";
+export type HandleKind = "runtime" | "region" | "task" | "cancel_token" | "fetch_request";
 
 export interface HandleRef {
   kind: HandleKind;
@@ -85,19 +76,10 @@ export type HandleLike =
 export type RuntimeHandleLike = RuntimeHandle | RuntimeHandleRef;
 export type RegionHandleLike = RegionHandle | RegionHandleRef;
 export type TaskHandleLike = TaskHandle | TaskHandleRef;
-export type CancellationTokenLike =
-  | CancellationToken
-  | CancellationTokenHandleRef;
+export type CancellationTokenLike = CancellationToken | CancellationTokenHandleRef;
 export type FetchHandleLike = FetchHandle | FetchHandleRef;
 
-export type WasmValue =
-  | undefined
-  | boolean
-  | number
-  | bigint
-  | string
-  | Uint8Array
-  | HandleLike;
+export type WasmValue = undefined | boolean | number | bigint | string | Uint8Array | HandleLike;
 
 export type Outcome<T = WasmValue, E = AbiFailure> =
   | { outcome: "ok"; value: T }
@@ -122,14 +104,7 @@ export interface TaskCancelRequest {
   message?: string;
 }
 
-export type FetchMethod =
-  | "GET"
-  | "POST"
-  | "PUT"
-  | "PATCH"
-  | "DELETE"
-  | "HEAD"
-  | "OPTIONS";
+export type FetchMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
 
 export interface FetchAuthority {
   allowedOrigins?: string[];
@@ -243,11 +218,7 @@ export declare class RegionHandle extends BaseHandle {
 export declare class TaskHandle extends BaseHandle {
   constructor(rawHandle: TaskHandleRef);
   join(outcome: Outcome, consumerVersion?: AbiVersion | null): Outcome<WasmValue>;
-  cancel(
-    kind: string,
-    message?: string,
-    consumerVersion?: AbiVersion | null,
-  ): Outcome<void>;
+  cancel(kind: string, message?: string, consumerVersion?: AbiVersion | null): Outcome<void>;
 }
 
 export declare class CancellationToken extends BaseHandle {
@@ -386,11 +357,7 @@ export declare const rawBindings: Readonly<{
   scope_enter(requestJson: string, consumerVersionJson?: string): string;
   scope_close(handleJson: string, consumerVersionJson?: string): string;
   task_spawn(requestJson: string, consumerVersionJson?: string): string;
-  task_join(
-    handleJson: string,
-    outcomeJson: string,
-    consumerVersionJson?: string,
-  ): string;
+  task_join(handleJson: string, outcomeJson: string, consumerVersionJson?: string): string;
   task_cancel(requestJson: string, consumerVersionJson?: string): string;
   fetch_request(requestJson: string, consumerVersionJson?: string): string;
   websocket_open(requestJson: string, consumerVersionJson?: string): string;

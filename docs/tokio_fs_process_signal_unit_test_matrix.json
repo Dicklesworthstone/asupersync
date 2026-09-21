@@ -4,7 +4,12 @@
   "version": 1,
   "generated_at": "2026-03-04",
   "generated_by": "SapphireHill",
-  "source_beads": ["asupersync-2oh2u.3.3", "asupersync-2oh2u.3.5", "asupersync-2oh2u.3.6", "asupersync-2oh2u.3.7"],
+  "source_beads": [
+    "asupersync-2oh2u.3.3",
+    "asupersync-2oh2u.3.5",
+    "asupersync-2oh2u.3.6",
+    "asupersync-2oh2u.3.7"
+  ],
   "domains": ["filesystem", "process", "signal", "cross-domain"],
   "coverage_categories": ["HP", "EC", "EP", "CX", "DT", "IX"],
   "test_evidence": [
@@ -87,10 +92,10 @@
     }
   ],
   "domain_totals": {
-    "filesystem": {"test_count": 79, "minimum": 50, "status": "pass"},
-    "process": {"test_count": 85, "minimum": 50, "status": "pass"},
-    "signal": {"test_count": 21, "minimum": 15, "status": "pass"},
-    "cross_domain": {"test_count": 63, "minimum": 30, "status": "pass"}
+    "filesystem": { "test_count": 79, "minimum": 50, "status": "pass" },
+    "process": { "test_count": 85, "minimum": 50, "status": "pass" },
+    "signal": { "test_count": 21, "minimum": 15, "status": "pass" },
+    "cross_domain": { "test_count": 63, "minimum": 30, "status": "pass" }
   },
   "coverage_gaps": [
     {
@@ -149,16 +154,76 @@
     }
   ],
   "gap_closure_tests": [
-    {"id": "UTM-01", "domain": "filesystem", "category": "CX", "title": "File drop mid-create is safe", "gap": "UTM-G1"},
-    {"id": "UTM-02", "domain": "filesystem", "category": "CX", "title": "File read cancellation discards partial", "gap": "UTM-G1"},
-    {"id": "UTM-03", "domain": "signal", "category": "EC", "title": "SignalKind variants have distinct values", "gap": "UTM-G2"},
-    {"id": "UTM-04", "domain": "signal", "category": "EC", "title": "ShutdownController multiple-subscribe is safe", "gap": "UTM-G2"},
-    {"id": "UTM-05", "domain": "signal", "category": "CX", "title": "ShutdownReceiver drop before wait does not leak", "gap": "UTM-G3"},
-    {"id": "UTM-06", "domain": "signal", "category": "CX", "title": "Concurrent receivers resolve independently", "gap": "UTM-G3"},
-    {"id": "UTM-07", "domain": "process", "category": "IX", "title": "Process exit visible via try_wait polling", "gap": "UTM-G4"},
-    {"id": "UTM-08", "domain": "filesystem", "category": "EC", "title": "Empty filename returns error", "gap": "UTM-G5"},
-    {"id": "UTM-09", "domain": "filesystem", "category": "EC", "title": "Path with null byte returns error", "gap": "UTM-G5"},
-    {"id": "UTM-10", "domain": "cross-domain", "category": "CX", "title": "Concurrent fs+process+shutdown is deterministic", "gap": "UTM-G6"}
+    {
+      "id": "UTM-01",
+      "domain": "filesystem",
+      "category": "CX",
+      "title": "File drop mid-create is safe",
+      "gap": "UTM-G1"
+    },
+    {
+      "id": "UTM-02",
+      "domain": "filesystem",
+      "category": "CX",
+      "title": "File read cancellation discards partial",
+      "gap": "UTM-G1"
+    },
+    {
+      "id": "UTM-03",
+      "domain": "signal",
+      "category": "EC",
+      "title": "SignalKind variants have distinct values",
+      "gap": "UTM-G2"
+    },
+    {
+      "id": "UTM-04",
+      "domain": "signal",
+      "category": "EC",
+      "title": "ShutdownController multiple-subscribe is safe",
+      "gap": "UTM-G2"
+    },
+    {
+      "id": "UTM-05",
+      "domain": "signal",
+      "category": "CX",
+      "title": "ShutdownReceiver drop before wait does not leak",
+      "gap": "UTM-G3"
+    },
+    {
+      "id": "UTM-06",
+      "domain": "signal",
+      "category": "CX",
+      "title": "Concurrent receivers resolve independently",
+      "gap": "UTM-G3"
+    },
+    {
+      "id": "UTM-07",
+      "domain": "process",
+      "category": "IX",
+      "title": "Process exit visible via try_wait polling",
+      "gap": "UTM-G4"
+    },
+    {
+      "id": "UTM-08",
+      "domain": "filesystem",
+      "category": "EC",
+      "title": "Empty filename returns error",
+      "gap": "UTM-G5"
+    },
+    {
+      "id": "UTM-09",
+      "domain": "filesystem",
+      "category": "EC",
+      "title": "Path with null byte returns error",
+      "gap": "UTM-G5"
+    },
+    {
+      "id": "UTM-10",
+      "domain": "cross-domain",
+      "category": "CX",
+      "title": "Concurrent fs+process+shutdown is deterministic",
+      "gap": "UTM-G6"
+    }
   ],
   "determinism_invariants": [
     "Coverage monotonicity: test count per domain never decreases",

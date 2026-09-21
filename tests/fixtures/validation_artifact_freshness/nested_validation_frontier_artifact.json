@@ -5,8 +5,6 @@
   },
   "validation_frontier_record": {
     "decision": "pass",
-    "touched_files": [
-      "tests/rch_retrieval_receipt_contract.rs"
-    ]
+    "touched_files": ["tests/rch_retrieval_receipt_contract.rs"]
   }
 }

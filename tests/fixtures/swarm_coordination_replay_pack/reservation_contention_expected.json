@@ -1,7 +1,5 @@
 {
-  "action_items": [
-    "coordinate holders or wait for one lease to release before editing that path"
-  ],
+  "action_items": ["coordinate holders or wait for one lease to release before editing that path"],
   "current_date": "2026-05-08",
   "forbidden_actions": {
     "runs_agent_mail_mutation": false,
@@ -59,10 +57,7 @@
   "violations": [
     {
       "code": "exclusive-reservation-contention",
-      "event_ids": [
-        "reservation-a",
-        "reservation-b"
-      ],
+      "event_ids": ["reservation-a", "reservation-b"],
       "message": "fuzz/Cargo.toml has overlapping exclusive reservations from BlackDove, TopazGoose",
       "remediation": "coordinate holders or wait for one lease to release before editing that path",
       "severity": "error"

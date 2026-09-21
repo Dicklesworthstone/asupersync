@@ -36,10 +36,7 @@
       }
     ]
   },
-  "candidate_surfaces": [
-    "fuzz/fuzz_targets",
-    "src/http/h2.rs"
-  ],
+  "candidate_surfaces": ["fuzz/fuzz_targets", "src/http/h2.rs"],
   "dirty_tree": {
     "status": "ok",
     "entries": []

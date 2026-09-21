@@ -1,8 +1,6 @@
 {
   "active_bead_ids": {
-    "in_progress": [
-      "asupersync-stale1"
-    ],
+    "in_progress": ["asupersync-stale1"],
     "ready": [],
     "stale_in_progress": [
       {

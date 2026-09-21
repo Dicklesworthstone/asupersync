@@ -4,15 +4,8 @@
   "generated_by": "asupersync-3narc.1.2",
   "source_policy": ".github/no_mock_policy.json",
   "scan_config": {
-    "roots": [
-      "src",
-      "tests"
-    ],
-    "terms": [
-      "mock",
-      "fake",
-      "stub"
-    ]
+    "roots": ["src", "tests"],
+    "terms": ["mock", "fake", "stub"]
   },
   "summary": {
     "matching_paths_total": 20,

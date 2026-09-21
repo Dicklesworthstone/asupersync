@@ -29,12 +29,8 @@
   },
   "workers": [
     {
-      "reasons": [
-        "recent observations are inside budget"
-      ],
-      "remediation": [
-        "worker is eligible for normal rch proof lanes"
-      ],
+      "reasons": ["recent observations are inside budget"],
+      "remediation": ["worker is eligible for normal rch proof lanes"],
       "signals": {
         "io_some_avg10": 0.2,
         "job_count": 2,

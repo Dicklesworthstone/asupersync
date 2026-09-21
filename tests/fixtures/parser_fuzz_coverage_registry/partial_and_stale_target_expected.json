@@ -9,9 +9,7 @@
       "evidence": {
         "covering_targets": [],
         "exemption_status": "missing",
-        "partial_targets": [
-          "fuzz_hpack_decode_smoke"
-        ],
+        "partial_targets": ["fuzz_hpack_decode_smoke"],
         "stale_covering_targets": []
       },
       "risk_rank": 3,
@@ -31,9 +29,7 @@
         "covering_targets": [],
         "exemption_status": "missing",
         "partial_targets": [],
-        "stale_covering_targets": [
-          "fuzz_mysql_handshake_old"
-        ]
+        "stale_covering_targets": ["fuzz_mysql_handshake_old"]
       },
       "risk_rank": 3,
       "status": "missing",
@@ -58,13 +54,9 @@
   },
   "generated_at": "2026-05-08T05:45:00Z",
   "input_schema_version": "parser-fuzz-coverage-input-v1",
-  "missing_coverage": [
-    "mysql_handshake_parse"
-  ],
+  "missing_coverage": ["mysql_handshake_parse"],
   "non_mutating": true,
-  "partial_coverage": [
-    "hpack_huffman_decode"
-  ],
+  "partial_coverage": ["hpack_huffman_decode"],
   "requirements": {
     "coverage_uses_active_fuzz_target": false,
     "every_public_byte_or_string_parser_has_coverage_or_exemption": false,

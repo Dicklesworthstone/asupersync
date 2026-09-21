@@ -178,9 +178,14 @@
     }
   ],
   "platform_support": {
-    "linux": {"fs": "full", "process": "full", "signal": "full", "io_uring": "optional"},
-    "macos": {"fs": "full", "process": "full", "signal": "full", "io_uring": "unsupported"},
-    "windows": {"fs": "full", "process": "partial", "signal": "SIGINT_SIGTERM_SIGBREAK_streams", "io_uring": "unsupported"}
+    "linux": { "fs": "full", "process": "full", "signal": "full", "io_uring": "optional" },
+    "macos": { "fs": "full", "process": "full", "signal": "full", "io_uring": "unsupported" },
+    "windows": {
+      "fs": "full",
+      "process": "partial",
+      "signal": "SIGINT_SIGTERM_SIGBREAK_streams",
+      "io_uring": "unsupported"
+    }
   },
   "rollback_strategies": [
     {
@@ -200,19 +205,61 @@
     }
   ],
   "evidence_refs": [
-    {"file": "tests/tokio_fs_process_signal_parity_matrix.rs", "domain": "parity", "tests": 36, "bead": "T3.1"},
-    {"file": "tests/tokio_process_lifecycle_parity.rs", "domain": "process", "tests": 36, "bead": "T3.4"},
-    {"file": "tests/tokio_cancel_safe_fs_process_signal.rs", "domain": "cancel-safety", "tests": 24, "bead": "T3.6"},
-    {"file": "tests/tokio_fs_process_signal_conformance.rs", "domain": "conformance", "tests": 34, "bead": "T3.7"},
-    {"file": "tests/tokio_fs_process_signal_unit_matrix.rs", "domain": "unit-matrix", "tests": 30, "bead": "T3.9"},
-    {"file": "tests/tokio_fs_process_signal_e2e.rs", "domain": "e2e", "tests": 20, "bead": "T3.10"}
+    {
+      "file": "tests/tokio_fs_process_signal_parity_matrix.rs",
+      "domain": "parity",
+      "tests": 36,
+      "bead": "T3.1"
+    },
+    {
+      "file": "tests/tokio_process_lifecycle_parity.rs",
+      "domain": "process",
+      "tests": 36,
+      "bead": "T3.4"
+    },
+    {
+      "file": "tests/tokio_cancel_safe_fs_process_signal.rs",
+      "domain": "cancel-safety",
+      "tests": 24,
+      "bead": "T3.6"
+    },
+    {
+      "file": "tests/tokio_fs_process_signal_conformance.rs",
+      "domain": "conformance",
+      "tests": 34,
+      "bead": "T3.7"
+    },
+    {
+      "file": "tests/tokio_fs_process_signal_unit_matrix.rs",
+      "domain": "unit-matrix",
+      "tests": 30,
+      "bead": "T3.9"
+    },
+    {
+      "file": "tests/tokio_fs_process_signal_e2e.rs",
+      "domain": "e2e",
+      "tests": 20,
+      "bead": "T3.10"
+    }
   ],
   "drift_detection": [
-    {"id": "DRIFT-MP1", "trigger": "New public API in fs/process/signal", "action": "Add migration recipe"},
-    {"id": "DRIFT-MP2", "trigger": "Gap closed", "action": "Update gap table and remove caveat"},
-    {"id": "DRIFT-MP3", "trigger": "Phase 1+ reactor changes", "action": "Review Phase 0 caveats"},
-    {"id": "DRIFT-MP4", "trigger": "New before/after pattern", "action": "Add to relevant section"},
-    {"id": "DRIFT-MP5", "trigger": "Error type change", "action": "Update rollback guidance"}
+    {
+      "id": "DRIFT-MP1",
+      "trigger": "New public API in fs/process/signal",
+      "action": "Add migration recipe"
+    },
+    { "id": "DRIFT-MP2", "trigger": "Gap closed", "action": "Update gap table and remove caveat" },
+    {
+      "id": "DRIFT-MP3",
+      "trigger": "Phase 1+ reactor changes",
+      "action": "Review Phase 0 caveats"
+    },
+    {
+      "id": "DRIFT-MP4",
+      "trigger": "New before/after pattern",
+      "action": "Add to relevant section"
+    },
+    { "id": "DRIFT-MP5", "trigger": "Error type change", "action": "Update rollback guidance" }
   ],
   "summary": {
     "total_recipes": 13,

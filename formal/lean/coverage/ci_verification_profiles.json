@@ -2,11 +2,7 @@
   "schema_version": "1.0.0",
   "profile_set_id": "lean.ci.verification_profiles.v1",
   "generated_by": "bd-rook4",
-  "ordering": [
-    "smoke",
-    "frontier",
-    "full"
-  ],
+  "ordering": ["smoke", "frontier", "full"],
   "artifact_contract": {
     "policy_id": "lean.ci.artifact_contract.v1",
     "manifest_schema_version": "lean.full.repro.bundle.v1",
@@ -252,16 +248,8 @@
       "closure_dependency_path",
       "status"
     ],
-    "risk_classes": [
-      "low",
-      "medium",
-      "high",
-      "critical"
-    ],
-    "status_values": [
-      "active",
-      "closed"
-    ],
+    "risk_classes": ["low", "medium", "high", "critical"],
+    "status_values": ["active", "closed"],
     "governance_checks": [
       {
         "check_id": "waiver.expiry.enforced",
@@ -283,10 +271,7 @@
         "reason": "Temporary frontier mismatch while Track-2 proof-shape bucket is being burned down.",
         "risk_class": "medium",
         "expires_at_utc": "2026-02-21T00:00:00Z",
-        "closure_dependency_path": [
-          "bd-k6fj1",
-          "bd-cspxm"
-        ],
+        "closure_dependency_path": ["bd-k6fj1", "bd-cspxm"],
         "status": "active"
       },
       {
@@ -295,10 +280,7 @@
         "reason": "Short-lived constructor coverage mismatch during artifact schema migration.",
         "risk_class": "low",
         "expires_at_utc": "2026-02-05T00:00:00Z",
-        "closure_dependency_path": [
-          "bd-rook4",
-          "bd-2ruh1"
-        ],
+        "closure_dependency_path": ["bd-rook4", "bd-2ruh1"],
         "status": "closed",
         "closure_bead": "bd-n5tqv",
         "closed_at_utc": "2026-02-04T18:00:00Z"
@@ -312,11 +294,7 @@
       {
         "review_id": "weekly-proof-health",
         "cadence": "weekly",
-        "required_participants": [
-          "track5-owner",
-          "triage-owner",
-          "refinement-owner"
-        ],
+        "required_participants": ["track5-owner", "triage-owner", "refinement-owner"],
         "required_artifacts": [
           "formal/lean/coverage/ci_verification_profiles.json",
           "formal/lean/coverage/gap_risk_sequencing_plan.json",
@@ -328,11 +306,7 @@
       {
         "review_id": "phase-exit-signoff",
         "cadence": "phase-exit",
-        "required_participants": [
-          "track5-owner",
-          "runtime-owner",
-          "formal-owner"
-        ],
+        "required_participants": ["track5-owner", "runtime-owner", "formal-owner"],
         "required_artifacts": [
           "formal/lean/coverage/baseline_report_v1.json",
           "formal/lean/coverage/runtime_state_refinement_map.json",
@@ -358,22 +332,14 @@
         "dependency_changes"
       ],
       "temporary_decisions_require_expiry": true,
-      "bead_status_change_required_fields": [
-        "bead_id",
-        "from_status",
-        "to_status",
-        "reason"
-      ],
+      "bead_status_change_required_fields": ["bead_id", "from_status", "to_status", "reason"],
       "dependency_change_required_fields": [
         "blocked_bead_id",
         "blocking_bead_id",
         "change_type",
         "reason"
       ],
-      "allowed_dependency_change_types": [
-        "add",
-        "remove"
-      ]
+      "allowed_dependency_change_types": ["add", "remove"]
     }
   },
   "promotion_policy": {

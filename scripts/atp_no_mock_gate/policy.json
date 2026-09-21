@@ -1,10 +1,7 @@
 {
   "schema_version": "atp-no-mo\u0063k-policy-v1",
   "scan": {
-    "roots": [
-      "src/atp",
-      "tests/atp"
-    ],
+    "roots": ["src/atp", "tests/atp"],
     "terms": [
       "mo\u0063k",
       "fa\u006be",

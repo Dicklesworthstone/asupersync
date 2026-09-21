@@ -63,13 +63,9 @@
   },
   "dirty_tree": {
     "classification": "unreserved-source",
-    "dirty_paths": [
-      "docs/proof_lane_pressure_chaos.md"
-    ],
+    "dirty_paths": ["docs/proof_lane_pressure_chaos.md"],
     "peer_owned_paths": [],
-    "unreserved_source_paths": [
-      "docs/proof_lane_pressure_chaos.md"
-    ]
+    "unreserved_source_paths": ["docs/proof_lane_pressure_chaos.md"]
   },
   "topology_guidance": {
     "artifact_path": "artifacts/large_host_topology_corpus_v1.json",

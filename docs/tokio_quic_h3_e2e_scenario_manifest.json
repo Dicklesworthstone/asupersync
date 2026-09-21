@@ -7,26 +7,76 @@
   "source_markdown": "docs/tokio_quic_h3_e2e_scenario_manifest.md",
   "domains": ["quic", "h3", "e2e", "telemetry", "forensic-log", "scenario-manifest"],
   "scenario_categories": [
-    {"prefix": "ES", "name": "Session lifecycle", "count": 6, "focus": "handshake, migration, resumption, key update, multi-stream"},
-    {"prefix": "EC", "name": "Congestion and loss", "count": 5, "focus": "cwnd, RTT, loss detection, bytes-in-flight, PTO"},
-    {"prefix": "EH", "name": "HTTP/3 protocol", "count": 6, "focus": "request lifecycle, GOAWAY, settings, protocol errors, QPACK"},
-    {"prefix": "ED", "name": "Drain and cancellation", "count": 5, "focus": "graceful close, cx cancel, stream reset, close_immediately"},
-    {"prefix": "ET", "name": "Telemetry validation", "count": 6, "focus": "forensic logger, event categories, manifest, log levels"},
-    {"prefix": "MV", "name": "Manifest validation", "count": 4, "focus": "structural checks on this artifact"}
+    {
+      "prefix": "ES",
+      "name": "Session lifecycle",
+      "count": 6,
+      "focus": "handshake, migration, resumption, key update, multi-stream"
+    },
+    {
+      "prefix": "EC",
+      "name": "Congestion and loss",
+      "count": 5,
+      "focus": "cwnd, RTT, loss detection, bytes-in-flight, PTO"
+    },
+    {
+      "prefix": "EH",
+      "name": "HTTP/3 protocol",
+      "count": 6,
+      "focus": "request lifecycle, GOAWAY, settings, protocol errors, QPACK"
+    },
+    {
+      "prefix": "ED",
+      "name": "Drain and cancellation",
+      "count": 5,
+      "focus": "graceful close, cx cancel, stream reset, close_immediately"
+    },
+    {
+      "prefix": "ET",
+      "name": "Telemetry validation",
+      "count": 6,
+      "focus": "forensic logger, event categories, manifest, log levels"
+    },
+    {
+      "prefix": "MV",
+      "name": "Manifest validation",
+      "count": 4,
+      "focus": "structural checks on this artifact"
+    }
   ],
   "telemetry_integration": {
     "logger": "QuicH3ForensicLogger",
     "manifest_builder": "QuicH3ScenarioManifest::from_logger",
     "event_enum": "QuicH3Event",
-    "event_categories": ["quic_transport", "quic_stream", "quic_connection", "h3_control", "h3_request", "h3_frame", "test_harness"],
+    "event_categories": [
+      "quic_transport",
+      "quic_stream",
+      "quic_connection",
+      "h3_control",
+      "h3_request",
+      "h3_frame",
+      "test_harness"
+    ],
     "schema_version": 1
   },
   "drift_detection": [
-    {"id": "DRIFT-E1", "trigger": "New NativeQuicConnection public method", "action": "Add ES/ED scenario"},
-    {"id": "DRIFT-E2", "trigger": "New H3 frame type or control state", "action": "Add EH scenario"},
-    {"id": "DRIFT-E3", "trigger": "New QuicH3Event variant added", "action": "Add ET validation"},
-    {"id": "DRIFT-E4", "trigger": "New ForensicLogger API", "action": "Add ET test coverage"},
-    {"id": "DRIFT-E5", "trigger": "Connection lifecycle state added", "action": "Add ES/ED transition test"}
+    {
+      "id": "DRIFT-E1",
+      "trigger": "New NativeQuicConnection public method",
+      "action": "Add ES/ED scenario"
+    },
+    {
+      "id": "DRIFT-E2",
+      "trigger": "New H3 frame type or control state",
+      "action": "Add EH scenario"
+    },
+    { "id": "DRIFT-E3", "trigger": "New QuicH3Event variant added", "action": "Add ET validation" },
+    { "id": "DRIFT-E4", "trigger": "New ForensicLogger API", "action": "Add ET test coverage" },
+    {
+      "id": "DRIFT-E5",
+      "trigger": "Connection lifecycle state added",
+      "action": "Add ES/ED transition test"
+    }
   ],
   "summary": {
     "total_tests": 32,

@@ -246,20 +246,42 @@
       "meta": 3
     },
     "domains_covered": [
-      "pool", "stats", "backpressure", "fault_injection", "error_propagation",
-      "close", "validation", "eviction", "backoff", "policy", "warm_up",
-      "postgres", "mysql", "sqlite", "cross_backend",
-      "kafka", "redis", "nats", "jetstream",
-      "timeout", "discard", "documentation", "runner"
+      "pool",
+      "stats",
+      "backpressure",
+      "fault_injection",
+      "error_propagation",
+      "close",
+      "validation",
+      "eviction",
+      "backoff",
+      "policy",
+      "warm_up",
+      "postgres",
+      "mysql",
+      "sqlite",
+      "cross_backend",
+      "kafka",
+      "redis",
+      "nats",
+      "jetstream",
+      "timeout",
+      "discard",
+      "documentation",
+      "runner"
     ]
   },
   "dependencies": {
     "blocked_by": [
-      {"bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit-test matrix", "status": "closed"}
+      {
+        "bead": "asupersync-2oh2u.6.12",
+        "reason": "Exhaustive unit-test matrix",
+        "status": "closed"
+      }
     ],
     "blocks": [
-      {"bead": "asupersync-2oh2u.10.12", "reason": "Cross-track e2e logging schema"},
-      {"bead": "asupersync-2oh2u.11.2", "reason": "Migration cookbooks"}
+      { "bead": "asupersync-2oh2u.10.12", "reason": "Cross-track e2e logging schema" },
+      { "bead": "asupersync-2oh2u.11.2", "reason": "Migration cookbooks" }
     ]
   }
 }

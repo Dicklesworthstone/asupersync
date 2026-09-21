@@ -5,28 +5,18 @@
   "blocked_selected_lanes": [
     {
       "blocked": {
-        "blocked_by_paths": [
-          "src/runtime/scheduler.rs"
-        ],
+        "blocked_by_paths": ["src/runtime/scheduler.rs"],
         "lane_id": "lib-tests",
         "reason": "peer dirty source file blocks lib frontier"
       },
       "broad_frontier": false,
       "command": "rch exec -- cargo test -p asupersync --lib",
-      "guarantee_ids": [
-        "lib-test-frontier"
-      ],
+      "guarantee_ids": ["lib-test-frontier"],
       "kind": "test_frontier",
       "lane_id": "lib-tests",
-      "matched_paths": [
-        "src/runtime/scheduler.rs"
-      ],
-      "reasons": [
-        "runtime source change needs lib-frontier proof plus broad compile frontier"
-      ],
-      "rule_ids": [
-        "runtime-source"
-      ]
+      "matched_paths": ["src/runtime/scheduler.rs"],
+      "reasons": ["runtime source change needs lib-frontier proof plus broad compile frontier"],
+      "rule_ids": ["runtime-source"]
     }
   ],
   "blocked_supplemental_lanes": [],
@@ -67,24 +57,14 @@
     {
       "broad_frontier": true,
       "command": "rch exec -- cargo check -p asupersync --all-targets",
-      "guarantee_ids": [
-        "all-target-compile-frontier"
-      ],
+      "guarantee_ids": ["all-target-compile-frontier"],
       "kind": "compile_frontier",
       "lane_id": "all-targets-check",
-      "matched_paths": [
-        "src/runtime/scheduler.rs"
-      ],
-      "reasons": [
-        "runtime source change needs lib-frontier proof plus broad compile frontier"
-      ],
-      "rule_ids": [
-        "runtime-source"
-      ]
+      "matched_paths": ["src/runtime/scheduler.rs"],
+      "reasons": ["runtime source change needs lib-frontier proof plus broad compile frontier"],
+      "rule_ids": ["runtime-source"]
     }
   ],
-  "touched_files": [
-    "src/runtime/scheduler.rs"
-  ],
+  "touched_files": ["src/runtime/scheduler.rs"],
   "unmatched_touched_files": []
 }

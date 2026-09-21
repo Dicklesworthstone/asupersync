@@ -9,9 +9,7 @@
       "status": "shipped",
       "summary": "Checks whether validation artifacts overlap dirty paths.",
       "test_path": "tests/validation_artifact_freshness_contract.py",
-      "validation": [
-        "python3 -m pytest tests/validation_artifact_freshness_contract.py"
-      ]
+      "validation": ["python3 -m pytest tests/validation_artifact_freshness_contract.py"]
     },
     {
       "capability_id": "artifact-freshness",

@@ -20,18 +20,14 @@
     {
       "candidate_id": "implementation-completeness:renamed-target",
       "lane": "implementation-completeness",
-      "paths": [
-        "tests/fixtures/reservation_aware_work_finder/new_candidate.json"
-      ],
+      "paths": ["tests/fixtures/reservation_aware_work_finder/new_candidate.json"],
       "priority": 1,
       "title": "Inspect renamed fixture target"
     },
     {
       "candidate_id": "implementation-completeness:safe-script",
       "lane": "implementation-completeness",
-      "paths": [
-        "scripts/reservation_aware_work_finder.py"
-      ],
+      "paths": ["scripts/reservation_aware_work_finder.py"],
       "priority": 2,
       "title": "Inspect reservation-aware finder script"
     }

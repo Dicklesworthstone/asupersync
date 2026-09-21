@@ -2,14 +2,14 @@ import {
   BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE,
   BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE,
   BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE,
+  type BrowserNativeMessagingCapability,
+  type BrowserNativeStreamCapability,
   createBrowserBroadcastChannel,
   createBrowserMessageChannel,
   createBrowserReadableStream,
   createBrowserWritableStream,
   detectBrowserNativeMessagingSupport,
   detectBrowserNativeStreamSupport,
-  type BrowserNativeMessagingCapability,
-  type BrowserNativeStreamCapability,
 } from "@asupersync/browser";
 
 type ScenarioRow = {
@@ -102,10 +102,10 @@ function makeRow(result: ScenarioResult): ScenarioRow {
 
 function errorCode(error: unknown): string | null {
   if (
-    typeof error === "object"
-    && error !== null
-    && "code" in error
-    && typeof (error as { code?: unknown }).code === "string"
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "string"
   ) {
     return (error as { code: string }).code;
   }
@@ -114,15 +114,14 @@ function errorCode(error: unknown): string | null {
 
 function errorReason(error: unknown): string | null {
   if (
-    typeof error === "object"
-    && error !== null
-    && "diagnostics" in error
-    && typeof (error as { diagnostics?: unknown }).diagnostics === "object"
-    && (error as { diagnostics?: unknown }).diagnostics !== null
-    && "reason" in ((error as { diagnostics: Record<string, unknown> }).diagnostics)
+    typeof error === "object" &&
+    error !== null &&
+    "diagnostics" in error &&
+    typeof (error as { diagnostics?: unknown }).diagnostics === "object" &&
+    (error as { diagnostics?: unknown }).diagnostics !== null &&
+    "reason" in (error as { diagnostics: Record<string, unknown> }).diagnostics
   ) {
-    const reason = (error as { diagnostics: Record<string, unknown> }).diagnostics
-      .reason;
+    const reason = (error as { diagnostics: Record<string, unknown> }).diagnostics.reason;
     return typeof reason === "string" ? reason : null;
   }
   return null;
@@ -130,15 +129,14 @@ function errorReason(error: unknown): string | null {
 
 function firstFailure(error: unknown): string | null {
   if (
-    typeof error === "object"
-    && error !== null
-    && "diagnostics" in error
-    && typeof (error as { diagnostics?: unknown }).diagnostics === "object"
-    && (error as { diagnostics?: unknown }).diagnostics !== null
-    && "firstFailure" in ((error as { diagnostics: Record<string, unknown> }).diagnostics)
+    typeof error === "object" &&
+    error !== null &&
+    "diagnostics" in error &&
+    typeof (error as { diagnostics?: unknown }).diagnostics === "object" &&
+    (error as { diagnostics?: unknown }).diagnostics !== null &&
+    "firstFailure" in (error as { diagnostics: Record<string, unknown> }).diagnostics
   ) {
-    const failure = (error as { diagnostics: Record<string, unknown> }).diagnostics
-      .firstFailure;
+    const failure = (error as { diagnostics: Record<string, unknown> }).diagnostics.firstFailure;
     return typeof failure === "string" ? failure : null;
   }
   return null;
@@ -148,10 +146,7 @@ function delay(ms = 0): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function waitFor<T>(
-  observe: () => T | null,
-  description: string,
-): Promise<T> {
+function waitFor<T>(observe: () => T | null, description: string): Promise<T> {
   const startedAt = performance.now();
   return new Promise((resolve, reject) => {
     const poll = () => {
@@ -226,8 +221,8 @@ async function messageChannelBytesRoundtrip(): Promise<ScenarioRow> {
     expected_error: null,
     actual_error: null,
     condition:
-      receivedBytes.byteLength === payload.byteLength
-      && receivedBytes.every((byte, index) => byte === payload[index]),
+      receivedBytes.byteLength === payload.byteLength &&
+      receivedBytes.every((byte, index) => byte === payload[index]),
   });
 }
 
@@ -294,8 +289,7 @@ async function messagePortAbortIsSticky(): Promise<ScenarioRow> {
     expected_error: `${BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE}:aborted:operator_abort`,
     actual_error: actual,
     condition:
-      actual
-      === `${BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE}:aborted:operator_abort`,
+      actual === `${BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE}:aborted:operator_abort`,
   });
 }
 
@@ -360,9 +354,9 @@ async function readableStreamBytes(): Promise<ScenarioRow> {
     expected_error: null,
     actual_error: null,
     condition:
-      readable.state === "closed"
-      && readable.bytesRead === payload.byteLength
-      && received.every((byte, index) => byte === payload[index]),
+      readable.state === "closed" &&
+      readable.bytesRead === payload.byteLength &&
+      received.every((byte, index) => byte === payload[index]),
   });
 }
 
@@ -394,10 +388,10 @@ async function writableStreamBytes(): Promise<ScenarioRow> {
     expected_error: null,
     actual_error: null,
     condition:
-      writable.state === "closed"
-      && writable.bytesWritten === payload.byteLength
-      && written === payload.byteLength
-      && receivedBytes === payload.byteLength,
+      writable.state === "closed" &&
+      writable.bytesWritten === payload.byteLength &&
+      written === payload.byteLength &&
+      receivedBytes === payload.byteLength,
   });
 }
 
@@ -476,8 +470,7 @@ async function degradedModeDenied(): Promise<ScenarioRow> {
     close_kind: "denied_before_open",
     expected_error: `${BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE}:degraded_mode_denied:false`,
     actual_error: actual,
-    condition:
-      actual === `${BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE}:degraded_mode_denied:false`,
+    condition: actual === `${BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE}:degraded_mode_denied:false`,
   });
 }
 
@@ -508,17 +501,14 @@ async function run(): Promise<void> {
   const failingRows = rows.filter((row) => row.verdict !== "pass");
 
   render({
-    phase: failingRows.length === 0 && missingScenarios.length === 0
-      ? "complete"
-      : "error",
+    phase: failingRows.length === 0 && missingScenarios.length === 0 ? "complete" : "error",
     marker: MARKER,
     bead_id: BEAD_ID,
     scenario_id: "BROWSER-NATIVE-MESSAGE-STREAM-CONSUMER",
     validation_passed: failingRows.length === 0 && missingScenarios.length === 0,
     missing_scenarios: missingScenarios,
     public_entrypoints: PUBLIC_ENTRYPOINT_MARKERS,
-    first_failure:
-      failingRows[0]?.first_failure ?? missingScenarios[0] ?? null,
+    first_failure: failingRows[0]?.first_failure ?? missingScenarios[0] ?? null,
     rows,
   });
 }

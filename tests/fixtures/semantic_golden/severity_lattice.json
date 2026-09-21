@@ -4,10 +4,10 @@
   "rule_ids": ["def.outcome.severity_lattice", "def.outcome.four_valued"],
   "description": "Expected severity values for all 4 outcome variants",
   "entries": [
-    { "variant": "Ok",        "severity_name": "ok",        "severity_value": 0 },
-    { "variant": "Err",       "severity_name": "err",       "severity_value": 1 },
+    { "variant": "Ok", "severity_name": "ok", "severity_value": 0 },
+    { "variant": "Err", "severity_name": "err", "severity_value": 1 },
     { "variant": "Cancelled", "severity_name": "cancelled", "severity_value": 2 },
-    { "variant": "Panicked",  "severity_name": "panicked",  "severity_value": 3 }
+    { "variant": "Panicked", "severity_name": "panicked", "severity_value": 3 }
   ],
   "invariants": [
     "Severity values form a total order: Ok < Err < Cancelled < Panicked",

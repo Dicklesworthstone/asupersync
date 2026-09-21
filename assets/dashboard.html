@@ -196,18 +196,18 @@ function stateClass(s) { return 'st-' + (s || 'unknown').toLowerCase(); }
 // ===== Tree =====
 function buildTree(snap) {
   var regionMap = {};
-  snap.regions.forEach(function(r) { regionMap[r.id.index] = r; });
+  snap.regions.forEach((r) => { regionMap[r.id.index] = r; });
   var tasksByRegion = {};
-  snap.tasks.forEach(function(t) {
+  snap.tasks.forEach((t) => {
     var rid = t.region_id.index;
     if (!tasksByRegion[rid]) tasksByRegion[rid] = [];
     tasksByRegion[rid].push(t);
   });
   var obligMap = {};
-  snap.obligations.forEach(function(o) { obligMap[o.id.index] = o; });
-  var roots = snap.regions.filter(function(r) { return !r.parent_id; });
+  snap.obligations.forEach((o) => { obligMap[o.id.index] = o; });
+  var roots = snap.regions.filter((r) => !r.parent_id);
   var childRegions = {};
-  snap.regions.forEach(function(r) {
+  snap.regions.forEach((r) => {
     if (r.parent_id) {
       var pid = r.parent_id.index;
       if (!childRegions[pid]) childRegions[pid] = [];
@@ -255,8 +255,8 @@ function renderRegion(r, tree, depth) {
   h += '</div>';
   if (hasChildren) {
     h += '<div class="tree-children' + (isCollapsed ? ' collapsed' : '') + '">';
-    children.forEach(function(c) { h += renderRegion(c, tree, depth + 1); });
-    tasks.forEach(function(t) { h += renderTask(t, tree); });
+    children.forEach((c) => { h += renderRegion(c, tree, depth + 1); });
+    tasks.forEach((t) => { h += renderTask(t, tree); });
     h += '</div>';
   }
   h += '</div>';
@@ -283,7 +283,7 @@ function renderTask(t, tree) {
   h += '</div>';
   if (hasObligs) {
     h += '<div class="tree-children' + (isCollapsed ? ' collapsed' : '') + '">';
-    t.obligations.forEach(function(oid) {
+    t.obligations.forEach((oid) => {
       var o = tree.obligMap[oid.index];
       if (o) h += renderObligation(o);
     });
@@ -313,9 +313,9 @@ function renderTree(snap) {
     return '<div class="empty">No regions or tasks</div>';
   }
   var h = '';
-  tree.roots.forEach(function(r) { h += renderRegion(r, tree, 0); });
-  var renderedRegions = new Set(snap.regions.map(function(r) { return r.id.index; }));
-  snap.tasks.forEach(function(t) {
+  tree.roots.forEach((r) => { h += renderRegion(r, tree, 0); });
+  var renderedRegions = new Set(snap.regions.map((r) => r.id.index));
+  snap.tasks.forEach((t) => {
     if (!renderedRegions.has(t.region_id.index)) {
       h += renderTask(t, tree);
     }
@@ -338,7 +338,7 @@ function render(snap) {
 }
 
 // ===== Tree interaction =====
-document.getElementById('tree').addEventListener('click', function(ev) {
+document.getElementById('tree').addEventListener('click', (ev) => {
   var tgt = ev.target;
   if (tgt.classList.contains('toggle')) {
     var key = tgt.getAttribute('data-key');
@@ -357,9 +357,9 @@ document.getElementById('tree').addEventListener('click', function(ev) {
 function showDetail(type, id) {
   if (!prevSnap) return;
   var obj = null;
-  if (type === 'region') obj = prevSnap.regions.find(function(r) { return String(r.id.index) === id; });
-  else if (type === 'task') obj = prevSnap.tasks.find(function(t) { return String(t.id.index) === id; });
-  else if (type === 'obligation') obj = prevSnap.obligations.find(function(o) { return String(o.id.index) === id; });
+  if (type === 'region') obj = prevSnap.regions.find((r) => String(r.id.index) === id);
+  else if (type === 'task') obj = prevSnap.tasks.find((t) => String(t.id.index) === id);
+  else if (type === 'obligation') obj = prevSnap.obligations.find((o) => String(o.id.index) === id);
   var panel = document.getElementById('detail');
   if (obj) {
     panel.classList.add('visible');
@@ -369,9 +369,9 @@ function showDetail(type, id) {
   }
 }
 
-document.getElementById('search').addEventListener('input', function() { if (prevSnap) render(prevSnap); });
-document.getElementById('hide-closed').addEventListener('change', function() { if (prevSnap) render(prevSnap); });
-document.getElementById('errors-only').addEventListener('change', function() { if (prevSnap) render(prevSnap); });
+document.getElementById('search').addEventListener('input', () => { if (prevSnap) render(prevSnap); });
+document.getElementById('hide-closed').addEventListener('change', () => { if (prevSnap) render(prevSnap); });
+document.getElementById('errors-only').addEventListener('change', () => { if (prevSnap) render(prevSnap); });
 
 // ===== Timeline =====
 var tlPlaying = false;
@@ -412,7 +412,7 @@ function eventDataStr(data) {
 function filterEvents(events) {
   var f = document.getElementById('tl-filter').value;
   if (f === 'all') return events;
-  return events.filter(function(e) { return eventCategory(e.kind) === f; });
+  return events.filter((e) => eventCategory(e.kind) === f);
 }
 
 function renderTimeline(snap) {
@@ -420,7 +420,7 @@ function renderTimeline(snap) {
   var filtered = filterEvents(events);
   var bar = document.getElementById('timeline-bar');
   var barW = bar.offsetWidth || 600;
-  bar.querySelectorAll('.timeline-marker').forEach(function(m) { m.remove(); });
+  bar.querySelectorAll('.timeline-marker').forEach((m) => { m.remove(); });
   if (events.length === 0) {
     document.getElementById('tl-start').textContent = '--';
     document.getElementById('tl-end').textContent = '--';
@@ -434,7 +434,7 @@ function renderTimeline(snap) {
   document.getElementById('tl-start').textContent = fmtNs(minT);
   document.getElementById('tl-end').textContent = fmtNs(maxT);
   document.getElementById('tl-info').textContent = filtered.length + ' / ' + events.length + ' events';
-  filtered.forEach(function(e) {
+  filtered.forEach((e) => {
     var pct = ((e.time - minT) / span) * 100;
     var marker = document.createElement('div');
     marker.className = 'timeline-marker ' + eventCategory(e.kind);
@@ -453,7 +453,7 @@ function renderTimeline(snap) {
   }
   document.getElementById('tl-fill').style.width = '100%';
   var h = '';
-  filtered.forEach(function(e, i) {
+  filtered.forEach((e, i) => {
     var sel = tlSelectedEvt === e.seq ? ' selected' : '';
     h += '<div class="tl-event' + sel + '" data-idx="' + i + '" data-seq="' + e.seq + '">';
     h += '<span class="tl-time">' + fmtNs(e.time) + '</span>';
@@ -464,7 +464,7 @@ function renderTimeline(snap) {
   document.getElementById('timeline-events').innerHTML = h || '<div class="empty">All events filtered</div>';
 }
 
-document.getElementById('timeline-bar').addEventListener('click', function(ev) {
+document.getElementById('timeline-bar').addEventListener('click', (ev) => {
   if (!prevSnap || !prevSnap.recent_events.length) return;
   var bar = document.getElementById('timeline-bar');
   var rect = bar.getBoundingClientRect();
@@ -475,12 +475,12 @@ document.getElementById('timeline-bar').addEventListener('click', function(ev) {
   renderTimeline(prevSnap);
 });
 
-document.getElementById('timeline-events').addEventListener('click', function(ev) {
+document.getElementById('timeline-events').addEventListener('click', (ev) => {
   var row = ev.target.closest('.tl-event');
   if (!row || !prevSnap) return;
   var seq = parseInt(row.getAttribute('data-seq'), 10);
   tlSelectedEvt = seq;
-  var evt = prevSnap.recent_events.find(function(e) { return e.seq === seq; });
+  var evt = prevSnap.recent_events.find((e) => e.seq === seq);
   if (evt) {
     var panel = document.getElementById('detail');
     panel.classList.add('visible');
@@ -496,7 +496,7 @@ document.getElementById('tl-play').addEventListener('click', function() {
   this.classList.toggle('active', tlPlaying);
   if (tlPlaying) {
     if (tlCursorIdx < 0) tlCursorIdx = 0;
-    playInterval = setInterval(function() {
+    playInterval = setInterval(() => {
       if (!prevSnap) return;
       var events = filterEvents(prevSnap.recent_events);
       if (tlCursorIdx < events.length - 1) {
@@ -512,25 +512,25 @@ document.getElementById('tl-play').addEventListener('click', function() {
   } else { clearInterval(playInterval); }
 });
 
-document.getElementById('tl-step-back').addEventListener('click', function() {
+document.getElementById('tl-step-back').addEventListener('click', () => {
   if (!prevSnap) return;
   var events = filterEvents(prevSnap.recent_events);
   if (tlCursorIdx > 0) { tlCursorIdx--; renderTimeline(prevSnap); }
   else if (tlCursorIdx < 0 && events.length > 0) { tlCursorIdx = events.length - 1; renderTimeline(prevSnap); }
 });
-document.getElementById('tl-step-fwd').addEventListener('click', function() {
+document.getElementById('tl-step-fwd').addEventListener('click', () => {
   if (!prevSnap) return;
   var events = filterEvents(prevSnap.recent_events);
   if (tlCursorIdx < events.length - 1) { tlCursorIdx++; renderTimeline(prevSnap); }
 });
 
-document.getElementById('tl-filter').addEventListener('change', function() {
+document.getElementById('tl-filter').addEventListener('change', () => {
   tlCursorIdx = -1;
   if (prevSnap) renderTimeline(prevSnap);
 });
 
 // ===== Export =====
-document.getElementById('export-btn').addEventListener('click', function() {
+document.getElementById('export-btn').addEventListener('click', () => {
   if (!prevSnap) return;
   var blob = new Blob([JSON.stringify(prevSnap, null, 2)], { type: 'application/json' });
   var url = URL.createObjectURL(blob);
@@ -542,12 +542,12 @@ document.getElementById('export-btn').addEventListener('click', function() {
 });
 
 // ===== Post-mortem file loader =====
-document.getElementById('trace-file').addEventListener('change', function(ev) {
+document.getElementById('trace-file').addEventListener('change', (ev) => {
   var file = ev.target.files[0];
   if (!file) return;
   document.getElementById('file-name').textContent = file.name;
   var reader = new FileReader();
-  reader.onload = function(e) {
+  reader.onload = (e) => {
     try {
       var data = JSON.parse(e.target.result);
       // Accept either a RuntimeSnapshot directly or an array of events.
@@ -590,12 +590,12 @@ function setMode(mode) {
 
 function poll() {
   fetch('/debug/snapshot')
-    .then(function(r) { return r.json(); })
-    .then(function(snap) {
+    .then((r) => r.json())
+    .then((snap) => {
       document.getElementById('error').style.display = 'none';
       render(snap);
     })
-    .catch(function(err) {
+    .catch((err) => {
       document.getElementById('error').textContent = 'Fetch error: ' + err;
       document.getElementById('error').style.display = 'block';
     });
@@ -612,9 +612,9 @@ if (location.protocol === 'file:') {
   setMode('file');
 } else {
   fetch('/debug/snapshot')
-    .then(function(r) {
+    .then((r) => {
       if (r.ok) {
-        return r.json().then(function(snap) {
+        return r.json().then((snap) => {
           setMode('live');
           render(snap);
           pollTimer = setInterval(poll, CONFIG.refreshMs);
@@ -623,7 +623,7 @@ if (location.protocol === 'file:') {
         setMode('file');
       }
     })
-    .catch(function() {
+    .catch(() => {
       setMode('file');
     });
 }

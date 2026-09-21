@@ -47,9 +47,7 @@
     {
       "evidence": {
         "expected_commit": "2468ace0",
-        "matched_message_ids": [
-          1010
-        ],
+        "matched_message_ids": [1010],
         "thread_id": "asupersync-stale-proof"
       },
       "row_id": "closeout_mail",

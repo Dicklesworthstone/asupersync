@@ -24,9 +24,7 @@
     "category": "request-cleanup-authorization",
     "files_to_reserve": [],
     "lane": "disk-pressure-cleanup-authorization",
-    "paths": [
-      "/tmp/rch_target_maroontrout_semaphore_fuzz"
-    ],
+    "paths": ["/tmp/rch_target_maroontrout_semaphore_fuzz"],
     "reason": "critical disk pressure leaves no safe work candidate; ask for explicit cleanup authorization",
     "safety_reason": "cleanup is report-only and requires explicit user authorization",
     "title": "stale artifact candidate",

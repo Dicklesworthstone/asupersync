@@ -3,18 +3,11 @@
   "description": "Deterministic optimization pipeline contract for browser-targeted wasm artifacts.",
   "budget_contract": {
     "source_document": "WASM_SIZE_PERF_BUDGETS.md",
-    "allowed_budget_profiles": [
-      "core-min",
-      "core-trace",
-      "full-dev"
-    ]
+    "allowed_budget_profiles": ["core-min", "core-trace", "full-dev"]
   },
   "invariants": {
     "target": "wasm32-unknown-unknown",
-    "required_features": [
-      "wasm-browser-preview",
-      "getrandom/wasm_js"
-    ],
+    "required_features": ["wasm-browser-preview", "getrandom/wasm_js"],
     "forbidden_features": [
       "cli",
       "io-uring",
@@ -35,16 +28,9 @@
       "cargo": {
         "release": false,
         "no_default_features": true,
-        "features": [
-          "wasm-browser-preview",
-          "getrandom/wasm_js"
-        ]
+        "features": ["wasm-browser-preview", "getrandom/wasm_js"]
       },
-      "rustflags": [
-        "-Copt-level=1",
-        "-Cdebuginfo=2",
-        "-Cpanic=abort"
-      ],
+      "rustflags": ["-Copt-level=1", "-Cdebuginfo=2", "-Cpanic=abort"],
       "wasm_opt": {
         "enabled": false,
         "passes": []
@@ -62,25 +48,12 @@
       "cargo": {
         "release": true,
         "no_default_features": true,
-        "features": [
-          "wasm-browser-preview",
-          "getrandom/wasm_js"
-        ]
+        "features": ["wasm-browser-preview", "getrandom/wasm_js"]
       },
-      "rustflags": [
-        "-Copt-level=s",
-        "-Cdebuginfo=1",
-        "-Ccodegen-units=1",
-        "-Cpanic=abort"
-      ],
+      "rustflags": ["-Copt-level=s", "-Cdebuginfo=1", "-Ccodegen-units=1", "-Cpanic=abort"],
       "wasm_opt": {
         "enabled": true,
-        "passes": [
-          "-O2",
-          "--enable-bulk-memory",
-          "--enable-sign-ext",
-          "--strip-dwarf"
-        ]
+        "passes": ["-O2", "--enable-bulk-memory", "--enable-sign-ext", "--strip-dwarf"]
       },
       "artifact": {
         "source": "target/wasm32-unknown-unknown/release/asupersync.wasm",
@@ -95,10 +68,7 @@
       "cargo": {
         "release": true,
         "no_default_features": true,
-        "features": [
-          "wasm-browser-preview",
-          "getrandom/wasm_js"
-        ]
+        "features": ["wasm-browser-preview", "getrandom/wasm_js"]
       },
       "rustflags": [
         "-Copt-level=z",
@@ -109,12 +79,7 @@
       ],
       "wasm_opt": {
         "enabled": true,
-        "passes": [
-          "-Oz",
-          "--strip-dwarf",
-          "--strip-producers",
-          "--vacuum"
-        ]
+        "passes": ["-Oz", "--strip-dwarf", "--strip-producers", "--vacuum"]
       },
       "artifact": {
         "source": "target/wasm32-unknown-unknown/release/asupersync.wasm",

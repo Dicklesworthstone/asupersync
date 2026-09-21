@@ -19,10 +19,7 @@
         "rerun the same focused proof lane after trimming artifact fanout"
       ],
       "operator_note": "Keep per-lane CARGO_TARGET_DIR values under transient rch scratch paths or add equivalent bulky artifact directories to .rchignore before rerunning.",
-      "recommended_patterns": [
-        ".rch-*/",
-        ".rch_target*/"
-      ]
+      "recommended_patterns": [".rch-*/", ".rch_target*/"]
     },
     "status": "not-configured",
     "violations": [],
@@ -61,9 +58,7 @@
   "non_mutating": true,
   "proof_lane": "unspecified",
   "remediation": {
-    "next_steps": [
-      "rerun through rch remote execution after worker health is restored"
-    ],
+    "next_steps": ["rerun through rch remote execution after worker health is restored"],
     "operator_note": "Reject local cargo/test output for this repo's proof lanes.",
     "summary": "rch attempted or used local fallback"
   },

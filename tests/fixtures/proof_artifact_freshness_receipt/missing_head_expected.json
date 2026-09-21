@@ -35,9 +35,7 @@
       },
       "safe_to_cite": false,
       "status": "pass",
-      "touched_files": [
-        "src/runtime/state.rs"
-      ]
+      "touched_files": ["src/runtime/state.rs"]
     }
   ],
   "safety": {

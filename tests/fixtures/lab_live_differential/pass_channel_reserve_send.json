@@ -15,25 +15,14 @@
     "path": "tests/lab_live_differential_v2.rs",
     "entry": "run_equivalence_pilot"
   },
-  "admitted_differences": [
-    "scheduler_decision_sequence_provenance"
-  ],
+  "admitted_differences": ["scheduler_decision_sequence_provenance"],
   "timing_normalization": {
     "policy_doc": "docs/lab_live_time_normalization_policy.md",
     "clock_model": "semantic_only",
     "wall_clock_fields": "provenance_only"
   },
-  "platform_prerequisites": [
-    "current_thread_runtime",
-    "no_external_services"
-  ],
-  "expected_logs": [
-    "scenario_id",
-    "surface_id",
-    "verdict",
-    "seed_lineage_id",
-    "repro_command"
-  ],
+  "platform_prerequisites": ["current_thread_runtime", "no_external_services"],
+  "expected_logs": ["scenario_id", "surface_id", "verdict", "seed_lineage_id", "repro_command"],
   "failure_bundle": {
     "bundle_path": "artifacts/lab_live/lab_live_5_1/pass/",
     "summary_record": "summary.json",
@@ -42,11 +31,7 @@
     "first_failure_field": ""
   },
   "readme_or_support_matrix_row": "docs/lab_live_differential_scope_matrix.md#normative-scope-matrix",
-  "verification_floor": [
-    "T0 unit_contract",
-    "T1 golden_fixture",
-    "T2 dual_run_smoke"
-  ],
+  "verification_floor": ["T0 unit_contract", "T1 golden_fixture", "T2 dual_run_smoke"],
   "expected_verdict": "pass",
   "no_claims": [
     "does not prove raw event ordering parity",

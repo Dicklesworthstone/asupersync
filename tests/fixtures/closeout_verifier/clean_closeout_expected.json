@@ -56,9 +56,7 @@
     {
       "evidence": {
         "expected_commit": "abc1234def",
-        "matched_message_ids": [
-          1001
-        ],
+        "matched_message_ids": [1001],
         "thread_id": "asupersync-clean"
       },
       "row_id": "closeout_mail",

@@ -25,35 +25,18 @@
     "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
     "platform": "current_thread_runtime",
     "adapter": "negative_fixture",
-    "logs": [
-      "scenario_id",
-      "expected_error"
-    ],
+    "logs": ["scenario_id", "expected_error"],
     "replay_pointers": [
       "artifacts/lab_live/lab_live_5_3/malformed_missing_platform_report/summary.json"
     ],
     "redaction": "not reached because platform_report is missing"
   },
-  "expected_logs": [
-    "scenario_id",
-    "expected_error"
-  ],
+  "expected_logs": ["scenario_id", "expected_error"],
   "redaction": {
-    "input_samples": [
-      "token=malformed-secret"
-    ],
-    "redacted_samples": [
-      "token=<redacted>"
-    ],
-    "forbidden_substrings": [
-      "malformed-secret"
-    ]
+    "input_samples": ["token=malformed-secret"],
+    "redacted_samples": ["token=<redacted>"],
+    "forbidden_substrings": ["malformed-secret"]
   },
-  "docs_alignment": [
-    "docs/lab_live_timing_platform_policy.md"
-  ],
-  "no_claims": [
-    "negative fixture only",
-    "does not represent a valid report"
-  ]
+  "docs_alignment": ["docs/lab_live_timing_platform_policy.md"],
+  "no_claims": ["negative fixture only", "does not represent a valid report"]
 }

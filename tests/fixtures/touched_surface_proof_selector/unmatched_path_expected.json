@@ -1,7 +1,5 @@
 {
-  "action_items": [
-    "add a selection rule or lane source path for packages/browser/src/index.ts"
-  ],
+  "action_items": ["add a selection rule or lane source path for packages/browser/src/index.ts"],
   "blocked_selected_lanes": [],
   "blocked_supplemental_lanes": [],
   "current_date": "2026-05-08",
@@ -38,10 +36,6 @@
     "unmatched_touched_count": 1
   },
   "supplemental_lanes": [],
-  "touched_files": [
-    "packages/browser/src/index.ts"
-  ],
-  "unmatched_touched_files": [
-    "packages/browser/src/index.ts"
-  ]
+  "touched_files": ["packages/browser/src/index.ts"],
+  "unmatched_touched_files": ["packages/browser/src/index.ts"]
 }

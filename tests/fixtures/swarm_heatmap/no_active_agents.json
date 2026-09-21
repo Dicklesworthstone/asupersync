@@ -5,10 +5,7 @@
     "messages": [],
     "reservations": []
   },
-  "candidate_surfaces": [
-    "fuzz/fuzz_targets",
-    "src/runtime"
-  ],
+  "candidate_surfaces": ["fuzz/fuzz_targets", "src/runtime"],
   "dirty_tree": {
     "status": "ok",
     "entries": []

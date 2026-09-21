@@ -1,8 +1,4 @@
-import {
-  abiFingerprint,
-  abiVersion,
-  detectBrowserRuntimeSupport,
-} from "@asupersync/browser";
+import { abiFingerprint, abiVersion, detectBrowserRuntimeSupport } from "@asupersync/browser";
 
 const payload = {
   support: detectBrowserRuntimeSupport(),

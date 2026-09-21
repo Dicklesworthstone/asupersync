@@ -11,7 +11,9 @@
       "proof-admission-blocked"
     ],
     "expected_warning_kinds": [],
-    "notes": ["blocked proof status, rejected admission, and insufficient disk all surface together"]
+    "notes": [
+      "blocked proof status, rejected admission, and insufficient disk all surface together"
+    ]
   },
   "sources": {
     "proof_lane_manifest": {

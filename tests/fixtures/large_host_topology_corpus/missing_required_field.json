@@ -48,9 +48,7 @@
     "artifact_path",
     "first_failure"
   ],
-  "required_profile_ids": [
-    "bad-missing-topology"
-  ],
+  "required_profile_ids": ["bad-missing-topology"],
   "profile_catalog": [
     {
       "profile_id": "bad-missing-topology",
@@ -58,9 +56,7 @@
       "title": "Fixture missing required topology and fallback fields",
       "memory": {
         "total_gib": 256,
-        "per_numa_node_gib": [
-          256
-        ],
+        "per_numa_node_gib": [256],
         "reserved_for_os_gib": 16,
         "admission_memory_ceiling_gib": 192,
         "memory_pressure_state": "healthy"
@@ -74,12 +70,8 @@
       "rch_slot_model": {
         "recommended_slots": 4,
         "max_parallel_heavy_lanes": 2,
-        "preferred_lane_classes": [
-          "focused-contract"
-        ],
-        "avoid_lane_classes": [
-          "local-fallback-cargo"
-        ]
+        "preferred_lane_classes": ["focused-contract"],
+        "avoid_lane_classes": ["local-fallback-cargo"]
       },
       "contention_domains": [
         {

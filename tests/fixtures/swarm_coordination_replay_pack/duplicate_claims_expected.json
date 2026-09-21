@@ -1,7 +1,5 @@
 {
-  "action_items": [
-    "one agent should stand down or split the write surface before edits continue"
-  ],
+  "action_items": ["one agent should stand down or split the write surface before edits continue"],
   "current_date": "2026-05-08",
   "forbidden_actions": {
     "runs_agent_mail_mutation": false,
@@ -59,10 +57,7 @@
   "violations": [
     {
       "code": "duplicate-active-claim",
-      "event_ids": [
-        "claim-a",
-        "claim-b"
-      ],
+      "event_ids": ["claim-a", "claim-b"],
       "message": "asupersync-aj7lx3.13 has simultaneous active claims from BlackDove, CopperSpring",
       "remediation": "one agent should stand down or split the write surface before edits continue",
       "severity": "error"

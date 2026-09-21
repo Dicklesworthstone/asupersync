@@ -26,24 +26,17 @@
         "proof_output_digest": "sha256:424dd7b9454acabbeeabcd07f2023c8b268aed605036a5e13c8b727b0a96f180",
         "proof_output_segment_count": 1,
         "rch_remote_route_required": true,
-        "rch_remote_route_segments": [
-          "[RCH] remote rch-worker-proof-01 (12.3s)"
-        ]
+        "rch_remote_route_segments": ["[RCH] remote rch-worker-proof-01 (12.3s)"]
       },
       "generated_at": "2026-05-08T05:15:00Z",
       "reason": "artifact HEAD and touched files match a clean cited surface",
       "remediation": {
-        "next_steps": [
-          "include the artifact path and git SHA in the closeout"
-        ],
+        "next_steps": ["include the artifact path and git SHA in the closeout"],
         "operator_note": "Artifact may be cited for the current clean surface."
       },
       "safe_to_cite": true,
       "status": "pass",
-      "touched_files": [
-        "scripts/proof_runner.py",
-        "tests/proof_runner_contract.rs"
-      ]
+      "touched_files": ["scripts/proof_runner.py", "tests/proof_runner_contract.rs"]
     }
   ],
   "safety": {

@@ -608,10 +608,7 @@
   "drift_routing": {
     "policy_id": "tokio-parity-drift-routing-v1",
     "generated_at": "2026-06-08T23:59:11Z",
-    "owner_roles": [
-      "tokio-replacement track owner",
-      "runtime maintainers"
-    ],
+    "owner_roles": ["tokio-replacement track owner", "runtime maintainers"],
     "alert_count": 0,
     "alerts": []
   },

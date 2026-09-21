@@ -17,9 +17,7 @@
         "id": "asupersync-ready-blocked",
         "title": "Extend closeout verifier report",
         "priority": 1,
-        "paths": [
-          "scripts/closeout_verifier.py"
-        ]
+        "paths": ["scripts/closeout_verifier.py"]
       }
     ]
   },
@@ -33,9 +31,7 @@
       "lane": "implementation-completeness",
       "title": "Scan src/http for incomplete code",
       "priority": 2,
-      "paths": [
-        "src/http"
-      ]
+      "paths": ["src/http"]
     }
   ]
 }

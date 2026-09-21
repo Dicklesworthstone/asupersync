@@ -33,22 +33,11 @@
   "$defs": {
     "row_type": {
       "type": "string",
-      "enum": [
-        "semantic_rule",
-        "invariant",
-        "refinement_obligation",
-        "operational_gate"
-      ]
+      "enum": ["semantic_rule", "invariant", "refinement_obligation", "operational_gate"]
     },
     "status": {
       "type": "string",
-      "enum": [
-        "not-started",
-        "in-progress",
-        "blocked",
-        "proven",
-        "validated-in-ci"
-      ]
+      "enum": ["not-started", "in-progress", "blocked", "proven", "validated-in-ci"]
     },
     "blocker_code": {
       "type": "string",
@@ -90,7 +79,16 @@
     "coverage_row": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "title", "row_type", "status", "description", "depends_on", "tags", "evidence"],
+      "required": [
+        "id",
+        "title",
+        "row_type",
+        "status",
+        "description",
+        "depends_on",
+        "tags",
+        "evidence"
+      ],
       "properties": {
         "id": {
           "type": "string",
@@ -125,10 +123,7 @@
           "items": { "type": "string" }
         },
         "blocker": {
-          "anyOf": [
-            { "$ref": "#/$defs/coverage_blocker" },
-            { "type": "null" }
-          ]
+          "anyOf": [{ "$ref": "#/$defs/coverage_blocker" }, { "type": "null" }]
         },
         "evidence": {
           "type": "array",

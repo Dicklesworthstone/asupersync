@@ -6,18 +6,18 @@
  */
 
 import {
-  Outcome as OutcomeFactory,
-  BrowserRuntime,
-  RegionHandle,
+  type AbiFailure,
+  type BrowserRuntime,
+  type BrowserRuntimeOptions,
+  type BrowserRuntimeSupportClass,
+  type BrowserRuntimeSupportDiagnostics,
+  type BrowserRuntimeSupportReason,
   createBrowserRuntime,
   detectBrowserRuntimeSupport,
   formatOutcomeFailure,
-  type BrowserRuntimeSupportClass,
-  type BrowserRuntimeSupportDiagnostics,
-  type BrowserRuntimeOptions,
-  type BrowserRuntimeSupportReason,
-  type AbiFailure,
   type Outcome,
+  Outcome as OutcomeFactory,
+  type RegionHandle,
 } from "@asupersync/browser";
 
 export * from "@asupersync/browser";
@@ -27,9 +27,7 @@ export type NextRuntimeSupportReason =
   | BrowserRuntimeSupportReason
   | "bridge_only_server_target"
   | "bridge_only_edge_target";
-export type NextRuntimeSupportClass =
-  | BrowserRuntimeSupportClass
-  | "bridge_only";
+export type NextRuntimeSupportClass = BrowserRuntimeSupportClass | "bridge_only";
 export type NextBootstrapPhase =
   | "server_rendered"
   | "hydrating"
@@ -42,20 +40,11 @@ export type NextRenderEnvironment =
   | "server_component"
   | "node_server"
   | "edge_runtime";
-export type NextNavigationType =
-  | "soft_navigation"
-  | "hard_navigation"
-  | "popstate";
-export type NextBootstrapRecoveryAction =
-  | "none"
-  | "reset_to_hydrating"
-  | "retry_runtime_init";
+export type NextNavigationType = "soft_navigation" | "hard_navigation" | "popstate";
+export type NextBootstrapRecoveryAction = "none" | "reset_to_hydrating" | "retry_runtime_init";
 
 export interface NextRuntimeSupportDiagnostics
-  extends Omit<
-    BrowserRuntimeSupportDiagnostics,
-    "packageName" | "reason" | "supportClass"
-  > {
+  extends Omit<BrowserRuntimeSupportDiagnostics, "packageName" | "reason" | "supportClass"> {
   packageName: "@asupersync/next";
   target: NextRuntimeTarget;
   reason: NextRuntimeSupportReason;
@@ -102,10 +91,7 @@ export interface NextClientBootstrapOptions extends BrowserRuntimeOptions {
   initialRouteSegment?: string;
   label?: string;
   popstatePreservesRuntime?: boolean;
-  onLogEvent?: (
-    event: NextBootstrapLogEvent,
-    snapshot: NextBootstrapSnapshot,
-  ) => void;
+  onLogEvent?: (event: NextBootstrapLogEvent, snapshot: NextBootstrapSnapshot) => void;
 }
 
 export interface NextBootstrapLogFieldOverrides {
@@ -120,9 +106,7 @@ export type NextRuntimeFallback =
   | "defer_until_hydrated"
   | "use_server_bridge"
   | "use_edge_bridge";
-export type NextServerBridgeEnvironment =
-  | "server_component"
-  | "node_server";
+export type NextServerBridgeEnvironment = "server_component" | "node_server";
 export type NextEdgeBridgeEnvironment = "edge_runtime";
 export type NextBridgeOutcome = "ok" | "err" | "cancelled" | "panicked";
 export type NextBridgeValue =
@@ -149,9 +133,7 @@ export interface NextServerBridgeRequestOptions {
   routeSegment?: string;
 }
 
-export interface NextServerBridgeRequest<
-  TPayload extends NextBridgeValue = NextBridgeValue,
-> {
+export interface NextServerBridgeRequest<TPayload extends NextBridgeValue = NextBridgeValue> {
   operation: string;
   payload: TPayload;
   routeSegment: string;
@@ -162,9 +144,7 @@ export interface NextServerBridgeRequest<
   cancellationMode: "explicit_status";
 }
 
-export interface NextServerBridgeResponse<
-  TPayload extends NextBridgeValue = NextBridgeValue,
-> {
+export interface NextServerBridgeResponse<TPayload extends NextBridgeValue = NextBridgeValue> {
   outcome: NextBridgeOutcome;
   payload?: TPayload;
   errorMessage?: string;
@@ -197,9 +177,7 @@ export interface NextEdgeBridgeRequestOptions {
   routeSegment?: string;
 }
 
-export interface NextEdgeBridgeRequest<
-  TPayload extends NextBridgeValue = NextBridgeValue,
-> {
+export interface NextEdgeBridgeRequest<TPayload extends NextBridgeValue = NextBridgeValue> {
   operation: string;
   payload: TPayload;
   routeSegment: string;
@@ -210,9 +188,7 @@ export interface NextEdgeBridgeRequest<
   cancellationMode: "explicit_status";
 }
 
-export interface NextEdgeBridgeResponse<
-  TPayload extends NextBridgeValue = NextBridgeValue,
-> {
+export interface NextEdgeBridgeResponse<TPayload extends NextBridgeValue = NextBridgeValue> {
   outcome: NextBridgeOutcome;
   payload?: TPayload;
   errorMessage?: string;
@@ -229,14 +205,10 @@ export interface NextEdgeBridgeRuntimeError extends Error {
   bridgeDiagnostics: NextEdgeBridgeDiagnostics;
 }
 
-export const NEXT_UNSUPPORTED_RUNTIME_CODE =
-  "ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME";
-export const NEXT_BOOTSTRAP_STATE_ERROR_CODE =
-  "ASUPERSYNC_NEXT_BOOTSTRAP_STATE_ERROR";
-export const NEXT_SERVER_BRIDGE_RESPONSE_ERROR_CODE =
-  "ASUPERSYNC_NEXT_SERVER_BRIDGE_RESPONSE";
-export const NEXT_EDGE_BRIDGE_RESPONSE_ERROR_CODE =
-  "ASUPERSYNC_NEXT_EDGE_BRIDGE_RESPONSE";
+export const NEXT_UNSUPPORTED_RUNTIME_CODE = "ASUPERSYNC_NEXT_UNSUPPORTED_RUNTIME";
+export const NEXT_BOOTSTRAP_STATE_ERROR_CODE = "ASUPERSYNC_NEXT_BOOTSTRAP_STATE_ERROR";
+export const NEXT_SERVER_BRIDGE_RESPONSE_ERROR_CODE = "ASUPERSYNC_NEXT_SERVER_BRIDGE_RESPONSE";
+export const NEXT_EDGE_BRIDGE_RESPONSE_ERROR_CODE = "ASUPERSYNC_NEXT_EDGE_BRIDGE_RESPONSE";
 export const NEXT_BOOTSTRAP_PHASES = [
   "server_rendered",
   "hydrating",
@@ -244,31 +216,20 @@ export const NEXT_BOOTSTRAP_PHASES = [
   "runtime_ready",
   "runtime_failed",
 ] as const;
-export const NEXT_NAVIGATION_TYPES = [
-  "soft_navigation",
-  "hard_navigation",
-  "popstate",
-] as const;
+export const NEXT_NAVIGATION_TYPES = ["soft_navigation", "hard_navigation", "popstate"] as const;
 export const NEXT_BOOTSTRAP_RECOVERY_ACTIONS = [
   "none",
   "reset_to_hydrating",
   "retry_runtime_init",
 ] as const;
-export const NEXT_BOUNDARY_MODES = [
-  "client",
-  "server",
-  "edge",
-] as const;
+export const NEXT_BOUNDARY_MODES = ["client", "server", "edge"] as const;
 export const NEXT_RUNTIME_FALLBACKS = [
   "none_required",
   "defer_until_hydrated",
   "use_server_bridge",
   "use_edge_bridge",
 ] as const;
-export const NEXT_SERVER_BRIDGE_ENVIRONMENTS = [
-  "server_component",
-  "node_server",
-] as const;
+export const NEXT_SERVER_BRIDGE_ENVIRONMENTS = ["server_component", "node_server"] as const;
 export const NEXT_EDGE_BRIDGE_ENVIRONMENTS = ["edge_runtime"] as const;
 
 type BrowserOutcome<T = unknown> = Outcome<T, AbiFailure>;
@@ -311,24 +272,18 @@ function bootstrapHydrationContext(phase: NextBootstrapPhase): string {
 
 function navigationCount(snapshot: NextBootstrapSnapshot): number {
   return (
-    snapshot.softNavigationCount +
-    snapshot.hardNavigationCount +
-    snapshot.popstateNavigationCount
+    snapshot.softNavigationCount + snapshot.hardNavigationCount + snapshot.popstateNavigationCount
   );
 }
 
-function cloneSnapshot(
-  snapshot: NextBootstrapSnapshot,
-): NextBootstrapSnapshot {
+function cloneSnapshot(snapshot: NextBootstrapSnapshot): NextBootstrapSnapshot {
   return {
     ...snapshot,
     phaseHistory: [...snapshot.phaseHistory],
   };
 }
 
-function createInitialSnapshot(
-  options: NextClientBootstrapOptions,
-): NextBootstrapSnapshot {
+function createInitialSnapshot(options: NextClientBootstrapOptions): NextBootstrapSnapshot {
   return {
     phase: "server_rendered",
     environment: "client_ssr",
@@ -354,10 +309,7 @@ function createInitialSnapshot(
   };
 }
 
-function isValidBootstrapTransition(
-  from: NextBootstrapPhase,
-  to: NextBootstrapPhase,
-): boolean {
+function isValidBootstrapTransition(from: NextBootstrapPhase, to: NextBootstrapPhase): boolean {
   if (from === to) {
     return true;
   }
@@ -368,11 +320,7 @@ function isValidBootstrapTransition(
     case "hydrating":
       return to === "hydrated" || to === "runtime_failed";
     case "hydrated":
-      return (
-        to === "runtime_ready" ||
-        to === "runtime_failed" ||
-        to === "server_rendered"
-      );
+      return to === "runtime_ready" || to === "runtime_failed" || to === "server_rendered";
     case "runtime_ready":
     case "runtime_failed":
       return to === "hydrating" || to === "server_rendered";
@@ -412,9 +360,7 @@ export function nextRuntimeFallbackForEnvironment(
   }
 }
 
-export function nextRuntimeFallbackReason(
-  environment: NextRenderEnvironment,
-): string {
+export function nextRuntimeFallbackReason(environment: NextRenderEnvironment): string {
   switch (nextRuntimeFallbackForEnvironment(environment)) {
     case "none_required":
       return "runtime capability available: execute directly in hydrated client boundary";
@@ -498,9 +444,7 @@ export interface NextEdgeBridgeResponseError extends Error {
   response: NextEdgeBridgeResponse;
 }
 
-export function createNextServerBridgeResponseFromOutcome<
-  TPayload extends NextBridgeValue,
->(
+export function createNextServerBridgeResponseFromOutcome<TPayload extends NextBridgeValue>(
   outcome: BrowserOutcome<TPayload>,
   options: NextServerBridgeAdapterOptions = {},
 ): NextServerBridgeResponse<TPayload> {
@@ -533,9 +477,7 @@ export function createNextServerBridgeResponseFromOutcome<
   }
 }
 
-export function createNextEdgeBridgeResponseFromOutcome<
-  TPayload extends NextBridgeValue,
->(
+export function createNextEdgeBridgeResponseFromOutcome<TPayload extends NextBridgeValue>(
   outcome: BrowserOutcome<TPayload>,
   options: NextEdgeBridgeAdapterOptions = {},
 ): NextEdgeBridgeResponse<TPayload> {
@@ -571,15 +513,12 @@ export function createNextEdgeBridgeResponseFromOutcome<
 function createNextServerBridgeResponseError(
   response: NextServerBridgeResponse,
 ): NextServerBridgeResponseError {
-  const message =
-    response.errorMessage ?? "bridge response did not include a payload";
+  const message = response.errorMessage ?? "bridge response did not include a payload";
   const error = new Error(
     `${response.diagnostics.renderEnvironment}: ${response.outcome}: ${message}`,
   ) as NextServerBridgeResponseError;
   error.code = NEXT_SERVER_BRIDGE_RESPONSE_ERROR_CODE;
-  error.bridgeDiagnostics = cloneNextServerBridgeDiagnostics(
-    response.diagnostics,
-  );
+  error.bridgeDiagnostics = cloneNextServerBridgeDiagnostics(response.diagnostics);
   error.response = {
     ...response,
     diagnostics: cloneNextServerBridgeDiagnostics(response.diagnostics),
@@ -590,8 +529,7 @@ function createNextServerBridgeResponseError(
 function createNextEdgeBridgeResponseError(
   response: NextEdgeBridgeResponse,
 ): NextEdgeBridgeResponseError {
-  const message =
-    response.errorMessage ?? "bridge response did not include a payload";
+  const message = response.errorMessage ?? "bridge response did not include a payload";
   const error = new Error(
     `${response.diagnostics.renderEnvironment}: ${response.outcome}: ${message}`,
   ) as NextEdgeBridgeResponseError;
@@ -604,9 +542,9 @@ function createNextEdgeBridgeResponseError(
   return error;
 }
 
-export function unwrapNextServerBridgeResponse<
-  TPayload extends NextBridgeValue,
->(response: NextServerBridgeResponse<TPayload>): TPayload {
+export function unwrapNextServerBridgeResponse<TPayload extends NextBridgeValue>(
+  response: NextServerBridgeResponse<TPayload>,
+): TPayload {
   if (response.outcome === "ok" && response.payload !== undefined) {
     return response.payload;
   }
@@ -653,9 +591,7 @@ export function detectNextRuntimeSupport(
       packageName: "@asupersync/next",
       target,
       supportClass: "bridge_only",
-      reason: isServerTarget
-        ? "bridge_only_server_target"
-        : "bridge_only_edge_target",
+      reason: isServerTarget ? "bridge_only_server_target" : "bridge_only_edge_target",
       message: isServerTarget
         ? "Next server runtimes are bridge-only for direct Browser Edition execution."
         : "Next edge runtimes are bridge-only for direct Browser Edition execution.",
@@ -674,10 +610,7 @@ export function detectNextRuntimeSupport(
     target,
     guidance: browserDiagnostics.supported
       ? []
-      : [
-          "Import @asupersync/next from client components only.",
-          ...browserDiagnostics.guidance,
-        ],
+      : ["Import @asupersync/next from client components only.", ...browserDiagnostics.guidance],
   };
 }
 
@@ -780,9 +713,7 @@ export class NextServerBridgeAdapter {
     return cloneNextServerBridgeDiagnostics(this.diagnosticsState);
   }
 
-  createLogFields(
-    overrides: NextBootstrapLogFieldOverrides = {},
-  ): Record<string, string> {
+  createLogFields(overrides: NextBootstrapLogFieldOverrides = {}): Record<string, string> {
     return createNextBridgeLogFields(this.diagnosticsState, overrides);
   }
 
@@ -803,9 +734,7 @@ export class NextServerBridgeAdapter {
     };
   }
 
-  ok<TPayload extends NextBridgeValue>(
-    payload: TPayload,
-  ): NextServerBridgeResponse<TPayload> {
+  ok<TPayload extends NextBridgeValue>(payload: TPayload): NextServerBridgeResponse<TPayload> {
     return {
       outcome: "ok",
       payload,
@@ -829,18 +758,14 @@ export class NextServerBridgeAdapter {
     };
   }
 
-  fromOutcome(
-    outcome: BrowserOutcome<NextBridgeValue>,
-  ): NextServerBridgeResponse<NextBridgeValue>;
+  fromOutcome(outcome: BrowserOutcome<NextBridgeValue>): NextServerBridgeResponse<NextBridgeValue>;
   fromOutcome<TPayload extends NextBridgeValue>(
     outcome: BrowserOutcome<TPayload>,
   ): NextServerBridgeResponse<TPayload> {
     return createNextServerBridgeResponseFromOutcome(outcome, this.options);
   }
 
-  unwrapResponse(
-    response: NextServerBridgeResponse<NextBridgeValue>,
-  ): NextBridgeValue;
+  unwrapResponse(response: NextServerBridgeResponse<NextBridgeValue>): NextBridgeValue;
   unwrapResponse<TPayload extends NextBridgeValue>(
     response: NextServerBridgeResponse<TPayload>,
   ): TPayload {
@@ -848,10 +773,9 @@ export class NextServerBridgeAdapter {
   }
 
   unsupportedRuntimeError(): NextServerBridgeRuntimeError {
-    return Object.assign(
-      createNextUnsupportedRuntimeError(this.diagnosticsState.runtimeSupport),
-      { bridgeDiagnostics: this.diagnostics() },
-    );
+    return Object.assign(createNextUnsupportedRuntimeError(this.diagnosticsState.runtimeSupport), {
+      bridgeDiagnostics: this.diagnostics(),
+    });
   }
 }
 
@@ -868,9 +792,7 @@ export class NextEdgeBridgeAdapter {
     return cloneNextEdgeBridgeDiagnostics(this.diagnosticsState);
   }
 
-  createLogFields(
-    overrides: NextBootstrapLogFieldOverrides = {},
-  ): Record<string, string> {
+  createLogFields(overrides: NextBootstrapLogFieldOverrides = {}): Record<string, string> {
     return createNextBridgeLogFields(this.diagnosticsState, overrides);
   }
 
@@ -891,9 +813,7 @@ export class NextEdgeBridgeAdapter {
     };
   }
 
-  ok<TPayload extends NextBridgeValue>(
-    payload: TPayload,
-  ): NextEdgeBridgeResponse<TPayload> {
+  ok<TPayload extends NextBridgeValue>(payload: TPayload): NextEdgeBridgeResponse<TPayload> {
     return {
       outcome: "ok",
       payload,
@@ -917,18 +837,14 @@ export class NextEdgeBridgeAdapter {
     };
   }
 
-  fromOutcome(
-    outcome: BrowserOutcome<NextBridgeValue>,
-  ): NextEdgeBridgeResponse<NextBridgeValue>;
+  fromOutcome(outcome: BrowserOutcome<NextBridgeValue>): NextEdgeBridgeResponse<NextBridgeValue>;
   fromOutcome<TPayload extends NextBridgeValue>(
     outcome: BrowserOutcome<TPayload>,
   ): NextEdgeBridgeResponse<TPayload> {
     return createNextEdgeBridgeResponseFromOutcome(outcome, this.options);
   }
 
-  unwrapResponse(
-    response: NextEdgeBridgeResponse<NextBridgeValue>,
-  ): NextBridgeValue;
+  unwrapResponse(response: NextEdgeBridgeResponse<NextBridgeValue>): NextBridgeValue;
   unwrapResponse<TPayload extends NextBridgeValue>(
     response: NextEdgeBridgeResponse<TPayload>,
   ): TPayload {
@@ -936,10 +852,9 @@ export class NextEdgeBridgeAdapter {
   }
 
   unsupportedRuntimeError(): NextEdgeBridgeRuntimeError {
-    return Object.assign(
-      createNextUnsupportedRuntimeError(this.diagnosticsState.runtimeSupport),
-      { bridgeDiagnostics: this.diagnostics() },
-    );
+    return Object.assign(createNextUnsupportedRuntimeError(this.diagnosticsState.runtimeSupport), {
+      bridgeDiagnostics: this.diagnostics(),
+    });
   }
 }
 
@@ -1020,9 +935,7 @@ export class NextClientBootstrapAdapter {
     const from = this.captureTransitionPoint();
     this.snapshotState.runtimeInitAttempts += 1;
 
-    const runtime = await createBrowserRuntime(
-      nextClientBrowserRuntimeOptions(this.options),
-    );
+    const runtime = await createBrowserRuntime(nextClientBrowserRuntimeOptions(this.options));
     if (runtime.outcome !== "ok") {
       this.markRuntimeFailure(formatOutcomeFailure(runtime), from);
       return runtime;
@@ -1122,10 +1035,7 @@ export class NextClientBootstrapAdapter {
     return this.recordEvent("recover", from, action, undefined, action);
   }
 
-  navigate(
-    navigationType: NextNavigationType,
-    routeSegment: string,
-  ): NextBootstrapLogEvent {
+  navigate(navigationType: NextNavigationType, routeSegment: string): NextBootstrapLogEvent {
     const from = this.captureTransitionPoint();
     this.snapshotState.routeSegment = routeSegment;
 
@@ -1173,10 +1083,7 @@ export class NextClientBootstrapAdapter {
 
   cacheRevalidated(): NextBootstrapLogEvent {
     const from = this.captureTransitionPoint();
-    if (
-      this.snapshotState.phase !== "hydrated" &&
-      this.snapshotState.phase !== "runtime_ready"
-    ) {
+    if (this.snapshotState.phase !== "hydrated" && this.snapshotState.phase !== "runtime_ready") {
       throw createNextBootstrapStateError(
         "cacheRevalidated",
         this.snapshotState.phase,
@@ -1202,13 +1109,8 @@ export class NextClientBootstrapAdapter {
       this.forceTransition("hydrated");
       this.snapshotState.environment = "client_hydrated";
     }
-    this.snapshotState.lastError =
-      failures.length > 0 ? `${reason}; ${failures.join("; ")}` : null;
-    return this.recordEvent(
-      "close_runtime",
-      from,
-      this.snapshotState.lastError ?? reason,
-    );
+    this.snapshotState.lastError = failures.length > 0 ? `${reason}; ${failures.join("; ")}` : null;
+    return this.recordEvent("close_runtime", from, this.snapshotState.lastError ?? reason);
   }
 
   private captureTransitionPoint(): {
@@ -1223,10 +1125,7 @@ export class NextClientBootstrapAdapter {
     };
   }
 
-  private transitionTo(
-    phase: NextBootstrapPhase,
-    action: string,
-  ): void {
+  private transitionTo(phase: NextBootstrapPhase, action: string): void {
     if (!isValidBootstrapTransition(this.snapshotState.phase, phase)) {
       throw createNextBootstrapStateError(
         action,
@@ -1240,10 +1139,7 @@ export class NextClientBootstrapAdapter {
   private forceTransition(phase: NextBootstrapPhase): void {
     if (this.snapshotState.phase !== phase) {
       this.snapshotState.phase = phase;
-      this.snapshotState.phaseHistory = [
-        ...this.snapshotState.phaseHistory,
-        phase,
-      ];
+      this.snapshotState.phaseHistory = [...this.snapshotState.phaseHistory, phase];
     }
   }
 
@@ -1267,8 +1163,7 @@ export class NextClientBootstrapAdapter {
       this.snapshotState.scopeInvalidationCount += 1;
       this.snapshotState.runtimeReinitRequiredCount += 1;
       this.snapshotState.cancellationCount += 1;
-      this.snapshotState.lastInvalidatedScopeGeneration =
-        this.snapshotState.activeScopeGeneration;
+      this.snapshotState.lastInvalidatedScopeGeneration = this.snapshotState.activeScopeGeneration;
       this.snapshotState.lastError = reason;
     }
     this.cleanupHandles();
@@ -1305,8 +1200,7 @@ export class NextClientBootstrapAdapter {
     },
     detail?: string,
     navigationType?: NextNavigationType,
-    recoveryAction: NextBootstrapRecoveryAction = this.snapshotState
-      .lastRecoveryAction,
+    recoveryAction: NextBootstrapRecoveryAction = this.snapshotState.lastRecoveryAction,
   ): NextBootstrapLogEvent {
     const event: NextBootstrapLogEvent = {
       action,

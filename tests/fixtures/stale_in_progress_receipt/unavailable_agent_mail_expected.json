@@ -3,9 +3,7 @@
   "agent_roster": {
     "active_window_hours": 4,
     "agents": [],
-    "assignees": [
-      "UnknownAgent"
-    ],
+    "assignees": ["UnknownAgent"],
     "counts": {
       "active_agents": 0,
       "inactive_agents": 0,
@@ -13,9 +11,7 @@
       "total_agents": 0,
       "unknown_activity_agents": 0
     },
-    "missing_assignees": [
-      "UnknownAgent"
-    ]
+    "missing_assignees": ["UnknownAgent"]
   },
   "classifications": [
     {

@@ -35,10 +35,7 @@
       },
       "command": "scripts/run_semantic_verification.sh --profile smoke --suite docs",
       "expected_exit": 1,
-      "expected_substrings": [
-        "docs: FAILED",
-        "Semantic Verification Summary"
-      ]
+      "expected_substrings": ["docs: FAILED", "Semantic Verification Summary"]
     },
     {
       "fixture_id": "runtime-annotation-removed",
@@ -72,10 +69,7 @@
       },
       "command": "scripts/run_semantic_verification.sh --profile full --suite lean",
       "expected_exit": 1,
-      "expected_substrings": [
-        "lean_validation: FAILED",
-        "Semantic Verification Summary"
-      ]
+      "expected_substrings": ["lean_validation: FAILED", "Semantic Verification Summary"]
     },
     {
       "fixture_id": "tla-suite-compile-drift",
@@ -90,10 +84,7 @@
       },
       "command": "scripts/run_semantic_verification.sh --profile full --suite tla",
       "expected_exit": 1,
-      "expected_substrings": [
-        "tla_validation: FAILED",
-        "Semantic Verification Summary"
-      ]
+      "expected_substrings": ["tla_validation: FAILED", "Semantic Verification Summary"]
     },
     {
       "fixture_id": "e2e-lane-artifact-contract-drift",
@@ -128,10 +119,7 @@
       },
       "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
       "expected_exit": 1,
-      "expected_substrings": [
-        "CI matrix lane failed: e2e",
-        "replay:rch_prefix"
-      ]
+      "expected_substrings": ["CI matrix lane failed: e2e", "replay:rch_prefix"]
     },
     {
       "fixture_id": "lint-build-step-local-cargo-drift",
@@ -166,10 +154,7 @@
       },
       "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
       "expected_exit": 1,
-      "expected_substrings": [
-        "CI matrix lane failed: e2e",
-        "threshold:required_artifacts_min(2<3)"
-      ]
+      "expected_substrings": ["CI matrix lane failed: e2e", "threshold:required_artifacts_min(2<3)"]
     }
   ]
 }

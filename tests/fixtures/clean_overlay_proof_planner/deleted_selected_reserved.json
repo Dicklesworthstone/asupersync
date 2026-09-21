@@ -3,9 +3,7 @@
   "agent_name": "SapphireHill",
   "head": "5555555555555555555555555555555555555555",
   "selected_paths": ["src/runtime/old_planner.rs"],
-  "dirty_entries": [
-    {"path": "src/runtime/old_planner.rs", "status": " D"}
-  ],
+  "dirty_entries": [{ "path": "src/runtime/old_planner.rs", "status": " D" }],
   "reservations": [
     {
       "id": 12,

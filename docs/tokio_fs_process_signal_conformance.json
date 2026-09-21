@@ -7,32 +7,92 @@
   "source_markdown": "docs/tokio_fs_process_signal_conformance.md",
   "domains": ["conformance", "fault-injection", "fs", "process", "signal", "error-paths"],
   "modules_tested": [
-    {"module": "src/fs/file.rs", "fault_domain": "shared-handle rejection, I/O errors", "error_paths_tested": 8},
-    {"module": "src/process.rs", "fault_domain": "spawn failure, pipe deadlock, double-wait, broken pipe", "error_paths_tested": 11},
-    {"module": "src/signal/signal.rs", "fault_domain": "signal coalescing, counter monotonicity", "error_paths_tested": 3},
-    {"module": "src/signal/shutdown.rs", "fault_domain": "concurrent shutdown, receiver ordering", "error_paths_tested": 3},
-    {"module": "src/signal/graceful.rs", "fault_domain": "grace period boundary, pre-shutdown early exit", "error_paths_tested": 2}
+    {
+      "module": "src/fs/file.rs",
+      "fault_domain": "shared-handle rejection, I/O errors",
+      "error_paths_tested": 8
+    },
+    {
+      "module": "src/process.rs",
+      "fault_domain": "spawn failure, pipe deadlock, double-wait, broken pipe",
+      "error_paths_tested": 11
+    },
+    {
+      "module": "src/signal/signal.rs",
+      "fault_domain": "signal coalescing, counter monotonicity",
+      "error_paths_tested": 3
+    },
+    {
+      "module": "src/signal/shutdown.rs",
+      "fault_domain": "concurrent shutdown, receiver ordering",
+      "error_paths_tested": 3
+    },
+    {
+      "module": "src/signal/graceful.rs",
+      "fault_domain": "grace period boundary, pre-shutdown early exit",
+      "error_paths_tested": 2
+    }
   ],
   "invariants_proven": [
-    {"id": "INV-CF-1", "description": "Shared file handle poll operations return descriptive errors", "verdict": "CONFORMANT"},
-    {"id": "INV-CF-2", "description": "Process error taxonomy is complete", "verdict": "CONFORMANT"},
-    {"id": "INV-CF-3", "description": "Signal counter is monotone even under storm injection", "verdict": "CONFORMANT"},
-    {"id": "INV-CF-4", "description": "Concurrent shutdown is idempotent under contention", "verdict": "CONFORMANT"},
-    {"id": "INV-CF-5", "description": "No resource leaks under any fault scenario", "verdict": "CONFORMANT"},
-    {"id": "INV-CF-6", "description": "Pipe deadlock is impossible with wait_with_output", "verdict": "CONFORMANT"}
+    {
+      "id": "INV-CF-1",
+      "description": "Shared file handle poll operations return descriptive errors",
+      "verdict": "CONFORMANT"
+    },
+    {
+      "id": "INV-CF-2",
+      "description": "Process error taxonomy is complete",
+      "verdict": "CONFORMANT"
+    },
+    {
+      "id": "INV-CF-3",
+      "description": "Signal counter is monotone even under storm injection",
+      "verdict": "CONFORMANT"
+    },
+    {
+      "id": "INV-CF-4",
+      "description": "Concurrent shutdown is idempotent under contention",
+      "verdict": "CONFORMANT"
+    },
+    {
+      "id": "INV-CF-5",
+      "description": "No resource leaks under any fault scenario",
+      "verdict": "CONFORMANT"
+    },
+    {
+      "id": "INV-CF-6",
+      "description": "Pipe deadlock is impossible with wait_with_output",
+      "verdict": "CONFORMANT"
+    }
   ],
   "fault_categories": [
-    {"prefix": "FF", "name": "Filesystem faults", "count": 8},
-    {"prefix": "PF", "name": "Process faults", "count": 11},
-    {"prefix": "SF", "name": "Signal faults", "count": 7},
-    {"prefix": "CF", "name": "Cross-module faults", "count": 4},
-    {"prefix": "CT", "name": "Contract validation", "count": 4}
+    { "prefix": "FF", "name": "Filesystem faults", "count": 8 },
+    { "prefix": "PF", "name": "Process faults", "count": 11 },
+    { "prefix": "SF", "name": "Signal faults", "count": 7 },
+    { "prefix": "CF", "name": "Cross-module faults", "count": 4 },
+    { "prefix": "CT", "name": "Contract validation", "count": 4 }
   ],
   "drift_detection": [
-    {"id": "DRIFT-CF1", "trigger": "New error variant added to ProcessError", "action": "Require fault-injection test"},
-    {"id": "DRIFT-CF2", "trigger": "New poll-based trait impl on File", "action": "Require shared-handle error test"},
-    {"id": "DRIFT-CF3", "trigger": "New signal kind added to dispatcher", "action": "Require coalescing test"},
-    {"id": "DRIFT-CF4", "trigger": "New cross-module interaction pattern", "action": "Require fault scenario"}
+    {
+      "id": "DRIFT-CF1",
+      "trigger": "New error variant added to ProcessError",
+      "action": "Require fault-injection test"
+    },
+    {
+      "id": "DRIFT-CF2",
+      "trigger": "New poll-based trait impl on File",
+      "action": "Require shared-handle error test"
+    },
+    {
+      "id": "DRIFT-CF3",
+      "trigger": "New signal kind added to dispatcher",
+      "action": "Require coalescing test"
+    },
+    {
+      "id": "DRIFT-CF4",
+      "trigger": "New cross-module interaction pattern",
+      "action": "Require fault scenario"
+    }
   ],
   "summary": {
     "modules_tested": 5,

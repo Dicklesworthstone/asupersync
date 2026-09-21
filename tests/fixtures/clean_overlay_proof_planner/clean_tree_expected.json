@@ -45,9 +45,7 @@
   "proof_allowed": true,
   "report_only": false,
   "schema_version": "clean-overlay-proof-planner-v1",
-  "selected_paths": [
-    "src/lib.rs"
-  ],
+  "selected_paths": ["src/lib.rs"],
   "summary": {
     "blocker_count": 0,
     "excluded_dirty_count": 0,

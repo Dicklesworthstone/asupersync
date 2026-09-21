@@ -4,8 +4,8 @@
   "head": "7777777777777777777777777777777777777777",
   "selected_paths": ["tests/clean_overlay_proof_planner_contract.rs"],
   "dirty_entries": [
-    {"path": "tests/clean_overlay_proof_planner_contract.rs", "status": "??"},
-    {"path": "src/grpc/client.rs", "status": " M"}
+    { "path": "tests/clean_overlay_proof_planner_contract.rs", "status": "??" },
+    { "path": "src/grpc/client.rs", "status": " M" }
   ],
   "reservations": [
     {

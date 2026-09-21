@@ -67,8 +67,5 @@
   "recommended_next_action": "run-claim-sequence",
   "schema_version": "claim-reservation-start-receipt-v1",
   "tracker_mutation_status": "ready",
-  "tracker_paths": [
-    ".beads/issues.jsonl",
-    ".beads/beads.db"
-  ]
+  "tracker_paths": [".beads/issues.jsonl", ".beads/beads.db"]
 }

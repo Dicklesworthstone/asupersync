@@ -8,9 +8,7 @@ type ServiceWorkerBrokerErrorMessage = {
   message: string;
 };
 
-type ServiceWorkerBrokerMessage =
-  | ServiceWorkerBrokerReadyMessage
-  | ServiceWorkerBrokerErrorMessage;
+type ServiceWorkerBrokerMessage = ServiceWorkerBrokerReadyMessage | ServiceWorkerBrokerErrorMessage;
 
 const statusElement = document.getElementById("status");
 if (!statusElement) {
@@ -41,26 +39,17 @@ async function waitForController(timeoutMs: number): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     const timeout = window.setTimeout(() => {
-      navigator.serviceWorker.removeEventListener(
-        "controllerchange",
-        onControllerChange,
-      );
+      navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
       reject(new Error("timed out waiting for service-worker controller"));
     }, timeoutMs);
 
     const onControllerChange = () => {
       window.clearTimeout(timeout);
-      navigator.serviceWorker.removeEventListener(
-        "controllerchange",
-        onControllerChange,
-      );
+      navigator.serviceWorker.removeEventListener("controllerchange", onControllerChange);
       resolve();
     };
 
-    navigator.serviceWorker.addEventListener(
-      "controllerchange",
-      onControllerChange,
-    );
+    navigator.serviceWorker.addEventListener("controllerchange", onControllerChange);
   });
 }
 
@@ -117,8 +106,7 @@ async function run(): Promise<void> {
 
 run().catch((error) => {
   state.phase = "error";
-  state.error_message =
-    error instanceof Error ? error.message : String(error);
+  state.error_message = error instanceof Error ? error.message : String(error);
   render();
 });
 

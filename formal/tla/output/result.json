@@ -1,17 +1,17 @@
 {
-    "status": "pass",
-    "exit_code": 0,
-    "distinct_states": "13686",
-    "violations": 0,
-    "spec": "formal/tla/Asupersync.tla",
-    "config": "formal/tla/Asupersync_MC.cfg",
-    "log": "tlc_20260302_131347.log",
-    "bead": "bd-11g3i",
-    "invariants_checked": [
-        "TypeInvariant",
-        "WellFormedInvariant",
-        "NoOrphanTasks",
-        "NoLeakedObligations",
-        "CloseImpliesQuiescent"
-    ]
+  "status": "pass",
+  "exit_code": 0,
+  "distinct_states": "13686",
+  "violations": 0,
+  "spec": "formal/tla/Asupersync.tla",
+  "config": "formal/tla/Asupersync_MC.cfg",
+  "log": "tlc_20260302_131347.log",
+  "bead": "bd-11g3i",
+  "invariants_checked": [
+    "TypeInvariant",
+    "WellFormedInvariant",
+    "NoOrphanTasks",
+    "NoLeakedObligations",
+    "CloseImpliesQuiescent"
+  ]
 }

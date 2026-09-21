@@ -13,11 +13,7 @@
     "capability_status": "supported",
     "eligibility_verdict": "admitted",
     "observability_status": "complete",
-    "platform_prerequisites": [
-      "scenario_clock_id",
-      "logical_deadline_id",
-      "normalization_window"
-    ]
+    "platform_prerequisites": ["scenario_clock_id", "logical_deadline_id", "normalization_window"]
   },
   "adapter": {
     "kind": "lab_live_policy_fixture",
@@ -37,12 +33,7 @@
     "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
     "platform": "current_thread_runtime",
     "adapter": "timer_surface.policy_fixture",
-    "logs": [
-      "scenario_id",
-      "surface_family",
-      "time_policy_class",
-      "verdict"
-    ],
+    "logs": ["scenario_id", "surface_family", "time_policy_class", "verdict"],
     "replay_pointers": [
       "artifacts/lab_live/lab_live_5_3/pass_timer_deadline/summary.json",
       "artifacts/lab_live/lab_live_5_3/pass_timer_deadline/events.ndjson"
@@ -57,21 +48,9 @@
     "repro_command"
   ],
   "redaction": {
-    "input_samples": [
-      "token=lab-live-secret",
-      "operator@example.com",
-      "/home/ubuntu/private"
-    ],
-    "redacted_samples": [
-      "token=<redacted>",
-      "<email:redacted>",
-      "<path:redacted>"
-    ],
-    "forbidden_substrings": [
-      "lab-live-secret",
-      "operator@example.com",
-      "/home/ubuntu/private"
-    ]
+    "input_samples": ["token=lab-live-secret", "operator@example.com", "/home/ubuntu/private"],
+    "redacted_samples": ["token=<redacted>", "<email:redacted>", "<path:redacted>"],
+    "forbidden_substrings": ["lab-live-secret", "operator@example.com", "/home/ubuntu/private"]
   },
   "docs_alignment": [
     "docs/lab_live_time_normalization_policy.md",

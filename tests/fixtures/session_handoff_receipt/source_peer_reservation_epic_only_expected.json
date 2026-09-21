@@ -1,9 +1,7 @@
 {
   "active_bead_ids": {
     "in_progress": [],
-    "ready": [
-      "asupersync-lhx6m4"
-    ],
+    "ready": ["asupersync-lhx6m4"],
     "stale_in_progress": []
   },
   "agent": "CopperSpring",

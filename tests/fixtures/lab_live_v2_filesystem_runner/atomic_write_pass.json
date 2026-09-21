@@ -12,12 +12,7 @@
     "raw_host_surface": false,
     "live_skip_allowed": false,
     "skip_is_pass": false,
-    "normalization": [
-      "path redaction",
-      "mtime omitted",
-      "inode omitted",
-      "errno omitted"
-    ]
+    "normalization": ["path redaction", "mtime omitted", "inode omitted", "errno omitted"]
   },
   "counters": {
     "lab": {

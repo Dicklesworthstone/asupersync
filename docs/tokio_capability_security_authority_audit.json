@@ -8,19 +8,75 @@
   "domains": ["capability-security", "authority-flow", "no-ambient-authority", "adapter-boundary"],
   "tracks_audited": ["T2", "T3", "T4", "T5", "T6", "T7"],
   "invariants_audited": [
-    {"id": "INV-1", "description": "No Ambient Authority: all capabilities explicitly passed", "verdict": "PASS"},
-    {"id": "INV-2", "description": "Structured Concurrency: all tasks region-owned", "verdict": "PASS"},
-    {"id": "INV-3", "description": "Cancellation is a Protocol: cancel propagates through adapters", "verdict": "PASS"},
-    {"id": "INV-4", "description": "No Obligation Leaks: resources tracked and released", "verdict": "PASS"},
-    {"id": "INV-5", "description": "Outcome Severity Lattice: results map to four-valued lattice", "verdict": "PASS"}
+    {
+      "id": "INV-1",
+      "description": "No Ambient Authority: all capabilities explicitly passed",
+      "verdict": "PASS"
+    },
+    {
+      "id": "INV-2",
+      "description": "Structured Concurrency: all tasks region-owned",
+      "verdict": "PASS"
+    },
+    {
+      "id": "INV-3",
+      "description": "Cancellation is a Protocol: cancel propagates through adapters",
+      "verdict": "PASS"
+    },
+    {
+      "id": "INV-4",
+      "description": "No Obligation Leaks: resources tracked and released",
+      "verdict": "PASS"
+    },
+    {
+      "id": "INV-5",
+      "description": "Outcome Severity Lattice: results map to four-valued lattice",
+      "verdict": "PASS"
+    }
   ],
   "per_track_verdicts": [
-    {"track": "T2", "name": "Async I/O and Codecs", "modules_audited": 11, "verdict": "COMPLIANT", "findings": 0},
-    {"track": "T3", "name": "Filesystem, Process, Signal", "modules_audited": 3, "verdict": "COMPLIANT", "findings": 0},
-    {"track": "T4", "name": "QUIC and HTTP/3", "modules_audited": 1, "verdict": "COMPLIANT", "findings": 0},
-    {"track": "T5", "name": "Web Framework and gRPC", "modules_audited": 3, "verdict": "COMPLIANT", "findings": 0},
-    {"track": "T6", "name": "Database and Messaging", "modules_audited": 2, "verdict": "COMPLIANT", "findings": 0},
-    {"track": "T7", "name": "Tokio-Compat Adapter Crate", "modules_audited": 5, "verdict": "COMPLIANT", "findings": 0}
+    {
+      "track": "T2",
+      "name": "Async I/O and Codecs",
+      "modules_audited": 11,
+      "verdict": "COMPLIANT",
+      "findings": 0
+    },
+    {
+      "track": "T3",
+      "name": "Filesystem, Process, Signal",
+      "modules_audited": 3,
+      "verdict": "COMPLIANT",
+      "findings": 0
+    },
+    {
+      "track": "T4",
+      "name": "QUIC and HTTP/3",
+      "modules_audited": 1,
+      "verdict": "COMPLIANT",
+      "findings": 0
+    },
+    {
+      "track": "T5",
+      "name": "Web Framework and gRPC",
+      "modules_audited": 3,
+      "verdict": "COMPLIANT",
+      "findings": 0
+    },
+    {
+      "track": "T6",
+      "name": "Database and Messaging",
+      "modules_audited": 2,
+      "verdict": "COMPLIANT",
+      "findings": 0
+    },
+    {
+      "track": "T7",
+      "name": "Tokio-Compat Adapter Crate",
+      "modules_audited": 5,
+      "verdict": "COMPLIANT",
+      "findings": 0
+    }
   ],
   "global_state_audit": {
     "static_mut": 0,
@@ -68,35 +124,61 @@
     }
   ],
   "prohibited_patterns": [
-    {"pattern": "static mut", "count": 0, "status": "clean"},
-    {"pattern": "thread_local! (production T2-T7)", "count": 0, "status": "clean"},
-    {"pattern": "lazy_static!", "count": 0, "status": "clean"},
-    {"pattern": "once_cell::sync::Lazy (T2-T7)", "count": 0, "status": "clean"},
-    {"pattern": "Cx::current() in adapter public API", "count": 0, "status": "clean"},
-    {"pattern": "tokio::spawn in main crate", "count": 0, "status": "clean"}
+    { "pattern": "static mut", "count": 0, "status": "clean" },
+    { "pattern": "thread_local! (production T2-T7)", "count": 0, "status": "clean" },
+    { "pattern": "lazy_static!", "count": 0, "status": "clean" },
+    { "pattern": "once_cell::sync::Lazy (T2-T7)", "count": 0, "status": "clean" },
+    { "pattern": "Cx::current() in adapter public API", "count": 0, "status": "clean" },
+    { "pattern": "tokio::spawn in main crate", "count": 0, "status": "clean" }
   ],
   "test_categories": [
-    {"prefix": "CSA", "name": "Contract validation", "count": 15},
-    {"prefix": "AF", "name": "Authority flow", "count": 6},
-    {"prefix": "BI", "name": "Boundary integrity", "count": 4},
-    {"prefix": "IC", "name": "Invariant coverage", "count": 5},
-    {"prefix": "DD", "name": "Drift detection", "count": 3}
+    { "prefix": "CSA", "name": "Contract validation", "count": 15 },
+    { "prefix": "AF", "name": "Authority flow", "count": 6 },
+    { "prefix": "BI", "name": "Boundary integrity", "count": 4 },
+    { "prefix": "IC", "name": "Invariant coverage", "count": 5 },
+    { "prefix": "DD", "name": "Drift detection", "count": 3 }
   ],
   "invariants_tested": [
-    {"id": "INV-CSA-1", "description": "All adapter entry points require explicit Cx or configuration"},
-    {"id": "INV-CSA-2", "description": "No static global Cx variables in adapter code"},
-    {"id": "INV-CSA-3", "description": "Blocking Cx propagation is RAII-guarded"},
-    {"id": "INV-CSA-4", "description": "Crate boundary is one-way (compat -> main)"},
-    {"id": "INV-CSA-5", "description": "All 5 boundary invariants have test coverage"},
-    {"id": "INV-CSA-6", "description": "Pre-existing ambient authority tracked in audit registry"},
-    {"id": "INV-CSA-7", "description": "No new ambient authority introduced by T2-T7"}
+    {
+      "id": "INV-CSA-1",
+      "description": "All adapter entry points require explicit Cx or configuration"
+    },
+    { "id": "INV-CSA-2", "description": "No static global Cx variables in adapter code" },
+    { "id": "INV-CSA-3", "description": "Blocking Cx propagation is RAII-guarded" },
+    { "id": "INV-CSA-4", "description": "Crate boundary is one-way (compat -> main)" },
+    { "id": "INV-CSA-5", "description": "All 5 boundary invariants have test coverage" },
+    {
+      "id": "INV-CSA-6",
+      "description": "Pre-existing ambient authority tracked in audit registry"
+    },
+    { "id": "INV-CSA-7", "description": "No new ambient authority introduced by T2-T7" }
   ],
   "drift_detection": [
-    {"id": "DRIFT-CSA1", "trigger": "New adapter module added", "action": "Verify explicit Cx/config in public API"},
-    {"id": "DRIFT-CSA2", "trigger": "New static/thread_local in T2-T7", "action": "Require exemption in audit registry"},
-    {"id": "DRIFT-CSA3", "trigger": "Reverse dependency main->tokio", "action": "HARD FAIL - block merge"},
-    {"id": "DRIFT-CSA4", "trigger": "Cx::current() in adapter public API", "action": "VIOLATION - must use explicit parameter"},
-    {"id": "DRIFT-CSA5", "trigger": "New OS resource API without builder", "action": "Review for ambient authority"}
+    {
+      "id": "DRIFT-CSA1",
+      "trigger": "New adapter module added",
+      "action": "Verify explicit Cx/config in public API"
+    },
+    {
+      "id": "DRIFT-CSA2",
+      "trigger": "New static/thread_local in T2-T7",
+      "action": "Require exemption in audit registry"
+    },
+    {
+      "id": "DRIFT-CSA3",
+      "trigger": "Reverse dependency main->tokio",
+      "action": "HARD FAIL - block merge"
+    },
+    {
+      "id": "DRIFT-CSA4",
+      "trigger": "Cx::current() in adapter public API",
+      "action": "VIOLATION - must use explicit parameter"
+    },
+    {
+      "id": "DRIFT-CSA5",
+      "trigger": "New OS resource API without builder",
+      "action": "Review for ambient authority"
+    }
   ],
   "summary": {
     "total_tracks_audited": 6,

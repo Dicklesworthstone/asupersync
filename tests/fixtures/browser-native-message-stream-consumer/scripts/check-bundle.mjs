@@ -12,11 +12,7 @@ function collectJsFiles(dir) {
       files.push(...collectJsFiles(resolved));
       continue;
     }
-    if (
-      resolved.endsWith(".js")
-      || resolved.endsWith(".mjs")
-      || resolved.endsWith(".ts")
-    ) {
+    if (resolved.endsWith(".js") || resolved.endsWith(".mjs") || resolved.endsWith(".ts")) {
       files.push(resolved);
     }
   }
@@ -56,13 +52,9 @@ const requiredMarkers = [
   "createBrowserWritableStream",
 ];
 
-const bundleText = jsAssets
-  .map((assetPath) => fs.readFileSync(assetPath, "utf8"))
-  .join("\n");
+const bundleText = jsAssets.map((assetPath) => fs.readFileSync(assetPath, "utf8")).join("\n");
 
-const missingMarkers = requiredMarkers.filter(
-  (marker) => !bundleText.includes(marker),
-);
+const missingMarkers = requiredMarkers.filter((marker) => !bundleText.includes(marker));
 
 if (missingMarkers.length > 0) {
   throw new Error(`Built bundle missing markers: ${missingMarkers.join(", ")}`);

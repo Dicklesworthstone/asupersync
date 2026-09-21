@@ -1,7 +1,5 @@
 {
-  "action_items": [
-    "add a fuzz target covering postgres_row_description_parse"
-  ],
+  "action_items": ["add a fuzz target covering postgres_row_description_parse"],
   "coverage": [
     {
       "evidence": {
@@ -33,9 +31,7 @@
   },
   "generated_at": "2026-05-08T05:45:00Z",
   "input_schema_version": "parser-fuzz-coverage-input-v1",
-  "missing_coverage": [
-    "postgres_row_description_parse"
-  ],
+  "missing_coverage": ["postgres_row_description_parse"],
   "non_mutating": true,
   "partial_coverage": [],
   "requirements": {

@@ -12,7 +12,11 @@
       "feature_gate": "postgres",
       "categories": ["connection", "query", "transaction", "error_classification", "custom_types"],
       "api_mappings": 12,
-      "caveats": ["no_background_connection_task", "tosql_signature_differs", "typed_row_accessors"],
+      "caveats": [
+        "no_background_connection_task",
+        "tosql_signature_differs",
+        "typed_row_accessors"
+      ],
       "status": "complete"
     },
     {
@@ -223,12 +227,20 @@
   },
   "dependencies": {
     "blocked_by": [
-      {"bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit-test matrix", "status": "closed"},
-      {"bead": "asupersync-2oh2u.6.10", "reason": "Integration/fault-injection suites", "status": "closed"}
+      {
+        "bead": "asupersync-2oh2u.6.12",
+        "reason": "Exhaustive unit-test matrix",
+        "status": "closed"
+      },
+      {
+        "bead": "asupersync-2oh2u.6.10",
+        "reason": "Integration/fault-injection suites",
+        "status": "closed"
+      }
     ],
     "blocks": [
-      {"bead": "asupersync-2oh2u.11.2", "reason": "Domain-specific migration cookbooks"},
-      {"bead": "asupersync-2oh2u.10.9", "reason": "Replacement-readiness gate aggregator"}
+      { "bead": "asupersync-2oh2u.11.2", "reason": "Domain-specific migration cookbooks" },
+      { "bead": "asupersync-2oh2u.10.9", "reason": "Replacement-readiness gate aggregator" }
     ]
   }
 }

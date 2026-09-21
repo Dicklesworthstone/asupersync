@@ -2,17 +2,12 @@
   "agent": "TopazGoose",
   "commit_boundary": {
     "decision": "path-limited-commit-required",
-    "non_self_staged_paths": [
-      "fuzz/Cargo.toml",
-      "fuzz/fuzz_targets/http_header_map_invariants.rs"
-    ],
+    "non_self_staged_paths": ["fuzz/Cargo.toml", "fuzz/fuzz_targets/http_header_map_invariants.rs"],
     "ordinary_index_commit_allowed": false,
     "path_limited_commit_command": "git commit --only -- scripts/dirty_tree_ownership_receipt.py",
     "peer_index_preservation_required": true,
     "reason": "self-owned staged paths share the index with peer or unattributed staged paths",
-    "self_owned_staged_paths": [
-      "scripts/dirty_tree_ownership_receipt.py"
-    ]
+    "self_owned_staged_paths": ["scripts/dirty_tree_ownership_receipt.py"]
   },
   "current_date": "2026-05-08",
   "generated_at": "2026-05-08T05:10:00Z",

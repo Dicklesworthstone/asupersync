@@ -72,19 +72,8 @@
         "rule_id": "inv.cancel.idempotence",
         "tier": "HIGH",
         "status_text": "UT+OC+DOC",
-        "required_classes": [
-          "UT",
-          "PT",
-          "OC",
-          "E2E",
-          "LOG",
-          "DOC"
-        ],
-        "missing_classes": [
-          "PT",
-          "E2E",
-          "LOG"
-        ],
+        "required_classes": ["UT", "PT", "OC", "E2E", "LOG", "DOC"],
+        "missing_classes": ["PT", "E2E", "LOG"],
         "evidence_class_sources": {
           "UT": "golden",
           "PT": "golden",
@@ -101,16 +90,8 @@
         "rule_id": "rule.cancel.request",
         "tier": "MED",
         "status_text": "UT+OC",
-        "required_classes": [
-          "UT",
-          "OC",
-          "LOG",
-          "DOC"
-        ],
-        "missing_classes": [
-          "LOG",
-          "DOC"
-        ],
+        "required_classes": ["UT", "OC", "LOG", "DOC"],
+        "missing_classes": ["LOG", "DOC"],
         "evidence_class_sources": {
           "UT": "golden",
           "OC": "golden",
@@ -125,13 +106,8 @@
         "rule_id": "def.cancel.reason_kinds",
         "tier": "LOW",
         "status_text": "UT",
-        "required_classes": [
-          "UT",
-          "DOC"
-        ],
-        "missing_classes": [
-          "DOC"
-        ],
+        "required_classes": ["UT", "DOC"],
+        "missing_classes": ["DOC"],
         "evidence_class_sources": {
           "UT": "golden",
           "DOC": "docs"
@@ -144,19 +120,8 @@
         "rule_id": "def.determinism.seed_equivalence",
         "tier": "HIGH",
         "status_text": "UT+OC+E2E",
-        "required_classes": [
-          "UT",
-          "PT",
-          "OC",
-          "E2E",
-          "LOG",
-          "DOC"
-        ],
-        "missing_classes": [
-          "PT",
-          "LOG",
-          "DOC"
-        ],
+        "required_classes": ["UT", "PT", "OC", "E2E", "LOG", "DOC"],
+        "missing_classes": ["PT", "LOG", "DOC"],
         "evidence_class_sources": {
           "UT": "golden",
           "PT": "golden",

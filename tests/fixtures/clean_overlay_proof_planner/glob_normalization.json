@@ -4,7 +4,7 @@
   "head": "6666666666666666666666666666666666666666",
   "selected_paths": ["./tests/fixtures/clean_overlay_proof_planner/**"],
   "dirty_entries": [
-    {"path": "./tests/fixtures/clean_overlay_proof_planner/new_case.json", "status": "??"}
+    { "path": "./tests/fixtures/clean_overlay_proof_planner/new_case.json", "status": "??" }
   ],
   "reservations": [
     {

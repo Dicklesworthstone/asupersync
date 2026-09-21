@@ -24,9 +24,7 @@
       "lane": "testing-conformance-harnesses",
       "title": "Add a session closeout conformance guard",
       "priority": 1,
-      "paths": [
-        "tests/session_handoff_receipt_contract.rs"
-      ],
+      "paths": ["tests/session_handoff_receipt_contract.rs"],
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_session_closeout cargo test -p asupersync --test session_handoff_receipt_contract"
       ]

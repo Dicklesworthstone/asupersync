@@ -24,9 +24,7 @@
     "bead_id": "asupersync-peer-dirt",
     "commit": "13579bdf",
     "mode": "bead-backed",
-    "owned_paths": [
-      "scripts/closeout_verifier.py"
-    ],
+    "owned_paths": ["scripts/closeout_verifier.py"],
     "slice_id": "asupersync-peer-dirt",
     "thread_id": "asupersync-peer-dirt"
   },

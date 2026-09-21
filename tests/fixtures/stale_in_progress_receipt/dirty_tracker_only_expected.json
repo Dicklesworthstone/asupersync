@@ -14,9 +14,7 @@
         "task_description": ""
       }
     ],
-    "assignees": [
-      "OlderAgent"
-    ],
+    "assignees": ["OlderAgent"],
     "counts": {
       "active_agents": 0,
       "inactive_agents": 1,
@@ -91,9 +89,6 @@
   "tracker_state": {
     "non_tracker_paths": [],
     "status": "dirty-tracker-only",
-    "tracker_paths": [
-      ".beads/issues.jsonl",
-      ".beads/beads.db"
-    ]
+    "tracker_paths": [".beads/issues.jsonl", ".beads/beads.db"]
   }
 }

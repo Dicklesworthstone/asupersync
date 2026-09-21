@@ -13,9 +13,7 @@
   "observation_flags": [
     {
       "command": "rch exec -- cargo test --test readme_claim_freshness_contract -- --nocapture",
-      "flags": [
-        "healthy_sample"
-      ],
+      "flags": ["healthy_sample"],
       "queue_wait_ms": 0,
       "remote_exit_code": 0,
       "remote_success": true,
@@ -27,9 +25,7 @@
     },
     {
       "command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
-      "flags": [
-        "slow_artifact_retrieval"
-      ],
+      "flags": ["slow_artifact_retrieval"],
       "queue_wait_ms": 500,
       "remote_exit_code": 0,
       "remote_success": true,
@@ -41,9 +37,7 @@
     },
     {
       "command": "rch exec -- cargo check -p asupersync --lib",
-      "flags": [
-        "slow_artifact_retrieval"
-      ],
+      "flags": ["slow_artifact_retrieval"],
       "queue_wait_ms": 100,
       "remote_exit_code": 0,
       "remote_success": true,
@@ -55,9 +49,7 @@
     },
     {
       "command": "rch exec -- cargo test -p asupersync --lib security:: -- --nocapture",
-      "flags": [
-        "remote_failure"
-      ],
+      "flags": ["remote_failure"],
       "queue_wait_ms": 0,
       "remote_exit_code": 101,
       "remote_success": false,
@@ -69,9 +61,7 @@
     },
     {
       "command": "rch exec -- cargo clippy -p asupersync --all-targets -- -D warnings",
-      "flags": [
-        "remote_failure"
-      ],
+      "flags": ["remote_failure"],
       "queue_wait_ms": 0,
       "remote_exit_code": 101,
       "remote_success": false,
@@ -83,9 +73,7 @@
     },
     {
       "command": "rch exec -- cargo check -p asupersync --all-targets",
-      "flags": [
-        "no_capacity"
-      ],
+      "flags": ["no_capacity"],
       "queue_wait_ms": 45000,
       "remote_exit_code": 0,
       "remote_success": true,
@@ -97,9 +85,7 @@
     },
     {
       "command": "rch exec -- cargo test --test stale_in_progress_receipt_contract -- --nocapture",
-      "flags": [
-        "remote_failure"
-      ],
+      "flags": ["remote_failure"],
       "queue_wait_ms": 0,
       "remote_exit_code": 101,
       "remote_success": false,
@@ -130,9 +116,7 @@
       "no_capacity_count": 0,
       "operator_guidance": "Avoid selecting this worker until fresh successful observations clear the degraded signal.",
       "quarantine_recommended": true,
-      "reasons": [
-        "2 remote failure sample(s)"
-      ],
+      "reasons": ["2 remote failure sample(s)"],
       "remote_failure_count": 2,
       "sample_count": 2,
       "score": 6,
@@ -146,9 +130,7 @@
       "no_capacity_count": 0,
       "operator_guidance": "Worker has only healthy fixture observations.",
       "quarantine_recommended": false,
-      "reasons": [
-        "1 healthy sample(s)"
-      ],
+      "reasons": ["1 healthy sample(s)"],
       "remote_failure_count": 0,
       "sample_count": 1,
       "score": 0,
@@ -162,9 +144,7 @@
       "no_capacity_count": 0,
       "operator_guidance": "Retry the proof on a different worker before treating the failure as project evidence.",
       "quarantine_recommended": false,
-      "reasons": [
-        "1 remote failure sample(s)"
-      ],
+      "reasons": ["1 remote failure sample(s)"],
       "remote_failure_count": 1,
       "sample_count": 1,
       "score": 3,
@@ -178,9 +158,7 @@
       "no_capacity_count": 0,
       "operator_guidance": "Avoid selecting this worker until fresh successful observations clear the degraded signal.",
       "quarantine_recommended": true,
-      "reasons": [
-        "2 slow retrieval sample(s)"
-      ],
+      "reasons": ["2 slow retrieval sample(s)"],
       "remote_failure_count": 0,
       "sample_count": 2,
       "score": 4,
@@ -194,9 +172,7 @@
       "no_capacity_count": 1,
       "operator_guidance": "Do not queue new broad proofs on this worker while zero-slot wait evidence is fresh.",
       "quarantine_recommended": false,
-      "reasons": [
-        "1 zero-slot wait sample(s)"
-      ],
+      "reasons": ["1 zero-slot wait sample(s)"],
       "remote_failure_count": 0,
       "sample_count": 1,
       "score": 1,

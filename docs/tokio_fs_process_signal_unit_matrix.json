@@ -7,32 +7,52 @@
   "source_markdown": "docs/tokio_fs_process_signal_unit_matrix.md",
   "domains": ["fs", "process", "signal", "unit-tests", "coverage-matrix", "traceability"],
   "bead_coverage": [
-    {"bead": "T3.3", "area": "File seek helpers, OpenOptions", "tests": 6},
-    {"bead": "T3.5", "area": "Signal constructors, graceful builder, grace period guard", "tests": 16},
-    {"bead": "T3.6", "area": "Cross-module composed workflows, receiver clone", "tests": 4},
-    {"bead": "T3.9", "area": "Matrix structural validation", "tests": 4}
+    { "bead": "T3.3", "area": "File seek helpers, OpenOptions", "tests": 6 },
+    {
+      "bead": "T3.5",
+      "area": "Signal constructors, graceful builder, grace period guard",
+      "tests": 16
+    },
+    { "bead": "T3.6", "area": "Cross-module composed workflows, receiver clone", "tests": 4 },
+    { "bead": "T3.9", "area": "Matrix structural validation", "tests": 4 }
   ],
   "test_categories": [
-    {"prefix": "FS", "name": "File seek and position", "count": 6, "bead": "T3.3"},
-    {"prefix": "SC", "name": "Signal convenience constructors", "count": 8, "bead": "T3.5"},
-    {"prefix": "GB", "name": "Graceful builder", "count": 5, "bead": "T3.5"},
-    {"prefix": "GP", "name": "Grace period guard", "count": 3, "bead": "T3.5"},
-    {"prefix": "CM", "name": "Cross-module composed workflows", "count": 4, "bead": "T3.6"},
-    {"prefix": "MV", "name": "Matrix validation", "count": 4, "bead": "T3.9"}
+    { "prefix": "FS", "name": "File seek and position", "count": 6, "bead": "T3.3" },
+    { "prefix": "SC", "name": "Signal convenience constructors", "count": 8, "bead": "T3.5" },
+    { "prefix": "GB", "name": "Graceful builder", "count": 5, "bead": "T3.5" },
+    { "prefix": "GP", "name": "Grace period guard", "count": 3, "bead": "T3.5" },
+    { "prefix": "CM", "name": "Cross-module composed workflows", "count": 4, "bead": "T3.6" },
+    { "prefix": "MV", "name": "Matrix validation", "count": 4, "bead": "T3.9" }
   ],
   "cumulative_t3_coverage": {
-    "tokio_process_lifecycle_parity.rs": {"bead": "T3.4", "tests": 36},
-    "tokio_cancel_safe_fs_process_signal.rs": {"bead": "T3.6", "tests": 24},
-    "tokio_fs_process_signal_conformance.rs": {"bead": "T3.7", "tests": 34},
-    "tokio_fs_process_signal_parity_matrix.rs": {"bead": "T3.1", "tests": 36},
-    "tokio_fs_process_signal_unit_matrix.rs": {"bead": "T3.9", "tests": 30},
+    "tokio_process_lifecycle_parity.rs": { "bead": "T3.4", "tests": 36 },
+    "tokio_cancel_safe_fs_process_signal.rs": { "bead": "T3.6", "tests": 24 },
+    "tokio_fs_process_signal_conformance.rs": { "bead": "T3.7", "tests": 34 },
+    "tokio_fs_process_signal_parity_matrix.rs": { "bead": "T3.1", "tests": 36 },
+    "tokio_fs_process_signal_unit_matrix.rs": { "bead": "T3.9", "tests": 30 },
     "total": 160
   },
   "drift_detection": [
-    {"id": "DRIFT-UM1", "trigger": "New public method on File without integration test", "action": "Add coverage to this matrix"},
-    {"id": "DRIFT-UM2", "trigger": "New signal convenience constructor added", "action": "Add SC-xx test"},
-    {"id": "DRIFT-UM3", "trigger": "New graceful shutdown API surface", "action": "Add GB-xx or GP-xx test"},
-    {"id": "DRIFT-UM4", "trigger": "T3 bead added without test mapping", "action": "Add MV assertion"}
+    {
+      "id": "DRIFT-UM1",
+      "trigger": "New public method on File without integration test",
+      "action": "Add coverage to this matrix"
+    },
+    {
+      "id": "DRIFT-UM2",
+      "trigger": "New signal convenience constructor added",
+      "action": "Add SC-xx test"
+    },
+    {
+      "id": "DRIFT-UM3",
+      "trigger": "New graceful shutdown API surface",
+      "action": "Add GB-xx or GP-xx test"
+    },
+    {
+      "id": "DRIFT-UM4",
+      "trigger": "T3 bead added without test mapping",
+      "action": "Add MV assertion"
+    }
   ],
   "summary": {
     "total_tests": 30,

@@ -25,9 +25,7 @@
           "pushed": true
         }
       ],
-      "dirty_peer_paths": [
-        "src/runtime/rch_health/mod.rs"
-      ],
+      "dirty_peer_paths": ["src/runtime/rch_health/mod.rs"],
       "handoff": {
         "capsule_id": "handoff-asw10",
         "decision": "coordinate_first"
@@ -54,9 +52,7 @@
           "status": "pass"
         }
       ],
-      "reservation_paths": [
-        "scripts/proof_receipt_inventory.py"
-      ],
+      "reservation_paths": ["scripts/proof_receipt_inventory.py"],
       "touched_paths": [
         "scripts/proof_receipt_inventory.py",
         "tests/proof_receipt_inventory_contract.rs"

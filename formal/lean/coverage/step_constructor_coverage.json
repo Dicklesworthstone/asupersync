@@ -3,10 +3,7 @@
   "coverage_id": "lean.step_constructor_coverage.v1",
   "source_file": "formal/lean/Asupersync.lean",
   "step_constructor_count": 22,
-  "global_proof_backstops": [
-    "step_preserves_wellformed",
-    "steps_preserve_wellformed"
-  ],
+  "global_proof_backstops": ["step_preserves_wellformed", "steps_preserve_wellformed"],
   "constructors": [
     {
       "line": 319,
@@ -172,10 +169,7 @@
       "constructor": "cancelMasked",
       "rule_id": "step.cancelMasked",
       "status": "covered",
-      "mapped_theorems": [
-        "cancel_masked_step",
-        "cancel_masked_potential_decreases"
-      ]
+      "mapped_theorems": ["cancel_masked_step", "cancel_masked_potential_decreases"]
     },
     {
       "line": 470,
@@ -219,10 +213,7 @@
       "constructor": "cancelPropagate",
       "rule_id": "step.cancelPropagate",
       "status": "covered",
-      "mapped_theorems": [
-        "cancel_propagation_bounded",
-        "cancel_label_preserves_region_structure"
-      ]
+      "mapped_theorems": ["cancel_propagation_bounded", "cancel_label_preserves_region_structure"]
     },
     {
       "line": 514,
@@ -243,10 +234,7 @@
       "constructor": "closeBegin",
       "rule_id": "step.closeBegin",
       "status": "covered",
-      "mapped_theorems": [
-        "close_begin_step",
-        "region_closing_canonical_form"
-      ]
+      "mapped_theorems": ["close_begin_step", "region_closing_canonical_form"]
     },
     {
       "line": 540,
@@ -279,9 +267,7 @@
       "constructor": "closeRunFinalizer",
       "rule_id": "step.closeRunFinalizer",
       "status": "covered",
-      "mapped_theorems": [
-        "close_run_finalizer_step"
-      ]
+      "mapped_theorems": ["close_run_finalizer_step"]
     },
     {
       "line": 579,

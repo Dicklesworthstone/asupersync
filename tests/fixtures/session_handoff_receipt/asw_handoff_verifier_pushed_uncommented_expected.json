@@ -1,9 +1,7 @@
 {
   "active_bead_ids": {
     "in_progress": [],
-    "ready": [
-      "asupersync-oxqrae.10"
-    ],
+    "ready": ["asupersync-oxqrae.10"],
     "stale_in_progress": []
   },
   "agent": "CopperSpring",
@@ -27,9 +25,7 @@
       "unresolved_ack_count": 0
     },
     "reason": "handoff capsule is structurally valid but needs fresh local evidence",
-    "required_refreshes": [
-      "record-pushed-commit-closeout"
-    ],
+    "required_refreshes": ["record-pushed-commit-closeout"],
     "schema_version": "asw-handoff-verifier-v1"
   },
   "next_action": {

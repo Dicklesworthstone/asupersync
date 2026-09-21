@@ -23,9 +23,7 @@
       "lane": "testing-fuzzing",
       "title": "Critical disk rch fuzz proof",
       "priority": 1,
-      "paths": [
-        "fuzz/fuzz_targets/postgres_row_description.rs"
-      ],
+      "paths": ["fuzz/fuzz_targets/postgres_row_description.rs"],
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_critical_disk cargo check --manifest-path fuzz/Cargo.toml --bin postgres_row_description"
       ]
@@ -36,12 +34,8 @@
       "title": "Source-only incomplete-code wording scan",
       "priority": 2,
       "no_build_validation": true,
-      "paths": [
-        "scripts/reservation_aware_work_finder.py"
-      ],
-      "proof_commands": [
-        "python3 -m py_compile scripts/reservation_aware_work_finder.py"
-      ]
+      "paths": ["scripts/reservation_aware_work_finder.py"],
+      "proof_commands": ["python3 -m py_compile scripts/reservation_aware_work_finder.py"]
     }
   ]
 }

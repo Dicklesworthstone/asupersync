@@ -2,18 +2,13 @@
   "expected": {
     "citable": false,
     "exit_code": 101,
-    "first_blocker_contains": [
-      "error[E0308]",
-      "mismatched types"
-    ],
+    "first_blocker_contains": ["error[E0308]", "mismatched types"],
     "first_blocker_forbidden": [],
     "lifecycle_state": "terminal_fail",
     "max_first_blocker_lines": 8,
     "outcome_status": "fail",
     "proof_evidence_status": "blocked",
-    "refusal_reason_codes": [
-      "failed-proof-status"
-    ],
+    "refusal_reason_codes": ["failed-proof-status"],
     "terminal_classification": "cargo_failure"
   },
   "fixture_id": "cargo-failure",

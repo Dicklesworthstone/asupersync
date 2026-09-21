@@ -11,13 +11,7 @@
       "blocked-mitigation-unmapped",
       "blocked-evidence-unlogged"
     ],
-    "required_rule_prefixes": [
-      "ATT-",
-      "REV-",
-      "MEM-",
-      "RA-",
-      "CVT-"
-    ],
+    "required_rule_prefixes": ["ATT-", "REV-", "MEM-", "RA-", "CVT-"],
     "safety": {
       "agent_mail_mutated": false,
       "beads_mutated": false,

@@ -15,18 +15,13 @@
     "path": "docs/lab_live_virtualized_surface_matrix.md",
     "entry": "raw_socket_gate"
   },
-  "admitted_differences": [
-    "none"
-  ],
+  "admitted_differences": ["none"],
   "timing_normalization": {
     "policy_doc": "docs/lab_live_time_normalization_policy.md",
     "clock_model": "not_applicable",
     "wall_clock_fields": "unsupported"
   },
-  "platform_prerequisites": [
-    "virtualization_boundary_missing",
-    "capture_manifest_missing"
-  ],
+  "platform_prerequisites": ["virtualization_boundary_missing", "capture_manifest_missing"],
   "expected_logs": [
     "scenario_id",
     "surface_id",
@@ -42,10 +37,7 @@
     "first_failure_field": "virtualization_boundary"
   },
   "readme_or_support_matrix_row": "docs/lab_live_differential_scope_matrix.md#surface-eligibility-matrix",
-  "verification_floor": [
-    "T0 unit_contract",
-    "T4 negative_control"
-  ],
+  "verification_floor": ["T0 unit_contract", "T4 negative_control"],
   "expected_verdict": "unsupported",
   "no_claims": [
     "does not claim epoll, kqueue, io_uring, or kernel scheduling parity",

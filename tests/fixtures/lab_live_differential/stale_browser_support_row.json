@@ -15,10 +15,7 @@
     "path": "tests/fixtures/browser-native-message-stream-consumer",
     "entry": "check-browser-run"
   },
-  "admitted_differences": [
-    "host_role_downgrade",
-    "browser_lane_support_class"
-  ],
+  "admitted_differences": ["host_role_downgrade", "browser_lane_support_class"],
   "timing_normalization": {
     "policy_doc": "docs/lab_live_time_normalization_policy.md",
     "clock_model": "scenario_clock_required",
@@ -45,10 +42,7 @@
     "first_failure_field": "evidence_freshness"
   },
   "readme_or_support_matrix_row": "docs/lab_live_virtualized_surface_matrix.md#browser_surface",
-  "verification_floor": [
-    "T0 unit_contract",
-    "T1 golden_fixture"
-  ],
+  "verification_floor": ["T0 unit_contract", "T1 golden_fixture"],
   "expected_verdict": "stale",
   "no_claims": [
     "does not promote browser host behavior without fresh fixture evidence",

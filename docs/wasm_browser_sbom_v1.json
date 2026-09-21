@@ -10,12 +10,7 @@
       "bash scripts/validate_npm_pack_smoke.sh"
     ]
   },
-  "profiles": [
-    "FP-BR-MIN",
-    "FP-BR-DEV",
-    "FP-BR-PROD",
-    "FP-BR-DET"
-  ],
+  "profiles": ["FP-BR-MIN", "FP-BR-DEV", "FP-BR-PROD", "FP-BR-DET"],
   "rust_packages": [
     {
       "name": "asupersync",

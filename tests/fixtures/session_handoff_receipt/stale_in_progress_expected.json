@@ -1,8 +1,6 @@
 {
   "active_bead_ids": {
-    "in_progress": [
-      "asupersync-stale1"
-    ],
+    "in_progress": ["asupersync-stale1"],
     "ready": [],
     "stale_in_progress": [
       {
@@ -31,9 +29,7 @@
     "reason": "stale in-progress bead needs owner or reclaim review",
     "updated_at": "2026-05-07T00:00:00Z"
   },
-  "proof_suggestions": [
-    "rustfmt-check"
-  ],
+  "proof_suggestions": ["rustfmt-check"],
   "rch": {
     "available": true,
     "queue_summary": "queued=0 running=0"

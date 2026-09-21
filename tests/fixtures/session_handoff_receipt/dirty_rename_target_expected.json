@@ -1,9 +1,7 @@
 {
   "active_bead_ids": {
     "in_progress": [],
-    "ready": [
-      "asupersync-ready-rename"
-    ],
+    "ready": ["asupersync-ready-rename"],
     "stale_in_progress": []
   },
   "agent": "CopperSpring",
@@ -16,23 +14,14 @@
   },
   "dirty_clusters": [
     {
-      "actions": [
-        "inspect literal arrow path without rename expansion"
-      ],
+      "actions": ["inspect literal arrow path without rename expansion"],
       "cluster": "peer-owned/docs-arrow",
-      "paths": [
-        "docs/name -> literal.md"
-      ]
+      "paths": ["docs/name -> literal.md"]
     },
     {
-      "actions": [
-        "coordinate with suspected owner/bead before staging or validation"
-      ],
+      "actions": ["coordinate with suspected owner/bead before staging or validation"],
       "cluster": "peer-owned/security-audit",
-      "paths": [
-        "docs/old-secret.rs",
-        "src/security/secret.rs"
-      ]
+      "paths": ["docs/old-secret.rs", "src/security/secret.rs"]
     }
   ],
   "generated_at": "2026-05-08T04:30:00Z",
@@ -41,9 +30,7 @@
     "path": "docs/old-secret.rs",
     "reason": "dirty paths need owner attribution before staging or validation"
   },
-  "proof_suggestions": [
-    "rustfmt-check"
-  ],
+  "proof_suggestions": ["rustfmt-check"],
   "rch": {
     "available": true,
     "queue_summary": "queued=0 running=0"

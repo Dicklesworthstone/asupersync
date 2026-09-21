@@ -4,9 +4,7 @@
   "head": "8888888888888888888888888888888888888888",
   "report_only": true,
   "selected_paths": ["tests/clean_overlay_proof_planner_contract.rs"],
-  "dirty_entries": [
-    {"path": "src/grpc/client.rs", "status": " M"}
-  ],
+  "dirty_entries": [{ "path": "src/grpc/client.rs", "status": " M" }],
   "reservations": [
     {
       "id": 16,

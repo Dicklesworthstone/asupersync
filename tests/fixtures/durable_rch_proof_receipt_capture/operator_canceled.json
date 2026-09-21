@@ -2,17 +2,13 @@
   "expected": {
     "citable": false,
     "exit_code": 130,
-    "first_blocker_contains": [
-      "operator canceled"
-    ],
+    "first_blocker_contains": ["operator canceled"],
     "first_blocker_forbidden": [],
     "lifecycle_state": "terminal_canceled",
     "max_first_blocker_lines": 8,
     "outcome_status": "canceled",
     "proof_evidence_status": "blocked",
-    "refusal_reason_codes": [
-      "failed-proof-status"
-    ],
+    "refusal_reason_codes": ["failed-proof-status"],
     "terminal_classification": "operator_canceled"
   },
   "fixture_id": "operator-canceled",

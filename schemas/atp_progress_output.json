@@ -15,7 +15,19 @@
     },
     "phase": {
       "type": "string",
-      "enum": ["initializing", "scanning", "chunking", "hashing", "connecting", "negotiating", "transferring", "verifying", "finalizing", "completed", "failed"],
+      "enum": [
+        "initializing",
+        "scanning",
+        "chunking",
+        "hashing",
+        "connecting",
+        "negotiating",
+        "transferring",
+        "verifying",
+        "finalizing",
+        "completed",
+        "failed"
+      ],
       "description": "Current operation phase"
     },
     "progress": {
@@ -58,7 +70,13 @@
           "description": "Overall completion percentage"
         }
       },
-      "required": ["bytes_processed", "total_bytes", "files_processed", "total_files", "percentage"],
+      "required": [
+        "bytes_processed",
+        "total_bytes",
+        "files_processed",
+        "total_files",
+        "percentage"
+      ],
       "additionalProperties": false
     },
     "performance": {
@@ -203,6 +221,17 @@
       "description": "Timestamp when this progress was captured"
     }
   },
-  "required": ["transfer_id", "operation", "phase", "progress", "performance", "network", "repair", "deduplication", "status_message", "timestamp"],
+  "required": [
+    "transfer_id",
+    "operation",
+    "phase",
+    "progress",
+    "performance",
+    "network",
+    "repair",
+    "deduplication",
+    "status_message",
+    "timestamp"
+  ],
   "additionalProperties": false
 }

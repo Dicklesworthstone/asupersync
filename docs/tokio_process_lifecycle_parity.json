@@ -15,21 +15,30 @@
     "parity_percentage": 100
   },
   "api_coverage": [
-    {"api": "Command::new", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Command::arg/args", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Command::env/envs/env_remove/env_clear", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Command::current_dir", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Command::stdin/stdout/stderr", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Command::kill_on_drop", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Command::spawn", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Command::output/output_async", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Command::status/status_async", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Child::id", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Child::wait/wait_async", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Child::wait_with_output/wait_with_output_async", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Child::kill", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Child::try_wait", "status": "COMPLETE", "tokio_parity": true},
-    {"api": "Child::signal (Unix)", "status": "COMPLETE", "tokio_parity": false, "note": "New API beyond Tokio"}
+    { "api": "Command::new", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Command::arg/args", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Command::env/envs/env_remove/env_clear", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Command::current_dir", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Command::stdin/stdout/stderr", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Command::kill_on_drop", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Command::spawn", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Command::output/output_async", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Command::status/status_async", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Child::id", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Child::wait/wait_async", "status": "COMPLETE", "tokio_parity": true },
+    {
+      "api": "Child::wait_with_output/wait_with_output_async",
+      "status": "COMPLETE",
+      "tokio_parity": true
+    },
+    { "api": "Child::kill", "status": "COMPLETE", "tokio_parity": true },
+    { "api": "Child::try_wait", "status": "COMPLETE", "tokio_parity": true },
+    {
+      "api": "Child::signal (Unix)",
+      "status": "COMPLETE",
+      "tokio_parity": false,
+      "note": "New API beyond Tokio"
+    }
   ],
   "gaps_addressed": [
     {
@@ -77,28 +86,50 @@
     "tested": true
   },
   "test_categories": [
-    {"prefix": "PL", "name": "Lifecycle", "count": 10},
-    {"prefix": "PS", "name": "Stdio", "count": 6},
-    {"prefix": "PK", "name": "Signal/Kill", "count": 5},
-    {"prefix": "PC", "name": "Cancellation", "count": 4},
-    {"prefix": "PE", "name": "Error paths", "count": 3},
-    {"prefix": "PB", "name": "Boundary/Env", "count": 4},
-    {"prefix": "CT", "name": "Contract artifact validation", "count": 4}
+    { "prefix": "PL", "name": "Lifecycle", "count": 10 },
+    { "prefix": "PS", "name": "Stdio", "count": 6 },
+    { "prefix": "PK", "name": "Signal/Kill", "count": 5 },
+    { "prefix": "PC", "name": "Cancellation", "count": 4 },
+    { "prefix": "PE", "name": "Error paths", "count": 3 },
+    { "prefix": "PB", "name": "Boundary/Env", "count": 4 },
+    { "prefix": "CT", "name": "Contract artifact validation", "count": 4 }
   ],
   "invariants_tested": [
-    {"id": "INV-PL-1", "description": "Spawn produces a valid PID"},
-    {"id": "INV-PL-2", "description": "Wait consumes the child handle (no double-wait)"},
-    {"id": "INV-PL-3", "description": "Exit code propagates correctly for 0, nonzero, and signal"},
-    {"id": "INV-PL-4", "description": "Kill-on-drop sends SIGKILL and reaps zombie"},
-    {"id": "INV-PL-5", "description": "Arbitrary signal delivery reaches the child"},
-    {"id": "INV-PL-6", "description": "Stdio pipes deliver data bidirectionally"},
-    {"id": "INV-PL-7", "description": "ProcessError taxonomy covers not-found and permission-denied"}
+    { "id": "INV-PL-1", "description": "Spawn produces a valid PID" },
+    { "id": "INV-PL-2", "description": "Wait consumes the child handle (no double-wait)" },
+    {
+      "id": "INV-PL-3",
+      "description": "Exit code propagates correctly for 0, nonzero, and signal"
+    },
+    { "id": "INV-PL-4", "description": "Kill-on-drop sends SIGKILL and reaps zombie" },
+    { "id": "INV-PL-5", "description": "Arbitrary signal delivery reaches the child" },
+    { "id": "INV-PL-6", "description": "Stdio pipes deliver data bidirectionally" },
+    {
+      "id": "INV-PL-7",
+      "description": "ProcessError taxonomy covers not-found and permission-denied"
+    }
   ],
   "drift_detection": [
-    {"id": "DRIFT-PL1", "trigger": "New public method on Child without cancel-safety doc", "action": "Require cancel-safety annotation"},
-    {"id": "DRIFT-PL2", "trigger": "New Stdio variant added", "action": "Require conversion to std::process::Stdio"},
-    {"id": "DRIFT-PL3", "trigger": "New platform-specific code without #[cfg] guard", "action": "Require platform matrix test"},
-    {"id": "DRIFT-PL4", "trigger": "unsafe block added to process module", "action": "Require safety comment and audit"}
+    {
+      "id": "DRIFT-PL1",
+      "trigger": "New public method on Child without cancel-safety doc",
+      "action": "Require cancel-safety annotation"
+    },
+    {
+      "id": "DRIFT-PL2",
+      "trigger": "New Stdio variant added",
+      "action": "Require conversion to std::process::Stdio"
+    },
+    {
+      "id": "DRIFT-PL3",
+      "trigger": "New platform-specific code without #[cfg] guard",
+      "action": "Require platform matrix test"
+    },
+    {
+      "id": "DRIFT-PL4",
+      "trigger": "unsafe block added to process module",
+      "action": "Require safety comment and audit"
+    }
   ],
   "summary": {
     "total_api_items": 15,

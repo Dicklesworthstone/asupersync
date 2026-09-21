@@ -14,12 +14,7 @@
     ]
   },
   "budget_contract": {
-    "required_fields": [
-      "pollQuota",
-      "deadlineMs",
-      "priority",
-      "cleanupQuota"
-    ],
+    "required_fields": ["pollQuota", "deadlineMs", "priority", "cleanupQuota"],
     "bounds": {
       "pollQuota": {
         "min": 1,
@@ -40,13 +35,7 @@
     }
   },
   "ownership_contract": {
-    "required_handle_kinds": [
-      "runtime",
-      "scope",
-      "task",
-      "channel",
-      "obligation"
-    ],
+    "required_handle_kinds": ["runtime", "scope", "task", "channel", "obligation"],
     "required_invariants": [
       "single_region_owner",
       "no_orphan_tasks",

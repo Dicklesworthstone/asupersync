@@ -150,11 +150,9 @@ async function main(): Promise<void> {
       ladder,
       browser_selection: browserSelection,
       preferred_dedicated_worker: preferredDedicatedWorker,
-      preferred_dedicated_worker_browser_selection:
-        preferredDedicatedWorkerBrowserSelection,
+      preferred_dedicated_worker_browser_selection: preferredDedicatedWorkerBrowserSelection,
       downgrade_without_webassembly: downgradeWithoutWebAssembly.value?.ladder ?? null,
-      downgrade_browser_selection:
-        downgradeWithoutWebAssembly.value?.browser_selection ?? null,
+      downgrade_browser_selection: downgradeWithoutWebAssembly.value?.browser_selection ?? null,
       downgrade_simulation: {
         marker: DOWNGRADE_MARKER,
         simulated: downgradeWithoutWebAssembly.simulated,
@@ -163,15 +161,12 @@ async function main(): Promise<void> {
     },
     dedicated_worker: dedicatedWorker,
     guarded_capabilities: {
-      main_thread_local_storage:
-        mainThreadCapabilities.storage?.has_local_storage === true,
+      main_thread_local_storage: mainThreadCapabilities.storage?.has_local_storage === true,
       main_thread_indexed_db: mainThreadCapabilities.storage?.has_indexed_db === true,
-      main_thread_web_transport:
-        mainThreadCapabilities.transport?.has_web_transport === true,
+      main_thread_web_transport: mainThreadCapabilities.transport?.has_web_transport === true,
       dedicated_worker_local_storage:
         dedicatedWorkerCapabilities.storage?.has_local_storage === true,
-      dedicated_worker_indexed_db:
-        dedicatedWorkerCapabilities.storage?.has_indexed_db === true,
+      dedicated_worker_indexed_db: dedicatedWorkerCapabilities.storage?.has_indexed_db === true,
       dedicated_worker_web_transport:
         dedicatedWorkerCapabilities.transport?.has_web_transport === true,
     },

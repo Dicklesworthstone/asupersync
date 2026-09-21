@@ -21,10 +21,7 @@ async function bootstrap(): Promise<void> {
   const ladder = inspect_rust_browser_execution_ladder() as Record<string, unknown>;
   const browserSelection = select_rust_browser_runtime() as Record<string, unknown>;
   const preferredMainThread =
-    inspect_rust_browser_execution_ladder_preferred_main_thread() as Record<
-      string,
-      unknown
-    >;
+    inspect_rust_browser_execution_ladder_preferred_main_thread() as Record<string, unknown>;
   const preferredMainThreadBrowserSelection =
     select_rust_browser_runtime_preferred_main_thread() as Record<string, unknown>;
 

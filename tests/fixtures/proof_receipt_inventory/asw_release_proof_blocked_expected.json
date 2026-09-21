@@ -111,9 +111,7 @@
             "pushed_refs": []
           }
         ],
-        "dirty_peer_paths": [
-          "src/runtime/rch_health/mod.rs"
-        ],
+        "dirty_peer_paths": ["src/runtime/rch_health/mod.rs"],
         "evidence_counts": {
           "commits": 2,
           "dirty_peer_paths": 1,
@@ -161,9 +159,7 @@
             "status": "pass"
           }
         ],
-        "reservations": [
-          "scripts/proof_receipt_inventory.py"
-        ],
+        "reservations": ["scripts/proof_receipt_inventory.py"],
         "status": "blocked",
         "touched_paths": [
           "scripts/proof_receipt_inventory.py",

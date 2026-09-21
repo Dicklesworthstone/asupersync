@@ -71,9 +71,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E001.md",
       "since": "0.3.2",
-      "source_refs": [
-        "src/runtime/state.rs"
-      ]
+      "source_refs": ["src/runtime/state.rs"]
     },
     {
       "code": "ASUP-E002",
@@ -91,9 +89,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E002.md",
       "since": "0.3.2",
-      "source_refs": [
-        "src/runtime/state.rs"
-      ]
+      "source_refs": ["src/runtime/state.rs"]
     },
     {
       "code": "ASUP-E003",
@@ -111,10 +107,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E003.md",
       "since": "0.3.2",
-      "source_refs": [
-        "src/error.rs",
-        "src/runtime/state.rs"
-      ]
+      "source_refs": ["src/error.rs", "src/runtime/state.rs"]
     },
     {
       "code": "ASUP-E004",
@@ -132,9 +125,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E004.md",
       "since": "0.3.2",
-      "source_refs": [
-        "src/runtime/state.rs"
-      ]
+      "source_refs": ["src/runtime/state.rs"]
     },
     {
       "code": "ASUP-E005",
@@ -152,9 +143,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E005.md",
       "since": "0.3.2",
-      "source_refs": [
-        "src/runtime/state.rs"
-      ]
+      "source_refs": ["src/runtime/state.rs"]
     },
     {
       "code": "ASUP-E006",
@@ -172,10 +161,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E006.md",
       "since": "0.3.2",
-      "source_refs": [
-        "src/error.rs",
-        "src/runtime/state.rs"
-      ]
+      "source_refs": ["src/error.rs", "src/runtime/state.rs"]
     },
     {
       "code": "ASUP-E007",
@@ -193,9 +179,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E007.md",
       "since": "0.3.2",
-      "source_refs": [
-        "src/runtime/state.rs"
-      ]
+      "source_refs": ["src/runtime/state.rs"]
     },
     {
       "code": "ASUP-E008",
@@ -213,9 +197,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E008.md",
       "since": "0.3.5",
-      "source_refs": [
-        "src/runtime/state.rs"
-      ]
+      "source_refs": ["src/runtime/state.rs"]
     },
     {
       "code": "ASUP-E101",
@@ -233,10 +215,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E101.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/error.rs",
-        "src/obligation/graded.rs"
-      ]
+      "source_refs": ["src/error.rs", "src/obligation/graded.rs"]
     },
     {
       "code": "ASUP-E102",
@@ -254,9 +233,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E102.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/error.rs"
-      ]
+      "source_refs": ["src/error.rs"]
     },
     {
       "code": "ASUP-E103",
@@ -276,10 +253,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E103.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/obligation/graded.rs",
-        "src/gen_server.rs"
-      ]
+      "source_refs": ["src/obligation/graded.rs", "src/gen_server.rs"]
     },
     {
       "code": "ASUP-E104",
@@ -299,9 +273,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E104.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/runtime/io_op.rs"
-      ]
+      "source_refs": ["src/runtime/io_op.rs"]
     },
     {
       "code": "ASUP-E105",
@@ -321,9 +293,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E105.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/obligation/recovery.rs"
-      ]
+      "source_refs": ["src/obligation/recovery.rs"]
     },
     {
       "code": "ASUP-E201",
@@ -341,9 +311,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E201.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/error.rs"
-      ]
+      "source_refs": ["src/error.rs"]
     },
     {
       "code": "ASUP-E202",
@@ -361,9 +329,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E202.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/obligation/marking.rs"
-      ]
+      "source_refs": ["src/obligation/marking.rs"]
     },
     {
       "code": "ASUP-E203",
@@ -404,9 +370,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E204.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/sync/semaphore.rs"
-      ]
+      "source_refs": ["src/sync/semaphore.rs"]
     },
     {
       "code": "ASUP-E205",
@@ -426,9 +390,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E205.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/sync/lock_ordering.rs"
-      ]
+      "source_refs": ["src/sync/lock_ordering.rs"]
     },
     {
       "code": "ASUP-E301",
@@ -446,10 +408,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E301.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/error.rs",
-        "src/observability/diagnostics.rs"
-      ]
+      "source_refs": ["src/error.rs", "src/observability/diagnostics.rs"]
     },
     {
       "code": "ASUP-E302",
@@ -467,9 +426,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E302.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/combinator/race.rs"
-      ]
+      "source_refs": ["src/combinator/race.rs"]
     },
     {
       "code": "ASUP-E303",
@@ -487,9 +444,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E303.md",
       "since": "0.3.5",
-      "source_refs": [
-        "src/record/finalizer.rs"
-      ]
+      "source_refs": ["src/record/finalizer.rs"]
     },
     {
       "code": "ASUP-E401",
@@ -507,10 +462,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E401.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/lab/scenario_runner.rs",
-        "src/trace/replayer.rs"
-      ]
+      "source_refs": ["src/lab/scenario_runner.rs", "src/trace/replayer.rs"]
     },
     {
       "code": "ASUP-E402",
@@ -528,9 +480,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E402.md",
       "since": "0.3.3",
-      "source_refs": [
-        "src/lab/runtime.rs"
-      ]
+      "source_refs": ["src/lab/runtime.rs"]
     },
     {
       "code": "ASUP-E403",
@@ -548,9 +498,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E403.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/lab/oracle/determinism.rs"
-      ]
+      "source_refs": ["src/lab/oracle/determinism.rs"]
     },
     {
       "code": "ASUP-E404",
@@ -570,9 +518,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E404.md",
       "since": "0.3.9",
-      "source_refs": [
-        "src/lab/snapshot_restore.rs"
-      ]
+      "source_refs": ["src/lab/snapshot_restore.rs"]
     },
     {
       "code": "ASUP-E501",
@@ -616,10 +562,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E502.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/web/middleware.rs",
-        "src/web/negotiate.rs"
-      ]
+      "source_refs": ["src/web/middleware.rs", "src/web/negotiate.rs"]
     },
     {
       "code": "ASUP-E503",
@@ -637,9 +580,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E503.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/web/extract.rs"
-      ]
+      "source_refs": ["src/web/extract.rs"]
     },
     {
       "code": "ASUP-E504",
@@ -659,9 +600,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E504.md",
       "since": "0.4.9",
-      "source_refs": [
-        "src/web/multipart.rs"
-      ]
+      "source_refs": ["src/web/multipart.rs"]
     },
     {
       "code": "ASUP-E505",
@@ -703,10 +642,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E506.md",
       "since": "0.4.10",
-      "source_refs": [
-        "src/web/mod.rs",
-        "src/web/multipart.rs"
-      ]
+      "source_refs": ["src/web/mod.rs", "src/web/multipart.rs"]
     },
     {
       "code": "ASUP-E507",
@@ -724,10 +660,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E507.md",
       "since": "0.4.10",
-      "source_refs": [
-        "src/web/mod.rs",
-        "src/web/multipart.rs"
-      ]
+      "source_refs": ["src/web/mod.rs", "src/web/multipart.rs"]
     },
     {
       "code": "ASUP-E508",
@@ -819,9 +752,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E601.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/database/pool.rs"
-      ]
+      "source_refs": ["src/database/pool.rs"]
     },
     {
       "code": "ASUP-E701",
@@ -839,9 +770,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E701.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/bin/asupersync.rs"
-      ]
+      "source_refs": ["src/bin/asupersync.rs"]
     },
     {
       "code": "ASUP-E702",
@@ -859,9 +788,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E702.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/bin/atpd.rs"
-      ]
+      "source_refs": ["src/bin/atpd.rs"]
     },
     {
       "code": "ASUP-E801",
@@ -879,10 +806,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E801.md",
       "since": "0.3.5",
-      "source_refs": [
-        "src/net/atp/transport_rq/mod.rs",
-        "src/net/atp/transport_quic/mod.rs"
-      ]
+      "source_refs": ["src/net/atp/transport_rq/mod.rs", "src/net/atp/transport_quic/mod.rs"]
     },
     {
       "code": "ASUP-E802",
@@ -900,10 +824,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E802.md",
       "since": "0.3.5",
-      "source_refs": [
-        "src/net/atp/transport_rq/mod.rs",
-        "src/net/atp/transport_quic/mod.rs"
-      ]
+      "source_refs": ["src/net/atp/transport_rq/mod.rs", "src/net/atp/transport_quic/mod.rs"]
     },
     {
       "code": "ASUP-E803",
@@ -921,10 +842,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E803.md",
       "since": "0.3.5",
-      "source_refs": [
-        "src/net/atp/transport_rq/mod.rs",
-        "src/net/atp/transport_quic/mod.rs"
-      ]
+      "source_refs": ["src/net/atp/transport_rq/mod.rs", "src/net/atp/transport_quic/mod.rs"]
     },
     {
       "code": "ASUP-E804",
@@ -942,9 +860,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E804.md",
       "since": "0.3.5",
-      "source_refs": [
-        "src/net/atp/transport_quic/mod.rs"
-      ]
+      "source_refs": ["src/net/atp/transport_quic/mod.rs"]
     },
     {
       "code": "ASUP-E805",
@@ -962,10 +878,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E805.md",
       "since": "0.3.5",
-      "source_refs": [
-        "src/net/atp/transport_rq/mod.rs",
-        "src/net/atp/transport_quic/mod.rs"
-      ]
+      "source_refs": ["src/net/atp/transport_rq/mod.rs", "src/net/atp/transport_quic/mod.rs"]
     },
     {
       "code": "ASUP-E901",
@@ -983,9 +896,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E901.md",
       "since": "0.3.4",
-      "source_refs": [
-        "src/error.rs"
-      ]
+      "source_refs": ["src/error.rs"]
     },
     {
       "code": "ASUP-E902",
@@ -1003,9 +914,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E902.md",
       "since": "0.3.4",
-      "source_refs": [
-        "scripts/semantic_lint.py"
-      ]
+      "source_refs": ["scripts/semantic_lint.py"]
     },
     {
       "code": "ASUP-E903",
@@ -1023,9 +932,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E903.md",
       "since": "0.3.4",
-      "source_refs": [
-        "scripts/semantic_lint.py"
-      ]
+      "source_refs": ["scripts/semantic_lint.py"]
     },
     {
       "code": "ASUP-E904",
@@ -1043,9 +950,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E904.md",
       "since": "0.3.4",
-      "source_refs": [
-        "scripts/semantic_lint.py"
-      ]
+      "source_refs": ["scripts/semantic_lint.py"]
     },
     {
       "code": "ASUP-E905",
@@ -1063,9 +968,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E905.md",
       "since": "0.3.4",
-      "source_refs": [
-        "scripts/semantic_lint.py"
-      ]
+      "source_refs": ["scripts/semantic_lint.py"]
     },
     {
       "code": "ASUP-E906",
@@ -1083,9 +986,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E906.md",
       "since": "0.3.4",
-      "source_refs": [
-        "scripts/semantic_lint.py"
-      ]
+      "source_refs": ["scripts/semantic_lint.py"]
     },
     {
       "code": "ASUP-E907",
@@ -1103,9 +1004,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E907.md",
       "since": "0.3.4",
-      "source_refs": [
-        "scripts/semantic_lint.py"
-      ]
+      "source_refs": ["scripts/semantic_lint.py"]
     },
     {
       "code": "ASUP-E908",
@@ -1123,9 +1022,7 @@
       ],
       "doc_path": "docs/error_codes/ASUP-E908.md",
       "since": "0.3.4",
-      "source_refs": [
-        "scripts/semantic_lint.py"
-      ]
+      "source_refs": ["scripts/semantic_lint.py"]
     }
   ]
 }

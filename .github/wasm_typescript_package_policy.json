@@ -79,10 +79,7 @@
         ]
       }
     ],
-    "forbidden_public_subpath_prefixes": [
-      "./internal/",
-      "./native/"
-    ],
+    "forbidden_public_subpath_prefixes": ["./internal/", "./native/"],
     "allowed_layer_edges": [
       {
         "from": "@asupersync/browser-core",
@@ -99,12 +96,7 @@
     ]
   },
   "type_surface": {
-    "required_symbols": [
-      "Outcome",
-      "Budget",
-      "CancellationToken",
-      "RegionHandle"
-    ],
+    "required_symbols": ["Outcome", "Budget", "CancellationToken", "RegionHandle"],
     "symbol_owners": {
       "Outcome": "@asupersync/browser-core",
       "Budget": "@asupersync/browser-core",

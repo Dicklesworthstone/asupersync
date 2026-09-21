@@ -33,10 +33,7 @@
           "Conformance mismatch or replay divergence artifact",
           "No unresolved model-side theorem obligations for the failing rule family"
         ],
-        "patch_targets": [
-          "src/runtime/**",
-          "tests/refinement_conformance.rs"
-        ],
+        "patch_targets": ["src/runtime/**", "tests/refinement_conformance.rs"],
         "fix_direction": "runtime-code",
         "owner_assignment": {
           "primary_owner_role": "Rust runtime owner",
@@ -52,11 +49,7 @@
           "tests/refinement_conformance.rs",
           "formal/lean/coverage/ci_verification_profiles.json"
         ],
-        "sign_off_roles": [
-          "Rust runtime owner",
-          "Formal owner",
-          "Conformance owner"
-        ]
+        "sign_off_roles": ["Rust runtime owner", "Formal owner", "Conformance owner"]
       },
       {
         "route_id": "model-first",
@@ -69,10 +62,7 @@
           "Traceability row showing mapping exists but theorem branch is incomplete",
           "No contradictory Rust conformance failure for the same operation"
         ],
-        "patch_targets": [
-          "formal/lean/Asupersync.lean",
-          "formal/lean/coverage/*.json"
-        ],
+        "patch_targets": ["formal/lean/Asupersync.lean", "formal/lean/coverage/*.json"],
         "fix_direction": "formal-model",
         "owner_assignment": {
           "primary_owner_role": "Formal owner",
@@ -88,11 +78,7 @@
           "target/lean-e2e/*_lake_build.log",
           "formal/lean/coverage/ci_verification_profiles.json"
         ],
-        "sign_off_roles": [
-          "Formal owner",
-          "Rust runtime owner",
-          "CI/governance owner"
-        ]
+        "sign_off_roles": ["Formal owner", "Rust runtime owner", "CI/governance owner"]
       },
       {
         "route_id": "assumptions-or-harness-first",
@@ -125,11 +111,7 @@
           "tests/refinement_conformance.rs",
           "formal/lean/coverage/ci_verification_profiles.json"
         ],
-        "sign_off_roles": [
-          "Conformance owner",
-          "Formal owner",
-          "Runtime owner"
-        ]
+        "sign_off_roles": ["Conformance owner", "Formal owner", "Runtime owner"]
       }
     ],
     "audit_requirements": [
@@ -144,10 +126,7 @@
       "bead_id": "bd-cspxm",
       "summary": "Lean preservation proofs failed due to proof-shape/declaration-order issues in setTask/setRegion cancellation branches.",
       "selected_route": "model-first",
-      "rejected_routes": [
-        "code-first",
-        "assumptions-or-harness-first"
-      ],
+      "rejected_routes": ["code-first", "assumptions-or-harness-first"],
       "owner_assignment_decision": {
         "primary_owner_role": "Formal owner",
         "assigned_bead_owner": "bd-cspxm owner",
@@ -185,11 +164,7 @@
           "note": "Refactor applied to substitution/rewrite helpers and cancelRequest preservation branch binders."
         }
       ],
-      "sign_off_roles": [
-        "Formal owner",
-        "Rust runtime owner",
-        "CI/governance owner"
-      ],
+      "sign_off_roles": ["Formal owner", "Rust runtime owner", "CI/governance owner"],
       "outcome": "Route held as model-first; Track-2 frontier buckets moved from 8 to 7 while keeping runtime mapping intact."
     }
   ],
@@ -200,11 +175,7 @@
       "seed_source": "lab_config.seed",
       "trace_normalization": "trace_fingerprint + canonicalized event tuples",
       "clock_source": "virtual_time_only",
-      "forbidden_entropy_sources": [
-        "system_time",
-        "ambient_rng",
-        "unstable_iteration_order"
-      ]
+      "forbidden_entropy_sources": ["system_time", "ambient_rng", "unstable_iteration_order"]
     },
     "mismatch_payload_fields": [
       "harness_id",
@@ -258,10 +229,7 @@
           "refinement.trace_equivalence_schedule_noise",
           "refinement.trace_equivalence_semantic_mismatch"
         ],
-        "formal_expectations": [
-          "race_losers_drained",
-          "stuttering_preserves_wellformed"
-        ],
+        "formal_expectations": ["race_losers_drained", "stuttering_preserves_wellformed"],
         "normalized_trace_artifact": "target/refinement-conformance/race_loser_drain/normalized_trace.json",
         "mismatch_payload_artifact": "target/refinement-conformance/race_loser_drain/mismatch_payload.json",
         "repro_manifest_artifact": "target/refinement-conformance/race_loser_drain/repro_manifest.json",
@@ -274,10 +242,7 @@
     "ci_consumers": [
       {
         "profile": "frontier",
-        "required_harness_ids": [
-          "harness.cancellation_obligation",
-          "harness.race_loser_drain"
-        ],
+        "required_harness_ids": ["harness.cancellation_obligation", "harness.race_loser_drain"],
         "required_artifacts": [
           "normalized_trace_artifact",
           "mismatch_payload_artifact",
@@ -287,10 +252,7 @@
       },
       {
         "profile": "full",
-        "required_harness_ids": [
-          "harness.cancellation_obligation",
-          "harness.race_loser_drain"
-        ],
+        "required_harness_ids": ["harness.cancellation_obligation", "harness.race_loser_drain"],
         "required_artifacts": [
           "normalized_trace_artifact",
           "mismatch_payload_artifact",
@@ -333,9 +295,7 @@
     "segment_chain": [
       {
         "segment_id": "cancel_ladder",
-        "operation_ids": [
-          "runtime_state.cancel_request"
-        ],
+        "operation_ids": ["runtime_state.cancel_request"],
         "required_theorems": [
           "cancel_protocol_terminates",
           "cancel_steps_testable_bound",
@@ -363,13 +323,8 @@
       },
       {
         "segment_id": "race_loser_drain",
-        "operation_ids": [
-          "scope.race_all_loser_drain"
-        ],
-        "required_theorems": [
-          "cancel_propagation_bounded",
-          "step_preserves_wellformed"
-        ],
+        "operation_ids": ["scope.race_all_loser_drain"],
+        "required_theorems": ["cancel_propagation_bounded", "step_preserves_wellformed"],
         "theorem_sources": [
           {
             "theorem": "cancel_propagation_bounded",
@@ -388,10 +343,7 @@
       },
       {
         "segment_id": "close_quiescence",
-        "operation_ids": [
-          "runtime_state.advance_region_state",
-          "runtime_state.task_completed"
-        ],
+        "operation_ids": ["runtime_state.advance_region_state", "runtime_state.task_completed"],
         "required_theorems": [
           "close_implies_quiescent",
           "close_quiescence_decomposition",
@@ -411,19 +363,14 @@
             "line": 1806
           }
         ],
-        "required_assumptions": [
-          "assume.close.quiescence_guard.v1"
-        ],
+        "required_assumptions": ["assume.close.quiescence_guard.v1"],
         "handoff_to": "terminal"
       }
     ],
     "end_to_end_guarantees": [
       {
         "guarantee_id": "guarantee.cancel_to_quiescence",
-        "required_segments": [
-          "cancel_ladder",
-          "close_quiescence"
-        ],
+        "required_segments": ["cancel_ladder", "close_quiescence"],
         "assumption_ids": [
           "assume.cancel.checkpoint_observability.v1",
           "assume.cancel.streak_fairness_bound.v1",
@@ -435,18 +382,11 @@
           "tests/refinement_conformance.rs",
           "tests/region_lifecycle_conformance.rs"
         ],
-        "expected_trace_signatures": [
-          "cancel_protocol_terminates",
-          "close_implies_quiescent"
-        ]
+        "expected_trace_signatures": ["cancel_protocol_terminates", "close_implies_quiescent"]
       },
       {
         "guarantee_id": "guarantee.race_loser_drain_to_quiescence",
-        "required_segments": [
-          "cancel_ladder",
-          "race_loser_drain",
-          "close_quiescence"
-        ],
+        "required_segments": ["cancel_ladder", "race_loser_drain", "close_quiescence"],
         "assumption_ids": [
           "assume.cancel.checkpoint_observability.v1",
           "assume.race.loser_drain_waits.v1",
@@ -472,11 +412,7 @@
       {
         "cadence_id": "weekly",
         "max_interval_days": 7,
-        "required_participants": [
-          "Conformance owner",
-          "Formal owner",
-          "Runtime owner"
-        ],
+        "required_participants": ["Conformance owner", "Formal owner", "Runtime owner"],
         "governance_record_thread": "bd-3gnw9"
       },
       {
@@ -493,11 +429,7 @@
     ],
     "ownership_roles": {
       "report_owner_role": "Conformance owner",
-      "signoff_approver_roles": [
-        "Formal owner",
-        "Runtime owner",
-        "CI/governance owner"
-      ],
+      "signoff_approver_roles": ["Formal owner", "Runtime owner", "CI/governance owner"],
       "escalation_owner_role": "Track-5 governance owner"
     },
     "governance_links": [
@@ -529,12 +461,8 @@
       {
         "check_id": "check.coverage_report_complete",
         "description": "Report contains coverage %, mismatch trend, unresolved blockers, and confidence statement.",
-        "required_artifacts": [
-          "formal/lean/coverage/runtime_state_refinement_map.json"
-        ],
-        "required_tests": [
-          "tests/runtime_state_refinement_map.rs"
-        ],
+        "required_artifacts": ["formal/lean/coverage/runtime_state_refinement_map.json"],
+        "required_tests": ["tests/runtime_state_refinement_map.rs"],
         "pass_criteria": "All required_report_fields are present and machine-validated."
       },
       {
@@ -553,12 +481,8 @@
       {
         "check_id": "check.governance_record_linked",
         "description": "Sign-off decision is linked to governance review cadence and bead updates.",
-        "required_artifacts": [
-          "formal/lean/coverage/ci_verification_profiles.json"
-        ],
-        "required_tests": [
-          "tests/runtime_state_refinement_map.rs"
-        ],
+        "required_artifacts": ["formal/lean/coverage/ci_verification_profiles.json"],
+        "required_tests": ["tests/runtime_state_refinement_map.rs"],
         "pass_criteria": "Governance thread references and ownership roles are present and non-empty."
       }
     ],
@@ -604,10 +528,7 @@
       ]
     },
     "track6_input_contract": {
-      "consumer_beads": [
-        "asupersync-2izu4",
-        "asupersync-3gf4i"
-      ],
+      "consumer_beads": ["asupersync-2izu4", "asupersync-3gf4i"],
       "export_fields": [
         "coverage_percent",
         "mismatch_trend",
@@ -631,9 +552,7 @@
         "Any semantic change to create_obligation input/output behavior or region admission policy.",
         "Any change to obligation creation bookkeeping fields or ownership invariants in RuntimeState."
       ],
-      "formal_labels": [
-        "step.reserve"
-      ],
+      "formal_labels": ["step.reserve"],
       "theorem_obligations": [
         {
           "theorem": "reserve_creates_reserved",
@@ -662,9 +581,7 @@
         "Any semantic change to commit_obligation state transitions, error handling, or resolution side effects.",
         "Any change to commit-related ledger counters, region-progress propagation, or post-commit cleanup."
       ],
-      "formal_labels": [
-        "step.commit"
-      ],
+      "formal_labels": ["step.commit"],
       "theorem_obligations": [
         {
           "theorem": "commit_resolves",
@@ -702,9 +619,7 @@
         "Any semantic change to abort_obligation behavior, reason classification, or abort-path side effects.",
         "Any change to abort-related ledger accounting or region-state progression hooks."
       ],
-      "formal_labels": [
-        "step.abort"
-      ],
+      "formal_labels": ["step.abort"],
       "theorem_obligations": [
         {
           "theorem": "abort_resolves",
@@ -742,9 +657,7 @@
         "Any change to leak detection policy, leak marking semantics, or leak-state transitions.",
         "Any change to runtime leak response behavior that affects close/quiescence progress assumptions."
       ],
-      "formal_labels": [
-        "step.leak"
-      ],
+      "formal_labels": ["step.leak"],
       "theorem_obligations": [
         {
           "theorem": "leak_marks_leaked",
@@ -778,11 +691,7 @@
         "Any change to cancel propagation order, descendant traversal strategy, or cause-chain strengthening behavior.",
         "Any change to cancel request staging that affects acknowledge/finalize/complete handoff assumptions."
       ],
-      "formal_labels": [
-        "step.cancelRequest",
-        "step.cancelPropagate",
-        "step.cancelChild"
-      ],
+      "formal_labels": ["step.cancelRequest", "step.cancelPropagate", "step.cancelChild"],
       "theorem_obligations": [
         {
           "theorem": "cancel_request_preserves_wellformed",
@@ -823,11 +732,7 @@
         "Any semantic change to task completion cleanup, obligation abort policy, or membership removal ordering.",
         "Any change to task_completed interactions with advance_region_state and close-progress signaling."
       ],
-      "formal_labels": [
-        "step.complete",
-        "step.abort",
-        "step.closeChildrenDone"
-      ],
+      "formal_labels": ["step.complete", "step.abort", "step.closeChildrenDone"],
       "theorem_obligations": [
         {
           "theorem": "complete_preserves_region",
@@ -932,11 +837,7 @@
         "Any change to cancel/timed/ready lane priority semantics, fairness yield policy, or deterministic tie-breaking.",
         "Any change to scheduler dispatch/stuttering trace signatures or related conformance harness expectations."
       ],
-      "formal_labels": [
-        "step.scheduleStep",
-        "step.schedule",
-        "step.tick"
-      ],
+      "formal_labels": ["step.scheduleStep", "step.schedule", "step.tick"],
       "theorem_obligations": [
         {
           "theorem": "scheduler_change_preserves_wellformed",

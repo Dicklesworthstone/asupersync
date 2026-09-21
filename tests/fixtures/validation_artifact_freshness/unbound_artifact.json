@@ -1,7 +1,5 @@
 {
   "decision": "passed",
   "generated_at": "2026-05-08T05:18:00Z",
-  "touched_files": [
-    "scripts/proof_runner.py"
-  ]
+  "touched_files": ["scripts/proof_runner.py"]
 }

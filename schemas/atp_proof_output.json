@@ -47,7 +47,15 @@
           "type": "boolean"
         }
       },
-      "required": ["version", "merkle_root", "object_count", "total_size_bytes", "chunk_count", "compression_enabled", "encryption_enabled"],
+      "required": [
+        "version",
+        "merkle_root",
+        "object_count",
+        "total_size_bytes",
+        "chunk_count",
+        "compression_enabled",
+        "encryption_enabled"
+      ],
       "additionalProperties": false
     },
     "repair": {
@@ -234,6 +242,17 @@
       "description": "Proof generation timestamp"
     }
   },
-  "required": ["bundle_path", "bundle_hash", "manifest", "repair", "content", "peer", "path", "journal", "replay", "timestamp"],
+  "required": [
+    "bundle_path",
+    "bundle_hash",
+    "manifest",
+    "repair",
+    "content",
+    "peer",
+    "path",
+    "journal",
+    "replay",
+    "timestamp"
+  ],
   "additionalProperties": false
 }

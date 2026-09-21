@@ -14,9 +14,7 @@
         "task_description": ""
       }
     ],
-    "assignees": [
-      "TopazGoose"
-    ],
+    "assignees": ["TopazGoose"],
     "counts": {
       "active_agents": 1,
       "inactive_agents": 0,

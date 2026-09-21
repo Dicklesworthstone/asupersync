@@ -131,7 +131,14 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["none", "full_cone", "restricted_cone", "port_restricted", "symmetric", "unknown"],
+          "enum": [
+            "none",
+            "full_cone",
+            "restricted_cone",
+            "port_restricted",
+            "symmetric",
+            "unknown"
+          ],
           "description": "Detected NAT type"
         },
         "upnp_available": {
@@ -229,7 +236,14 @@
             "description": "Protocol efficiency ratio"
           }
         },
-        "required": ["target", "direction", "throughput_bps", "duration_seconds", "test_size_bytes", "efficiency"],
+        "required": [
+          "target",
+          "direction",
+          "throughput_bps",
+          "duration_seconds",
+          "test_size_bytes",
+          "efficiency"
+        ],
         "additionalProperties": false
       }
     },
@@ -276,6 +290,15 @@
       "description": "Total time taken for all diagnostics"
     }
   },
-  "required": ["summary", "network_interfaces", "connectivity_tests", "nat_traversal", "bandwidth_tests", "path_recommendations", "timestamp", "test_duration_seconds"],
+  "required": [
+    "summary",
+    "network_interfaces",
+    "connectivity_tests",
+    "nat_traversal",
+    "bandwidth_tests",
+    "path_recommendations",
+    "timestamp",
+    "test_duration_seconds"
+  ],
   "additionalProperties": false
 }

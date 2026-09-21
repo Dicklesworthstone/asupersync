@@ -6,53 +6,44 @@
  */
 
 import initWasm, {
-  BUDGET_BOUNDS,
-  CANCELLATION_PHASE_ORDER,
-  ERROR_CODES,
-  RECOVERABILITY_LEVELS,
-  BaseHandle,
-  CancellationToken as CoreCancellationToken,
-  FetchHandle as CoreFetchHandle,
-  Outcome as OutcomeFactory,
-  RegionHandle as CoreRegionHandle,
-  RuntimeHandle as CoreRuntimeHandle,
-  TaskHandle as CoreTaskHandle,
-  abiFingerprint,
-  abiMetadata,
-  abiVersion,
-  createBudget,
-  fetchRequest,
-  rawBindings,
-  runtimeClose,
-  runtimeCreate,
-  scopeClose,
-  scopeEnter,
-  taskCancel,
-  taskJoin,
-  taskSpawn,
-  websocketClose,
-  websocketOpen,
-  websocketRecv,
-  websocketSend,
-  webtransportCancel,
-  webtransportClose,
-  webtransportOpen,
-  webtransportRecv,
-  webtransportSend,
   type AbiCancellation,
   type AbiFailure,
   type AbiVersion,
+  abiFingerprint,
+  abiMetadata,
+  abiVersion,
+  BaseHandle,
+  BUDGET_BOUNDS,
   type Budget,
+  CANCELLATION_PHASE_ORDER,
+  CancellationToken as CoreCancellationToken,
+  FetchHandle as CoreFetchHandle,
+  RegionHandle as CoreRegionHandle,
+  RuntimeHandle as CoreRuntimeHandle,
+  TaskHandle as CoreTaskHandle,
+  createBudget,
+  ERROR_CODES,
   type ErrorCode,
   type FetchAuthority,
   type FetchRequest,
+  fetchRequest,
   type HandleKind,
   type HandleRef,
   type InitInput,
+  Outcome as OutcomeFactory,
+  RECOVERABILITY_LEVELS,
   type Recoverability,
+  rawBindings,
+  runtimeClose,
+  runtimeCreate,
   type ScopeEnterRequest,
+  scopeClose,
+  scopeEnter,
   type TaskCancelRequest,
   type TaskSpawnRequest,
+  taskCancel,
+  taskJoin,
+  taskSpawn,
   type WasmValue,
   type WebSocketCancelRequest,
   type WebSocketCloseRequest,
@@ -64,35 +55,6 @@ import initWasm, {
   type WebTransportOpenRequest,
   type WebTransportRecvRequest,
   type WebTransportSendRequest,
-} from "@asupersync/browser-core";
-import type { BrowserTraceRecord } from "./tracing.js";
-
-export {
-  BUDGET_BOUNDS,
-  CANCELLATION_PHASE_ORDER,
-  ERROR_CODES,
-  RECOVERABILITY_LEVELS,
-  BaseHandle,
-  CoreCancellationToken,
-  CoreFetchHandle,
-  CoreRegionHandle,
-  CoreRuntimeHandle,
-  CoreTaskHandle,
-  OutcomeFactory as Outcome,
-  abiFingerprint,
-  abiMetadata,
-  abiVersion,
-  createBudget,
-  fetchRequest,
-  initWasm as init,
-  rawBindings,
-  runtimeClose,
-  runtimeCreate,
-  scopeClose,
-  scopeEnter,
-  taskCancel,
-  taskJoin,
-  taskSpawn,
   websocketClose,
   websocketOpen,
   websocketRecv,
@@ -102,7 +64,8 @@ export {
   webtransportOpen,
   webtransportRecv,
   webtransportSend,
-};
+} from "@asupersync/browser-core";
+import type { BrowserTraceRecord } from "./tracing.js";
 
 export type {
   AbiCancellation,
@@ -130,6 +93,42 @@ export type {
   WebTransportOpenRequest,
   WebTransportRecvRequest,
   WebTransportSendRequest,
+};
+export {
+  abiFingerprint,
+  abiMetadata,
+  abiVersion,
+  BaseHandle,
+  BUDGET_BOUNDS,
+  CANCELLATION_PHASE_ORDER,
+  CoreCancellationToken,
+  CoreFetchHandle,
+  CoreRegionHandle,
+  CoreRuntimeHandle,
+  CoreTaskHandle,
+  createBudget,
+  ERROR_CODES,
+  fetchRequest,
+  initWasm as init,
+  OutcomeFactory as Outcome,
+  RECOVERABILITY_LEVELS,
+  rawBindings,
+  runtimeClose,
+  runtimeCreate,
+  scopeClose,
+  scopeEnter,
+  taskCancel,
+  taskJoin,
+  taskSpawn,
+  websocketClose,
+  websocketOpen,
+  websocketRecv,
+  websocketSend,
+  webtransportCancel,
+  webtransportClose,
+  webtransportOpen,
+  webtransportRecv,
+  webtransportSend,
 };
 
 export type BrowserAbiMetadata = typeof abiMetadata;
@@ -182,9 +181,7 @@ export interface BrowserCapabilitySnapshot {
   hasWritableStream: boolean;
 }
 
-export type BrowserRuntimeSupportClass =
-  | "direct_runtime_supported"
-  | "unsupported";
+export type BrowserRuntimeSupportClass = "direct_runtime_supported" | "unsupported";
 
 export type BrowserRuntimeContext =
   | "browser_main_thread"
@@ -212,10 +209,8 @@ export interface BrowserRuntimeSupportDiagnostics {
   capabilities: BrowserCapabilitySnapshot;
 }
 
-export const BROWSER_EXECUTION_POLICY_SCHEMA_VERSION =
-  "wasm-browser-execution-ladder-v1";
-export const BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE =
-  "lane.browser.main_thread.direct_runtime";
+export const BROWSER_EXECUTION_POLICY_SCHEMA_VERSION = "wasm-browser-execution-ladder-v1";
+export const BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE = "lane.browser.main_thread.direct_runtime";
 export const BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE =
   "lane.browser.dedicated_worker.direct_runtime";
 export const BROWSER_UNSUPPORTED_LANE = "lane.unsupported";
@@ -254,10 +249,7 @@ export type BrowserExecutionReasonCode =
 
 export type BrowserExecutionLaneReason = BrowserExecutionReasonCode;
 
-export type BrowserLaneHealthStatus =
-  | "healthy"
-  | "retrying"
-  | "demoted";
+export type BrowserLaneHealthStatus = "healthy" | "retrying" | "demoted";
 
 export type BrowserLaneHealthTrigger =
   | "runtime_init_failure"
@@ -354,14 +346,10 @@ export interface BrowserScopeSelectionResult {
   outcome: BrowserOutcome<RegionHandle> | null;
 }
 
-export const BROWSER_UNSUPPORTED_RUNTIME_CODE =
-  "ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME";
-export const BROWSER_WEBTRANSPORT_UNSUPPORTED_CODE =
-  "ASUPERSYNC_BROWSER_WEBTRANSPORT_UNSUPPORTED";
-export const BROWSER_STORAGE_UNSUPPORTED_CODE =
-  "ASUPERSYNC_BROWSER_STORAGE_UNSUPPORTED";
-export const BROWSER_STORAGE_OPERATION_FAILED_CODE =
-  "ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED";
+export const BROWSER_UNSUPPORTED_RUNTIME_CODE = "ASUPERSYNC_BROWSER_UNSUPPORTED_RUNTIME";
+export const BROWSER_WEBTRANSPORT_UNSUPPORTED_CODE = "ASUPERSYNC_BROWSER_WEBTRANSPORT_UNSUPPORTED";
+export const BROWSER_STORAGE_UNSUPPORTED_CODE = "ASUPERSYNC_BROWSER_STORAGE_UNSUPPORTED";
+export const BROWSER_STORAGE_OPERATION_FAILED_CODE = "ASUPERSYNC_BROWSER_STORAGE_OPERATION_FAILED";
 export const BROWSER_ARTIFACT_OPERATION_FAILED_CODE =
   "ASUPERSYNC_BROWSER_ARTIFACT_OPERATION_FAILED";
 export const BROWSER_ARTIFACT_DOWNLOAD_UNSUPPORTED_CODE =
@@ -395,11 +383,7 @@ export interface BrowserWebTransportCloseOptions {
   reason?: string;
 }
 
-export type BrowserWebTransportPayload =
-  | Uint8Array
-  | ArrayBuffer
-  | ArrayBufferView
-  | number[];
+export type BrowserWebTransportPayload = Uint8Array | ArrayBuffer | ArrayBufferView | number[];
 
 export type BrowserStorageBackend = "indexeddb" | "localstorage";
 
@@ -435,18 +419,9 @@ export interface BrowserStorageOptions {
   version?: number;
 }
 
-export type BrowserStorageValue =
-  | Uint8Array
-  | ArrayBuffer
-  | ArrayBufferView
-  | number[];
+export type BrowserStorageValue = Uint8Array | ArrayBuffer | ArrayBufferView | number[];
 
-export type BrowserStorageOperation =
-  | "get"
-  | "set"
-  | "delete"
-  | "list_keys"
-  | "clear_namespace";
+export type BrowserStorageOperation = "get" | "set" | "delete" | "list_keys" | "clear_namespace";
 
 export type BrowserStorageOperationFailureReason =
   | "unsupported_environment"
@@ -505,13 +480,7 @@ export interface BrowserArtifactStoreOptions extends BrowserStorageOptions {
   retention?: Partial<BrowserArtifactRetentionPolicy>;
 }
 
-export type BrowserArtifactValue =
-  | BrowserStorageValue
-  | string
-  | object
-  | number
-  | boolean
-  | null;
+export type BrowserArtifactValue = BrowserStorageValue | string | object | number | boolean | null;
 
 export interface BrowserArtifactPersistRequest {
   kind: BrowserArtifactKind;
@@ -581,15 +550,12 @@ export interface BrowserArtifactOperationDiagnostics {
   capabilities: BrowserCapabilitySnapshot;
 }
 
-export const BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID =
-  "wasm-service-worker-broker-contract-v1";
-export const BROWSER_SERVICE_WORKER_BROKER_LANE =
-  "lane.browser.service_worker.broker";
+export const BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID = "wasm-service-worker-broker-contract-v1";
+export const BROWSER_SERVICE_WORKER_BROKER_LANE = "lane.browser.service_worker.broker";
 export const BROWSER_BRIDGE_ONLY_FALLBACK_TARGET = "bridge_fallback";
 export const BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID =
   "wasm-shared-worker-tenancy-lifecycle-v1";
-export const BROWSER_SHARED_WORKER_COORDINATOR_LANE =
-  "lane.browser.shared_worker.coordinator";
+export const BROWSER_SHARED_WORKER_COORDINATOR_LANE = "lane.browser.shared_worker.coordinator";
 export const BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL =
   "asupersync.browser.shared_worker.handshake.v1";
 export const BROWSER_SERVICE_WORKER_BROKER_UNSUPPORTED_CODE =
@@ -599,8 +565,7 @@ export const BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE =
 export const BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED_CODE =
   "ASUPERSYNC_BROWSER_SHARED_WORKER_COORDINATOR_UNSUPPORTED";
 
-export type BrowserServiceWorkerBrokerRequestedLane =
-  typeof BROWSER_SERVICE_WORKER_BROKER_LANE;
+export type BrowserServiceWorkerBrokerRequestedLane = typeof BROWSER_SERVICE_WORKER_BROKER_LANE;
 
 export type BrowserServiceWorkerBrokerFallbackTarget =
   | typeof BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
@@ -703,8 +668,7 @@ export interface BrowserServiceWorkerBrokerSupportDiagnostics {
   capabilities: BrowserCapabilitySnapshot;
 }
 
-export interface BrowserServiceWorkerBrokerStoreOptions
-  extends BrowserStorageOptions {
+export interface BrowserServiceWorkerBrokerStoreOptions extends BrowserStorageOptions {
   allowBrowserMainThreadFallback?: boolean;
   allowDedicatedWorkerFallback?: boolean;
   now?: () => number;
@@ -879,7 +843,8 @@ export interface BrowserSharedWorkerCoordinatorSupportOptions {
 }
 
 export interface BrowserSharedWorkerCoordinatorSelectionOptions
-  extends BrowserRuntimeOptions, BrowserSharedWorkerCoordinatorSupportOptions {
+  extends BrowserRuntimeOptions,
+    BrowserSharedWorkerCoordinatorSupportOptions {
   clientArtifactNamespace: string;
   clientCapabilitySummary?: Record<string, unknown> | null;
   clientEpoch?: number;
@@ -966,14 +931,12 @@ export interface BrowserSharedWorkerCoordinatorSelectionResult {
   fallbackLaneId: BrowserExecutionLane | null;
 }
 
-export const BROWSER_NATIVE_MESSAGING_CONTRACT_ID =
-  "browser-native-messaging-api-v1";
+export const BROWSER_NATIVE_MESSAGING_CONTRACT_ID = "browser-native-messaging-api-v1";
 export const BROWSER_NATIVE_MESSAGING_UNSUPPORTED_CODE =
   "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED";
 export const BROWSER_NATIVE_MESSAGING_OPERATION_FAILED_CODE =
   "ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED";
-export const BROWSER_NATIVE_STREAM_CONTRACT_ID =
-  "browser-native-stream-api-v1";
+export const BROWSER_NATIVE_STREAM_CONTRACT_ID = "browser-native-stream-api-v1";
 export const BROWSER_NATIVE_STREAM_UNSUPPORTED_CODE =
   "ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED";
 export const BROWSER_NATIVE_STREAM_OPERATION_FAILED_CODE =
@@ -984,9 +947,7 @@ export type BrowserNativeMessagingSurface =
   | "message_port"
   | "broadcast_channel";
 
-export type BrowserNativeMessagingSupportClass =
-  | "direct_runtime_supported"
-  | "unsupported";
+export type BrowserNativeMessagingSupportClass = "direct_runtime_supported" | "unsupported";
 
 export type BrowserNativeMessagingReason =
   | BrowserRuntimeSupportReason
@@ -995,16 +956,9 @@ export type BrowserNativeMessagingReason =
   | "missing_message_channel"
   | "missing_broadcast_channel";
 
-export type BrowserNativeMessagingState =
-  | "open"
-  | "closed"
-  | "aborted"
-  | "detached"
-  | "errored";
+export type BrowserNativeMessagingState = "open" | "closed" | "aborted" | "detached" | "errored";
 
-export type BrowserNativeMessagingRedactionPolicy =
-  | "metadata_only"
-  | "omit_payloads";
+export type BrowserNativeMessagingRedactionPolicy = "metadata_only" | "omit_payloads";
 
 export interface BrowserNativeMessagingCapability {
   capabilityGranted: boolean;
@@ -1044,20 +998,17 @@ export interface BrowserNativeMessagingOperationDiagnostics {
   firstFailure: string | null;
 }
 
-export interface BrowserMessagePortOptions
-  extends BrowserNativeMessagingSupportOptions {
+export interface BrowserMessagePortOptions extends BrowserNativeMessagingSupportOptions {
   support?: BrowserNativeMessagingSupportDiagnostics | null;
   start?: boolean;
 }
 
-export interface BrowserMessageChannelOptions
-  extends BrowserNativeMessagingSupportOptions {
+export interface BrowserMessageChannelOptions extends BrowserNativeMessagingSupportOptions {
   support?: BrowserNativeMessagingSupportDiagnostics | null;
   startPorts?: boolean;
 }
 
-export interface BrowserBroadcastChannelOptions
-  extends BrowserNativeMessagingSupportOptions {
+export interface BrowserBroadcastChannelOptions extends BrowserNativeMessagingSupportOptions {
   support?: BrowserNativeMessagingSupportDiagnostics | null;
 }
 
@@ -1067,13 +1018,9 @@ export type BrowserNativeMessageErrorHandler = (
   diagnostics: BrowserNativeMessagingOperationDiagnostics,
 ) => void;
 
-export type BrowserNativeStreamSurface =
-  | "readable_stream"
-  | "writable_stream";
+export type BrowserNativeStreamSurface = "readable_stream" | "writable_stream";
 
-export type BrowserNativeStreamSupportClass =
-  | "direct_runtime_supported"
-  | "unsupported";
+export type BrowserNativeStreamSupportClass = "direct_runtime_supported" | "unsupported";
 
 export type BrowserNativeStreamReason =
   | BrowserRuntimeSupportReason
@@ -1090,9 +1037,7 @@ export type BrowserNativeStreamState =
   | "released"
   | "errored";
 
-export type BrowserNativeStreamRedactionPolicy =
-  | "metadata_only"
-  | "omit_payloads";
+export type BrowserNativeStreamRedactionPolicy = "metadata_only" | "omit_payloads";
 
 export type BrowserNativeStreamChunk =
   | Uint8Array
@@ -1150,15 +1095,13 @@ export interface BrowserNativeStreamOperationDiagnostics {
   bytesWritten: number;
 }
 
-export interface BrowserReadableStreamOptions
-  extends BrowserNativeStreamSupportOptions {
+export interface BrowserReadableStreamOptions extends BrowserNativeStreamSupportOptions {
   support?: BrowserNativeStreamSupportDiagnostics | null;
   maxBytes?: number | null;
   autoReleaseLock?: boolean;
 }
 
-export interface BrowserWritableStreamOptions
-  extends BrowserNativeStreamSupportOptions {
+export interface BrowserWritableStreamOptions extends BrowserNativeStreamSupportOptions {
   support?: BrowserNativeStreamSupportDiagnostics | null;
   maxBytes?: number | null;
   autoReleaseLock?: boolean;
@@ -1173,12 +1116,10 @@ const DEFAULT_INDEXEDDB_VERSION = 1;
 const BROWSER_ARTIFACT_INDEX_KEY = "__artifact_index__";
 const BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION = 1;
 const DEFAULT_BROWSER_ARTIFACT_NAMESPACE = "runtime_artifacts_v1";
-const BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY =
-  "__service_worker_broker_registration__";
+const BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY = "__service_worker_broker_registration__";
 const BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX = "broker_work:";
 const BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX = "broker_handoff:";
-const DEFAULT_BROWSER_SERVICE_WORKER_BROKER_NAMESPACE =
-  "service_worker_broker_v1";
+const DEFAULT_BROWSER_SERVICE_WORKER_BROKER_NAMESPACE = "service_worker_broker_v1";
 const DEFAULT_BROWSER_LANE_HEALTH_SCOPE_KEY = "@asupersync/browser::default";
 const DEFAULT_BROWSER_LANE_HEALTH_POLICY: BrowserLaneHealthPolicy = {
   maxConsecutiveFailures: 2,
@@ -1215,10 +1156,7 @@ interface BrowserSharedWorkerLike {
 }
 
 interface BrowserSharedWorkerConstructorLike {
-  new (
-    scriptUrl: string,
-    options?: string | { name?: string },
-  ): BrowserSharedWorkerLike;
+  new (scriptUrl: string, options?: string | { name?: string }): BrowserSharedWorkerLike;
 }
 
 interface BrowserSharedWorkerCoordinatorSelectionFailure {
@@ -1252,8 +1190,7 @@ export interface BrowserNativeMessageChannelLike {
   port2: BrowserNativeMessagePortLike;
 }
 
-type BrowserNativeMessageChannelConstructorLike =
-  new () => BrowserNativeMessageChannelLike;
+type BrowserNativeMessageChannelConstructorLike = new () => BrowserNativeMessageChannelLike;
 
 export interface BrowserNativeBroadcastChannelLike {
   addEventListener?(
@@ -1381,10 +1318,7 @@ interface BrowserStorageGlobalLike {
 
 const REGION_PARENTS = new Map<string, string>();
 const INFLIGHT_WEBTRANSPORTS = new Map<string, BrowserWebTransportState>();
-const TERMINAL_WEBTRANSPORTS = new Map<
-  string,
-  BrowserWebTransportTerminalState
->();
+const TERMINAL_WEBTRANSPORTS = new Map<string, BrowserWebTransportTerminalState>();
 const BROWSER_LANE_HEALTH_REGISTRY = new Map<
   string,
   Map<BrowserExecutionLane, BrowserLaneHealthSnapshot>
@@ -1411,19 +1345,14 @@ function browserCapabilitySnapshot(
   };
 }
 
-function isDedicatedWorkerGlobal(
-  globalObject: Record<string, unknown> | undefined,
-): boolean {
+function isDedicatedWorkerGlobal(globalObject: Record<string, unknown> | undefined): boolean {
   return (
     globalObject !== undefined &&
-    Object.prototype.toString.call(globalObject) ===
-      DEDICATED_WORKER_GLOBAL_SCOPE_TAG
+    Object.prototype.toString.call(globalObject) === DEDICATED_WORKER_GLOBAL_SCOPE_TAG
   );
 }
 
-function isServiceWorkerLikeGlobal(
-  globalObject: Record<string, unknown> | undefined,
-): boolean {
+function isServiceWorkerLikeGlobal(globalObject: Record<string, unknown> | undefined): boolean {
   return (
     globalObject !== undefined &&
     !isDedicatedWorkerGlobal(globalObject) &&
@@ -1433,9 +1362,7 @@ function isServiceWorkerLikeGlobal(
   );
 }
 
-function isSharedWorkerLikeGlobal(
-  globalObject: Record<string, unknown> | undefined,
-): boolean {
+function isSharedWorkerLikeGlobal(globalObject: Record<string, unknown> | undefined): boolean {
   return (
     globalObject !== undefined &&
     !isDedicatedWorkerGlobal(globalObject) &&
@@ -1446,8 +1373,7 @@ function isSharedWorkerLikeGlobal(
 
 function deferredBrowserHostDiagnostics(
   globalObject: Record<string, unknown> | undefined,
-): Pick<BrowserRuntimeSupportDiagnostics, "reason" | "message" | "guidance">
-  | null {
+): Pick<BrowserRuntimeSupportDiagnostics, "reason" | "message" | "guidance"> | null {
   if (isServiceWorkerLikeGlobal(globalObject)) {
     return {
       reason: "service_worker_not_yet_shipped",
@@ -1463,8 +1389,7 @@ function deferredBrowserHostDiagnostics(
   if (isSharedWorkerLikeGlobal(globalObject)) {
     return {
       reason: "shared_worker_not_yet_shipped",
-      message:
-        "@asupersync/browser does not yet ship direct runtime APIs for shared-worker hosts.",
+      message: "@asupersync/browser does not yet ship direct runtime APIs for shared-worker hosts.",
       guidance: [
         "Use a dedicated worker bootstrap today if you need shipped direct Browser Edition execution.",
         "Keep shared-worker coordination at the application boundary until this host is promoted.",
@@ -1515,9 +1440,8 @@ function browserRuntimeContext(
 }
 
 export function detectBrowserRuntimeSupport(
-  globalObject:
-    | Record<string, unknown>
-    | undefined = typeof globalThis === "object" && globalThis !== null
+  globalObject: Record<string, unknown> | undefined = typeof globalThis === "object" &&
+  globalThis !== null
     ? (globalThis as unknown as Record<string, unknown>)
     : undefined,
 ): BrowserRuntimeSupportDiagnostics {
@@ -1580,8 +1504,7 @@ export function detectBrowserRuntimeSupport(
       supportClass: "unsupported",
       runtimeContext,
       reason: "missing_webassembly",
-      message:
-        "@asupersync/browser requires WebAssembly support in the current browser runtime.",
+      message: "@asupersync/browser requires WebAssembly support in the current browser runtime.",
       guidance: [
         "Use a browser/runtime with WebAssembly enabled before initializing Browser Edition.",
         ...sharedGuidance,
@@ -1675,9 +1598,7 @@ function nativeMessagingGuidance(
 function nativeMessagingMissingReason(
   surface: BrowserNativeMessagingSurface,
 ): BrowserNativeMessagingReason {
-  return surface === "broadcast_channel"
-    ? "missing_broadcast_channel"
-    : "missing_message_channel";
+  return surface === "broadcast_channel" ? "missing_broadcast_channel" : "missing_message_channel";
 }
 
 function browserNativeMessagingGlobals(
@@ -1795,8 +1716,7 @@ function supportForNativeMessagingConstruction(
     | BrowserMessageChannelOptions
     | BrowserBroadcastChannelOptions,
 ): BrowserNativeMessagingSupportDiagnostics {
-  const diagnostics =
-    options.support ?? detectBrowserNativeMessagingSupport(surface, options);
+  const diagnostics = options.support ?? detectBrowserNativeMessagingSupport(surface, options);
   if (diagnostics.surface !== surface) {
     throw createBrowserNativeMessagingUnsupportedError({
       ...diagnostics,
@@ -1918,11 +1838,7 @@ export class BrowserMessagePort {
     options: { start?: boolean } = {},
   ) {
     nativeMessagingAddPortListener(this.port, "message", this.messageListener);
-    nativeMessagingAddPortListener(
-      this.port,
-      "messageerror",
-      this.messageErrorListener,
-    );
+    nativeMessagingAddPortListener(this.port, "messageerror", this.messageErrorListener);
     nativeMessagingStartPort(this.port, options.start);
   }
 
@@ -2013,11 +1929,7 @@ export class BrowserMessagePort {
 
   private detachListeners(): void {
     nativeMessagingRemovePortListener(this.port, "message", this.messageListener);
-    nativeMessagingRemovePortListener(
-      this.port,
-      "messageerror",
-      this.messageErrorListener,
-    );
+    nativeMessagingRemovePortListener(this.port, "messageerror", this.messageErrorListener);
     this.messageHandlers.clear();
     this.errorHandlers.clear();
   }
@@ -2186,10 +2098,7 @@ export class BrowserBroadcastChannel {
   private detachListeners(): void {
     if (typeof this.channel.removeEventListener === "function") {
       this.channel.removeEventListener("message", this.messageListener);
-      this.channel.removeEventListener(
-        "messageerror",
-        this.messageErrorListener,
-      );
+      this.channel.removeEventListener("messageerror", this.messageErrorListener);
     }
     if (this.channel.onmessage === this.messageListener) {
       this.channel.onmessage = null;
@@ -2213,13 +2122,8 @@ export function createBrowserMessagePort(
 export function createBrowserMessageChannel(
   options: BrowserMessageChannelOptions,
 ): BrowserMessageChannel {
-  const support = supportForNativeMessagingConstruction(
-    "message_channel",
-    options,
-  );
-  const globals = browserNativeMessagingGlobals(
-    options.globalObject ?? defaultGlobalObject(),
-  );
+  const support = supportForNativeMessagingConstruction("message_channel", options);
+  const globals = browserNativeMessagingGlobals(options.globalObject ?? defaultGlobalObject());
   const MessageChannelConstructor = globals?.MessageChannel;
   if (typeof MessageChannelConstructor !== "function") {
     throw createBrowserNativeMessagingUnsupportedError({
@@ -2241,13 +2145,8 @@ export function createBrowserBroadcastChannel(
   name: string,
   options: BrowserBroadcastChannelOptions,
 ): BrowserBroadcastChannel {
-  const support = supportForNativeMessagingConstruction(
-    "broadcast_channel",
-    options,
-  );
-  const globals = browserNativeMessagingGlobals(
-    options.globalObject ?? defaultGlobalObject(),
-  );
+  const support = supportForNativeMessagingConstruction("broadcast_channel", options);
+  const globals = browserNativeMessagingGlobals(options.globalObject ?? defaultGlobalObject());
   const BroadcastChannelConstructor = globals?.BroadcastChannel;
   if (typeof BroadcastChannelConstructor !== "function") {
     throw createBrowserNativeMessagingUnsupportedError({
@@ -2257,16 +2156,10 @@ export function createBrowserBroadcastChannel(
       reason: "missing_broadcast_channel",
       reasonCode: "missing_broadcast_channel",
       message: "BroadcastChannel is unavailable in this browser/runtime.",
-      guidance: nativeMessagingGuidance(
-        "broadcast_channel",
-        "missing_broadcast_channel",
-      ),
+      guidance: nativeMessagingGuidance("broadcast_channel", "missing_broadcast_channel"),
     });
   }
-  return new BrowserBroadcastChannel(
-    new BroadcastChannelConstructor(name),
-    support,
-  );
+  return new BrowserBroadcastChannel(new BroadcastChannelConstructor(name), support);
 }
 
 function nativeStreamGuidance(
@@ -2313,12 +2206,8 @@ function nativeStreamGuidance(
   }
 }
 
-function nativeStreamMissingReason(
-  surface: BrowserNativeStreamSurface,
-): BrowserNativeStreamReason {
-  return surface === "readable_stream"
-    ? "missing_readable_stream"
-    : "missing_writable_stream";
+function nativeStreamMissingReason(surface: BrowserNativeStreamSurface): BrowserNativeStreamReason {
+  return surface === "readable_stream" ? "missing_readable_stream" : "missing_writable_stream";
 }
 
 function browserNativeStreamGlobals(
@@ -2433,8 +2322,7 @@ function supportForNativeStreamConstruction(
   surface: BrowserNativeStreamSurface,
   options: BrowserReadableStreamOptions | BrowserWritableStreamOptions,
 ): BrowserNativeStreamSupportDiagnostics {
-  const diagnostics =
-    options.support ?? detectBrowserNativeStreamSupport(surface, options);
+  const diagnostics = options.support ?? detectBrowserNativeStreamSupport(surface, options);
   if (diagnostics.surface !== surface) {
     throw createBrowserNativeStreamUnsupportedError({
       ...diagnostics,
@@ -2895,9 +2783,7 @@ function browserExecutionReasonCodeFromRuntimeSupport(
   }
 }
 
-function browserExecutionLaneKind(
-  laneId: BrowserExecutionLane,
-): BrowserExecutionLaneKind {
+function browserExecutionLaneKind(laneId: BrowserExecutionLane): BrowserExecutionLaneKind {
   return laneId === BROWSER_UNSUPPORTED_LANE ? "unsupported" : "direct_runtime";
 }
 
@@ -2912,9 +2798,7 @@ function browserExecutionLaneRank(laneId: BrowserExecutionLane): number {
   }
 }
 
-function browserLaneHealthScopeKey(
-  healthScopeKey: string | null | undefined,
-): string {
+function browserLaneHealthScopeKey(healthScopeKey: string | null | undefined): string {
   const normalized = healthScopeKey?.trim() ?? "";
   return normalized || DEFAULT_BROWSER_LANE_HEALTH_SCOPE_KEY;
 }
@@ -2998,8 +2882,7 @@ function readBrowserLaneHealthSnapshot(
   const scopeKey = browserLaneHealthScopeKey(healthScopeKey);
   const nowMs = (now ?? Date.now)();
   const registry = browserLaneHealthRegistry(scopeKey);
-  const stored =
-    registry.get(laneId) ?? createHealthyBrowserLaneHealthSnapshot(laneId, policy);
+  const stored = registry.get(laneId) ?? createHealthyBrowserLaneHealthSnapshot(laneId, policy);
   const refreshed = refreshBrowserLaneHealthSnapshot(stored, policy, nowMs);
   if (refreshed !== stored) {
     registry.set(laneId, refreshed);
@@ -3033,33 +2916,19 @@ function recordBrowserLaneHealthEvent(
 ): BrowserLaneHealthDiagnostics {
   const policy = browserLaneHealthPolicy(healthPolicy);
   const nowMs = (now ?? Date.now)();
-  const current = readBrowserLaneHealthSnapshot(
-    laneId,
-    healthScopeKey,
-    healthPolicy,
-    now,
-  );
+  const current = readBrowserLaneHealthSnapshot(laneId, healthScopeKey, healthPolicy, now);
   const base = refreshBrowserLaneHealthSnapshot(current, policy, nowMs);
 
   if (trigger === "manual_reset") {
     return writeBrowserLaneHealthSnapshot(
       laneId,
-      createHealthyBrowserLaneHealthSnapshot(
-        laneId,
-        policy,
-        trigger,
-        message ?? null,
-        nowMs,
-      ),
+      createHealthyBrowserLaneHealthSnapshot(laneId, policy, trigger, message ?? null, nowMs),
       healthScopeKey,
     );
   }
 
   const failureCount = base.failureCount + 1;
-  const retryBudgetRemaining = Math.max(
-    0,
-    policy.maxConsecutiveFailures - failureCount,
-  );
+  const retryBudgetRemaining = Math.max(0, policy.maxConsecutiveFailures - failureCount);
   const demoted = retryBudgetRemaining === 0;
   return writeBrowserLaneHealthSnapshot(
     laneId,
@@ -3086,12 +2955,7 @@ function clearBrowserLaneHealth(
   now: (() => number) | undefined,
 ): BrowserLaneHealthDiagnostics {
   const policy = browserLaneHealthPolicy(healthPolicy);
-  const current = readBrowserLaneHealthSnapshot(
-    laneId,
-    healthScopeKey,
-    healthPolicy,
-    now,
-  );
+  const current = readBrowserLaneHealthSnapshot(laneId, healthScopeKey, healthPolicy, now);
   if (current.status === "healthy" && current.failureCount === 0) {
     return current;
   }
@@ -3108,9 +2972,7 @@ function clearBrowserLaneHealth(
   );
 }
 
-function browserLaneHealthMessageFragment(
-  health: BrowserLaneHealthDiagnostics,
-): string {
+function browserLaneHealthMessageFragment(health: BrowserLaneHealthDiagnostics): string {
   const cooldown =
     health.cooldownUntilMs === null
       ? "lane_health_cooldown_until_ms=null"
@@ -3157,9 +3019,7 @@ function browserExecutionHealthDemotionGuidance(
   ];
 }
 
-function browserExecutionFallbackLane(
-  laneId: BrowserExecutionLane,
-): BrowserExecutionLane | null {
+function browserExecutionFallbackLane(laneId: BrowserExecutionLane): BrowserExecutionLane | null {
   return laneId === BROWSER_UNSUPPORTED_LANE ? null : BROWSER_UNSUPPORTED_LANE;
 }
 
@@ -3180,9 +3040,7 @@ function browserExecutionDowngradeOrder(
   hostRole: BrowserExecutionHostRole,
 ): BrowserExecutionLane[] {
   const directLane = browserExecutionDirectLaneForHostRole(hostRole);
-  return directLane === null
-    ? [BROWSER_UNSUPPORTED_LANE]
-    : [directLane, BROWSER_UNSUPPORTED_LANE];
+  return directLane === null ? [BROWSER_UNSUPPORTED_LANE] : [directLane, BROWSER_UNSUPPORTED_LANE];
 }
 
 function browserExecutionSelectedLane(
@@ -3228,9 +3086,7 @@ function createBrowserExecutionLaneCandidate(
   };
 }
 
-function browserExecutionHostMismatchMessage(
-  laneId: BrowserExecutionLane,
-): string {
+function browserExecutionHostMismatchMessage(laneId: BrowserExecutionLane): string {
   switch (laneId) {
     case BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE:
       return `${laneId} only applies when Browser Edition is running on the browser main thread.`;
@@ -3241,9 +3097,7 @@ function browserExecutionHostMismatchMessage(
   }
 }
 
-function browserExecutionHostMismatchGuidance(
-  laneId: BrowserExecutionLane,
-): string[] {
+function browserExecutionHostMismatchGuidance(laneId: BrowserExecutionLane): string[] {
   switch (laneId) {
     case BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE:
       return [
@@ -3260,26 +3114,20 @@ function browserExecutionHostMismatchGuidance(
   }
 }
 
-function browserExecutionMissingPrerequisiteMessage(
-  laneId: BrowserExecutionLane,
-): string {
+function browserExecutionMissingPrerequisiteMessage(laneId: BrowserExecutionLane): string {
   if (laneId === BROWSER_UNSUPPORTED_LANE) {
     return "lane.unsupported remains the terminal fail-closed fallback if the current direct-runtime lane loses truthful prerequisites.";
   }
   return `${laneId} matches the current host role but is unavailable until the required Browser Edition prerequisites are restored.`;
 }
 
-function browserExecutionMissingPrerequisiteGuidance(
-  laneId: BrowserExecutionLane,
-): string[] {
+function browserExecutionMissingPrerequisiteGuidance(laneId: BrowserExecutionLane): string[] {
   if (laneId === BROWSER_UNSUPPORTED_LANE) {
     return [
       "Expect Browser Edition to demote here instead of throwing when direct-runtime prerequisites disappear.",
     ];
   }
-  return [
-    "Restore the missing Browser Edition prerequisites before pinning this lane again.",
-  ];
+  return ["Restore the missing Browser Edition prerequisites before pinning this lane again."];
 }
 
 function browserExecutionPreferredLaneMismatch(
@@ -3289,10 +3137,7 @@ function browserExecutionPreferredLaneMismatch(
   directLaneForHost: BrowserExecutionLane | null,
   reasonCode: BrowserExecutionReasonCode,
 ): { message: string; guidance: string[] } {
-  if (
-    preferredLane !== BROWSER_UNSUPPORTED_LANE &&
-    preferredLane !== directLaneForHost
-  ) {
+  if (preferredLane !== BROWSER_UNSUPPORTED_LANE && preferredLane !== directLaneForHost) {
     return {
       message: `Preferred lane ${preferredLane} is not truthful for host role ${hostRole}, so Browser Edition stayed on ${selectedLane}.`,
       guidance: [
@@ -3422,8 +3267,7 @@ function buildBrowserExecutionLadder(
   const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
   const directLaneForHost = browserExecutionDirectLaneForHostRole(hostRole);
   const nominalLane = browserExecutionSelectedLane(hostRole, runtimeSupport);
-  const supportedHostWithoutDirectLane =
-    runtimeSupport.supported && directLaneForHost === null;
+  const supportedHostWithoutDirectLane = runtimeSupport.supported && directLaneForHost === null;
   const laneHealth = readBrowserLaneHealthSnapshot(
     directLaneForHost ?? nominalLane,
     healthScopeKey,
@@ -3436,7 +3280,7 @@ function buildBrowserExecutionLadder(
     directLaneForHost !== null &&
     laneHealth.status === "demoted";
   const selectedLane = healthDemotion
-    ? laneHealth.demotedToLaneId ?? BROWSER_UNSUPPORTED_LANE
+    ? (laneHealth.demotedToLaneId ?? BROWSER_UNSUPPORTED_LANE)
     : nominalLane;
   const supportClass = runtimeSupport.supportClass;
   const fallbackLaneId = browserExecutionFallbackLane(selectedLane);
@@ -3444,9 +3288,9 @@ function buildBrowserExecutionLadder(
     ? "demote_due_to_lane_health"
     : supportedHostWithoutDirectLane
       ? "unsupported_runtime_context"
-    : runtimeSupport.supported
-      ? "supported"
-      : browserExecutionReasonCodeFromRuntimeSupport(runtimeSupport.reason);
+      : runtimeSupport.supported
+        ? "supported"
+        : browserExecutionReasonCodeFromRuntimeSupport(runtimeSupport.reason);
   let message = runtimeSupport.message;
   let guidance = [...runtimeSupport.guidance];
 
@@ -3454,8 +3298,7 @@ function buildBrowserExecutionLadder(
     message = browserExecutionHealthDemotionMessage(directLaneForHost, laneHealth);
     guidance = browserExecutionHealthDemotionGuidance(directLaneForHost, laneHealth);
   } else if (supportedHostWithoutDirectLane) {
-    message =
-      `Browser Edition detected ${hostRole} prerequisites but found no truthful direct-runtime lane mapping, so it fail-closed to ${BROWSER_UNSUPPORTED_LANE}.`;
+    message = `Browser Edition detected ${hostRole} prerequisites but found no truthful direct-runtime lane mapping, so it fail-closed to ${BROWSER_UNSUPPORTED_LANE}.`;
     guidance = [
       "Treat lane.unsupported as the truthful terminal fallback until the host role gains an explicit direct-runtime lane mapping.",
       "Do not silently remap service-worker or shared-worker hosts onto the browser main-thread lane.",
@@ -3545,9 +3388,7 @@ export function inspectBrowserLaneHealth(
   const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
   const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
   const laneId =
-    options.laneId ??
-    browserExecutionDirectLaneForHostRole(hostRole) ??
-    BROWSER_UNSUPPORTED_LANE;
+    options.laneId ?? browserExecutionDirectLaneForHostRole(hostRole) ?? BROWSER_UNSUPPORTED_LANE;
   return readBrowserLaneHealthSnapshot(
     laneId,
     options.healthScopeKey,
@@ -3563,9 +3404,7 @@ export function reportBrowserLaneUnhealthy(
   const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
   const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
   const laneId =
-    options.laneId ??
-    browserExecutionDirectLaneForHostRole(hostRole) ??
-    BROWSER_UNSUPPORTED_LANE;
+    options.laneId ?? browserExecutionDirectLaneForHostRole(hostRole) ?? BROWSER_UNSUPPORTED_LANE;
   return recordBrowserLaneHealthEvent(
     laneId,
     options.trigger,
@@ -3583,9 +3422,7 @@ export function resetBrowserLaneHealth(
   const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
   const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
   const laneId =
-    options.laneId ??
-    browserExecutionDirectLaneForHostRole(hostRole) ??
-    BROWSER_UNSUPPORTED_LANE;
+    options.laneId ?? browserExecutionDirectLaneForHostRole(hostRole) ?? BROWSER_UNSUPPORTED_LANE;
   return recordBrowserLaneHealthEvent(
     laneId,
     "manual_reset",
@@ -3606,9 +3443,7 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
-function defaultGlobalObject():
-  | Record<string, unknown>
-  | undefined {
+function defaultGlobalObject(): Record<string, unknown> | undefined {
   return typeof globalThis === "object" && globalThis !== null
     ? (globalThis as unknown as Record<string, unknown>)
     : undefined;
@@ -3720,9 +3555,7 @@ function browserIndexedDbKeyRange(
   return null;
 }
 
-function browserLocalStorage(
-  globalObject: Record<string, unknown> | undefined,
-): Storage | null {
+function browserLocalStorage(globalObject: Record<string, unknown> | undefined): Storage | null {
   try {
     return browserStorageGlobals(globalObject)?.localStorage ?? null;
   } catch {
@@ -3740,7 +3573,9 @@ function browserTextDecoder(globalObject: Record<string, unknown> | undefined): 
   return new ctor();
 }
 
-function browserBtoa(globalObject: Record<string, unknown> | undefined): ((value: string) => string) | null {
+function browserBtoa(
+  globalObject: Record<string, unknown> | undefined,
+): ((value: string) => string) | null {
   const candidate = browserStorageGlobals(globalObject)?.btoa;
   if (typeof candidate === "function") {
     return candidate.bind(globalObject);
@@ -3751,7 +3586,9 @@ function browserBtoa(globalObject: Record<string, unknown> | undefined): ((value
   return null;
 }
 
-function browserAtob(globalObject: Record<string, unknown> | undefined): ((value: string) => string) | null {
+function browserAtob(
+  globalObject: Record<string, unknown> | undefined,
+): ((value: string) => string) | null {
   const candidate = browserStorageGlobals(globalObject)?.atob;
   if (typeof candidate === "function") {
     return candidate.bind(globalObject);
@@ -3770,20 +3607,12 @@ function assertWellFormedBrowserStorageString(
     const codeUnit = value.charCodeAt(index);
     if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
       const trailing = value.charCodeAt(index + 1);
-      if (
-        index + 1 >= value.length
-        || trailing < 0xdc00
-        || trailing > 0xdfff
-      ) {
-        throw new TypeError(
-          `browser storage ${label} must contain well-formed UTF-16`,
-        );
+      if (index + 1 >= value.length || trailing < 0xdc00 || trailing > 0xdfff) {
+        throw new TypeError(`browser storage ${label} must contain well-formed UTF-16`);
       }
       index += 1;
     } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      throw new TypeError(
-        `browser storage ${label} must contain well-formed UTF-16`,
-      );
+      throw new TypeError(`browser storage ${label} must contain well-formed UTF-16`);
     }
   }
 }
@@ -3834,8 +3663,8 @@ function decodeCanonicalIndexedDbStorageSegment(
     }
     const ctor = browserStorageGlobals(globalObject)?.TextDecoder ?? TextDecoder;
     const logicalKey = new ctor("utf-8", { fatal: true }).decode(decoded);
-    return normalizeBrowserStorageKey(logicalKey) === logicalKey
-      && encodeBrowserStorageSegment(logicalKey, globalObject) === value
+    return normalizeBrowserStorageKey(logicalKey) === logicalKey &&
+      encodeBrowserStorageSegment(logicalKey, globalObject) === value
       ? logicalKey
       : null;
   } catch {
@@ -3876,9 +3705,7 @@ function normalizeBrowserStorageKey(key: string): string {
   return normalized;
 }
 
-function normalizeBrowserStorageValue(
-  value: BrowserStorageValue,
-): Uint8Array {
+function normalizeBrowserStorageValue(value: BrowserStorageValue): Uint8Array {
   if (ARRAY_BUFFER_IS_VIEW(value)) {
     const { buffer, byteLength, byteOffset } = browserStorageViewParts(value);
     return new Uint8Array(buffer, byteOffset, byteLength);
@@ -3894,8 +3721,8 @@ function normalizeBrowserStorageValue(
   }
 
   if (
-    Array.isArray(value)
-    && value.every((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255)
+    Array.isArray(value) &&
+    value.every((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255)
   ) {
     return Uint8Array.from(value);
   }
@@ -3918,10 +3745,7 @@ const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
   TYPED_ARRAY_PROTOTYPE,
   "byteLength",
 )?.get;
-const DATA_VIEW_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
-  DataView.prototype,
-  "buffer",
-)?.get;
+const DATA_VIEW_BUFFER_GETTER = Object.getOwnPropertyDescriptor(DataView.prototype, "buffer")?.get;
 const DATA_VIEW_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(
   DataView.prototype,
   "byteOffset",
@@ -3943,9 +3767,9 @@ function browserStorageViewParts(value: ArrayBufferView): {
   byteOffset: number;
 } {
   if (
-    TYPED_ARRAY_BUFFER_GETTER
-    && TYPED_ARRAY_BYTE_OFFSET_GETTER
-    && TYPED_ARRAY_BYTE_LENGTH_GETTER
+    TYPED_ARRAY_BUFFER_GETTER &&
+    TYPED_ARRAY_BYTE_OFFSET_GETTER &&
+    TYPED_ARRAY_BYTE_LENGTH_GETTER
   ) {
     try {
       return {
@@ -3958,11 +3782,7 @@ function browserStorageViewParts(value: ArrayBufferView): {
     }
   }
 
-  if (
-    DATA_VIEW_BUFFER_GETTER
-    && DATA_VIEW_BYTE_OFFSET_GETTER
-    && DATA_VIEW_BYTE_LENGTH_GETTER
-  ) {
+  if (DATA_VIEW_BUFFER_GETTER && DATA_VIEW_BYTE_OFFSET_GETTER && DATA_VIEW_BYTE_LENGTH_GETTER) {
     try {
       return {
         buffer: Reflect.apply(DATA_VIEW_BUFFER_GETTER, value, []) as ArrayBufferLike,
@@ -3979,11 +3799,11 @@ function browserStorageViewParts(value: ArrayBufferView): {
 
 function compactIndexedDbBytes(value: Uint8Array): Uint8Array {
   if (
-    !ARRAY_BUFFER_IS_VIEW(value)
-    || !TYPED_ARRAY_BUFFER_GETTER
-    || !TYPED_ARRAY_BYTE_OFFSET_GETTER
-    || !TYPED_ARRAY_BYTE_LENGTH_GETTER
-    || !ARRAY_BUFFER_BYTE_LENGTH_GETTER
+    !ARRAY_BUFFER_IS_VIEW(value) ||
+    !TYPED_ARRAY_BUFFER_GETTER ||
+    !TYPED_ARRAY_BYTE_OFFSET_GETTER ||
+    !TYPED_ARRAY_BYTE_LENGTH_GETTER ||
+    !ARRAY_BUFFER_BYTE_LENGTH_GETTER
   ) {
     throw new TypeError("IndexedDB byte value must be a genuine typed-array view");
   }
@@ -3993,11 +3813,7 @@ function compactIndexedDbBytes(value: Uint8Array): Uint8Array {
   const byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []) as number;
   let arrayBufferByteLength: number | null = null;
   try {
-    arrayBufferByteLength = Reflect.apply(
-      ARRAY_BUFFER_BYTE_LENGTH_GETTER,
-      buffer,
-      [],
-    ) as number;
+    arrayBufferByteLength = Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GETTER, buffer, []) as number;
   } catch {
     // SharedArrayBuffer is not an IndexedDB-storage value. Copy its visible
     // bytes into an ordinary ArrayBuffer rather than retaining shared backing.
@@ -4051,10 +3867,7 @@ function decodeIndexedDbStorageKey(
   if (!encoded.startsWith(prefix)) {
     return null;
   }
-  return decodeCanonicalIndexedDbStorageSegment(
-    encoded.slice(prefix.length),
-    globalObject,
-  );
+  return decodeCanonicalIndexedDbStorageSegment(encoded.slice(prefix.length), globalObject);
 }
 
 function encodeLocalStorageKey(
@@ -4213,10 +4026,7 @@ function browserServiceWorkerBrokerFallbackLaneId(
   return target === BROWSER_BRIDGE_ONLY_FALLBACK_TARGET ? null : target;
 }
 
-function normalizeBrowserServiceWorkerBrokerString(
-  value: string,
-  label: string,
-): string {
+function normalizeBrowserServiceWorkerBrokerString(value: string, label: string): string {
   const normalized = value.trim();
   if (!normalized) {
     throw new TypeError(`${label} must not be empty`);
@@ -4249,9 +4059,8 @@ function normalizeOptionalBrowserServiceWorkerBrokerVersion(
 function browserServiceWorkerBrokerOrigin(
   globalObject: Record<string, unknown> | undefined,
 ): string | null {
-  const candidate = (
-    globalObject as { location?: { origin?: unknown } } | undefined
-  )?.location?.origin;
+  const candidate = (globalObject as { location?: { origin?: unknown } } | undefined)?.location
+    ?.origin;
   return typeof candidate === "string" ? candidate : null;
 }
 
@@ -4259,9 +4068,11 @@ function browserServiceWorkerBrokerRegistrationScope(
   globalObject: Record<string, unknown> | undefined,
 ): string | null {
   const candidate = (
-    globalObject as {
-      registration?: { scope?: unknown };
-    } | undefined
+    globalObject as
+      | {
+          registration?: { scope?: unknown };
+        }
+      | undefined
   )?.registration?.scope;
   return typeof candidate === "string" ? candidate : null;
 }
@@ -4270,11 +4081,13 @@ function browserServiceWorkerBrokerControllerPresent(
   globalObject: Record<string, unknown> | undefined,
 ): boolean {
   const navigatorController = (
-    globalObject as {
-      navigator?: {
-        serviceWorker?: { controller?: unknown };
-      };
-    } | undefined
+    globalObject as
+      | {
+          navigator?: {
+            serviceWorker?: { controller?: unknown };
+          };
+        }
+      | undefined
   )?.navigator?.serviceWorker?.controller;
   return navigatorController !== null && navigatorController !== undefined;
 }
@@ -4366,84 +4179,62 @@ export function detectBrowserServiceWorkerBrokerSupport(
     options.allowBrowserMainThreadFallback,
   );
   const fallbackTarget = fallbackTargets[0];
-  const fallbackLaneId = browserServiceWorkerBrokerFallbackLaneId(
-    fallbackTarget,
-  );
-  const hostRole = browserExecutionHostRole(
-    globalObject,
-    runtimeSupport.capabilities,
-  );
+  const fallbackLaneId = browserServiceWorkerBrokerFallbackLaneId(fallbackTarget);
+  const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
   const origin = normalizeOptionalBrowserServiceWorkerBrokerString(
     options.origin ?? browserServiceWorkerBrokerOrigin(globalObject),
   );
   const registrationScope = normalizeOptionalBrowserServiceWorkerBrokerString(
-    options.registrationScope
-      ?? browserServiceWorkerBrokerRegistrationScope(globalObject),
+    options.registrationScope ?? browserServiceWorkerBrokerRegistrationScope(globalObject),
   );
-  const appNamespace = normalizeOptionalBrowserServiceWorkerBrokerString(
-    options.appNamespace,
-  );
+  const appNamespace = normalizeOptionalBrowserServiceWorkerBrokerString(options.appNamespace);
   const appVersionMajor = normalizeOptionalBrowserServiceWorkerBrokerVersion(
     options.appVersionMajor,
   );
-  const brokerProtocolVersion =
-    normalizeOptionalBrowserServiceWorkerBrokerVersion(
-      options.brokerProtocolVersion,
-    );
-  const expectedRegistrationScope =
-    normalizeOptionalBrowserServiceWorkerBrokerString(
-      options.expectedRegistrationScope,
-    );
+  const brokerProtocolVersion = normalizeOptionalBrowserServiceWorkerBrokerVersion(
+    options.brokerProtocolVersion,
+  );
+  const expectedRegistrationScope = normalizeOptionalBrowserServiceWorkerBrokerString(
+    options.expectedRegistrationScope,
+  );
   const expectedAppNamespace = normalizeOptionalBrowserServiceWorkerBrokerString(
     options.expectedAppNamespace,
   );
-  const expectedAppVersionMajor =
-    normalizeOptionalBrowserServiceWorkerBrokerVersion(
-      options.expectedAppVersionMajor,
-    );
-  const expectedBrokerProtocolVersion =
-    normalizeOptionalBrowserServiceWorkerBrokerVersion(
-      options.expectedBrokerProtocolVersion,
-    );
+  const expectedAppVersionMajor = normalizeOptionalBrowserServiceWorkerBrokerVersion(
+    options.expectedAppVersionMajor,
+  );
+  const expectedBrokerProtocolVersion = normalizeOptionalBrowserServiceWorkerBrokerVersion(
+    options.expectedBrokerProtocolVersion,
+  );
   const controllerPresent =
-    options.controllerPresent
-    ?? browserServiceWorkerBrokerControllerPresent(globalObject);
+    options.controllerPresent ?? browserServiceWorkerBrokerControllerPresent(globalObject);
   const runProfile =
-    normalizeOptionalBrowserServiceWorkerBrokerString(options.runProfile)
-    ?? "restartable";
+    normalizeOptionalBrowserServiceWorkerBrokerString(options.runProfile) ?? "restartable";
   const backend = options.backend ?? "indexeddb";
 
   let reason: BrowserServiceWorkerBrokerSupportReason = "supported";
   if (!isServiceWorkerLikeGlobal(globalObject)) {
     reason = "service_worker_api_missing";
   } else if (
-    expectedRegistrationScope !== null
-    && registrationScope !== expectedRegistrationScope
+    expectedRegistrationScope !== null &&
+    registrationScope !== expectedRegistrationScope
   ) {
     reason = "service_worker_registration_scope_mismatch";
   } else if (options.requireController && !controllerPresent) {
     reason = "service_worker_controller_missing_when_required";
-  } else if (
-    expectedAppNamespace !== null
-    && appNamespace !== expectedAppNamespace
-  ) {
+  } else if (expectedAppNamespace !== null && appNamespace !== expectedAppNamespace) {
     reason = "app_namespace_mismatch";
-  } else if (
-    expectedAppVersionMajor !== null
-    && appVersionMajor !== expectedAppVersionMajor
-  ) {
+  } else if (expectedAppVersionMajor !== null && appVersionMajor !== expectedAppVersionMajor) {
     reason = "app_version_major_mismatch";
   } else if (
-    expectedBrokerProtocolVersion !== null
-    && brokerProtocolVersion !== expectedBrokerProtocolVersion
+    expectedBrokerProtocolVersion !== null &&
+    brokerProtocolVersion !== expectedBrokerProtocolVersion
   ) {
     reason = "broker_protocol_version_mismatch";
   } else if (
-    runProfile !== "ephemeral"
-    && (
-      (backend === "indexeddb" && browserIndexedDbFactory(globalObject) === null)
-      || (backend === "localstorage" && browserLocalStorage(globalObject) === null)
-    )
+    runProfile !== "ephemeral" &&
+    ((backend === "indexeddb" && browserIndexedDbFactory(globalObject) === null) ||
+      (backend === "localstorage" && browserLocalStorage(globalObject) === null))
   ) {
     reason = "durable_store_unavailable_for_restartable_profile";
   }
@@ -4573,10 +4364,7 @@ function browserSharedWorkerCoordinatorFallbackLaneId(
   return target === BROWSER_BRIDGE_ONLY_FALLBACK_TARGET ? null : target;
 }
 
-function normalizeBrowserSharedWorkerCoordinatorString(
-  value: string,
-  label: string,
-): string {
+function normalizeBrowserSharedWorkerCoordinatorString(value: string, label: string): string {
   const normalized = value.trim();
   if (!normalized) {
     throw new TypeError(`${label} must not be empty`);
@@ -4613,11 +4401,7 @@ function normalizeBrowserSharedWorkerCoordinatorFeatures(
     return [];
   }
   return Array.from(
-    new Set(
-      values
-        .map((value) => value.trim())
-        .filter((value) => value.length > 0),
-    ),
+    new Set(values.map((value) => value.trim()).filter((value) => value.length > 0)),
   ).sort();
 }
 
@@ -4659,17 +4443,18 @@ function browserSharedWorkerCoordinatorResolvedScriptUrl(
   if (scriptUrl === null || scriptUrl === undefined) {
     return null;
   }
-  const raw =
-    scriptUrl instanceof URL ? scriptUrl.toString() : scriptUrl.trim();
+  const raw = scriptUrl instanceof URL ? scriptUrl.toString() : scriptUrl.trim();
   if (!raw) {
     return null;
   }
   const hrefCandidate = (
-    globalObject as {
-      location?: {
-        href?: unknown;
-      };
-    } | undefined
+    globalObject as
+      | {
+          location?: {
+            href?: unknown;
+          };
+        }
+      | undefined
   )?.location?.href;
   try {
     if (typeof hrefCandidate === "string" && hrefCandidate.length > 0) {
@@ -4681,9 +4466,7 @@ function browserSharedWorkerCoordinatorResolvedScriptUrl(
   }
 }
 
-function browserSharedWorkerCoordinatorScriptOrigin(
-  scriptUrl: string | null,
-): string | null {
+function browserSharedWorkerCoordinatorScriptOrigin(scriptUrl: string | null): string | null {
   if (scriptUrl === null) {
     return null;
   }
@@ -4767,40 +4550,28 @@ export function detectBrowserSharedWorkerCoordinatorSupport(
 ): BrowserSharedWorkerCoordinatorSupportDiagnostics {
   const globalObject = options.globalObject ?? defaultGlobalObject();
   const runtimeSupport = detectBrowserRuntimeSupport(globalObject);
-  const hostRole = browserExecutionHostRole(
-    globalObject,
-    runtimeSupport.capabilities,
-  );
+  const hostRole = browserExecutionHostRole(globalObject, runtimeSupport.capabilities);
   const fallbackTargets = browserSharedWorkerCoordinatorFallbackTargets(
     hostRole,
     options.allowDedicatedWorkerFallback,
     options.allowBrowserMainThreadFallback,
   );
   const fallbackTarget = fallbackTargets[0];
-  const fallbackLaneId = browserSharedWorkerCoordinatorFallbackLaneId(
-    fallbackTarget,
-  );
+  const fallbackLaneId = browserSharedWorkerCoordinatorFallbackLaneId(fallbackTarget);
   const origin = normalizeOptionalBrowserSharedWorkerCoordinatorString(
     options.origin ?? browserSharedWorkerCoordinatorOrigin(globalObject),
   );
-  const appNamespace = normalizeOptionalBrowserSharedWorkerCoordinatorString(
-    options.appNamespace,
+  const appNamespace = normalizeOptionalBrowserSharedWorkerCoordinatorString(options.appNamespace);
+  const appVersionMajor = normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
+    options.appVersionMajor,
   );
-  const appVersionMajor =
-    normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
-      options.appVersionMajor,
-    );
-  const coordinatorProtocolVersion =
-    normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
-      options.coordinatorProtocolVersion,
-    );
+  const coordinatorProtocolVersion = normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
+    options.coordinatorProtocolVersion,
+  );
   const runProfile =
-    normalizeOptionalBrowserSharedWorkerCoordinatorString(options.runProfile)
-    ?? "ephemeral";
+    normalizeOptionalBrowserSharedWorkerCoordinatorString(options.runProfile) ?? "ephemeral";
   const backend = options.backend ?? "indexeddb";
-  const workerName = normalizeOptionalBrowserSharedWorkerCoordinatorString(
-    options.workerName,
-  );
+  const workerName = normalizeOptionalBrowserSharedWorkerCoordinatorString(options.workerName);
   const scriptUrl = browserSharedWorkerCoordinatorResolvedScriptUrl(
     options.scriptUrl,
     globalObject,
@@ -4813,10 +4584,7 @@ export function detectBrowserSharedWorkerCoordinatorSupport(
   let reason: BrowserSharedWorkerCoordinatorSupportReason = "supported";
   if (options.operatorEnabled === false) {
     reason = "operator_policy_disabled_shared_worker_lane";
-  } else if (
-    hostRole !== "browser_main_thread"
-    && hostRole !== "dedicated_worker"
-  ) {
+  } else if (hostRole !== "browser_main_thread" && hostRole !== "dedicated_worker") {
     reason = "shared_worker_api_missing";
   } else if (!options.workerFactory && sharedWorkerCtor === null) {
     reason = "shared_worker_api_missing";
@@ -4827,31 +4595,23 @@ export function detectBrowserSharedWorkerCoordinatorSupport(
   } else if (scriptOrigin !== null && scriptOrigin !== origin) {
     reason = "origin_not_same_origin_or_opaque";
   } else if (
-    appNamespace === null
-    || appVersionMajor === null
-    || coordinatorProtocolVersion === null
+    appNamespace === null ||
+    appVersionMajor === null ||
+    coordinatorProtocolVersion === null
   ) {
     reason = "registration_schema_mismatch";
   } else if (
-    runProfile !== "ephemeral"
-    && (
-      (backend === "indexeddb" && browserIndexedDbFactory(globalObject) === null)
-      || (backend === "localstorage"
-        && browserLocalStorage(globalObject) === null)
-    )
+    runProfile !== "ephemeral" &&
+    ((backend === "indexeddb" && browserIndexedDbFactory(globalObject) === null) ||
+      (backend === "localstorage" && browserLocalStorage(globalObject) === null))
   ) {
     reason = "durable_store_unavailable_for_recovery_required_profile";
   }
 
-  const guidance = browserSharedWorkerCoordinatorGuidance(
-    reason,
-    fallbackTarget,
-  );
-  const directRuntimeReason: BrowserRuntimeSupportReason =
-    "shared_worker_not_yet_shipped";
-  const directExecutionReasonCode = browserExecutionReasonCodeFromRuntimeSupport(
-    directRuntimeReason,
-  );
+  const guidance = browserSharedWorkerCoordinatorGuidance(reason, fallbackTarget);
+  const directRuntimeReason: BrowserRuntimeSupportReason = "shared_worker_not_yet_shipped";
+  const directExecutionReasonCode =
+    browserExecutionReasonCodeFromRuntimeSupport(directRuntimeReason);
   const message =
     reason === "supported"
       ? "@asupersync/browser shared-worker coordinator prerequisites are available; direct BrowserRuntime creation remains fail-closed inside the shared-worker host and attach must downgrade explicitly on denial or loss."
@@ -4910,9 +4670,7 @@ export function assertBrowserSharedWorkerCoordinatorSupport(
   return diagnostics;
 }
 
-function browserStorageFailureReason(
-  message: string,
-): BrowserStorageOperationFailureReason {
+function browserStorageFailureReason(message: string): BrowserStorageOperationFailureReason {
   const normalized = message.toLowerCase();
   if (normalized.includes("blocked")) {
     return "blocked_upgrade";
@@ -4921,9 +4679,9 @@ function browserStorageFailureReason(
     return "quota_exceeded";
   }
   if (
-    normalized.includes("securityerror")
-    || normalized.includes("denied")
-    || normalized.includes("notallowed")
+    normalized.includes("securityerror") ||
+    normalized.includes("denied") ||
+    normalized.includes("notallowed")
   ) {
     return "access_denied";
   }
@@ -5083,10 +4841,7 @@ function openIndexedDbStore(
   };
 }
 
-function mapOutcome<T, U>(
-  outcome: BrowserOutcome<T>,
-  map: (value: T) => U,
-): BrowserOutcome<U> {
+function mapOutcome<T, U>(outcome: BrowserOutcome<T>, map: (value: T) => U): BrowserOutcome<U> {
   if (outcome.outcome === "ok") {
     return OutcomeFactory.ok(map(outcome.value));
   }
@@ -5098,15 +4853,11 @@ function requireHandleKind<K extends HandleKind>(
   expectedKind: K,
 ): asserts handle is HandleRef & { kind: K } {
   if (handle.kind !== expectedKind) {
-    throw new TypeError(
-      `Expected ${expectedKind} handle; received ${handle.kind}`,
-    );
+    throw new TypeError(`Expected ${expectedKind} handle; received ${handle.kind}`);
   }
 }
 
-function asCoreRegionHandle(
-  handle: RegionHandle | CoreRegionHandle | HandleRef,
-): CoreRegionHandle {
+function asCoreRegionHandle(handle: RegionHandle | CoreRegionHandle | HandleRef): CoreRegionHandle {
   if (handle instanceof RegionHandle) {
     return handle.core;
   }
@@ -5117,9 +4868,7 @@ function asCoreRegionHandle(
   return new CoreRegionHandle(handle);
 }
 
-function asCoreTaskHandle(
-  handle: TaskHandle | CoreTaskHandle | HandleRef,
-): CoreTaskHandle {
+function asCoreTaskHandle(handle: TaskHandle | CoreTaskHandle | HandleRef): CoreTaskHandle {
   if (handle instanceof TaskHandle) {
     return handle.core;
   }
@@ -5130,9 +4879,7 @@ function asCoreTaskHandle(
   return new CoreTaskHandle(handle);
 }
 
-function asCoreFetchHandle(
-  handle: FetchHandle | CoreFetchHandle | HandleRef,
-): CoreFetchHandle {
+function asCoreFetchHandle(handle: FetchHandle | CoreFetchHandle | HandleRef): CoreFetchHandle {
   if (handle instanceof FetchHandle) {
     return handle.core;
   }
@@ -5153,23 +4900,17 @@ function normalizeBrowserWebTransportUrl(url: string): string {
   try {
     parsed = new URL(trimmed);
   } catch (error) {
-    throw new TypeError(
-      `WebTransport requires an absolute https:// URL: ${errorMessage(error)}`,
-    );
+    throw new TypeError(`WebTransport requires an absolute https:// URL: ${errorMessage(error)}`);
   }
 
   if (parsed.protocol !== "https:") {
-    throw new TypeError(
-      `WebTransport requires an https:// URL; received ${parsed.href}`,
-    );
+    throw new TypeError(`WebTransport requires an https:// URL; received ${parsed.href}`);
   }
 
   return parsed.href;
 }
 
-function normalizeWebTransportPayload(
-  value: BrowserWebTransportPayload,
-): Uint8Array {
+function normalizeWebTransportPayload(value: BrowserWebTransportPayload): Uint8Array {
   if (value instanceof Uint8Array) {
     return value;
   }
@@ -5190,21 +4931,13 @@ function normalizeWebTransportPayload(
   );
 }
 
-function browserWebTransportStateKey(
-  handle: BrowserHandleLike,
-): string {
+function browserWebTransportStateKey(handle: BrowserHandleLike): string {
   const raw = handle.toJSON();
   return `${raw.kind}:${raw.slot}:${raw.generation}:${raw.owner_token ?? "legacy"}`;
 }
 
-function recordRegionParent(
-  parent: BrowserHandleLike,
-  region: CoreRegionHandle,
-): void {
-  REGION_PARENTS.set(
-    browserWebTransportStateKey(region),
-    browserWebTransportStateKey(parent),
-  );
+function recordRegionParent(parent: BrowserHandleLike, region: CoreRegionHandle): void {
+  REGION_PARENTS.set(browserWebTransportStateKey(region), browserWebTransportStateKey(parent));
 }
 
 function collectOwnedRegionKeys(rootKey: string): Set<string> {
@@ -5230,9 +4963,7 @@ function deleteOwnedRegionKeys(rootKey: string): Set<string> {
   return owned;
 }
 
-function lookupWebTransportState(
-  handle: CoreTaskHandle,
-): BrowserWebTransportState | null {
+function lookupWebTransportState(handle: CoreTaskHandle): BrowserWebTransportState | null {
   return INFLIGHT_WEBTRANSPORTS.get(browserWebTransportStateKey(handle)) ?? null;
 }
 
@@ -5285,9 +5016,7 @@ function webTransportCancellationOutcome(
   });
 }
 
-function collapseTaskOutcome(
-  outcome: BrowserOutcome<WasmValue>,
-): BrowserOutcome<void> {
+function collapseTaskOutcome(outcome: BrowserOutcome<WasmValue>): BrowserOutcome<void> {
   if (outcome.outcome === "ok") {
     return OutcomeFactory.ok(undefined);
   }
@@ -5317,10 +5046,7 @@ function settleWebTransportTask(
   return taskJoin(handle, outcome, consumerVersion);
 }
 
-function cleanupWebTransportState(
-  state: BrowserWebTransportState,
-  reason?: string,
-): void {
+function cleanupWebTransportState(state: BrowserWebTransportState, reason?: string): void {
   // Best-effort cleanup must close/abort before releasing the lock; otherwise
   // Web Streams can reject with a released-reader/writer error on teardown.
   void state.reader
@@ -5340,9 +5066,7 @@ function cleanupWebTransportState(
   void state.writer
     .then((writer) =>
       Promise.resolve()
-        .then(() =>
-          reason !== undefined ? writer.abort?.(reason) : writer.close?.(),
-        )
+        .then(() => (reason !== undefined ? writer.abort?.(reason) : writer.close?.()))
         .catch(() => undefined)
         .finally(() => {
           try {
@@ -5355,25 +5079,17 @@ function cleanupWebTransportState(
     .catch(() => undefined);
 }
 
-function closeTrackedWebTransportState(
-  state: BrowserWebTransportState,
-  reason?: string,
-): void {
+function closeTrackedWebTransportState(state: BrowserWebTransportState, reason?: string): void {
   state.settled = true;
   cleanupWebTransportState(state, reason);
   try {
-    state.session.close(
-      reason === undefined ? undefined : { reason },
-    );
+    state.session.close(reason === undefined ? undefined : { reason });
   } catch {
     // Ignore close races during scope/runtime teardown.
   }
 }
 
-function closeOwnedWebTransports(
-  ownerKeys: Set<string>,
-  reason?: string,
-): void {
+function closeOwnedWebTransports(ownerKeys: Set<string>, reason?: string): void {
   for (const [taskKey, state] of INFLIGHT_WEBTRANSPORTS) {
     if (!ownerKeys.has(state.scopeKey)) {
       continue;
@@ -5388,18 +5104,14 @@ function closeOwnedWebTransports(
   }
 }
 
-function cleanupScopeOwnedWebTransports(
-  handle: CoreRegionHandle,
-): void {
+function cleanupScopeOwnedWebTransports(handle: CoreRegionHandle): void {
   closeOwnedWebTransports(
     deleteOwnedRegionKeys(browserWebTransportStateKey(handle)),
     "scope_close",
   );
 }
 
-function cleanupRuntimeOwnedWebTransports(
-  handle: CoreRuntimeHandle,
-): void {
+function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
   closeOwnedWebTransports(
     deleteOwnedRegionKeys(browserWebTransportStateKey(handle)),
     "runtime_close",
@@ -5461,10 +5173,7 @@ function createBrowserWebTransportState(
       cleanupWebTransportState(state, "webtransport closed");
       settleWebTransportTask(
         handle,
-        webTransportCancellationOutcome(
-          "webtransport_close",
-          "WebTransport session closed.",
-        ),
+        webTransportCancellationOutcome("webtransport_close", "WebTransport session closed."),
         consumerVersion,
       );
     })
@@ -5543,10 +5252,7 @@ export class BrowserRuntime {
         healthScopeKey: this.healthScopeKey,
         now: this.now,
       });
-    this.diagnostics = createBrowserSdkDiagnostics(
-      consumerVersion,
-      initialExecutionLadder,
-    );
+    this.diagnostics = createBrowserSdkDiagnostics(consumerVersion, initialExecutionLadder);
   }
 
   private currentExecutionLadder(): BrowserExecutionLadderDiagnostics {
@@ -5565,17 +5271,13 @@ export class BrowserRuntime {
     return ladder;
   }
 
-  laneAvailabilityOutcome(
-    operation: string,
-  ): BrowserOutcome<never> | null {
+  laneAvailabilityOutcome(operation: string): BrowserOutcome<never> | null {
     const ladder = this.refreshDiagnostics();
     if (ladder.supported) {
       return null;
     }
     const recoverability: Recoverability =
-      ladder.reasonCode === "demote_due_to_lane_health"
-        ? "transient"
-        : "permanent";
+      ladder.reasonCode === "demote_due_to_lane_health" ? "transient" : "permanent";
     return OutcomeFactory.err(
       "capability_denied",
       recoverability,
@@ -5622,9 +5324,7 @@ export class BrowserRuntime {
     return this.core.toJSON();
   }
 
-  close(
-    consumerVersion: AbiVersion | null = this.consumerVersion,
-  ): BrowserOutcome<void> {
+  close(consumerVersion: AbiVersion | null = this.consumerVersion): BrowserOutcome<void> {
     const closed = runtimeClose(this.core, consumerVersion);
     if (closed.outcome === "ok") {
       cleanupRuntimeOwnedWebTransports(this.core);
@@ -5645,9 +5345,7 @@ export class BrowserRuntime {
       return entered;
     }
     recordRegionParent(this.core, entered.value);
-    return OutcomeFactory.ok(
-      new RegionHandle(entered.value, consumerVersion, this),
-    );
+    return OutcomeFactory.ok(new RegionHandle(entered.value, consumerVersion, this));
   }
 
   async withScope<T>(
@@ -5679,9 +5377,7 @@ export class RegionHandle {
     return this.core.toJSON();
   }
 
-  close(
-    consumerVersion: AbiVersion | null = this.consumerVersion,
-  ): BrowserOutcome<void> {
+  close(consumerVersion: AbiVersion | null = this.consumerVersion): BrowserOutcome<void> {
     const closed = scopeClose(this.core, consumerVersion);
     if (closed.outcome === "ok") {
       cleanupScopeOwnedWebTransports(this.core);
@@ -5704,9 +5400,7 @@ export class RegionHandle {
       return entered;
     }
     recordRegionParent(this.core, entered.value);
-    return OutcomeFactory.ok(
-      new RegionHandle(entered.value, consumerVersion, this.runtime),
-    );
+    return OutcomeFactory.ok(new RegionHandle(entered.value, consumerVersion, this.runtime));
   }
 
   spawnTask(
@@ -5811,10 +5505,7 @@ export class RegionHandle {
         session,
         browserWebTransportStateKey(this.core),
       );
-      INFLIGHT_WEBTRANSPORTS.set(
-        browserWebTransportStateKey(spawned.value),
-        state,
-      );
+      INFLIGHT_WEBTRANSPORTS.set(browserWebTransportStateKey(spawned.value), state);
     } catch (error) {
       const failure = webTransportFailureOutcome(
         `failed to construct browser WebTransport: ${errorMessage(error)}`,
@@ -5824,9 +5515,7 @@ export class RegionHandle {
       return failure;
     }
 
-    return OutcomeFactory.ok(
-      new WebTransportHandle(spawned.value, consumerVersion),
-    );
+    return OutcomeFactory.ok(new WebTransportHandle(spawned.value, consumerVersion));
   }
 }
 
@@ -5855,10 +5544,7 @@ export class TaskHandle {
     if (tokenOrKind instanceof CancellationToken) {
       return tokenOrKind.cancel(this, consumerVersion);
     }
-    return taskCancel(
-      { task: this.core, kind: tokenOrKind, message },
-      consumerVersion,
-    );
+    return taskCancel({ task: this.core, kind: tokenOrKind, message }, consumerVersion);
   }
 }
 
@@ -5892,9 +5578,7 @@ export class WebTransportHandle {
       if (terminal) {
         return collapseTaskOutcome(terminal);
       }
-      return invalidHandleOutcome(
-        "unknown WebTransport handle; the session may already be closed",
-      );
+      return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
     try {
@@ -5918,9 +5602,7 @@ export class WebTransportHandle {
       if (terminal) {
         return collapseTaskOutcome(terminal);
       }
-      return invalidHandleOutcome(
-        "unknown WebTransport handle; the session may already be closed",
-      );
+      return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
     try {
@@ -5944,9 +5626,7 @@ export class WebTransportHandle {
       if (terminal) {
         return terminal as BrowserOutcome<Uint8Array>;
       }
-      return invalidHandleOutcome(
-        "unknown WebTransport handle; the session may already be closed",
-      );
+      return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
     try {
@@ -5957,17 +5637,11 @@ export class WebTransportHandle {
           "webtransport_close",
           "WebTransport datagram reader reached end-of-stream.",
         );
-        settleWebTransportTask(
-          this.core,
-          cancelled,
-          consumerVersion,
-        );
+        settleWebTransportTask(this.core, cancelled, consumerVersion);
         return cancelled as BrowserOutcome<Uint8Array>;
       }
       return OutcomeFactory.ok(
-        result.value instanceof Uint8Array
-          ? result.value
-          : new Uint8Array(result.value),
+        result.value instanceof Uint8Array ? result.value : new Uint8Array(result.value),
       );
     } catch (error) {
       takeTerminalWebTransportOutcome(this.core);
@@ -5987,9 +5661,7 @@ export class WebTransportHandle {
       if (terminal) {
         return collapseTaskOutcome(terminal);
       }
-      return invalidHandleOutcome(
-        "unknown WebTransport handle; the session may already be closed",
-      );
+      return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
     try {
@@ -6027,9 +5699,7 @@ export class WebTransportHandle {
       if (terminal) {
         return collapseTaskOutcome(terminal);
       }
-      return invalidHandleOutcome(
-        "unknown WebTransport handle; the session may already be closed",
-      );
+      return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
     const cancelOutcome = taskCancel(
@@ -6046,9 +5716,7 @@ export class WebTransportHandle {
 
     try {
       cleanupWebTransportState(state, token.message);
-      state.session.close(
-        token.message === undefined ? undefined : { reason: token.message },
-      );
+      state.session.close(token.message === undefined ? undefined : { reason: token.message });
     } catch (error) {
       return webTransportFailureOutcome(
         `browser WebTransport cancel failed: ${errorMessage(error)}`,
@@ -6073,9 +5741,7 @@ export class BrowserStorage {
   readonly backend: BrowserStorageBackend;
   readonly dbName: string;
   readonly globalObject: Record<string, unknown> | undefined;
-  readonly onIndexedDbBlocked:
-    | ((progress: BrowserIndexedDbBlockedProgress) => void)
-    | undefined;
+  readonly onIndexedDbBlocked: ((progress: BrowserIndexedDbBlockedProgress) => void) | undefined;
   readonly storeName: string;
   readonly version: number;
 
@@ -6107,17 +5773,9 @@ export class BrowserStorage {
           this.onIndexedDbBlocked,
         );
         try {
-          const { store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readonly",
-          );
+          const { store } = openIndexedDbStore(database, this.storeName, "readonly");
           const request = store.get(
-            encodeIndexedDbStorageKey(
-              normalizedNamespace,
-              normalizedKey,
-              this.globalObject,
-            ),
+            encodeIndexedDbStorageKey(normalizedNamespace, normalizedKey, this.globalObject),
           );
           const result = await awaitIndexedDbRequest(request);
           if (result === undefined || result === null) {
@@ -6135,11 +5793,7 @@ export class BrowserStorage {
         throw createBrowserStorageUnsupportedError(this.diagnostics());
       }
       const result = storage.getItem(
-        encodeLocalStorageKey(
-          normalizedNamespace,
-          normalizedKey,
-          this.globalObject,
-        ),
+        encodeLocalStorageKey(normalizedNamespace, normalizedKey, this.globalObject),
       );
       if (result === null) {
         return null;
@@ -6179,18 +5833,10 @@ export class BrowserStorage {
           this.onIndexedDbBlocked,
         );
         try {
-          const { transaction, store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readwrite",
-          );
+          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
           store.put(
             compactIndexedDbBytes(normalizedValue),
-            encodeIndexedDbStorageKey(
-              normalizedNamespace,
-              normalizedKey,
-              this.globalObject,
-            ),
+            encodeIndexedDbStorageKey(normalizedNamespace, normalizedKey, this.globalObject),
           );
           await awaitIndexedDbTransaction(transaction);
           return;
@@ -6204,11 +5850,7 @@ export class BrowserStorage {
         throw createBrowserStorageUnsupportedError(this.diagnostics());
       }
       storage.setItem(
-        encodeLocalStorageKey(
-          normalizedNamespace,
-          normalizedKey,
-          this.globalObject,
-        ),
+        encodeLocalStorageKey(normalizedNamespace, normalizedKey, this.globalObject),
         encodeBrowserStorageBytes(normalizedValue, this.globalObject),
       );
     } catch (error) {
@@ -6240,11 +5882,7 @@ export class BrowserStorage {
           this.onIndexedDbBlocked,
         );
         try {
-          const { transaction, store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readwrite",
-          );
+          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
           const storageKey = encodeIndexedDbStorageKey(
             normalizedNamespace,
             normalizedKey,
@@ -6299,25 +5937,14 @@ export class BrowserStorage {
           this.onIndexedDbBlocked,
         );
         try {
-          const { store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readonly",
-          );
-          const namespaceRange = indexedDbNamespaceRange(
-            normalizedNamespace,
-            this.globalObject,
-          );
+          const { store } = openIndexedDbStore(database, this.storeName, "readonly");
+          const namespaceRange = indexedDbNamespaceRange(normalizedNamespace, this.globalObject);
           const request = store.getAllKeys(namespaceRange);
           const rawKeys = await awaitIndexedDbRequest(request);
           const keys = Array.from(rawKeys as ArrayLike<unknown>)
             .map((value) =>
               typeof value === "string"
-                ? decodeIndexedDbStorageKey(
-                    value,
-                    normalizedNamespace,
-                    this.globalObject,
-                  )
+                ? decodeIndexedDbStorageKey(value, normalizedNamespace, this.globalObject)
                 : null,
             )
             .filter((value): value is string => value !== null);
@@ -6332,21 +5959,14 @@ export class BrowserStorage {
       if (!storage) {
         throw createBrowserStorageUnsupportedError(this.diagnostics());
       }
-      const prefix = localStorageNamespacePrefix(
-        normalizedNamespace,
-        this.globalObject,
-      );
+      const prefix = localStorageNamespacePrefix(normalizedNamespace, this.globalObject);
       const keys: string[] = [];
       for (let index = 0; index < storage.length; index += 1) {
         const maybeKey = storage.key(index);
         if (!maybeKey || !maybeKey.startsWith(prefix)) {
           continue;
         }
-        const decoded = decodeLocalStorageKey(
-          maybeKey,
-          normalizedNamespace,
-          this.globalObject,
-        );
+        const decoded = decodeLocalStorageKey(maybeKey, normalizedNamespace, this.globalObject);
         if (decoded !== null) {
           keys.push(decoded);
         }
@@ -6381,15 +6001,8 @@ export class BrowserStorage {
           this.onIndexedDbBlocked,
         );
         try {
-          const { transaction, store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readwrite",
-          );
-          const namespaceRange = indexedDbNamespaceRange(
-            normalizedNamespace,
-            this.globalObject,
-          );
+          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
+          const namespaceRange = indexedDbNamespaceRange(normalizedNamespace, this.globalObject);
           const transactionCompletion = awaitIndexedDbTransaction(transaction);
           const countRequest = store.count(namespaceRange);
           store.delete(namespaceRange);
@@ -6409,13 +6022,7 @@ export class BrowserStorage {
       }
       const keys = await this.listKeys(normalizedNamespace);
       for (const key of keys) {
-        storage.removeItem(
-          encodeLocalStorageKey(
-            normalizedNamespace,
-            key,
-            this.globalObject,
-          ),
-        );
+        storage.removeItem(encodeLocalStorageKey(normalizedNamespace, key, this.globalObject));
       }
       return keys.length;
     } catch (error) {
@@ -6524,19 +6131,13 @@ function sumBrowserArtifactBytes(entries: BrowserArtifactIndexEntry[]): number {
 
 function isBrowserBinaryValue(value: unknown): value is BrowserStorageValue {
   return (
-    value instanceof Uint8Array
-    || value instanceof ArrayBuffer
-    || ArrayBuffer.isView(value)
-    || (
-      Array.isArray(value)
-      && value.every(
-        (item) =>
-          typeof item === "number"
-          && Number.isInteger(item)
-          && item >= 0
-          && item <= 255,
-      )
-    )
+    value instanceof Uint8Array ||
+    value instanceof ArrayBuffer ||
+    ArrayBuffer.isView(value) ||
+    (Array.isArray(value) &&
+      value.every(
+        (item) => typeof item === "number" && Number.isInteger(item) && item >= 0 && item <= 255,
+      ))
   );
 }
 
@@ -6585,9 +6186,7 @@ function normalizeBrowserArtifactTags(tags: string[] | undefined): string[] {
   if (!tags) {
     return [];
   }
-  const normalized = tags
-    .map((tag) => tag.trim())
-    .filter((tag) => tag.length > 0);
+  const normalized = tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0);
   normalized.sort();
   return Array.from(new Set(normalized));
 }
@@ -6620,7 +6219,9 @@ function normalizeBrowserArtifactFilename(
   format: BrowserArtifactFormat,
   filename: string | undefined,
 ): string {
-  const candidate = (filename ?? `asupersync-${kind}-${id}.${browserArtifactExtension(format)}`).trim();
+  const candidate = (
+    filename ?? `asupersync-${kind}-${id}.${browserArtifactExtension(format)}`
+  ).trim();
   if (!candidate) {
     return `asupersync-${kind}-${id}.${browserArtifactExtension(format)}`;
   }
@@ -6666,7 +6267,9 @@ function normalizeBrowserArtifactBytes(
 
   const serialized = JSON.stringify(value);
   if (serialized === undefined) {
-    throw new TypeError("browser artifact payload must be binary, plain text, or JSON-serializable");
+    throw new TypeError(
+      "browser artifact payload must be binary, plain text, or JSON-serializable",
+    );
   }
   return browserTextEncoder(globalObject).encode(serialized);
 }
@@ -6675,16 +6278,18 @@ function browserArtifactFailureReasonFromError(
   error: unknown,
   fallback: BrowserArtifactFailureReason,
 ): BrowserArtifactFailureReason {
-  const code = typeof error === "object" && error !== null && "code" in error
-    ? (error as { code?: string }).code
-    : undefined;
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: string }).code
+      : undefined;
   if (code === BROWSER_STORAGE_UNSUPPORTED_CODE) {
     return "unsupported_environment";
   }
   if (code === BROWSER_STORAGE_OPERATION_FAILED_CODE) {
-    const diagnostics = typeof error === "object" && error !== null && "diagnostics" in error
-      ? (error as { diagnostics?: BrowserStorageOperationDiagnostics }).diagnostics
-      : undefined;
+    const diagnostics =
+      typeof error === "object" && error !== null && "diagnostics" in error
+        ? (error as { diagnostics?: BrowserStorageOperationDiagnostics }).diagnostics
+        : undefined;
     if (diagnostics?.reason === "quota_exceeded") {
       return "quota_exceeded";
     }
@@ -6733,14 +6338,16 @@ function createBrowserArtifactBlob(
   return new ctor([stableBytes.buffer], { type: contentType });
 }
 
-function browserDocumentLike(
-  globalObject: Record<string, unknown> | undefined,
-): Document | null {
+function browserDocumentLike(globalObject: Record<string, unknown> | undefined): Document | null {
   const candidate = (globalObject as { document?: Document } | undefined)?.document;
   if (candidate && typeof candidate.createElement === "function") {
     return candidate;
   }
-  if (typeof document === "object" && document !== null && typeof document.createElement === "function") {
+  if (
+    typeof document === "object" &&
+    document !== null &&
+    typeof document.createElement === "function"
+  ) {
     return document;
   }
   return null;
@@ -6755,8 +6362,8 @@ function browserUrlLike(
     return null;
   }
   if (
-    typeof urlLike.createObjectURL !== "function"
-    || typeof urlLike.revokeObjectURL !== "function"
+    typeof urlLike.createObjectURL !== "function" ||
+    typeof urlLike.revokeObjectURL !== "function"
   ) {
     return null;
   }
@@ -6832,21 +6439,20 @@ export class BrowserArtifactStore {
   }
 
   private isCorruptIndexError(error: unknown): boolean {
-    const code = typeof error === "object" && error !== null && "code" in error
-      ? (error as { code?: string }).code
-      : undefined;
-    const diagnostics = typeof error === "object" && error !== null && "diagnostics" in error
-      ? (error as { diagnostics?: BrowserArtifactOperationDiagnostics }).diagnostics
-      : undefined;
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
+    const diagnostics =
+      typeof error === "object" && error !== null && "diagnostics" in error
+        ? (error as { diagnostics?: BrowserArtifactOperationDiagnostics }).diagnostics
+        : undefined;
     return (
-      code === BROWSER_ARTIFACT_OPERATION_FAILED_CODE
-      && diagnostics?.reason === "corrupt_index"
+      code === BROWSER_ARTIFACT_OPERATION_FAILED_CODE && diagnostics?.reason === "corrupt_index"
     );
   }
 
-  private async namespaceKeys(
-    operation: BrowserArtifactOperation,
-  ): Promise<string[]> {
+  private async namespaceKeys(operation: BrowserArtifactOperation): Promise<string[]> {
     try {
       return await this.storage.listKeys(this.namespace);
     } catch (error) {
@@ -6858,9 +6464,7 @@ export class BrowserArtifactStore {
     }
   }
 
-  private async clearNamespace(
-    operation: BrowserArtifactOperation,
-  ): Promise<number> {
+  private async clearNamespace(operation: BrowserArtifactOperation): Promise<number> {
     try {
       return await this.storage.clearNamespace(this.namespace);
     } catch (error) {
@@ -6893,8 +6497,8 @@ export class BrowserArtifactStore {
         browserTextDecoder(this.storage.globalObject).decode(raw),
       ) as Partial<BrowserArtifactIndex>;
       if (
-        parsed.schemaVersion !== BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION
-        || !Array.isArray(parsed.entries)
+        parsed.schemaVersion !== BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION ||
+        !Array.isArray(parsed.entries)
       ) {
         throw new Error("browser artifact index schema mismatch");
       }
@@ -6905,27 +6509,27 @@ export class BrowserArtifactStore {
         }
         const candidate = entry as Partial<BrowserArtifactIndexEntry>;
         if (
-          typeof candidate.id !== "string"
-          || typeof candidate.payloadKey !== "string"
-          || typeof candidate.filename !== "string"
-          || typeof candidate.contentType !== "string"
-          || typeof candidate.byteLength !== "number"
-          || typeof candidate.sequence !== "number"
+          typeof candidate.id !== "string" ||
+          typeof candidate.payloadKey !== "string" ||
+          typeof candidate.filename !== "string" ||
+          typeof candidate.contentType !== "string" ||
+          typeof candidate.byteLength !== "number" ||
+          typeof candidate.sequence !== "number"
         ) {
           throw new Error("browser artifact index entry is missing required fields");
         }
         if (
-          candidate.kind !== "trace"
-          && candidate.kind !== "crashpack"
-          && candidate.kind !== "evidence"
-          && candidate.kind !== "custom"
+          candidate.kind !== "trace" &&
+          candidate.kind !== "crashpack" &&
+          candidate.kind !== "evidence" &&
+          candidate.kind !== "custom"
         ) {
           throw new Error("browser artifact index entry has an invalid kind");
         }
         if (
-          candidate.format !== "binary"
-          && candidate.format !== "json"
-          && candidate.format !== "text"
+          candidate.format !== "binary" &&
+          candidate.format !== "json" &&
+          candidate.format !== "text"
         ) {
           throw new Error("browser artifact index entry has an invalid format");
         }
@@ -6946,10 +6550,7 @@ export class BrowserArtifactStore {
       });
 
       entries.sort((left, right) => right.sequence - left.sequence);
-      const highestSequence = entries.reduce(
-        (max, entry) => Math.max(max, entry.sequence),
-        0,
-      );
+      const highestSequence = entries.reduce((max, entry) => Math.max(max, entry.sequence), 0);
 
       return {
         schemaVersion: BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION,
@@ -6961,11 +6562,7 @@ export class BrowserArtifactStore {
         entries,
       };
     } catch (error) {
-      throw this.operationError(
-        operation,
-        "corrupt_index",
-        errorMessage(error),
-      );
+      throw this.operationError(operation, "corrupt_index", errorMessage(error));
     }
   }
 
@@ -6978,9 +6575,7 @@ export class BrowserArtifactStore {
         await this.storage.delete(this.namespace, BROWSER_ARTIFACT_INDEX_KEY);
         return;
       }
-      const payload = browserTextEncoder(this.storage.globalObject).encode(
-        JSON.stringify(index),
-      );
+      const payload = browserTextEncoder(this.storage.globalObject).encode(JSON.stringify(index));
       await this.storage.set(this.namespace, BROWSER_ARTIFACT_INDEX_KEY, payload);
     } catch (error) {
       throw this.operationError(
@@ -6999,30 +6594,20 @@ export class BrowserArtifactStore {
   async persistArtifact(
     request: BrowserArtifactPersistRequest,
   ): Promise<BrowserArtifactPersistResult> {
-    const requestedId = request.id === undefined
-      ? undefined
-      : normalizeBrowserArtifactId(request.id);
+    const requestedId =
+      request.id === undefined ? undefined : normalizeBrowserArtifactId(request.id);
     const index = await this.readIndex("persist");
     const format = detectBrowserArtifactFormat(request.value, request.format);
     let bytes: Uint8Array;
     try {
-      bytes = normalizeBrowserArtifactBytes(
-        request.value,
-        format,
-        this.storage.globalObject,
-      );
+      bytes = normalizeBrowserArtifactBytes(request.value, format, this.storage.globalObject);
     } catch (error) {
-      throw this.operationError(
-        "persist",
-        "serialization_failed",
-        errorMessage(error),
-        request.id,
-      );
+      throw this.operationError("persist", "serialization_failed", errorMessage(error), request.id);
     }
 
     if (
-      bytes.byteLength > this.retention.maxArtifactBytes
-      || bytes.byteLength > this.retention.maxTotalBytes
+      bytes.byteLength > this.retention.maxArtifactBytes ||
+      bytes.byteLength > this.retention.maxTotalBytes
     ) {
       throw this.operationError(
         "persist",
@@ -7033,17 +6618,11 @@ export class BrowserArtifactStore {
     }
 
     const sequence = index.nextSequence + 1;
-    const id = requestedId ?? normalizeBrowserArtifactId(
-      `${request.kind}-${sequence.toString().padStart(6, "0")}`,
-    );
-    const filename = normalizeBrowserArtifactFilename(
-      request.kind,
-      id,
-      format,
-      request.filename,
-    );
-    const contentType =
-      request.contentType ?? defaultBrowserArtifactContentType(format);
+    const id =
+      requestedId ??
+      normalizeBrowserArtifactId(`${request.kind}-${sequence.toString().padStart(6, "0")}`);
+    const filename = normalizeBrowserArtifactFilename(request.kind, id, format, request.filename);
+    const contentType = request.contentType ?? defaultBrowserArtifactContentType(format);
     const tags = normalizeBrowserArtifactTags(request.tags);
     const payloadKey = `artifact:${sequence.toString().padStart(6, "0")}:${encodeBrowserStorageSegment(id, this.storage.globalObject)}`;
 
@@ -7056,8 +6635,8 @@ export class BrowserArtifactStore {
 
     if (this.retention.quotaStrategy === "evict_oldest") {
       while (
-        retainedEntries.length + 1 > this.retention.maxArtifacts
-        || totalBytes > this.retention.maxTotalBytes
+        retainedEntries.length + 1 > this.retention.maxArtifacts ||
+        totalBytes > this.retention.maxTotalBytes
       ) {
         const oldest = retainedEntries.shift();
         if (!oldest) {
@@ -7069,8 +6648,8 @@ export class BrowserArtifactStore {
     }
 
     if (
-      retainedEntries.length + 1 > this.retention.maxArtifacts
-      || totalBytes > this.retention.maxTotalBytes
+      retainedEntries.length + 1 > this.retention.maxArtifacts ||
+      totalBytes > this.retention.maxTotalBytes
     ) {
       throw this.operationError(
         "persist",
@@ -7107,9 +6686,7 @@ export class BrowserArtifactStore {
       schemaVersion: BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION,
       nextSequence: sequence,
       retention: this.retention,
-      entries: [...retainedEntries, entry].sort(
-        (left, right) => right.sequence - left.sequence,
-      ),
+      entries: [...retainedEntries, entry].sort((left, right) => right.sequence - left.sequence),
     };
 
     try {
@@ -7119,10 +6696,7 @@ export class BrowserArtifactStore {
       throw error;
     }
 
-    const staleEntries = [
-      ...(existing ? [existing] : []),
-      ...evictedEntries,
-    ];
+    const staleEntries = [...(existing ? [existing] : []), ...evictedEntries];
     for (const stale of staleEntries) {
       await this.storage.delete(this.namespace, stale.payloadKey).catch(() => false);
     }
@@ -7211,11 +6785,7 @@ export class BrowserArtifactStore {
     return {
       artifact: stripBrowserArtifactRecord(entry),
       bytes,
-      blob: createBrowserArtifactBlob(
-        bytes,
-        entry.contentType,
-        this.storage.globalObject,
-      ),
+      blob: createBrowserArtifactBlob(bytes, entry.contentType, this.storage.globalObject),
       contentType: entry.contentType,
       filename: entry.filename,
     };
@@ -7257,9 +6827,7 @@ export class BrowserArtifactStore {
       retention: this.retention,
       artifacts,
     };
-    const bytes = browserTextEncoder(this.storage.globalObject).encode(
-      JSON.stringify(archive),
-    );
+    const bytes = browserTextEncoder(this.storage.globalObject).encode(JSON.stringify(archive));
     return {
       archive,
       bytes,
@@ -7376,13 +6944,13 @@ function isBrowserServiceWorkerBrokerLifecycleState(
   value: unknown,
 ): value is BrowserServiceWorkerBrokerLifecycleState {
   return (
-    value === "cold_start"
-    || value === "validating_scope"
-    || value === "reconciling_durable_state"
-    || value === "brokering"
-    || value === "draining"
-    || value === "quiescent"
-    || value === "terminated"
+    value === "cold_start" ||
+    value === "validating_scope" ||
+    value === "reconciling_durable_state" ||
+    value === "brokering" ||
+    value === "draining" ||
+    value === "quiescent" ||
+    value === "terminated"
   );
 }
 
@@ -7398,9 +6966,9 @@ function normalizeBrowserServiceWorkerBrokerFallbackTarget(
 ): BrowserServiceWorkerBrokerFallbackTarget {
   const candidate = value ?? fallbackTarget;
   if (
-    candidate === BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE
-    || candidate === BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE
-    || candidate === BROWSER_BRIDGE_ONLY_FALLBACK_TARGET
+    candidate === BROWSER_DEDICATED_WORKER_DIRECT_RUNTIME_LANE ||
+    candidate === BROWSER_MAIN_THREAD_DIRECT_RUNTIME_LANE ||
+    candidate === BROWSER_BRIDGE_ONLY_FALLBACK_TARGET
   ) {
     return candidate;
   }
@@ -7416,9 +6984,7 @@ function normalizeBrowserServiceWorkerBrokerMetadata(
   return { ...value };
 }
 
-function normalizeBrowserServiceWorkerBrokerLeaseEpoch(
-  value: number,
-): number {
+function normalizeBrowserServiceWorkerBrokerLeaseEpoch(value: number): number {
   if (!Number.isFinite(value)) {
     throw new TypeError("service-worker broker lease_epoch must be a finite number");
   }
@@ -7444,17 +7010,13 @@ function normalizeBrowserServiceWorkerBrokerAdmissionTuple(
     appVersionMajor: Math.max(
       0,
       Math.trunc(
-        normalizeOptionalBrowserServiceWorkerBrokerVersion(
-          admission.appVersionMajor,
-        ) ?? 0,
+        normalizeOptionalBrowserServiceWorkerBrokerVersion(admission.appVersionMajor) ?? 0,
       ),
     ),
     brokerProtocolVersion: Math.max(
       0,
       Math.trunc(
-        normalizeOptionalBrowserServiceWorkerBrokerVersion(
-          admission.brokerProtocolVersion,
-        ) ?? 0,
+        normalizeOptionalBrowserServiceWorkerBrokerVersion(admission.brokerProtocolVersion) ?? 0,
       ),
     ),
     runProfile: normalizeBrowserServiceWorkerBrokerString(
@@ -7472,12 +7034,12 @@ function parseBrowserServiceWorkerBrokerAdmissionTuple(
   }
   const candidate = value as Partial<BrowserServiceWorkerBrokerAdmissionTuple>;
   if (
-    typeof candidate.origin !== "string"
-    || typeof candidate.registrationScope !== "string"
-    || typeof candidate.appNamespace !== "string"
-    || typeof candidate.appVersionMajor !== "number"
-    || typeof candidate.brokerProtocolVersion !== "number"
-    || typeof candidate.runProfile !== "string"
+    typeof candidate.origin !== "string" ||
+    typeof candidate.registrationScope !== "string" ||
+    typeof candidate.appNamespace !== "string" ||
+    typeof candidate.appVersionMajor !== "number" ||
+    typeof candidate.brokerProtocolVersion !== "number" ||
+    typeof candidate.runProfile !== "string"
   ) {
     throw new Error("service-worker broker admission tuple is missing required fields");
   }
@@ -7494,15 +7056,15 @@ function parseBrowserServiceWorkerBrokerRegistration(
   }
   const candidate = value as Partial<BrowserServiceWorkerBrokerRegistration>;
   if (
-    candidate.contractId !== BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID
-    || candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE
-    || typeof candidate.backend !== "string"
-    || !Array.isArray(candidate.downgradeOrder)
-    || typeof candidate.capabilityManifestVersion !== "string"
-    || typeof candidate.controllerPresent !== "boolean"
-    || typeof candidate.directExecutionReasonCode !== "string"
-    || typeof candidate.registeredAtMs !== "number"
-    || typeof candidate.updatedAtMs !== "number"
+    candidate.contractId !== BROWSER_SERVICE_WORKER_BROKER_CONTRACT_ID ||
+    candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE ||
+    typeof candidate.backend !== "string" ||
+    !Array.isArray(candidate.downgradeOrder) ||
+    typeof candidate.capabilityManifestVersion !== "string" ||
+    typeof candidate.controllerPresent !== "boolean" ||
+    typeof candidate.directExecutionReasonCode !== "string" ||
+    typeof candidate.registeredAtMs !== "number" ||
+    typeof candidate.updatedAtMs !== "number"
   ) {
     throw new Error("service-worker broker registration is missing required fields");
   }
@@ -7522,10 +7084,9 @@ function parseBrowserServiceWorkerBrokerRegistration(
       normalizeBrowserServiceWorkerBrokerFallbackTarget(
         target,
         BROWSER_BRIDGE_ONLY_FALLBACK_TARGET,
-      )
+      ),
     ),
-    backend:
-      candidate.backend === "indexeddb" ? "indexeddb" : "localstorage",
+    backend: candidate.backend === "indexeddb" ? "indexeddb" : "localstorage",
     admission: parseBrowserServiceWorkerBrokerAdmissionTuple(candidate.admission),
     capabilityManifestVersion: normalizeBrowserServiceWorkerBrokerString(
       candidate.capabilityManifestVersion,
@@ -7547,15 +7108,15 @@ function parseBrowserServiceWorkerBrokerDescriptor(
   }
   const candidate = value as Partial<BrowserServiceWorkerBrokerDescriptor>;
   if (
-    candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE
-    || typeof candidate.artifactNamespace !== "string"
-    || typeof candidate.brokerWorkId !== "string"
-    || typeof candidate.capabilityManifestVersion !== "string"
-    || typeof candidate.idempotencyKey !== "string"
-    || typeof candidate.leaseEpoch !== "number"
-    || typeof candidate.sourceEventKind !== "string"
-    || typeof candidate.createdAtMs !== "number"
-    || typeof candidate.updatedAtMs !== "number"
+    candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE ||
+    typeof candidate.artifactNamespace !== "string" ||
+    typeof candidate.brokerWorkId !== "string" ||
+    typeof candidate.capabilityManifestVersion !== "string" ||
+    typeof candidate.idempotencyKey !== "string" ||
+    typeof candidate.leaseEpoch !== "number" ||
+    typeof candidate.sourceEventKind !== "string" ||
+    typeof candidate.createdAtMs !== "number" ||
+    typeof candidate.updatedAtMs !== "number"
   ) {
     throw new Error("service-worker broker descriptor is missing required fields");
   }
@@ -7583,11 +7144,9 @@ function parseBrowserServiceWorkerBrokerDescriptor(
       candidate.idempotencyKey,
       "service-worker broker idempotency_key",
     ),
-    leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(
-      candidate.leaseEpoch,
-    ),
+    leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(candidate.leaseEpoch),
     metadata: normalizeBrowserServiceWorkerBrokerMetadata(
-      (candidate.metadata as Record<string, unknown> | null | undefined),
+      candidate.metadata as Record<string, unknown> | null | undefined,
     ),
     requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
     sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
@@ -7606,15 +7165,15 @@ function parseBrowserServiceWorkerBrokerHandoffRecord(
   }
   const candidate = value as Partial<BrowserServiceWorkerBrokerHandoffRecord>;
   if (
-    candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE
-    || typeof candidate.artifactNamespace !== "string"
-    || typeof candidate.brokerWorkId !== "string"
-    || typeof candidate.capabilityManifestVersion !== "string"
-    || typeof candidate.idempotencyKey !== "string"
-    || typeof candidate.leaseEpoch !== "number"
-    || typeof candidate.sourceEventKind !== "string"
-    || typeof candidate.reason !== "string"
-    || typeof candidate.recordedAtMs !== "number"
+    candidate.requestedLane !== BROWSER_SERVICE_WORKER_BROKER_LANE ||
+    typeof candidate.artifactNamespace !== "string" ||
+    typeof candidate.brokerWorkId !== "string" ||
+    typeof candidate.capabilityManifestVersion !== "string" ||
+    typeof candidate.idempotencyKey !== "string" ||
+    typeof candidate.leaseEpoch !== "number" ||
+    typeof candidate.sourceEventKind !== "string" ||
+    typeof candidate.reason !== "string" ||
+    typeof candidate.recordedAtMs !== "number"
   ) {
     throw new Error("service-worker broker handoff record is missing required fields");
   }
@@ -7645,17 +7204,14 @@ function parseBrowserServiceWorkerBrokerHandoffRecord(
       candidate.idempotencyKey,
       "service-worker broker idempotency_key",
     ),
-    leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(
-      candidate.leaseEpoch,
-    ),
+    leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(candidate.leaseEpoch),
     metadata: normalizeBrowserServiceWorkerBrokerMetadata(
-      (candidate.metadata as Record<string, unknown> | null | undefined),
+      candidate.metadata as Record<string, unknown> | null | undefined,
     ),
-    reason:
-      normalizeBrowserServiceWorkerBrokerString(
-        candidate.reason,
-        "service-worker broker reason",
-      ) as BrowserServiceWorkerBrokerSupportReason | BrowserExecutionReasonCode,
+    reason: normalizeBrowserServiceWorkerBrokerString(
+      candidate.reason,
+      "service-worker broker reason",
+    ) as BrowserServiceWorkerBrokerSupportReason | BrowserExecutionReasonCode,
     recordedAtMs: Math.max(0, Math.trunc(candidate.recordedAtMs)),
     requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
     sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
@@ -7675,17 +7231,13 @@ export class BrowserServiceWorkerBrokerStore {
   readonly globalObject: Record<string, unknown> | undefined;
   readonly namespace: string;
   readonly now: () => number;
-  readonly onIndexedDbBlocked:
-    | ((progress: BrowserIndexedDbBlockedProgress) => void)
-    | undefined;
+  readonly onIndexedDbBlocked: ((progress: BrowserIndexedDbBlockedProgress) => void) | undefined;
   readonly storeName: string;
   readonly version: number;
 
   constructor(options: BrowserServiceWorkerBrokerStoreOptions = {}) {
-    this.allowBrowserMainThreadFallback =
-      options.allowBrowserMainThreadFallback !== false;
-    this.allowDedicatedWorkerFallback =
-      options.allowDedicatedWorkerFallback !== false;
+    this.allowBrowserMainThreadFallback = options.allowBrowserMainThreadFallback !== false;
+    this.allowDedicatedWorkerFallback = options.allowDedicatedWorkerFallback !== false;
     this.backend = options.backend ?? "indexeddb";
     this.dbName = options.dbName ?? DEFAULT_INDEXEDDB_NAME;
     this.globalObject = options.globalObject ?? defaultGlobalObject();
@@ -7701,10 +7253,7 @@ export class BrowserServiceWorkerBrokerStore {
   diagnostics(
     overrides: Omit<
       BrowserServiceWorkerBrokerSupportOptions,
-      | "allowBrowserMainThreadFallback"
-      | "allowDedicatedWorkerFallback"
-      | "backend"
-      | "globalObject"
+      "allowBrowserMainThreadFallback" | "allowDedicatedWorkerFallback" | "backend" | "globalObject"
     > = {},
   ): BrowserServiceWorkerBrokerSupportDiagnostics {
     return detectBrowserServiceWorkerBrokerSupport({
@@ -7761,11 +7310,10 @@ export class BrowserServiceWorkerBrokerStore {
 
   private isBrokerOperationError(error: unknown): boolean {
     return (
-      typeof error === "object"
-      && error !== null
-      && "code" in error
-      && (error as { code?: string }).code
-        === BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: string }).code === BROWSER_SERVICE_WORKER_BROKER_OPERATION_FAILED_CODE
     );
   }
 
@@ -7786,11 +7334,7 @@ export class BrowserServiceWorkerBrokerStore {
           this.onIndexedDbBlocked,
         );
         try {
-          const { store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readonly",
-          );
+          const { store } = openIndexedDbStore(database, this.storeName, "readonly");
           const request = store.get(
             encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
           );
@@ -7809,9 +7353,7 @@ export class BrowserServiceWorkerBrokerStore {
       if (!storage) {
         throw new Error("localStorage is unavailable in this browser/runtime");
       }
-      const result = storage.getItem(
-        encodeLocalStorageKey(this.namespace, key, this.globalObject),
-      );
+      const result = storage.getItem(encodeLocalStorageKey(this.namespace, key, this.globalObject));
       if (result === null) {
         return null;
       }
@@ -7821,12 +7363,7 @@ export class BrowserServiceWorkerBrokerStore {
       }
       return decoded;
     } catch (error) {
-      throw this.operationError(
-        operation,
-        "storage_failed",
-        errorMessage(error),
-        brokerWorkId,
-      );
+      throw this.operationError(operation, "storage_failed", errorMessage(error), brokerWorkId);
     }
   }
 
@@ -7848,11 +7385,7 @@ export class BrowserServiceWorkerBrokerStore {
           this.onIndexedDbBlocked,
         );
         try {
-          const { transaction, store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readwrite",
-          );
+          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
           store.put(
             compactIndexedDbBytes(value),
             encodeIndexedDbStorageKey(this.namespace, key, this.globalObject),
@@ -7873,12 +7406,7 @@ export class BrowserServiceWorkerBrokerStore {
         encodeBrowserStorageBytes(value, this.globalObject),
       );
     } catch (error) {
-      throw this.operationError(
-        operation,
-        "storage_failed",
-        errorMessage(error),
-        brokerWorkId,
-      );
+      throw this.operationError(operation, "storage_failed", errorMessage(error), brokerWorkId);
     }
   }
 
@@ -7899,16 +7427,8 @@ export class BrowserServiceWorkerBrokerStore {
           this.onIndexedDbBlocked,
         );
         try {
-          const { transaction, store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readwrite",
-          );
-          const storageKey = encodeIndexedDbStorageKey(
-            this.namespace,
-            key,
-            this.globalObject,
-          );
+          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
+          const storageKey = encodeIndexedDbStorageKey(this.namespace, key, this.globalObject);
           const existing = await awaitIndexedDbRequest(store.getKey(storageKey));
           store.delete(storageKey);
           await awaitIndexedDbTransaction(transaction);
@@ -7922,21 +7442,12 @@ export class BrowserServiceWorkerBrokerStore {
       if (!storage) {
         throw new Error("localStorage is unavailable in this browser/runtime");
       }
-      const storageKey = encodeLocalStorageKey(
-        this.namespace,
-        key,
-        this.globalObject,
-      );
+      const storageKey = encodeLocalStorageKey(this.namespace, key, this.globalObject);
       const existed = storage.getItem(storageKey) !== null;
       storage.removeItem(storageKey);
       return existed;
     } catch (error) {
-      throw this.operationError(
-        operation,
-        "storage_failed",
-        errorMessage(error),
-        brokerWorkId,
-      );
+      throw this.operationError(operation, "storage_failed", errorMessage(error), brokerWorkId);
     }
   }
 
@@ -7955,26 +7466,13 @@ export class BrowserServiceWorkerBrokerStore {
           this.onIndexedDbBlocked,
         );
         try {
-          const { store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readonly",
-          );
-          const namespaceRange = indexedDbNamespaceRange(
-            this.namespace,
-            this.globalObject,
-          );
-          const rawKeys = await awaitIndexedDbRequest(
-            store.getAllKeys(namespaceRange),
-          );
+          const { store } = openIndexedDbStore(database, this.storeName, "readonly");
+          const namespaceRange = indexedDbNamespaceRange(this.namespace, this.globalObject);
+          const rawKeys = await awaitIndexedDbRequest(store.getAllKeys(namespaceRange));
           const keys = Array.from(rawKeys as ArrayLike<unknown>)
             .map((value) =>
               typeof value === "string"
-                ? decodeIndexedDbStorageKey(
-                    value,
-                    this.namespace,
-                    this.globalObject,
-                  )
+                ? decodeIndexedDbStorageKey(value, this.namespace, this.globalObject)
                 : null,
             )
             .filter((value): value is string => value !== null);
@@ -7989,21 +7487,14 @@ export class BrowserServiceWorkerBrokerStore {
       if (!storage) {
         throw new Error("localStorage is unavailable in this browser/runtime");
       }
-      const prefix = localStorageNamespacePrefix(
-        this.namespace,
-        this.globalObject,
-      );
+      const prefix = localStorageNamespacePrefix(this.namespace, this.globalObject);
       const keys: string[] = [];
       for (let index = 0; index < storage.length; index += 1) {
         const maybeKey = storage.key(index);
         if (!maybeKey || !maybeKey.startsWith(prefix)) {
           continue;
         }
-        const decoded = decodeLocalStorageKey(
-          maybeKey,
-          this.namespace,
-          this.globalObject,
-        );
+        const decoded = decodeLocalStorageKey(maybeKey, this.namespace, this.globalObject);
         if (decoded !== null) {
           keys.push(decoded);
         }
@@ -8011,17 +7502,11 @@ export class BrowserServiceWorkerBrokerStore {
       keys.sort();
       return Array.from(new Set(keys));
     } catch (error) {
-      throw this.operationError(
-        operation,
-        "storage_failed",
-        errorMessage(error),
-      );
+      throw this.operationError(operation, "storage_failed", errorMessage(error));
     }
   }
 
-  private async clearNamespace(
-    operation: BrowserServiceWorkerBrokerOperation,
-  ): Promise<number> {
+  private async clearNamespace(operation: BrowserServiceWorkerBrokerOperation): Promise<number> {
     if (this.backend === "indexeddb") {
       try {
         const database = await openIndexedDbDatabase(
@@ -8032,15 +7517,8 @@ export class BrowserServiceWorkerBrokerStore {
           this.onIndexedDbBlocked,
         );
         try {
-          const { transaction, store } = openIndexedDbStore(
-            database,
-            this.storeName,
-            "readwrite",
-          );
-          const namespaceRange = indexedDbNamespaceRange(
-            this.namespace,
-            this.globalObject,
-          );
+          const { transaction, store } = openIndexedDbStore(database, this.storeName, "readwrite");
+          const namespaceRange = indexedDbNamespaceRange(this.namespace, this.globalObject);
           const transactionCompletion = awaitIndexedDbTransaction(transaction);
           const countRequest = store.count(namespaceRange);
           store.delete(namespaceRange);
@@ -8053,11 +7531,7 @@ export class BrowserServiceWorkerBrokerStore {
           database.close();
         }
       } catch (error) {
-        throw this.operationError(
-          operation,
-          "storage_failed",
-          errorMessage(error),
-        );
+        throw this.operationError(operation, "storage_failed", errorMessage(error));
       }
     }
 
@@ -8071,17 +7545,11 @@ export class BrowserServiceWorkerBrokerStore {
         throw new Error("localStorage is unavailable in this browser/runtime");
       }
       for (const key of keys) {
-        storage.removeItem(
-          encodeLocalStorageKey(this.namespace, key, this.globalObject),
-        );
+        storage.removeItem(encodeLocalStorageKey(this.namespace, key, this.globalObject));
       }
       return keys.length;
     } catch (error) {
-      throw this.operationError(
-        operation,
-        "storage_failed",
-        errorMessage(error),
-      );
+      throw this.operationError(operation, "storage_failed", errorMessage(error));
     }
   }
 
@@ -8092,9 +7560,7 @@ export class BrowserServiceWorkerBrokerStore {
     brokerWorkId?: string,
   ): T {
     try {
-      const candidate = JSON.parse(
-        browserTextDecoder(this.globalObject).decode(raw),
-      );
+      const candidate = JSON.parse(browserTextDecoder(this.globalObject).decode(raw));
       return parser(candidate);
     } catch (error) {
       throw this.operationError(
@@ -8160,9 +7626,7 @@ export class BrowserServiceWorkerBrokerStore {
   async registerBroker(
     request: BrowserServiceWorkerBrokerRegistrationRequest,
   ): Promise<BrowserServiceWorkerBrokerRegistration> {
-    const admission = normalizeBrowserServiceWorkerBrokerAdmissionTuple(
-      request.admission,
-    );
+    const admission = normalizeBrowserServiceWorkerBrokerAdmissionTuple(request.admission);
     const support = this.assertSupported({
       appNamespace: admission.appNamespace,
       appVersionMajor: admission.appVersionMajor,
@@ -8189,8 +7653,7 @@ export class BrowserServiceWorkerBrokerStore {
       lifecycleState: normalizeBrowserServiceWorkerBrokerLifecycleState(
         request.lifecycleState ?? "validating_scope",
       ),
-      controllerPresent:
-        request.controllerPresent ?? support.controllerPresent,
+      controllerPresent: request.controllerPresent ?? support.controllerPresent,
       directExecutionReasonCode: support.directExecutionReasonCode,
       registeredAtMs: existing?.registeredAtMs ?? now,
       updatedAtMs: now,
@@ -8212,9 +7675,7 @@ export class BrowserServiceWorkerBrokerStore {
     }
     const updated: BrowserServiceWorkerBrokerRegistration = {
       ...registration,
-      lifecycleState: normalizeBrowserServiceWorkerBrokerLifecycleState(
-        lifecycleState,
-      ),
+      lifecycleState: normalizeBrowserServiceWorkerBrokerLifecycleState(lifecycleState),
       updatedAtMs: Math.max(0, Math.trunc(this.now())),
     };
     await this.writeJsonRecord(
@@ -8226,22 +7687,17 @@ export class BrowserServiceWorkerBrokerStore {
   }
 
   async clearRegistration(): Promise<boolean> {
-    return this.deleteRaw(
-      BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY,
-      "clear_registration",
-    );
+    return this.deleteRaw(BROWSER_SERVICE_WORKER_BROKER_REGISTRATION_KEY, "clear_registration");
   }
 
   async listPendingWork(): Promise<BrowserServiceWorkerBrokerDescriptor[]> {
     const keys = await this.listNamespaceKeys("list_work");
     const workKeys = keys.filter((key) =>
-      key.startsWith(BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX)
+      key.startsWith(BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX),
     );
     const descriptors = await Promise.all(
       workKeys.map(async (key) => {
-        const brokerWorkId = key.slice(
-          BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX.length,
-        );
+        const brokerWorkId = key.slice(BROWSER_SERVICE_WORKER_BROKER_WORK_PREFIX.length);
         return this.readJsonRecord(
           key,
           "list_work",
@@ -8252,8 +7708,7 @@ export class BrowserServiceWorkerBrokerStore {
     );
     return descriptors
       .filter(
-        (descriptor): descriptor is BrowserServiceWorkerBrokerDescriptor =>
-          descriptor !== null,
+        (descriptor): descriptor is BrowserServiceWorkerBrokerDescriptor => descriptor !== null,
       )
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs);
   }
@@ -8302,9 +7757,7 @@ export class BrowserServiceWorkerBrokerStore {
         request.idempotencyKey,
         "service-worker broker idempotency_key",
       ),
-      leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(
-        request.leaseEpoch,
-      ),
+      leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(request.leaseEpoch),
       metadata: normalizeBrowserServiceWorkerBrokerMetadata(request.metadata),
       requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
       sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
@@ -8337,13 +7790,11 @@ export class BrowserServiceWorkerBrokerStore {
   async listDurableHandoffs(): Promise<BrowserServiceWorkerBrokerHandoffRecord[]> {
     const keys = await this.listNamespaceKeys("list_handoffs");
     const handoffKeys = keys.filter((key) =>
-      key.startsWith(BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX)
+      key.startsWith(BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX),
     );
     const records = await Promise.all(
       handoffKeys.map(async (key) => {
-        const brokerWorkId = key.slice(
-          BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX.length,
-        );
+        const brokerWorkId = key.slice(BROWSER_SERVICE_WORKER_BROKER_HANDOFF_PREFIX.length);
         return this.readJsonRecord(
           key,
           "list_handoffs",
@@ -8353,10 +7804,7 @@ export class BrowserServiceWorkerBrokerStore {
       }),
     );
     return records
-      .filter(
-        (record): record is BrowserServiceWorkerBrokerHandoffRecord =>
-          record !== null,
-      )
+      .filter((record): record is BrowserServiceWorkerBrokerHandoffRecord => record !== null)
       .sort((left, right) => right.recordedAtMs - left.recordedAtMs);
   }
 
@@ -8400,15 +7848,11 @@ export class BrowserServiceWorkerBrokerStore {
         request.idempotencyKey,
         "service-worker broker idempotency_key",
       ),
-      leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(
-        request.leaseEpoch,
-      ),
+      leaseEpoch: normalizeBrowserServiceWorkerBrokerLeaseEpoch(request.leaseEpoch),
       metadata: normalizeBrowserServiceWorkerBrokerMetadata(request.metadata),
-      reason:
-        (
-          request.reason
-          ?? registration.directExecutionReasonCode
-        ) as BrowserServiceWorkerBrokerSupportReason | BrowserExecutionReasonCode,
+      reason: (request.reason ?? registration.directExecutionReasonCode) as
+        | BrowserServiceWorkerBrokerSupportReason
+        | BrowserExecutionReasonCode,
       recordedAtMs: Math.max(0, Math.trunc(this.now())),
       requestedLane: BROWSER_SERVICE_WORKER_BROKER_LANE,
       sourceEventKind: normalizeBrowserServiceWorkerBrokerString(
@@ -8453,17 +7897,11 @@ export class CancellationToken {
     this.consumerVersion = kindOrOptions.consumerVersion ?? null;
   }
 
-  static user(
-    message?: string,
-    consumerVersion: AbiVersion | null = null,
-  ): CancellationToken {
+  static user(message?: string, consumerVersion: AbiVersion | null = null): CancellationToken {
     return new CancellationToken("user", message, consumerVersion);
   }
 
-  static timeout(
-    message?: string,
-    consumerVersion: AbiVersion | null = null,
-  ): CancellationToken {
+  static timeout(message?: string, consumerVersion: AbiVersion | null = null): CancellationToken {
     return new CancellationToken("timeout", message, consumerVersion);
   }
 
@@ -8485,9 +7923,7 @@ export class CancellationToken {
     );
   }
 
-  toCancellation(
-    phase: AbiCancellation["phase"] = "requested",
-  ): AbiCancellation {
+  toCancellation(phase: AbiCancellation["phase"] = "requested"): AbiCancellation {
     return {
       kind: this.kind,
       phase,
@@ -8512,13 +7948,11 @@ function createBrowserSharedWorkerCoordinatorAdmission(
       support.appNamespace ?? "",
       "shared-worker coordinator app_namespace",
     ),
-    appVersionMajor: normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
-      support.appVersionMajor,
-    ) ?? 0,
+    appVersionMajor:
+      normalizeOptionalBrowserSharedWorkerCoordinatorVersion(support.appVersionMajor) ?? 0,
     coordinatorProtocolVersion:
-      normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
-        support.coordinatorProtocolVersion,
-      ) ?? 0,
+      normalizeOptionalBrowserSharedWorkerCoordinatorVersion(support.coordinatorProtocolVersion) ??
+      0,
     runProfile: normalizeBrowserSharedWorkerCoordinatorString(
       support.runProfile,
       "shared-worker coordinator run_profile",
@@ -8533,36 +7967,25 @@ function createBrowserSharedWorkerClientRegistration(
   const now = options.now ?? (() => Date.now());
   BROWSER_SHARED_WORKER_CLIENT_SEQUENCE += 1;
   const clientInstanceId =
-    normalizeOptionalBrowserSharedWorkerCoordinatorString(
-      options.clientInstanceId,
-    )
-    ?? `browser-shared-worker-client-${Math.max(0, Math.trunc(now()))}-${BROWSER_SHARED_WORKER_CLIENT_SEQUENCE}`;
+    normalizeOptionalBrowserSharedWorkerCoordinatorString(options.clientInstanceId) ??
+    `browser-shared-worker-client-${Math.max(0, Math.trunc(now()))}-${BROWSER_SHARED_WORKER_CLIENT_SEQUENCE}`;
   const clientKind =
-    normalizeOptionalBrowserSharedWorkerCoordinatorString(options.clientKind)
-    ?? (
-      executionLadder.hostRole === "dedicated_worker"
-        ? "dedicated_worker"
-        : "browser_tab"
-    );
-  const clientCapabilitySummary =
-    options.clientCapabilitySummary ?? { ...executionLadder.capabilities };
+    normalizeOptionalBrowserSharedWorkerCoordinatorString(options.clientKind) ??
+    (executionLadder.hostRole === "dedicated_worker" ? "dedicated_worker" : "browser_tab");
+  const clientCapabilitySummary = options.clientCapabilitySummary ?? {
+    ...executionLadder.capabilities,
+  };
   return {
     clientInstanceId: normalizeBrowserSharedWorkerCoordinatorString(
       clientInstanceId,
       "shared-worker coordinator client_instance_id",
     ),
-    clientEpoch:
-      normalizeOptionalBrowserSharedWorkerCoordinatorVersion(
-        options.clientEpoch,
-      ) ?? 0,
+    clientEpoch: normalizeOptionalBrowserSharedWorkerCoordinatorVersion(options.clientEpoch) ?? 0,
     clientKind: normalizeBrowserSharedWorkerCoordinatorString(
       clientKind,
       "shared-worker coordinator client_kind",
     ),
-    clientStartedAtMs: Math.max(
-      0,
-      Math.trunc(options.clientStartedAtMs ?? now()),
-    ),
+    clientStartedAtMs: Math.max(0, Math.trunc(options.clientStartedAtMs ?? now())),
     clientCapabilitySummary,
     clientArtifactNamespace: normalizeBrowserSharedWorkerCoordinatorString(
       options.clientArtifactNamespace,
@@ -8601,11 +8024,11 @@ function isBrowserSharedWorkerCoordinatorSelectionFailure(
   error: unknown,
 ): error is BrowserSharedWorkerCoordinatorSelectionFailure {
   return (
-    typeof error === "object"
-    && error !== null
-    && "reason" in error
-    && "message" in error
-    && "guidance" in error
+    typeof error === "object" &&
+    error !== null &&
+    "reason" in error &&
+    "message" in error &&
+    "guidance" in error
   );
 }
 
@@ -8617,10 +8040,10 @@ function isBrowserSharedWorkerCoordinatorHandshakeResponse(
   }
   const candidate = value as Partial<BrowserSharedWorkerCoordinatorHandshakeResponse>;
   return (
-    candidate.type === "asupersync.browser.shared_worker.handshake.response"
-    && candidate.protocol === BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL
-    && candidate.contractId === BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID
-    && typeof candidate.accepted === "boolean"
+    candidate.type === "asupersync.browser.shared_worker.handshake.response" &&
+    candidate.protocol === BROWSER_SHARED_WORKER_COORDINATOR_PROTOCOL &&
+    candidate.contractId === BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID &&
+    typeof candidate.accepted === "boolean"
   );
 }
 
@@ -8700,10 +8123,7 @@ async function awaitBrowserSharedWorkerCoordinatorHandshake(
       fail(
         "coordinator_bootstrap_failure",
         `SharedWorker coordinator attach failed before the handshake could start: ${errorMessage(error)}`,
-        browserSharedWorkerCoordinatorGuidance(
-          "coordinator_bootstrap_failure",
-          fallbackTarget,
-        ),
+        browserSharedWorkerCoordinatorGuidance("coordinator_bootstrap_failure", fallbackTarget),
       );
     }
   });
@@ -8730,15 +8150,11 @@ async function createBrowserSharedWorkerFallbackSelection(
   const finalGuidance = [...guidance];
   let finalMessage = message;
   if (!runtimeSelection.executionLadder.supported) {
-    finalMessage =
-      `${finalMessage} Fallback runtime selection stayed on ${runtimeSelection.executionLadder.selectedLane} because Browser Edition currently reports ${runtimeSelection.executionLadder.reasonCode}.`;
+    finalMessage = `${finalMessage} Fallback runtime selection stayed on ${runtimeSelection.executionLadder.selectedLane} because Browser Edition currently reports ${runtimeSelection.executionLadder.reasonCode}.`;
     finalGuidance.push(...runtimeSelection.executionLadder.guidance);
     if (runtimeSelection.executionLadder.reasonCode === "demote_due_to_lane_health") {
       finalGuidance.push(
-        ...browserSharedWorkerCoordinatorGuidance(
-          "lane_health_demoted",
-          support.fallbackTarget,
-        ),
+        ...browserSharedWorkerCoordinatorGuidance("lane_health_demoted", support.fallbackTarget),
       );
     }
   }
@@ -8889,40 +8305,25 @@ export async function createBrowserSharedWorkerCoordinatorSelection(
   }
 
   const admission = createBrowserSharedWorkerCoordinatorAdmission(support);
-  const client = createBrowserSharedWorkerClientRegistration(
-    options,
-    executionLadder,
-  );
+  const client = createBrowserSharedWorkerClientRegistration(options, executionLadder);
   const requestedFeatures = {
-    required: normalizeBrowserSharedWorkerCoordinatorFeatures(
-      options.requiredCoordinatorFeatures,
-    ),
-    optional: normalizeBrowserSharedWorkerCoordinatorFeatures(
-      options.optionalCoordinatorFeatures,
-    ),
+    required: normalizeBrowserSharedWorkerCoordinatorFeatures(options.requiredCoordinatorFeatures),
+    optional: normalizeBrowserSharedWorkerCoordinatorFeatures(options.optionalCoordinatorFeatures),
   } satisfies BrowserSharedWorkerCoordinatorFeatureRequest;
-  const handshakeTimeoutMs = Math.max(
-    1,
-    Math.trunc(options.handshakeTimeoutMs ?? 2_000),
-  );
+  const handshakeTimeoutMs = Math.max(1, Math.trunc(options.handshakeTimeoutMs ?? 2_000));
 
   try {
-    const worker = createBrowserSharedWorkerInstance(
-      support,
-      options,
-      globalObject,
-    );
+    const worker = createBrowserSharedWorkerInstance(support, options, globalObject);
     const port = worker.port;
     if (
-      !port
-      || typeof port.postMessage !== "function"
-      || typeof port.addEventListener !== "function"
-      || typeof port.removeEventListener !== "function"
+      !port ||
+      typeof port.postMessage !== "function" ||
+      typeof port.addEventListener !== "function" ||
+      typeof port.removeEventListener !== "function"
     ) {
       throw {
         reason: "coordinator_bootstrap_failure",
-        message:
-          "SharedWorker coordinator did not expose a usable MessagePort for attach.",
+        message: "SharedWorker coordinator did not expose a usable MessagePort for attach.",
         guidance: browserSharedWorkerCoordinatorGuidance(
           "coordinator_bootstrap_failure",
           support.fallbackTarget,
@@ -8951,19 +8352,15 @@ export async function createBrowserSharedWorkerCoordinatorSelection(
         options,
         support,
         responseReason,
-        response.message
-          ?? `SharedWorker coordinator rejected attach with ${responseReason}.`,
-        response.guidance
-          ?? browserSharedWorkerCoordinatorGuidance(
-            responseReason,
-            support.fallbackTarget,
-          ),
+        response.message ?? `SharedWorker coordinator rejected attach with ${responseReason}.`,
+        response.guidance ??
+          browserSharedWorkerCoordinatorGuidance(responseReason, support.fallbackTarget),
       );
     }
 
     if (
-      response.coordinatorProtocolVersion !== undefined
-      && response.coordinatorProtocolVersion !== admission.coordinatorProtocolVersion
+      response.coordinatorProtocolVersion !== undefined &&
+      response.coordinatorProtocolVersion !== admission.coordinatorProtocolVersion
     ) {
       port.close?.();
       return createBrowserSharedWorkerFallbackSelection(
@@ -8978,15 +8375,13 @@ export async function createBrowserSharedWorkerCoordinatorSelection(
       );
     }
 
-    const coordinatorFeatures =
-      normalizeBrowserSharedWorkerCoordinatorFeatures(
-        response.coordinatorFeatures,
-      );
-    const missingRequiredFeatures =
-      browserSharedWorkerMissingRequiredFeatures(
-        requestedFeatures.required,
-        coordinatorFeatures,
-      );
+    const coordinatorFeatures = normalizeBrowserSharedWorkerCoordinatorFeatures(
+      response.coordinatorFeatures,
+    );
+    const missingRequiredFeatures = browserSharedWorkerMissingRequiredFeatures(
+      requestedFeatures.required,
+      coordinatorFeatures,
+    );
     if (missingRequiredFeatures.length > 0) {
       port.close?.();
       return createBrowserSharedWorkerFallbackSelection(
@@ -9004,34 +8399,27 @@ export async function createBrowserSharedWorkerCoordinatorSelection(
     const lifecycleState =
       response.lifecycleState === undefined
         ? "active"
-        : normalizeBrowserSharedWorkerCoordinatorLifecycleState(
-          response.lifecycleState,
-        );
-    const coordinator = new BrowserSharedWorkerCoordinatorClient(
-      worker,
-      port,
-      {
-        contractId: BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID,
-        requestedLane: BROWSER_SHARED_WORKER_COORDINATOR_LANE,
-        fallbackTarget: support.fallbackTarget,
-        fallbackLaneId: support.fallbackLaneId,
-        admission,
-        client,
-        directExecutionLadder: executionLadder,
-        lifecycleState,
-        coordinatorFeatures,
-        scriptUrl: support.scriptUrl ?? "<custom-worker-factory>",
-        workerName: support.workerName,
-      },
-    );
+        : normalizeBrowserSharedWorkerCoordinatorLifecycleState(response.lifecycleState);
+    const coordinator = new BrowserSharedWorkerCoordinatorClient(worker, port, {
+      contractId: BROWSER_SHARED_WORKER_COORDINATOR_CONTRACT_ID,
+      requestedLane: BROWSER_SHARED_WORKER_COORDINATOR_LANE,
+      fallbackTarget: support.fallbackTarget,
+      fallbackLaneId: support.fallbackLaneId,
+      admission,
+      client,
+      directExecutionLadder: executionLadder,
+      lifecycleState,
+      coordinatorFeatures,
+      scriptUrl: support.scriptUrl ?? "<custom-worker-factory>",
+      workerName: support.workerName,
+    });
 
     return {
       selectedMode: "shared_worker",
       support,
       executionLadder,
       reason: "supported",
-      message:
-        `@asupersync/browser attached a SharedWorker coordinator and preserved ${support.fallbackTarget} as the truthful downgrade lane.`,
+      message: `@asupersync/browser attached a SharedWorker coordinator and preserved ${support.fallbackTarget} as the truthful downgrade lane.`,
       guidance: [
         "Treat the SharedWorker coordinator as an optional optimization over the current direct-runtime lane, not as a new ambient authority boundary.",
         "Downgrade immediately to the fallback lane whenever the coordinator denies attach, crashes, or is reclaimed by the browser.",
@@ -9046,13 +8434,13 @@ export async function createBrowserSharedWorkerCoordinatorSelection(
       isBrowserSharedWorkerCoordinatorSelectionFailure(error)
         ? error
         : {
-          reason: "coordinator_bootstrap_failure",
-          message: `SharedWorker coordinator attach failed: ${errorMessage(error)}`,
-          guidance: browserSharedWorkerCoordinatorGuidance(
-            "coordinator_bootstrap_failure",
-            support.fallbackTarget,
-          ),
-        };
+            reason: "coordinator_bootstrap_failure",
+            message: `SharedWorker coordinator attach failed: ${errorMessage(error)}`,
+            guidance: browserSharedWorkerCoordinatorGuidance(
+              "coordinator_bootstrap_failure",
+              support.fallbackTarget,
+            ),
+          };
     return createBrowserSharedWorkerFallbackSelection(
       options,
       support,
@@ -9145,29 +8533,35 @@ export async function createBrowserRuntimeSelection(
     }
   }
 
-  const outcome = mapOutcome(runtimeCreate({
-    fetchAuthority: options.fetchAuthority,
-  }, consumerVersion), (handle) => {
-    const stableLaneHealth = clearBrowserLaneHealth(
-      executionLadder.health.laneId,
-      options.healthScopeKey,
-      options.healthPolicy,
-      options.now,
-    );
-    const stableExecutionLadder = detectBrowserExecutionLadder({
-      globalObject: options.globalObject,
-      preferredLane: options.preferredLane,
-      healthPolicy: options.healthPolicy,
-      healthScopeKey: stableLaneHealth.scopeKey,
-      now: options.now,
-    });
-    return new BrowserRuntime(handle, consumerVersion, stableExecutionLadder, {
-      globalObject: options.globalObject,
-      healthPolicy: options.healthPolicy,
-      healthScopeKey: stableLaneHealth.scopeKey,
-      now: options.now,
-    });
-  });
+  const outcome = mapOutcome(
+    runtimeCreate(
+      {
+        fetchAuthority: options.fetchAuthority,
+      },
+      consumerVersion,
+    ),
+    (handle) => {
+      const stableLaneHealth = clearBrowserLaneHealth(
+        executionLadder.health.laneId,
+        options.healthScopeKey,
+        options.healthPolicy,
+        options.now,
+      );
+      const stableExecutionLadder = detectBrowserExecutionLadder({
+        globalObject: options.globalObject,
+        preferredLane: options.preferredLane,
+        healthPolicy: options.healthPolicy,
+        healthScopeKey: stableLaneHealth.scopeKey,
+        now: options.now,
+      });
+      return new BrowserRuntime(handle, consumerVersion, stableExecutionLadder, {
+        globalObject: options.globalObject,
+        healthPolicy: options.healthPolicy,
+        healthScopeKey: stableLaneHealth.scopeKey,
+        now: options.now,
+      });
+    },
+  );
 
   if (outcome.outcome !== "ok") {
     const health = recordBrowserLaneHealthEvent(

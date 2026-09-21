@@ -31,9 +31,7 @@
       "summary": "Draft receipt exercises proof runner execute mode against reviewed fixture outputs.",
       "superseded_by": "",
       "test_path": "tests/proof_runner_contract.rs",
-      "validation": [
-        "rch exec -- cargo test -p asupersync --test proof_runner_contract"
-      ]
+      "validation": ["rch exec -- cargo test -p asupersync --test proof_runner_contract"]
     }
   ],
   "redaction_counts": {

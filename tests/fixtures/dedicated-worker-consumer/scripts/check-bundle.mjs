@@ -81,9 +81,7 @@ if (!sawBootstrapMarker) {
 }
 
 if (!sawShutdownMarker) {
-  throw new Error(
-    "Built worker bundle must retain the worker-shutdown-complete message marker",
-  );
+  throw new Error("Built worker bundle must retain the worker-shutdown-complete message marker");
 }
 
 if (!sawRuntimeSelectionBaselineMarker) {

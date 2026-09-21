@@ -8,10 +8,7 @@
   },
   "scenario_registry": {
     "owner_bead": "asupersync-5z2scg.5.4",
-    "roots": [
-      "examples/scenarios",
-      "frankenlab/examples/scenarios"
-    ],
+    "roots": ["examples/scenarios", "frankenlab/examples/scenarios"],
     "source_state": "SOURCE_ALIGNED_STATIC",
     "execution_state": "NOT_RUN_BY_STATIC_LANE",
     "no_claim": "Registry coverage is source metadata only; it does not prove that any scenario parses, validates, executes, or replays."
@@ -22,13 +19,8 @@
       "availability": "unavailable-on-pinned-toolchain",
       "policy": "report-only",
       "checked_command": "rustc -W help",
-      "observed_related_lints": [
-        "missing-docs"
-      ],
-      "replacement_gates": [
-        "cargo test -p asupersync --doc",
-        "cargo doc -p asupersync --no-deps"
-      ]
+      "observed_related_lints": ["missing-docs"],
+      "replacement_gates": ["cargo test -p asupersync --doc", "cargo doc -p asupersync --no-deps"]
     },
     "core_api": [
       {
@@ -186,11 +178,7 @@
         "end": 115
       },
       "kind": "markdown",
-      "demonstrates": [
-        "example-catalog",
-        "graduated-onramp",
-        "run-command-discovery"
-      ],
+      "demonstrates": ["example-catalog", "graduated-onramp", "run-command-discovery"],
       "feature_flags": [],
       "run_command": "manual: read examples/README.md",
       "description": "Human-readable index of every runnable example, operator artifact, and deterministic scenario fixture."
@@ -203,11 +191,7 @@
         "end": 389
       },
       "kind": "rust",
-      "demonstrates": [
-        "appspec",
-        "deterministic-lab-runtime",
-        "fail-closed-lowering"
-      ],
+      "demonstrates": ["appspec", "deterministic-lab-runtime", "fail-closed-lowering"],
       "feature_flags": [],
       "run_command": "cargo run --example appspec_reference_journey",
       "description": "Declarative AppSpec and Lab lifecycle journey demonstrating explicit Cx ownership, quiescence, and fail-closed lowering; declared services are metadata."
@@ -220,11 +204,7 @@
         "end": 497
       },
       "kind": "rust",
-      "demonstrates": [
-        "atp-daemon-configuration",
-        "peer-directory",
-        "transfer-accounting"
-      ],
+      "demonstrates": ["atp-daemon-configuration", "peer-directory", "transfer-accounting"],
       "feature_flags": [],
       "run_command": "cargo run --example atp_daemon_basic",
       "description": "Basic ATP daemon setup with in-process peer and transfer state."
@@ -237,11 +217,7 @@
         "end": 315
       },
       "kind": "shell",
-      "demonstrates": [
-        "atp-cli-workflow",
-        "dogfood-script",
-        "operator-transcript"
-      ],
+      "demonstrates": ["atp-cli-workflow", "dogfood-script", "operator-transcript"],
       "feature_flags": [],
       "run_command": "manual: bash examples/atp_dogfood_demo.sh",
       "description": "Shell-driven ATP dogfood workflow for manual operator validation."
@@ -254,11 +230,7 @@
         "end": 554
       },
       "kind": "markdown",
-      "demonstrates": [
-        "atp-cli-journeys",
-        "operator-recipes",
-        "workflow-documentation"
-      ],
+      "demonstrates": ["atp-cli-journeys", "operator-recipes", "workflow-documentation"],
       "feature_flags": [],
       "run_command": "manual: read examples/atp_j5_cli_examples.md",
       "description": "Markdown catalog of ATP J5 CLI journeys and expected operator flows."
@@ -288,14 +260,8 @@
         "end": 3
       },
       "kind": "rust",
-      "demonstrates": [
-        "channel-mpsc",
-        "select-combinator",
-        "real-service-e2e"
-      ],
-      "feature_flags": [
-        "channel-mpsc-select-e2e"
-      ],
+      "demonstrates": ["channel-mpsc", "select-combinator", "real-service-e2e"],
+      "feature_flags": ["channel-mpsc-select-e2e"],
       "run_command": "cargo run --example channel_mpsc_select_e2e --features channel-mpsc-select-e2e",
       "description": "Thin example target that dispatches the real channel MPSC select E2E harness."
     },
@@ -307,11 +273,7 @@
         "end": 264
       },
       "kind": "rust",
-      "demonstrates": [
-        "chaos-injection",
-        "lab-runtime",
-        "deterministic-reproduction"
-      ],
+      "demonstrates": ["chaos-injection", "lab-runtime", "deterministic-reproduction"],
       "feature_flags": [],
       "run_command": "cargo run --example chaos_testing",
       "description": "Chaos-mode examples for deterministic fault, delay, and budget injection."
@@ -324,14 +286,8 @@
         "end": 679
       },
       "kind": "rust",
-      "demonstrates": [
-        "time-travel-debugging",
-        "golden-checksums",
-        "trace-minimization"
-      ],
-      "feature_flags": [
-        "test-internals"
-      ],
+      "demonstrates": ["time-travel-debugging", "golden-checksums", "trace-minimization"],
+      "feature_flags": ["test-internals"],
       "run_command": "cargo run --example demo_benchmark --features test-internals",
       "description": "Reproducible time-travel demo benchmark with golden checksum validation."
     },
@@ -343,14 +299,8 @@
         "end": 374
       },
       "kind": "rust",
-      "demonstrates": [
-        "delta-debugging",
-        "trace-minimizer",
-        "failure-narrative"
-      ],
-      "feature_flags": [
-        "test-internals"
-      ],
+      "demonstrates": ["delta-debugging", "trace-minimizer", "failure-narrative"],
+      "feature_flags": ["test-internals"],
       "run_command": "cargo run --example demo_delta_debug --features test-internals",
       "description": "Hierarchical delta-debugging demo over recorded structured-concurrency traces."
     },
@@ -362,11 +312,7 @@
         "end": 449
       },
       "kind": "rust",
-      "demonstrates": [
-        "nondeterministic-replay",
-        "obligation-leak-search",
-        "trace-recording"
-      ],
+      "demonstrates": ["nondeterministic-replay", "obligation-leak-search", "trace-recording"],
       "feature_flags": [],
       "run_command": "cargo run --example demo_record_nondeterministic",
       "description": "Seed sweep that records a cancel and obligation race for deterministic replay."
@@ -379,11 +325,7 @@
         "end": 35
       },
       "kind": "rust",
-      "demonstrates": [
-        "same-seed-replay",
-        "lab-runtime",
-        "structured-fanout"
-      ],
+      "demonstrates": ["same-seed-replay", "lab-runtime", "structured-fanout"],
       "feature_flags": [],
       "run_command": "cargo run --example deterministic_test",
       "description": "Short same-seed replay example that checks quiescence, leak freedom, and deterministic fan-out."
@@ -396,11 +338,7 @@
         "end": 25
       },
       "kind": "rust",
-      "demonstrates": [
-        "public-api",
-        "runtime-builder",
-        "external-consumer-smoke"
-      ],
+      "demonstrates": ["public-api", "runtime-builder", "external-consumer-smoke"],
       "feature_flags": [],
       "run_command": "cargo run --example external_consumer",
       "description": "Small public-API consumer smoke example for runtime and lab entry points."
@@ -413,11 +351,7 @@
         "end": 744
       },
       "kind": "json",
-      "demonstrates": [
-        "observability-dashboard",
-        "grafana-import",
-        "metrics-visualization"
-      ],
+      "demonstrates": ["observability-dashboard", "grafana-import", "metrics-visualization"],
       "feature_flags": [],
       "run_command": "manual: import examples/grafana_dashboard.json into Grafana",
       "description": "Grafana dashboard JSON for visualizing Asupersync observability metrics."
@@ -430,11 +364,7 @@
         "end": 5
       },
       "kind": "rust",
-      "demonstrates": [
-        "main-macro",
-        "cx-checkpoint",
-        "minimal-runtime"
-      ],
+      "demonstrates": ["main-macro", "cx-checkpoint", "minimal-runtime"],
       "feature_flags": [],
       "run_command": "cargo run --example hello",
       "description": "Minimal async entry point using Asupersync's main macro and Cx checkpoint."
@@ -447,11 +377,7 @@
         "end": 72
       },
       "kind": "rust",
-      "demonstrates": [
-        "proc-macros",
-        "scope-macro",
-        "spawn-join-basics"
-      ],
+      "demonstrates": ["proc-macros", "scope-macro", "spawn-join-basics"],
       "feature_flags": [],
       "run_command": "cargo run --example macros_basic",
       "description": "Basic structured-concurrency macro usage with scope and spawned work."
@@ -464,11 +390,7 @@
         "end": 24
       },
       "kind": "rust",
-      "demonstrates": [
-        "proc-macros",
-        "error-propagation",
-        "scope-failure"
-      ],
+      "demonstrates": ["proc-macros", "error-propagation", "scope-failure"],
       "feature_flags": [],
       "run_command": "cargo run --example macros_error_handling",
       "description": "Structured-concurrency macro error-handling example."
@@ -481,11 +403,7 @@
         "end": 74
       },
       "kind": "rust",
-      "demonstrates": [
-        "proc-macros",
-        "nested-scopes",
-        "structured-concurrency-tree"
-      ],
+      "demonstrates": ["proc-macros", "nested-scopes", "structured-concurrency-tree"],
       "feature_flags": [],
       "run_command": "cargo run --example macros_nested",
       "description": "Nested macro scopes demonstrating tree-shaped task ownership."
@@ -498,11 +416,7 @@
         "end": 71
       },
       "kind": "rust",
-      "demonstrates": [
-        "proc-macros",
-        "race-macro",
-        "loser-drain"
-      ],
+      "demonstrates": ["proc-macros", "race-macro", "loser-drain"],
       "feature_flags": [],
       "run_command": "cargo run --example macros_race",
       "description": "Race macro example focused on winner selection and loser cleanup."
@@ -515,10 +429,7 @@
         "end": 8
       },
       "kind": "rust",
-      "demonstrates": [
-        "entry-attribute",
-        "production-runtime-entry"
-      ],
+      "demonstrates": ["entry-attribute", "production-runtime-entry"],
       "feature_flags": [],
       "run_command": "cargo run --example onramp_level0",
       "description": "Level-zero entry point using the production runtime attribute without introducing runtime concepts."
@@ -531,12 +442,7 @@
         "end": 16
       },
       "kind": "rust",
-      "demonstrates": [
-        "prelude",
-        "capability-context",
-        "outcome",
-        "budget-meet"
-      ],
+      "demonstrates": ["prelude", "capability-context", "outcome", "budget-meet"],
       "feature_flags": [],
       "run_command": "cargo run --example onramp_level1",
       "description": "Level-one program making capability context, four-valued outcomes, and composable budgets explicit."
@@ -549,11 +455,7 @@
         "end": 23
       },
       "kind": "rust",
-      "demonstrates": [
-        "scope-budget",
-        "join-set",
-        "region-owned-fanout"
-      ],
+      "demonstrates": ["scope-budget", "join-set", "region-owned-fanout"],
       "feature_flags": [],
       "run_command": "cargo run --example onramp_level2",
       "description": "Level-two program spawning and collecting dynamic fan-out through a scoped region-owned JoinSet."
@@ -566,11 +468,7 @@
         "end": 41
       },
       "kind": "rust",
-      "demonstrates": [
-        "two-phase-send",
-        "lab-runtime",
-        "obligation-leak-oracle"
-      ],
+      "demonstrates": ["two-phase-send", "lab-runtime", "obligation-leak-oracle"],
       "feature_flags": [],
       "run_command": "cargo run --example onramp_level3",
       "description": "Level-three program committing a two-phase send and asserting that the lab catches a deliberate obligation leak."
@@ -583,14 +481,8 @@
         "end": 182
       },
       "kind": "rust",
-      "demonstrates": [
-        "http1-listener",
-        "sqlite-handler",
-        "graceful-drain"
-      ],
-      "feature_flags": [
-        "sqlite"
-      ],
+      "demonstrates": ["http1-listener", "sqlite-handler", "graceful-drain"],
+      "feature_flags": ["sqlite"],
       "run_command": "cargo run --example production_service --features sqlite",
       "description": "Production-style HTTP service fixture with SQLite-backed handler and request-aware graceful drain."
     },
@@ -602,14 +494,8 @@
         "end": 158
       },
       "kind": "rust",
-      "demonstrates": [
-        "metrics",
-        "opentelemetry",
-        "prometheus-export-shape"
-      ],
-      "feature_flags": [
-        "metrics"
-      ],
+      "demonstrates": ["metrics", "opentelemetry", "prometheus-export-shape"],
+      "feature_flags": ["metrics"],
       "run_command": "cargo run --example prometheus_metrics --features metrics",
       "description": "Metrics-provider example showing OpenTelemetry integration for Prometheus-style export."
     },
@@ -621,11 +507,7 @@
         "end": 30
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "cancellation-exhaustive",
-        "lab-scenario-runner"
-      ],
+      "demonstrates": ["scenario-fixture", "cancellation-exhaustive", "lab-scenario-runner"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/cancellation_exhaustive.yaml",
       "description": "Scenario fixture for exhaustive cancellation behavior checks."
@@ -638,11 +520,7 @@
         "end": 34
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "send-permit",
-        "ack-obligation"
-      ],
+      "demonstrates": ["scenario-fixture", "send-permit", "ack-obligation"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/chaos_sendpermit_ack.yaml",
       "description": "Chaos scenario covering send-permit and ack obligation interactions."
@@ -655,11 +533,7 @@
         "end": 42
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "clock-skew",
-        "lease-obligation"
-      ],
+      "demonstrates": ["scenario-fixture", "clock-skew", "lease-obligation"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/clock_skew_lease.yaml",
       "description": "Clock-skew scenario for lease obligation behavior."
@@ -672,11 +546,7 @@
         "end": 25
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "composition-base",
-        "reusable-scenario"
-      ],
+      "demonstrates": ["scenario-fixture", "composition-base", "reusable-scenario"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/composable_base.yaml",
       "description": "Base scenario fixture used by composed scenario workflows."
@@ -689,11 +559,7 @@
         "end": 31
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "partition",
-        "scenario-composition"
-      ],
+      "demonstrates": ["scenario-fixture", "partition", "scenario-composition"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/composed_partition_test.yaml",
       "description": "Composed scenario fixture for partition behavior."
@@ -706,11 +572,7 @@
         "end": 64
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "latency-model",
-        "network-simulation"
-      ],
+      "demonstrates": ["scenario-fixture", "latency-model", "network-simulation"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/custom_latency_model.yaml",
       "description": "Scenario fixture with a custom latency model for network simulation."
@@ -723,11 +585,7 @@
         "end": 57
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "obligation-leak-narrative",
-        "frankenlab-cli"
-      ],
+      "demonstrates": ["scenario-fixture", "obligation-leak-narrative", "frankenlab-cli"],
       "feature_flags": [],
       "run_command": "scenario: frankenlab/examples/scenarios/02_obligation_leak.yaml",
       "description": "Typed FrankenLab Scenario fixture describing an obligation-leak narrative; this registry does not establish runner effects."
@@ -740,11 +598,7 @@
         "end": 41
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "race-condition-narrative",
-        "frankenlab-cli"
-      ],
+      "demonstrates": ["scenario-fixture", "race-condition-narrative", "frankenlab-cli"],
       "feature_flags": [],
       "run_command": "scenario: frankenlab/examples/scenarios/01_race_condition.yaml",
       "description": "Typed FrankenLab Scenario fixture describing a race-condition narrative; this registry does not establish runner effects."
@@ -757,11 +611,7 @@
         "end": 127
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "saga-partition-narrative",
-        "frankenlab-cli"
-      ],
+      "demonstrates": ["scenario-fixture", "saga-partition-narrative", "frankenlab-cli"],
       "feature_flags": [],
       "run_command": "scenario: frankenlab/examples/scenarios/03_saga_partition.yaml",
       "description": "Typed FrankenLab Scenario fixture describing a partitioned-saga narrative; this registry does not establish runner effects."
@@ -774,11 +624,7 @@
         "end": 46
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "host-crash",
-        "restart-recovery"
-      ],
+      "demonstrates": ["scenario-fixture", "host-crash", "restart-recovery"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/host_crash_restart.yaml",
       "description": "Scenario fixture for host crash and restart recovery behavior."
@@ -791,11 +637,7 @@
         "end": 62
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "network-partition",
-        "partition-healing"
-      ],
+      "demonstrates": ["scenario-fixture", "network-partition", "partition-healing"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/partition_heal.yaml",
       "description": "Scenario fixture for network partition and healing behavior."
@@ -808,11 +650,7 @@
         "end": 24
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "smoke-test",
-        "happy-path"
-      ],
+      "demonstrates": ["scenario-fixture", "smoke-test", "happy-path"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/smoke_happy_path.yaml",
       "description": "Small happy-path scenario fixture for runner smoke tests."
@@ -825,11 +663,7 @@
         "end": 44
       },
       "kind": "scenario-yaml",
-      "demonstrates": [
-        "scenario-fixture",
-        "stress",
-        "task-scale"
-      ],
+      "demonstrates": ["scenario-fixture", "stress", "task-scale"],
       "feature_flags": [],
       "run_command": "scenario: examples/scenarios/stress_10k_tasks.yaml",
       "description": "Stress scenario fixture for a high task-count workload."
@@ -842,11 +676,7 @@
         "end": 121
       },
       "kind": "rust",
-      "demonstrates": [
-        "session-types",
-        "obligation-proofs",
-        "typed-channel-protocol"
-      ],
+      "demonstrates": ["session-types", "obligation-proofs", "typed-channel-protocol"],
       "feature_flags": [],
       "run_command": "cargo run --example session_typed_channel",
       "description": "Obligation session facade examples covering send permit, lease, and two-phase commit."
@@ -859,11 +689,7 @@
         "end": 15
       },
       "kind": "rust",
-      "demonstrates": [
-        "cx-spawn",
-        "fanout",
-        "join"
-      ],
+      "demonstrates": ["cx-spawn", "fanout", "join"],
       "feature_flags": [],
       "run_command": "cargo run --example spawn_fanout",
       "description": "Small fanout example spawning and joining child tasks through Cx."
@@ -876,14 +702,8 @@
         "end": 247
       },
       "kind": "rust",
-      "demonstrates": [
-        "spork",
-        "supervision-tree",
-        "named-gen-server"
-      ],
-      "feature_flags": [
-        "test-internals"
-      ],
+      "demonstrates": ["spork", "supervision-tree", "named-gen-server"],
+      "feature_flags": ["test-internals"],
       "run_command": "cargo run --example spork_minimal_supervised_app --features test-internals",
       "description": "Minimal supervised application example with a named GenServer child."
     },
@@ -895,11 +715,7 @@
         "end": 67
       },
       "kind": "rust",
-      "demonstrates": [
-        "io",
-        "read-line",
-        "manual-smoke"
-      ],
+      "demonstrates": ["io", "read-line", "manual-smoke"],
       "feature_flags": [],
       "run_command": "cargo run --example test_manual",
       "description": "Manual smoke example for buffered read_line behavior over split UTF-8 input."

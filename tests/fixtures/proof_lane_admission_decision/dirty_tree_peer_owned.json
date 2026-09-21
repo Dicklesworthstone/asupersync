@@ -69,12 +69,8 @@
   },
   "dirty_tree": {
     "classification": "peer-owned-source",
-    "dirty_paths": [
-      "src/net/tcp/stream.rs"
-    ],
-    "peer_owned_paths": [
-      "src/net/tcp/stream.rs"
-    ],
+    "dirty_paths": ["src/net/tcp/stream.rs"],
+    "peer_owned_paths": ["src/net/tcp/stream.rs"],
     "unreserved_source_paths": []
   },
   "proof_cache_warmth": {

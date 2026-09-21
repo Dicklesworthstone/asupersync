@@ -17,10 +17,7 @@ type WorkerShutdownMessage = {
   reason: string | null;
 };
 
-type WorkerMessage =
-  | WorkerBootstrapMessage
-  | WorkerBootstrapFailedMessage
-  | WorkerShutdownMessage;
+type WorkerMessage = WorkerBootstrapMessage | WorkerBootstrapFailedMessage | WorkerShutdownMessage;
 
 const statusElement = document.getElementById("status");
 if (!statusElement) {

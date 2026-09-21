@@ -1,7 +1,5 @@
 {
-  "action_items": [
-    "provide at least one touched file before selecting proof lanes"
-  ],
+  "action_items": ["provide at least one touched file before selecting proof lanes"],
   "blocked_selected_lanes": [],
   "blocked_supplemental_lanes": [],
   "current_date": "2026-05-08",

@@ -1,11 +1,7 @@
 {
   "active_bead_ids": {
-    "in_progress": [
-      "asupersync-c8thc8.11"
-    ],
-    "ready": [
-      "asupersync-c8thc8.1"
-    ],
+    "in_progress": ["asupersync-c8thc8.11"],
+    "ready": ["asupersync-c8thc8.1"],
     "stale_in_progress": []
   },
   "agent": "CopperSpring",
@@ -18,22 +14,14 @@
   },
   "dirty_clusters": [
     {
-      "actions": [
-        "stage only with the matching bead work; do not mix unrelated tracker updates"
-      ],
+      "actions": ["stage only with the matching bead work; do not mix unrelated tracker updates"],
       "cluster": "beads-tracker-state",
-      "paths": [
-        ".beads/issues.jsonl"
-      ]
+      "paths": [".beads/issues.jsonl"]
     },
     {
-      "actions": [
-        "coordinate with RubyRobin before validation"
-      ],
+      "actions": ["coordinate with RubyRobin before validation"],
       "cluster": "peer-owned/swarm-capacity",
-      "paths": [
-        "src/runtime/scheduler/swarm_evidence.rs"
-      ]
+      "paths": ["src/runtime/scheduler/swarm_evidence.rs"]
     }
   ],
   "generated_at": "2026-05-08T04:30:00Z",
@@ -42,10 +30,7 @@
     "path": "src/runtime/scheduler/swarm_evidence.rs",
     "reason": "dirty paths need owner attribution before staging or validation"
   },
-  "proof_suggestions": [
-    "rustfmt-check",
-    "all-targets-check"
-  ],
+  "proof_suggestions": ["rustfmt-check", "all-targets-check"],
   "rch": {
     "available": true,
     "queue_summary": "queued=0 running=0"

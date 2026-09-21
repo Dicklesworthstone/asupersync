@@ -27,14 +27,8 @@
         "Asupersync.lean:3029:34",
         "Asupersync.lean:3043:34"
       ],
-      "linked_gap_ids": [
-        "gap.proof_shape.preservation_branches"
-      ],
-      "linked_bead_ids": [
-        "bd-112rm",
-        "bd-366fd",
-        "bd-3tal8"
-      ]
+      "linked_gap_ids": ["gap.proof_shape.preservation_branches"],
+      "linked_bead_ids": ["bd-112rm", "bd-366fd", "bd-3tal8"]
     }
   ]
 }

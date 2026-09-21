@@ -39,20 +39,13 @@
     "formal/lean/coverage/invariant_theorem_test_link_map.json",
     "formal/lean/coverage/ci_verification_profiles.json"
   ],
-  "required_tests": [
-    "tests/refinement_conformance.rs",
-    "tests/runtime_state_refinement_map.rs"
-  ],
+  "required_tests": ["tests/refinement_conformance.rs", "tests/runtime_state_refinement_map.rs"],
   "signoff_checklist": [
     {
       "check_id": "check.coverage_report_complete",
       "description": "Report contains coverage %, mismatch trend, unresolved blockers, and confidence statement.",
-      "required_artifacts": [
-        "formal/lean/coverage/runtime_state_refinement_map.json"
-      ],
-      "required_tests": [
-        "tests/runtime_state_refinement_map.rs"
-      ],
+      "required_artifacts": ["formal/lean/coverage/runtime_state_refinement_map.json"],
+      "required_tests": ["tests/runtime_state_refinement_map.rs"],
       "pass_criteria": "All required_report_fields are present and machine-validated."
     },
     {
@@ -71,12 +64,8 @@
     {
       "check_id": "check.governance_record_linked",
       "description": "Sign-off decision is linked to governance review cadence and bead updates.",
-      "required_artifacts": [
-        "formal/lean/coverage/ci_verification_profiles.json"
-      ],
-      "required_tests": [
-        "tests/runtime_state_refinement_map.rs"
-      ],
+      "required_artifacts": ["formal/lean/coverage/ci_verification_profiles.json"],
+      "required_tests": ["tests/runtime_state_refinement_map.rs"],
       "pass_criteria": "Governance thread references and ownership roles are present and non-empty."
     }
   ],
@@ -85,11 +74,7 @@
       {
         "cadence_id": "weekly",
         "max_interval_days": 7,
-        "required_participants": [
-          "Conformance owner",
-          "Formal owner",
-          "Runtime owner"
-        ],
+        "required_participants": ["Conformance owner", "Formal owner", "Runtime owner"],
         "governance_record_thread": "bd-3gnw9"
       },
       {
@@ -106,11 +91,7 @@
     ],
     "ownership_roles": {
       "report_owner_role": "Conformance owner",
-      "signoff_approver_roles": [
-        "Formal owner",
-        "Runtime owner",
-        "CI/governance owner"
-      ],
+      "signoff_approver_roles": ["Formal owner", "Runtime owner", "CI/governance owner"],
       "escalation_owner_role": "Track-5 governance owner"
     },
     "governance_links": [
@@ -124,10 +105,7 @@
     "Run phase-exit sign-off after blocker closure and attach governance thread note."
   ],
   "track6_input": {
-    "consumer_beads": [
-      "asupersync-2izu4",
-      "asupersync-3gf4i"
-    ],
+    "consumer_beads": ["asupersync-2izu4", "asupersync-3gf4i"],
     "export_fields": [
       "coverage_percent",
       "mismatch_trend",

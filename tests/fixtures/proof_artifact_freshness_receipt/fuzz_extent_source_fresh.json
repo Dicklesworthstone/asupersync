@@ -18,14 +18,8 @@
       "status": "pass",
       "generated_at": "2026-05-08T05:15:00Z",
       "fuzz_extent": {
-        "registered_targets": [
-          "dns_lookup_decoder",
-          "dns_message_decoder"
-        ],
-        "compiled_targets": [
-          "dns_lookup_decoder",
-          "dns_message_decoder"
-        ],
+        "registered_targets": ["dns_lookup_decoder", "dns_message_decoder"],
+        "compiled_targets": ["dns_lookup_decoder", "dns_message_decoder"],
         "command_fingerprint": "sha256:command-fuzz-all-bins",
         "toolchain_fingerprint": "rustc 1.91.0-nightly (remote-rch)",
         "target_dir_identity": "/tmp/rch_target_fuzz_extent_source_fresh",

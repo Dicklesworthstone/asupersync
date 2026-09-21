@@ -2270,7 +2270,7 @@ async function loadWasm() {
         try { return { outcome: 'ok', value: new Kind(call()) }; }
         catch (error) { return { outcome: 'err', failure: failureFrom(error, label) }; }
       };
-      const runtimeCreateCompat = function(options = {}) {
+      const runtimeCreateCompat = (options = {}) => {
         let result;
         const request = JSON.stringify({
           fetchAuthority: options.fetchAuthority || {},
@@ -2387,7 +2387,7 @@ function animateCounter(elementId, targetValue, duration = 1200) {
   function tick(now) {
     const t = Math.min(1, (now - start) / duration);
     // easeOutExpo: 1 - 2^(-10t)
-    const eased = t === 1 ? 1 : 1 - Math.pow(2, -10 * t);
+    const eased = t === 1 ? 1 : 1 - 2 ** (-10 * t);
     const current = Math.round(startVal + (targetValue - startVal) * eased);
     el.textContent = current.toLocaleString();
     if (t < 1) requestAnimationFrame(tick);
@@ -2508,19 +2508,19 @@ async function initRuntime() {
     initRuntimePromise = null;
   }
 }
-window.retryWasm = async function() {
+window.retryWasm = async () => {
   wasmReady = false; mod = null;
   const error = document.getElementById('init-error');
   error.hidden = true;
   document.getElementById('wasm-status-badge').innerHTML = '<span class="status-dot loading"></span> Retrying local WASM…';
   await initRuntime();
 };
-window.scrollToTop = function() { window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' }); };
+window.scrollToTop = () => { window.scrollTo({ top: 0, behavior: reducedMotion ? 'auto' : 'smooth' }); };
 // Keep initDemo as an alias for backward compatibility with onclick handlers
 window.initDemo = initRuntime;
 
 // ─── Exhibit 1: ABI ──────────────────────────────────────────────
-window.runAbiDemo = function() {
+window.runAbiDemo = () => {
   clearConsole('abi-console');
   const a = requireWasm('abi-console');
   if (!a) return;
@@ -2645,7 +2645,7 @@ const regionState = {
   },
   getDescendants(id) {
     const children = this.regions.filter(r => r.parent === id);
-    let ids = [];
+    const ids = [];
     for (const c of children) { ids.push(c.id); ids.push(...this.getDescendants(c.id)); }
     return ids;
   }
@@ -2683,7 +2683,7 @@ function renderRegionTree() {
   svg.innerHTML = html;
 }
 
-window.cancelRegion = function(id) {
+window.cancelRegion = (id) => {
   const region = regionState.regions.find(r => r.id === id);
   if (!region || region.status !== 'running') return;
 
@@ -2741,7 +2741,7 @@ window.cancelRegion = function(id) {
   }, 1400));
 };
 
-window.runRegionDemo = async function() {
+window.runRegionDemo = async () => {
   if (!liveRT) {
     await initRuntime();
   }
@@ -2749,7 +2749,7 @@ window.runRegionDemo = async function() {
   clog('region-console', 'Region tree initialized. Click any region to trigger cascading cancellation.', 'info');
 };
 
-window.resetRegionViz = function() {
+window.resetRegionViz = () => {
   clearConsole('region-console');
   // Close old WASM runtime before reinitializing
   if (regionState.wasmRT) {
@@ -2832,7 +2832,7 @@ function renderOutcomeLattice(selected) {
   svg.innerHTML = html;
 }
 
-window.selectOutcome = function(id) {
+window.selectOutcome = (id) => {
   const o = outcomeTypes.find(x => x.id === id);
   if (!o) return;
 
@@ -2965,7 +2965,7 @@ function renderCancelSM() {
     : cancelStatusText[cancelState.phase];
 }
 
-window.triggerCancel = function() {
+window.triggerCancel = () => {
   if (cancelState.animating) return;
   cancelState.animating = true;
   document.getElementById('btn-cancel-trigger').disabled = true;
@@ -3099,7 +3099,7 @@ window.triggerCancel = function() {
   }, 2500));
 };
 
-window.resetCancel = function() {
+window.resetCancel = () => {
   cancelState.timers.forEach(id => { clearInterval(id); clearTimeout(id); });
   if (cancelState.wasmScope) { try { cancelState.wasmScope.close(); } catch(e) {} }
   if (cancelState.wasmRT) { try { cancelState.wasmRT.close(); } catch(e) {} }
@@ -3131,7 +3131,7 @@ window.resetCancel = function() {
 };
 
 // ─── Exhibit 5: Budget ───────────────────────────────────────────
-window.runBudgetDemo = function() {
+window.runBudgetDemo = () => {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
   const createBudget = a.createBudget;
@@ -3194,7 +3194,7 @@ window.runBudgetDemo = function() {
 };
 
 // ─── Exhibit 6: Stale Handle Safety ─────────────────────────────
-window.runStaleDemo = function() {
+window.runStaleDemo = () => {
   clearConsole('stale-console');
   const a = requireWasm('stale-console');
   if (!a) return;
@@ -3280,7 +3280,7 @@ window.runStaleDemo = function() {
 // ─── Exhibit 7: Deep Cascade Close ──────────────────────────────
 let cascadeHandles = { rt: null, scopes: [], tasks: [], timers: [] };
 
-window.cascadeBuild = function() {
+window.cascadeBuild = () => {
   clearConsole('cascade-console');
   const a = requireWasm('cascade-console');
   if (!a) return;
@@ -3356,7 +3356,7 @@ function renderCascadeTree(tree, closedSet) {
   container._tree = tree;
 }
 
-window.cascadeClose = function() {
+window.cascadeClose = () => {
   const tree = document.getElementById('cascade-tree')._tree;
   if (!tree) return;
 
@@ -3399,7 +3399,7 @@ window.cascadeClose = function() {
   });
 };
 
-window.cascadeReset = function() {
+window.cascadeReset = () => {
   // Clear pending cascade animation timers
   cascadeHandles.timers.forEach(id => clearTimeout(id));
   // Clean up any remaining handles
@@ -3414,7 +3414,7 @@ window.cascadeReset = function() {
 };
 
 // ─── Exhibit 8: Cancel-then-Join Protocol ───────────────────────
-window.runProtocolDemo = function() {
+window.runProtocolDemo = () => {
   clearConsole('protocol-console');
   const a = requireWasm('protocol-console');
   if (!a) return;
@@ -3592,14 +3592,14 @@ try {
 }`,
 ];
 
-window.loadSnippet = function(idx) {
+window.loadSnippet = (idx) => {
   const input = document.getElementById('repl-input');
   input.value = REPL_SNIPPETS[idx] || '';
   input.focus();
   announce('REPL example loaded.');
 };
 
-window.runRepl = function() {
+window.runRepl = () => {
   const input = document.getElementById('repl-input').value.trim();
   if (!input) return;
 
@@ -3650,7 +3650,7 @@ window.runRepl = function() {
   announce('REPL execution finished.');
 };
 
-window.clearRepl = function() {
+window.clearRepl = () => {
   clearConsole('repl-console');
   clog('repl-console', 'Cleared. Ready.', 'dim');
 };
@@ -3696,7 +3696,7 @@ document.addEventListener('keydown', (e) => {
 let chaosRunning = false;
 let chaosRunId = 0;
 let chaosActiveRT = null;
-window.runChaos = async function() {
+window.runChaos = async () => {
   if (chaosRunning) return;
   chaosRunning = true;
   const runId = ++chaosRunId;
@@ -3840,7 +3840,7 @@ window.runChaos = async function() {
   document.getElementById('btn-chaos-run').disabled = false;
 };
 
-window.resetChaos = function() {
+window.resetChaos = () => {
   chaosRunId++;
   if (chaosActiveRT) {
     try { chaosActiveRT.close(); } catch(e) {}
@@ -3864,7 +3864,7 @@ window.resetChaos = function() {
 // ─── Exhibit 11: Scope-Bounded Fetch ──────────────────────────────
 let sfState = { rt: null, scope: null, fetchHandles: [], timeline: [], startTime: 0 };
 
-window.runScopeFetch = function() {
+window.runScopeFetch = () => {
   if (sfState.scope) return;
   clearConsole('scopefetch-console');
   const a = requireWasm('scopefetch-console');
@@ -3915,7 +3915,7 @@ window.runScopeFetch = function() {
   sfState.startTime = startTime;
 };
 
-window.closeScopeFetch = function() {
+window.closeScopeFetch = () => {
   if (!sfState.scope && !sfState.rt) return;
   const elapsed = performance.now() - sfState.startTime;
   const hadRuntime = Boolean(sfState.rt);
@@ -3957,7 +3957,7 @@ function renderSfTimeline(timeline) {
 }
 
 // ─── Exhibit 12: Outcome Severity Propagation ────────────────────
-window.runSeverityDemo = function() {
+window.runSeverityDemo = () => {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
   const Outcome = a.Outcome;
@@ -4026,7 +4026,7 @@ window.runSeverityDemo = function() {
 };
 
 // ─── Exhibit 13: Cancellation Attribution Forensics ──────────────
-window.runForensicsDemo = function() {
+window.runForensicsDemo = () => {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
   const Outcome = a.Outcome;
@@ -4095,7 +4095,7 @@ window.runForensicsDemo = function() {
 };
 
 // ─── Exhibit 14: Handle Slot Recycling Heatmap ───────────────────
-window.runRecyclingDemo = function() {
+window.runRecyclingDemo = () => {
   clearConsole('recycling-console');
   const a = requireWasm('recycling-console');
   if (!a) return;
@@ -4165,7 +4165,7 @@ window.runRecyclingDemo = function() {
 // ─── Exhibit 15: Sibling Scope Isolation ─────────────────────────
 let isoState = { rt: null, root: null, siblings: [], closeIdx: 0, probeFailures: 0, timers: [] };
 
-window.buildIsolation = function() {
+window.buildIsolation = () => {
   clearConsole('isolation-console');
   const a = requireWasm('isolation-console');
   if (!a) return;
@@ -4221,7 +4221,7 @@ function renderIsolation() {
   `;
 }
 
-window.closeNextSibling = function() {
+window.closeNextSibling = () => {
   if (isoState.closeIdx >= isoState.siblings.length) return;
   const sib = isoState.siblings[isoState.closeIdx];
 
@@ -4273,7 +4273,7 @@ window.closeNextSibling = function() {
   }
 };
 
-window.resetIsolation = function() {
+window.resetIsolation = () => {
   isoState.timers.forEach(clearTimeout);
   if (isoState.rt) { try { isoState.rt.close(); } catch(e) {} }
   isoState = { rt: null, root: null, siblings: [], closeIdx: 0, probeFailures: 0, timers: [] };
@@ -4284,7 +4284,7 @@ window.resetIsolation = function() {
 };
 
 // ─── Exhibit 16: Deterministic Replay Proof ──────────────────────
-window.runReplayDemo = function() {
+window.runReplayDemo = () => {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
 
@@ -4383,7 +4383,7 @@ window.runReplayDemo = function() {
 };
 
 // ─── Exhibit 17: Handle Leak Detection ───────────────────────────
-window.runLeakDetectDemo = function() {
+window.runLeakDetectDemo = () => {
   clearConsole('leakdetect-console');
   const a = requireWasm('leakdetect-console');
   if (!a) return;
@@ -4454,7 +4454,7 @@ window.runLeakDetectDemo = function() {
 };
 
 // ─── Exhibit 18: Scope-as-Timeout ────────────────────────────────
-window.runTimeoutDemo = function() {
+window.runTimeoutDemo = () => {
   clearConsole('timeout-console');
   const a = requireWasm('timeout-console');
   if (!a) return;
@@ -4533,7 +4533,7 @@ window.runTimeoutDemo = function() {
 // Scoped resource lifecycle: the channel is owned by a WASM scope.
 let chanState = { rt: null, scope: null, sendPort: null, recvPort: null, sentCount: 0, msgCount: 0, tasks: [] };
 
-window.runChannelDemo = function() {
+window.runChannelDemo = () => {
   if (chanState.scope) return;
   clearConsole('websocket-console');
   const a = requireWasm('websocket-console');
@@ -4594,7 +4594,7 @@ function renderChanState(state) {
   `;
 }
 
-window.wsSend = function() {
+window.wsSend = () => {
   if (chanState.sendPort) {
     const n = ++chanState.sentCount;
     const msg = 'Hello from scope ' + (chanState.scope?.slot ?? '?') + ' (msg #' + n + ')';
@@ -4603,7 +4603,7 @@ window.wsSend = function() {
   }
 };
 
-window.wsCloseScope = function() {
+window.wsCloseScope = () => {
   // Close ports, then close scope (releases WASM tasks)
   if (chanState.sendPort) { chanState.sendPort.close(); chanState.sendPort = null; }
   if (chanState.recvPort) { chanState.recvPort.close(); chanState.recvPort = null; }
@@ -4632,7 +4632,7 @@ window.wsCloseScope = function() {
 };
 
 // ─── Exhibit 21: Rapid Scope Churn Benchmark ─────────────────────
-window.runBenchmark = async function() {
+window.runBenchmark = async () => {
   const a = requireWasm();
   if (!a) { showToast('WASM not loaded', 'err'); return; }
   const button = document.getElementById('btn-bench');
@@ -4731,7 +4731,7 @@ window.runBenchmark = async function() {
 };
 
 // ─── Optional animation hook (kept local; no external dependency) ─
-let motionLib = null;
+const motionLib = null;
 
 // ─── Init on load ────────────────────────────────────────────────
 regionState.init();
@@ -4741,7 +4741,7 @@ renderOutcomeLattice(null);
 renderCancelSM();
 
 // ─── Copy to Clipboard ───────────────────────────────────────────
-window.copyCode = function(btn) {
+window.copyCode = (btn) => {
   const codeBody = btn.closest('.code-block')?.querySelector('.code-body');
   if (!codeBody) return;
   const text = codeBody.textContent;
@@ -4758,7 +4758,7 @@ window.copyCode = function(btn) {
 };
 
 // ─── Toast Notifications ─────────────────────────────────────────
-window.showToast = function(msg, type = 'info') {
+window.showToast = (msg, type = 'info') => {
   const container = document.getElementById('toast-container');
   if (!container) return;
   const icons = { ok: '&#10003;', info: '&#8505;', warn: '&#9888;', err: '&#10007;' };
@@ -4774,7 +4774,7 @@ window.showToast = function(msg, type = 'info') {
 };
 
 // ─── Mobile Menu ─────────────────────────────────────────────────
-window.toggleMobileMenu = function() {
+window.toggleMobileMenu = () => {
   const menu = document.getElementById('nav-mobile-menu');
   const button = document.getElementById('nav-hamburger');
   const open = !menu.classList.contains('open');
@@ -4783,7 +4783,7 @@ window.toggleMobileMenu = function() {
   button.setAttribute('aria-label', open ? 'Close exhibit navigation' : 'Open exhibit navigation');
   if (open) menu.querySelector('a')?.focus();
 };
-window.closeMobileMenu = function() {
+window.closeMobileMenu = () => {
   const menu = document.getElementById('nav-mobile-menu');
   const button = document.getElementById('nav-hamburger');
   menu.classList.remove('open');

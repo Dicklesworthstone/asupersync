@@ -51,11 +51,7 @@ async function main(): Promise<void> {
     await storage.clearNamespace(VANILLA_STORAGE_NAMESPACE);
     await artifactStore.clearArtifacts();
 
-    await storage.set(
-      VANILLA_STORAGE_NAMESPACE,
-      "ready",
-      "browser-storage-ready",
-    );
+    await storage.set(VANILLA_STORAGE_NAMESPACE, "ready", "browser-storage-ready");
     const storedValue = await storage.get(VANILLA_STORAGE_NAMESPACE, "ready");
     const listedKeys = await storage.listKeys(VANILLA_STORAGE_NAMESPACE);
 
@@ -97,8 +93,7 @@ async function main(): Promise<void> {
       exportedArtifactCount: archive.archive.artifacts.length,
       archiveFilename: archive.filename,
       clearedArtifacts,
-      downloadArchiveAvailable:
-        typeof artifactStore.downloadArchive === "function",
+      downloadArchiveAvailable: typeof artifactStore.downloadArchive === "function",
     };
   }
 

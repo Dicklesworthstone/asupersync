@@ -3,9 +3,7 @@
   "agent_name": "SapphireHill",
   "head": "3333333333333333333333333333333333333333",
   "selected_paths": ["tests/clean_overlay_proof_planner_contract.rs"],
-  "dirty_entries": [
-    {"path": "tests/clean_overlay_proof_planner_contract.rs", "status": "??"}
-  ],
+  "dirty_entries": [{ "path": "tests/clean_overlay_proof_planner_contract.rs", "status": "??" }],
   "reservations": [
     {
       "id": 38591,

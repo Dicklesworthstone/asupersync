@@ -25,10 +25,7 @@
       }
     ]
   },
-  "candidate_surfaces": [
-    "src/security/secret.rs",
-    "src/http"
-  ],
+  "candidate_surfaces": ["src/security/secret.rs", "src/http"],
   "dirty_tree": {
     "status": "ok",
     "entries": [

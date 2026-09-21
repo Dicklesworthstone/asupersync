@@ -58,9 +58,7 @@
   },
   "active_project_exclusion": {
     "local_project_active": true,
-    "same_project_workers_excluded": [
-      "rchw-local"
-    ],
+    "same_project_workers_excluded": ["rchw-local"],
     "remote_worker_required": true
   },
   "cargo_target_isolation": {
@@ -108,10 +106,6 @@
   "expected_preflight": {
     "input_status": "complete",
     "admission_precondition": "schema-ready",
-    "reason_codes": [
-      "host-large-core",
-      "worker-admissible",
-      "target-dir-isolated"
-    ]
+    "reason_codes": ["host-large-core", "worker-admissible", "target-dir-isolated"]
   }
 }
