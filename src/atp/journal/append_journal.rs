@@ -1295,6 +1295,11 @@ impl AppendJournal {
 
     /// Append a new record to the journal
     pub fn append(&mut self, record: JournalRecord) -> Outcome<u64, JournalError> {
+        let Some(next_sequence) = self.sequence.checked_add(1) else {
+            return Outcome::Err(JournalError::Serialization(
+                "journal sequence exhausted".to_string(),
+            ));
+        };
         // Ensure we have an active writer
         match self.ensure_writer() {
             Outcome::Ok(()) => {}
@@ -1343,7 +1348,7 @@ impl AppendJournal {
 
         // Update in-memory state
         let current_sequence = self.sequence;
-        self.sequence += 1;
+        self.sequence = next_sequence;
 
         self.index_transfer_entry(&entry);
         self.recent_entries.push_back(entry);
@@ -1663,7 +1668,14 @@ impl AppendJournal {
                 // If the latest file was corrupted (e.g. partial write from power loss),
                 // we must not append to it. We increment max_generation so the next write
                 // starts a new file cleanly.
-                recovered_generation = recovered_generation.saturating_add(1);
+                recovered_generation = match recovered_generation.checked_add(1) {
+                    Some(generation) => generation,
+                    None => {
+                        return Outcome::Err(JournalError::Deserialization(
+                            "cannot rotate corrupted journal: generation exhausted".to_string(),
+                        ));
+                    }
+                };
             }
 
             for entry in entries {
@@ -1693,7 +1705,14 @@ impl AppendJournal {
         self.transfer_entries = transfer_entries;
         self.generation = recovered_generation;
         if found_sequence {
-            self.sequence = max_sequence + 1;
+            self.sequence = match max_sequence.checked_add(1) {
+                Some(sequence) => sequence,
+                None => {
+                    return Outcome::Err(JournalError::Deserialization(
+                        "recovered journal sequence exhausted".to_string(),
+                    ));
+                }
+            };
         } else {
             self.sequence = 0;
         }
@@ -2311,6 +2330,70 @@ mod tests {
             Outcome::Err(JournalError::DirectoryRead(_))
         ));
         assert_eq!(std::fs::read(non_directory).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn exhausted_journal_counters_refuse_without_mutating_disk() {
+        let config = JournalConfig {
+            base_dir: unique_temp_dir("exhausted_journal_sequence"),
+            max_journal_size: u64::MAX,
+            ..Default::default()
+        };
+        let record = JournalRecord::Accept {
+            transfer_id: "sequence-boundary".to_string(),
+            peer_id: "peer".to_string(),
+            timestamp: 1,
+            auth_tag: unsigned_tag(),
+        };
+        let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+        journal.sequence = u64::MAX - 1;
+        assert_eq!(journal.append(record.clone()).unwrap(), u64::MAX - 1);
+        journal.flush().unwrap();
+        let path = journal_file_path(&config.base_dir, 0);
+        let original = std::fs::read(&path).unwrap();
+        assert!(matches!(
+            journal.append(record.clone()),
+            Outcome::Err(JournalError::Serialization(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let mut reopened = AppendJournal::new(config, test_auth_key()).unwrap();
+        assert_eq!(reopened.get_stats().sequence, u64::MAX);
+        assert!(matches!(
+            reopened.append(record.clone()),
+            Outcome::Err(JournalError::Serialization(_))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let exhausted = JournalConfig {
+            base_dir: unique_temp_dir("exhausted_recovered_sequence"),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&exhausted.base_dir).unwrap();
+        let entry =
+            JournalEntry::try_new(u64::MAX, record.with_signature(&test_auth_key())).unwrap();
+        let encoded = entry.encode();
+        let mut frame = u32::try_from(encoded.len()).unwrap().to_le_bytes().to_vec();
+        frame.extend_from_slice(&encoded);
+        let path = journal_file_path(&exhausted.base_dir, 0);
+        std::fs::write(&path, &frame).unwrap();
+        assert!(matches!(
+            AppendJournal::new(exhausted, test_auth_key()),
+            Outcome::Err(JournalError::Deserialization(_))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), frame);
+
+        let exhausted = JournalConfig {
+            base_dir: unique_temp_dir("exhausted_journal_generation"),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&exhausted.base_dir).unwrap();
+        let path = journal_file_path(&exhausted.base_dir, u64::MAX);
+        std::fs::write(&path, [1_u8]).unwrap();
+        assert!(matches!(
+            AppendJournal::new(exhausted, test_auth_key()),
+            Outcome::Err(JournalError::Deserialization(_))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), [1_u8]);
     }
 
     #[test]
