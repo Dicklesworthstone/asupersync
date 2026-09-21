@@ -356,12 +356,15 @@ where
     P: Policy,
 {
     fn drop(&mut self) {
-        // Drop is a cancellation *request* to any member that has not yet been
-        // collected; region close remains the quiescence backstop that
-        // guarantees no orphans. Already-finished handles treat this as a
-        // no-op.
+        // Drop is a cancellation *request* to any member that has not yet
+        // finished; region close remains the quiescence backstop. Explicit
+        // TaskHandle::abort can strengthen a completed task's reason, so do
+        // not use it on terminal members during implicit ownership cleanup.
+        // This also protects completed prefixes retained by drain_all.
         for handle in &self.handles {
-            handle.abort();
+            if !handle.is_finished() {
+                handle.abort();
+            }
         }
     }
 }
@@ -557,13 +560,12 @@ mod tests {
 
         for (index, entry) in spawn_entries.iter().enumerate() {
             let member_index = index.to_string();
-            let region = region.as_str();
+            let active_members = (index + 1).to_string();
 
             assert_eq!(entry.get_field("join_set_id"), Some(set_id.as_str()));
-            assert_eq!(entry.get_field("region"), Some(region));
-            assert_eq!(entry.get_field("member_index"), Some(member_index.as_str()));
+            assert_eq!(entry.get_field("region"), Some(region.as_str()));
             assert_eq!(entry.get_field("spawn_kind"), Some("send"));
-            let active_members = (index + 1).to_string();
+            assert_eq!(entry.get_field("member_index"), Some(member_index.as_str()));
             assert_eq!(
                 entry.get_field("active_members"),
                 Some(active_members.as_str())
@@ -825,13 +827,13 @@ mod tests {
             }
         }
 
-        let observed = run_in_runtime(move |cx| async move {
+        let (observed, prefix_cancelled) = run_in_runtime(move |cx| async move {
             let mut set = JoinSet::<(), (), _>::in_cx(&cx);
             let mut prefix_receipts = Vec::new();
             for _ in 0..ready_prefix {
                 let (sender, receiver) = oneshot::channel();
-                let factory = move |_: Cx| async move {
-                    sender.send_blocking(()).expect("prefix receipt");
+                let factory = move |member_cx: Cx| async move {
+                    sender.send_blocking(member_cx).expect("prefix receipt");
                     Ok::<(), ()>(())
                 };
                 if local {
@@ -841,9 +843,11 @@ mod tests {
                 }
                 prefix_receipts.push(receiver);
             }
+            let mut prefix_contexts = Vec::new();
             for mut receipt in prefix_receipts {
-                receipt.recv(&cx).await.expect("prefix completed");
+                prefix_contexts.push(receipt.recv(&cx).await.expect("prefix completed"));
             }
+            assert!(set.handles.iter().all(TaskHandle::is_finished));
 
             let mut parked_receipts = Vec::new();
             let mut release_senders = Vec::new();
@@ -883,7 +887,11 @@ mod tests {
             // On this current-thread runtime each receipt is consumed after
             // the sender's poll returns. Every member has a live Pending recv,
             // and each prefix task has returned before the drain is polled.
-            assert!(member_contexts.iter().all(|member| !member.is_cancel_requested()));
+            assert!(
+                member_contexts
+                    .iter()
+                    .all(|member| !member.is_cancel_requested())
+            );
             let mut joining = Box::pin(set.join_all(&cx));
             std::future::poll_fn(|task_cx| {
                 assert!(joining.as_mut().poll(task_cx).is_pending());
@@ -892,6 +900,10 @@ mod tests {
             .await;
             drop(joining);
             let observed = member_contexts
+                .iter()
+                .map(Cx::is_cancel_requested)
+                .collect::<Vec<_>>();
+            let prefix_cancelled = prefix_contexts
                 .iter()
                 .map(Cx::is_cancel_requested)
                 .collect::<Vec<_>>();
@@ -905,10 +917,11 @@ mod tests {
             for mut receipt in retirement_receipts {
                 receipt.recv(&cx).await.expect("member future retired");
             }
-            observed
+            (observed, prefix_cancelled)
         });
 
         assert_eq!(observed, vec![true; PENDING_MEMBERS]);
+        assert_eq!(prefix_cancelled, vec![false; ready_prefix]);
     }
 
     #[test]
@@ -929,6 +942,40 @@ mod tests {
     #[test]
     fn dropped_join_all_cancels_local_suffix_after_completed_prefix() {
         assert_dropped_join_all_cancels_parked_suffix(true, 2);
+    }
+
+    #[test]
+    fn dropping_finished_members_does_not_rewrite_their_contexts() {
+        for local in [false, true] {
+            for unpolled_join in [false, true] {
+                let cancelled = run_in_runtime(move |cx| async move {
+                    let mut set = JoinSet::<(), (), _>::in_cx(&cx);
+                    let (sender, mut receiver) = oneshot::channel();
+                    let factory = move |member_cx: Cx| async move {
+                        sender.send_blocking(member_cx).expect("member context");
+                        Ok::<(), ()>(())
+                    };
+                    if local {
+                        set.spawn_local(&cx, factory).expect("local member");
+                    } else {
+                        set.spawn(&cx, factory).expect("send member");
+                    }
+                    let member_cx = receiver.recv(&cx).await.expect("finished member");
+                    assert!(set.handles[0].is_finished());
+                    assert!(!member_cx.is_cancel_requested());
+                    if unpolled_join {
+                        drop(set.join_all(&cx));
+                    } else {
+                        drop(set);
+                    }
+                    member_cx.is_cancel_requested()
+                });
+                assert!(
+                    !cancelled,
+                    "terminal Cx changed: local={local}, unpolled_join={unpolled_join}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -966,7 +1013,7 @@ mod tests {
             let outcomes = set.cancel_all(&cx).await;
             let mut summary = JoinSummary::default();
             for outcome in &outcomes {
-                summary.record(&outcome);
+                summary.record(outcome);
             }
             (outcomes, summary)
         });
