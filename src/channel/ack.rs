@@ -27,7 +27,7 @@
 
 use crate::cx::{CancelWakerToken, Cx};
 use crate::record::{ObligationAbortReason, ObligationKind};
-use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken};
+use crate::runtime::obligation_mailbox::{ObligationAdmissionError, ObligationToken, ObligationTransferError};
 use crate::sync::Notify;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -57,6 +57,9 @@ pub enum QueueError {
     /// Runtime obligation admission refused; physical ownership was rolled back.
     #[error("acknowledged work queue obligation refused: {0}")]
     Admission(#[from] ObligationAdmissionError),
+    /// Some unacknowledged work was destroyed after every receiver was dropped.
+    #[error("acknowledged work was abandoned, not drained successfully")]
+    Abandoned,
     /// No wrapped item identity is issued.
     #[error("acknowledged work queue item sequence exhausted")]
     SequenceExhausted,
@@ -90,6 +93,8 @@ pub struct QueueStats {
     pub in_flight: usize,
     /// No new producer reservations can be admitted.
     pub admission_closed: bool,
+    /// At least one queued or nacked item was destroyed after receiver abandonment.
+    pub abandoned: bool,
 }
 
 impl QueueStats {
@@ -107,6 +112,7 @@ struct State<T> {
     receivers: usize,
     sealed: bool,
     sequence: u64,
+    abandoned: bool,
 }
 struct Shared<T> { state: Mutex<State<T>>, changed: Notify, capacity: usize }
 
@@ -135,12 +141,23 @@ impl<T> Shared<T> {
             capacity: self.capacity, queued: state.ready.len(), reserved: state.reserved,
             in_flight: state.in_flight,
             admission_closed: state.sealed || state.senders == 0 || state.receivers == 0,
+            abandoned: state.abandoned,
         }
     }
 
     fn close(&self) {
         self.state.lock().sealed = true;
         notify(&self.changed);
+    }
+
+    async fn wait_drained(&self, cx: &Cx) -> Result<(), QueueError> {
+        self.wait(cx, || {
+            let state = self.state.lock();
+            if !state.ready.is_empty() || state.reserved != 0 || state.in_flight != 0 {
+                Err(QueueError::Empty)
+            } else if state.abandoned { Err(QueueError::Abandoned) }
+            else { Ok(()) }
+        }).await
     }
 
     async fn wait<R>(&self, cx: &Cx, mut attempt: impl FnMut() -> Result<R, QueueError>) -> Result<R, QueueError> {
@@ -175,7 +192,7 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             ready: VecDeque::with_capacity(capacity), reserved: 0, in_flight: 0,
-            senders: 1, receivers: 1, sealed: false, sequence: 0,
+            senders: 1, receivers: 1, sealed: false, sequence: 0, abandoned: false,
         }),
         changed: Notify::new(), capacity,
     });
@@ -222,7 +239,10 @@ impl<T> Drop for Receiver<T> {
         let abandoned = {
             let mut state = self.shared.state.lock();
             state.receivers -= 1;
-            if state.receivers == 0 { Some(std::mem::take(&mut state.ready)) } else { None }
+            if state.receivers == 0 {
+                state.abandoned |= !state.ready.is_empty();
+                Some(std::mem::take(&mut state.ready))
+            } else { None }
         };
         let _wake = WakeAfter(&self.shared.changed);
         // Payload destructors can reenter the queue. No queue lock is held.
@@ -236,6 +256,24 @@ impl<T> Sender<T> {
     pub fn stats(&self) -> QueueStats { self.shared.stats() }
     /// Seal new reservations. Already issued permits retain their send right.
     pub fn close(&self) { self.shared.close(); }
+
+    /// Wait until ready items, reservations and deliveries have all settled.
+    /// An abandoned item makes the result `Abandoned`, never successful drain.
+    /// Without `close`, this is only a point-in-time empty observation. This
+    /// barrier does not join worker tasks or wait for runtime ledger projection;
+    /// the owning region remains the authoritative task/obligation close barrier.
+    pub async fn wait_drained(&self, cx: &Cx) -> Result<(), QueueError> {
+        self.shared.wait_drained(cx).await
+    }
+
+    /// Seal admission and wait for every accepted item to be acknowledged.
+    /// Preissued permits still need to send or abort. Dropping/cancelling this
+    /// wait does not reopen admission; repeat `wait_drained` to observe progress.
+    pub async fn close_and_drain(&self, cx: &Cx) -> Result<(), QueueError> {
+        if cx.checkpoint().is_err() { return Err(QueueError::Cancelled); }
+        self.close();
+        self.wait_drained(cx).await
+    }
 
     /// Reserve without waiting, using checked runtime obligation admission.
     pub fn try_reserve(&self, cx: &Cx) -> Result<SendPermit<T>, QueueError> {
@@ -316,6 +354,33 @@ impl<T> Receiver<T> {
     }
 }
 
+/// A refused holder transfer retaining the original resource guard.
+/// Dropping this failure drops its guard (abort for a permit, nack for a delivery).
+#[derive(Debug)]
+#[must_use = "recover the original guard or deliberately abort/nack it"]
+pub struct TransferFailure<G> {
+    /// Original runtime refusal, with no invented destination ownership.
+    pub error: ObligationTransferError,
+    /// Guard retaining its original holder, payload/credit and queue identity.
+    pub guard: G,
+}
+impl<G> fmt::Display for TransferFailure<G> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Display::fmt(&self.error, f) }
+}
+impl<G: fmt::Debug> std::error::Error for TransferFailure<G> {}
+
+fn transfer<Caps>(slot: &mut Option<ObligationToken>, destination: &Cx<Caps>) -> Result<(), ObligationTransferError> {
+    let token = slot.take().ok_or(ObligationTransferError::SourceNotChecked)?;
+    match token.try_transfer(destination) {
+        Ok(next) => { *slot = Some(next); Ok(()) }
+        Err(failure) => {
+            let (error, original) = failure.into_parts();
+            *slot = Some(original);
+            Err(error)
+        }
+    }
+}
+
 /// Owned send credit. Drop/abort releases capacity and aborts its tracked obligation.
 #[must_use = "send a value or abort the reservation"]
 pub struct SendPermit<T> {
@@ -325,6 +390,17 @@ impl<T> fmt::Debug for SendPermit<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.debug_struct("AckSendPermit").field("sequence", &self.sequence).finish_non_exhaustive() }
 }
 impl<T> SendPermit<T> {
+    /// Transfer runtime liability to an actual live task in the same runtime.
+    /// Refusal retains this exact credit; untracked guards refuse explicitly.
+    /// A notification panic follows the runtime's transfer contract and Drop
+    /// releases the physical reservation. It never fabricates a delivered value.
+    pub fn try_transfer<Caps>(mut self, destination: &Cx<Caps>) -> Result<Self, TransferFailure<Self>> {
+        match transfer(&mut self.obligation, destination) {
+            Ok(()) => Ok(self),
+            Err(error) => Err(TransferFailure { error, guard: self }),
+        }
+    }
+
     /// Commit without a cancellation checkpoint. Closing admission does not
     /// revoke this credit, but last-receiver abandonment returns the value.
     pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
@@ -372,6 +448,17 @@ impl<T> fmt::Debug for Delivery<T> {
     }
 }
 impl<T> Delivery<T> {
+    /// Transfer the Ack liability before handing this delivery to another task.
+    /// Queue item identity, payload, attempt count and capacity remain unchanged.
+    /// Refusal returns the original guard. A notification panic aborts any
+    /// unreturned destination obligation and this guard's Drop requeues the item.
+    pub fn try_transfer<Caps>(mut self, destination: &Cx<Caps>) -> Result<Self, TransferFailure<Self>> {
+        match transfer(&mut self.obligation, destination) {
+            Ok(()) => Ok(self),
+            Err(error) => Err(TransferFailure { error, guard: self }),
+        }
+    }
+
     /// Queue-local item identity, preserved through every retry; gaps are allowed.
     #[must_use]
     pub fn sequence(&self) -> u64 { self.item.as_ref().expect("live delivery").sequence }
@@ -405,6 +492,7 @@ impl<T> Drop for Delivery<T> {
                 let mut state = self.shared.state.lock();
                 state.in_flight -= 1;
                 if state.receivers != 0 { state.ready.push_back(abandoned.take().expect("owned retry")); }
+                else { state.abandoned = true; }
             }
             let _wake = WakeAfter(&self.shared.changed);
             if let Some(token) = self.obligation.take() { let _ = token.abort(ObligationAbortReason::Cancel); }
@@ -415,3 +503,7 @@ impl<T> Drop for Delivery<T> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "ack/lifecycle_tests.rs"]
+mod lifecycle_tests;
