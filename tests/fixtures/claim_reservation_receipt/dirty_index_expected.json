@@ -48,9 +48,7 @@
   ],
   "preflight": {
     "dirty_index": {
-      "staged_paths": [
-        "README.md"
-      ],
+      "staged_paths": ["README.md"],
       "status": "blocked"
     },
     "forbidden_command_tokens": [],
@@ -69,8 +67,5 @@
   "recommended_next_action": "clear-dirty-index-before-claim",
   "schema_version": "claim-reservation-start-receipt-v1",
   "tracker_mutation_status": "not-attempted",
-  "tracker_paths": [
-    ".beads/issues.jsonl",
-    ".beads/beads.db"
-  ]
+  "tracker_paths": [".beads/issues.jsonl", ".beads/beads.db"]
 }

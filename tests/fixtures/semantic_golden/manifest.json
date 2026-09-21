@@ -67,10 +67,7 @@
     },
     {
       "id": "golden-dual-run-harness-contract",
-      "rule_ids": [
-        "differential.shared_harness.contract",
-        "differential.seed_lineage.roundtrip"
-      ],
+      "rule_ids": ["differential.shared_harness.contract", "differential.seed_lineage.roundtrip"],
       "rule_numbers": [201, 202],
       "description": "Expected shared dual-run identity and provenance records for the canonical harness contract case",
       "file": "dual_run_harness_contract.json",

@@ -3,10 +3,7 @@
   "coverage": [
     {
       "evidence": {
-        "covering_targets": [
-          "fuzz_nats_headers_a",
-          "fuzz_nats_headers_b"
-        ],
+        "covering_targets": ["fuzz_nats_headers_a", "fuzz_nats_headers_b"],
         "exemption_status": "missing",
         "partial_targets": [],
         "stale_covering_targets": []

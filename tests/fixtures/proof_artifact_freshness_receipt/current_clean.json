@@ -12,10 +12,7 @@
       "stderr": "[RCH] remote rch-worker-proof-01 (12.3s)",
       "source_fingerprint": "sha256:source-current-clean",
       "tree_fingerprint": "git-tree:current-clean",
-      "touched_files": [
-        "scripts/proof_runner.py",
-        "tests/proof_runner_contract.rs"
-      ],
+      "touched_files": ["scripts/proof_runner.py", "tests/proof_runner_contract.rs"],
       "status": "pass",
       "generated_at": "2026-05-08T05:15:00Z"
     }

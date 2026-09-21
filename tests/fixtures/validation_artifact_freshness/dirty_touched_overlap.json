@@ -1,4 +1,1 @@
-[
-  "scripts/proof_runner.py",
-  "src/channel/mod.rs"
-]
+["scripts/proof_runner.py", "src/channel/mod.rs"]

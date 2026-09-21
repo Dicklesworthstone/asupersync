@@ -56,9 +56,7 @@
       "shutdown_completed",
       "diagnostic"
     ],
-    "payload_transfer_modes": [
-      "structured_clone"
-    ],
+    "payload_transfer_modes": ["structured_clone"],
     "owned_payload_required": true,
     "states": [
       "created",
@@ -70,10 +68,7 @@
       "completed",
       "failed"
     ],
-    "terminal_states": [
-      "completed",
-      "failed"
-    ]
+    "terminal_states": ["completed", "failed"]
   },
   "cancellation_contract": {
     "request_timeout_ms": 25,
@@ -113,9 +108,7 @@
         "id": "lane.browser.main_thread.direct_runtime",
         "rank": 10,
         "lane_kind": "direct_runtime",
-        "host_roles": [
-          "browser_main_thread"
-        ],
+        "host_roles": ["browser_main_thread"],
         "fallback_lane_id": "lane.unsupported",
         "selection_mode": "use_current_host_only"
       },
@@ -123,9 +116,7 @@
         "id": "lane.browser.dedicated_worker.direct_runtime",
         "rank": 20,
         "lane_kind": "direct_runtime",
-        "host_roles": [
-          "dedicated_worker"
-        ],
+        "host_roles": ["dedicated_worker"],
         "fallback_lane_id": "lane.unsupported",
         "selection_mode": "use_current_host_only"
       },
@@ -133,9 +124,7 @@
         "id": "lane.next.server.bridge",
         "rank": 30,
         "lane_kind": "bridge_only",
-        "host_roles": [
-          "next_server"
-        ],
+        "host_roles": ["next_server"],
         "fallback_lane_id": "lane.unsupported",
         "selection_mode": "host_adaptive_downgrade"
       },
@@ -143,9 +132,7 @@
         "id": "lane.next.edge.bridge",
         "rank": 40,
         "lane_kind": "bridge_only",
-        "host_roles": [
-          "next_edge"
-        ],
+        "host_roles": ["next_edge"],
         "fallback_lane_id": "lane.unsupported",
         "selection_mode": "host_adaptive_downgrade"
       },
@@ -153,11 +140,7 @@
         "id": "lane.unsupported",
         "rank": 99,
         "lane_kind": "unsupported",
-        "host_roles": [
-          "service_worker",
-          "shared_worker",
-          "non_browser_or_unknown"
-        ],
+        "host_roles": ["service_worker", "shared_worker", "non_browser_or_unknown"],
         "fallback_lane_id": null,
         "selection_mode": "terminal"
       }
@@ -166,68 +149,48 @@
       {
         "id": "browser_main_thread",
         "support_class": "direct_runtime_supported",
-        "selection_order": [
-          "lane.browser.main_thread.direct_runtime",
-          "lane.unsupported"
-        ],
+        "selection_order": ["lane.browser.main_thread.direct_runtime", "lane.unsupported"],
         "default_reason_code": "supported"
       },
       {
         "id": "dedicated_worker",
         "support_class": "direct_runtime_supported",
-        "selection_order": [
-          "lane.browser.dedicated_worker.direct_runtime",
-          "lane.unsupported"
-        ],
+        "selection_order": ["lane.browser.dedicated_worker.direct_runtime", "lane.unsupported"],
         "default_reason_code": "supported"
       },
       {
         "id": "service_worker",
         "support_class": "unsupported",
-        "selection_order": [
-          "lane.unsupported"
-        ],
+        "selection_order": ["lane.unsupported"],
         "default_reason_code": "service_worker_direct_runtime_not_shipped"
       },
       {
         "id": "shared_worker",
         "support_class": "unsupported",
-        "selection_order": [
-          "lane.unsupported"
-        ],
+        "selection_order": ["lane.unsupported"],
         "default_reason_code": "shared_worker_direct_runtime_not_shipped"
       },
       {
         "id": "next_server",
         "support_class": "bridge_only",
-        "selection_order": [
-          "lane.next.server.bridge",
-          "lane.unsupported"
-        ],
+        "selection_order": ["lane.next.server.bridge", "lane.unsupported"],
         "default_reason_code": "downgrade_to_server_bridge"
       },
       {
         "id": "next_edge",
         "support_class": "bridge_only",
-        "selection_order": [
-          "lane.next.edge.bridge",
-          "lane.unsupported"
-        ],
+        "selection_order": ["lane.next.edge.bridge", "lane.unsupported"],
         "default_reason_code": "downgrade_to_edge_bridge"
       },
       {
         "id": "non_browser_or_unknown",
         "support_class": "unsupported",
-        "selection_order": [
-          "lane.unsupported"
-        ],
+        "selection_order": ["lane.unsupported"],
         "default_reason_code": "unsupported_runtime_context"
       }
     ],
     "reason_codes": {
-      "supported": [
-        "supported"
-      ],
+      "supported": ["supported"],
       "skip": [
         "candidate_host_role_mismatch",
         "candidate_prerequisite_missing",
@@ -239,9 +202,7 @@
         "downgrade_to_websocket_or_fetch",
         "downgrade_to_export_bytes_for_download"
       ],
-      "health": [
-        "demote_due_to_lane_health"
-      ],
+      "health": ["demote_due_to_lane_health"],
       "policy_denial": [
         "service_worker_direct_runtime_not_shipped",
         "shared_worker_direct_runtime_not_shipped",
@@ -296,11 +257,7 @@
     },
     "repro_command_convention": {
       "format": "pnpm --filter <package> test:e2e -- --lane <lane_id> --host-role <host_role> --reason <reason_code>",
-      "must_include_tokens": [
-        "--lane",
-        "--host-role",
-        "--reason"
-      ]
+      "must_include_tokens": ["--lane", "--host-role", "--reason"]
     },
     "explicit_non_goals": [
       "service_worker_general_runtime_without_bounded_broker_contract",

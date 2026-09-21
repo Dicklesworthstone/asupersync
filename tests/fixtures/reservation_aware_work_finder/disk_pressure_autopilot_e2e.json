@@ -34,9 +34,7 @@
     {
       "candidate_id": "testing-fuzzing:critical-rch-only",
       "lane": "testing-fuzzing",
-      "paths": [
-        "fuzz/fuzz_targets/websocket_frame_fuzzing.rs"
-      ],
+      "paths": ["fuzz/fuzz_targets/websocket_frame_fuzzing.rs"],
       "priority": 1,
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_websocket cargo check --manifest-path fuzz/Cargo.toml --bin websocket_frame_fuzzing"

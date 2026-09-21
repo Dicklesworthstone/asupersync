@@ -13,10 +13,7 @@
     "capability_status": "unsupported",
     "eligibility_verdict": "skip_not_pass",
     "observability_status": "missing_virtualization_boundary",
-    "platform_prerequisites": [
-      "virtualization_boundary_missing",
-      "capture_manifest_missing"
-    ]
+    "platform_prerequisites": ["virtualization_boundary_missing", "capture_manifest_missing"]
   },
   "adapter": {
     "kind": "not_bound",
@@ -36,12 +33,7 @@
     "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
     "platform": "uncontrolled_host_kernel",
     "adapter": "raw_socket.policy_fixture",
-    "logs": [
-      "scenario_id",
-      "unsupported_reason",
-      "eligibility_verdict",
-      "observability_status"
-    ],
+    "logs": ["scenario_id", "unsupported_reason", "eligibility_verdict", "observability_status"],
     "replay_pointers": [
       "artifacts/lab_live/lab_live_5_3/skip_raw_socket/summary.json",
       "artifacts/lab_live/lab_live_5_3/skip_raw_socket/events.ndjson"
@@ -61,11 +53,7 @@
       "operator@example.com",
       "/var/tmp/raw-socket-secret"
     ],
-    "redacted_samples": [
-      "host=<host:redacted>",
-      "<email:redacted>",
-      "<path:redacted>"
-    ],
+    "redacted_samples": ["host=<host:redacted>", "<email:redacted>", "<path:redacted>"],
     "forbidden_substrings": [
       "raw-socket-worker.internal",
       "operator@example.com",

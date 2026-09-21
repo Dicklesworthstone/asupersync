@@ -10,13 +10,9 @@
       "git_sha": "3333333333333333333333333333333333333333",
       "git_branch": "main",
       "manifest_lane_id": "proof-reuse-cache-contract",
-      "manifest_guarantee_ids": [
-        "proof-reuse-cache-schema"
-      ],
+      "manifest_guarantee_ids": ["proof-reuse-cache-schema"],
       "claim_scope": "proof-reuse-cache-schema",
-      "allowed_cache_hit_claims": [
-        "proof-reuse-cache-schema"
-      ],
+      "allowed_cache_hit_claims": ["proof-reuse-cache-schema"],
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture",
       "command_fingerprint": "sha256:proof-reuse-cache-command",
       "source_fingerprint": "sha256:source-index-current",

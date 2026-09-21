@@ -272,12 +272,7 @@
         "approval_bead",
         "closure_dependency_path"
       ],
-      "statuses": [
-        "draft",
-        "active",
-        "closed",
-        "expired"
-      ],
+      "statuses": ["draft", "active", "closed", "expired"],
       "governance_checks": [
         {
           "check_id": "waiver.expiry.enforced",
@@ -333,11 +328,7 @@
         "formal/lean/coverage/theorem_surface_inventory.json",
         "formal/lean/Asupersync.lean"
       ],
-      "linked_beads": [
-        "bd-1dorb",
-        "bd-53a0d",
-        "bd-vmom8"
-      ],
+      "linked_beads": ["bd-1dorb", "bd-53a0d", "bd-vmom8"],
       "product_risk": 5,
       "unblock_potential": 5,
       "implementation_effort": 3,
@@ -351,13 +342,8 @@
       "id": "gap.tactic_instability.recursive_simp",
       "failure_mode": "tactic-instability",
       "summary": "Recursive simplification and brittle tactic bundles create nondeterministic proof behavior and occasional depth failures.",
-      "evidence_refs": [
-        "formal/lean/Asupersync.lean"
-      ],
-      "linked_beads": [
-        "bd-kf0mv",
-        "bd-e5iyi"
-      ],
+      "evidence_refs": ["formal/lean/Asupersync.lean"],
+      "linked_beads": ["bd-kf0mv", "bd-e5iyi"],
       "product_risk": 4,
       "unblock_potential": 4,
       "implementation_effort": 2,
@@ -371,14 +357,8 @@
       "id": "gap.proof_shape.preservation_branches",
       "failure_mode": "proof-shape",
       "summary": "Preservation branches still need constructor-specific proof-shape repairs (rewrite direction, subst shape, local goals).",
-      "evidence_refs": [
-        "formal/lean/coverage/step_constructor_coverage.json"
-      ],
-      "linked_beads": [
-        "bd-112rm",
-        "bd-3tal8",
-        "bd-366fd"
-      ],
+      "evidence_refs": ["formal/lean/coverage/step_constructor_coverage.json"],
+      "linked_beads": ["bd-112rm", "bd-3tal8", "bd-366fd"],
       "product_risk": 5,
       "unblock_potential": 4,
       "implementation_effort": 3,
@@ -392,13 +372,8 @@
       "id": "gap.missing_lemma.partial_constructor_specificity",
       "failure_mode": "missing-lemma",
       "summary": "Constructor-specific preservation lemmas for enqueue/scheduleStep/schedule/cancelChild are now in place; keep this row as a regression sentinel.",
-      "evidence_refs": [
-        "formal/lean/coverage/step_constructor_coverage.json"
-      ],
-      "linked_beads": [
-        "bd-112rm",
-        "bd-1ab3k"
-      ],
+      "evidence_refs": ["formal/lean/coverage/step_constructor_coverage.json"],
+      "linked_beads": ["bd-112rm", "bd-1ab3k"],
       "product_risk": 1,
       "unblock_potential": 2,
       "implementation_effort": 1,
@@ -412,16 +387,8 @@
       "id": "gap.missing_lemma.invariant_witness_bundle",
       "failure_mode": "missing-lemma",
       "summary": "Non-negotiable invariants still contain partial/unproven witness bundles (notably no ambient authority and loser-drain).",
-      "evidence_refs": [
-        "formal/lean/coverage/invariant_status_inventory.json"
-      ],
-      "linked_beads": [
-        "bd-244p5",
-        "bd-19efq",
-        "bd-3k6l5",
-        "bd-2iwok",
-        "bd-nc3ut"
-      ],
+      "evidence_refs": ["formal/lean/coverage/invariant_status_inventory.json"],
+      "linked_beads": ["bd-244p5", "bd-19efq", "bd-3k6l5", "bd-2iwok", "bd-nc3ut"],
       "product_risk": 5,
       "unblock_potential": 5,
       "implementation_effort": 4,
@@ -435,14 +402,8 @@
       "id": "gap.model_code_mismatch.refinement_table",
       "failure_mode": "model-code-mismatch",
       "summary": "Rust↔Lean refinement rows are not yet complete for cross-entity runtime operations and scheduler/combinator behavior.",
-      "evidence_refs": [
-        "formal/lean/coverage/theorem_rule_traceability_ledger.json"
-      ],
-      "linked_beads": [
-        "bd-2ve1x",
-        "bd-23hq7",
-        "bd-1yrju"
-      ],
+      "evidence_refs": ["formal/lean/coverage/theorem_rule_traceability_ledger.json"],
+      "linked_beads": ["bd-2ve1x", "bd-23hq7", "bd-1yrju"],
       "product_risk": 5,
       "unblock_potential": 4,
       "implementation_effort": 3,
@@ -460,10 +421,7 @@
         "formal/lean/coverage/README.md",
         "formal/lean/coverage/runtime_state_refinement_map.json"
       ],
-      "linked_beads": [
-        "bd-1b2iv",
-        "bd-3mo4f"
-      ],
+      "linked_beads": ["bd-1b2iv", "bd-3mo4f"],
       "product_risk": 4,
       "unblock_potential": 3,
       "implementation_effort": 2,
@@ -477,14 +435,8 @@
       "id": "gap.tactic_instability.repro_artifact_governance",
       "failure_mode": "tactic-instability",
       "summary": "Proof failures are not yet universally captured as deterministic repro bundles with governance-grade manifests.",
-      "evidence_refs": [
-        "formal/lean/coverage/README.md"
-      ],
-      "linked_beads": [
-        "bd-rook4",
-        "bd-8vpa5",
-        "bd-kmkaf"
-      ],
+      "evidence_refs": ["formal/lean/coverage/README.md"],
+      "linked_beads": ["bd-rook4", "bd-8vpa5", "bd-kmkaf"],
       "product_risk": 3,
       "unblock_potential": 3,
       "implementation_effort": 2,
@@ -498,16 +450,8 @@
       "id": "gap.missing_lemma.impact_loop_application",
       "failure_mode": "missing-lemma",
       "summary": "Proof-derived assumptions are not yet fully converted into enforceable runtime guardrails and impact measurements.",
-      "evidence_refs": [
-        "formal/lean/coverage/invariant_status_inventory.json"
-      ],
-      "linked_beads": [
-        "bd-1lda7",
-        "bd-l2b3m",
-        "bd-3t7o5",
-        "bd-3q3z0",
-        "bd-n5tqv"
-      ],
+      "evidence_refs": ["formal/lean/coverage/invariant_status_inventory.json"],
+      "linked_beads": ["bd-1lda7", "bd-l2b3m", "bd-3t7o5", "bd-3q3z0", "bd-n5tqv"],
       "product_risk": 4,
       "unblock_potential": 4,
       "implementation_effort": 3,
@@ -536,13 +480,7 @@
     "gap.tactic_instability.repro_artifact_governance"
   ],
   "sequencing": {
-    "recommended_track_order": [
-      "track-2",
-      "track-3",
-      "track-4",
-      "track-5",
-      "track-6"
-    ],
+    "recommended_track_order": ["track-2", "track-3", "track-4", "track-5", "track-6"],
     "dependency_edges": [
       {
         "from_gap": "gap.declaration_order.helper_frontier",
@@ -633,9 +571,7 @@
       {
         "phase": "phase-4-operationalization",
         "track": "track-5",
-        "target_gaps": [
-          "gap.tactic_instability.repro_artifact_governance"
-        ],
+        "target_gaps": ["gap.tactic_instability.repro_artifact_governance"],
         "exit_criteria": [
           "CI profiles and artifact manifests make proof status continuously enforceable."
         ]
@@ -643,9 +579,7 @@
       {
         "phase": "phase-5-impact-loop",
         "track": "track-6",
-        "target_gaps": [
-          "gap.missing_lemma.impact_loop_application"
-        ],
+        "target_gaps": ["gap.missing_lemma.impact_loop_application"],
         "exit_criteria": [
           "Proof-guided improvements in performance, reliability, and correctness are measured and reported."
         ]

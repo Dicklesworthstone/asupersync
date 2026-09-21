@@ -60,10 +60,7 @@
       "title": "No orphan tasks or obligation leaks",
       "severity": "critical",
       "description": "Structured concurrency invariants must hold: region close implies quiescence, cancellation follows request-drain-finalize protocol, no obligation leaks.",
-      "test_files": [
-        "tests/close_quiescence_regression.rs",
-        "tests/obligation_wasm_parity.rs"
-      ],
+      "test_files": ["tests/close_quiescence_regression.rs", "tests/obligation_wasm_parity.rs"],
       "blocks_release": true
     },
     {
@@ -108,10 +105,7 @@
         "fuzz_http2_frame",
         "fuzz_interest_flags"
       ],
-      "desired_targets": [
-        "fuzz_websocket_frame",
-        "fuzz_grpc_message"
-      ],
+      "desired_targets": ["fuzz_websocket_frame", "fuzz_grpc_message"],
       "blocks_release": false
     },
     {
@@ -178,23 +172,12 @@
       "ci_max": 30
     },
     "opt_in_levels": {
-      "local_allowed_modes": [
-        "metadata_only",
-        "strict",
-        "none"
-      ],
-      "ci_allowed_modes": [
-        "metadata_only",
-        "strict"
-      ],
-      "ci_forbidden_modes": [
-        "none"
-      ]
+      "local_allowed_modes": ["metadata_only", "strict", "none"],
+      "ci_allowed_modes": ["metadata_only", "strict"],
+      "ci_forbidden_modes": ["none"]
     },
     "sensitive_field_policy": {
-      "required_redacted_fields": [
-        "suite_log"
-      ],
+      "required_redacted_fields": ["suite_log"],
       "denylist_patterns": [
         "(?i)authorization",
         "(?i)cookie",

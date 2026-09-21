@@ -15,21 +15,110 @@
       "checkpoint_count": 10,
       "sustained_budget_pass": true,
       "checkpoint_metrics": [
-        { "checkpoint_index": 0, "latency_p50_ms": 120, "latency_p95_ms": 320, "latency_p99_ms": 650, "memory_peak_mb": 40, "error_rate_bps": 0, "drift_basis_points": 0 },
-        { "checkpoint_index": 1, "latency_p50_ms": 125, "latency_p95_ms": 330, "latency_p99_ms": 670, "memory_peak_mb": 41, "error_rate_bps": 2, "drift_basis_points": 50 },
-        { "checkpoint_index": 2, "latency_p50_ms": 122, "latency_p95_ms": 325, "latency_p99_ms": 660, "memory_peak_mb": 41, "error_rate_bps": 1, "drift_basis_points": 30 },
-        { "checkpoint_index": 3, "latency_p50_ms": 128, "latency_p95_ms": 335, "latency_p99_ms": 680, "memory_peak_mb": 42, "error_rate_bps": 3, "drift_basis_points": 70 },
-        { "checkpoint_index": 4, "latency_p50_ms": 124, "latency_p95_ms": 328, "latency_p99_ms": 665, "memory_peak_mb": 41, "error_rate_bps": 2, "drift_basis_points": 40 },
-        { "checkpoint_index": 5, "latency_p50_ms": 126, "latency_p95_ms": 332, "latency_p99_ms": 675, "memory_peak_mb": 42, "error_rate_bps": 3, "drift_basis_points": 60 },
-        { "checkpoint_index": 6, "latency_p50_ms": 123, "latency_p95_ms": 326, "latency_p99_ms": 658, "memory_peak_mb": 41, "error_rate_bps": 1, "drift_basis_points": 25 },
-        { "checkpoint_index": 7, "latency_p50_ms": 127, "latency_p95_ms": 334, "latency_p99_ms": 678, "memory_peak_mb": 42, "error_rate_bps": 4, "drift_basis_points": 80 },
-        { "checkpoint_index": 8, "latency_p50_ms": 121, "latency_p95_ms": 322, "latency_p99_ms": 655, "memory_peak_mb": 40, "error_rate_bps": 1, "drift_basis_points": 20 },
-        { "checkpoint_index": 9, "latency_p50_ms": 125, "latency_p95_ms": 330, "latency_p99_ms": 668, "memory_peak_mb": 41, "error_rate_bps": 2, "drift_basis_points": 45 }
+        {
+          "checkpoint_index": 0,
+          "latency_p50_ms": 120,
+          "latency_p95_ms": 320,
+          "latency_p99_ms": 650,
+          "memory_peak_mb": 40,
+          "error_rate_bps": 0,
+          "drift_basis_points": 0
+        },
+        {
+          "checkpoint_index": 1,
+          "latency_p50_ms": 125,
+          "latency_p95_ms": 330,
+          "latency_p99_ms": 670,
+          "memory_peak_mb": 41,
+          "error_rate_bps": 2,
+          "drift_basis_points": 50
+        },
+        {
+          "checkpoint_index": 2,
+          "latency_p50_ms": 122,
+          "latency_p95_ms": 325,
+          "latency_p99_ms": 660,
+          "memory_peak_mb": 41,
+          "error_rate_bps": 1,
+          "drift_basis_points": 30
+        },
+        {
+          "checkpoint_index": 3,
+          "latency_p50_ms": 128,
+          "latency_p95_ms": 335,
+          "latency_p99_ms": 680,
+          "memory_peak_mb": 42,
+          "error_rate_bps": 3,
+          "drift_basis_points": 70
+        },
+        {
+          "checkpoint_index": 4,
+          "latency_p50_ms": 124,
+          "latency_p95_ms": 328,
+          "latency_p99_ms": 665,
+          "memory_peak_mb": 41,
+          "error_rate_bps": 2,
+          "drift_basis_points": 40
+        },
+        {
+          "checkpoint_index": 5,
+          "latency_p50_ms": 126,
+          "latency_p95_ms": 332,
+          "latency_p99_ms": 675,
+          "memory_peak_mb": 42,
+          "error_rate_bps": 3,
+          "drift_basis_points": 60
+        },
+        {
+          "checkpoint_index": 6,
+          "latency_p50_ms": 123,
+          "latency_p95_ms": 326,
+          "latency_p99_ms": 658,
+          "memory_peak_mb": 41,
+          "error_rate_bps": 1,
+          "drift_basis_points": 25
+        },
+        {
+          "checkpoint_index": 7,
+          "latency_p50_ms": 127,
+          "latency_p95_ms": 334,
+          "latency_p99_ms": 678,
+          "memory_peak_mb": 42,
+          "error_rate_bps": 4,
+          "drift_basis_points": 80
+        },
+        {
+          "checkpoint_index": 8,
+          "latency_p50_ms": 121,
+          "latency_p95_ms": 322,
+          "latency_p99_ms": 655,
+          "memory_peak_mb": 40,
+          "error_rate_bps": 1,
+          "drift_basis_points": 20
+        },
+        {
+          "checkpoint_index": 9,
+          "latency_p50_ms": 125,
+          "latency_p95_ms": 330,
+          "latency_p99_ms": 668,
+          "memory_peak_mb": 41,
+          "error_rate_bps": 2,
+          "drift_basis_points": 45
+        }
       ],
       "artifact_index": [
-        { "artifact_class": "structured_log", "path": "target/stress-soak/soak-steady-state/structured.jsonl" },
-        { "artifact_class": "summary", "path": "target/stress-soak/soak-steady-state/summary.json" },
-        { "artifact_class": "transcript", "path": "target/stress-soak/soak-steady-state/transcript.log" }
+        {
+          "artifact_class": "structured_log",
+          "path": "target/stress-soak/soak-steady-state/structured.jsonl"
+        },
+        {
+          "artifact_class": "summary",
+          "path": "target/stress-soak/soak-steady-state/summary.json"
+        },
+        {
+          "artifact_class": "transcript",
+          "path": "target/stress-soak/soak-steady-state/transcript.log"
+        }
       ],
       "repro_command": "asupersync doctor stress-soak-smoke --scenario soak-steady-state --seed 4242 --profile-mode soak"
     },
@@ -41,12 +130,60 @@
       "checkpoint_count": 6,
       "sustained_budget_pass": false,
       "checkpoint_metrics": [
-        { "checkpoint_index": 0, "latency_p50_ms": 380, "latency_p95_ms": 1200, "latency_p99_ms": 2500, "memory_peak_mb": 50, "error_rate_bps": 0, "drift_basis_points": 0 },
-        { "checkpoint_index": 1, "latency_p50_ms": 420, "latency_p95_ms": 1350, "latency_p99_ms": 2800, "memory_peak_mb": 52, "error_rate_bps": 120, "drift_basis_points": 450 },
-        { "checkpoint_index": 2, "latency_p50_ms": 480, "latency_p95_ms": 1480, "latency_p99_ms": 3100, "memory_peak_mb": 55, "error_rate_bps": 250, "drift_basis_points": 1200 },
-        { "checkpoint_index": 3, "latency_p50_ms": 510, "latency_p95_ms": 1520, "latency_p99_ms": 3250, "memory_peak_mb": 58, "error_rate_bps": 380, "drift_basis_points": 1650 },
-        { "checkpoint_index": 4, "latency_p50_ms": 550, "latency_p95_ms": 1600, "latency_p99_ms": 3500, "memory_peak_mb": 60, "error_rate_bps": 520, "drift_basis_points": 2200 },
-        { "checkpoint_index": 5, "latency_p50_ms": 590, "latency_p95_ms": 1700, "latency_p99_ms": 3800, "memory_peak_mb": 62, "error_rate_bps": 680, "drift_basis_points": 2800 }
+        {
+          "checkpoint_index": 0,
+          "latency_p50_ms": 380,
+          "latency_p95_ms": 1200,
+          "latency_p99_ms": 2500,
+          "memory_peak_mb": 50,
+          "error_rate_bps": 0,
+          "drift_basis_points": 0
+        },
+        {
+          "checkpoint_index": 1,
+          "latency_p50_ms": 420,
+          "latency_p95_ms": 1350,
+          "latency_p99_ms": 2800,
+          "memory_peak_mb": 52,
+          "error_rate_bps": 120,
+          "drift_basis_points": 450
+        },
+        {
+          "checkpoint_index": 2,
+          "latency_p50_ms": 480,
+          "latency_p95_ms": 1480,
+          "latency_p99_ms": 3100,
+          "memory_peak_mb": 55,
+          "error_rate_bps": 250,
+          "drift_basis_points": 1200
+        },
+        {
+          "checkpoint_index": 3,
+          "latency_p50_ms": 510,
+          "latency_p95_ms": 1520,
+          "latency_p99_ms": 3250,
+          "memory_peak_mb": 58,
+          "error_rate_bps": 380,
+          "drift_basis_points": 1650
+        },
+        {
+          "checkpoint_index": 4,
+          "latency_p50_ms": 550,
+          "latency_p95_ms": 1600,
+          "latency_p99_ms": 3500,
+          "memory_peak_mb": 60,
+          "error_rate_bps": 520,
+          "drift_basis_points": 2200
+        },
+        {
+          "checkpoint_index": 5,
+          "latency_p50_ms": 590,
+          "latency_p95_ms": 1700,
+          "latency_p99_ms": 3800,
+          "memory_peak_mb": 62,
+          "error_rate_bps": 680,
+          "drift_basis_points": 2800
+        }
       ],
       "failure_output": {
         "saturation_indicators": [
@@ -58,9 +195,18 @@
         "rerun_command": "asupersync doctor stress-soak-smoke --scenario stress-cancel-recovery --seed 4242 --profile-mode soak"
       },
       "artifact_index": [
-        { "artifact_class": "structured_log", "path": "target/stress-soak/stress-cancel-recovery/structured.jsonl" },
-        { "artifact_class": "summary", "path": "target/stress-soak/stress-cancel-recovery/summary.json" },
-        { "artifact_class": "transcript", "path": "target/stress-soak/stress-cancel-recovery/transcript.log" }
+        {
+          "artifact_class": "structured_log",
+          "path": "target/stress-soak/stress-cancel-recovery/structured.jsonl"
+        },
+        {
+          "artifact_class": "summary",
+          "path": "target/stress-soak/stress-cancel-recovery/summary.json"
+        },
+        {
+          "artifact_class": "transcript",
+          "path": "target/stress-soak/stress-cancel-recovery/transcript.log"
+        }
       ],
       "repro_command": "asupersync doctor stress-soak-smoke --scenario stress-cancel-recovery --seed 4242 --profile-mode soak"
     },
@@ -72,19 +218,92 @@
       "checkpoint_count": 8,
       "sustained_budget_pass": true,
       "checkpoint_metrics": [
-        { "checkpoint_index": 0, "latency_p50_ms": 280, "latency_p95_ms": 850, "latency_p99_ms": 1800, "memory_peak_mb": 70, "error_rate_bps": 0, "drift_basis_points": 0 },
-        { "checkpoint_index": 1, "latency_p50_ms": 300, "latency_p95_ms": 900, "latency_p99_ms": 1950, "memory_peak_mb": 72, "error_rate_bps": 20, "drift_basis_points": 200 },
-        { "checkpoint_index": 2, "latency_p50_ms": 310, "latency_p95_ms": 920, "latency_p99_ms": 2000, "memory_peak_mb": 74, "error_rate_bps": 15, "drift_basis_points": 250 },
-        { "checkpoint_index": 3, "latency_p50_ms": 295, "latency_p95_ms": 890, "latency_p99_ms": 1920, "memory_peak_mb": 71, "error_rate_bps": 10, "drift_basis_points": 150 },
-        { "checkpoint_index": 4, "latency_p50_ms": 305, "latency_p95_ms": 910, "latency_p99_ms": 1970, "memory_peak_mb": 73, "error_rate_bps": 18, "drift_basis_points": 220 },
-        { "checkpoint_index": 5, "latency_p50_ms": 298, "latency_p95_ms": 895, "latency_p99_ms": 1940, "memory_peak_mb": 72, "error_rate_bps": 12, "drift_basis_points": 180 },
-        { "checkpoint_index": 6, "latency_p50_ms": 312, "latency_p95_ms": 930, "latency_p99_ms": 2010, "memory_peak_mb": 75, "error_rate_bps": 22, "drift_basis_points": 280 },
-        { "checkpoint_index": 7, "latency_p50_ms": 302, "latency_p95_ms": 905, "latency_p99_ms": 1960, "memory_peak_mb": 73, "error_rate_bps": 14, "drift_basis_points": 200 }
+        {
+          "checkpoint_index": 0,
+          "latency_p50_ms": 280,
+          "latency_p95_ms": 850,
+          "latency_p99_ms": 1800,
+          "memory_peak_mb": 70,
+          "error_rate_bps": 0,
+          "drift_basis_points": 0
+        },
+        {
+          "checkpoint_index": 1,
+          "latency_p50_ms": 300,
+          "latency_p95_ms": 900,
+          "latency_p99_ms": 1950,
+          "memory_peak_mb": 72,
+          "error_rate_bps": 20,
+          "drift_basis_points": 200
+        },
+        {
+          "checkpoint_index": 2,
+          "latency_p50_ms": 310,
+          "latency_p95_ms": 920,
+          "latency_p99_ms": 2000,
+          "memory_peak_mb": 74,
+          "error_rate_bps": 15,
+          "drift_basis_points": 250
+        },
+        {
+          "checkpoint_index": 3,
+          "latency_p50_ms": 295,
+          "latency_p95_ms": 890,
+          "latency_p99_ms": 1920,
+          "memory_peak_mb": 71,
+          "error_rate_bps": 10,
+          "drift_basis_points": 150
+        },
+        {
+          "checkpoint_index": 4,
+          "latency_p50_ms": 305,
+          "latency_p95_ms": 910,
+          "latency_p99_ms": 1970,
+          "memory_peak_mb": 73,
+          "error_rate_bps": 18,
+          "drift_basis_points": 220
+        },
+        {
+          "checkpoint_index": 5,
+          "latency_p50_ms": 298,
+          "latency_p95_ms": 895,
+          "latency_p99_ms": 1940,
+          "memory_peak_mb": 72,
+          "error_rate_bps": 12,
+          "drift_basis_points": 180
+        },
+        {
+          "checkpoint_index": 6,
+          "latency_p50_ms": 312,
+          "latency_p95_ms": 930,
+          "latency_p99_ms": 2010,
+          "memory_peak_mb": 75,
+          "error_rate_bps": 22,
+          "drift_basis_points": 280
+        },
+        {
+          "checkpoint_index": 7,
+          "latency_p50_ms": 302,
+          "latency_p95_ms": 905,
+          "latency_p99_ms": 1960,
+          "memory_peak_mb": 73,
+          "error_rate_bps": 14,
+          "drift_basis_points": 200
+        }
       ],
       "artifact_index": [
-        { "artifact_class": "structured_log", "path": "target/stress-soak/stress-concurrent-ops/structured.jsonl" },
-        { "artifact_class": "summary", "path": "target/stress-soak/stress-concurrent-ops/summary.json" },
-        { "artifact_class": "transcript", "path": "target/stress-soak/stress-concurrent-ops/transcript.log" }
+        {
+          "artifact_class": "structured_log",
+          "path": "target/stress-soak/stress-concurrent-ops/structured.jsonl"
+        },
+        {
+          "artifact_class": "summary",
+          "path": "target/stress-soak/stress-concurrent-ops/summary.json"
+        },
+        {
+          "artifact_class": "transcript",
+          "path": "target/stress-soak/stress-concurrent-ops/transcript.log"
+        }
       ],
       "repro_command": "asupersync doctor stress-soak-smoke --scenario stress-concurrent-ops --seed 4242 --profile-mode soak"
     },
@@ -96,21 +315,110 @@
       "checkpoint_count": 10,
       "sustained_budget_pass": true,
       "checkpoint_metrics": [
-        { "checkpoint_index": 0, "latency_p50_ms": 320, "latency_p95_ms": 980, "latency_p99_ms": 1950, "memory_peak_mb": 95, "error_rate_bps": 0, "drift_basis_points": 0 },
-        { "checkpoint_index": 1, "latency_p50_ms": 340, "latency_p95_ms": 1020, "latency_p99_ms": 2100, "memory_peak_mb": 98, "error_rate_bps": 10, "drift_basis_points": 300 },
-        { "checkpoint_index": 2, "latency_p50_ms": 330, "latency_p95_ms": 990, "latency_p99_ms": 2050, "memory_peak_mb": 100, "error_rate_bps": 5, "drift_basis_points": 150 },
-        { "checkpoint_index": 3, "latency_p50_ms": 335, "latency_p95_ms": 1000, "latency_p99_ms": 2080, "memory_peak_mb": 101, "error_rate_bps": 8, "drift_basis_points": 200 },
-        { "checkpoint_index": 4, "latency_p50_ms": 338, "latency_p95_ms": 1010, "latency_p99_ms": 2090, "memory_peak_mb": 102, "error_rate_bps": 12, "drift_basis_points": 250 },
-        { "checkpoint_index": 5, "latency_p50_ms": 325, "latency_p95_ms": 975, "latency_p99_ms": 2020, "memory_peak_mb": 99, "error_rate_bps": 3, "drift_basis_points": 100 },
-        { "checkpoint_index": 6, "latency_p50_ms": 342, "latency_p95_ms": 1030, "latency_p99_ms": 2120, "memory_peak_mb": 103, "error_rate_bps": 15, "drift_basis_points": 310 },
-        { "checkpoint_index": 7, "latency_p50_ms": 330, "latency_p95_ms": 995, "latency_p99_ms": 2060, "memory_peak_mb": 100, "error_rate_bps": 7, "drift_basis_points": 180 },
-        { "checkpoint_index": 8, "latency_p50_ms": 328, "latency_p95_ms": 985, "latency_p99_ms": 2040, "memory_peak_mb": 99, "error_rate_bps": 5, "drift_basis_points": 140 },
-        { "checkpoint_index": 9, "latency_p50_ms": 332, "latency_p95_ms": 1005, "latency_p99_ms": 2070, "memory_peak_mb": 101, "error_rate_bps": 9, "drift_basis_points": 220 }
+        {
+          "checkpoint_index": 0,
+          "latency_p50_ms": 320,
+          "latency_p95_ms": 980,
+          "latency_p99_ms": 1950,
+          "memory_peak_mb": 95,
+          "error_rate_bps": 0,
+          "drift_basis_points": 0
+        },
+        {
+          "checkpoint_index": 1,
+          "latency_p50_ms": 340,
+          "latency_p95_ms": 1020,
+          "latency_p99_ms": 2100,
+          "memory_peak_mb": 98,
+          "error_rate_bps": 10,
+          "drift_basis_points": 300
+        },
+        {
+          "checkpoint_index": 2,
+          "latency_p50_ms": 330,
+          "latency_p95_ms": 990,
+          "latency_p99_ms": 2050,
+          "memory_peak_mb": 100,
+          "error_rate_bps": 5,
+          "drift_basis_points": 150
+        },
+        {
+          "checkpoint_index": 3,
+          "latency_p50_ms": 335,
+          "latency_p95_ms": 1000,
+          "latency_p99_ms": 2080,
+          "memory_peak_mb": 101,
+          "error_rate_bps": 8,
+          "drift_basis_points": 200
+        },
+        {
+          "checkpoint_index": 4,
+          "latency_p50_ms": 338,
+          "latency_p95_ms": 1010,
+          "latency_p99_ms": 2090,
+          "memory_peak_mb": 102,
+          "error_rate_bps": 12,
+          "drift_basis_points": 250
+        },
+        {
+          "checkpoint_index": 5,
+          "latency_p50_ms": 325,
+          "latency_p95_ms": 975,
+          "latency_p99_ms": 2020,
+          "memory_peak_mb": 99,
+          "error_rate_bps": 3,
+          "drift_basis_points": 100
+        },
+        {
+          "checkpoint_index": 6,
+          "latency_p50_ms": 342,
+          "latency_p95_ms": 1030,
+          "latency_p99_ms": 2120,
+          "memory_peak_mb": 103,
+          "error_rate_bps": 15,
+          "drift_basis_points": 310
+        },
+        {
+          "checkpoint_index": 7,
+          "latency_p50_ms": 330,
+          "latency_p95_ms": 995,
+          "latency_p99_ms": 2060,
+          "memory_peak_mb": 100,
+          "error_rate_bps": 7,
+          "drift_basis_points": 180
+        },
+        {
+          "checkpoint_index": 8,
+          "latency_p50_ms": 328,
+          "latency_p95_ms": 985,
+          "latency_p99_ms": 2040,
+          "memory_peak_mb": 99,
+          "error_rate_bps": 5,
+          "drift_basis_points": 140
+        },
+        {
+          "checkpoint_index": 9,
+          "latency_p50_ms": 332,
+          "latency_p95_ms": 1005,
+          "latency_p99_ms": 2070,
+          "memory_peak_mb": 101,
+          "error_rate_bps": 9,
+          "drift_basis_points": 220
+        }
       ],
       "artifact_index": [
-        { "artifact_class": "structured_log", "path": "target/stress-soak/stress-high-volume/structured.jsonl" },
-        { "artifact_class": "summary", "path": "target/stress-soak/stress-high-volume/summary.json" },
-        { "artifact_class": "transcript", "path": "target/stress-soak/stress-high-volume/transcript.log" }
+        {
+          "artifact_class": "structured_log",
+          "path": "target/stress-soak/stress-high-volume/structured.jsonl"
+        },
+        {
+          "artifact_class": "summary",
+          "path": "target/stress-soak/stress-high-volume/summary.json"
+        },
+        {
+          "artifact_class": "transcript",
+          "path": "target/stress-soak/stress-high-volume/transcript.log"
+        }
       ],
       "repro_command": "asupersync doctor stress-soak-smoke --scenario stress-high-volume --seed 4242 --profile-mode soak"
     }

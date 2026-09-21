@@ -2,9 +2,7 @@
   "artifact": {
     "decision": "passed",
     "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "touched_files": [
-      "scripts/proof_runner.py"
-    ]
+    "touched_files": ["scripts/proof_runner.py"]
   },
   "artifact_path": "tests/fixtures/validation_artifact_freshness/stale_head_artifact.json",
   "classification": "stale-head",

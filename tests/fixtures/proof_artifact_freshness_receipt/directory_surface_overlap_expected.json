@@ -31,9 +31,7 @@
         "proof_output_digest": "sha256:b9f60eff5e33bf2f9f56a5c34304aa6a7f49cfa0c175bec3aa3539dc50e1be43",
         "proof_output_segment_count": 1,
         "rch_remote_route_required": true,
-        "rch_remote_route_segments": [
-          "[RCH] remote rch-worker-proof-status-02 (15.1s)"
-        ]
+        "rch_remote_route_segments": ["[RCH] remote rch-worker-proof-status-02 (15.1s)"]
       },
       "generated_at": "2026-05-08T05:18:00Z",
       "reason": "artifact touched files overlap current dirty tree entries",
@@ -47,9 +45,7 @@
       },
       "safe_to_cite": false,
       "status": "pass",
-      "touched_files": [
-        "tests/proof_status"
-      ]
+      "touched_files": ["tests/proof_status"]
     }
   ],
   "safety": {

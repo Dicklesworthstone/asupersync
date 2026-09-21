@@ -29,9 +29,7 @@
           "tests/fixtures/proof_lane_disk_pressure_autopilot"
         ],
         "source_only_validation": true,
-        "proof_commands": [
-          "python3 tests/proof_lane_disk_pressure_autopilot_contract.py"
-        ]
+        "proof_commands": ["python3 tests/proof_lane_disk_pressure_autopilot_contract.py"]
       }
     ]
   },
@@ -71,9 +69,7 @@
       "lane": "testing-fuzzing",
       "title": "Exercise WebSocket frame codec with real parser",
       "priority": 1,
-      "paths": [
-        "fuzz/fuzz_targets/websocket_frame_fuzzing.rs"
-      ],
+      "paths": ["fuzz/fuzz_targets/websocket_frame_fuzzing.rs"],
       "proof_commands": [
         "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_websocket cargo check --manifest-path fuzz/Cargo.toml --bin websocket_frame_fuzzing"
       ]

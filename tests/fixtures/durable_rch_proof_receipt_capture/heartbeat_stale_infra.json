@@ -2,17 +2,13 @@
   "expected": {
     "citable": false,
     "exit_code": 255,
-    "first_blocker_contains": [
-      "heartbeat stale"
-    ],
+    "first_blocker_contains": ["heartbeat stale"],
     "first_blocker_forbidden": [],
     "lifecycle_state": "terminal_infra_error",
     "max_first_blocker_lines": 8,
     "outcome_status": "infra_error",
     "proof_evidence_status": "blocked",
-    "refusal_reason_codes": [
-      "failed-proof-status"
-    ],
+    "refusal_reason_codes": ["failed-proof-status"],
     "terminal_classification": "heartbeat_stale_infra"
   },
   "fixture_id": "heartbeat-stale-infra",

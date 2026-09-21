@@ -1,15 +1,7 @@
 {
   "accepted_input_contract": {
-    "failure_required_fields": [
-      "summary",
-      "first_blocker"
-    ],
-    "required_top_level_fields": [
-      "schema_version",
-      "artifact_id",
-      "source_kind",
-      "failure"
-    ],
+    "failure_required_fields": ["summary", "first_blocker"],
+    "required_top_level_fields": ["schema_version", "artifact_id", "source_kind", "failure"],
     "schema_version": "crashpack-to-repro-input-v1",
     "supported_source_kinds": [
       "cargo_test",
@@ -66,10 +58,7 @@
   "safety": {
     "cargo_commands_require_rch": true,
     "direct_main_safe": true,
-    "forbidden_cwd_patterns_checked": [
-      "/tmp/asupersync-",
-      "/data/projects/asupersync-"
-    ],
+    "forbidden_cwd_patterns_checked": ["/tmp/asupersync-", "/data/projects/asupersync-"],
     "forbidden_patterns_checked": [
       "git branch ",
       "git checkout -b",
@@ -94,10 +83,7 @@
     "first_blocker": "thread 'region_close_panics_on_live_child' panicked at tests/repro_region_lifecycle.rs:88",
     "source_kind": "cargo_test",
     "summary": "Lab runtime region close crashpack from a live-child repro",
-    "touched_files": [
-      "src/lab/runtime.rs",
-      "tests/repro_region_lifecycle.rs"
-    ]
+    "touched_files": ["src/lab/runtime.rs", "tests/repro_region_lifecycle.rs"]
   },
   "summary": {
     "command_count": 1,

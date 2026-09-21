@@ -19,10 +19,7 @@
         "rerun the same focused proof lane after trimming artifact fanout"
       ],
       "operator_note": "Keep per-lane CARGO_TARGET_DIR values under transient rch scratch paths or add equivalent bulky artifact directories to .rchignore before rerunning.",
-      "recommended_patterns": [
-        ".rch-*/",
-        ".rch_target*/"
-      ]
+      "recommended_patterns": [".rch-*/", ".rch_target*/"]
     },
     "status": "retrieval-incomplete",
     "violations": [

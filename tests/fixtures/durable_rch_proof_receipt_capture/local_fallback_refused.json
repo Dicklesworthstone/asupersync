@@ -2,17 +2,13 @@
   "expected": {
     "citable": false,
     "exit_code": 0,
-    "first_blocker_contains": [
-      "[RCH] local fallback"
-    ],
+    "first_blocker_contains": ["[RCH] local fallback"],
     "first_blocker_forbidden": [],
     "lifecycle_state": "terminal_fail",
     "max_first_blocker_lines": 8,
     "outcome_status": "local_fallback_refused",
     "proof_evidence_status": "blocked",
-    "refusal_reason_codes": [
-      "local-fallback-marker"
-    ],
+    "refusal_reason_codes": ["local-fallback-marker"],
     "terminal_classification": "local_fallback_refused"
   },
   "fixture_id": "local-fallback-refused",

@@ -90,7 +90,12 @@
       "gridPos": { "h": 6, "w": 9, "x": 6, "y": 1 },
       "id": 3,
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "legend": {
+          "calcs": ["mean", "max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
         "tooltip": { "mode": "multi", "sort": "none" }
       },
       "pluginVersion": "10.0.0",
@@ -138,10 +143,24 @@
           "unit": "ops"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "ok" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "err" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "cancelled" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "panicked" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }] }
+          {
+            "matcher": { "id": "byName", "options": "ok" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "err" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "cancelled" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "panicked" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }
+            ]
+          }
         ]
       },
       "gridPos": { "h": 6, "w": 9, "x": 15, "y": 1 },
@@ -209,7 +228,12 @@
       "gridPos": { "h": 6, "w": 12, "x": 0, "y": 7 },
       "id": 5,
       "options": {
-        "legend": { "calcs": ["mean", "p95", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "legend": {
+          "calcs": ["mean", "p95", "max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
         "tooltip": { "mode": "multi", "sort": "none" }
       },
       "pluginVersion": "10.0.0",
@@ -313,7 +337,12 @@
       "gridPos": { "h": 6, "w": 9, "x": 6, "y": 14 },
       "id": 8,
       "options": {
-        "legend": { "calcs": ["mean", "p95", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "legend": {
+          "calcs": ["mean", "p95", "max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
         "tooltip": { "mode": "multi", "sort": "none" }
       },
       "pluginVersion": "10.0.0",
@@ -420,7 +449,12 @@
       "gridPos": { "h": 6, "w": 12, "x": 12, "y": 21 },
       "id": 11,
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "legend": {
+          "calcs": ["mean", "max"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
         "tooltip": { "mode": "multi", "sort": "none" }
       },
       "pluginVersion": "10.0.0",
@@ -510,7 +544,10 @@
           "unit": "ops"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "leaked" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+          {
+            "matcher": { "id": "byName", "options": "leaked" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
         ]
       },
       "gridPos": { "h": 6, "w": 9, "x": 6, "y": 28 },
@@ -573,7 +610,12 @@
       "gridPos": { "h": 6, "w": 9, "x": 15, "y": 28 },
       "id": 15,
       "options": {
-        "legend": { "calcs": ["mean", "p95"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "legend": {
+          "calcs": ["mean", "p95"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
         "tooltip": { "mode": "multi", "sort": "none" }
       },
       "pluginVersion": "10.0.0",
@@ -624,14 +666,25 @@
           "unit": "ops"
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "violations" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
-          { "matcher": { "id": "byName", "options": "stuck" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] }
+          {
+            "matcher": { "id": "byName", "options": "violations" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "stuck" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          }
         ]
       },
       "gridPos": { "h": 6, "w": 12, "x": 0, "y": 35 },
       "id": 17,
       "options": {
-        "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "legend": {
+          "calcs": ["sum"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
         "tooltip": { "mode": "multi", "sort": "none" }
       },
       "pluginVersion": "10.0.0",
@@ -688,7 +741,12 @@
       "gridPos": { "h": 6, "w": 12, "x": 12, "y": 35 },
       "id": 18,
       "options": {
-        "legend": { "calcs": ["mean", "p95"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "legend": {
+          "calcs": ["mean", "p95"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
         "tooltip": { "mode": "multi", "sort": "none" }
       },
       "pluginVersion": "10.0.0",

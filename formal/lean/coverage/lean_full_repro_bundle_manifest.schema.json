@@ -57,14 +57,7 @@
     "ci_context": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "workflow",
-        "run_id",
-        "run_attempt",
-        "event_name",
-        "git_ref",
-        "git_commit"
-      ],
+      "required": ["workflow", "run_id", "run_attempt", "event_name", "git_ref", "git_commit"],
       "properties": {
         "workflow": { "type": "string", "minLength": 1 },
         "run_id": { "type": "string", "minLength": 1 },
@@ -150,16 +143,10 @@
         "path": { "type": "string", "minLength": 1 },
         "exists": { "type": "boolean" },
         "sha256": {
-          "anyOf": [
-            { "type": "null" },
-            { "type": "string", "pattern": "^[a-f0-9]{64}$" }
-          ]
+          "anyOf": [{ "type": "null" }, { "type": "string", "pattern": "^[a-f0-9]{64}$" }]
         },
         "size_bytes": {
-          "anyOf": [
-            { "type": "null" },
-            { "type": "integer", "minimum": 0 }
-          ]
+          "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
         },
         "schema_version": {
           "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1 }]
@@ -192,16 +179,10 @@
           "path": { "type": "string", "minLength": 1 },
           "exists": { "type": "boolean" },
           "sha256": {
-            "anyOf": [
-              { "type": "null" },
-              { "type": "string", "pattern": "^[a-f0-9]{64}$" }
-            ]
+            "anyOf": [{ "type": "null" }, { "type": "string", "pattern": "^[a-f0-9]{64}$" }]
           },
           "size_bytes": {
-            "anyOf": [
-              { "type": "null" },
-              { "type": "integer", "minimum": 0 }
-            ]
+            "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 0 }]
           }
         }
       }

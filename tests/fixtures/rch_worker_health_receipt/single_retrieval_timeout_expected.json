@@ -29,9 +29,7 @@
   },
   "workers": [
     {
-      "reasons": [
-        "single artifact retrieval timeout"
-      ],
+      "reasons": ["single artifact retrieval timeout"],
       "remediation": [
         "keep the worker eligible only for narrow proof lanes",
         "watch the next rch receipt for repeated failures or retrieval stalls"

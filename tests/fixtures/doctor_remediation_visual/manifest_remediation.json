@@ -54,10 +54,7 @@
       "artifact_path": "artifacts/golden-remediation-run-001/doctor/e2e/summary.json",
       "checksum_hint": "sha256:rem-summary-001",
       "retention_class": "warm",
-      "linked_artifacts": [
-        "golden-remediation-apply-metrics",
-        "golden-remediation-apply-snapshot"
-      ]
+      "linked_artifacts": ["golden-remediation-apply-metrics", "golden-remediation-apply-snapshot"]
     },
     {
       "artifact_id": "golden-remediation-apply-transcript",

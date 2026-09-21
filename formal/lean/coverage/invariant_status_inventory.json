@@ -38,11 +38,7 @@
       "statement": "Effects require explicit capabilities; unauthorized ambient effects are disallowed."
     }
   ],
-  "status_scale": [
-    "fully_proven",
-    "partially_proven",
-    "unproven"
-  ],
+  "status_scale": ["fully_proven", "partially_proven", "unproven"],
   "invariants": [
     {
       "id": "inv.structured_concurrency.single_owner",

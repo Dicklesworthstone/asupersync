@@ -29,12 +29,8 @@
   },
   "workers": [
     {
-      "reasons": [
-        "recent observations are inside budget"
-      ],
-      "remediation": [
-        "worker is eligible for normal rch proof lanes"
-      ],
+      "reasons": ["recent observations are inside budget"],
+      "remediation": ["worker is eligible for normal rch proof lanes"],
       "signals": {
         "io_some_avg10": 0.0,
         "job_count": 1,
@@ -52,9 +48,7 @@
       "worker": "worker-good"
     },
     {
-      "reasons": [
-        "single artifact retrieval timeout"
-      ],
+      "reasons": ["single artifact retrieval timeout"],
       "remediation": [
         "keep the worker eligible only for narrow proof lanes",
         "watch the next rch receipt for repeated failures or retrieval stalls"
@@ -76,9 +70,7 @@
       "worker": "worker-warn"
     },
     {
-      "reasons": [
-        "low storage on /"
-      ],
+      "reasons": ["low storage on /"],
       "remediation": [
         "avoid scheduling expensive cargo lanes on this worker until inspected",
         "inspect `df -h / /tmp` and recent rch logs on the worker",

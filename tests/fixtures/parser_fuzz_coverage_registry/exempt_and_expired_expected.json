@@ -63,9 +63,7 @@
   },
   "generated_at": "2026-05-08T05:45:00Z",
   "input_schema_version": "parser-fuzz-coverage-input-v1",
-  "missing_coverage": [
-    "internal_validated_status_parse"
-  ],
+  "missing_coverage": ["internal_validated_status_parse"],
   "non_mutating": true,
   "partial_coverage": [],
   "requirements": {

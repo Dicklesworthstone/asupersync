@@ -69,7 +69,5 @@
     "ready_count": 0,
     "waiting_count": 1
   },
-  "waiting_proposals": [
-    "asupersync-fuzz-a:MaroonBear:http_header_map_invariants"
-  ]
+  "waiting_proposals": ["asupersync-fuzz-a:MaroonBear:http_header_map_invariants"]
 }

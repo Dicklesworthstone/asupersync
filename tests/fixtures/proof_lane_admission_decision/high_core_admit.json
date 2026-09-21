@@ -45,9 +45,7 @@
   },
   "active_project_exclusion": {
     "local_project_active": true,
-    "same_project_workers_excluded": [
-      "rchw-local"
-    ],
+    "same_project_workers_excluded": ["rchw-local"],
     "remote_worker_required": true
   },
   "cargo_target_isolation": {

@@ -24,20 +24,12 @@
     {
       "broad_frontier": false,
       "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
-      "guarantee_ids": [
-        "default-production-tokio-free"
-      ],
+      "guarantee_ids": ["default-production-tokio-free"],
       "kind": "dependency_graph",
       "lane_id": "default-production-tokio-tree",
-      "matched_paths": [
-        "Cargo.toml"
-      ],
-      "reasons": [
-        "dependency changes need production graph proof and compile frontier"
-      ],
-      "rule_ids": [
-        "dependency-manifest"
-      ]
+      "matched_paths": ["Cargo.toml"],
+      "reasons": ["dependency changes need production graph proof and compile frontier"],
+      "rule_ids": ["dependency-manifest"]
     }
   ],
   "source": "tests/fixtures/touched_surface_proof_selector/manifest_change.json",
@@ -58,24 +50,14 @@
     {
       "broad_frontier": true,
       "command": "rch exec -- cargo check -p asupersync --all-targets",
-      "guarantee_ids": [
-        "all-target-compile-frontier"
-      ],
+      "guarantee_ids": ["all-target-compile-frontier"],
       "kind": "compile_frontier",
       "lane_id": "all-targets-check",
-      "matched_paths": [
-        "Cargo.toml"
-      ],
-      "reasons": [
-        "dependency changes need production graph proof and compile frontier"
-      ],
-      "rule_ids": [
-        "dependency-manifest"
-      ]
+      "matched_paths": ["Cargo.toml"],
+      "reasons": ["dependency changes need production graph proof and compile frontier"],
+      "rule_ids": ["dependency-manifest"]
     }
   ],
-  "touched_files": [
-    "Cargo.toml"
-  ],
+  "touched_files": ["Cargo.toml"],
   "unmatched_touched_files": []
 }

@@ -74,9 +74,7 @@
     "telemetry_age_seconds": 20,
     "requested_lane_class": "broad-lane",
     "requested_contention_domain": "socket0-l3",
-    "active_contention_domains": [
-      "socket0-l3"
-    ],
+    "active_contention_domains": ["socket0-l3"],
     "topology_guidance_is_correctness_evidence": false
   },
   "proof_lane": {

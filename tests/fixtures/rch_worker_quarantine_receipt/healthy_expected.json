@@ -13,9 +13,7 @@
   "observation_flags": [
     {
       "command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
-      "flags": [
-        "healthy_sample"
-      ],
+      "flags": ["healthy_sample"],
       "queue_wait_ms": 100,
       "remote_exit_code": 0,
       "remote_success": true,
@@ -27,9 +25,7 @@
     },
     {
       "command": "rch exec -- cargo check -p asupersync --lib",
-      "flags": [
-        "healthy_sample"
-      ],
+      "flags": ["healthy_sample"],
       "queue_wait_ms": 0,
       "remote_exit_code": 0,
       "remote_success": true,
@@ -60,9 +56,7 @@
       "no_capacity_count": 0,
       "operator_guidance": "Worker has only healthy fixture observations.",
       "quarantine_recommended": false,
-      "reasons": [
-        "2 healthy sample(s)"
-      ],
+      "reasons": ["2 healthy sample(s)"],
       "remote_failure_count": 0,
       "sample_count": 2,
       "score": 0,

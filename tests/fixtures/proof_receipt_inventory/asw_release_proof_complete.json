@@ -17,10 +17,7 @@
           "main_mirror_pushed": true,
           "main_ref_pushed": true,
           "pushed": true,
-          "pushed_refs": [
-            "origin/main",
-            "main-mirror"
-          ]
+          "pushed_refs": ["origin/main", "main-mirror"]
         }
       ],
       "dirty_peer_paths": [],

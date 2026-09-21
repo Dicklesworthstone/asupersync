@@ -15,40 +15,129 @@
     "total_error_variants": 27
   },
   "stability_tiers": [
-    {"tier": "stable", "types": ["ConnectionId", "PacketHeader", "TransportParameters", "NativeQuicConnection", "NativeQuicConnectionConfig", "H3Frame", "H3Settings", "H3ControlState", "H3ConnectionState"], "count": 9},
-    {"tier": "provisional", "types": ["QuicH3ForensicLogger", "QuicH3Event", "QuicH3ScenarioManifest", "qpack_encode_*", "qpack_decode_*"], "count": 5},
-    {"tier": "internal", "types": ["QuicTransportMachine", "QuicTlsMachine", "StreamTable"], "count": 3}
+    {
+      "tier": "stable",
+      "types": [
+        "ConnectionId",
+        "PacketHeader",
+        "TransportParameters",
+        "NativeQuicConnection",
+        "NativeQuicConnectionConfig",
+        "H3Frame",
+        "H3Settings",
+        "H3ControlState",
+        "H3ConnectionState"
+      ],
+      "count": 9
+    },
+    {
+      "tier": "provisional",
+      "types": [
+        "QuicH3ForensicLogger",
+        "QuicH3Event",
+        "QuicH3ScenarioManifest",
+        "qpack_encode_*",
+        "qpack_decode_*"
+      ],
+      "count": 5
+    },
+    {
+      "tier": "internal",
+      "types": ["QuicTransportMachine", "QuicTlsMachine", "StreamTable"],
+      "count": 3
+    }
   ],
   "migration_patterns": [
-    {"id": "MP-01", "from": "quinn/s2n-quic", "pattern": "Connection setup", "section": "3.1"},
-    {"id": "MP-02", "from": "quinn", "pattern": "Stream operations", "section": "3.2"},
-    {"id": "MP-03", "from": "quinn", "pattern": "Graceful shutdown", "section": "3.3"},
-    {"id": "MP-04", "from": "hyper/h3", "pattern": "HTTP/3 request lifecycle", "section": "3.4"},
-    {"id": "MP-05", "from": "tokio", "pattern": "Cancellation token to Cx", "section": "3.5"},
-    {"id": "MP-06", "from": "quinn/generic", "pattern": "Key update and 0-RTT", "section": "3.6"}
+    { "id": "MP-01", "from": "quinn/s2n-quic", "pattern": "Connection setup", "section": "3.1" },
+    { "id": "MP-02", "from": "quinn", "pattern": "Stream operations", "section": "3.2" },
+    { "id": "MP-03", "from": "quinn", "pattern": "Graceful shutdown", "section": "3.3" },
+    { "id": "MP-04", "from": "hyper/h3", "pattern": "HTTP/3 request lifecycle", "section": "3.4" },
+    { "id": "MP-05", "from": "tokio", "pattern": "Cancellation token to Cx", "section": "3.5" },
+    { "id": "MP-06", "from": "quinn/generic", "pattern": "Key update and 0-RTT", "section": "3.6" }
   ],
   "known_limitations": [
-    {"id": "L1", "area": "QPACK", "severity": "medium", "description": "Dynamic table not implemented"},
-    {"id": "L2", "area": "TLS", "severity": "high", "description": "No actual TLS handshake"},
-    {"id": "L3", "area": "I/O", "severity": "by-design", "description": "No UDP socket integration"},
-    {"id": "L4", "area": "Migration", "severity": "low", "description": "No connection migration implementation"},
-    {"id": "L5", "area": "H3", "severity": "low", "description": "No PUSH_PROMISE support"},
-    {"id": "L6", "area": "Loss", "severity": "medium", "description": "Simplified loss recovery"},
-    {"id": "L7", "area": "Congestion", "severity": "medium", "description": "No congestion controller pluggability"}
+    {
+      "id": "L1",
+      "area": "QPACK",
+      "severity": "medium",
+      "description": "Dynamic table not implemented"
+    },
+    { "id": "L2", "area": "TLS", "severity": "high", "description": "No actual TLS handshake" },
+    {
+      "id": "L3",
+      "area": "I/O",
+      "severity": "by-design",
+      "description": "No UDP socket integration"
+    },
+    {
+      "id": "L4",
+      "area": "Migration",
+      "severity": "low",
+      "description": "No connection migration implementation"
+    },
+    { "id": "L5", "area": "H3", "severity": "low", "description": "No PUSH_PROMISE support" },
+    { "id": "L6", "area": "Loss", "severity": "medium", "description": "Simplified loss recovery" },
+    {
+      "id": "L7",
+      "area": "Congestion",
+      "severity": "medium",
+      "description": "No congestion controller pluggability"
+    }
   ],
   "test_categories": [
-    {"prefix": "AS", "name": "API surface validation", "count": 6, "focus": "Public type availability, re-exports, constructors"},
-    {"prefix": "MP", "name": "Migration pattern validation", "count": 6, "focus": "Before/after code patterns compile and execute correctly"},
-    {"prefix": "ER", "name": "Error taxonomy validation", "count": 6, "focus": "Error composition, From impls, recovery paths"},
-    {"prefix": "ST", "name": "Stability contract validation", "count": 6, "focus": "Tier assignments, method counts, field visibility"},
-    {"prefix": "MV", "name": "Manifest validation", "count": 4, "focus": "Structural checks on this artifact"}
+    {
+      "prefix": "AS",
+      "name": "API surface validation",
+      "count": 6,
+      "focus": "Public type availability, re-exports, constructors"
+    },
+    {
+      "prefix": "MP",
+      "name": "Migration pattern validation",
+      "count": 6,
+      "focus": "Before/after code patterns compile and execute correctly"
+    },
+    {
+      "prefix": "ER",
+      "name": "Error taxonomy validation",
+      "count": 6,
+      "focus": "Error composition, From impls, recovery paths"
+    },
+    {
+      "prefix": "ST",
+      "name": "Stability contract validation",
+      "count": 6,
+      "focus": "Tier assignments, method counts, field visibility"
+    },
+    {
+      "prefix": "MV",
+      "name": "Manifest validation",
+      "count": 4,
+      "focus": "Structural checks on this artifact"
+    }
   ],
   "drift_detection": [
-    {"id": "DRIFT-S1", "trigger": "New public method on NativeQuicConnection", "action": "Add migration example"},
-    {"id": "DRIFT-S2", "trigger": "New error variant in QUIC/H3 error enum", "action": "Update error taxonomy"},
-    {"id": "DRIFT-S3", "trigger": "New limitation discovered", "action": "Add to limitations table"},
-    {"id": "DRIFT-S4", "trigger": "New QuicH3Event variant", "action": "Update forensic log docs"},
-    {"id": "DRIFT-S5", "trigger": "Stability tier change", "action": "Update stability tiers"}
+    {
+      "id": "DRIFT-S1",
+      "trigger": "New public method on NativeQuicConnection",
+      "action": "Add migration example"
+    },
+    {
+      "id": "DRIFT-S2",
+      "trigger": "New error variant in QUIC/H3 error enum",
+      "action": "Update error taxonomy"
+    },
+    {
+      "id": "DRIFT-S3",
+      "trigger": "New limitation discovered",
+      "action": "Add to limitations table"
+    },
+    {
+      "id": "DRIFT-S4",
+      "trigger": "New QuicH3Event variant",
+      "action": "Update forensic log docs"
+    },
+    { "id": "DRIFT-S5", "trigger": "Stability tier change", "action": "Update stability tiers" }
   ],
   "summary": {
     "total_tests": 28,

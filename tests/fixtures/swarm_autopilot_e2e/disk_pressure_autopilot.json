@@ -3,9 +3,7 @@
   "scenario_id": "disk_pressure_autopilot",
   "stages": [
     {
-      "active_target_dirs": [
-        "/tmp/rch_target_other_agent"
-      ],
+      "active_target_dirs": ["/tmp/rch_target_other_agent"],
       "artifact_free_proof_receipt": true,
       "audit_target_dir": true,
       "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_autopilot_e2e cargo test --test swarm_autopilot_e2e_contract",
@@ -29,10 +27,7 @@
       "agent": "CrimsonHawk",
       "expect": {
         "blocked_count": 1,
-        "cleanup_candidate_ids": [
-          "stale-rch-target-large",
-          "stale-rch-target-medium"
-        ],
+        "cleanup_candidate_ids": ["stale-rch-target-large", "stale-rch-target-medium"],
         "dirty_path_count": 1,
         "disk_pressure_level": "critical",
         "handoff_cleanup_requires_authorization": true,

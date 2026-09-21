@@ -20,12 +20,12 @@
         "title": "Configuration Parity",
         "domain": "pool",
         "parameters": [
-          {"name": "min_idle", "type": "usize", "default": 1},
-          {"name": "max_size", "type": "usize", "default": 10},
-          {"name": "connection_timeout", "type": "Duration", "default_secs": 30},
-          {"name": "idle_timeout", "type": "Duration", "default_secs": 600},
-          {"name": "max_lifetime", "type": "Duration", "default_secs": 3600},
-          {"name": "validate_on_checkout", "type": "bool", "default": true}
+          { "name": "min_idle", "type": "usize", "default": 1 },
+          { "name": "max_size", "type": "usize", "default": 10 },
+          { "name": "connection_timeout", "type": "Duration", "default_secs": 30 },
+          { "name": "idle_timeout", "type": "Duration", "default_secs": 600 },
+          { "name": "max_lifetime", "type": "Duration", "default_secs": 3600 },
+          { "name": "validate_on_checkout", "type": "bool", "default": true }
         ],
         "backends": ["postgresql", "mysql", "sqlite"],
         "status": "defined"
@@ -51,14 +51,14 @@
         "title": "Statistics Contract",
         "domain": "pool",
         "required_fields": [
-          {"name": "active", "type": "usize"},
-          {"name": "idle", "type": "usize"},
-          {"name": "total", "type": "usize"},
-          {"name": "max_size", "type": "usize"},
-          {"name": "waiters", "type": "usize"},
-          {"name": "total_acquisitions", "type": "u64"},
-          {"name": "total_timeouts", "type": "u64"},
-          {"name": "total_validation_failures", "type": "u64"}
+          { "name": "active", "type": "usize" },
+          { "name": "idle", "type": "usize" },
+          { "name": "total", "type": "usize" },
+          { "name": "max_size", "type": "usize" },
+          { "name": "waiters", "type": "usize" },
+          { "name": "total_acquisitions", "type": "u64" },
+          { "name": "total_timeouts", "type": "u64" },
+          { "name": "total_validation_failures", "type": "u64" }
         ],
         "status": "partial"
       },
@@ -67,9 +67,9 @@
         "title": "Cancel-Safety",
         "domain": "pool",
         "phases": [
-          {"phase": "wait", "guarantee": "no_resource_leak"},
-          {"phase": "hold", "guarantee": "drop_returns_to_pool"},
-          {"phase": "transaction", "guarantee": "rollback_before_return"}
+          { "phase": "wait", "guarantee": "no_resource_leak" },
+          { "phase": "hold", "guarantee": "drop_returns_to_pool" },
+          { "phase": "transaction", "guarantee": "rollback_before_return" }
         ],
         "status": "defined"
       },
@@ -224,11 +224,11 @@
         "title": "Connection Lifecycle Events",
         "domain": "observability",
         "events": [
-          {"name": "connection.created", "fields": ["backend", "pool_id", "conn_id"]},
-          {"name": "connection.acquired", "fields": ["pool_id", "conn_id", "wait_ms"]},
-          {"name": "connection.released", "fields": ["pool_id", "conn_id", "held_ms"]},
-          {"name": "connection.evicted", "fields": ["pool_id", "conn_id", "reason"]},
-          {"name": "connection.validation_failed", "fields": ["pool_id", "conn_id"]}
+          { "name": "connection.created", "fields": ["backend", "pool_id", "conn_id"] },
+          { "name": "connection.acquired", "fields": ["pool_id", "conn_id", "wait_ms"] },
+          { "name": "connection.released", "fields": ["pool_id", "conn_id", "held_ms"] },
+          { "name": "connection.evicted", "fields": ["pool_id", "conn_id", "reason"] },
+          { "name": "connection.validation_failed", "fields": ["pool_id", "conn_id"] }
         ],
         "status": "not_implemented"
       },
@@ -237,10 +237,10 @@
         "title": "Transaction Lifecycle Events",
         "domain": "observability",
         "events": [
-          {"name": "transaction.begin", "fields": ["backend", "isolation", "conn_id"]},
-          {"name": "transaction.commit", "fields": ["conn_id", "duration_ms"]},
-          {"name": "transaction.rollback", "fields": ["conn_id", "duration_ms", "reason"]},
-          {"name": "transaction.retry", "fields": ["conn_id", "attempt", "error"]}
+          { "name": "transaction.begin", "fields": ["backend", "isolation", "conn_id"] },
+          { "name": "transaction.commit", "fields": ["conn_id", "duration_ms"] },
+          { "name": "transaction.rollback", "fields": ["conn_id", "duration_ms", "reason"] },
+          { "name": "transaction.retry", "fields": ["conn_id", "attempt", "error"] }
         ],
         "status": "not_implemented"
       },
@@ -249,10 +249,13 @@
         "title": "Pool Health Metrics",
         "domain": "observability",
         "derived_metrics": [
-          {"name": "pool_utilization", "formula": "active / max_size"},
-          {"name": "wait_queue_depth", "formula": "waiters"},
-          {"name": "timeout_rate", "formula": "total_timeouts / total_acquisitions"},
-          {"name": "validation_failure_rate", "formula": "total_validation_failures / total_acquisitions"}
+          { "name": "pool_utilization", "formula": "active / max_size" },
+          { "name": "wait_queue_depth", "formula": "waiters" },
+          { "name": "timeout_rate", "formula": "total_timeouts / total_acquisitions" },
+          {
+            "name": "validation_failure_rate",
+            "formula": "total_validation_failures / total_acquisitions"
+          }
         ],
         "status": "partial"
       },
@@ -347,11 +350,29 @@
   "summary": {
     "total_contracts": 22,
     "domains": {
-      "pool": {"count": 7, "implemented": 0, "partial": 1, "defined": 6, "not_implemented": 0},
-      "transaction": {"count": 5, "implemented": 4, "partial": 0, "defined": 1, "not_implemented": 0},
-      "timeout": {"count": 4, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 1},
-      "observability": {"count": 4, "implemented": 0, "partial": 1, "defined": 0, "not_implemented": 3},
-      "error_normalization": {"count": 2, "implemented": 1, "partial": 0, "defined": 1, "not_implemented": 0}
+      "pool": { "count": 7, "implemented": 0, "partial": 1, "defined": 6, "not_implemented": 0 },
+      "transaction": {
+        "count": 5,
+        "implemented": 4,
+        "partial": 0,
+        "defined": 1,
+        "not_implemented": 0
+      },
+      "timeout": { "count": 4, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 1 },
+      "observability": {
+        "count": 4,
+        "implemented": 0,
+        "partial": 1,
+        "defined": 0,
+        "not_implemented": 3
+      },
+      "error_normalization": {
+        "count": 2,
+        "implemented": 1,
+        "partial": 0,
+        "defined": 1,
+        "not_implemented": 0
+      }
     },
     "backends": ["postgresql", "mysql", "sqlite"],
     "pool_integration_status": {
@@ -360,10 +381,10 @@
       "sqlite": "internal_only"
     },
     "blocking_gaps": [
-      {"id": "PG-G4", "severity": "critical", "description": "PostgreSQL pool integration"},
-      {"id": "MY-G3", "severity": "critical", "description": "MySQL pool integration"},
-      {"id": "POOL-G1", "severity": "high", "description": "Async pool to database adapter"},
-      {"id": "POOL-G2", "severity": "high", "description": "ConnectionManager implementations"}
+      { "id": "PG-G4", "severity": "critical", "description": "PostgreSQL pool integration" },
+      { "id": "MY-G3", "severity": "critical", "description": "MySQL pool integration" },
+      { "id": "POOL-G1", "severity": "high", "description": "Async pool to database adapter" },
+      { "id": "POOL-G2", "severity": "high", "description": "ConnectionManager implementations" }
     ]
   },
   "source_modules": {
@@ -376,13 +397,13 @@
   },
   "dependencies": {
     "blocked_by": [
-      {"bead": "asupersync-2oh2u.6.2", "reason": "PostgreSQL hardening in progress"},
-      {"bead": "asupersync-2oh2u.6.3", "reason": "MySQL hardening", "status": "closed"},
-      {"bead": "asupersync-2oh2u.6.4", "reason": "SQLite hardening", "status": "closed"}
+      { "bead": "asupersync-2oh2u.6.2", "reason": "PostgreSQL hardening in progress" },
+      { "bead": "asupersync-2oh2u.6.3", "reason": "MySQL hardening", "status": "closed" },
+      { "bead": "asupersync-2oh2u.6.4", "reason": "SQLite hardening", "status": "closed" }
     ],
     "blocks": [
-      {"bead": "asupersync-2oh2u.6.9", "reason": "Retry/idempotency/failure contracts"},
-      {"bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit tests"}
+      { "bead": "asupersync-2oh2u.6.9", "reason": "Retry/idempotency/failure contracts" },
+      { "bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit tests" }
     ]
   }
 }

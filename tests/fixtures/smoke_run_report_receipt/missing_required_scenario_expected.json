@@ -7,9 +7,7 @@
   "contract_version": "authority-flow-audit-v1",
   "dry_run": false,
   "generated_at": "2026-05-08T05:55:00Z",
-  "missing_required_scenarios": [
-    "AFA-SMOKE-AUDIT"
-  ],
+  "missing_required_scenarios": ["AFA-SMOKE-AUDIT"],
   "redaction_counts": {
     "long_token": 0,
     "secret": 0,

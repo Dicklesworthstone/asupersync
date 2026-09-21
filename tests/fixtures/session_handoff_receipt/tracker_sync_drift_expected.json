@@ -1,9 +1,7 @@
 {
   "active_bead_ids": {
     "in_progress": [],
-    "ready": [
-      "asupersync-ready1"
-    ],
+    "ready": ["asupersync-ready1"],
     "stale_in_progress": []
   },
   "agent": "CopperSpring",
@@ -17,11 +15,7 @@
   "dirty_clusters": [],
   "generated_at": "2026-05-08T04:30:00Z",
   "next_action": {
-    "blocking_flags": [
-      "dirty_count",
-      "jsonl_newer",
-      "db_newer"
-    ],
+    "blocking_flags": ["dirty_count", "jsonl_newer", "db_newer"],
     "category": "blocked",
     "db_newer": true,
     "dirty_count": 2,
@@ -52,11 +46,7 @@
   },
   "tracker_sync": {
     "blocked": true,
-    "blocking_flags": [
-      "dirty_count",
-      "jsonl_newer",
-      "db_newer"
-    ],
+    "blocking_flags": ["dirty_count", "jsonl_newer", "db_newer"],
     "db_newer": true,
     "dirty_count": 2,
     "jsonl_content_hash": "15ec29fb52a6e4f0b2110a7ec90cd923dc3b657f42d90ae2c532483547d2067a",

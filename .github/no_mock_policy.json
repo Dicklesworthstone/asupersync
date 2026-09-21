@@ -2,18 +2,8 @@
   "schema_version": "no-mock-policy-v1",
   "description": "Policy for mock/fake/stub usage in src/tests with explicit allowlist + waivers.",
   "scan": {
-    "roots": [
-      "src",
-      "tests"
-    ],
-    "terms": [
-      "mock",
-      "fake",
-      "stub",
-      "placeholder",
-      "todo",
-      "unimplemented"
-    ]
+    "roots": ["src", "tests"],
+    "terms": ["mock", "fake", "stub", "placeholder", "todo", "unimplemented"]
   },
   "default_owner": "runtime-core",
   "classification_rules": [
@@ -205,9 +195,7 @@
       "reason": "The Initial-packet encoder first sizes the header with a same-width length value, then emits the padded authenticated packet. Placeholder describes that sizing value in the GH#68 repair, not missing packet encoding or fabricated transport.",
       "revisit_condition": "Review any additional marker independently; this entry covers only the sizing comment.",
       "replacement_issue": "asupersync-ghxhvm",
-      "justified_text": [
-        "^\\s*// is sized with a placeholder length of the same varint width the$"
-      ]
+      "justified_text": ["^\\s*// is sized with a placeholder length of the same varint width the$"]
     },
     {
       "pattern": "src/runtime/current_thread.rs",
@@ -249,9 +237,7 @@
       "reason": "The exact Status::unimplemented return is the typed refusal for native HTTP/2 transport on wasm32. The cfg-gated branch returns Err with an explicit unavailable-on-wasm32 message; it does not fabricate an RPC response. Only that return line is covered, not the client implementation or any additional completion marker.",
       "revisit_condition": "Revisit when the wasm32 native-transport refusal changes; additional markers outside the exact typed-refusal line must remain uncovered.",
       "replacement_issue": "asupersync-ghxhvm",
-      "justified_text": [
-        "^\\s*return Err\\(Status::unimplemented\\($"
-      ]
+      "justified_text": ["^\\s*return Err\\(Status::unimplemented\\($"]
     },
     {
       "pattern": "src/grpc/service.rs",
@@ -531,10 +517,7 @@
     },
     {
       "group_id": "fixture-reference-policy-2026-05-05",
-      "patterns": [
-        "tests/artifacts/**",
-        "src/**/snapshots/**"
-      ],
+      "patterns": ["tests/artifacts/**", "src/**/snapshots/**"],
       "category": "fixture_reference_implementation",
       "owner": "test-infra",
       "reason": "Golden snapshots and checked-in artifact baselines are reference fixtures; mock/fake/stub words in those files describe fixture inputs or expected text rather than incomplete runtime behavior.",
@@ -563,10 +546,7 @@
     },
     {
       "group_id": "stale-audit-prose-policy-2026-05-05",
-      "patterns": [
-        "src/**/*_audit_test.rs",
-        "src/**/*_audit.rs"
-      ],
+      "patterns": ["src/**/*_audit_test.rs", "src/**/*_audit.rs"],
       "category": "stale_audit_prose",
       "owner": "test-infra",
       "reason": "Audit modules are tracked as evidence surfaces after source-truth repairs. The policy must report them separately from production stubs so stale prose is reviewed during final signoff instead of mixed into runtime-code failures.",
@@ -622,9 +602,7 @@
     },
     {
       "group_id": "known-production-runtime-core-policy-hits-2026-05-05",
-      "patterns": [
-        "src/bin/asupersync.rs"
-      ],
+      "patterns": ["src/bin/asupersync.rs"],
       "category": "production_stub",
       "owner": "runtime-core",
       "reason": "Re-verified 2026-07-26 under asupersync-3j4ib0. This group held 38 whole-file patterns; after asupersync-pzfwf5 gave the scanner #[cfg(test)] awareness, 37 of them matched no production hit at all and were removed rather than left as standing whole-file coverage. The one survivor is the ATP CLI, and it is narrowed to its five justified sentences: two comments recording that fake progress/sleep-loop streams were REMOVED (br-asupersync-qk02uw), one documented preview sentinel for a local-only receive preflight, and two comments on atp_not_implemented() refusals for sync and mirror reconcile. Those refusals are complete fail-closed behavior, not unfinished work, which is why they take an allowlist entry rather than an expiring waiver.",

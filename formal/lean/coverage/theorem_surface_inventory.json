@@ -980,10 +980,7 @@
           "setObligation_getObligation_same",
           "setObligation_getObligation_other"
         ],
-        "must_not_depend_on": [
-          "step_preserves_wellformed",
-          "refinement_preserves_wellformed"
-        ]
+        "must_not_depend_on": ["step_preserves_wellformed", "refinement_preserves_wellformed"]
       },
       {
         "rule_id": "constructor_helpers_depend_on_canonical",
@@ -995,11 +992,7 @@
           "aborted_obligation_stable",
           "leaked_obligation_stable"
         ],
-        "must_depend_on_any": [
-          "commit_resolves",
-          "abort_resolves",
-          "leak_marks_leaked"
-        ]
+        "must_depend_on_any": ["commit_resolves", "abort_resolves", "leak_marks_leaked"]
       },
       {
         "rule_id": "liveness_variants_follow_canonical",
@@ -1012,10 +1005,7 @@
           "close_quiescence_decomposition",
           "close_complete_step"
         ],
-        "must_depend_on_any": [
-          "cancel_protocol_terminates",
-          "close_implies_quiescent"
-        ]
+        "must_depend_on_any": ["cancel_protocol_terminates", "close_implies_quiescent"]
       }
     ]
   }

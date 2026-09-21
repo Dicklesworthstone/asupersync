@@ -29,10 +29,7 @@
       "asupersync_surface": ["src/process.rs"],
       "ownership_boundary": "core",
       "current_parity": "active_with_critical_divergences",
-      "existing_evidence": [
-        "tests/compile_test_process.rs",
-        "src/process.rs"
-      ]
+      "existing_evidence": ["tests/compile_test_process.rs", "src/process.rs"]
     },
     {
       "tokio_family": "tokio::signal",
@@ -84,9 +81,7 @@
       "severity": "high",
       "divergence_risk": "cross-platform deterministic replay drift",
       "owner_modules": ["src/fs/vfs.rs"],
-      "evidence_requirements": [
-        "lab/runtime parity tests for deterministic fs behavior"
-      ],
+      "evidence_requirements": ["lab/runtime parity tests for deterministic fs behavior"],
       "downstream_bead": "asupersync-2oh2u.3.7"
     },
     {
@@ -95,9 +90,7 @@
       "severity": "medium",
       "divergence_risk": "io_uring path semantics drift from blocking path",
       "owner_modules": ["src/fs/uring.rs", "src/fs/path_ops.rs"],
-      "evidence_requirements": [
-        "cross-path equivalence tests with io-uring on/off"
-      ],
+      "evidence_requirements": ["cross-path equivalence tests with io-uring on/off"],
       "downstream_bead": "asupersync-2oh2u.3.3"
     },
     {
@@ -106,9 +99,7 @@
       "severity": "medium",
       "divergence_risk": "platform-specific symlink behavior mismatches",
       "owner_modules": ["src/fs/path_ops.rs", "src/fs/mod.rs"],
-      "evidence_requirements": [
-        "platform matrix tests/docs for symlink_file/symlink_dir behavior"
-      ],
+      "evidence_requirements": ["platform matrix tests/docs for symlink_file/symlink_dir behavior"],
       "downstream_bead": "asupersync-2oh2u.3.3"
     },
     {
@@ -117,9 +108,7 @@
       "severity": "high",
       "divergence_risk": "blocking wait semantics vs async tokio behavior",
       "owner_modules": ["src/process.rs"],
-      "evidence_requirements": [
-        "async wait parity tests under load and cancellation"
-      ],
+      "evidence_requirements": ["async wait parity tests under load and cancellation"],
       "downstream_bead": "asupersync-2oh2u.3.4"
     },
     {
@@ -137,9 +126,7 @@
       "severity": "medium",
       "divergence_risk": "windows process behavior drift",
       "owner_modules": ["src/process.rs"],
-      "evidence_requirements": [
-        "platform behavior table and CI evidence per supported OS"
-      ],
+      "evidence_requirements": ["platform behavior table and CI evidence per supported OS"],
       "downstream_bead": "asupersync-2oh2u.3.4"
     },
     {
@@ -148,9 +135,7 @@
       "severity": "high",
       "divergence_risk": "zombie/leak or output truncation on cancellation",
       "owner_modules": ["src/process.rs"],
-      "evidence_requirements": [
-        "deterministic cancellation drills with kill_on_drop variants"
-      ],
+      "evidence_requirements": ["deterministic cancellation drills with kill_on_drop variants"],
       "downstream_bead": "asupersync-2oh2u.3.6"
     },
     {
@@ -192,9 +177,7 @@
       "severity": "high",
       "divergence_risk": "inconsistent shutdown propagation under races",
       "owner_modules": ["src/signal/shutdown.rs", "src/signal/graceful.rs"],
-      "evidence_requirements": [
-        "integration tests for controller plus os-signal race behavior"
-      ],
+      "evidence_requirements": ["integration tests for controller plus os-signal race behavior"],
       "downstream_bead": "asupersync-2oh2u.3.6"
     }
   ],
@@ -266,8 +249,27 @@
         "WritePermit is not presented as filesystem path rollback"
       ],
       "failure_semantics": "emit FS-G2 diagnostic with the owning filesystem module and the missing or overclaimed cancellation boundary",
-      "owner_modules": ["src/fs/file.rs", "src/fs/open_options.rs", "src/fs/path_ops.rs", "src/fs/dir.rs", "src/fs/uring.rs", "src/fs/vfs.rs", "src/fs/mod.rs"],
-      "artifacts": ["src/fs/file.rs", "src/fs/open_options.rs", "src/fs/path_ops.rs", "src/fs/dir.rs", "src/fs/uring.rs", "src/fs/vfs.rs", "src/fs/mod.rs", "docs/tokio_cancel_safe_fs_process_signal.json", "tests/tokio_cancel_safe_fs_process_signal.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "owner_modules": [
+        "src/fs/file.rs",
+        "src/fs/open_options.rs",
+        "src/fs/path_ops.rs",
+        "src/fs/dir.rs",
+        "src/fs/uring.rs",
+        "src/fs/vfs.rs",
+        "src/fs/mod.rs"
+      ],
+      "artifacts": [
+        "src/fs/file.rs",
+        "src/fs/open_options.rs",
+        "src/fs/path_ops.rs",
+        "src/fs/dir.rs",
+        "src/fs/uring.rs",
+        "src/fs/vfs.rs",
+        "src/fs/mod.rs",
+        "docs/tokio_cancel_safe_fs_process_signal.json",
+        "tests/tokio_cancel_safe_fs_process_signal.rs",
+        "tests/tokio_fs_process_signal_parity_matrix.rs"
+      ],
       "contract_tests": ["t37c_02_fs_cancel_safety_protocol"],
       "mapped_gap": "FS-G2",
       "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_02 -- --nocapture"
@@ -286,7 +288,11 @@
       ],
       "failure_semantics": "emit FS-G1 diagnostic with owner src/fs/path_ops.rs and missing API or fidelity invariant",
       "owner_modules": ["src/fs/path_ops.rs", "src/fs/mod.rs"],
-      "artifacts": ["src/fs/path_ops.rs", "src/fs/mod.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "artifacts": [
+        "src/fs/path_ops.rs",
+        "src/fs/mod.rs",
+        "tests/tokio_fs_process_signal_parity_matrix.rs"
+      ],
       "contract_tests": ["t37c_03_atomic_write_error_fidelity"],
       "mapped_gap": "FS-G1",
       "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_03 -- --nocapture"
@@ -357,7 +363,11 @@
       ],
       "failure_semantics": "emit SG-G3 diagnostic with owner src/signal/signal.rs and the delivery invariant that failed",
       "owner_modules": ["src/signal/signal.rs", "src/signal/kind.rs"],
-      "artifacts": ["src/signal/signal.rs", "src/signal/kind.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "artifacts": [
+        "src/signal/signal.rs",
+        "src/signal/kind.rs",
+        "tests/tokio_fs_process_signal_parity_matrix.rs"
+      ],
       "contract_tests": ["t37c_07_signal_delivery_monotonicity"],
       "mapped_gap": "SG-G3",
       "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_07 -- --nocapture"
@@ -375,21 +385,81 @@
       ],
       "failure_semantics": "emit SG-G4 diagnostic with owner src/signal/shutdown.rs and the convergence or classification invariant that failed",
       "owner_modules": ["src/signal/shutdown.rs", "src/signal/graceful.rs"],
-      "artifacts": ["src/signal/shutdown.rs", "src/signal/graceful.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+      "artifacts": [
+        "src/signal/shutdown.rs",
+        "src/signal/graceful.rs",
+        "tests/tokio_fs_process_signal_parity_matrix.rs"
+      ],
       "contract_tests": ["t37c_08_shutdown_convergence"],
       "mapped_gap": "SG-G4",
       "reproduction_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_tokio_fs_process_signal_docs cargo test --test tokio_fs_process_signal_parity_matrix t37c_08 -- --nocapture"
     }
   ],
   "fault_injection_scenarios": [
-    {"id": "FI-01", "domain": "filesystem", "injection_point": "Vfs::write / VfsFile write path", "expected_behavior": "io::Error propagated without partial state", "owner_module": "src/fs/vfs.rs", "mapped_gap": "FS-G3"},
-    {"id": "FI-02", "domain": "filesystem", "injection_point": "Vfs::read / VfsFile read path", "expected_behavior": "io::Error propagated; no silent data corruption", "owner_module": "src/fs/vfs.rs", "mapped_gap": "FS-G3"},
-    {"id": "FI-03", "domain": "filesystem", "injection_point": "Vfs::open", "expected_behavior": "io::Error with PermissionDenied; no handle leak", "owner_module": "src/fs/vfs.rs", "mapped_gap": "FS-G3"},
-    {"id": "FI-04", "domain": "process", "injection_point": "Command::spawn with nonexistent binary", "expected_behavior": "ProcessError::NotFound with program name", "owner_module": "src/process.rs", "mapped_gap": "PR-G3"},
-    {"id": "FI-05", "domain": "process", "injection_point": "Command::spawn with non-executable path", "expected_behavior": "ProcessError::PermissionDenied with program name", "owner_module": "src/process.rs", "mapped_gap": "PR-G3"},
-    {"id": "FI-06", "domain": "signal", "injection_point": "signal(kind) for unsupported platform or POSIX-only Windows signal", "expected_behavior": "io::Error with unsupported message", "owner_module": "src/signal/signal.rs", "mapped_gap": "SG-G1"},
-    {"id": "FI-07", "domain": "signal", "injection_point": "rapid inject() calls on signal slot", "expected_behavior": "monotonic counter; no lost signals", "owner_module": "src/signal/signal.rs", "mapped_gap": "SG-G3"},
-    {"id": "FI-08", "domain": "signal", "injection_point": "concurrent shutdown() calls", "expected_behavior": "exactly one transition; all subscribers notified; idempotent", "owner_module": "src/signal/shutdown.rs", "mapped_gap": "SG-G4"}
+    {
+      "id": "FI-01",
+      "domain": "filesystem",
+      "injection_point": "Vfs::write / VfsFile write path",
+      "expected_behavior": "io::Error propagated without partial state",
+      "owner_module": "src/fs/vfs.rs",
+      "mapped_gap": "FS-G3"
+    },
+    {
+      "id": "FI-02",
+      "domain": "filesystem",
+      "injection_point": "Vfs::read / VfsFile read path",
+      "expected_behavior": "io::Error propagated; no silent data corruption",
+      "owner_module": "src/fs/vfs.rs",
+      "mapped_gap": "FS-G3"
+    },
+    {
+      "id": "FI-03",
+      "domain": "filesystem",
+      "injection_point": "Vfs::open",
+      "expected_behavior": "io::Error with PermissionDenied; no handle leak",
+      "owner_module": "src/fs/vfs.rs",
+      "mapped_gap": "FS-G3"
+    },
+    {
+      "id": "FI-04",
+      "domain": "process",
+      "injection_point": "Command::spawn with nonexistent binary",
+      "expected_behavior": "ProcessError::NotFound with program name",
+      "owner_module": "src/process.rs",
+      "mapped_gap": "PR-G3"
+    },
+    {
+      "id": "FI-05",
+      "domain": "process",
+      "injection_point": "Command::spawn with non-executable path",
+      "expected_behavior": "ProcessError::PermissionDenied with program name",
+      "owner_module": "src/process.rs",
+      "mapped_gap": "PR-G3"
+    },
+    {
+      "id": "FI-06",
+      "domain": "signal",
+      "injection_point": "signal(kind) for unsupported platform or POSIX-only Windows signal",
+      "expected_behavior": "io::Error with unsupported message",
+      "owner_module": "src/signal/signal.rs",
+      "mapped_gap": "SG-G1"
+    },
+    {
+      "id": "FI-07",
+      "domain": "signal",
+      "injection_point": "rapid inject() calls on signal slot",
+      "expected_behavior": "monotonic counter; no lost signals",
+      "owner_module": "src/signal/signal.rs",
+      "mapped_gap": "SG-G3"
+    },
+    {
+      "id": "FI-08",
+      "domain": "signal",
+      "injection_point": "concurrent shutdown() calls",
+      "expected_behavior": "exactly one transition; all subscribers notified; idempotent",
+      "owner_module": "src/signal/shutdown.rs",
+      "mapped_gap": "SG-G4"
+    }
   ],
   "signal_contracts": [
     {
@@ -547,23 +617,68 @@
     "version": "1.0",
     "domains": ["filesystem", "process", "signal"],
     "breaking_changes": [
-      {"domain": "process", "change": "wait() is synchronous; use wait_async() for async", "severity": "high", "migration": "Replace child.wait().await with child.wait_async().await"},
-      {"domain": "process", "change": "wait_with_output() is synchronous; use wait_with_output_async()", "severity": "high", "migration": "Replace child.wait_with_output().await with child.wait_with_output_async().await"},
-      {"domain": "process", "change": "kill() is synchronous; no .await needed", "severity": "medium", "migration": "Remove .await from child.kill()"},
-      {"domain": "process", "change": "ProcessError enum instead of io::Error", "severity": "medium", "migration": "Match on ProcessError variants or use .into()"},
-      {"domain": "signal", "change": "Windows now supports SIGINT, SIGTERM, and SIGBREAK streams; POSIX-only signals still return SignalError off Unix", "severity": "medium", "migration": "Use signal(SignalKind::interrupt/terminate/quit) or sigint/sigterm/sigquit on Unix and Windows; cfg-guard SIGHUP/SIGUSR/SIGCHLD/SIGWINCH/SIGPIPE/SIGALRM helpers to Unix"}
+      {
+        "domain": "process",
+        "change": "wait() is synchronous; use wait_async() for async",
+        "severity": "high",
+        "migration": "Replace child.wait().await with child.wait_async().await"
+      },
+      {
+        "domain": "process",
+        "change": "wait_with_output() is synchronous; use wait_with_output_async()",
+        "severity": "high",
+        "migration": "Replace child.wait_with_output().await with child.wait_with_output_async().await"
+      },
+      {
+        "domain": "process",
+        "change": "kill() is synchronous; no .await needed",
+        "severity": "medium",
+        "migration": "Remove .await from child.kill()"
+      },
+      {
+        "domain": "process",
+        "change": "ProcessError enum instead of io::Error",
+        "severity": "medium",
+        "migration": "Match on ProcessError variants or use .into()"
+      },
+      {
+        "domain": "signal",
+        "change": "Windows now supports SIGINT, SIGTERM, and SIGBREAK streams; POSIX-only signals still return SignalError off Unix",
+        "severity": "medium",
+        "migration": "Use signal(SignalKind::interrupt/terminate/quit) or sigint/sigterm/sigquit on Unix and Windows; cfg-guard SIGHUP/SIGUSR/SIGCHLD/SIGWINCH/SIGPIPE/SIGALRM helpers to Unix"
+      }
     ],
     "api_compatible_surfaces": [
-      "fs::File::open", "fs::File::create", "fs::read", "fs::read_to_string", "fs::write",
-      "fs::copy", "fs::rename", "fs::remove_file", "fs::create_dir", "fs::create_dir_all",
-      "fs::remove_dir_all", "fs::metadata", "fs::read_dir", "fs::OpenOptions",
-      "process::Command::new", "process::Command::arg/args/env/stdin/stdout/stderr/kill_on_drop/spawn",
-      "process::Child::id/try_wait", "process::Stdio::inherit/piped/null",
-      "signal::ctrl_c", "signal::signal(kind)", "signal::Signal::recv"
+      "fs::File::open",
+      "fs::File::create",
+      "fs::read",
+      "fs::read_to_string",
+      "fs::write",
+      "fs::copy",
+      "fs::rename",
+      "fs::remove_file",
+      "fs::create_dir",
+      "fs::create_dir_all",
+      "fs::remove_dir_all",
+      "fs::metadata",
+      "fs::read_dir",
+      "fs::OpenOptions",
+      "process::Command::new",
+      "process::Command::arg/args/env/stdin/stdout/stderr/kill_on_drop/spawn",
+      "process::Child::id/try_wait",
+      "process::Stdio::inherit/piped/null",
+      "signal::ctrl_c",
+      "signal::signal(kind)",
+      "signal::Signal::recv"
     ],
     "asupersync_extensions": [
-      "fs::write_atomic", "fs::try_exists", "fs::Vfs trait", "fs::IoUringFile",
-      "signal::ShutdownController", "signal::ShutdownReceiver", "signal::GracefulOutcome",
+      "fs::write_atomic",
+      "fs::try_exists",
+      "fs::Vfs trait",
+      "fs::IoUringFile",
+      "signal::ShutdownController",
+      "signal::ShutdownReceiver",
+      "signal::GracefulOutcome",
       "signal::with_graceful_shutdown"
     ],
     "evidence_linkage": {
@@ -579,26 +694,115 @@
     "scenario_count": 10,
     "failure_drill_count": 5,
     "scenarios": [
-      {"id": "T310-E2E-01", "domain": "filesystem", "focus": "file lifecycle under concurrent access", "owner_modules": ["src/fs/file.rs", "src/fs/path_ops.rs"]},
-      {"id": "T310-E2E-02", "domain": "filesystem", "focus": "target-stable cancellation at atomic post-stage gate", "owner_modules": ["src/fs/path_ops.rs"]},
-      {"id": "T310-E2E-03", "domain": "filesystem", "focus": "directory tree operations with symlinks", "owner_modules": ["src/fs/dir.rs", "src/fs/read_dir.rs", "src/fs/path_ops.rs"]},
-      {"id": "T310-E2E-04", "domain": "process", "focus": "piped IO and exit code verification", "owner_modules": ["src/process.rs"]},
-      {"id": "T310-E2E-05", "domain": "process", "focus": "kill_on_drop cancellation no-zombie", "owner_modules": ["src/process.rs"]},
-      {"id": "T310-E2E-06", "domain": "process", "focus": "spawn error classification", "owner_modules": ["src/process.rs"]},
-      {"id": "T310-E2E-07", "domain": "signal", "focus": "signal storm monotonic delivery", "owner_modules": ["src/signal/signal.rs"]},
-      {"id": "T310-E2E-08", "domain": "signal", "focus": "graceful shutdown multi-subscriber", "owner_modules": ["src/signal/shutdown.rs", "src/signal/graceful.rs"]},
-      {"id": "T310-E2E-09", "domain": "cross-domain", "focus": "file+process+signal composed workflow", "owner_modules": ["src/fs/file.rs", "src/process.rs", "src/signal/shutdown.rs"]},
-      {"id": "T310-E2E-10", "domain": "cross-domain", "focus": "replay after induced failure", "owner_modules": ["src/fs/file.rs", "src/process.rs", "src/signal/shutdown.rs"]}
+      {
+        "id": "T310-E2E-01",
+        "domain": "filesystem",
+        "focus": "file lifecycle under concurrent access",
+        "owner_modules": ["src/fs/file.rs", "src/fs/path_ops.rs"]
+      },
+      {
+        "id": "T310-E2E-02",
+        "domain": "filesystem",
+        "focus": "target-stable cancellation at atomic post-stage gate",
+        "owner_modules": ["src/fs/path_ops.rs"]
+      },
+      {
+        "id": "T310-E2E-03",
+        "domain": "filesystem",
+        "focus": "directory tree operations with symlinks",
+        "owner_modules": ["src/fs/dir.rs", "src/fs/read_dir.rs", "src/fs/path_ops.rs"]
+      },
+      {
+        "id": "T310-E2E-04",
+        "domain": "process",
+        "focus": "piped IO and exit code verification",
+        "owner_modules": ["src/process.rs"]
+      },
+      {
+        "id": "T310-E2E-05",
+        "domain": "process",
+        "focus": "kill_on_drop cancellation no-zombie",
+        "owner_modules": ["src/process.rs"]
+      },
+      {
+        "id": "T310-E2E-06",
+        "domain": "process",
+        "focus": "spawn error classification",
+        "owner_modules": ["src/process.rs"]
+      },
+      {
+        "id": "T310-E2E-07",
+        "domain": "signal",
+        "focus": "signal storm monotonic delivery",
+        "owner_modules": ["src/signal/signal.rs"]
+      },
+      {
+        "id": "T310-E2E-08",
+        "domain": "signal",
+        "focus": "graceful shutdown multi-subscriber",
+        "owner_modules": ["src/signal/shutdown.rs", "src/signal/graceful.rs"]
+      },
+      {
+        "id": "T310-E2E-09",
+        "domain": "cross-domain",
+        "focus": "file+process+signal composed workflow",
+        "owner_modules": ["src/fs/file.rs", "src/process.rs", "src/signal/shutdown.rs"]
+      },
+      {
+        "id": "T310-E2E-10",
+        "domain": "cross-domain",
+        "focus": "replay after induced failure",
+        "owner_modules": ["src/fs/file.rs", "src/process.rs", "src/signal/shutdown.rs"]
+      }
     ],
     "failure_drills": [
-      {"id": "T310-FD-01", "failure_class": "FS write failure (ENOSPC)", "quiescence_check": "no leaked file handles"},
-      {"id": "T310-FD-02", "failure_class": "process spawn failure", "quiescence_check": "no zombie processes"},
-      {"id": "T310-FD-03", "failure_class": "signal delivery timeout", "quiescence_check": "controller reusable"},
-      {"id": "T310-FD-04", "failure_class": "cascading cancellation", "quiescence_check": "no obligation leaks"},
-      {"id": "T310-FD-05", "failure_class": "replay after fault", "quiescence_check": "clean state"}
+      {
+        "id": "T310-FD-01",
+        "failure_class": "FS write failure (ENOSPC)",
+        "quiescence_check": "no leaked file handles"
+      },
+      {
+        "id": "T310-FD-02",
+        "failure_class": "process spawn failure",
+        "quiescence_check": "no zombie processes"
+      },
+      {
+        "id": "T310-FD-03",
+        "failure_class": "signal delivery timeout",
+        "quiescence_check": "controller reusable"
+      },
+      {
+        "id": "T310-FD-04",
+        "failure_class": "cascading cancellation",
+        "quiescence_check": "no obligation leaks"
+      },
+      {
+        "id": "T310-FD-05",
+        "failure_class": "replay after fault",
+        "quiescence_check": "clean state"
+      }
     ],
-    "log_schema_fields": ["correlation_id", "scenario_id", "timestamp_ms", "phase", "op_type", "outcome", "timeline_ms", "replay_command", "owner_module", "error_detail"],
-    "required_log_fields": ["correlation_id", "scenario_id", "timestamp_ms", "phase", "op_type", "outcome", "timeline_ms"],
+    "log_schema_fields": [
+      "correlation_id",
+      "scenario_id",
+      "timestamp_ms",
+      "phase",
+      "op_type",
+      "outcome",
+      "timeline_ms",
+      "replay_command",
+      "owner_module",
+      "error_detail"
+    ],
+    "required_log_fields": [
+      "correlation_id",
+      "scenario_id",
+      "timestamp_ms",
+      "phase",
+      "op_type",
+      "outcome",
+      "timeline_ms"
+    ],
     "migration_linkage": {
       "playbook_beads": ["asupersync-2oh2u.3.8", "asupersync-2oh2u.11.2"],
       "tokio_fs_scenarios": ["T310-E2E-01", "T310-E2E-02", "T310-E2E-03"],
@@ -614,44 +818,153 @@
     "total_inline_tests": 106,
     "total_tests": 390,
     "test_files": [
-      {"file": "tests/fs_verification.rs", "bead": "baseline", "domain": "filesystem", "category": "happy-path, boundary", "test_count": 36, "scenario_prefix": "FS-V"},
-      {"file": "tests/e2e_fs.rs", "bead": "baseline", "domain": "filesystem", "category": "e2e, integration", "test_count": 22, "scenario_prefix": "FS-E2E"},
-      {"file": "tests/compile_test_process.rs", "bead": "baseline", "domain": "process", "category": "compile-time", "test_count": 3, "scenario_prefix": "PR-CT"},
-      {"file": "tests/e2e_signal.rs", "bead": "baseline", "domain": "signal", "category": "e2e, integration", "test_count": 7, "scenario_prefix": "SIG-E2E"},
-      {"file": "tests/process_lifecycle_hardening.rs", "bead": "asupersync-2oh2u.3.4", "domain": "process", "category": "lifecycle, boundary, error", "test_count": 38, "scenario_prefix": "PR-LH"},
-      {"file": "tests/tokio_process_lifecycle_parity.rs", "bead": "asupersync-2oh2u.3.4", "domain": "process", "category": "parity, protocol", "test_count": 36, "scenario_prefix": "PR-LP"},
-      {"file": "tests/tokio_cancel_safe_fs_process_signal.rs", "bead": "asupersync-2oh2u.3.6", "domain": "fs+process+signal", "category": "cancellation", "test_count": 24, "scenario_prefix": "T36-CS"},
-      {"file": "tests/tokio_fs_process_signal_conformance.rs", "bead": "asupersync-2oh2u.3.7", "domain": "fs+process+signal", "category": "conformance", "test_count": 34, "scenario_prefix": "T37-CF"},
-      {"file": "tests/tokio_fs_process_signal_conformance_faults.rs", "bead": "asupersync-2oh2u.3.7", "domain": "fs+process+signal", "category": "fault-injection", "test_count": 48, "scenario_prefix": "T37-FI"},
-      {"file": "tests/tokio_fs_process_signal_parity_matrix.rs", "bead": "asupersync-2oh2u.3.1", "domain": "fs+process+signal", "category": "contract, drift", "test_count": 36, "scenario_prefix": "T3-PM"}
+      {
+        "file": "tests/fs_verification.rs",
+        "bead": "baseline",
+        "domain": "filesystem",
+        "category": "happy-path, boundary",
+        "test_count": 36,
+        "scenario_prefix": "FS-V"
+      },
+      {
+        "file": "tests/e2e_fs.rs",
+        "bead": "baseline",
+        "domain": "filesystem",
+        "category": "e2e, integration",
+        "test_count": 22,
+        "scenario_prefix": "FS-E2E"
+      },
+      {
+        "file": "tests/compile_test_process.rs",
+        "bead": "baseline",
+        "domain": "process",
+        "category": "compile-time",
+        "test_count": 3,
+        "scenario_prefix": "PR-CT"
+      },
+      {
+        "file": "tests/e2e_signal.rs",
+        "bead": "baseline",
+        "domain": "signal",
+        "category": "e2e, integration",
+        "test_count": 7,
+        "scenario_prefix": "SIG-E2E"
+      },
+      {
+        "file": "tests/process_lifecycle_hardening.rs",
+        "bead": "asupersync-2oh2u.3.4",
+        "domain": "process",
+        "category": "lifecycle, boundary, error",
+        "test_count": 38,
+        "scenario_prefix": "PR-LH"
+      },
+      {
+        "file": "tests/tokio_process_lifecycle_parity.rs",
+        "bead": "asupersync-2oh2u.3.4",
+        "domain": "process",
+        "category": "parity, protocol",
+        "test_count": 36,
+        "scenario_prefix": "PR-LP"
+      },
+      {
+        "file": "tests/tokio_cancel_safe_fs_process_signal.rs",
+        "bead": "asupersync-2oh2u.3.6",
+        "domain": "fs+process+signal",
+        "category": "cancellation",
+        "test_count": 24,
+        "scenario_prefix": "T36-CS"
+      },
+      {
+        "file": "tests/tokio_fs_process_signal_conformance.rs",
+        "bead": "asupersync-2oh2u.3.7",
+        "domain": "fs+process+signal",
+        "category": "conformance",
+        "test_count": 34,
+        "scenario_prefix": "T37-CF"
+      },
+      {
+        "file": "tests/tokio_fs_process_signal_conformance_faults.rs",
+        "bead": "asupersync-2oh2u.3.7",
+        "domain": "fs+process+signal",
+        "category": "fault-injection",
+        "test_count": 48,
+        "scenario_prefix": "T37-FI"
+      },
+      {
+        "file": "tests/tokio_fs_process_signal_parity_matrix.rs",
+        "bead": "asupersync-2oh2u.3.1",
+        "domain": "fs+process+signal",
+        "category": "contract, drift",
+        "test_count": 36,
+        "scenario_prefix": "T3-PM"
+      }
     ],
     "inline_tests": [
-      {"module": "src/fs/file.rs", "domain": "filesystem", "test_count": 7},
-      {"module": "src/fs/vfs.rs", "domain": "filesystem", "test_count": 10},
-      {"module": "src/fs/path_ops.rs", "domain": "filesystem", "test_count": 10},
-      {"module": "src/fs/dir.rs", "domain": "filesystem", "test_count": 6},
-      {"module": "src/fs/read_dir.rs", "domain": "filesystem", "test_count": 3},
-      {"module": "src/fs/open_options.rs", "domain": "filesystem", "test_count": 6},
-      {"module": "src/fs/metadata.rs", "domain": "filesystem", "test_count": 9},
-      {"module": "src/process.rs", "domain": "process", "test_count": 18},
-      {"module": "src/signal/signal.rs", "domain": "signal", "test_count": 5},
-      {"module": "src/signal/ctrl_c.rs", "domain": "signal", "test_count": 2},
-      {"module": "src/signal/kind.rs", "domain": "signal", "test_count": 5},
-      {"module": "src/signal/shutdown.rs", "domain": "signal", "test_count": 9},
-      {"module": "src/signal/graceful.rs", "domain": "signal", "test_count": 16}
+      { "module": "src/fs/file.rs", "domain": "filesystem", "test_count": 7 },
+      { "module": "src/fs/vfs.rs", "domain": "filesystem", "test_count": 10 },
+      { "module": "src/fs/path_ops.rs", "domain": "filesystem", "test_count": 10 },
+      { "module": "src/fs/dir.rs", "domain": "filesystem", "test_count": 6 },
+      { "module": "src/fs/read_dir.rs", "domain": "filesystem", "test_count": 3 },
+      { "module": "src/fs/open_options.rs", "domain": "filesystem", "test_count": 6 },
+      { "module": "src/fs/metadata.rs", "domain": "filesystem", "test_count": 9 },
+      { "module": "src/process.rs", "domain": "process", "test_count": 18 },
+      { "module": "src/signal/signal.rs", "domain": "signal", "test_count": 5 },
+      { "module": "src/signal/ctrl_c.rs", "domain": "signal", "test_count": 2 },
+      { "module": "src/signal/kind.rs", "domain": "signal", "test_count": 5 },
+      { "module": "src/signal/shutdown.rs", "domain": "signal", "test_count": 9 },
+      { "module": "src/signal/graceful.rs", "domain": "signal", "test_count": 16 }
     ],
     "bead_coverage": [
-      {"bead": "asupersync-2oh2u.3.3", "focus": "platform semantics and io_uring parity", "test_files": ["tests/fs_verification.rs", "tests/e2e_fs.rs"], "min_tests": 58},
-      {"bead": "asupersync-2oh2u.3.4", "focus": "process lifecycle parity", "test_files": ["tests/process_lifecycle_hardening.rs", "tests/tokio_process_lifecycle_parity.rs", "tests/compile_test_process.rs"], "min_tests": 77},
-      {"bead": "asupersync-2oh2u.3.5", "focus": "cross-platform signal contracts", "test_files": ["tests/e2e_signal.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"], "min_tests": 7},
-      {"bead": "asupersync-2oh2u.3.6", "focus": "cancellation-safe integration", "test_files": ["tests/tokio_cancel_safe_fs_process_signal.rs"], "min_tests": 24},
-      {"bead": "asupersync-2oh2u.3.7", "focus": "conformance and fault-injection", "test_files": ["tests/tokio_fs_process_signal_conformance.rs", "tests/tokio_fs_process_signal_conformance_faults.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"], "min_tests": 82}
+      {
+        "bead": "asupersync-2oh2u.3.3",
+        "focus": "platform semantics and io_uring parity",
+        "test_files": ["tests/fs_verification.rs", "tests/e2e_fs.rs"],
+        "min_tests": 58
+      },
+      {
+        "bead": "asupersync-2oh2u.3.4",
+        "focus": "process lifecycle parity",
+        "test_files": [
+          "tests/process_lifecycle_hardening.rs",
+          "tests/tokio_process_lifecycle_parity.rs",
+          "tests/compile_test_process.rs"
+        ],
+        "min_tests": 77
+      },
+      {
+        "bead": "asupersync-2oh2u.3.5",
+        "focus": "cross-platform signal contracts",
+        "test_files": ["tests/e2e_signal.rs", "tests/tokio_fs_process_signal_parity_matrix.rs"],
+        "min_tests": 7
+      },
+      {
+        "bead": "asupersync-2oh2u.3.6",
+        "focus": "cancellation-safe integration",
+        "test_files": ["tests/tokio_cancel_safe_fs_process_signal.rs"],
+        "min_tests": 24
+      },
+      {
+        "bead": "asupersync-2oh2u.3.7",
+        "focus": "conformance and fault-injection",
+        "test_files": [
+          "tests/tokio_fs_process_signal_conformance.rs",
+          "tests/tokio_fs_process_signal_conformance_faults.rs",
+          "tests/tokio_fs_process_signal_parity_matrix.rs"
+        ],
+        "min_tests": 82
+      }
     ],
     "ci_thresholds": {
       "min_integration_tests": 280,
       "min_inline_tests": 100,
       "min_test_files": 10,
-      "required_beads": ["asupersync-2oh2u.3.3", "asupersync-2oh2u.3.4", "asupersync-2oh2u.3.5", "asupersync-2oh2u.3.6", "asupersync-2oh2u.3.7"],
+      "required_beads": [
+        "asupersync-2oh2u.3.3",
+        "asupersync-2oh2u.3.4",
+        "asupersync-2oh2u.3.5",
+        "asupersync-2oh2u.3.6",
+        "asupersync-2oh2u.3.7"
+      ],
       "required_domains": ["filesystem", "process", "signal"]
     }
   },

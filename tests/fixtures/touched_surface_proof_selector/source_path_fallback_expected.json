@@ -24,20 +24,12 @@
     {
       "broad_frontier": false,
       "command": "rch exec -- cargo test -p asupersync --test proof_lane_manifest_contract",
-      "guarantee_ids": [
-        "proof-lane-manifest-verifier"
-      ],
+      "guarantee_ids": ["proof-lane-manifest-verifier"],
       "kind": "test_frontier",
       "lane_id": "proof-lane-manifest-contract",
-      "matched_paths": [
-        "artifacts/proof_lane_manifest_v1.json"
-      ],
-      "reasons": [
-        "touched path overlaps lane source_paths"
-      ],
-      "rule_ids": [
-        "source-path-fallback"
-      ]
+      "matched_paths": ["artifacts/proof_lane_manifest_v1.json"],
+      "reasons": ["touched path overlaps lane source_paths"],
+      "rule_ids": ["source-path-fallback"]
     }
   ],
   "source": "tests/fixtures/touched_surface_proof_selector/source_path_fallback.json",
@@ -55,8 +47,6 @@
     "unmatched_touched_count": 0
   },
   "supplemental_lanes": [],
-  "touched_files": [
-    "artifacts/proof_lane_manifest_v1.json"
-  ],
+  "touched_files": ["artifacts/proof_lane_manifest_v1.json"],
   "unmatched_touched_files": []
 }

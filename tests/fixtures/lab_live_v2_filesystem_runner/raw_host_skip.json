@@ -13,11 +13,7 @@
     "live_skip_allowed": true,
     "skip_is_pass": false,
     "skip_reason": "raw host filesystem timing and metadata are unsupported by the current lab/live scope matrix",
-    "normalization": [
-      "skip raw host probe",
-      "capture intent only",
-      "record no pass evidence"
-    ]
+    "normalization": ["skip raw host probe", "capture intent only", "record no pass evidence"]
   },
   "counters": {
     "lab": {

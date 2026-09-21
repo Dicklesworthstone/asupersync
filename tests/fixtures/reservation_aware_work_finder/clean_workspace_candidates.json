@@ -17,9 +17,7 @@
       "lane": "testing-fuzzing",
       "title": "PostgreSQL RowDescription fuzz target",
       "priority": 1,
-      "paths": [
-        "fuzz/fuzz_targets/postgres_row_description.rs"
-      ],
+      "paths": ["fuzz/fuzz_targets/postgres_row_description.rs"],
       "proof_commands": [
         "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_<agent>_postgres_row_description cargo check --manifest-path fuzz/Cargo.toml --bin postgres_row_description"
       ]
@@ -29,9 +27,7 @@
       "lane": "testing-golden-artifacts",
       "title": "Trace golden artifact refresh",
       "priority": 2,
-      "paths": [
-        "tests/fixtures/trace"
-      ]
+      "paths": ["tests/fixtures/trace"]
     }
   ]
 }

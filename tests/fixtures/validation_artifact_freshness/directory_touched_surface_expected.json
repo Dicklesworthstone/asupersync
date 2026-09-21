@@ -2,16 +2,12 @@
   "artifact": {
     "decision": "passed",
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "touched_files": [
-      "tests/proof_status"
-    ]
+    "touched_files": ["tests/proof_status"]
   },
   "artifact_path": "tests/fixtures/validation_artifact_freshness/directory_touched_surface_artifact.json",
   "classification": "stale-dirty-overlap",
   "current": {
-    "dirty_paths": [
-      "tests/proof_status/snapshot.json"
-    ],
+    "dirty_paths": ["tests/proof_status/snapshot.json"],
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
   "current_date": "2026-05-08",
@@ -24,9 +20,7 @@
   "generated_at": "2026-05-08T05:30:00Z",
   "markers": {
     "dirty_external_paths": [],
-    "dirty_touched_overlap": [
-      "tests/proof_status/snapshot.json"
-    ],
+    "dirty_touched_overlap": ["tests/proof_status/snapshot.json"],
     "has_artifact_head": true,
     "head_matches": true
   },

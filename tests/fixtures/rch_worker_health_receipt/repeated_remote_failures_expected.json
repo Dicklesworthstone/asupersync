@@ -29,9 +29,7 @@
   },
   "workers": [
     {
-      "reasons": [
-        "repeated remote command failures"
-      ],
+      "reasons": ["repeated remote command failures"],
       "remediation": [
         "avoid scheduling expensive cargo lanes on this worker until inspected",
         "inspect `df -h / /tmp` and recent rch logs on the worker",

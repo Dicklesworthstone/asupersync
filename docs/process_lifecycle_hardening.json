@@ -166,10 +166,28 @@
     }
   ],
   "platform_matrix": {
-    "linux": {"spawn": true, "kill": "SIGKILL", "signal": true, "reactor_stdio": true, "pty": false},
-    "macos": {"spawn": true, "kill": "SIGKILL", "signal": true, "reactor_stdio": true, "pty": false},
-    "windows": {"spawn": true, "kill": "TerminateProcess", "signal": false, "reactor_stdio": false, "pty": false},
-    "wasm": {"spawn": false, "kill": false, "signal": false, "reactor_stdio": false, "pty": false}
+    "linux": {
+      "spawn": true,
+      "kill": "SIGKILL",
+      "signal": true,
+      "reactor_stdio": true,
+      "pty": false
+    },
+    "macos": {
+      "spawn": true,
+      "kill": "SIGKILL",
+      "signal": true,
+      "reactor_stdio": true,
+      "pty": false
+    },
+    "windows": {
+      "spawn": true,
+      "kill": "TerminateProcess",
+      "signal": false,
+      "reactor_stdio": false,
+      "pty": false
+    },
+    "wasm": { "spawn": false, "kill": false, "signal": false, "reactor_stdio": false, "pty": false }
   },
   "determinism_invariants": [
     "Spawn determinism: same command+args+env produces same child behavior",

@@ -23,9 +23,7 @@
       "theorem_line": 2286,
       "rule_id": "step.abort",
       "semantic_intent": "Supports formal obligations for step.abort",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -42,9 +40,7 @@
       "theorem_line": 747,
       "rule_id": "step.abort",
       "semantic_intent": "Supports formal obligations for step.abort",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -61,9 +57,7 @@
       "theorem_line": 691,
       "rule_id": "step.abort",
       "semantic_intent": "Supports formal obligations for step.abort",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -80,9 +74,7 @@
       "theorem_line": 3518,
       "rule_id": "step.abort",
       "semantic_intent": "Supports formal obligations for step.abort",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -99,9 +91,7 @@
       "theorem_line": 2898,
       "rule_id": "step.abort",
       "semantic_intent": "Supports formal obligations for step.abort",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -118,9 +108,7 @@
       "theorem_line": 3186,
       "rule_id": "step.cancelAcknowledge",
       "semantic_intent": "Supports formal obligations for step.cancelAcknowledge",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -137,9 +125,7 @@
       "theorem_line": 1686,
       "rule_id": "step.cancelAcknowledge",
       "semantic_intent": "Supports formal obligations for step.cancelAcknowledge",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -156,9 +142,7 @@
       "theorem_line": 2413,
       "rule_id": "step.cancelChild",
       "semantic_intent": "Supports formal obligations for step.cancelChild",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -175,9 +159,7 @@
       "theorem_line": 3333,
       "rule_id": "step.cancelChild",
       "semantic_intent": "Supports formal obligations for step.cancelChild",
-      "assumptions": [
-        "Monotone potential / bounded budget"
-      ],
+      "assumptions": ["Monotone potential / bounded budget"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -194,9 +176,7 @@
       "theorem_line": 3070,
       "rule_id": "step.cancelChild",
       "semantic_intent": "Supports formal obligations for step.cancelChild",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -213,9 +193,7 @@
       "theorem_line": 3139,
       "rule_id": "step.cancelChild",
       "semantic_intent": "Supports formal obligations for step.cancelChild",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -232,9 +210,7 @@
       "theorem_line": 3213,
       "rule_id": "step.cancelComplete",
       "semantic_intent": "Supports formal obligations for step.cancelComplete",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -251,9 +227,7 @@
       "theorem_line": 1733,
       "rule_id": "step.cancelComplete",
       "semantic_intent": "Supports formal obligations for step.cancelComplete",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -270,9 +244,7 @@
       "theorem_line": 1713,
       "rule_id": "step.cancelComplete",
       "semantic_intent": "Supports formal obligations for step.cancelComplete",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -289,9 +261,7 @@
       "theorem_line": 3254,
       "rule_id": "step.cancelComplete",
       "semantic_intent": "Supports formal obligations for step.cancelComplete",
-      "assumptions": [
-        "Monotone potential / bounded budget"
-      ],
+      "assumptions": ["Monotone potential / bounded budget"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -308,9 +278,7 @@
       "theorem_line": 3309,
       "rule_id": "step.cancelComplete",
       "semantic_intent": "Supports formal obligations for step.cancelComplete",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -327,9 +295,7 @@
       "theorem_line": 3282,
       "rule_id": "step.cancelComplete",
       "semantic_intent": "Supports formal obligations for step.cancelComplete",
-      "assumptions": [
-        "Monotone potential / bounded budget"
-      ],
+      "assumptions": ["Monotone potential / bounded budget"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -346,9 +312,7 @@
       "theorem_line": 3296,
       "rule_id": "step.cancelComplete",
       "semantic_intent": "Supports formal obligations for step.cancelComplete",
-      "assumptions": [
-        "Monotone potential / bounded budget"
-      ],
+      "assumptions": ["Monotone potential / bounded budget"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -365,9 +329,7 @@
       "theorem_line": 3200,
       "rule_id": "step.cancelFinalize",
       "semantic_intent": "Supports formal obligations for step.cancelFinalize",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -384,9 +346,7 @@
       "theorem_line": 1700,
       "rule_id": "step.cancelFinalize",
       "semantic_intent": "Supports formal obligations for step.cancelFinalize",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -403,9 +363,7 @@
       "theorem_line": 3171,
       "rule_id": "step.cancelMasked",
       "semantic_intent": "Supports formal obligations for step.cancelMasked",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -422,9 +380,7 @@
       "theorem_line": 1666,
       "rule_id": "step.cancelMasked",
       "semantic_intent": "Supports formal obligations for step.cancelMasked",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -441,9 +397,7 @@
       "theorem_line": 2413,
       "rule_id": "step.cancelPropagate",
       "semantic_intent": "Supports formal obligations for step.cancelPropagate",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -460,9 +414,7 @@
       "theorem_line": 3333,
       "rule_id": "step.cancelPropagate",
       "semantic_intent": "Supports formal obligations for step.cancelPropagate",
-      "assumptions": [
-        "Monotone potential / bounded budget"
-      ],
+      "assumptions": ["Monotone potential / bounded budget"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -479,9 +431,7 @@
       "theorem_line": 2373,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Supports formal obligations for step.cancelRequest",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -498,9 +448,7 @@
       "theorem_line": 2413,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Supports formal obligations for step.cancelRequest",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -517,9 +465,7 @@
       "theorem_line": 1311,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Supports formal obligations for step.cancelRequest",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -536,9 +482,7 @@
       "theorem_line": 3475,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Supports formal obligations for step.cancelRequest",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -555,9 +499,7 @@
       "theorem_line": 1055,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Supports formal obligations for step.cancelRequest",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -574,9 +516,7 @@
       "theorem_line": 1806,
       "rule_id": "step.close",
       "semantic_intent": "Supports formal obligations for step.close",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -593,9 +533,7 @@
       "theorem_line": 820,
       "rule_id": "step.close",
       "semantic_intent": "Supports formal obligations for step.close",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -612,9 +550,7 @@
       "theorem_line": 808,
       "rule_id": "step.close",
       "semantic_intent": "Supports formal obligations for step.close",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -631,9 +567,7 @@
       "theorem_line": 794,
       "rule_id": "step.close",
       "semantic_intent": "Supports formal obligations for step.close",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -650,9 +584,7 @@
       "theorem_line": 3492,
       "rule_id": "step.close",
       "semantic_intent": "Supports formal obligations for step.close",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -669,9 +601,7 @@
       "theorem_line": 889,
       "rule_id": "step.close",
       "semantic_intent": "Supports formal obligations for step.close",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -688,9 +618,7 @@
       "theorem_line": 1747,
       "rule_id": "step.closeBegin",
       "semantic_intent": "Supports formal obligations for step.closeBegin",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -707,9 +635,7 @@
       "theorem_line": 2413,
       "rule_id": "step.closeCancelChildren",
       "semantic_intent": "Supports formal obligations for step.closeCancelChildren",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -726,9 +652,7 @@
       "theorem_line": 1757,
       "rule_id": "step.closeCancelChildren",
       "semantic_intent": "Supports formal obligations for step.closeCancelChildren",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -745,9 +669,7 @@
       "theorem_line": 1407,
       "rule_id": "step.closeCancelChildren",
       "semantic_intent": "Supports formal obligations for step.closeCancelChildren",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -764,9 +686,7 @@
       "theorem_line": 1782,
       "rule_id": "step.closeChildrenDone",
       "semantic_intent": "Supports formal obligations for step.closeChildrenDone",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -783,9 +703,7 @@
       "theorem_line": 1446,
       "rule_id": "step.closeChildrenDone",
       "semantic_intent": "Supports formal obligations for step.closeChildrenDone",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -802,9 +720,7 @@
       "theorem_line": 1794,
       "rule_id": "step.closeRunFinalizer",
       "semantic_intent": "Supports formal obligations for step.closeRunFinalizer",
-      "assumptions": [
-        "Step constructor premises hold"
-      ],
+      "assumptions": ["Step constructor premises hold"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -821,9 +737,7 @@
       "theorem_line": 2277,
       "rule_id": "step.commit",
       "semantic_intent": "Supports formal obligations for step.commit",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -840,9 +754,7 @@
       "theorem_line": 723,
       "rule_id": "step.commit",
       "semantic_intent": "Supports formal obligations for step.commit",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -859,9 +771,7 @@
       "theorem_line": 675,
       "rule_id": "step.commit",
       "semantic_intent": "Supports formal obligations for step.commit",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -878,9 +788,7 @@
       "theorem_line": 3505,
       "rule_id": "step.commit",
       "semantic_intent": "Supports formal obligations for step.commit",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -897,9 +805,7 @@
       "theorem_line": 2488,
       "rule_id": "step.commit",
       "semantic_intent": "Supports formal obligations for step.commit",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -916,9 +822,7 @@
       "theorem_line": 1295,
       "rule_id": "step.complete",
       "semantic_intent": "Supports formal obligations for step.complete",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -935,9 +839,7 @@
       "theorem_line": 1279,
       "rule_id": "step.complete",
       "semantic_intent": "Supports formal obligations for step.complete",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -954,9 +856,7 @@
       "theorem_line": 1558,
       "rule_id": "step.complete",
       "semantic_intent": "Supports formal obligations for step.complete",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -973,9 +873,7 @@
       "theorem_line": 989,
       "rule_id": "step.complete",
       "semantic_intent": "Supports formal obligations for step.complete",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -992,9 +890,7 @@
       "theorem_line": 3070,
       "rule_id": "step.enqueue",
       "semantic_intent": "Supports formal obligations for step.enqueue",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1011,9 +907,7 @@
       "theorem_line": 3139,
       "rule_id": "step.enqueue",
       "semantic_intent": "Supports formal obligations for step.enqueue",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1030,9 +924,7 @@
       "theorem_line": 707,
       "rule_id": "step.leak",
       "semantic_intent": "Supports formal obligations for step.leak",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1049,9 +941,7 @@
       "theorem_line": 2295,
       "rule_id": "step.leak",
       "semantic_intent": "Supports formal obligations for step.leak",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1068,9 +958,7 @@
       "theorem_line": 770,
       "rule_id": "step.leak",
       "semantic_intent": "Supports formal obligations for step.leak",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1087,9 +975,7 @@
       "theorem_line": 2996,
       "rule_id": "step.leak",
       "semantic_intent": "Supports formal obligations for step.leak",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1106,9 +992,7 @@
       "theorem_line": 918,
       "rule_id": "step.reserve",
       "semantic_intent": "Supports formal obligations for step.reserve",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1125,9 +1009,7 @@
       "theorem_line": 1360,
       "rule_id": "step.reserve",
       "semantic_intent": "Supports formal obligations for step.reserve",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1144,9 +1026,7 @@
       "theorem_line": 1032,
       "rule_id": "step.reserve",
       "semantic_intent": "Supports formal obligations for step.reserve",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1163,9 +1043,7 @@
       "theorem_line": 1215,
       "rule_id": "step.reserve",
       "semantic_intent": "Supports formal obligations for step.reserve",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1182,9 +1060,7 @@
       "theorem_line": 1987,
       "rule_id": "step.reserve",
       "semantic_intent": "Supports formal obligations for step.reserve",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1201,9 +1077,7 @@
       "theorem_line": 2721,
       "rule_id": "step.schedule",
       "semantic_intent": "Supports formal obligations for step.schedule",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1220,9 +1094,7 @@
       "theorem_line": 3070,
       "rule_id": "step.schedule",
       "semantic_intent": "Supports formal obligations for step.schedule",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1239,9 +1111,7 @@
       "theorem_line": 3139,
       "rule_id": "step.schedule",
       "semantic_intent": "Supports formal obligations for step.schedule",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1258,9 +1128,7 @@
       "theorem_line": 2611,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1277,9 +1145,7 @@
       "theorem_line": 2650,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1296,9 +1162,7 @@
       "theorem_line": 2634,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1315,9 +1179,7 @@
       "theorem_line": 2619,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1334,9 +1196,7 @@
       "theorem_line": 2662,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1353,9 +1213,7 @@
       "theorem_line": 2546,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1372,9 +1230,7 @@
       "theorem_line": 2572,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1391,9 +1247,7 @@
       "theorem_line": 2559,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1410,9 +1264,7 @@
       "theorem_line": 2721,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1429,9 +1281,7 @@
       "theorem_line": 3070,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1448,9 +1298,7 @@
       "theorem_line": 3139,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Supports formal obligations for step.scheduleStep",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1467,9 +1315,7 @@
       "theorem_line": 3462,
       "rule_id": "step.spawn",
       "semantic_intent": "Supports formal obligations for step.spawn",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1486,9 +1332,7 @@
       "theorem_line": 3438,
       "rule_id": "step.spawn",
       "semantic_intent": "Supports formal obligations for step.spawn",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1505,9 +1349,7 @@
       "theorem_line": 999,
       "rule_id": "step.spawn",
       "semantic_intent": "Supports formal obligations for step.spawn",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1524,9 +1366,7 @@
       "theorem_line": 1265,
       "rule_id": "step.spawn",
       "semantic_intent": "Supports formal obligations for step.spawn",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1543,9 +1383,7 @@
       "theorem_line": 3450,
       "rule_id": "step.spawn",
       "semantic_intent": "Supports formal obligations for step.spawn",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1562,9 +1400,7 @@
       "theorem_line": 1844,
       "rule_id": "step.spawn",
       "semantic_intent": "Supports formal obligations for step.spawn",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1581,9 +1417,7 @@
       "theorem_line": 2692,
       "rule_id": "step.spawn",
       "semantic_intent": "Supports formal obligations for step.spawn",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1600,9 +1434,7 @@
       "theorem_line": 2706,
       "rule_id": "step.spawn",
       "semantic_intent": "Supports formal obligations for step.spawn",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1619,9 +1451,7 @@
       "theorem_line": 1514,
       "rule_id": "step.tick",
       "semantic_intent": "Supports formal obligations for step.tick",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1638,9 +1468,7 @@
       "theorem_line": 1346,
       "rule_id": "step.tick",
       "semantic_intent": "Supports formal obligations for step.tick",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1657,9 +1485,7 @@
       "theorem_line": 1337,
       "rule_id": "step.tick",
       "semantic_intent": "Supports formal obligations for step.tick",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1676,9 +1502,7 @@
       "theorem_line": 1328,
       "rule_id": "step.tick",
       "semantic_intent": "Supports formal obligations for step.tick",
-      "assumptions": [
-        "Constructor-specific premises from Step"
-      ],
+      "assumptions": ["Constructor-specific premises from Step"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1695,9 +1519,7 @@
       "theorem_line": 1530,
       "rule_id": "step.tick",
       "semantic_intent": "Supports formal obligations for step.tick",
-      "assumptions": [
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Pre-state is wellformed"],
       "downstream_impact": [
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
         "Feeds Lean coverage matrix rollups for bd-3kzbt",
@@ -1714,10 +1536,7 @@
       "theorem_line": 3786,
       "rule_id": "step.enqueue",
       "semantic_intent": "Constructor-specific preservation coverage for step.enqueue",
-      "assumptions": [
-        "Pre-state is wellformed",
-        "Step.enqueue premises hold"
-      ],
+      "assumptions": ["Pre-state is wellformed", "Step.enqueue premises hold"],
       "downstream_impact": [
         "Completes constructor-total preservation coverage for step.enqueue",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1734,10 +1553,7 @@
       "theorem_line": 3800,
       "rule_id": "step.scheduleStep",
       "semantic_intent": "Constructor-specific preservation coverage for step.scheduleStep",
-      "assumptions": [
-        "Pre-state is wellformed",
-        "Step.scheduleStep premises hold"
-      ],
+      "assumptions": ["Pre-state is wellformed", "Step.scheduleStep premises hold"],
       "downstream_impact": [
         "Completes constructor-total preservation coverage for step.scheduleStep",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1754,10 +1570,7 @@
       "theorem_line": 3809,
       "rule_id": "step.schedule",
       "semantic_intent": "Constructor-specific preservation coverage for step.schedule",
-      "assumptions": [
-        "Pre-state is wellformed",
-        "Step.schedule premises hold"
-      ],
+      "assumptions": ["Pre-state is wellformed", "Step.schedule premises hold"],
       "downstream_impact": [
         "Completes constructor-total preservation coverage for step.schedule",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1774,10 +1587,7 @@
       "theorem_line": 3826,
       "rule_id": "step.cancelChild",
       "semantic_intent": "Constructor-specific preservation coverage for step.cancelChild",
-      "assumptions": [
-        "Pre-state is wellformed",
-        "Step.cancelChild premises hold"
-      ],
+      "assumptions": ["Pre-state is wellformed", "Step.cancelChild premises hold"],
       "downstream_impact": [
         "Completes constructor-total preservation coverage for step.cancelChild",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1794,9 +1604,7 @@
       "theorem_line": 3878,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Canonical-form decomposition for cancel-requested task states.",
-      "assumptions": [
-        "Task state matches TaskState.cancelRequested _ _"
-      ],
+      "assumptions": ["Task state matches TaskState.cancelRequested _ _"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for cancellation ladder proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1813,9 +1621,7 @@
       "theorem_line": 3890,
       "rule_id": "step.cancelAcknowledge",
       "semantic_intent": "Canonical-form decomposition for cancelling task states.",
-      "assumptions": [
-        "Task state matches TaskState.cancelling _ _"
-      ],
+      "assumptions": ["Task state matches TaskState.cancelling _ _"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for cancellation ladder proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1832,9 +1638,7 @@
       "theorem_line": 3902,
       "rule_id": "step.cancelFinalize",
       "semantic_intent": "Canonical-form decomposition for finalizing task states.",
-      "assumptions": [
-        "Task state matches TaskState.finalizing _ _"
-      ],
+      "assumptions": ["Task state matches TaskState.finalizing _ _"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for cancellation ladder proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1851,9 +1655,7 @@
       "theorem_line": 3914,
       "rule_id": "step.closeBegin",
       "semantic_intent": "Canonical-form decomposition for closing region states.",
-      "assumptions": [
-        "Region state matches RegionState.closing"
-      ],
+      "assumptions": ["Region state matches RegionState.closing"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for region close ladder proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1870,9 +1672,7 @@
       "theorem_line": 3926,
       "rule_id": "step.closeCancelChildren",
       "semantic_intent": "Canonical-form decomposition for draining region states.",
-      "assumptions": [
-        "Region state matches RegionState.draining"
-      ],
+      "assumptions": ["Region state matches RegionState.draining"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for region close ladder proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1889,9 +1689,7 @@
       "theorem_line": 3938,
       "rule_id": "step.closeChildrenDone",
       "semantic_intent": "Canonical-form decomposition for finalizing region states.",
-      "assumptions": [
-        "Region state matches RegionState.finalizing"
-      ],
+      "assumptions": ["Region state matches RegionState.finalizing"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for region close ladder proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1908,9 +1706,7 @@
       "theorem_line": 3950,
       "rule_id": "step.reserve",
       "semantic_intent": "Canonical-form decomposition for reserved obligations.",
-      "assumptions": [
-        "Obligation state matches ObligationState.reserved"
-      ],
+      "assumptions": ["Obligation state matches ObligationState.reserved"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1927,9 +1723,7 @@
       "theorem_line": 3961,
       "rule_id": "step.commit",
       "semantic_intent": "Canonical-form decomposition for committed obligations.",
-      "assumptions": [
-        "Obligation state matches ObligationState.committed"
-      ],
+      "assumptions": ["Obligation state matches ObligationState.committed"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1946,9 +1740,7 @@
       "theorem_line": 3972,
       "rule_id": "step.abort",
       "semantic_intent": "Canonical-form decomposition for aborted obligations.",
-      "assumptions": [
-        "Obligation state matches ObligationState.aborted"
-      ],
+      "assumptions": ["Obligation state matches ObligationState.aborted"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1965,9 +1757,7 @@
       "theorem_line": 3983,
       "rule_id": "step.leak",
       "semantic_intent": "Canonical-form decomposition for leaked obligations.",
-      "assumptions": [
-        "Obligation state matches ObligationState.leaked"
-      ],
+      "assumptions": ["Obligation state matches ObligationState.leaked"],
       "downstream_impact": [
         "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
         "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
@@ -1984,10 +1774,7 @@
       "theorem_line": 4479,
       "rule_id": "step.spawn",
       "semantic_intent": "SingleOwner invariant preserved through spawn (adds task + extends children)",
-      "assumptions": [
-        "Pre-state is wellformed",
-        "Pre-state satisfies SingleOwner"
-      ],
+      "assumptions": ["Pre-state is wellformed", "Pre-state satisfies SingleOwner"],
       "downstream_impact": [
         "Closes SEM-06.F1 (asupersync-3cddg.6.6)",
         "Feeds invariant_status_inventory.json upgrade to fully_proven"
@@ -2003,9 +1790,7 @@
       "theorem_line": 4584,
       "rule_id": "step.spawn",
       "semantic_intent": "SingleOwner is an inductive invariant across all finite step sequences",
-      "assumptions": [
-        "Initial state is wellformed and satisfies SingleOwner"
-      ],
+      "assumptions": ["Initial state is wellformed and satisfies SingleOwner"],
       "downstream_impact": [
         "Closes SEM-06.F1 global inductive invariant",
         "Provides multi-step closure guarantee"
@@ -2021,9 +1806,7 @@
       "theorem_line": 4637,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task already cancelRequested.",
-      "assumptions": [
-        "Task state is cancelRequested"
-      ],
+      "assumptions": ["Task state is cancelRequested"],
       "downstream_impact": [
         "Closes idempotence gap in inv.cancel.protocol",
         "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
@@ -2039,9 +1822,7 @@
       "theorem_line": 4648,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is cancelling.",
-      "assumptions": [
-        "Task state is cancelling"
-      ],
+      "assumptions": ["Task state is cancelling"],
       "downstream_impact": [
         "Closes idempotence gap in inv.cancel.protocol",
         "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
@@ -2057,9 +1838,7 @@
       "theorem_line": 4659,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is finalizing.",
-      "assumptions": [
-        "Task state is finalizing"
-      ],
+      "assumptions": ["Task state is finalizing"],
       "downstream_impact": [
         "Closes idempotence gap in inv.cancel.protocol",
         "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
@@ -2075,9 +1854,7 @@
       "theorem_line": 4670,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is completed.",
-      "assumptions": [
-        "Task state is completed"
-      ],
+      "assumptions": ["Task state is completed"],
       "downstream_impact": [
         "Closes idempotence gap in inv.cancel.protocol",
         "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
@@ -2093,9 +1870,7 @@
       "theorem_line": 4680,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Master idempotence: any task not in {created, running} is in cancel-protocol or completed.",
-      "assumptions": [
-        "Task state is not created and not running"
-      ],
+      "assumptions": ["Task state is not created and not running"],
       "downstream_impact": [
         "Canonical theorem for cancel_request_idempotence family",
         "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
@@ -2129,15 +1904,9 @@
       "theorem_line": 4712,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Monotonicity: strengthenOpt result rank >= incoming reason rank.",
-      "assumptions": [
-        "Any CancelReason and Option CancelReason"
-      ],
-      "downstream_impact": [
-        "Supports monotone reason-strength invariant across cancel protocol"
-      ],
-      "artifacts": [
-        "formal/lean/Asupersync.lean:4712"
-      ],
+      "assumptions": ["Any CancelReason and Option CancelReason"],
+      "downstream_impact": ["Supports monotone reason-strength invariant across cancel protocol"],
+      "artifacts": ["formal/lean/Asupersync.lean:4712"],
       "rule_status": "covered"
     },
     {
@@ -2145,15 +1914,9 @@
       "theorem_line": 4722,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Monotonicity: strengthenOpt result rank >= existing reason rank.",
-      "assumptions": [
-        "Existing and incoming CancelReasons"
-      ],
-      "downstream_impact": [
-        "Supports monotone reason-strength invariant across cancel protocol"
-      ],
-      "artifacts": [
-        "formal/lean/Asupersync.lean:4722"
-      ],
+      "assumptions": ["Existing and incoming CancelReasons"],
+      "downstream_impact": ["Supports monotone reason-strength invariant across cancel protocol"],
+      "artifacts": ["formal/lean/Asupersync.lean:4722"],
       "rule_status": "covered"
     },
     {
@@ -2161,15 +1924,9 @@
       "theorem_line": 4731,
       "rule_id": "step.cancelRequest",
       "semantic_intent": "Generic monotonicity: strengthenOpt never weakens existing cancel reason rank.",
-      "assumptions": [
-        "Current is some existing CancelReason"
-      ],
-      "downstream_impact": [
-        "Supports monotone reason-strength invariant across cancel protocol"
-      ],
-      "artifacts": [
-        "formal/lean/Asupersync.lean:4731"
-      ],
+      "assumptions": ["Current is some existing CancelReason"],
+      "downstream_impact": ["Supports monotone reason-strength invariant across cancel protocol"],
+      "artifacts": ["formal/lean/Asupersync.lean:4731"],
       "rule_status": "covered"
     },
     {
@@ -2177,10 +1934,7 @@
       "theorem_line": 4781,
       "rule_id": "step.close",
       "semantic_intent": "Race-loser drain: if a region is closed, all children in its task list are completed.",
-      "assumptions": [
-        "Region state is RegionState.closed",
-        "Pre-state is wellformed"
-      ],
+      "assumptions": ["Region state is RegionState.closed", "Pre-state is wellformed"],
       "downstream_impact": [
         "Foundational for race_loser_drain_completeness",
         "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
@@ -2235,9 +1989,7 @@
       "theorem_line": 4843,
       "rule_id": "step.close",
       "semantic_intent": "Race-loser drain: decomposes Quiescent into allTasksCompleted + allRegionsClosed + empty obligations/finalizers.",
-      "assumptions": [
-        "Region is Quiescent"
-      ],
+      "assumptions": ["Region is Quiescent"],
       "downstream_impact": [
         "Quiescence decomposition for race-loser analysis",
         "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
@@ -2292,10 +2044,7 @@
       "theorem_line": 4912,
       "rule_id": "step.reserve",
       "semantic_intent": "No-leak: WF projection — obligation in ledger must be in reserved state.",
-      "assumptions": [
-        "Pre-state is wellformed",
-        "Obligation is in region's ledger"
-      ],
+      "assumptions": ["Pre-state is wellformed", "Obligation is in region's ledger"],
       "downstream_impact": [
         "Building block for non_reserved_excluded_from_ledger and leaked_not_in_ledger",
         "Canonical theorem for obligation_no_leak family"
@@ -2311,10 +2060,7 @@
       "theorem_line": 4930,
       "rule_id": "step.commit",
       "semantic_intent": "No-leak: contrapositive — non-reserved obligations excluded from all ledgers.",
-      "assumptions": [
-        "Pre-state is wellformed",
-        "Obligation state is not reserved"
-      ],
+      "assumptions": ["Pre-state is wellformed", "Obligation state is not reserved"],
       "downstream_impact": [
         "Proves committed/aborted/leaked obligations cannot hide in ledger",
         "Feeds leaked_not_in_ledger"
@@ -2330,10 +2076,7 @@
       "theorem_line": 4945,
       "rule_id": "step.leak",
       "semantic_intent": "No-leak: leaked obligations cannot appear in any region's ledger.",
-      "assumptions": [
-        "Pre-state is wellformed",
-        "Obligation state is leaked"
-      ],
+      "assumptions": ["Pre-state is wellformed", "Obligation state is leaked"],
       "downstream_impact": [
         "Core no-hiding guarantee: leaked obligations never block close",
         "Feeds leaked_tracked_and_non_blocking"
@@ -2349,9 +2092,7 @@
       "theorem_line": 4960,
       "rule_id": "step.leak",
       "semantic_intent": "No-leak: characterizes leak precondition — requires completed task holding reserved obligation.",
-      "assumptions": [
-        "A leak step fires"
-      ],
+      "assumptions": ["A leak step fires"],
       "downstream_impact": [
         "Precondition characterization for bounded assumption reasoning",
         "Feeds no_leak_from_proper_lifecycle"
@@ -2367,9 +2108,7 @@
       "theorem_line": 4980,
       "rule_id": "step.leak",
       "semantic_intent": "No-leak: conditional — proper task lifecycle discipline prevents leak step from firing.",
-      "assumptions": [
-        "No completed task holds reserved obligations"
-      ],
+      "assumptions": ["No completed task holds reserved obligations"],
       "downstream_impact": [
         "Formalizes bounded assumption: zero leaked obligations under discipline",
         "Closes gap for conditional no-leak execution guarantee"
@@ -2424,9 +2163,7 @@
       "theorem_line": 5119,
       "rule_id": "step.spawn",
       "semantic_intent": "No-ambient-authority: spawn requires open region and task absence — entity existence gates the effect.",
-      "assumptions": [
-        "A spawn step fires"
-      ],
+      "assumptions": ["A spawn step fires"],
       "downstream_impact": [
         "Per-label authority gating for spawn constructor",
         "Feeds no_ambient_effect_without_context composite"
@@ -2442,9 +2179,7 @@
       "theorem_line": 5131,
       "rule_id": "step.commit",
       "semantic_intent": "No-ambient-authority: commit requires obligation holder match — entity ownership gates the effect.",
-      "assumptions": [
-        "A commit step fires"
-      ],
+      "assumptions": ["A commit step fires"],
       "downstream_impact": [
         "Per-label authority gating for commit constructor",
         "Feeds no_ambient_effect_without_context composite"
@@ -2460,9 +2195,7 @@
       "theorem_line": 5143,
       "rule_id": "step.abort",
       "semantic_intent": "No-ambient-authority: abort requires obligation holder match — entity ownership gates the effect.",
-      "assumptions": [
-        "An abort step fires"
-      ],
+      "assumptions": ["An abort step fires"],
       "downstream_impact": [
         "Per-label authority gating for abort constructor",
         "Feeds no_ambient_effect_without_context composite"
@@ -2478,9 +2211,7 @@
       "theorem_line": 5157,
       "rule_id": "step.close",
       "semantic_intent": "No-ambient-authority: close requires region existence, finalizing state, and quiescence — entity existence gates the effect.",
-      "assumptions": [
-        "A close step fires"
-      ],
+      "assumptions": ["A close step fires"],
       "downstream_impact": [
         "Per-label authority gating for close constructor",
         "Feeds no_ambient_effect_without_context composite"
@@ -2496,9 +2227,7 @@
       "theorem_line": 5173,
       "rule_id": "step.spawn",
       "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
-      "assumptions": [
-        "Step fires with non-tau non-tick label"
-      ],
+      "assumptions": ["Step fires with non-tau non-tick label"],
       "downstream_impact": [
         "Central SEM-06.F5 theorem closing inv.authority.no_ambient",
         "Canonical theorem for no_ambient_authority family"
@@ -2514,12 +2243,8 @@
       "theorem_line": 5173,
       "rule_id": "step.commit",
       "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
-      "assumptions": [
-        "Step fires with non-tau non-tick label"
-      ],
-      "downstream_impact": [
-        "Cross-cutting authority gating coverage for commit constructor"
-      ],
+      "assumptions": ["Step fires with non-tau non-tick label"],
+      "downstream_impact": ["Cross-cutting authority gating coverage for commit constructor"],
       "artifacts": [
         "formal/lean/Asupersync.lean:5173",
         "formal/lean/coverage/step_constructor_coverage.json"
@@ -2531,12 +2256,8 @@
       "theorem_line": 5173,
       "rule_id": "step.abort",
       "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
-      "assumptions": [
-        "Step fires with non-tau non-tick label"
-      ],
-      "downstream_impact": [
-        "Cross-cutting authority gating coverage for abort constructor"
-      ],
+      "assumptions": ["Step fires with non-tau non-tick label"],
+      "downstream_impact": ["Cross-cutting authority gating coverage for abort constructor"],
       "artifacts": [
         "formal/lean/Asupersync.lean:5173",
         "formal/lean/coverage/step_constructor_coverage.json"
@@ -2548,12 +2269,8 @@
       "theorem_line": 5173,
       "rule_id": "step.close",
       "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
-      "assumptions": [
-        "Step fires with non-tau non-tick label"
-      ],
-      "downstream_impact": [
-        "Cross-cutting authority gating coverage for close constructor"
-      ],
+      "assumptions": ["Step fires with non-tau non-tick label"],
+      "downstream_impact": ["Cross-cutting authority gating coverage for close constructor"],
       "artifacts": [
         "formal/lean/Asupersync.lean:5173",
         "formal/lean/coverage/step_constructor_coverage.json"

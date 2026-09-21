@@ -62,9 +62,7 @@
       "target_path": "fuzz/fuzz_targets/redis_resp3_map_invariants.rs"
     }
   ],
-  "ready_now": [
-    "asupersync-fuzz-a:MaroonBear:http_header_map_invariants"
-  ],
+  "ready_now": ["asupersync-fuzz-a:MaroonBear:http_header_map_invariants"],
   "safety_notes": [
     "receipt is fixture-backed and does not call Agent Mail",
     "manifest and target reservations must be acquired by the operator before editing",
@@ -86,7 +84,5 @@
     "ready_count": 1,
     "waiting_count": 1
   },
-  "waiting_proposals": [
-    "asupersync-fuzz-b:BlackDove:redis_resp3_map_invariants"
-  ]
+  "waiting_proposals": ["asupersync-fuzz-b:BlackDove:redis_resp3_map_invariants"]
 }

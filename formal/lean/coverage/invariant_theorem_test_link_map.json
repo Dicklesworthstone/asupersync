@@ -25,96 +25,54 @@
         "region_lifecycle",
         "obligation_resolution"
       ],
-      "incident_severity_levels": [
-        "sev1",
-        "sev2",
-        "sev3"
-      ]
+      "incident_severity_levels": ["sev1", "sev2", "sev3"]
     },
     "assumption_class_matrix": [
       {
         "assumption_class": "budget_constraints",
-        "invariant_ids": [
-          "inv.cancel.protocol",
-          "inv.region_close.quiescence"
-        ],
-        "checklist_ids": [
-          "budget_monotonicity",
-          "evidence_commands"
-        ],
+        "invariant_ids": ["inv.cancel.protocol", "inv.region_close.quiescence"],
+        "checklist_ids": ["budget_monotonicity", "evidence_commands"],
         "conformance_artifacts": [
           "formal/lean/coverage/refinement_conformance_report_v1.json",
           "tests/refinement_conformance.rs"
         ],
-        "governance_cadence_ids": [
-          "weekly",
-          "phase-exit"
-        ],
+        "governance_cadence_ids": ["weekly", "phase-exit"],
         "failure_policy": "fail-safe",
         "policy_rationale": "Budget drift can be tolerated briefly only when cleanup budgets remain bounded and recovery evidence is retained."
       },
       {
         "assumption_class": "cancellation_protocol",
-        "invariant_ids": [
-          "inv.cancel.protocol",
-          "inv.race.losers_drained"
-        ],
-        "checklist_ids": [
-          "cancel_protocol_order",
-          "race_loser_drain",
-          "evidence_commands"
-        ],
+        "invariant_ids": ["inv.cancel.protocol", "inv.race.losers_drained"],
+        "checklist_ids": ["cancel_protocol_order", "race_loser_drain", "evidence_commands"],
         "conformance_artifacts": [
           "tests/cancellation_conformance.rs",
           "tests/refinement_conformance.rs"
         ],
-        "governance_cadence_ids": [
-          "weekly",
-          "phase-exit"
-        ],
+        "governance_cadence_ids": ["weekly", "phase-exit"],
         "failure_policy": "fail-fast",
         "policy_rationale": "Cancellation-order regressions can strand work and obligations, so merges must stop until protocol ordering is restored."
       },
       {
         "assumption_class": "region_lifecycle",
-        "invariant_ids": [
-          "inv.region_close.quiescence",
-          "inv.structured_concurrency.single_owner"
-        ],
-        "checklist_ids": [
-          "region_quiescence",
-          "determinism_surface",
-          "evidence_commands"
-        ],
+        "invariant_ids": ["inv.region_close.quiescence", "inv.structured_concurrency.single_owner"],
+        "checklist_ids": ["region_quiescence", "determinism_surface", "evidence_commands"],
         "conformance_artifacts": [
           "tests/region_lifecycle_conformance.rs",
           "tests/refinement_conformance.rs"
         ],
-        "governance_cadence_ids": [
-          "weekly",
-          "phase-exit"
-        ],
+        "governance_cadence_ids": ["weekly", "phase-exit"],
         "failure_policy": "fail-safe",
         "policy_rationale": "Operational mitigations may be applied while restoring lifecycle invariants, but unresolved leaks/quiescence gaps stay escalated."
       },
       {
         "assumption_class": "obligation_resolution",
-        "invariant_ids": [
-          "inv.obligation.no_leaks",
-          "inv.region_close.quiescence"
-        ],
-        "checklist_ids": [
-          "obligation_totality",
-          "evidence_commands"
-        ],
+        "invariant_ids": ["inv.obligation.no_leaks", "inv.region_close.quiescence"],
+        "checklist_ids": ["obligation_totality", "evidence_commands"],
         "conformance_artifacts": [
           "tests/cancel_obligation_invariants.rs",
           "tests/obligation_lifecycle_e2e.rs"
         ],
-        "governance_cadence_ids": [
-          "weekly",
-          "phase-exit"
-        ],
+        "governance_cadence_ids": ["weekly", "phase-exit"],
         "failure_policy": "fail-fast",
         "policy_rationale": "Unresolved obligations violate safety invariants directly and must block promotion until commit/abort/leak coverage is restored."
       }
@@ -123,11 +81,7 @@
       {
         "step_id": "classify_assumption",
         "description": "Map incident symptom to exactly one assumption class before proposing remediation.",
-        "required_outputs": [
-          "assumption_class",
-          "candidate_invariant_ids",
-          "severity"
-        ]
+        "required_outputs": ["assumption_class", "candidate_invariant_ids", "severity"]
       },
       {
         "step_id": "verify_guardrails",
@@ -141,20 +95,12 @@
       {
         "step_id": "route_disposition",
         "description": "Select fail-fast or fail-safe disposition using policy rationale and observed severity.",
-        "required_outputs": [
-          "failure_policy",
-          "mitigation_owner",
-          "next_review_cadence"
-        ]
+        "required_outputs": ["failure_policy", "mitigation_owner", "next_review_cadence"]
       },
       {
         "step_id": "governance_escalation",
         "description": "Escalate unresolved guardrail failures into governance threads and blocker beads.",
-        "required_outputs": [
-          "blocker_bead_id",
-          "governance_thread",
-          "signoff_status"
-        ]
+        "required_outputs": ["blocker_bead_id", "governance_thread", "signoff_status"]
       }
     ]
   },
@@ -164,14 +110,18 @@
       "invariant_name": "No ambient authority",
       "proof_status": "fully_proven",
       "theorem_witnesses": [
-        {"theorem": "cap_subset_refl", "theorem_line": 5083, "rule_ids": []},
-        {"theorem": "cap_subset_trans", "theorem_line": 5088, "rule_ids": []},
-        {"theorem": "cap_subset_antisymm", "theorem_line": 5103, "rule_ids": []},
-        {"theorem": "spawn_authority_gated", "theorem_line": 5119, "rule_ids": ["step.spawn"]},
-        {"theorem": "commit_holder_authority", "theorem_line": 5131, "rule_ids": ["step.commit"]},
-        {"theorem": "abort_holder_authority", "theorem_line": 5143, "rule_ids": ["step.abort"]},
-        {"theorem": "close_authority_gated", "theorem_line": 5157, "rule_ids": ["step.close"]},
-        {"theorem": "no_ambient_effect_without_context", "theorem_line": 5173, "rule_ids": ["step.abort", "step.close", "step.commit", "step.spawn"]}
+        { "theorem": "cap_subset_refl", "theorem_line": 5083, "rule_ids": [] },
+        { "theorem": "cap_subset_trans", "theorem_line": 5088, "rule_ids": [] },
+        { "theorem": "cap_subset_antisymm", "theorem_line": 5103, "rule_ids": [] },
+        { "theorem": "spawn_authority_gated", "theorem_line": 5119, "rule_ids": ["step.spawn"] },
+        { "theorem": "commit_holder_authority", "theorem_line": 5131, "rule_ids": ["step.commit"] },
+        { "theorem": "abort_holder_authority", "theorem_line": 5143, "rule_ids": ["step.abort"] },
+        { "theorem": "close_authority_gated", "theorem_line": 5157, "rule_ids": ["step.close"] },
+        {
+          "theorem": "no_ambient_effect_without_context",
+          "theorem_line": 5173,
+          "rule_ids": ["step.abort", "step.close", "step.commit", "step.spawn"]
+        }
       ],
       "executable_checks": [
         "tests/property_cap_obligation.rs",
@@ -198,10 +148,7 @@
           "tests/cap_obligation_compile_fail.rs",
           "tests/integration_e2e.rs"
         ],
-        "feeds_invariants": [
-          "inv.structured_concurrency.single_owner",
-          "inv.obligation.no_leaks"
-        ]
+        "feeds_invariants": ["inv.structured_concurrency.single_owner", "inv.obligation.no_leaks"]
       },
       "explicit_gaps": []
     },
@@ -213,150 +160,107 @@
         {
           "theorem": "cancel_masked_step",
           "theorem_line": 1666,
-          "rule_ids": [
-            "step.cancelMasked"
-          ]
+          "rule_ids": ["step.cancelMasked"]
         },
         {
           "theorem": "cancel_ack_step",
           "theorem_line": 1686,
-          "rule_ids": [
-            "step.cancelAcknowledge"
-          ]
+          "rule_ids": ["step.cancelAcknowledge"]
         },
         {
           "theorem": "cancel_finalize_step",
           "theorem_line": 1700,
-          "rule_ids": [
-            "step.cancelFinalize"
-          ]
+          "rule_ids": ["step.cancelFinalize"]
         },
         {
           "theorem": "cancel_complete_step",
           "theorem_line": 1713,
-          "rule_ids": [
-            "step.cancelComplete"
-          ]
+          "rule_ids": ["step.cancelComplete"]
         },
         {
           "theorem": "cancel_complete_produces_cancelled",
           "theorem_line": 1733,
-          "rule_ids": [
-            "step.cancelComplete"
-          ]
+          "rule_ids": ["step.cancelComplete"]
         },
         {
           "theorem": "cancel_masked_potential_decreases",
           "theorem_line": 3171,
-          "rule_ids": [
-            "step.cancelMasked"
-          ]
+          "rule_ids": ["step.cancelMasked"]
         },
         {
           "theorem": "cancel_acknowledge_potential_decreases",
           "theorem_line": 3186,
-          "rule_ids": [
-            "step.cancelAcknowledge"
-          ]
+          "rule_ids": ["step.cancelAcknowledge"]
         },
         {
           "theorem": "cancel_finalize_potential_decreases",
           "theorem_line": 3200,
-          "rule_ids": [
-            "step.cancelFinalize"
-          ]
+          "rule_ids": ["step.cancelFinalize"]
         },
         {
           "theorem": "cancel_complete_potential_reaches_zero",
           "theorem_line": 3213,
-          "rule_ids": [
-            "step.cancelComplete"
-          ]
+          "rule_ids": ["step.cancelComplete"]
         },
         {
           "theorem": "cancel_protocol_terminates",
           "theorem_line": 3254,
-          "rule_ids": [
-            "step.cancelComplete"
-          ]
+          "rule_ids": ["step.cancelComplete"]
         },
         {
           "theorem": "cancel_steps_testable_bound",
           "theorem_line": 3309,
-          "rule_ids": [
-            "step.cancelComplete"
-          ]
+          "rule_ids": ["step.cancelComplete"]
         },
         {
           "theorem": "cancel_propagation_bounded",
           "theorem_line": 3333,
-          "rule_ids": [
-            "step.cancelChild",
-            "step.cancelPropagate"
-          ]
+          "rule_ids": ["step.cancelChild", "step.cancelPropagate"]
         },
         {
           "theorem": "cancel_request_blocked_when_cancel_requested",
           "theorem_line": 4637,
-          "rule_ids": [
-            "step.cancelRequest"
-          ]
+          "rule_ids": ["step.cancelRequest"]
         },
         {
           "theorem": "cancel_request_blocked_when_cancelling",
           "theorem_line": 4648,
-          "rule_ids": [
-            "step.cancelRequest"
-          ]
+          "rule_ids": ["step.cancelRequest"]
         },
         {
           "theorem": "cancel_request_blocked_when_finalizing",
           "theorem_line": 4659,
-          "rule_ids": [
-            "step.cancelRequest"
-          ]
+          "rule_ids": ["step.cancelRequest"]
         },
         {
           "theorem": "cancel_request_blocked_when_completed",
           "theorem_line": 4670,
-          "rule_ids": [
-            "step.cancelRequest"
-          ]
+          "rule_ids": ["step.cancelRequest"]
         },
         {
           "theorem": "cancel_request_requires_pre_cancel_state",
           "theorem_line": 4680,
-          "rule_ids": [
-            "step.cancelRequest"
-          ]
+          "rule_ids": ["step.cancelRequest"]
         },
         {
           "theorem": "cancel_child_blocked_when_cancel_protocol",
           "theorem_line": 4702,
-          "rule_ids": [
-            "step.cancelChild"
-          ]
+          "rule_ids": ["step.cancelChild"]
         },
         {
           "theorem": "cancel_request_reason_monotone_incoming",
           "theorem_line": 4712,
-          "rule_ids": [
-            "step.cancelRequest"
-          ]
+          "rule_ids": ["step.cancelRequest"]
         },
         {
           "theorem": "cancel_request_reason_monotone_existing",
           "theorem_line": 4722,
-          "rule_ids": [
-            "step.cancelRequest"
-          ]
+          "rule_ids": ["step.cancelRequest"]
         },
         {
           "theorem": "strengthen_opt_monotone_rank",
           "theorem_line": 4731,
-          "rule_ids": [
-            "step.cancelRequest"
-          ]
+          "rule_ids": ["step.cancelRequest"]
         }
       ],
       "executable_checks": [
@@ -380,23 +284,15 @@
       },
       "composition_contract": {
         "status": "ready",
-        "consumed_by": [
-          "tests/refinement_conformance.rs",
-          "tests/cancellation_conformance.rs"
-        ],
-        "feeds_invariants": [
-          "inv.race.losers_drained",
-          "inv.obligation.no_leaks"
-        ]
+        "consumed_by": ["tests/refinement_conformance.rs", "tests/cancellation_conformance.rs"],
+        "feeds_invariants": ["inv.race.losers_drained", "inv.obligation.no_leaks"]
       },
       "explicit_gaps": [
         {
           "gap_id": "inv.cancel.protocol.gap.idempotence-theorem-missing",
           "description": "Idempotence of repeated cancel requests is not captured as a dedicated Lean theorem.",
           "owner": "GentleHeron",
-          "dependency_blockers": [
-            "bd-1ab3k"
-          ]
+          "dependency_blockers": ["bd-1ab3k"]
         }
       ]
     },
@@ -408,65 +304,47 @@
         {
           "theorem": "commit_resolves",
           "theorem_line": 675,
-          "rule_ids": [
-            "step.commit"
-          ]
+          "rule_ids": ["step.commit"]
         },
         {
           "theorem": "abort_resolves",
           "theorem_line": 691,
-          "rule_ids": [
-            "step.abort"
-          ]
+          "rule_ids": ["step.abort"]
         },
         {
           "theorem": "leak_marks_leaked",
           "theorem_line": 707,
-          "rule_ids": [
-            "step.leak"
-          ]
+          "rule_ids": ["step.leak"]
         },
         {
           "theorem": "commit_removes_from_ledger",
           "theorem_line": 723,
-          "rule_ids": [
-            "step.commit"
-          ]
+          "rule_ids": ["step.commit"]
         },
         {
           "theorem": "abort_removes_from_ledger",
           "theorem_line": 747,
-          "rule_ids": [
-            "step.abort"
-          ]
+          "rule_ids": ["step.abort"]
         },
         {
           "theorem": "leak_removes_from_ledger",
           "theorem_line": 770,
-          "rule_ids": [
-            "step.leak"
-          ]
+          "rule_ids": ["step.leak"]
         },
         {
           "theorem": "committed_obligation_stable",
           "theorem_line": 2488,
-          "rule_ids": [
-            "step.commit"
-          ]
+          "rule_ids": ["step.commit"]
         },
         {
           "theorem": "aborted_obligation_stable",
           "theorem_line": 2898,
-          "rule_ids": [
-            "step.abort"
-          ]
+          "rule_ids": ["step.abort"]
         },
         {
           "theorem": "leaked_obligation_stable",
           "theorem_line": 2996,
-          "rule_ids": [
-            "step.leak"
-          ]
+          "rule_ids": ["step.leak"]
         },
         {
           "theorem": "obligation_in_ledger_blocks_close",
@@ -476,9 +354,7 @@
         {
           "theorem": "close_implies_ledger_empty",
           "theorem_line": 808,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "call_obligation_resolved_at_close",
@@ -498,51 +374,37 @@
         {
           "theorem": "ledger_implies_reserved",
           "theorem_line": 4912,
-          "rule_ids": [
-            "step.reserve"
-          ]
+          "rule_ids": ["step.reserve"]
         },
         {
           "theorem": "non_reserved_excluded_from_ledger",
           "theorem_line": 4930,
-          "rule_ids": [
-            "step.commit"
-          ]
+          "rule_ids": ["step.commit"]
         },
         {
           "theorem": "leaked_not_in_ledger",
           "theorem_line": 4945,
-          "rule_ids": [
-            "step.leak"
-          ]
+          "rule_ids": ["step.leak"]
         },
         {
           "theorem": "leak_requires_completed_holder",
           "theorem_line": 4960,
-          "rule_ids": [
-            "step.leak"
-          ]
+          "rule_ids": ["step.leak"]
         },
         {
           "theorem": "no_leak_from_proper_lifecycle",
           "theorem_line": 4980,
-          "rule_ids": [
-            "step.leak"
-          ]
+          "rule_ids": ["step.leak"]
         },
         {
           "theorem": "execution_obligation_lifecycle_completeness",
           "theorem_line": 5000,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "leaked_tracked_and_non_blocking",
           "theorem_line": 5021,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         }
       ],
       "executable_checks": [
@@ -572,20 +434,14 @@
           "tests/leak_regression_e2e.rs",
           "tests/lease_semantics.rs"
         ],
-        "feeds_invariants": [
-          "inv.region_close.quiescence",
-          "inv.race.losers_drained"
-        ]
+        "feeds_invariants": ["inv.region_close.quiescence", "inv.race.losers_drained"]
       },
       "explicit_gaps": [
         {
           "gap_id": "inv.obligation.no_leaks.gap.global-zero-leak-theorem-missing",
           "description": "A single global theorem stating zero leaked obligations across all reachable executions is not yet present.",
           "owner": "MagentaBridge",
-          "dependency_blockers": [
-            "bd-3k6l5",
-            "asupersync-1pdet"
-          ]
+          "dependency_blockers": ["bd-3k6l5", "asupersync-1pdet"]
         }
       ]
     },
@@ -597,62 +453,42 @@
         {
           "theorem": "cancel_propagation_bounded",
           "theorem_line": 3333,
-          "rule_ids": [
-            "step.cancelChild",
-            "step.cancelPropagate"
-          ]
+          "rule_ids": ["step.cancelChild", "step.cancelPropagate"]
         },
         {
           "theorem": "step_preserves_wellformed",
           "theorem_line": 3070,
-          "rule_ids": [
-            "step.cancelChild",
-            "step.enqueue",
-            "step.schedule",
-            "step.scheduleStep"
-          ]
+          "rule_ids": ["step.cancelChild", "step.enqueue", "step.schedule", "step.scheduleStep"]
         },
         {
           "theorem": "closed_region_children_all_completed",
           "theorem_line": 4781,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "closed_region_child_completed",
           "theorem_line": 4793,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "loser_drained_from_quiescence",
           "theorem_line": 4807,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "close_gate_requires_drain",
           "theorem_line": 4843,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "race_loser_drain_completeness",
           "theorem_line": 4857,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "cancelled_child_progress",
           "theorem_line": 4873,
-          "rule_ids": [
-            "step.closeCancelChildren"
-          ]
+          "rule_ids": ["step.closeCancelChildren"]
         }
       ],
       "executable_checks": [
@@ -681,20 +517,14 @@
           "tests/refinement_conformance.rs",
           "tests/e2e/combinator/cancel_correctness/loser_drain.rs"
         ],
-        "feeds_invariants": [
-          "inv.cancel.protocol",
-          "inv.obligation.no_leaks"
-        ]
+        "feeds_invariants": ["inv.cancel.protocol", "inv.obligation.no_leaks"]
       },
       "explicit_gaps": [
         {
           "gap_id": "inv.race.losers_drained.gap.direct-lean-theorem-missing",
           "description": "No direct Lean theorem currently states and proves race-loser full-drain semantics.",
           "owner": "GentleHeron",
-          "dependency_blockers": [
-            "bd-19efq",
-            "bd-244p5"
-          ]
+          "dependency_blockers": ["bd-19efq", "bd-244p5"]
         }
       ]
     },
@@ -706,23 +536,17 @@
         {
           "theorem": "close_implies_quiescent",
           "theorem_line": 794,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "close_implies_ledger_empty",
           "theorem_line": 808,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "close_implies_finalizers_empty",
           "theorem_line": 820,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "quiescent_tasks_completed",
@@ -747,16 +571,12 @@
         {
           "theorem": "close_quiescence_decomposition",
           "theorem_line": 889,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         },
         {
           "theorem": "close_complete_step",
           "theorem_line": 1806,
-          "rule_ids": [
-            "step.close"
-          ]
+          "rule_ids": ["step.close"]
         }
       ],
       "executable_checks": [
@@ -779,14 +599,8 @@
       },
       "composition_contract": {
         "status": "ready",
-        "consumed_by": [
-          "tests/refinement_conformance.rs",
-          "tests/region_lifecycle_conformance.rs"
-        ],
-        "feeds_invariants": [
-          "inv.structured_concurrency.single_owner",
-          "inv.obligation.no_leaks"
-        ]
+        "consumed_by": ["tests/refinement_conformance.rs", "tests/region_lifecycle_conformance.rs"],
+        "feeds_invariants": ["inv.structured_concurrency.single_owner", "inv.obligation.no_leaks"]
       },
       "explicit_gaps": []
     },
@@ -798,30 +612,22 @@
         {
           "theorem": "spawn_preserves_existing_task",
           "theorem_line": 999,
-          "rule_ids": [
-            "step.spawn"
-          ]
+          "rule_ids": ["step.spawn"]
         },
         {
           "theorem": "spawn_preserves_obligation",
           "theorem_line": 1265,
-          "rule_ids": [
-            "step.spawn"
-          ]
+          "rule_ids": ["step.spawn"]
         },
         {
           "theorem": "spawn_preserves_wellformed",
           "theorem_line": 1844,
-          "rule_ids": [
-            "step.spawn"
-          ]
+          "rule_ids": ["step.spawn"]
         },
         {
           "theorem": "spawned_task_in_region",
           "theorem_line": 2706,
-          "rule_ids": [
-            "step.spawn"
-          ]
+          "rule_ids": ["step.spawn"]
         },
         {
           "theorem": "setTask_same_region_preserves_wellformed",
@@ -836,12 +642,7 @@
         {
           "theorem": "step_preserves_wellformed",
           "theorem_line": 3070,
-          "rule_ids": [
-            "step.cancelChild",
-            "step.enqueue",
-            "step.schedule",
-            "step.scheduleStep"
-          ]
+          "rule_ids": ["step.cancelChild", "step.enqueue", "step.schedule", "step.scheduleStep"]
         },
         {
           "theorem": "scheduler_change_preserves_single_owner",
@@ -881,16 +682,12 @@
         {
           "theorem": "step_preserves_single_owner",
           "theorem_line": 4479,
-          "rule_ids": [
-            "step.spawn"
-          ]
+          "rule_ids": ["step.spawn"]
         },
         {
           "theorem": "steps_preserve_single_owner",
           "theorem_line": 4584,
-          "rule_ids": [
-            "step.spawn"
-          ]
+          "rule_ids": ["step.spawn"]
         }
       ],
       "executable_checks": [
@@ -918,20 +715,14 @@
           "tests/region_lifecycle_conformance.rs",
           "tests/integration_e2e.rs"
         ],
-        "feeds_invariants": [
-          "inv.region_close.quiescence",
-          "inv.cancel.protocol"
-        ]
+        "feeds_invariants": ["inv.region_close.quiescence", "inv.cancel.protocol"]
       },
       "explicit_gaps": [
         {
           "gap_id": "inv.structured_concurrency.single_owner.gap.global-uniqueness-theorem-missing",
           "description": "No single explicit theorem stating global uniqueness of region ownership for all task IDs.",
           "owner": "MagentaBridge",
-          "dependency_blockers": [
-            "bd-nc3ut",
-            "bd-2iwok"
-          ]
+          "dependency_blockers": ["bd-nc3ut", "bd-2iwok"]
         }
       ]
     }
@@ -943,10 +734,7 @@
       {
         "assumption_id": "assume.cancel.checkpoint_observability.v1",
         "statement": "Runtime tasks observe cancellation through explicit checkpoints so cancellation progression can be witnessed and bounded in traces.",
-        "evidence_refs": [
-          "src/cx/cx.rs:1090",
-          "src/cancel/symbol_cancel.rs"
-        ]
+        "evidence_refs": ["src/cx/cx.rs:1090", "src/cancel/symbol_cancel.rs"]
       },
       {
         "assumption_id": "assume.cancel.streak_fairness_bound.v1",
@@ -967,10 +755,7 @@
       {
         "assumption_id": "assume.close.quiescence_guard.v1",
         "statement": "Region close transitions require quiescence preconditions (no live descendants and no unresolved obligations) before terminal close completion.",
-        "evidence_refs": [
-          "src/runtime/state.rs",
-          "formal/lean/Asupersync.lean:794"
-        ]
+        "evidence_refs": ["src/runtime/state.rs", "formal/lean/Asupersync.lean:794"]
       }
     ],
     "invariant_ids": [
@@ -1011,10 +796,7 @@
       },
       {
         "segment_id": "race_loser_drain",
-        "theorems": [
-          "cancel_propagation_bounded",
-          "step_preserves_wellformed"
-        ],
+        "theorems": ["cancel_propagation_bounded", "step_preserves_wellformed"],
         "theorem_sources": [
           {
             "theorem": "cancel_propagation_bounded",
@@ -1057,9 +839,7 @@
             "line": 1806
           }
         ],
-        "assumption_ids": [
-          "assume.close.quiescence_guard.v1"
-        ],
+        "assumption_ids": ["assume.close.quiescence_guard.v1"],
         "guarantee": "Region close concludes only in quiescent state with completed close transition."
       }
     ],
@@ -1078,9 +858,7 @@
           "assume.cancel.streak_fairness_bound.v1",
           "assume.close.quiescence_guard.v1"
         ],
-        "harness_ids": [
-          "harness.cancellation_obligation"
-        ],
+        "harness_ids": ["harness.cancellation_obligation"],
         "consumed_by": [
           "tests/cancellation_conformance.rs",
           "tests/refinement_conformance.rs",
@@ -1100,9 +878,7 @@
           "assume.race.loser_drain_waits.v1",
           "assume.close.quiescence_guard.v1"
         ],
-        "harness_ids": [
-          "harness.race_loser_drain"
-        ],
+        "harness_ids": ["harness.race_loser_drain"],
         "consumed_by": [
           "tests/e2e/combinator/cancel_correctness/loser_drain.rs",
           "tests/refinement_conformance.rs",

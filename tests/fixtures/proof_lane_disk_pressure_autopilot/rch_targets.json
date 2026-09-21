@@ -1,8 +1,5 @@
 {
-  "roots": [
-    "/tmp/rch_target*",
-    "/data/projects/asupersync/.rch-target-*"
-  ],
+  "roots": ["/tmp/rch_target*", "/data/projects/asupersync/.rch-target-*"],
   "candidates": [
     {
       "path": "/tmp/rch_target_active_rubyrobin",

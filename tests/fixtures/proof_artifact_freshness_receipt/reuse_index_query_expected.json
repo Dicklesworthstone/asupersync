@@ -2,9 +2,7 @@
   "best_candidate": {
     "cache_hit_is_fresh_rch_pass": false,
     "candidate_id": "proof:reuse-index-reusable",
-    "citeable_claims": [
-      "proof-reuse-cache-schema"
-    ],
+    "citeable_claims": ["proof-reuse-cache-schema"],
     "classifier_decision": "reusable",
     "command_fingerprint": "sha256:proof-reuse-cache-command",
     "decision": "reusable",
@@ -108,9 +106,7 @@
     {
       "cache_hit_is_fresh_rch_pass": false,
       "candidate_id": "proof:reuse-index-reusable",
-      "citeable_claims": [
-        "proof-reuse-cache-schema"
-      ],
+      "citeable_claims": ["proof-reuse-cache-schema"],
       "classifier_decision": "reusable",
       "command_fingerprint": "sha256:proof-reuse-cache-command",
       "decision": "reusable",
@@ -143,9 +139,7 @@
     {
       "cache_hit_is_fresh_rch_pass": false,
       "candidate_id": "proof:reuse-index-stale",
-      "citeable_claims": [
-        "proof-reuse-cache-schema"
-      ],
+      "citeable_claims": ["proof-reuse-cache-schema"],
       "classifier_decision": "refused",
       "command_fingerprint": "sha256:proof-reuse-cache-command",
       "decision": "refused",
@@ -157,13 +151,9 @@
       "proof_id": "proof:reuse-index-stale",
       "rank": 2,
       "rank_score": 201,
-      "reason_codes": [
-        "stale-head"
-      ],
+      "reason_codes": ["stale-head"],
       "remediation": {
-        "next_steps": [
-          "rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"
-        ],
+        "next_steps": ["rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"],
         "operator_note": "Rerun because candidate HEAD is stale.",
         "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
       },
@@ -181,9 +171,7 @@
     {
       "cache_hit_is_fresh_rch_pass": false,
       "candidate_id": "proof:reuse-index-failed",
-      "citeable_claims": [
-        "proof-reuse-cache-schema"
-      ],
+      "citeable_claims": ["proof-reuse-cache-schema"],
       "classifier_decision": "refused",
       "command_fingerprint": "sha256:proof-reuse-cache-command",
       "decision": "refused",
@@ -195,13 +183,9 @@
       "proof_id": "proof:reuse-index-failed",
       "rank": 3,
       "rank_score": 221,
-      "reason_codes": [
-        "failed-proof-status"
-      ],
+      "reason_codes": ["failed-proof-status"],
       "remediation": {
-        "next_steps": [
-          "rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"
-        ],
+        "next_steps": ["rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"],
         "operator_note": "Rerun because the candidate proof failed.",
         "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
       },
@@ -219,9 +203,7 @@
     {
       "cache_hit_is_fresh_rch_pass": false,
       "candidate_id": "proof:reuse-index-local-fallback",
-      "citeable_claims": [
-        "proof-reuse-cache-schema"
-      ],
+      "citeable_claims": ["proof-reuse-cache-schema"],
       "classifier_decision": "refused",
       "command_fingerprint": "sha256:proof-reuse-cache-command",
       "decision": "refused",
@@ -233,13 +215,9 @@
       "proof_id": "proof:reuse-index-local-fallback",
       "rank": 4,
       "rank_score": 251,
-      "reason_codes": [
-        "local-fallback-marker"
-      ],
+      "reason_codes": ["local-fallback-marker"],
       "remediation": {
-        "next_steps": [
-          "rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"
-        ],
+        "next_steps": ["rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"],
         "operator_note": "Rerun remotely because candidate evidence records local fallback.",
         "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
       },
@@ -257,9 +235,7 @@
     {
       "cache_hit_is_fresh_rch_pass": false,
       "candidate_id": "proof:reuse-index-dirty-overlap",
-      "citeable_claims": [
-        "proof-reuse-cache-schema"
-      ],
+      "citeable_claims": ["proof-reuse-cache-schema"],
       "classifier_decision": "refused",
       "command_fingerprint": "sha256:proof-reuse-cache-command",
       "decision": "refused",
@@ -271,13 +247,9 @@
       "proof_id": "proof:reuse-index-dirty-overlap",
       "rank": 5,
       "rank_score": 301,
-      "reason_codes": [
-        "dirty-frontier-overlap"
-      ],
+      "reason_codes": ["dirty-frontier-overlap"],
       "remediation": {
-        "next_steps": [
-          "rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"
-        ],
+        "next_steps": ["rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"],
         "operator_note": "Rerun after the dirty frontier is clean or non-overlapping.",
         "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
       },
@@ -295,9 +267,7 @@
     {
       "cache_hit_is_fresh_rch_pass": false,
       "candidate_id": "proof:reuse-index-unrelated-lane",
-      "citeable_claims": [
-        "proof-reuse-cache-schema"
-      ],
+      "citeable_claims": ["proof-reuse-cache-schema"],
       "classifier_decision": "miss",
       "command_fingerprint": "sha256:proof-reuse-cache-command",
       "decision": "miss",
@@ -309,13 +279,9 @@
       "proof_id": "proof:reuse-index-unrelated-lane",
       "rank": 6,
       "rank_score": 1001,
-      "reason_codes": [
-        "lane-mismatch"
-      ],
+      "reason_codes": ["lane-mismatch"],
       "remediation": {
-        "next_steps": [
-          "continue scanning candidates or rerun the requested proof lane"
-        ],
+        "next_steps": ["continue scanning candidates or rerun the requested proof lane"],
         "operator_note": "Candidate does not cover the requested proof lane.",
         "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
       },

@@ -41,16 +41,10 @@
       "assignee": "BlueMesa",
       "id": "asupersync-http-proof",
       "status": "in_progress",
-      "touched_paths": [
-        "src/http/**"
-      ]
+      "touched_paths": ["src/http/**"]
     }
   ],
-  "candidate_surfaces": [
-    "src/http/h1.rs",
-    "src/sync",
-    "tests/http_h1.rs"
-  ],
+  "candidate_surfaces": ["src/http/h1.rs", "src/sync", "tests/http_h1.rs"],
   "dirty_tree": {
     "entries": [
       {
@@ -68,17 +62,12 @@
     {
       "lane_id": "http-h1-proof",
       "release_blocking": true,
-      "touched_paths": [
-        "src/http/h1.rs",
-        "tests/http_h1.rs"
-      ]
+      "touched_paths": ["src/http/h1.rs", "tests/http_h1.rs"]
     },
     {
       "lane_id": "sync-proof",
       "release_blocking": false,
-      "touched_paths": [
-        "src/sync"
-      ]
+      "touched_paths": ["src/sync"]
     }
   ],
   "validation_frontier_blockers": [

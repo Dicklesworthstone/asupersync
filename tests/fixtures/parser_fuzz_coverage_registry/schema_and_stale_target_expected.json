@@ -5,14 +5,10 @@
   "coverage": [
     {
       "evidence": {
-        "covering_targets": [
-          "fuzz_dns_message_decoder"
-        ],
+        "covering_targets": ["fuzz_dns_message_decoder"],
         "exemption_status": "missing",
         "partial_targets": [],
-        "stale_covering_targets": [
-          "fuzz_dns_message_old"
-        ]
+        "stale_covering_targets": ["fuzz_dns_message_old"]
       },
       "risk_rank": 4,
       "status": "covered",

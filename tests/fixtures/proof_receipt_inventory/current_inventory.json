@@ -12,9 +12,7 @@
       "summary": "Classifies rch workers as healthy, warn, quarantine-candidate, or unavailable.",
       "superseded_by": "",
       "test_path": "tests/rch_worker_health_receipt_contract.py",
-      "validation": [
-        "python3 -m unittest tests/rch_worker_health_receipt_contract.py"
-      ]
+      "validation": ["python3 -m unittest tests/rch_worker_health_receipt_contract.py"]
     },
     {
       "bead_id": "asupersync-aj7lx3",

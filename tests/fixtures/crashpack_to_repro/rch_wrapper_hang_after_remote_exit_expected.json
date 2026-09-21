@@ -1,15 +1,7 @@
 {
   "accepted_input_contract": {
-    "failure_required_fields": [
-      "summary",
-      "first_blocker"
-    ],
-    "required_top_level_fields": [
-      "schema_version",
-      "artifact_id",
-      "source_kind",
-      "failure"
-    ],
+    "failure_required_fields": ["summary", "first_blocker"],
+    "required_top_level_fields": ["schema_version", "artifact_id", "source_kind", "failure"],
     "schema_version": "crashpack-to-repro-input-v1",
     "supported_source_kinds": [
       "cargo_test",
@@ -84,10 +76,7 @@
   "safety": {
     "cargo_commands_require_rch": true,
     "direct_main_safe": true,
-    "forbidden_cwd_patterns_checked": [
-      "/tmp/asupersync-",
-      "/data/projects/asupersync-"
-    ],
+    "forbidden_cwd_patterns_checked": ["/tmp/asupersync-", "/data/projects/asupersync-"],
     "forbidden_patterns_checked": [
       "git branch ",
       "git checkout -b",
@@ -112,9 +101,7 @@
     "first_blocker": "local wrapper timed out while retrieving .rch-target after remote exit=0",
     "source_kind": "rch_wrapper_hang_after_remote_exit",
     "summary": "rch wrapper hang after remote proof success",
-    "touched_files": [
-      "tests/web_csrf_validation_audit.rs"
-    ]
+    "touched_files": ["tests/web_csrf_validation_audit.rs"]
   },
   "summary": {
     "command_count": 2,

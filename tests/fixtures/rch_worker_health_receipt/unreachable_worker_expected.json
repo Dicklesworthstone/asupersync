@@ -29,9 +29,7 @@
   },
   "workers": [
     {
-      "reasons": [
-        "worker probe is unavailable"
-      ],
+      "reasons": ["worker probe is unavailable"],
       "remediation": [
         "run `rch workers probe --all` before assigning new proof lanes",
         "route current work to a reachable worker or surface rch fleet unavailability"

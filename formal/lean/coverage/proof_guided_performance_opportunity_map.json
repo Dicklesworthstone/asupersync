@@ -75,9 +75,7 @@
     {
       "opportunity_id": "PG-OPT-001",
       "priority_band": "P0",
-      "target_surface": [
-        "src/runtime/scheduler/**"
-      ],
+      "target_surface": ["src/runtime/scheduler/**"],
       "expected_impact": "Lower scheduler overhead and better tail latency under mixed ready/cancel load.",
       "proof_coverage_confidence": "high",
       "risk_class": "medium",
@@ -95,38 +93,19 @@
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test refinement_conformance -- --nocapture",
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test scheduler_lane_fairness -- --nocapture"
       ],
-      "theorem_invariant_anchors": [
-        "OPT-LOCK-001",
-        "OPT-CANCEL-001",
-        "OPT-DET-001"
-      ],
+      "theorem_invariant_anchors": ["OPT-LOCK-001", "OPT-CANCEL-001", "OPT-DET-001"],
       "required_measurements": {
-        "metrics_before": [
-          "scheduler dispatch throughput",
-          "p95 dispatch latency"
-        ],
-        "metrics_after": [
-          "scheduler dispatch throughput",
-          "p95 dispatch latency"
-        ],
-        "determinism_evidence": [
-          "trace fingerprint stability under fixed seed"
-        ],
+        "metrics_before": ["scheduler dispatch throughput", "p95 dispatch latency"],
+        "metrics_after": ["scheduler dispatch throughput", "p95 dispatch latency"],
+        "determinism_evidence": ["trace fingerprint stability under fixed seed"],
         "acceptance_rule": "No regression in conformance checks and no semantic drift in deterministic trace fingerprints."
       },
-      "consumer_beads": [
-        "bd-1lda7",
-        "bd-3q3z0"
-      ]
+      "consumer_beads": ["bd-1lda7", "bd-3q3z0"]
     },
     {
       "opportunity_id": "PG-OPT-002",
       "priority_band": "P1",
-      "target_surface": [
-        "src/cancel/**",
-        "src/combinator/race.rs",
-        "src/combinator/hedge.rs"
-      ],
+      "target_surface": ["src/cancel/**", "src/combinator/race.rs", "src/combinator/hedge.rs"],
       "expected_impact": "Reduced cancellation-path latency and loser-drain overhead.",
       "proof_coverage_confidence": "high",
       "risk_class": "medium",
@@ -143,36 +122,19 @@
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test refinement_conformance -- --nocapture",
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test cancellation_conformance -- --nocapture"
       ],
-      "theorem_invariant_anchors": [
-        "OPT-CANCEL-001",
-        "OPT-CANCEL-002"
-      ],
+      "theorem_invariant_anchors": ["OPT-CANCEL-001", "OPT-CANCEL-002"],
       "required_measurements": {
-        "metrics_before": [
-          "cancel-path latency",
-          "loser-drain completion latency"
-        ],
-        "metrics_after": [
-          "cancel-path latency",
-          "loser-drain completion latency"
-        ],
-        "determinism_evidence": [
-          "stable cancel-phase transitions in replay traces"
-        ],
+        "metrics_before": ["cancel-path latency", "loser-drain completion latency"],
+        "metrics_after": ["cancel-path latency", "loser-drain completion latency"],
+        "determinism_evidence": ["stable cancel-phase transitions in replay traces"],
         "acceptance_rule": "Cancellation phase monotonicity remains intact and loser-drain checks stay green."
       },
-      "consumer_beads": [
-        "bd-1lda7",
-        "bd-3q3z0"
-      ]
+      "consumer_beads": ["bd-1lda7", "bd-3q3z0"]
     },
     {
       "opportunity_id": "PG-OPT-003",
       "priority_band": "P1",
-      "target_surface": [
-        "src/obligation/**",
-        "src/runtime/obligation_table.rs"
-      ],
+      "target_surface": ["src/obligation/**", "src/runtime/obligation_table.rs"],
       "expected_impact": "Lower obligation bookkeeping overhead in high-concurrency workflows.",
       "proof_coverage_confidence": "medium",
       "risk_class": "medium/high",
@@ -189,36 +151,19 @@
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test cancellation_conformance -- --nocapture"
       ],
-      "theorem_invariant_anchors": [
-        "OPT-OBL-001",
-        "OPT-DET-001"
-      ],
+      "theorem_invariant_anchors": ["OPT-OBL-001", "OPT-DET-001"],
       "required_measurements": {
-        "metrics_before": [
-          "obligation table operation latency",
-          "obligation leak incidence"
-        ],
-        "metrics_after": [
-          "obligation table operation latency",
-          "obligation leak incidence"
-        ],
-        "determinism_evidence": [
-          "stable obligation-lifecycle trace signatures"
-        ],
+        "metrics_before": ["obligation table operation latency", "obligation leak incidence"],
+        "metrics_after": ["obligation table operation latency", "obligation leak incidence"],
+        "determinism_evidence": ["stable obligation-lifecycle trace signatures"],
         "acceptance_rule": "No obligation leaks and no futurelock regressions in deterministic suites."
       },
-      "consumer_beads": [
-        "bd-1lda7",
-        "bd-3q3z0"
-      ]
+      "consumer_beads": ["bd-1lda7", "bd-3q3z0"]
     },
     {
       "opportunity_id": "PG-OPT-004",
       "priority_band": "P2",
-      "target_surface": [
-        "src/runtime/task_table.rs",
-        "src/runtime/sharded_state.rs"
-      ],
+      "target_surface": ["src/runtime/task_table.rs", "src/runtime/sharded_state.rs"],
       "expected_impact": "Better throughput via cache-local table operations and reduced contention.",
       "proof_coverage_confidence": "medium",
       "risk_class": "medium",
@@ -234,29 +179,14 @@
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test refinement_conformance -- --nocapture",
         "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_proof_guided_docs cargo test --test runtime_state_refinement_map -- --nocapture"
       ],
-      "theorem_invariant_anchors": [
-        "OPT-HOT-001",
-        "OPT-LOCK-001",
-        "OPT-DET-001"
-      ],
+      "theorem_invariant_anchors": ["OPT-HOT-001", "OPT-LOCK-001", "OPT-DET-001"],
       "required_measurements": {
-        "metrics_before": [
-          "task table mutation throughput",
-          "sharded lock contention"
-        ],
-        "metrics_after": [
-          "task table mutation throughput",
-          "sharded lock contention"
-        ],
-        "determinism_evidence": [
-          "stable task/region lifecycle trace fingerprints"
-        ],
+        "metrics_before": ["task table mutation throughput", "sharded lock contention"],
+        "metrics_after": ["task table mutation throughput", "sharded lock contention"],
+        "determinism_evidence": ["stable task/region lifecycle trace fingerprints"],
         "acceptance_rule": "Lifecycle invariants remain preserved while throughput/latency metrics improve or hold."
       },
-      "consumer_beads": [
-        "bd-1lda7",
-        "bd-3q3z0"
-      ]
+      "consumer_beads": ["bd-1lda7", "bd-3q3z0"]
     }
   ],
   "consumption_contract": {
@@ -274,9 +204,7 @@
     ],
     "must_reference_constraint_ids": true,
     "must_include_measurement_artifacts": true,
-    "closed_loop_consumer_beads": [
-      "bd-3q3z0"
-    ],
+    "closed_loop_consumer_beads": ["bd-3q3z0"],
     "reject_conditions": [
       "Candidate cannot be mapped to one PG-OPT-* envelope with explicit theorem linkage.",
       "Candidate proposes a prohibited transformation.",

@@ -131,61 +131,411 @@
     ]
   },
   "transport_gaps": [
-    {"id": "QI-G1", "title": "QUIC v1 incomplete (loss/CC/migration)", "rfc": "9000", "severity": "critical", "priority": "P0", "blocking_bead": "T4.4, T4.7"},
-    {"id": "QI-G2", "title": "No QUIC v2 support", "rfc": "9369", "severity": "medium", "priority": "P2", "blocking_bead": "future"},
-    {"id": "QI-G3", "title": "Version negotiation scaffold only", "rfc": "9000 §6", "severity": "high", "priority": "P1", "blocking_bead": "T4.4"},
-    {"id": "QI-G4", "title": "Retry packet scaffold only", "rfc": "9000 §17.2.5", "severity": "high", "priority": "P1", "blocking_bead": "T4.4"},
-    {"id": "QI-G5", "title": "No stateless reset", "rfc": "9000 §10.3", "severity": "medium", "priority": "P1", "blocking_bead": "T4.7"},
-    {"id": "QI-G6", "title": "0-RTT resumption scaffold", "rfc": "9000 §4.6", "severity": "high", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G7", "title": "Connection migration scaffold", "rfc": "9000 §9", "severity": "high", "priority": "P1", "blocking_bead": "T4.4"},
-    {"id": "QI-G8", "title": "No preferred address", "rfc": "9000 §9.6", "severity": "low", "priority": "P2", "blocking_bead": "future"},
-    {"id": "QI-G9", "title": "MAX_STREAMS scaffold only", "rfc": "9000 §4.6", "severity": "medium", "priority": "P1", "blocking_bead": "T4.7"},
-    {"id": "QI-G10", "title": "No STREAMS_BLOCKED frame", "rfc": "9000 §19.14", "severity": "low", "priority": "P2", "blocking_bead": "T4.7"},
-    {"id": "QI-G11", "title": "No stream prioritization", "rfc": "9218", "severity": "low", "priority": "P2", "blocking_bead": "future"},
-    {"id": "QI-G12", "title": "No DATA_BLOCKED frame", "rfc": "9000 §19.12", "severity": "low", "priority": "P2", "blocking_bead": "T4.7"},
-    {"id": "QI-G13", "title": "No STREAM_DATA_BLOCKED", "rfc": "9000 §19.13", "severity": "low", "priority": "P2", "blocking_bead": "T4.7"},
-    {"id": "QI-G14", "title": "No auto-tuning flow control", "rfc": null, "severity": "medium", "priority": "P1", "blocking_bead": "T4.7"},
-    {"id": "QI-G15", "title": "Time-based loss detection scaffold", "rfc": "9002 §6.1", "severity": "critical", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G16", "title": "Packet threshold loss scaffold", "rfc": "9002 §6.1", "severity": "critical", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G17", "title": "PTO scaffold only", "rfc": "9002 §6.2", "severity": "critical", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G18", "title": "No ECN support", "rfc": "9000 §19.3.2", "severity": "low", "priority": "P2", "blocking_bead": "future"},
-    {"id": "QI-G19", "title": "Basic cwnd only", "rfc": "9002 §7", "severity": "critical", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G20", "title": "No NewReno", "rfc": "9002 §7", "severity": "high", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G21", "title": "No Cubic", "rfc": null, "severity": "medium", "priority": "P1", "blocking_bead": "T4.7"},
-    {"id": "QI-G22", "title": "No BBR/BBRv2", "rfc": null, "severity": "low", "priority": "P2", "blocking_bead": "future"},
-    {"id": "QI-G23", "title": "No slow start / AIMD", "rfc": "9002 §7.3-7.4", "severity": "critical", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G24", "title": "No pacing", "rfc": null, "severity": "medium", "priority": "P1", "blocking_bead": "T4.7"},
-    {"id": "QI-G25", "title": "Key update scaffold", "rfc": "9001 §6", "severity": "high", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G26", "title": "Header protection scaffold", "rfc": "9001 §5.4", "severity": "high", "priority": "P0", "blocking_bead": "T4.4"},
-    {"id": "QI-G27", "title": "No NEW_TOKEN", "rfc": "9000 §8", "severity": "high", "priority": "P1", "blocking_bead": "T4.7"},
-    {"id": "QI-G28", "title": "No address validation", "rfc": "9000 §8", "severity": "high", "priority": "P1", "blocking_bead": "T4.7"}
+    {
+      "id": "QI-G1",
+      "title": "QUIC v1 incomplete (loss/CC/migration)",
+      "rfc": "9000",
+      "severity": "critical",
+      "priority": "P0",
+      "blocking_bead": "T4.4, T4.7"
+    },
+    {
+      "id": "QI-G2",
+      "title": "No QUIC v2 support",
+      "rfc": "9369",
+      "severity": "medium",
+      "priority": "P2",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "QI-G3",
+      "title": "Version negotiation scaffold only",
+      "rfc": "9000 §6",
+      "severity": "high",
+      "priority": "P1",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G4",
+      "title": "Retry packet scaffold only",
+      "rfc": "9000 §17.2.5",
+      "severity": "high",
+      "priority": "P1",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G5",
+      "title": "No stateless reset",
+      "rfc": "9000 §10.3",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G6",
+      "title": "0-RTT resumption scaffold",
+      "rfc": "9000 §4.6",
+      "severity": "high",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G7",
+      "title": "Connection migration scaffold",
+      "rfc": "9000 §9",
+      "severity": "high",
+      "priority": "P1",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G8",
+      "title": "No preferred address",
+      "rfc": "9000 §9.6",
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "QI-G9",
+      "title": "MAX_STREAMS scaffold only",
+      "rfc": "9000 §4.6",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G10",
+      "title": "No STREAMS_BLOCKED frame",
+      "rfc": "9000 §19.14",
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G11",
+      "title": "No stream prioritization",
+      "rfc": "9218",
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "QI-G12",
+      "title": "No DATA_BLOCKED frame",
+      "rfc": "9000 §19.12",
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G13",
+      "title": "No STREAM_DATA_BLOCKED",
+      "rfc": "9000 §19.13",
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G14",
+      "title": "No auto-tuning flow control",
+      "rfc": null,
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G15",
+      "title": "Time-based loss detection scaffold",
+      "rfc": "9002 §6.1",
+      "severity": "critical",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G16",
+      "title": "Packet threshold loss scaffold",
+      "rfc": "9002 §6.1",
+      "severity": "critical",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G17",
+      "title": "PTO scaffold only",
+      "rfc": "9002 §6.2",
+      "severity": "critical",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G18",
+      "title": "No ECN support",
+      "rfc": "9000 §19.3.2",
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "QI-G19",
+      "title": "Basic cwnd only",
+      "rfc": "9002 §7",
+      "severity": "critical",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G20",
+      "title": "No NewReno",
+      "rfc": "9002 §7",
+      "severity": "high",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G21",
+      "title": "No Cubic",
+      "rfc": null,
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G22",
+      "title": "No BBR/BBRv2",
+      "rfc": null,
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "QI-G23",
+      "title": "No slow start / AIMD",
+      "rfc": "9002 §7.3-7.4",
+      "severity": "critical",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G24",
+      "title": "No pacing",
+      "rfc": null,
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G25",
+      "title": "Key update scaffold",
+      "rfc": "9001 §6",
+      "severity": "high",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G26",
+      "title": "Header protection scaffold",
+      "rfc": "9001 §5.4",
+      "severity": "high",
+      "priority": "P0",
+      "blocking_bead": "T4.4"
+    },
+    {
+      "id": "QI-G27",
+      "title": "No NEW_TOKEN",
+      "rfc": "9000 §8",
+      "severity": "high",
+      "priority": "P1",
+      "blocking_bead": "T4.7"
+    },
+    {
+      "id": "QI-G28",
+      "title": "No address validation",
+      "rfc": "9000 §8",
+      "severity": "high",
+      "priority": "P1",
+      "blocking_bead": "T4.7"
+    }
   ],
   "h3_gaps": [
-    {"id": "H3I-G1", "title": "PUSH_PROMISE codec only", "rfc": "9114 §7.2.7", "severity": "medium", "priority": "P1", "blocking_bead": "T4.5"},
-    {"id": "H3I-G2", "title": "No GREASE frame support", "rfc": "9114 §7.2.8", "severity": "medium", "priority": "P1", "blocking_bead": "T4.5"},
-    {"id": "H3I-G3", "title": "No unknown frame skip", "rfc": "9114 §9", "severity": "high", "priority": "P0", "blocking_bead": "T4.5"},
-    {"id": "H3I-G4", "title": "QPACK dynamic table not implemented", "rfc": "9204 §4.3", "severity": "critical", "priority": "P0", "blocking_bead": "T4.5"},
-    {"id": "H3I-G5", "title": "Dynamic table capacity not enforced", "rfc": "9204 §4.3.1", "severity": "high", "priority": "P0", "blocking_bead": "T4.5"},
-    {"id": "H3I-G6", "title": "Blocked streams queue missing", "rfc": "9204 §2.1.1", "severity": "medium", "priority": "P1", "blocking_bead": "T4.5"},
-    {"id": "H3I-G7", "title": "No required insert count", "rfc": "9204 §4.5.1", "severity": "medium", "priority": "P1", "blocking_bead": "T4.5"},
-    {"id": "H3I-G8", "title": "QPACK encoder/decoder streams type-ID only", "rfc": "9204 §4.2", "severity": "high", "priority": "P0", "blocking_bead": "T4.5"},
-    {"id": "H3I-G9", "title": "No table size update instruction", "rfc": "9204 §4.3.1", "severity": "medium", "priority": "P1", "blocking_bead": "T4.5"},
-    {"id": "H3I-G10", "title": "No Huffman encoding/decoding", "rfc": "9204 §4.1.1", "severity": "critical", "priority": "P0", "blocking_bead": "T4.5"},
-    {"id": "H3I-G11", "title": "No 1xx informational responses", "rfc": "9114 §4.1.1", "severity": "medium", "priority": "P1", "blocking_bead": "T4.5"},
-    {"id": "H3I-G12", "title": "Server push codec-only", "rfc": "9114 §4.6", "severity": "medium", "priority": "P2", "blocking_bead": "future"},
-    {"id": "H3I-G13", "title": "No CONNECT method", "rfc": "9114 §4.4", "severity": "medium", "priority": "P1", "blocking_bead": "future"},
-    {"id": "H3I-G14", "title": "No Extended CONNECT (WebSockets over H3)", "rfc": "9220", "severity": "low", "priority": "P2", "blocking_bead": "future"},
-    {"id": "H3I-G15", "title": "Push stream type-ID only", "rfc": "9114 §6.2.2", "severity": "low", "priority": "P2", "blocking_bead": "future"},
-    {"id": "H3I-G16", "title": "No unknown stream type handling", "rfc": "9114 §6.2", "severity": "medium", "priority": "P1", "blocking_bead": "T4.5"}
+    {
+      "id": "H3I-G1",
+      "title": "PUSH_PROMISE codec only",
+      "rfc": "9114 §7.2.7",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G2",
+      "title": "No GREASE frame support",
+      "rfc": "9114 §7.2.8",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G3",
+      "title": "No unknown frame skip",
+      "rfc": "9114 §9",
+      "severity": "high",
+      "priority": "P0",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G4",
+      "title": "QPACK dynamic table not implemented",
+      "rfc": "9204 §4.3",
+      "severity": "critical",
+      "priority": "P0",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G5",
+      "title": "Dynamic table capacity not enforced",
+      "rfc": "9204 §4.3.1",
+      "severity": "high",
+      "priority": "P0",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G6",
+      "title": "Blocked streams queue missing",
+      "rfc": "9204 §2.1.1",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G7",
+      "title": "No required insert count",
+      "rfc": "9204 §4.5.1",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G8",
+      "title": "QPACK encoder/decoder streams type-ID only",
+      "rfc": "9204 §4.2",
+      "severity": "high",
+      "priority": "P0",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G9",
+      "title": "No table size update instruction",
+      "rfc": "9204 §4.3.1",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G10",
+      "title": "No Huffman encoding/decoding",
+      "rfc": "9204 §4.1.1",
+      "severity": "critical",
+      "priority": "P0",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G11",
+      "title": "No 1xx informational responses",
+      "rfc": "9114 §4.1.1",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.5"
+    },
+    {
+      "id": "H3I-G12",
+      "title": "Server push codec-only",
+      "rfc": "9114 §4.6",
+      "severity": "medium",
+      "priority": "P2",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "H3I-G13",
+      "title": "No CONNECT method",
+      "rfc": "9114 §4.4",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "H3I-G14",
+      "title": "No Extended CONNECT (WebSockets over H3)",
+      "rfc": "9220",
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "H3I-G15",
+      "title": "Push stream type-ID only",
+      "rfc": "9114 §6.2.2",
+      "severity": "low",
+      "priority": "P2",
+      "blocking_bead": "future"
+    },
+    {
+      "id": "H3I-G16",
+      "title": "No unknown stream type handling",
+      "rfc": "9114 §6.2",
+      "severity": "medium",
+      "priority": "P1",
+      "blocking_bead": "T4.5"
+    }
   ],
   "cross_impl_issues": [
-    {"id": "XC-1", "title": "QPACK dynamic table required for quinn interop", "affected_peers": ["quinn", "h3-crate"], "severity": "high", "blocked_by": "H3I-G4"},
-    {"id": "XC-2", "title": "GREASE frame causes protocol error from ngtcp2", "affected_peers": ["ngtcp2"], "severity": "medium", "blocked_by": "H3I-G3"},
-    {"id": "XC-3", "title": "No Huffman decoding prevents aioquic header interop", "affected_peers": ["aioquic"], "severity": "high", "blocked_by": "H3I-G10"},
-    {"id": "XC-4", "title": "Version negotiation fails with v2-preferred peers", "affected_peers": ["ngtcp2"], "severity": "medium", "blocked_by": "QI-G3"},
-    {"id": "XC-5", "title": "ECN asymmetry with s2n-quic", "affected_peers": ["s2n-quic"], "severity": "low", "blocked_by": "QI-G18"},
-    {"id": "XC-6", "title": "BLOCKED frames not sent degrades peer flow control", "affected_peers": ["quinn", "s2n-quic"], "severity": "low", "blocked_by": "QI-G12"},
-    {"id": "XC-7", "title": "Missing address validation tokens block server deployment", "affected_peers": ["quinn", "s2n-quic"], "severity": "high", "blocked_by": "QI-G27"}
+    {
+      "id": "XC-1",
+      "title": "QPACK dynamic table required for quinn interop",
+      "affected_peers": ["quinn", "h3-crate"],
+      "severity": "high",
+      "blocked_by": "H3I-G4"
+    },
+    {
+      "id": "XC-2",
+      "title": "GREASE frame causes protocol error from ngtcp2",
+      "affected_peers": ["ngtcp2"],
+      "severity": "medium",
+      "blocked_by": "H3I-G3"
+    },
+    {
+      "id": "XC-3",
+      "title": "No Huffman decoding prevents aioquic header interop",
+      "affected_peers": ["aioquic"],
+      "severity": "high",
+      "blocked_by": "H3I-G10"
+    },
+    {
+      "id": "XC-4",
+      "title": "Version negotiation fails with v2-preferred peers",
+      "affected_peers": ["ngtcp2"],
+      "severity": "medium",
+      "blocked_by": "QI-G3"
+    },
+    {
+      "id": "XC-5",
+      "title": "ECN asymmetry with s2n-quic",
+      "affected_peers": ["s2n-quic"],
+      "severity": "low",
+      "blocked_by": "QI-G18"
+    },
+    {
+      "id": "XC-6",
+      "title": "BLOCKED frames not sent degrades peer flow control",
+      "affected_peers": ["quinn", "s2n-quic"],
+      "severity": "low",
+      "blocked_by": "QI-G12"
+    },
+    {
+      "id": "XC-7",
+      "title": "Missing address validation tokens block server deployment",
+      "affected_peers": ["quinn", "s2n-quic"],
+      "severity": "high",
+      "blocked_by": "QI-G27"
+    }
   ],
   "summary": {
     "total_transport_gaps": 28,
@@ -194,18 +544,26 @@
     "critical_p0_gaps": 15,
     "high_p0_p1_gaps": 26,
     "cross_impl_issues": 7,
-    "best_peer_compat": {"peer": "aioquic", "score": 0.48},
-    "worst_peer_compat": {"peer": "ngtcp2", "score": 0.37},
+    "best_peer_compat": { "peer": "aioquic", "score": 0.48 },
+    "worst_peer_compat": { "peer": "ngtcp2", "score": 0.37 },
     "primary_blocker": "Loss detection + QPACK dynamic table + Huffman decoding"
   },
   "drift_detection": {
     "rules": [
-      {"id": "DRIFT-Q1", "trigger": "New QUIC RFC published", "action": "Open gap entry + link to RFC"},
-      {"id": "DRIFT-Q2", "trigger": "quinn new release", "action": "Update quinn column"},
-      {"id": "DRIFT-Q3", "trigger": "s2n-quic new release", "action": "Update s2n-quic column"},
-      {"id": "DRIFT-Q4", "trigger": "Asupersync QUIC module change", "action": "Revalidate affected rows"},
-      {"id": "DRIFT-Q5", "trigger": "ngtcp2/nghttp3 release", "action": "Update ngtcp2 column"},
-      {"id": "DRIFT-Q6", "trigger": "JSON hash changes", "action": "Re-run contract tests"}
+      {
+        "id": "DRIFT-Q1",
+        "trigger": "New QUIC RFC published",
+        "action": "Open gap entry + link to RFC"
+      },
+      { "id": "DRIFT-Q2", "trigger": "quinn new release", "action": "Update quinn column" },
+      { "id": "DRIFT-Q3", "trigger": "s2n-quic new release", "action": "Update s2n-quic column" },
+      {
+        "id": "DRIFT-Q4",
+        "trigger": "Asupersync QUIC module change",
+        "action": "Revalidate affected rows"
+      },
+      { "id": "DRIFT-Q5", "trigger": "ngtcp2/nghttp3 release", "action": "Update ngtcp2 column" },
+      { "id": "DRIFT-Q6", "trigger": "JSON hash changes", "action": "Re-run contract tests" }
     ],
     "staleness_policy": {
       "markdown_max_age_days": 14,

@@ -1,7 +1,5 @@
 {
-  "action_items": [
-    "next safe proposal: asupersync-fuzz-a:MaroonBear:http_header_map_invariants"
-  ],
+  "action_items": ["next safe proposal: asupersync-fuzz-a:MaroonBear:http_header_map_invariants"],
   "blocked_proposals": [],
   "forbidden_actions": {
     "creates_fuzz_target": false,
@@ -53,9 +51,7 @@
       "target_path": "fuzz/fuzz_targets/redis_resp3_map_invariants.rs"
     }
   ],
-  "ready_now": [
-    "asupersync-fuzz-a:MaroonBear:http_header_map_invariants"
-  ],
+  "ready_now": ["asupersync-fuzz-a:MaroonBear:http_header_map_invariants"],
   "safety_notes": [
     "receipt is fixture-backed and does not call Agent Mail",
     "manifest and target reservations must be acquired by the operator before editing",

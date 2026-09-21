@@ -13,11 +13,7 @@
     "capability_status": "supported",
     "eligibility_verdict": "admitted",
     "observability_status": "complete",
-    "platform_prerequisites": [
-      "root_region",
-      "child_join_witness",
-      "finalizer_witness"
-    ]
+    "platform_prerequisites": ["root_region", "child_join_witness", "finalizer_witness"]
   },
   "adapter": {
     "kind": "lab_live_policy_fixture",
@@ -37,13 +33,7 @@
     "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
     "platform": "current_thread_runtime",
     "adapter": "region_close.policy_fixture",
-    "logs": [
-      "scenario_id",
-      "first_failure_field",
-      "lab_value",
-      "live_value",
-      "verdict"
-    ],
+    "logs": ["scenario_id", "first_failure_field", "lab_value", "live_value", "verdict"],
     "replay_pointers": [
       "artifacts/lab_live/lab_live_5_3/fail_region_close/summary.json",
       "artifacts/lab_live/lab_live_5_3/fail_region_close/events.ndjson"
@@ -63,11 +53,7 @@
       "region-owner@example.com",
       "/tmp/asupersync/private-region"
     ],
-    "redacted_samples": [
-      "token=<redacted>",
-      "<email:redacted>",
-      "<path:redacted>"
-    ],
+    "redacted_samples": ["token=<redacted>", "<email:redacted>", "<path:redacted>"],
     "forbidden_substrings": [
       "region-secret",
       "region-owner@example.com",

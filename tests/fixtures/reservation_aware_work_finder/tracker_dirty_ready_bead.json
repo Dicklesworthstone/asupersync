@@ -10,9 +10,7 @@
         "id": "asupersync-ready-needs-dirty-tracker",
         "title": "Claimable bead while tracker has peer dirt",
         "priority": 1,
-        "paths": [
-          "scripts/reservation_aware_work_finder.py"
-        ]
+        "paths": ["scripts/reservation_aware_work_finder.py"]
       }
     ]
   },
@@ -33,12 +31,8 @@
       "title": "Inspect reservation-aware finder without tracker mutation",
       "priority": 2,
       "no_build_validation": true,
-      "paths": [
-        "scripts/reservation_aware_work_finder.py"
-      ],
-      "proof_commands": [
-        "python3 -m py_compile scripts/reservation_aware_work_finder.py"
-      ]
+      "paths": ["scripts/reservation_aware_work_finder.py"],
+      "proof_commands": ["python3 -m py_compile scripts/reservation_aware_work_finder.py"]
     }
   ]
 }

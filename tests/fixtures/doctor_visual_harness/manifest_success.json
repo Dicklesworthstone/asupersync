@@ -32,10 +32,7 @@
       "artifact_path": "artifacts/golden-run-001/doctor/e2e/golden-scenario-success-snapshot.json",
       "checksum_hint": "snapshot-golden-success-snapshot-0",
       "retention_class": "hot",
-      "linked_artifacts": [
-        "golden-scenario-success-summary",
-        "golden-scenario-success-transcript"
-      ]
+      "linked_artifacts": ["golden-scenario-success-summary", "golden-scenario-success-transcript"]
     },
     {
       "artifact_id": "golden-scenario-success-structured-log",

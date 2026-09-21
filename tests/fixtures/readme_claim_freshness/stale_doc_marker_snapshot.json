@@ -7,12 +7,8 @@
       "proof_evidence_status": "rerun-required",
       "notes": "Green here is a mapped proof lane, not a fresh execution result; rerun before claiming fresh proof.",
       "doc_claim_markers": {
-        "README.md": [
-          "present readme marker"
-        ],
-        "AGENTS.md": [
-          "present agents marker"
-        ]
+        "README.md": ["present readme marker"],
+        "AGENTS.md": ["present agents marker"]
       }
     },
     {
@@ -22,12 +18,8 @@
       "proof_evidence_status": "rerun-required",
       "notes": "Yellow frontier row: rerun required and not a broad proof claim.",
       "doc_claim_markers": {
-        "README.md": [
-          "missing readme marker"
-        ],
-        "AGENTS.md": [
-          "missing agents marker"
-        ]
+        "README.md": ["missing readme marker"],
+        "AGENTS.md": ["missing agents marker"]
       }
     }
   ]

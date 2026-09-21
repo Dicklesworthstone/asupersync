@@ -7,9 +7,7 @@
   },
   "fuzz": {
     "artifact_path": "fuzz/artifacts/fuzz_raptorq_decoder/crash-07",
-    "libfuzzer_args": [
-      "-runs=1"
-    ],
+    "libfuzzer_args": ["-runs=1"],
     "target": "fuzz_raptorq_decoder"
   },
   "repo": {
@@ -18,8 +16,5 @@
   },
   "schema_version": "crashpack-to-repro-input-v1",
   "source_kind": "fuzz",
-  "touched_files": [
-    "fuzz/fuzz_targets/fuzz_raptorq_decoder.rs",
-    "src/raptorq/decoder.rs"
-  ]
+  "touched_files": ["fuzz/fuzz_targets/fuzz_raptorq_decoder.rs", "src/raptorq/decoder.rs"]
 }

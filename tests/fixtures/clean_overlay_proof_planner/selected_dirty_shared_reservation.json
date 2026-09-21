@@ -3,9 +3,7 @@
   "agent_name": "SapphireHill",
   "head": "abababababababababababababababababababab",
   "selected_paths": ["src/runtime/pool_sizing.rs"],
-  "dirty_entries": [
-    {"path": "src/runtime/pool_sizing.rs", "status": " M"}
-  ],
+  "dirty_entries": [{ "path": "src/runtime/pool_sizing.rs", "status": " M" }],
   "reservations": [
     {
       "id": 38591,

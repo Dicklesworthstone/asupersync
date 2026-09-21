@@ -39,7 +39,10 @@
             }
           ]
         },
-        "required_guarantee_ids": ["all-target-compile-frontier", "swarm-pressure-preflight-report"],
+        "required_guarantee_ids": [
+          "all-target-compile-frontier",
+          "swarm-pressure-preflight-report"
+        ],
         "lanes": [
           {
             "lane_id": "all-targets-check",

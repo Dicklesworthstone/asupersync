@@ -23,7 +23,7 @@
       "package": "@asupersync/browser-core",
       "kind": "manifest",
       "digest": {
-          "sha256": "e3007336e5420c5e912744dbdc0874ada1977d61761b81d3ca6cf039aa0ea006"
+        "sha256": "e3007336e5420c5e912744dbdc0874ada1977d61761b81d3ca6cf039aa0ea006"
       }
     },
     {
@@ -31,7 +31,7 @@
       "package": "@asupersync/browser-core",
       "kind": "package-file",
       "digest": {
-          "sha256": "b56619dd48edf7564d0742719b13bc83e028c778ec177482cd083dc838959abe"
+        "sha256": "b56619dd48edf7564d0742719b13bc83e028c778ec177482cd083dc838959abe"
       }
     },
     {
@@ -39,7 +39,7 @@
       "package": "@asupersync/browser-core",
       "kind": "package-file",
       "digest": {
-          "sha256": "7b4c9697f9bee810f467b99c83bc22f1ad508e76349f1353e0f60a4f60142442"
+        "sha256": "7b4c9697f9bee810f467b99c83bc22f1ad508e76349f1353e0f60a4f60142442"
       }
     },
     {
@@ -103,7 +103,7 @@
       "package": "@asupersync/browser",
       "kind": "manifest",
       "digest": {
-          "sha256": "ffff63a780e9c4ec87c17d6cb8f95014c5d2e56056899a389c2c9a8324ac4660"
+        "sha256": "ffff63a780e9c4ec87c17d6cb8f95014c5d2e56056899a389c2c9a8324ac4660"
       }
     },
     {
@@ -111,7 +111,7 @@
       "package": "@asupersync/react",
       "kind": "manifest",
       "digest": {
-          "sha256": "ade0dd97c4dc0124625076f392d52cb0189dda1fd4f0a1b0b968d3a9ad18e61e"
+        "sha256": "ade0dd97c4dc0124625076f392d52cb0189dda1fd4f0a1b0b968d3a9ad18e61e"
       }
     },
     {
@@ -119,7 +119,7 @@
       "package": "@asupersync/next",
       "kind": "manifest",
       "digest": {
-          "sha256": "57c7d4a31bb460c927f30a0baf5b63343ecc3d5323e8c8a9650cfd3e2e754aae"
+        "sha256": "57c7d4a31bb460c927f30a0baf5b63343ecc3d5323e8c8a9650cfd3e2e754aae"
       }
     }
   ],
@@ -136,7 +136,13 @@
     "optimized_wasm_sha256": "62fcd770accbb4dd7328b9bf30b74575409ec912c8a02a2173053fca0df3a7a5",
     "wasm_bindgen_version": "0.2.126",
     "wasm_opt_version": "131",
-    "wasm_opt_flags": ["-Oz", "--enable-bulk-memory", "--strip-dwarf", "--strip-producers", "--vacuum"],
+    "wasm_opt_flags": [
+      "-Oz",
+      "--enable-bulk-memory",
+      "--strip-dwarf",
+      "--strip-producers",
+      "--vacuum"
+    ],
     "npm_publish_executed": false,
     "scope": "Fresh prod WASM compilation and packaging only. Manifest versions and package facade files are inventoried current candidate inputs; these commands do not execute TypeScript build, npm pack, or npm publish."
   },

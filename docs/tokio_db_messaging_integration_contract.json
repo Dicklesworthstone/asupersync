@@ -256,7 +256,22 @@
     }
   ],
   "coverage_matrix": {
-    "pool": ["INT-POOL-01", "INT-POOL-02", "INT-POOL-03", "INT-POOL-04", "INT-POOL-05", "INT-POOL-06", "INT-POOL-07", "FI-01", "FI-02", "FI-03", "FI-04", "FI-05", "CS-01", "CS-02"],
+    "pool": [
+      "INT-POOL-01",
+      "INT-POOL-02",
+      "INT-POOL-03",
+      "INT-POOL-04",
+      "INT-POOL-05",
+      "INT-POOL-06",
+      "INT-POOL-07",
+      "FI-01",
+      "FI-02",
+      "FI-03",
+      "FI-04",
+      "FI-05",
+      "CS-01",
+      "CS-02"
+    ],
     "transaction": ["INT-TXN-01", "INT-TXN-02", "INT-TXN-03", "CS-03"],
     "postgres": ["INT-TXN-03", "INT-ERR-01"],
     "mysql": ["INT-TXN-03", "INT-ERR-01"],

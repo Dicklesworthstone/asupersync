@@ -20,10 +20,7 @@
     ],
     "messages": []
   },
-  "candidate_surfaces": [
-    "src/sync",
-    "tests"
-  ],
+  "candidate_surfaces": ["src/sync", "tests"],
   "dirty_tree": {
     "status": "ok",
     "entries": []

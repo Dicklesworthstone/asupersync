@@ -29,9 +29,7 @@
   },
   "workers": [
     {
-      "reasons": [
-        "low storage on /tmp"
-      ],
+      "reasons": ["low storage on /tmp"],
       "remediation": [
         "avoid scheduling expensive cargo lanes on this worker until inspected",
         "inspect `df -h / /tmp` and recent rch logs on the worker",

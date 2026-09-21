@@ -10,9 +10,7 @@
         "min_members": 1,
         "min_edges": 1,
         "min_warnings": 1,
-        "warning_contains": [
-          "missing"
-        ],
+        "warning_contains": ["missing"],
         "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness scanner_workspace_baseline"
       }
     },
@@ -81,18 +79,8 @@
           "stale_docs_claim",
           "stale_rch_proof"
         ],
-        "expected_risk_classes": [
-          "destructive-forbidden",
-          "edit-suggestion",
-          "observe",
-          "rerun"
-        ],
-        "expected_asup_codes": [
-          "ASUP-E101",
-          "ASUP-E301",
-          "ASUP-E402",
-          "ASUP-E901"
-        ],
+        "expected_risk_classes": ["destructive-forbidden", "edit-suggestion", "observe", "rerun"],
+        "expected_asup_codes": ["ASUP-E101", "ASUP-E301", "ASUP-E402", "ASUP-E901"],
         "repro_command": "rch exec -- cargo test -p asupersync --features cli --test doctor_analyzer_fixture_harness evidence_analysis_d2_matrix"
       }
     }

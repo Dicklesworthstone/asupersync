@@ -19,10 +19,7 @@
         "rerun the same focused proof lane after trimming artifact fanout"
       ],
       "operator_note": "Keep per-lane CARGO_TARGET_DIR values under transient rch scratch paths or add equivalent bulky artifact directories to .rchignore before rerunning.",
-      "recommended_patterns": [
-        ".rch-*/",
-        ".rch_target*/"
-      ]
+      "recommended_patterns": [".rch-*/", ".rch_target*/"]
     },
     "status": "not-configured",
     "violations": [],
@@ -79,9 +76,7 @@
       "reason": "local disk pressure or stale target candidates require explicit cleanup authorization",
       "report_only": true,
       "required_authorization": "explicit written user authorization is required before deleting files or directories",
-      "stale_target_candidates": [
-        "/tmp/rch_target_maroontrout_semaphore_fuzz"
-      ],
+      "stale_target_candidates": ["/tmp/rch_target_maroontrout_semaphore_fuzz"],
       "status": "required"
     },
     "closeout_template": "remote_result.status=pass; retrieval_result.status=blocked; local_pressure.status=critical; cleanup_authorization.status=required; cleanup_authorization.authorized=false",

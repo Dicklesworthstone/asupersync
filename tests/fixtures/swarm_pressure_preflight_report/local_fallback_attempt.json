@@ -5,12 +5,11 @@
   "e2e_expectations": {
     "case_id": "remote-required-lane-attempted-locally",
     "expected_decision": "preflight-blocked",
-    "expected_blocker_kinds": [
-      "unsafe-proof-command-prefix",
-      "unsafe-resource-envelope-policy"
-    ],
+    "expected_blocker_kinds": ["unsafe-proof-command-prefix", "unsafe-resource-envelope-policy"],
     "expected_warning_kinds": [],
-    "notes": ["command omits RCH_REQUIRE_REMOTE=1 rch exec prefix and envelope allows local fallback"]
+    "notes": [
+      "command omits RCH_REQUIRE_REMOTE=1 rch exec prefix and envelope allows local fallback"
+    ]
   },
   "sources": {
     "proof_lane_manifest": {

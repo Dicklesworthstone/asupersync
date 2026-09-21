@@ -35,7 +35,5 @@
   },
   "schema_version": "crashpack-to-repro-input-v1",
   "source_kind": "rch_wrapper_hang_after_remote_exit",
-  "touched_files": [
-    "tests/web_csrf_validation_audit.rs"
-  ]
+  "touched_files": ["tests/web_csrf_validation_audit.rs"]
 }

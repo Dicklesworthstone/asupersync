@@ -7,28 +7,48 @@
   "source_markdown": "docs/tokio_quic_h3_unit_protocol_matrix.md",
   "domains": ["quic", "h3", "transport", "flow-control", "tls", "codec", "unit-tests"],
   "bead_coverage": [
-    {"bead": "T4.2", "area": "QUIC core codec, connection ID, packet headers", "tests": 5},
-    {"bead": "T4.3", "area": "Transport state machine, RTT, congestion, loss", "tests": 13},
-    {"bead": "T4.3/T4.4", "area": "Stream management, flow control credits", "tests": 15},
-    {"bead": "T4.4", "area": "TLS key phase, 0-RTT, resumption, key update", "tests": 10},
-    {"bead": "T4.2", "area": "Connection lifecycle and config defaults", "tests": 6},
-    {"bead": "T4.5", "area": "H3 frame codec, settings, control state, pseudo headers", "tests": 15}
+    { "bead": "T4.2", "area": "QUIC core codec, connection ID, packet headers", "tests": 5 },
+    { "bead": "T4.3", "area": "Transport state machine, RTT, congestion, loss", "tests": 13 },
+    { "bead": "T4.3/T4.4", "area": "Stream management, flow control credits", "tests": 15 },
+    { "bead": "T4.4", "area": "TLS key phase, 0-RTT, resumption, key update", "tests": 10 },
+    { "bead": "T4.2", "area": "Connection lifecycle and config defaults", "tests": 6 },
+    {
+      "bead": "T4.5",
+      "area": "H3 frame codec, settings, control state, pseudo headers",
+      "tests": 15
+    }
   ],
   "test_categories": [
-    {"prefix": "QC", "name": "QUIC core codec", "count": 5, "bead": "T4.2"},
-    {"prefix": "QT", "name": "Transport state machine", "count": 13, "bead": "T4.3"},
-    {"prefix": "QS", "name": "Stream and flow control", "count": 15, "bead": "T4.3/T4.4"},
-    {"prefix": "TL", "name": "TLS/key phase machine", "count": 10, "bead": "T4.4"},
-    {"prefix": "NC", "name": "Connection lifecycle", "count": 6, "bead": "T4.2"},
-    {"prefix": "HF", "name": "HTTP/3 frame codec and protocol", "count": 15, "bead": "T4.5"},
-    {"prefix": "MV", "name": "Matrix validation", "count": 4, "bead": "T4.10"}
+    { "prefix": "QC", "name": "QUIC core codec", "count": 5, "bead": "T4.2" },
+    { "prefix": "QT", "name": "Transport state machine", "count": 13, "bead": "T4.3" },
+    { "prefix": "QS", "name": "Stream and flow control", "count": 15, "bead": "T4.3/T4.4" },
+    { "prefix": "TL", "name": "TLS/key phase machine", "count": 10, "bead": "T4.4" },
+    { "prefix": "NC", "name": "Connection lifecycle", "count": 6, "bead": "T4.2" },
+    { "prefix": "HF", "name": "HTTP/3 frame codec and protocol", "count": 15, "bead": "T4.5" },
+    { "prefix": "MV", "name": "Matrix validation", "count": 4, "bead": "T4.10" }
   ],
   "drift_detection": [
-    {"id": "DRIFT-QH1", "trigger": "New public type in quic_core/quic_native", "action": "Add unit test"},
-    {"id": "DRIFT-QH2", "trigger": "New H3 frame type added", "action": "Add encode/decode test"},
-    {"id": "DRIFT-QH3", "trigger": "State machine transition added", "action": "Add transition test"},
-    {"id": "DRIFT-QH4", "trigger": "New flow control error variant", "action": "Add boundary test"},
-    {"id": "DRIFT-QH5", "trigger": "T4.8 observability hooks complete", "action": "Add observability tests"}
+    {
+      "id": "DRIFT-QH1",
+      "trigger": "New public type in quic_core/quic_native",
+      "action": "Add unit test"
+    },
+    { "id": "DRIFT-QH2", "trigger": "New H3 frame type added", "action": "Add encode/decode test" },
+    {
+      "id": "DRIFT-QH3",
+      "trigger": "State machine transition added",
+      "action": "Add transition test"
+    },
+    {
+      "id": "DRIFT-QH4",
+      "trigger": "New flow control error variant",
+      "action": "Add boundary test"
+    },
+    {
+      "id": "DRIFT-QH5",
+      "trigger": "T4.8 observability hooks complete",
+      "action": "Add observability tests"
+    }
   ],
   "summary": {
     "total_tests": 68,

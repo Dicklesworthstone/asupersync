@@ -1,10 +1,7 @@
 {
   "schema_version": "semantic-golden-fixture-v1",
   "fixture_id": "golden-dual-run-harness-contract",
-  "rule_ids": [
-    "differential.shared_harness.contract",
-    "differential.seed_lineage.roundtrip"
-  ],
+  "rule_ids": ["differential.shared_harness.contract", "differential.seed_lineage.roundtrip"],
   "description": "Expected shared dual-run identity and provenance records for the canonical harness contract case",
   "identity": {
     "schema_version": "lab-live-scenario-spec-v1",
@@ -88,10 +85,6 @@
     "surface_contract_version": "cancel.race.v1",
     "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
     "failure_reason": "contract smoke mismatch",
-    "phases_executed": [
-      "setup",
-      "execute",
-      "compare"
-    ]
+    "phases_executed": ["setup", "execute", "compare"]
   }
 }

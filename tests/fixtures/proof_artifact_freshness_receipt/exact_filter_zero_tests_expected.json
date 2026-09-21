@@ -27,9 +27,7 @@
         "exact_filter_failed_tests": 0,
         "exact_filter_ignored_tests": 0,
         "exact_filter_passed_tests": 0,
-        "exact_filter_proof_reasons": [
-          "zero-tests"
-        ],
+        "exact_filter_proof_reasons": ["zero-tests"],
         "exact_filter_result_count_segments": [
           {
             "failed": 0,
@@ -37,17 +35,13 @@
             "passed": 0
           }
         ],
-        "exact_filter_running_count_segments": [
-          0
-        ],
+        "exact_filter_running_count_segments": [0],
         "exact_filter_total_tests": 0,
         "proof_output_byte_count": 165,
         "proof_output_digest": "sha256:d64885afc1e88d121059b55435a1d4e359a79c2350760c953f83d18af6508a8d",
         "proof_output_segment_count": 1,
         "rch_remote_route_required": true,
-        "rch_remote_route_segments": [
-          "[RCH] remote rch-worker-exact-filter-zero (711.3s)"
-        ]
+        "rch_remote_route_segments": ["[RCH] remote rch-worker-exact-filter-zero (711.3s)"]
       },
       "generated_at": "2026-06-05T03:20:00Z",
       "reason": "artifact exact cargo test proof ran zero tests",
@@ -61,10 +55,7 @@
       },
       "safe_to_cite": false,
       "status": "pass",
-      "touched_files": [
-        "src/web/security.rs",
-        "tests/proof_artifact_freshness_receipt_contract.rs"
-      ]
+      "touched_files": ["src/web/security.rs", "tests/proof_artifact_freshness_receipt_contract.rs"]
     }
   ],
   "safety": {

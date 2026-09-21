@@ -76,8 +76,5 @@
   "recommended_next_action": "wait-for-implementation-reservation",
   "schema_version": "claim-reservation-start-receipt-v1",
   "tracker_mutation_status": "not-attempted",
-  "tracker_paths": [
-    ".beads/issues.jsonl",
-    ".beads/beads.db"
-  ]
+  "tracker_paths": [".beads/issues.jsonl", ".beads/beads.db"]
 }

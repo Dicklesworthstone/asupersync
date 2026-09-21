@@ -47,9 +47,7 @@
     {
       "evidence": {
         "expected_commit": "def4567abc",
-        "matched_message_ids": [
-          1002
-        ],
+        "matched_message_ids": [1002],
         "thread_id": "asupersync-open-reservation"
       },
       "row_id": "closeout_mail",

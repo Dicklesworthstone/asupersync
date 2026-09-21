@@ -49,9 +49,7 @@
         "real_host_throughput_proof": false,
         "requires_refresh_for_numbers": true
       },
-      "source_refs": [
-        "benches/methodology_baselines.rs"
-      ]
+      "source_refs": ["benches/methodology_baselines.rs"]
     }
   ]
 }

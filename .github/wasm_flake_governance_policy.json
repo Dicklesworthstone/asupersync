@@ -6,20 +6,13 @@
     "runner_command": "scripts/run_semantic_flake_detector.sh --iterations 5 --json",
     "dashboard_schema_version": "sem-variance-dashboard-v1",
     "dashboard_path": "target/semantic-verification/flake/latest/variance_dashboard.json",
-    "required_suites": [
-      "witness_seed_equivalence",
-      "cross_seed_replay"
-    ]
+    "required_suites": ["witness_seed_equivalence", "cross_seed_replay"]
   },
   "quarantine": {
     "automation_required": true,
     "manifest_schema_version": "wasm-flake-quarantine-v1",
     "manifest_path": "artifacts/wasm_flake_quarantine_manifest.json",
-    "statuses": [
-      "open",
-      "resolved",
-      "reactivated"
-    ],
+    "statuses": ["open", "resolved", "reactivated"],
     "required_fields": [
       "id",
       "suite",

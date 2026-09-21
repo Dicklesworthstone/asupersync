@@ -65,10 +65,28 @@
         },
         "selected_knobs": ["in_flight_bytes", "stream_count", "chunk_size_bytes"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 9437184, "direction": "Increase", "delta": 1048576 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 9437184,
+            "direction": "Increase",
+            "delta": 1048576
+          },
           { "knob": "stream_count", "previous": 4, "next": 5, "direction": "Increase", "delta": 1 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 294912, "direction": "Increase", "delta": 32768 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 294912,
+            "direction": "Increase",
+            "delta": 32768
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 256,
+            "direction": "Hold",
+            "delta": 0
+          }
         ]
       }
     },
@@ -117,7 +135,12 @@
           "sample_count": 16
         },
         "bottlenecks": [
-          { "kind": "NetworkLoss", "metric": "atp.autotune.loss_permille", "observed": 26, "threshold": 25 }
+          {
+            "kind": "NetworkLoss",
+            "metric": "atp.autotune.loss_permille",
+            "observed": 26,
+            "threshold": 25
+          }
         ],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -133,10 +156,28 @@
         },
         "selected_knobs": ["in_flight_bytes", "stream_count", "repair_symbols_per_second"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 6291456,
+            "direction": "Decrease",
+            "delta": 2097152
+          },
           { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 320, "direction": "Increase", "delta": 64 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 262144,
+            "direction": "Hold",
+            "delta": 0
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 320,
+            "direction": "Increase",
+            "delta": 64
+          }
         ]
       }
     },
@@ -181,7 +222,12 @@
           "sample_count": 16
         },
         "bottlenecks": [
-          { "kind": "NetworkLatency", "metric": "atp.autotune.pto_micros", "observed": 250001, "threshold": 250000 }
+          {
+            "kind": "NetworkLatency",
+            "metric": "atp.autotune.pto_micros",
+            "observed": 250001,
+            "threshold": 250000
+          }
         ],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -197,10 +243,28 @@
         },
         "selected_knobs": ["in_flight_bytes", "stream_count"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 6291456,
+            "direction": "Decrease",
+            "delta": 2097152
+          },
           { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 262144,
+            "direction": "Hold",
+            "delta": 0
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 256,
+            "direction": "Hold",
+            "delta": 0
+          }
         ]
       }
     },
@@ -245,8 +309,18 @@
           "sample_count": 16
         },
         "bottlenecks": [
-          { "kind": "DiskReadLag", "metric": "atp.autotune.disk_read_lag_micros", "observed": 100001, "threshold": 100000 },
-          { "kind": "DiskWriteLag", "metric": "atp.autotune.disk_write_lag_micros", "observed": 100001, "threshold": 100000 }
+          {
+            "kind": "DiskReadLag",
+            "metric": "atp.autotune.disk_read_lag_micros",
+            "observed": 100001,
+            "threshold": 100000
+          },
+          {
+            "kind": "DiskWriteLag",
+            "metric": "atp.autotune.disk_write_lag_micros",
+            "observed": 100001,
+            "threshold": 100000
+          }
         ],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -262,10 +336,28 @@
         },
         "selected_knobs": ["chunk_size_bytes"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 8388608, "direction": "Hold", "delta": 0 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 8388608,
+            "direction": "Hold",
+            "delta": 0
+          },
           { "knob": "stream_count", "previous": 4, "next": 4, "direction": "Hold", "delta": 0 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 196608, "direction": "Decrease", "delta": 65536 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 196608,
+            "direction": "Decrease",
+            "delta": 65536
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 256,
+            "direction": "Hold",
+            "delta": 0
+          }
         ]
       }
     },
@@ -310,8 +402,18 @@
           "sample_count": 16
         },
         "bottlenecks": [
-          { "kind": "EncodeBacklog", "metric": "atp.autotune.encode_backlog_symbols", "observed": 4097, "threshold": 4096 },
-          { "kind": "DecodeBacklog", "metric": "atp.autotune.decode_backlog_symbols", "observed": 4097, "threshold": 4096 }
+          {
+            "kind": "EncodeBacklog",
+            "metric": "atp.autotune.encode_backlog_symbols",
+            "observed": 4097,
+            "threshold": 4096
+          },
+          {
+            "kind": "DecodeBacklog",
+            "metric": "atp.autotune.decode_backlog_symbols",
+            "observed": 4097,
+            "threshold": 4096
+          }
         ],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -327,10 +429,28 @@
         },
         "selected_knobs": ["chunk_size_bytes"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 8388608, "direction": "Hold", "delta": 0 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 8388608,
+            "direction": "Hold",
+            "delta": 0
+          },
           { "knob": "stream_count", "previous": 4, "next": 4, "direction": "Hold", "delta": 0 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 196608, "direction": "Decrease", "delta": 65536 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 196608,
+            "direction": "Decrease",
+            "delta": 65536
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 256,
+            "direction": "Hold",
+            "delta": 0
+          }
         ]
       }
     },
@@ -341,9 +461,7 @@
         "trace_id": "trace-atp-relay-001",
         "workload_id": "workload-relay-cost",
         "sample_count": 16,
-        "samples": [
-          { "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }
-        ]
+        "samples": [{ "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }]
       },
       "current_settings": {
         "in_flight_bytes": 8388608,
@@ -357,9 +475,7 @@
         "workload_id": "workload-relay-cost",
         "sample_count": 16,
         "consumer_status": "degraded",
-        "samples": [
-          { "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }
-        ],
+        "samples": [{ "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }],
         "outcome": "PressureBackoff",
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
@@ -373,7 +489,12 @@
           "sample_count": 16
         },
         "bottlenecks": [
-          { "kind": "RelayCost", "metric": "atp.autotune.relay_cost_micros_per_mib", "observed": 500001, "threshold": 500000 }
+          {
+            "kind": "RelayCost",
+            "metric": "atp.autotune.relay_cost_micros_per_mib",
+            "observed": 500001,
+            "threshold": 500000
+          }
         ],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -389,10 +510,28 @@
         },
         "selected_knobs": ["in_flight_bytes", "stream_count"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 6291456,
+            "direction": "Decrease",
+            "delta": 2097152
+          },
           { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 262144,
+            "direction": "Hold",
+            "delta": 0
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 256,
+            "direction": "Hold",
+            "delta": 0
+          }
         ]
       }
     },
@@ -403,9 +542,7 @@
         "trace_id": "trace-atp-migration-001",
         "workload_id": "workload-path-migration",
         "sample_count": 16,
-        "samples": [
-          { "metric": "atp.autotune.migration_events", "value": 1 }
-        ]
+        "samples": [{ "metric": "atp.autotune.migration_events", "value": 1 }]
       },
       "current_settings": {
         "in_flight_bytes": 8388608,
@@ -419,9 +556,7 @@
         "workload_id": "workload-path-migration",
         "sample_count": 16,
         "consumer_status": "degraded",
-        "samples": [
-          { "metric": "atp.autotune.migration_events", "value": 1 }
-        ],
+        "samples": [{ "metric": "atp.autotune.migration_events", "value": 1 }],
         "outcome": "PressureBackoff",
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
@@ -435,7 +570,12 @@
           "sample_count": 16
         },
         "bottlenecks": [
-          { "kind": "MigrationInstability", "metric": "atp.autotune.migration_events", "observed": 1, "threshold": 0 }
+          {
+            "kind": "MigrationInstability",
+            "metric": "atp.autotune.migration_events",
+            "observed": 1,
+            "threshold": 0
+          }
         ],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -451,10 +591,28 @@
         },
         "selected_knobs": ["in_flight_bytes", "stream_count"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 6291456,
+            "direction": "Decrease",
+            "delta": 2097152
+          },
           { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 262144,
+            "direction": "Hold",
+            "delta": 0
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 256,
+            "direction": "Hold",
+            "delta": 0
+          }
         ]
       }
     },
@@ -515,10 +673,28 @@
         },
         "selected_knobs": ["in_flight_bytes", "stream_count", "chunk_size_bytes"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 9437184, "direction": "Increase", "delta": 1048576 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 9437184,
+            "direction": "Increase",
+            "delta": 1048576
+          },
           { "knob": "stream_count", "previous": 4, "next": 5, "direction": "Increase", "delta": 1 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 294912, "direction": "Increase", "delta": 32768 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 294912,
+            "direction": "Increase",
+            "delta": 32768
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 256,
+            "direction": "Hold",
+            "delta": 0
+          }
         ]
       }
     },
@@ -573,10 +749,28 @@
         },
         "selected_knobs": [],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 8388608, "direction": "Hold", "delta": 0 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 8388608,
+            "direction": "Hold",
+            "delta": 0
+          },
           { "knob": "stream_count", "previous": 4, "next": 4, "direction": "Hold", "delta": 0 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 262144,
+            "direction": "Hold",
+            "delta": 0
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 256,
+            "direction": "Hold",
+            "delta": 0
+          }
         ]
       }
     },
@@ -587,9 +781,7 @@
         "trace_id": "",
         "workload_id": "workload-stale-trace",
         "sample_count": 16,
-        "samples": [
-          { "metric": "atp.autotune.loss_permille", "value": 26 }
-        ]
+        "samples": [{ "metric": "atp.autotune.loss_permille", "value": 26 }]
       },
       "current_settings": {
         "in_flight_bytes": 8388608,
@@ -603,9 +795,7 @@
         "workload_id": "workload-stale-trace",
         "sample_count": 16,
         "consumer_status": "malformed",
-        "samples": [
-          { "metric": "atp.autotune.loss_permille", "value": 26 }
-        ],
+        "samples": [{ "metric": "atp.autotune.loss_permille", "value": 26 }],
         "outcome": "MalformedTelemetry",
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
@@ -620,7 +810,12 @@
         },
         "bottlenecks": [
           { "kind": "ContradictoryTelemetry", "metric": null, "observed": 0, "threshold": 1 },
-          { "kind": "NetworkLoss", "metric": "atp.autotune.loss_permille", "observed": 26, "threshold": 25 }
+          {
+            "kind": "NetworkLoss",
+            "metric": "atp.autotune.loss_permille",
+            "observed": 26,
+            "threshold": 25
+          }
         ],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -636,10 +831,28 @@
         },
         "selected_knobs": ["in_flight_bytes", "stream_count", "repair_symbols_per_second"],
         "changes": [
-          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          {
+            "knob": "in_flight_bytes",
+            "previous": 8388608,
+            "next": 6291456,
+            "direction": "Decrease",
+            "delta": 2097152
+          },
           { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
-          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
-          { "knob": "repair_symbols_per_second", "previous": 256, "next": 320, "direction": "Increase", "delta": 64 }
+          {
+            "knob": "chunk_size_bytes",
+            "previous": 262144,
+            "next": 262144,
+            "direction": "Hold",
+            "delta": 0
+          },
+          {
+            "knob": "repair_symbols_per_second",
+            "previous": 256,
+            "next": 320,
+            "direction": "Increase",
+            "delta": 64
+          }
         ]
       }
     },
@@ -650,9 +863,7 @@
         "trace_id": "trace-atp-out-of-range-001",
         "workload_id": "workload-out-of-range-loss",
         "sample_count": 16,
-        "samples": [
-          { "metric": "atp.autotune.loss_permille", "value": 70000 }
-        ]
+        "samples": [{ "metric": "atp.autotune.loss_permille", "value": 70000 }]
       },
       "expected_error": {
         "error": "metric_value_out_of_range",

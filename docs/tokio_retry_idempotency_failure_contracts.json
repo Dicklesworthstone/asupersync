@@ -11,11 +11,11 @@
         "title": "Shared Retry Policy Structure",
         "domain": "retry",
         "fields": [
-          {"name": "max_attempts", "type": "u32", "default": 3},
-          {"name": "initial_delay", "type": "Duration", "default_ms": 100},
-          {"name": "max_delay", "type": "Duration", "default_secs": 30},
-          {"name": "multiplier", "type": "f64", "default": 2.0},
-          {"name": "jitter", "type": "f64", "default": 0.1}
+          { "name": "max_attempts", "type": "u32", "default": 3 },
+          { "name": "initial_delay", "type": "Duration", "default_ms": 100 },
+          { "name": "max_delay", "type": "Duration", "default_secs": 30 },
+          { "name": "multiplier", "type": "f64", "default": 2.0 },
+          { "name": "jitter", "type": "f64", "default": 0.1 }
         ],
         "delay_formula": "min(initial_delay * multiplier^(attempt-1), max_delay) * (1 + random(jitter))",
         "reference": "src/combinator/retry.rs",
@@ -224,9 +224,9 @@
         "title": "Request-Level Idempotency Keys",
         "domain": "idempotency",
         "fields": [
-          {"name": "idempotency_key", "type": "String"},
-          {"name": "ttl", "type": "Duration"},
-          {"name": "result_cache", "type": "bool"}
+          { "name": "idempotency_key", "type": "String" },
+          { "name": "ttl", "type": "Duration" },
+          { "name": "result_cache", "type": "bool" }
         ],
         "status": "not_implemented"
       }
@@ -237,13 +237,41 @@
         "title": "Delivery Semantics Matrix",
         "domain": "delivery",
         "systems": {
-          "postgresql": {"default": "exactly_once", "best": "exactly_once", "mechanism": "acid_transactions"},
-          "mysql": {"default": "exactly_once", "best": "exactly_once", "mechanism": "acid_transactions"},
-          "sqlite": {"default": "exactly_once", "best": "exactly_once", "mechanism": "acid_transactions"},
-          "kafka": {"default": "at_least_once", "best": "exactly_once", "mechanism": "idempotent_transactional"},
-          "jetstream": {"default": "at_least_once", "best": "effectively_once", "mechanism": "ack_plus_dedup"},
-          "nats_core": {"default": "at_most_once", "best": "at_most_once", "mechanism": "fire_and_forget"},
-          "redis_pubsub": {"default": "at_most_once", "best": "at_most_once", "mechanism": "no_persistence"}
+          "postgresql": {
+            "default": "exactly_once",
+            "best": "exactly_once",
+            "mechanism": "acid_transactions"
+          },
+          "mysql": {
+            "default": "exactly_once",
+            "best": "exactly_once",
+            "mechanism": "acid_transactions"
+          },
+          "sqlite": {
+            "default": "exactly_once",
+            "best": "exactly_once",
+            "mechanism": "acid_transactions"
+          },
+          "kafka": {
+            "default": "at_least_once",
+            "best": "exactly_once",
+            "mechanism": "idempotent_transactional"
+          },
+          "jetstream": {
+            "default": "at_least_once",
+            "best": "effectively_once",
+            "mechanism": "ack_plus_dedup"
+          },
+          "nats_core": {
+            "default": "at_most_once",
+            "best": "at_most_once",
+            "mechanism": "fire_and_forget"
+          },
+          "redis_pubsub": {
+            "default": "at_most_once",
+            "best": "at_most_once",
+            "mechanism": "no_persistence"
+          }
         },
         "status": "defined"
       },
@@ -252,9 +280,21 @@
         "title": "Acknowledgement Contract",
         "domain": "delivery",
         "systems": {
-          "kafka": {"ack_type": "offset_commit", "timeout": "configurable", "redelivery": "from_last_committed"},
-          "jetstream": {"ack_type": "explicit_none_all", "timeout": "ack_wait", "redelivery": "up_to_max_deliver"},
-          "database": {"ack_type": "transaction_commit", "timeout": "connection_timeout", "redelivery": "n/a"}
+          "kafka": {
+            "ack_type": "offset_commit",
+            "timeout": "configurable",
+            "redelivery": "from_last_committed"
+          },
+          "jetstream": {
+            "ack_type": "explicit_none_all",
+            "timeout": "ack_wait",
+            "redelivery": "up_to_max_deliver"
+          },
+          "database": {
+            "ack_type": "transaction_commit",
+            "timeout": "connection_timeout",
+            "redelivery": "n/a"
+          }
         },
         "status": "defined"
       },
@@ -317,9 +357,9 @@
         "title": "Queue Depth Signals",
         "domain": "backpressure",
         "signals": {
-          "connection_pool": {"metric": "waiters", "threshold": "configurable"},
-          "kafka_producer": {"metric": "queue_size", "threshold": "queue.buffering.max.messages"},
-          "rate_limiter": {"metric": "token_count", "threshold": "configured_rate"}
+          "connection_pool": { "metric": "waiters", "threshold": "configurable" },
+          "kafka_producer": { "metric": "queue_size", "threshold": "queue.buffering.max.messages" },
+          "rate_limiter": { "metric": "token_count", "threshold": "configured_rate" }
         },
         "status": "partial"
       },
@@ -340,21 +380,75 @@
   "summary": {
     "total_contracts": 19,
     "domains": {
-      "retry": {"count": 5, "implemented": 4, "partial": 0, "defined": 1, "not_implemented": 0},
-      "error_classification": {"count": 3, "implemented": 3, "partial": 0, "defined": 0, "not_implemented": 0},
-      "idempotency": {"count": 3, "implemented": 0, "partial": 1, "defined": 1, "not_implemented": 1},
-      "delivery": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
-      "failure_propagation": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
-      "backpressure": {"count": 2, "implemented": 0, "partial": 1, "defined": 1, "not_implemented": 0}
+      "retry": { "count": 5, "implemented": 4, "partial": 0, "defined": 1, "not_implemented": 0 },
+      "error_classification": {
+        "count": 3,
+        "implemented": 3,
+        "partial": 0,
+        "defined": 0,
+        "not_implemented": 0
+      },
+      "idempotency": {
+        "count": 3,
+        "implemented": 0,
+        "partial": 1,
+        "defined": 1,
+        "not_implemented": 1
+      },
+      "delivery": {
+        "count": 3,
+        "implemented": 0,
+        "partial": 0,
+        "defined": 3,
+        "not_implemented": 0
+      },
+      "failure_propagation": {
+        "count": 3,
+        "implemented": 0,
+        "partial": 0,
+        "defined": 3,
+        "not_implemented": 0
+      },
+      "backpressure": {
+        "count": 2,
+        "implemented": 0,
+        "partial": 1,
+        "defined": 1,
+        "not_implemented": 0
+      }
     },
     "systems": ["postgresql", "mysql", "sqlite", "kafka", "jetstream", "nats_core", "redis_pubsub"],
     "blocking_gaps": [
-      {"id": "RTY-G1", "severity": "closed", "description": "MySQL/SQLite transaction retry — IMPLEMENTED"},
-      {"id": "ERR-G1", "severity": "closed", "description": "MySQL/SQLite error classification methods — IMPLEMENTED"},
-      {"id": "ERR-G2", "severity": "closed", "description": "PostgreSQL is_transient/is_connection_error — IMPLEMENTED"},
-      {"id": "ERR-G3", "severity": "closed", "description": "Messaging error classification methods — IMPLEMENTED"},
-      {"id": "RTY-G2", "severity": "closed", "description": "Connection pool retry — IMPLEMENTED via get_with_retry()"},
-      {"id": "IMP-G1", "severity": "low", "description": "Request-level idempotency keys not implemented"}
+      {
+        "id": "RTY-G1",
+        "severity": "closed",
+        "description": "MySQL/SQLite transaction retry — IMPLEMENTED"
+      },
+      {
+        "id": "ERR-G1",
+        "severity": "closed",
+        "description": "MySQL/SQLite error classification methods — IMPLEMENTED"
+      },
+      {
+        "id": "ERR-G2",
+        "severity": "closed",
+        "description": "PostgreSQL is_transient/is_connection_error — IMPLEMENTED"
+      },
+      {
+        "id": "ERR-G3",
+        "severity": "closed",
+        "description": "Messaging error classification methods — IMPLEMENTED"
+      },
+      {
+        "id": "RTY-G2",
+        "severity": "closed",
+        "description": "Connection pool retry — IMPLEMENTED via get_with_retry()"
+      },
+      {
+        "id": "IMP-G1",
+        "severity": "low",
+        "description": "Request-level idempotency keys not implemented"
+      }
     ]
   },
   "source_modules": {
@@ -372,14 +466,14 @@
   },
   "dependencies": {
     "blocked_by": [
-      {"bead": "asupersync-2oh2u.6.5", "reason": "Pool/transaction contracts", "status": "open"},
-      {"bead": "asupersync-2oh2u.6.6", "reason": "Redis parity", "status": "in_progress"},
-      {"bead": "asupersync-2oh2u.6.7", "reason": "NATS/JetStream parity", "status": "closed"},
-      {"bead": "asupersync-2oh2u.6.8", "reason": "Kafka parity", "status": "in_progress"}
+      { "bead": "asupersync-2oh2u.6.5", "reason": "Pool/transaction contracts", "status": "open" },
+      { "bead": "asupersync-2oh2u.6.6", "reason": "Redis parity", "status": "in_progress" },
+      { "bead": "asupersync-2oh2u.6.7", "reason": "NATS/JetStream parity", "status": "closed" },
+      { "bead": "asupersync-2oh2u.6.8", "reason": "Kafka parity", "status": "in_progress" }
     ],
     "blocks": [
-      {"bead": "asupersync-2oh2u.6.10", "reason": "Deterministic integration suites"},
-      {"bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit tests"}
+      { "bead": "asupersync-2oh2u.6.10", "reason": "Deterministic integration suites" },
+      { "bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit tests" }
     ]
   }
 }

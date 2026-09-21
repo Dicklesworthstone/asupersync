@@ -9,7 +9,18 @@
       "properties": {
         "profile": {
           "type": "string",
-          "enum": ["bulk-file", "sync-tree", "media", "sparse-image", "artifact", "stream", "clean-lan", "lossy-wifi", "relay-only", "auto"],
+          "enum": [
+            "bulk-file",
+            "sync-tree",
+            "media",
+            "sparse-image",
+            "artifact",
+            "stream",
+            "clean-lan",
+            "lossy-wifi",
+            "relay-only",
+            "auto"
+          ],
           "description": "Transfer profile used for benchmark"
         },
         "test_size_bytes": {
@@ -89,11 +100,26 @@
                 "minimum": 0
               }
             },
-            "required": ["rtt_ms", "packet_loss_rate", "active_connections", "repair_symbols_used", "dedup_savings_bytes", "compression_ratio"],
+            "required": [
+              "rtt_ms",
+              "packet_loss_rate",
+              "active_connections",
+              "repair_symbols_used",
+              "dedup_savings_bytes",
+              "compression_ratio"
+            ],
             "additionalProperties": false
           }
         },
-        "required": ["iteration", "duration_seconds", "throughput_bps", "peak_throughput_bps", "cpu_usage_percent", "memory_usage_bytes", "network_metrics"],
+        "required": [
+          "iteration",
+          "duration_seconds",
+          "throughput_bps",
+          "peak_throughput_bps",
+          "cpu_usage_percent",
+          "memory_usage_bytes",
+          "network_metrics"
+        ],
         "additionalProperties": false
       }
     },
@@ -126,7 +152,14 @@
           "minimum": 0
         }
       },
-      "required": ["avg_throughput_bps", "throughput_std_dev", "best_throughput_bps", "worst_throughput_bps", "avg_cpu_usage_percent", "avg_memory_usage_bytes"],
+      "required": [
+        "avg_throughput_bps",
+        "throughput_std_dev",
+        "best_throughput_bps",
+        "worst_throughput_bps",
+        "avg_cpu_usage_percent",
+        "avg_memory_usage_bytes"
+      ],
       "additionalProperties": false
     },
     "system_info": {

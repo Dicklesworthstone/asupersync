@@ -52,13 +52,7 @@
         "gap.proof_shape.preservation_branches",
         "gap.missing_lemma.invariant_witness_bundle"
       ],
-      "recommended_track_order": [
-        "track-2",
-        "track-3",
-        "track-4",
-        "track-5",
-        "track-6"
-      ]
+      "recommended_track_order": ["track-2", "track-3", "track-4", "track-5", "track-6"]
     },
     "frontier_buckets": {
       "diagnostics_total": 54,
@@ -72,9 +66,7 @@
     "schema_version": "1.0.0",
     "dashboard_id": "lean.track2.frontier_burndown.v1",
     "bucket_ordering": "lexicographic(failure_mode,error_code)",
-    "generated_from_artifacts": [
-      "formal/lean/coverage/lean_frontier_buckets_v1.json"
-    ],
+    "generated_from_artifacts": ["formal/lean/coverage/lean_frontier_buckets_v1.json"],
     "generation_commands": [
       "cargo test --test lean_baseline_report baseline_report_track2_burndown_and_closure_gate_are_well_formed -- --nocapture"
     ],

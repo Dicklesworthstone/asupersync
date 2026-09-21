@@ -98,10 +98,7 @@
         "status": " M"
       }
     ],
-    "ignored_artifact_patterns": [
-      "target/**",
-      ".rch-target-*"
-    ],
+    "ignored_artifact_patterns": ["target/**", ".rch-target-*"],
     "status": "ok",
     "upstream": {
       "ahead": 0,
@@ -111,9 +108,6 @@
     }
   },
   "release_prep": {
-    "ignored_artifact_patterns": [
-      "target/**",
-      ".rch-target-*"
-    ]
+    "ignored_artifact_patterns": ["target/**", ".rch-target-*"]
   }
 }

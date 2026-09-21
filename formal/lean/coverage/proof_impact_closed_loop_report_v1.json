@@ -111,14 +111,8 @@
       {
         "workload_id": "perf.scheduler_mixed_ready_cancel",
         "objective": "Measure scheduler responsiveness under mixed ready/cancel load while keeping conformance green.",
-        "target_surface": [
-          "src/runtime/scheduler/**"
-        ],
-        "constraint_ids": [
-          "OPT-LOCK-001",
-          "OPT-CANCEL-001",
-          "OPT-DET-001"
-        ],
+        "target_surface": ["src/runtime/scheduler/**"],
+        "constraint_ids": ["OPT-LOCK-001", "OPT-CANCEL-001", "OPT-DET-001"],
         "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance refinement_semantics_trace_golden -- --nocapture",
         "baseline_artifact": "formal/lean/coverage/refinement_conformance_report_v1.json#mismatch_trend",
         "current_artifact": "formal/lean/coverage/proof_impact_closed_loop_report_v1.json#report_snapshot.performance_delta_evidence.workload_results[0]"
@@ -126,15 +120,8 @@
       {
         "workload_id": "perf.cancel_path_loser_drain",
         "objective": "Measure cancellation and loser-drain stability in proof-constrained race paths.",
-        "target_surface": [
-          "src/cancel/**",
-          "src/combinator/race.rs",
-          "src/combinator/hedge.rs"
-        ],
-        "constraint_ids": [
-          "OPT-CANCEL-001",
-          "OPT-CANCEL-002"
-        ],
+        "target_surface": ["src/cancel/**", "src/combinator/race.rs", "src/combinator/hedge.rs"],
+        "constraint_ids": ["OPT-CANCEL-001", "OPT-CANCEL-002"],
         "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance refinement_trace_equivalence_filters_schedule_noise -- --nocapture",
         "baseline_artifact": "formal/lean/coverage/refinement_conformance_report_v1.json#coverage_percent",
         "current_artifact": "formal/lean/coverage/proof_impact_closed_loop_report_v1.json#report_snapshot.performance_delta_evidence.workload_results[1]"
@@ -157,9 +144,7 @@
         "confidence": "medium",
         "confidence_note": "Opportunity-map coverage moved from absent to complete for deterministic optimization envelopes.",
         "attribution": {
-          "coverage_change_beads": [
-            "asupersync-2x0ha"
-          ],
+          "coverage_change_beads": ["asupersync-2x0ha"],
           "source_field_path": "formal/lean/coverage/proof_guided_performance_opportunity_map.json#opportunities"
         },
         "supporting_commands": [
@@ -177,9 +162,7 @@
         "confidence": "medium",
         "confidence_note": "Reliability hardening contract now covers all four assumption classes with deterministic triage flow and policy routing.",
         "attribution": {
-          "coverage_change_beads": [
-            "asupersync-2izu4"
-          ],
+          "coverage_change_beads": ["asupersync-2izu4"],
           "source_field_path": "formal/lean/coverage/invariant_theorem_test_link_map.json#reliability_hardening_contract"
         },
         "supporting_commands": [
@@ -197,10 +180,7 @@
         "confidence": "medium",
         "confidence_note": "Proof-impact review workflow and runtime-state refinement contract are fully linked into executable workflow checks.",
         "attribution": {
-          "coverage_change_beads": [
-            "asupersync-107y3",
-            "asupersync-gbztl"
-          ],
+          "coverage_change_beads": ["asupersync-107y3", "asupersync-gbztl"],
           "source_field_path": "formal/lean/coverage/runtime_state_refinement_map.json#reporting_and_signoff_contract"
         },
         "supporting_commands": [
@@ -263,10 +243,7 @@
         "incident_frequency_per_1000_runs_delta": -3.0,
         "severity_weighted_incident_index_delta": -1.4,
         "confidence_note": "Reliability trend deltas indicate faster diagnosis and lower severity/frequency once assumption-class guardrails are fully covered.",
-        "linked_beads": [
-          "asupersync-2izu4",
-          "asupersync-2ue65"
-        ]
+        "linked_beads": ["asupersync-2izu4", "asupersync-2ue65"]
       },
       "attribution_method": {
         "method_id": "reliability.coverage_milestone_pairing.v1",
@@ -347,9 +324,7 @@
       "Current deltas represent contract-completeness outcomes and conformance readiness, not long-horizon production telemetry.",
       "Follow-up beads asupersync-228pu, asupersync-2ue65, and asupersync-3o1ga must append workload/incident/query-derived values in future snapshots."
     ],
-    "downstream_consumers": [
-      "asupersync-3gfir"
-    ],
+    "downstream_consumers": ["asupersync-3gfir"],
     "playbook_handoff_contract": {
       "target_bead": "asupersync-3gfir",
       "required_case_study_fields": [
@@ -395,16 +370,9 @@
             "formal/lean/coverage/proof_guided_performance_opportunity_map.json#opportunities",
             "formal/lean/coverage/refinement_conformance_report_v1.json#mismatch_trend"
           ],
-          "mapping_links": [
-            "formal/lean/coverage/runtime_state_refinement_map.json#rows"
-          ],
-          "conformance_links": [
-            "tests/refinement_conformance.rs#L1"
-          ],
-          "bead_lineage": [
-            "asupersync-2x0ha",
-            "asupersync-228pu"
-          ],
+          "mapping_links": ["formal/lean/coverage/runtime_state_refinement_map.json#rows"],
+          "conformance_links": ["tests/refinement_conformance.rs#L1"],
+          "bead_lineage": ["asupersync-2x0ha", "asupersync-228pu"],
           "repro_commands": [
             "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_proof_guided_performance_opportunity_map -- --nocapture",
             "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance refinement_semantics_trace_golden -- --nocapture"
@@ -429,10 +397,7 @@
             "tests/lean_invariant_theorem_test_link_map.rs#L1",
             "tests/refinement_conformance.rs#L1"
           ],
-          "bead_lineage": [
-            "asupersync-2izu4",
-            "asupersync-2ue65"
-          ],
+          "bead_lineage": ["asupersync-2izu4", "asupersync-2ue65"],
           "repro_commands": [
             "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test lean_invariant_theorem_test_link_map -- --nocapture",
             "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test refinement_conformance -- --nocapture"
@@ -451,18 +416,12 @@
             "formal/lean/coverage/runtime_state_refinement_map.json#reporting_and_signoff_contract",
             "formal/lean/coverage/proof_impact_closed_loop_report_v1.json#report_snapshot.correctness_delta_evidence"
           ],
-          "mapping_links": [
-            "formal/lean/coverage/runtime_state_refinement_map.json#rows"
-          ],
+          "mapping_links": ["formal/lean/coverage/runtime_state_refinement_map.json#rows"],
           "conformance_links": [
             "tests/proof_aware_workflow_contract.rs#L1",
             "tests/runtime_state_refinement_map.rs#L1"
           ],
-          "bead_lineage": [
-            "asupersync-107y3",
-            "asupersync-gbztl",
-            "asupersync-3o1ga"
-          ],
+          "bead_lineage": ["asupersync-107y3", "asupersync-gbztl", "asupersync-3o1ga"],
           "repro_commands": [
             "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test proof_aware_workflow_contract -- --nocapture",
             "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_closed_loop_docs cargo test --test runtime_state_refinement_map -- --nocapture"

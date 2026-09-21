@@ -8,9 +8,7 @@
       "git_branch": "main",
       "git_sha": "2222222222222222222222222222222222222222",
       "status": "pass",
-      "touched_files": [
-        "tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json"
-      ]
+      "touched_files": ["tests/fixtures/proof_artifact_freshness_receipt/renamed_target.json"]
     }
   ],
   "dirty_tree": {

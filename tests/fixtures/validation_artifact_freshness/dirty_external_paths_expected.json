@@ -2,16 +2,12 @@
   "artifact": {
     "decision": "passed",
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "touched_files": [
-      "scripts/proof_runner.py"
-    ]
+    "touched_files": ["scripts/proof_runner.py"]
   },
   "artifact_path": "tests/fixtures/validation_artifact_freshness/current_artifact.json",
   "classification": "current-with-external-dirt",
   "current": {
-    "dirty_paths": [
-      "src/channel/mod.rs"
-    ],
+    "dirty_paths": ["src/channel/mod.rs"],
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   },
   "current_date": "2026-05-08",
@@ -23,9 +19,7 @@
   },
   "generated_at": "2026-05-08T05:30:00Z",
   "markers": {
-    "dirty_external_paths": [
-      "src/channel/mod.rs"
-    ],
+    "dirty_external_paths": ["src/channel/mod.rs"],
     "dirty_touched_overlap": [],
     "has_artifact_head": true,
     "head_matches": true

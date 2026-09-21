@@ -29,18 +29,14 @@
       "lane": "testing-fuzzing",
       "title": "H2 RST_STREAM fuzz target",
       "priority": 1,
-      "paths": [
-        "fuzz/fuzz_targets/h2_rst_stream.rs"
-      ]
+      "paths": ["fuzz/fuzz_targets/h2_rst_stream.rs"]
     },
     {
       "candidate_id": "implementation-completeness:tests",
       "lane": "implementation-completeness",
       "title": "Scan tests for incomplete assertions",
       "priority": 2,
-      "paths": [
-        "tests"
-      ]
+      "paths": ["tests"]
     }
   ]
 }

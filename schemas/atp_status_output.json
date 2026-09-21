@@ -38,7 +38,13 @@
           "description": "Estimated completion time for all active transfers"
         }
       },
-      "required": ["active_transfers", "queued_transfers", "completed_transfers", "failed_transfers", "total_throughput_bps"],
+      "required": [
+        "active_transfers",
+        "queued_transfers",
+        "completed_transfers",
+        "failed_transfers",
+        "total_throughput_bps"
+      ],
       "additionalProperties": false
     },
     "transfers": {
@@ -65,7 +71,17 @@
           },
           "state": {
             "type": "string",
-            "enum": ["Queued", "Connecting", "Negotiating", "Transferring", "Verifying", "Completed", "Failed", "Cancelled", "Paused"],
+            "enum": [
+              "Queued",
+              "Connecting",
+              "Negotiating",
+              "Transferring",
+              "Verifying",
+              "Completed",
+              "Failed",
+              "Cancelled",
+              "Paused"
+            ],
             "description": "Current transfer state"
           },
           "progress": {
@@ -105,7 +121,15 @@
                 "minimum": 0
               }
             },
-            "required": ["bytes_transferred", "total_bytes", "files_transferred", "total_files", "percentage", "current_rate_bps", "average_rate_bps"],
+            "required": [
+              "bytes_transferred",
+              "total_bytes",
+              "files_transferred",
+              "total_files",
+              "percentage",
+              "current_rate_bps",
+              "average_rate_bps"
+            ],
             "additionalProperties": false
           },
           "performance": {
@@ -137,7 +161,14 @@
                 "minimum": 0
               }
             },
-            "required": ["rtt_ms", "packet_loss_rate", "active_connections", "repair_symbols_used", "dedup_savings_bytes", "compression_ratio"],
+            "required": [
+              "rtt_ms",
+              "packet_loss_rate",
+              "active_connections",
+              "repair_symbols_used",
+              "dedup_savings_bytes",
+              "compression_ratio"
+            ],
             "additionalProperties": false
           },
           "error": {
@@ -150,7 +181,15 @@
             "description": "Additional transfer-specific metadata"
           }
         },
-        "required": ["id", "direction", "source", "destination", "state", "progress", "performance"],
+        "required": [
+          "id",
+          "direction",
+          "source",
+          "destination",
+          "state",
+          "progress",
+          "performance"
+        ],
         "additionalProperties": false
       }
     },
@@ -202,7 +241,13 @@
           }
         }
       },
-      "required": ["cpu_usage_percent", "memory_usage_bytes", "memory_available_bytes", "disk_cache_usage_bytes", "network_interfaces"],
+      "required": [
+        "cpu_usage_percent",
+        "memory_usage_bytes",
+        "memory_available_bytes",
+        "disk_cache_usage_bytes",
+        "network_interfaces"
+      ],
       "additionalProperties": false
     },
     "timestamp": {

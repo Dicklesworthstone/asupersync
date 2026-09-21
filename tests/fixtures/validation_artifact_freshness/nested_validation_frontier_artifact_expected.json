@@ -2,9 +2,7 @@
   "artifact": {
     "decision": "pass",
     "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "touched_files": [
-      "tests/rch_retrieval_receipt_contract.rs"
-    ]
+    "touched_files": ["tests/rch_retrieval_receipt_contract.rs"]
   },
   "artifact_path": "tests/fixtures/validation_artifact_freshness/nested_validation_frontier_artifact.json",
   "classification": "current",
@@ -28,9 +26,7 @@
   },
   "non_mutating": true,
   "remediation": {
-    "next_steps": [
-      "include this receipt alongside the proof artifact"
-    ],
+    "next_steps": ["include this receipt alongside the proof artifact"],
     "operator_note": "The artifact can be cited for its touched surface.",
     "summary": "artifact matches the current frontier"
   },

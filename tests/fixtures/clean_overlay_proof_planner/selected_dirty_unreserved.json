@@ -3,9 +3,7 @@
   "agent_name": "SapphireHill",
   "head": "4444444444444444444444444444444444444444",
   "selected_paths": ["src/runtime/pool_sizing.rs"],
-  "dirty_entries": [
-    {"path": "src/runtime/pool_sizing.rs", "status": " M"}
-  ],
+  "dirty_entries": [{ "path": "src/runtime/pool_sizing.rs", "status": " M" }],
   "reservations": [],
   "command_intent": {
     "description": "unreserved selected dirty path should fail",

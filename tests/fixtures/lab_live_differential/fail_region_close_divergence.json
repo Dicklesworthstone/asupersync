@@ -15,18 +15,13 @@
     "path": "tests/lab_live_differential_v2.rs",
     "entry": "run_region_divergence_pilot"
   },
-  "admitted_differences": [
-    "seed_lineage_provenance"
-  ],
+  "admitted_differences": ["seed_lineage_provenance"],
   "timing_normalization": {
     "policy_doc": "docs/lab_live_time_normalization_policy.md",
     "clock_model": "semantic_only",
     "wall_clock_fields": "provenance_only"
   },
-  "platform_prerequisites": [
-    "current_thread_runtime",
-    "no_external_services"
-  ],
+  "platform_prerequisites": ["current_thread_runtime", "no_external_services"],
   "expected_logs": [
     "scenario_id",
     "surface_id",

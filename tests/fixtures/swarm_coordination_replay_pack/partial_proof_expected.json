@@ -1,7 +1,5 @@
 {
-  "action_items": [
-    "capture a remote exit event or rerun the focused rch proof lane"
-  ],
+  "action_items": ["capture a remote exit event or rerun the focused rch proof lane"],
   "current_date": "2026-05-08",
   "forbidden_actions": {
     "runs_agent_mail_mutation": false,
@@ -49,9 +47,7 @@
   "violations": [
     {
       "code": "partial-proof-launch",
-      "event_ids": [
-        "proof-start"
-      ],
+      "event_ids": ["proof-start"],
       "message": "proof-missing-exit started but has no remote exit event",
       "remediation": "capture a remote exit event or rerun the focused rch proof lane",
       "severity": "error"

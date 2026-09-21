@@ -41,10 +41,7 @@
     }
   ],
   "profile_contract": {
-    "required_artifacts": [
-      "docs_output.txt",
-      "golden_output.txt"
-    ]
+    "required_artifacts": ["docs_output.txt", "golden_output.txt"]
   },
   "report_dir": "report_artifacts"
 }
