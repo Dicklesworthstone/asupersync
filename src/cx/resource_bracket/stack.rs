@@ -6,22 +6,13 @@
 //! order, including after another release fails or panics. The current release
 //! future and completed results live in the stack, not in its borrowing wait.
 //!
-//! A standalone stack's owner must establish user quiescence BEFORE `close`.
-//! [`Cx::spawn_resource_scope`] instead retains the stack inside the existing
-//! bracket controller and drains its work subtree before releasing any resource.
-//! Its work callback receives [`ResourceScope`], which cannot close or replace
-//! the stack. This is not general runtime finalizer registration. Dropping an
-//! entire standalone stack performs ordinary destruction, not async release.
-//! A blocked release blocks older entries deliberately: dependent resources must
-//! not be torn down out of order.
+//! This is an application-owned resource stack, not runtime finalizer
+//! registration. Its owner must establish that all resource users are quiescent
+//! BEFORE calling `close`. Dropping the entire stack performs ordinary Rust
+//! destruction, not asynchronous release. A blocked release blocks older entries
+//! deliberately: dependent resources must not be torn down out of order.
 
-use super::{
-    BracketConfig, BracketHandle, BracketPhase, BracketReport, BracketUseFuture,
-    Cx, Outcome, cancel_reason, evaluate,
-};
-use crate::runtime::{JoinError, SpawnError};
-use crate::types::TaskId;
-use parking_lot::Mutex;
+use super::{BracketPhase, Cx, Outcome, evaluate};
 use std::any::Any;
 use std::fmt;
 use std::future::{Future, poll_fn};
@@ -203,7 +194,7 @@ impl<C: Send + 'static> ResourceStack<C> {
         self.entries.try_reserve(1).map_err(|_| ResourceStackError::Allocation)?;
         // No release runs while registration is open. Reserve enough eventual
         // result slots, not merely one extra slot relative to the still-empty Vec.
-        self.report.entries.try_reserve(count).map_err(|_| ResourceStackError::Allocation)?;
+        self.report.entries.try_reserve_exact(count).map_err(|_| ResourceStackError::Allocation)?;
         Ok(ResourceReservation { stack: self })
     }
 
@@ -230,9 +221,7 @@ impl<C: Send + 'static> ResourceStack<C> {
         self.entries.get(key.index)?.as_ref()?.resource().downcast_ref()
     }
 
-    /// Mutably borrow a live resource. As with any `&mut T`, a caller can replace
-    /// its value; release then receives the replacement. Interior ownership and
-    /// any explicitly extracted/replaced values remain the caller's responsibility.
+    /// Mutably borrow a live resource without extracting it from its release owner.
     pub fn get_mut<T: 'static>(&mut self, key: &ResourceKey<T>) -> Option<&mut T> {
         if self.closing || !Arc::ptr_eq(&self.owner, &key.owner) { return None; }
         self.entries.get_mut(key.index)?.as_mut()?.resource_mut().downcast_mut()
@@ -300,44 +289,6 @@ impl<C> fmt::Debug for ResourceReservation<'_, C> {
     }
 }
 impl<C: Send + 'static> ResourceReservation<'_, C> {
-    /// Acquire into an already-reserved slot. On success the resource is installed
-    /// before returning, even if cancellation arrived during acquisition or the
-    /// acquisition future's destructor panicked. Inspect BOTH phase fields: an
-    /// `Ok(key)` with a retirement panic preserves ownership, not successful setup.
-    ///
-    /// Cancellation before the first acquisition poll skips the factory. Factory
-    /// and poll panics use the bracket's existing phase isolation. A failure that
-    /// returns no resource owns its own partial-acquisition cleanup. Dropping this
-    /// future while acquisition is pending drops that acquisition, not any older
-    /// registered resources. Use a resource scope to retain controller ownership.
-    pub async fn acquire<T, E, A, AF, F, FF>(
-        self, cx: &Cx, acquire: A, release: F,
-    ) -> BracketPhase<ResourceKey<T>, E>
-    where
-        T: Send + 'static,
-        A: FnOnce(Cx) -> AF,
-        AF: Future<Output = Outcome<T, E>>,
-        F: FnOnce(Cx, T) -> FF + Send + 'static,
-        FF: Future<Output = Outcome<(), C>> + Send + 'static,
-    {
-        if cx.checkpoint().is_err() {
-            return BracketPhase {
-                outcome: Outcome::Cancelled(cancel_reason(cx)), retirement_panic: None,
-            };
-        }
-        let BracketPhase { outcome, retirement_panic } =
-            evaluate(|| acquire(cx.clone()), None).await;
-        let outcome = match outcome {
-            // No checkpoint or await may separate a returned resource from the
-            // reserved release owner, including after an acquisition Drop panic.
-            Outcome::Ok(resource) => Outcome::Ok(self.insert(resource, release)),
-            Outcome::Err(error) => Outcome::Err(error),
-            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => Outcome::Panicked(payload),
-        };
-        BracketPhase { outcome, retirement_panic }
-    }
-
     /// Infallibly commit this slot; no cancellation checkpoint separates successful
     /// acquisition from installing its resource owner. Standard Box allocation can
     /// still abort on OOM. The factory is invoked only by a subsequent close.
@@ -350,146 +301,6 @@ impl<C: Send + 'static> ResourceReservation<'_, C> {
         let index = self.stack.entries.len();
         self.stack.entries.push(Some(Box::new(Entry { resource, release })));
         ResourceKey { owner: Arc::clone(&self.stack.owner), index, marker: PhantomData }
-    }
-}
-
-/// Restricted work-phase access to a controller-owned resource stack.
-///
-/// This facade provides registration and borrowing, but NOT close, extraction,
-/// or replacement of the stack. Dropping the facade does not drop its resources.
-/// Returned keys carry identity only and do not keep resources alive after close.
-pub struct ResourceScope<'a, C> { stack: &'a mut ResourceStack<C> }
-impl<C> fmt::Debug for ResourceScope<'_, C> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResourceScope").field("stack", &self.stack).finish()
-    }
-}
-impl<C: Send + 'static> ResourceScope<'_, C> {
-    /// Reserve capacity before starting acquisition. Refusal invokes no factory.
-    pub fn reserve(&mut self) -> Result<ResourceReservation<'_, C>, ResourceStackError> {
-        self.stack.reserve()
-    }
-
-    /// Register an existing resource or recover it and its release factory.
-    pub fn try_insert<T, F, FF>(&mut self, resource: T, release: F)
-        -> Result<ResourceKey<T>, ResourceInsertError<T, F>>
-    where
-        T: Send + 'static,
-        F: FnOnce(Cx, T) -> FF + Send + 'static,
-        FF: Future<Output = Outcome<(), C>> + Send + 'static,
-    {
-        self.stack.try_insert(resource, release)
-    }
-
-    /// Borrow a resource from this scope; foreign keys return None.
-    #[must_use]
-    pub fn get<T: 'static>(&self, key: &ResourceKey<T>) -> Option<&T> { self.stack.get(key) }
-
-    /// Mutably borrow the registered value. Replacing the value changes what its
-    /// release factory later owns, exactly as with a standalone stack's get_mut.
-    pub fn get_mut<T: 'static>(&mut self, key: &ResourceKey<T>) -> Option<&mut T> {
-        self.stack.get_mut(key)
-    }
-}
-
-/// Work, runtime drain, and every release result, without requiring Clone errors.
-#[derive(Debug)]
-#[must_use = "inspect both runtime lifecycle and every resource cleanup result"]
-pub struct ResourceScopeReport<T, E, C> {
-    /// Existing bracket lifecycle. A release `Err(())` means at least one stack
-    /// entry failed; the exact typed errors are in `cleanup`. A failed region
-    /// close leaves the ENTIRE stack in `unreleased`; it must not be closed until
-    /// user quiescence is independently established.
-    pub lifecycle: BracketReport<ResourceStack<C>, T, E, ()>,
-    /// Every terminal resource release in LIFO order, including successes. None
-    /// when no stack was created or the runtime could not establish quiescence.
-    pub cleanup: Option<ResourceCleanupReport<C>>,
-}
-impl<T, E, C> ResourceScopeReport<T, E, C> {
-    /// Both work and every runtime/resource cleanup phase succeeded.
-    #[must_use]
-    pub fn is_success(&self) -> bool {
-        self.lifecycle.is_success()
-            && self.cleanup.as_ref().is_some_and(ResourceCleanupReport::is_success)
-    }
-}
-
-/// Owns the existing bracket controller; no second worker or executor is created.
-/// Dropping this handle requests cancellation; join it to observe resource release.
-#[must_use = "retain and join to observe resource-scope cleanup"]
-pub struct ResourceScopeHandle<T, E, C> {
-    bracket: BracketHandle<ResourceStack<C>, T, E, ()>,
-    cleanup: Arc<Mutex<Option<ResourceCleanupReport<C>>>>,
-}
-impl<T, E, C> fmt::Debug for ResourceScopeHandle<T, E, C> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResourceScopeHandle").field("bracket", &self.bracket).finish_non_exhaustive()
-    }
-}
-impl<T, E, C> ResourceScopeHandle<T, E, C> {
-    /// Current identity of the bracket controller task.
-    #[must_use]
-    pub fn task_id(&self) -> TaskId { self.bracket.task_id() }
-
-    /// Request stop; joining still waits for subtree drain and LIFO cleanup.
-    pub fn abort(&self) { self.bracket.abort(); }
-
-    /// Join once. Dropping a borrowing wait neither requests stop nor discards
-    /// partial work/cleanup results. This wait is deliberately uninterruptible;
-    /// use abort to request cooperative shutdown and then continue joining.
-    pub async fn join(&mut self) -> Result<ResourceScopeReport<T, E, C>, JoinError> {
-        let lifecycle = self.bracket.join().await?;
-        let cleanup = self.cleanup.lock().take();
-        Ok(ResourceScopeReport { lifecycle, cleanup })
-    }
-}
-
-impl Cx {
-    /// Run multi-step resource acquisition/use with runtime-owned LIFO release.
-    ///
-    /// The work callback may register different `Send` resource types, and all
-    /// release callbacks share the caller's cleanup error type C. The existing
-    /// bracket owns the stack BEFORE the work factory runs, joins its body, drains
-    /// descendants/finalizers, then releases entries newest-first. Work errors,
-    /// cancellation and panics do not bypass cleanup of earlier registrations.
-    ///
-    /// `config.release_masked_polls` applies to the ENTIRE stack release future,
-    /// not a fresh allowance per entry. A pending release stays owned when this
-    /// finite allowance ends; subsequent polls are unmasked. Callbacks must return
-    /// and make progress, and must drain any work they themselves start. Captured
-    /// external capabilities, hard runtime abort and process exit remain outside
-    /// this contract. This is not registration on an arbitrary existing region.
-    ///
-    /// # Errors
-    /// Returns the original SpawnError if controller submission is refused.
-    /// Later admission/work/drain/cleanup failures remain in the joined report.
-    pub fn spawn_resource_scope<T, E, C, U>(
-        &self, config: BracketConfig, capacity: usize, work: U,
-    ) -> Result<ResourceScopeHandle<T, E, C>, SpawnError>
-    where
-        T: Send + 'static, E: Send + 'static, C: Send + 'static,
-        U: for<'a> FnOnce(Cx, ResourceScope<'a, C>) -> BracketUseFuture<'a, T, E>
-            + Send + 'static,
-    {
-        let cleanup = Arc::new(Mutex::new(None));
-        let publication = Arc::clone(&cleanup);
-        let bracket = self.spawn_bracket(
-            config,
-            move |_| async move { Outcome::<_, E>::Ok(ResourceStack::<C>::new(capacity)) },
-            move |cx, stack| work(cx, ResourceScope { stack }),
-            move |cx, mut stack| async move {
-                stack.close(&cx).await;
-                let report = stack.report;
-                let success = report.is_success();
-                // Terminal publication is independent of cancelled Cx. No user
-                // error/destructor is invoked while holding this private slot lock.
-                let old = publication.lock().replace(report);
-                debug_assert!(old.is_none(), "one cleanup report per resource scope");
-                drop(old);
-                if success { Outcome::Ok(()) } else { Outcome::Err(()) }
-            },
-        )?;
-        Ok(ResourceScopeHandle { bracket, cleanup })
     }
 }
 
