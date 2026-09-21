@@ -115,6 +115,7 @@ pub mod replay_minimization;
 pub mod runtime;
 pub mod scenario;
 pub mod scenario_runner;
+pub mod schedule_minimizer;
 pub mod snapshot_restore;
 pub mod spork_harness;
 pub mod swarm_replay;
