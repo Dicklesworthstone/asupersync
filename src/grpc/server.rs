@@ -6,6 +6,16 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server_streaming;
 
+// Re-export the server-streaming config at the `grpc::server` level, where
+// `health_rpc` (and other callers) import it via
+// `crate::grpc::server::ServerStreamingConfig`. The type is already `pub` in
+// `server_streaming`, but the re-export was missing, so that import failed to
+// resolve (E0432) and left the whole lib-test target red. Fleet-red heal by
+// SapphireHill for the owner of the server-streaming work
+// (br-asupersync-server-stack-hardening-eeexl1.10).
+#[cfg(not(target_arch = "wasm32"))]
+pub use server_streaming::ServerStreamingConfig;
+
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
