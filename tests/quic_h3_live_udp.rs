@@ -1900,6 +1900,339 @@ fn authenticated_managed_public_handoff_self_wake_and_restart_cross_real_udp() {
     managed_assert_runtime_cleanup(&runtime);
 }
 
+#[test]
+fn authenticated_managed_concurrent_accepts_preserve_h3_survivor() {
+    let runtime = managed_runtime();
+    let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        let (client, server) = live_pair(&cx, H3_ALPN, H3_ALPN).await;
+        let (mut survivor, mut client_h3) = client.unwrap();
+        let mut owner = server.unwrap();
+        let server_addr = owner.local_addr();
+        let survivor_cid = owner.local_connection_id();
+        let mut server_h3 = NativeH3Session::server();
+        server_h3
+            .initialize(&cx, owner.connection_mut(), H3Settings::default())
+            .unwrap();
+        owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+        assert_eq!(
+            drain_h3_events(&cx, &mut server_h3, owner.connection_mut()),
+            vec![NativeH3Event::Settings(H3Settings::default())]
+        );
+        survivor.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+        assert_eq!(
+            drain_h3_events(&cx, &mut client_h3, survivor.connection_mut()),
+            vec![NativeH3Event::Settings(H3Settings::default())]
+        );
+        let mut endpoint = owner
+            .into_managed(
+                &cx,
+                ManagedEndpointConfig {
+                    is_server: true,
+                    max_connections: 4,
+                    packet_batch_size: 1,
+                    connection_config: connection_config(),
+                    ..ManagedEndpointConfig::default()
+                },
+            )
+            .unwrap();
+        endpoint.set_authenticated_accept_limit(2).unwrap();
+        let endpoint_id = endpoint.endpoint_id();
+        let config = connection_config();
+        let server_driver = || {
+            QuicHandshakeDriver::server(
+                server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![H3_ALPN.to_vec()],
+                )
+                .unwrap(),
+                transport_parameters(config),
+            )
+            .unwrap()
+        };
+        let client_driver = || {
+            QuicHandshakeDriver::client(
+                client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![H3_ALPN.to_vec()]).unwrap(),
+                ServerName::try_from("localhost").unwrap(),
+                transport_parameters(config),
+            )
+            .unwrap()
+        };
+        let silent_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let silent_peer = silent_socket.local_addr();
+        let silent_metrics = silent_socket.metrics();
+        let silent_initial = ConnectionId::new(b"parallel-init-slow").unwrap();
+        let silent_client = ConnectionId::new(b"parallel-cli-slow").unwrap();
+        let silent_server = ConnectionId::new(b"parallel-srv-slow").unwrap();
+        endpoint
+            .begin_authenticated_accept(
+                &cx,
+                server_driver(),
+                silent_peer,
+                silent_initial,
+                silent_server,
+                H3_ALPN,
+            )
+            .unwrap();
+        let mut silent_connect = Box::pin(NativeQuicUdpConnection::connect(
+            &cx,
+            silent_socket,
+            server_addr,
+            client_driver(),
+            silent_initial,
+            silent_client,
+            config,
+            H3_ALPN,
+        ));
+        // Hold the first admission after its real Initial reaches the kernel.
+        // No server receive has run yet, so this witnesses an incomplete TLS
+        // handshake without relying on timing or a sleep.
+        std::future::poll_fn(|task_cx| {
+            assert!(silent_connect.as_mut().poll(task_cx).is_pending());
+            if silent_metrics.packets_sent.load(Ordering::SeqCst) > 0 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        let ready_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let ready_peer = ready_socket.local_addr();
+        let ready_initial = ConnectionId::new(b"parallel-init-ready").unwrap();
+        let ready_client = ConnectionId::new(b"parallel-cli-ready").unwrap();
+        let ready_server = ConnectionId::new(b"parallel-srv-ready").unwrap();
+        endpoint
+            .begin_authenticated_accept(
+                &cx,
+                server_driver(),
+                ready_peer,
+                ready_initial,
+                ready_server,
+                H3_ALPN,
+            )
+            .expect("the second TLS admission has its own bounded slot");
+        assert!(matches!(
+            endpoint.begin_authenticated_accept(
+                &cx,
+                server_driver(),
+                silent_peer,
+                ConnectionId::new(b"parallel-init-full").unwrap(),
+                ConnectionId::new(b"parallel-srv-full").unwrap(),
+                H3_ALPN,
+            ),
+            Err(ManagedEndpointError::InvalidConfig(reason))
+                if reason.contains("capacity exhausted")
+        ));
+        // Pending admissions reserve capacity without publishing an
+        // unauthenticated connection in the application router.
+        assert_eq!(endpoint.connection_stats().active_connections, 1);
+        assert_eq!(endpoint.connection_stats().established_connections, 1);
+        assert!(
+            endpoint
+                .take_authenticated_accept_result_with_id()
+                .is_none()
+        );
+        assert!(endpoint.negotiated_alpn(silent_server).is_err());
+        assert!(endpoint.negotiated_alpn(ready_server).is_err());
+        let mut ready_socket = Some(ready_socket);
+        let mut ready_owner = None;
+        for round in 0..2 {
+            let request = H3RequestHead::new(
+                H3PseudoHeaders {
+                    method: Some("POST".to_owned()),
+                    scheme: Some("https".to_owned()),
+                    authority: Some("localhost".to_owned()),
+                    path: Some(format!("/concurrent-admission/{round}")),
+                    ..H3PseudoHeaders::default()
+                },
+                Vec::new(),
+            )
+            .unwrap();
+            let request_body = format!("surviving request {round}");
+            let response_body = format!("surviving response {round}");
+            let response_head = H3ResponseHead::new(200, Vec::new()).unwrap();
+            let stream = client_h3
+                .send_request(
+                    &cx,
+                    survivor.connection_mut(),
+                    &request,
+                    Bytes::from(request_body.clone()),
+                )
+                .unwrap();
+            let completed = AtomicUsize::new(0);
+            let survivor_round = async {
+                survivor.flush(&cx).await.unwrap();
+                let mut received_head = None;
+                let mut received_body = Vec::new();
+                loop {
+                    survivor.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    for event in drain_h3_events(&cx, &mut client_h3, survivor.connection_mut()) {
+                        match event {
+                            NativeH3Event::ResponseHeaders { stream_id, head } => {
+                                assert_eq!(stream_id, stream);
+                                assert!(received_head.replace(head).is_none());
+                            }
+                            NativeH3Event::Data { stream_id, bytes } => {
+                                assert_eq!(stream_id, stream);
+                                received_body.extend_from_slice(&bytes);
+                            }
+                            NativeH3Event::Finished { stream_id } => {
+                                assert_eq!(stream_id, stream);
+                                assert_eq!(received_head.as_ref(), Some(&response_head));
+                                assert_eq!(received_body, response_body.as_bytes());
+                                completed.fetch_or(1, Ordering::SeqCst);
+                                return;
+                            }
+                            other => panic!("unexpected survivor H3 event: {other:?}"),
+                        }
+                    }
+                }
+            };
+            let ready_handshake = async {
+                let owner = if let Some(socket) = ready_socket.take() {
+                    Some(
+                        NativeQuicUdpConnection::connect(
+                            &cx,
+                            socket,
+                            server_addr,
+                            client_driver(),
+                            ready_initial,
+                            ready_client,
+                            config,
+                            H3_ALPN,
+                        )
+                        .await
+                        .expect("a silent first admission must not block the second client"),
+                    )
+                } else {
+                    None
+                };
+                completed.fetch_or(2, Ordering::SeqCst);
+                owner
+            };
+            let mut received_head = None;
+            let mut received_body = Vec::new();
+            let mut replied = false;
+            let mut admitted = round != 0;
+            let server_round =
+                endpoint.run_event_loop_with_application(&cx, |cx, endpoint, task_cx| {
+                    endpoint
+                        .with_connection_mut(cx, survivor_cid, |connection| {
+                            for event in drain_h3_events(cx, &mut server_h3, connection) {
+                                match event {
+                                    NativeH3Event::RequestHeaders { stream_id, head } => {
+                                        assert_eq!(stream_id, stream);
+                                        assert!(received_head.replace(head).is_none());
+                                    }
+                                    NativeH3Event::Data { stream_id, bytes } => {
+                                        assert_eq!(stream_id, stream);
+                                        received_body.extend_from_slice(&bytes);
+                                    }
+                                    NativeH3Event::Finished { stream_id } => {
+                                        assert_eq!(stream_id, stream);
+                                        assert_eq!(received_head.as_ref(), Some(&request));
+                                        assert_eq!(received_body, request_body.as_bytes());
+                                        assert!(!replied);
+                                        server_h3
+                                            .send_response(
+                                                cx,
+                                                connection,
+                                                stream,
+                                                &response_head,
+                                                Bytes::from(response_body.clone()),
+                                            )
+                                            .unwrap();
+                                        replied = true;
+                                    }
+                                    other => panic!("unexpected server H3 event: {other:?}"),
+                                }
+                            }
+                        })
+                        .unwrap();
+                    if let Some((cid, result)) = endpoint.take_authenticated_accept_result_with_id()
+                    {
+                        assert_eq!(round, 0);
+                        assert!(!admitted, "each admission completes exactly once");
+                        assert_eq!(
+                            cid, ready_server,
+                            "completion is attributed to its own slot"
+                        );
+                        assert_eq!(result.unwrap(), ready_server);
+                        assert!(endpoint.negotiated_alpn(silent_server).is_err());
+                        admitted = true;
+                    }
+                    if admitted && replied && completed.load(Ordering::SeqCst) == 3 {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        task_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                });
+            let (((), connected), driven) = asupersync::time::timeout(
+                cx.now(),
+                Duration::from_secs(15),
+                zip(zip(survivor_round, ready_handshake), server_round),
+            )
+            .await
+            .expect("concurrent TLS and survivor H3 must make native UDP progress");
+            driven.unwrap();
+            if let Some(owner) = connected {
+                assert!(ready_owner.replace(owner).is_none());
+            }
+            assert_eq!(endpoint.local_addr(), server_addr);
+            assert_eq!(endpoint.endpoint_id(), endpoint_id);
+            assert_eq!(endpoint.negotiated_alpn(survivor_cid).unwrap(), H3_ALPN);
+            assert_eq!(endpoint.negotiated_alpn(ready_server).unwrap(), H3_ALPN);
+            assert_eq!(endpoint.connection_stats().established_connections, 2);
+            assert!(
+                endpoint
+                    .take_authenticated_accept_result_with_id()
+                    .is_none()
+            );
+            if round == 0 {
+                assert_eq!(endpoint.connection_stats().active_connections, 2);
+                endpoint.remove_connection(&cx, silent_server).unwrap();
+                assert_eq!(
+                    endpoint.take_authenticated_accept_result_with_id(),
+                    Some((silent_server, Err(ManagedEndpointError::Cancelled)))
+                );
+                assert!(
+                    endpoint
+                        .take_authenticated_accept_result_with_id()
+                        .is_none()
+                );
+            }
+            assert_eq!(endpoint.connection_stats().active_connections, 2);
+        }
+        let ready_owner = ready_owner.unwrap();
+        assert_eq!(ready_owner.peer_addr(), server_addr);
+        assert_eq!(ready_owner.local_addr(), ready_peer);
+        assert_eq!(ready_owner.peer_connection_id(), ready_server);
+        assert_eq!(ready_owner.negotiated_alpn(), H3_ALPN);
+        drop(silent_connect);
+        drop(ready_owner);
+        drop(survivor);
+        endpoint.shutdown(&cx).await.unwrap();
+        assert_eq!(endpoint.connection_stats().active_connections, 0);
+        assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+    });
+    runtime.block_on(runtime.handle().spawn(parent));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
 fn managed_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))

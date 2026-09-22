@@ -87,6 +87,14 @@ struct PendingAuthenticatedAccept {
 }
 
 #[cfg(feature = "tls")]
+#[derive(Debug)]
+struct AuthenticatedAcceptResult {
+    initial_cid: ConnectionId,
+    local_cid: ConnectionId,
+    result: Result<ConnectionId, ManagedEndpointError>,
+}
+
+#[cfg(feature = "tls")]
 impl std::fmt::Debug for PendingAuthenticatedAccept {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PendingAuthenticatedAccept")
@@ -320,9 +328,12 @@ pub struct ManagedQuicEndpoint {
     /// merely because another datagram resembles an Initial packet.
     authenticated_only: bool,
     #[cfg(feature = "tls")]
-    pending_authenticated_accept: Option<PendingAuthenticatedAccept>,
+    pending_authenticated_accept: VecDeque<PendingAuthenticatedAccept>,
     #[cfg(feature = "tls")]
-    authenticated_accept_result: Option<(ConnectionId, Result<ConnectionId, ManagedEndpointError>)>,
+    authenticated_accept_result: VecDeque<AuthenticatedAcceptResult>,
+    /// Pending handshakes and unconsumed terminal receipts share this ceiling.
+    #[cfg(feature = "tls")]
+    authenticated_accept_limit: usize,
     #[cfg(feature = "tls")]
     prefer_accept_output: bool,
     /// Alternate ready read/write batches; timers and cancellation always get a turn.
@@ -628,9 +639,11 @@ impl ManagedQuicEndpoint {
                 .collect(),
             authenticated_only: true,
             #[cfg(feature = "tls")]
-            pending_authenticated_accept: None,
+            pending_authenticated_accept: VecDeque::new(),
             #[cfg(feature = "tls")]
-            authenticated_accept_result: None,
+            authenticated_accept_result: VecDeque::new(),
+            #[cfg(feature = "tls")]
+            authenticated_accept_limit: 1,
             #[cfg(feature = "tls")]
             prefer_accept_output: true,
             prefer_send: true,
@@ -669,10 +682,48 @@ impl ManagedQuicEndpoint {
             .map_err(Into::into)
     }
 
+    /// Opt into bounded concurrent authenticated handshakes on this socket.
+    ///
+    /// The default remains one. A nonzero limit may not exceed
+    /// [`ManagedEndpointConfig::max_connections`]. Pending handshakes and their
+    /// unread terminal receipts share the limit, so a caller which stops
+    /// collecting results cannot grow an unbounded completion queue. Changing
+    /// the limit requires both queues to be empty; established connections may
+    /// remain active. Each admission retains the independent byte, packet,
+    /// amplification and deadline bounds documented by
+    /// [`Self::begin_authenticated_accept`], so their aggregate memory ceiling
+    /// scales with this explicitly selected limit.
+    #[cfg(feature = "tls")]
+    pub fn set_authenticated_accept_limit(
+        &mut self,
+        limit: usize,
+    ) -> Result<(), ManagedEndpointError> {
+        if self.shutting_down {
+            return Err(ManagedEndpointError::ShuttingDown);
+        }
+        if limit == 0 || limit > self.config.max_connections {
+            return Err(accept_error(
+                "admission limit must be nonzero and at most max_connections",
+            ));
+        }
+        if !self.pending_authenticated_accept.is_empty()
+            || !self.authenticated_accept_result.is_empty()
+        {
+            return Err(accept_error(
+                "cannot change admission limit while handshakes or receipts are owned",
+            ));
+        }
+        self.authenticated_accept_limit = limit;
+        Ok(())
+    }
+
     /// Admit one fresh server TLS handshake on this endpoint's existing socket.
     ///
     /// The caller must drive the managed event loop and consume
-    /// [`Self::take_authenticated_accept_result`] before another admission.
+    /// [`Self::take_authenticated_accept_result`] to release admission capacity.
+    /// One admission is allowed by default; [`Self::set_authenticated_accept_limit`]
+    /// enables concurrent peers. A silent peer cannot block another admitted
+    /// handshake, and unread receipts continue charging the configured limit.
     /// Established peers continue using that same receive/send/timer loop.
     /// Only the configured source address and destination CID aliases reach
     /// this driver; unknown Initial packets retain the existing refusal policy.
@@ -710,10 +761,13 @@ impl ManagedQuicEndpoint {
                 "requires an imported authenticated server socket",
             ));
         }
-        if self.pending_authenticated_accept.is_some() || self.authenticated_accept_result.is_some()
+        if self.pending_authenticated_accept.len()
+            >= self
+                .authenticated_accept_limit
+                .saturating_sub(self.authenticated_accept_result.len())
         {
             return Err(accept_error(
-                "previous admission or its terminal receipt is still owned",
+                "authenticated admission or terminal receipt capacity exhausted",
             ));
         }
         if required_alpn.is_empty() || required_alpn.len() > 255 {
@@ -727,13 +781,39 @@ impl ManagedQuicEndpoint {
         {
             return Err(accept_error("requires a fresh server TLS driver"));
         }
-        if self.connection_stats().active_connections >= self.config.max_connections {
+        if self.connection_stats().active_connections
+            >= self
+                .config
+                .max_connections
+                .saturating_sub(self.pending_authenticated_accept.len())
+        {
             return Err(ManagedEndpointError::MaxConnectionsReached {
                 limit: self.config.max_connections,
             });
         }
         self.connection_router
             .validate_authenticated_cids(initial_dcid, local_cid)?;
+        // Short headers carry no CID length. Prefix-related local IDs cannot be
+        // routed unambiguously; long-header aliases must not name another owner.
+        // Keep aliases reserved through receipt consumption, including failure.
+        let conflicts = |initial: ConnectionId, local: ConnectionId| {
+            initial_dcid == initial
+                || initial_dcid == local
+                || local_cid == initial
+                || local_cid.as_bytes().starts_with(local.as_bytes())
+                || local.as_bytes().starts_with(local_cid.as_bytes())
+        };
+        if self
+            .pending_authenticated_accept
+            .iter()
+            .any(|pending| conflicts(pending.initial_cid, pending.local_cid))
+            || self
+                .authenticated_accept_result
+                .iter()
+                .any(|receipt| conflicts(receipt.initial_cid, receipt.local_cid))
+        {
+            return Err(accept_error("occupied or ambiguous admitted connection ID"));
+        }
         if driver.local_transport_parameters().len() > ACCEPT_MAX_BYTES {
             return Err(accept_error(
                 "local transport parameters exceed admission byte bound",
@@ -764,61 +844,107 @@ impl ManagedQuicEndpoint {
         driver
             .install_initial_keys(initial_dcid.as_bytes())
             .map_err(accept_error)?;
-        self.pending_authenticated_accept = Some(PendingAuthenticatedAccept {
-            driver,
-            peer: expected_peer,
-            initial_cid: initial_dcid,
-            local_cid,
-            required_alpn: required_alpn.to_vec(),
-            packet_number: 0,
-            received_packets: 0,
-            flights: 0,
-            next_pto,
-            expires,
-            last_flight: Vec::new(),
-            outbound: VecDeque::new(),
-            outstanding_packets: 0,
-            outstanding_bytes: 0,
-            socket_pending_bytes: 0,
-            authenticated_received_bytes: 0,
-            sent_bytes: 0,
-            address_validated: false,
-            early: Vec::new(),
-            early_bytes: 0,
-        });
+        self.pending_authenticated_accept
+            .push_back(PendingAuthenticatedAccept {
+                driver,
+                peer: expected_peer,
+                initial_cid: initial_dcid,
+                local_cid,
+                required_alpn: required_alpn.to_vec(),
+                packet_number: 0,
+                received_packets: 0,
+                flights: 0,
+                next_pto,
+                expires,
+                last_flight: Vec::new(),
+                outbound: VecDeque::new(),
+                outstanding_packets: 0,
+                outstanding_bytes: 0,
+                socket_pending_bytes: 0,
+                authenticated_received_bytes: 0,
+                sent_bytes: 0,
+                address_validated: false,
+                early: Vec::new(),
+                early_bytes: 0,
+            });
         Ok(())
     }
 
-    /// Consume the single retained accept receipt after managed-loop progress.
+    /// Consume the oldest completed accept receipt after managed-loop progress.
     /// `None` does not drive or poll the socket. A managed application callback
     /// is offered another turn after actual transport/timer progress.
     #[cfg(feature = "tls")]
     pub fn take_authenticated_accept_result(
         &mut self,
     ) -> Option<Result<ConnectionId, ManagedEndpointError>> {
-        self.authenticated_accept_result
-            .take()
+        self.take_authenticated_accept_result_with_id()
             .map(|(_, result)| result)
+    }
+
+    /// Consume a completed admission together with its caller-selected local CID.
+    ///
+    /// Results follow completion order, independent of admission order. The CID
+    /// remains available on failure or cancellation so concurrent callers can
+    /// identify the failed attempt. Consuming a receipt releases its admission
+    /// slot; a successful connection remains owned by the endpoint.
+    #[cfg(feature = "tls")]
+    pub fn take_authenticated_accept_result_with_id(
+        &mut self,
+    ) -> Option<(ConnectionId, Result<ConnectionId, ManagedEndpointError>)> {
+        self.authenticated_accept_result
+            .pop_front()
+            .map(|receipt| (receipt.local_cid, receipt.result))
     }
 
     #[cfg(feature = "tls")]
     fn fail_authenticated_accept(&mut self, error: ManagedEndpointError) {
-        if let Some(pending) = self.pending_authenticated_accept.take() {
+        while !self.pending_authenticated_accept.is_empty() {
+            self.fail_authenticated_accept_at(0, error.clone());
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    fn fail_authenticated_accept_at(&mut self, index: usize, error: ManagedEndpointError) {
+        if let Some(pending) = self.pending_authenticated_accept.remove(index) {
             self.pending_outgoing
                 .retain(|packet| packet.connection_id != pending.local_cid);
             self.pending_incoming
                 .retain(|packet| !pending.owns_packet(&packet.packet));
-            self.authenticated_accept_result = Some((pending.local_cid, Err(error)));
+            self.authenticated_accept_result
+                .push_back(AuthenticatedAcceptResult {
+                    initial_cid: pending.initial_cid,
+                    local_cid: pending.local_cid,
+                    result: Err(error),
+                });
         }
     }
 
     #[cfg(feature = "tls")]
     fn advance_authenticated_accept(&mut self, cx: &Cx, now: Instant) -> bool {
-        let Some(pending) = &mut self.pending_authenticated_accept else {
+        let mut completed = false;
+        let mut index = 0;
+        while index < self.pending_authenticated_accept.len() {
+            if self.advance_authenticated_accept_at(cx, now, index) {
+                completed = true;
+            } else {
+                index += 1;
+            }
+            // TLS and connection installation can call user-provided hooks.
+            // Never advance another admission after such a hook cancels Cx.
+            if cx.is_cancel_requested() {
+                break;
+            }
+        }
+        completed
+    }
+
+    #[cfg(feature = "tls")]
+    fn advance_authenticated_accept_at(&mut self, cx: &Cx, now: Instant, index: usize) -> bool {
+        let Some(pending) = self.pending_authenticated_accept.get_mut(index) else {
             return false;
         };
         if now >= pending.expires {
-            self.fail_authenticated_accept(accept_error("handshake deadline expired"));
+            self.fail_authenticated_accept_at(index, accept_error("handshake deadline expired"));
             return true;
         }
         if pending.driver.is_complete() && pending.outstanding_packets == 0 {
@@ -849,12 +975,12 @@ impl ManagedQuicEndpoint {
                 Ok(())
             });
             if let Err(error) = checked {
-                self.fail_authenticated_accept(error);
+                self.fail_authenticated_accept_at(index, error);
                 return true;
             }
             let pending = self
                 .pending_authenticated_accept
-                .take()
+                .remove(index)
                 .expect("owned handshake");
             let result = super::NativeQuicUdpConnection::finish_authenticated_handshake(
                 cx,
@@ -894,8 +1020,12 @@ impl ManagedQuicEndpoint {
                     )
                 });
             }
-            self.authenticated_accept_result =
-                Some((pending.local_cid, result.map(|()| pending.local_cid)));
+            self.authenticated_accept_result
+                .push_back(AuthenticatedAcceptResult {
+                    initial_cid: pending.initial_cid,
+                    local_cid: pending.local_cid,
+                    result: result.map(|()| pending.local_cid),
+                });
             return true;
         }
         if now >= pending.next_pto {
@@ -910,7 +1040,7 @@ impl ManagedQuicEndpoint {
                     pending.retransmit()
                 };
                 if let Err(error) = result {
-                    self.fail_authenticated_accept(error);
+                    self.fail_authenticated_accept_at(index, error);
                     return true;
                 }
             }
@@ -923,13 +1053,18 @@ impl ManagedQuicEndpoint {
         if self.pending_outgoing.len() >= self.config.packet_batch_size {
             return;
         }
-        if let Some(pending) = &mut self.pending_authenticated_accept {
+        for _ in 0..self.pending_authenticated_accept.len() {
+            let pending = self
+                .pending_authenticated_accept
+                .front_mut()
+                .expect("owned admission");
             if pending
                 .outbound
                 .front()
                 .is_none_or(|packet| !pending.can_queue(packet.data.len()))
             {
-                return;
+                self.pending_authenticated_accept.rotate_left(1);
+                continue;
             }
             if let Some(packet) = pending.outbound.pop_front() {
                 pending.socket_pending_bytes += packet.data.len();
@@ -940,6 +1075,8 @@ impl ManagedQuicEndpoint {
                     ack_eliciting: false,
                 });
             }
+            self.pending_authenticated_accept.rotate_left(1);
+            break;
         }
     }
 
@@ -958,12 +1095,12 @@ impl ManagedQuicEndpoint {
             return Err(ManagedEndpointError::ShuttingDown);
         }
         #[cfg(feature = "tls")]
-        if self
+        if let Some(index) = self
             .pending_authenticated_accept
-            .as_ref()
-            .is_some_and(|pending| pending.local_cid == connection_id)
+            .iter()
+            .position(|pending| pending.local_cid == connection_id)
         {
-            self.fail_authenticated_accept(ManagedEndpointError::Cancelled);
+            self.fail_authenticated_accept_at(index, ManagedEndpointError::Cancelled);
             return Ok(());
         }
         // Decode retained short-header ownership while its CID is still known.
@@ -983,9 +1120,10 @@ impl ManagedQuicEndpoint {
         self.pending_outgoing
             .retain(|packet| packet.connection_id != connection_id);
         #[cfg(feature = "tls")]
-        if let Some((id, result)) = &mut self.authenticated_accept_result {
-            if *id == connection_id {
-                *result = Err(ConnectionRouterError::ConnectionNotFound(connection_id).into());
+        for receipt in &mut self.authenticated_accept_result {
+            if receipt.local_cid == connection_id {
+                receipt.result =
+                    Err(ConnectionRouterError::ConnectionNotFound(connection_id).into());
             }
         }
         Ok(())
@@ -1049,9 +1187,11 @@ impl ManagedQuicEndpoint {
             pending_incoming: VecDeque::new(),
             authenticated_only: false,
             #[cfg(feature = "tls")]
-            pending_authenticated_accept: None,
+            pending_authenticated_accept: VecDeque::new(),
             #[cfg(feature = "tls")]
-            authenticated_accept_result: None,
+            authenticated_accept_result: VecDeque::new(),
+            #[cfg(feature = "tls")]
+            authenticated_accept_limit: 1,
             #[cfg(feature = "tls")]
             prefer_accept_output: true,
             prefer_send: true,
@@ -1390,14 +1530,15 @@ impl ManagedQuicEndpoint {
                         if let Some(packet) = self.pending_outgoing.front() {
                             let peer = packet.packet.dst_addr;
                             #[cfg(feature = "tls")]
-                            if self
+                            while let Some(index) = self
                                 .pending_authenticated_accept
-                                .as_ref()
-                                .is_some_and(|pending| pending.peer == peer)
+                                .iter()
+                                .position(|pending| pending.peer == peer)
                             {
-                                self.fail_authenticated_accept(ManagedEndpointError::UdpEndpoint(
-                                    error.to_string(),
-                                ));
+                                self.fail_authenticated_accept_at(
+                                    index,
+                                    ManagedEndpointError::UdpEndpoint(error.to_string()),
+                                );
                             }
                             let queued = self.pending_outgoing.len();
                             self.pending_outgoing
@@ -1422,10 +1563,12 @@ impl ManagedQuicEndpoint {
                     let sent_at = self.timer_scheduler.now(cx);
                     for packet in self.pending_outgoing.drain(..result.packets_processed) {
                         #[cfg(feature = "tls")]
-                        if let Some(pending) = &mut self.pending_authenticated_accept {
-                            if packet.connection_id == pending.local_cid {
-                                pending.sent(packet.packet.data.len());
-                            }
+                        if let Some(pending) = self
+                            .pending_authenticated_accept
+                            .iter_mut()
+                            .find(|pending| packet.connection_id == pending.local_cid)
+                        {
+                            pending.sent(packet.packet.data.len());
                         }
                         // Commit the entire sent prefix even if clock validation
                         // fails; retrying it would duplicate transmitted packets.
@@ -1514,21 +1657,21 @@ impl ManagedQuicEndpoint {
                 break;
             };
             #[cfg(feature = "tls")]
-            if self
+            if let Some(index) = self
                 .pending_authenticated_accept
-                .as_ref()
-                .is_some_and(|pending| pending.owns_packet(&packet))
+                .iter()
+                .position(|pending| pending.owns_packet(&packet))
             {
                 self.pending_incoming.pop_front();
                 let now = self.timer_scheduler.now(cx)?;
                 let max_packet_size = self.config.udp_config.max_packet_size;
                 let result = self
                     .pending_authenticated_accept
-                    .as_mut()
+                    .get_mut(index)
                     .expect("owned admission")
                     .receive(packet, max_packet_size, now);
                 if let Err(error) = result {
-                    self.fail_authenticated_accept(error);
+                    self.fail_authenticated_accept_at(index, error);
                 }
                 if cx.checkpoint().is_err() {
                     return Err(ManagedEndpointError::Cancelled);
@@ -1690,8 +1833,8 @@ impl ManagedQuicEndpoint {
         #[cfg(feature = "tls")]
         let next = self
             .pending_authenticated_accept
-            .as_ref()
-            .map_or(next, |pending| {
+            .iter()
+            .fold(next, |next, pending| {
                 let admission = pending.next_pto.min(pending.expires);
                 Some(next.map_or(admission, |established| established.min(admission)))
             });
@@ -3543,7 +3686,7 @@ mod tests {
                             )
                             .is_err()
                     );
-                    assert!(endpoint.pending_authenticated_accept.is_none());
+                    assert!(endpoint.pending_authenticated_accept.is_empty());
                     assert!(endpoint.take_authenticated_accept_result().is_none());
                     assert_eq!(endpoint.connection_stats().active_connections, 1);
                 }
@@ -3571,7 +3714,7 @@ mod tests {
                     )
                     .unwrap();
                 let now = endpoint.timer_scheduler.now(&cx).unwrap();
-                let pending = endpoint.pending_authenticated_accept.as_mut().unwrap();
+                let pending = endpoint.pending_authenticated_accept.front_mut().unwrap();
                 let wrong_peer = "127.0.0.1:1".parse().unwrap();
                 pending
                     .receive(short_packet(b, wrong_peer, now), 16_384, now)
@@ -3588,7 +3731,7 @@ mod tests {
                     .pending_outgoing
                     .push_back(routed_packet(a, peer, 7));
                 endpoint.remove_connection(&cx, b).unwrap();
-                assert!(endpoint.pending_authenticated_accept.is_none());
+                assert!(endpoint.pending_authenticated_accept.is_empty());
                 assert_eq!(endpoint.pending_outgoing.len(), 1);
                 assert_eq!(endpoint.pending_outgoing[0].connection_id, a);
                 assert!(
@@ -3615,6 +3758,327 @@ mod tests {
                     original_deadline
                 );
                 assert_eq!(endpoint.connection_stats().active_connections, 1);
+                endpoint.shutdown(&cx).await.unwrap();
+                assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn managed_accept_concurrent_capacity_and_cid_ownership_include_unread_receipts() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, timer, mut endpoint, peer, established) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                enable_admission_mechanics(&mut endpoint);
+                endpoint.config.max_connections = 4;
+                assert!(endpoint.set_authenticated_accept_limit(0).is_err());
+                assert!(endpoint.set_authenticated_accept_limit(5).is_err());
+                endpoint.set_authenticated_accept_limit(3).unwrap();
+                let peer = peer.local_addr().unwrap();
+                let first = ConnectionId::new(&[0x81; 8]).unwrap();
+                let second = ConnectionId::new(&[0x82; 8]).unwrap();
+                let third = ConnectionId::new(&[0x83; 8]).unwrap();
+                let first_initial = ConnectionId::new(&[0x91; 8]).unwrap();
+                let second_initial = ConnectionId::new(&[0x92; 8]).unwrap();
+                let third_initial = ConnectionId::new(&[0x93; 8]).unwrap();
+                for (initial, local) in [(first_initial, first), (second_initial, second)] {
+                    endpoint
+                        .begin_authenticated_accept(
+                            &cx,
+                            server_driver(None),
+                            peer,
+                            initial,
+                            local,
+                            b"atp/1",
+                        )
+                        .unwrap();
+                }
+                assert_eq!(endpoint.pending_authenticated_accept.len(), 2);
+                assert!(endpoint.set_authenticated_accept_limit(4).is_err());
+                for (initial, local) in [
+                    (first_initial, third),
+                    (first, third),
+                    (third_initial, first_initial),
+                    (third_initial, ConnectionId::new(&[0x81; 4]).unwrap()),
+                    (third_initial, ConnectionId::new(&[0x81; 12]).unwrap()),
+                ] {
+                    assert!(
+                        endpoint
+                            .begin_authenticated_accept(
+                                &cx,
+                                server_driver(None),
+                                peer,
+                                initial,
+                                local,
+                                b"atp/1",
+                            )
+                            .is_err(),
+                        "pending aliases and ambiguous short IDs remain reserved"
+                    );
+                    assert_eq!(endpoint.pending_authenticated_accept.len(), 2);
+                }
+                endpoint.remove_connection(&cx, first).unwrap();
+                assert!(
+                    endpoint
+                        .begin_authenticated_accept(
+                            &cx,
+                            server_driver(None),
+                            peer,
+                            first_initial,
+                            first,
+                            b"atp/1",
+                        )
+                        .is_err(),
+                    "failure receipt keeps its CID reservation"
+                );
+                endpoint
+                    .begin_authenticated_accept(
+                        &cx,
+                        server_driver(None),
+                        peer,
+                        third_initial,
+                        third,
+                        b"atp/1",
+                    )
+                    .unwrap();
+                assert!(
+                    endpoint
+                        .begin_authenticated_accept(
+                            &cx,
+                            server_driver(None),
+                            peer,
+                            ConnectionId::new(&[0x94; 8]).unwrap(),
+                            ConnectionId::new(&[0x84; 8]).unwrap(),
+                            b"atp/1",
+                        )
+                        .is_err(),
+                    "two pending plus one unread receipt fill three slots"
+                );
+                assert_eq!(
+                    endpoint.take_authenticated_accept_result_with_id(),
+                    Some((first, Err(ManagedEndpointError::Cancelled)))
+                );
+                endpoint.config.max_connections = 3;
+                assert_eq!(
+                    endpoint.begin_authenticated_accept(
+                        &cx,
+                        server_driver(None),
+                        peer,
+                        first_initial,
+                        first,
+                        b"atp/1",
+                    ),
+                    Err(ManagedEndpointError::MaxConnectionsReached { limit: 3 }),
+                    "pending handshakes reserve eventual connection capacity"
+                );
+                endpoint.remove_connection(&cx, second).unwrap();
+                endpoint.remove_connection(&cx, third).unwrap();
+                assert_eq!(
+                    endpoint.take_authenticated_accept_result_with_id(),
+                    Some((second, Err(ManagedEndpointError::Cancelled)))
+                );
+                assert_eq!(
+                    endpoint.take_authenticated_accept_result(),
+                    Some(Err(ManagedEndpointError::Cancelled))
+                );
+                assert!(
+                    endpoint
+                        .take_authenticated_accept_result_with_id()
+                        .is_none()
+                );
+                endpoint.set_authenticated_accept_limit(2).unwrap();
+                assert_eq!(endpoint.connection_stats().active_connections, 1);
+                assert!(
+                    endpoint
+                        .connection_router
+                        .connection_mut_for_testing(&cx, established)
+                        .is_ok()
+                );
+                endpoint.shutdown(&cx).await.unwrap();
+                assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn managed_accept_round_robin_skips_silent_and_credit_blocked_peers() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, timer, mut endpoint, peer, established) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                enable_admission_mechanics(&mut endpoint);
+                endpoint.set_authenticated_accept_limit(3).unwrap();
+                let peer = peer.local_addr().unwrap();
+                let silent = ConnectionId::new(&[0xa1; 8]).unwrap();
+                let first = ConnectionId::new(&[0xa2; 8]).unwrap();
+                let second = ConnectionId::new(&[0xa3; 8]).unwrap();
+                for (value, local) in [(0xb1, silent), (0xb2, first), (0xb3, second)] {
+                    endpoint
+                        .begin_authenticated_accept(
+                            &cx,
+                            server_driver(None),
+                            peer,
+                            ConnectionId::new(&[value; 8]).unwrap(),
+                            local,
+                            b"atp/1",
+                        )
+                        .unwrap();
+                }
+                // Queue mechanics only: live TLS/UDP progress is exercised by
+                // quic_h3_live_udp, not inferred from these planted flights.
+                for local in [first, second] {
+                    let pending = endpoint
+                        .pending_authenticated_accept
+                        .iter_mut()
+                        .find(|pending| pending.local_cid == local)
+                        .unwrap();
+                    pending.address_validated = true;
+                    let packet = routed_packet(local, peer, 1).packet;
+                    pending.queue_flight(&[packet.clone(), packet]).unwrap();
+                }
+                for expected in [first, second, first, second] {
+                    endpoint.queue_accept_output();
+                    assert_eq!(endpoint.pending_outgoing.len(), 1);
+                    let packet = endpoint.pending_outgoing.pop_front().unwrap();
+                    assert_eq!(packet.connection_id, expected);
+                    endpoint
+                        .pending_authenticated_accept
+                        .iter_mut()
+                        .find(|pending| pending.local_cid == expected)
+                        .unwrap()
+                        .sent(packet.packet.data.len());
+                }
+                for local in [first, second] {
+                    let pending = endpoint
+                        .pending_authenticated_accept
+                        .iter_mut()
+                        .find(|pending| pending.local_cid == local)
+                        .unwrap();
+                    pending
+                        .queue_flight(&[routed_packet(local, peer, 2).packet])
+                        .unwrap();
+                    pending.address_validated = local == second;
+                }
+                endpoint.queue_accept_output();
+                let packet = endpoint.pending_outgoing.pop_front().unwrap();
+                assert_eq!(
+                    packet.connection_id, second,
+                    "blocked peer must not hold the send turn"
+                );
+                endpoint
+                    .pending_authenticated_accept
+                    .iter_mut()
+                    .find(|pending| pending.local_cid == second)
+                    .unwrap()
+                    .sent(packet.packet.data.len());
+                endpoint
+                    .pending_outgoing
+                    .push_back(routed_packet(established, peer, 7));
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                endpoint
+                    .pending_authenticated_accept
+                    .iter_mut()
+                    .find(|pending| pending.local_cid == silent)
+                    .unwrap()
+                    .expires = now;
+                assert!(endpoint.advance_authenticated_accept(&cx, now));
+                assert_eq!(endpoint.pending_authenticated_accept.len(), 2);
+                assert_eq!(endpoint.pending_outgoing.len(), 1);
+                assert_eq!(endpoint.pending_outgoing[0].connection_id, established);
+                assert!(
+                    matches!(endpoint.take_authenticated_accept_result_with_id(),
+                    Some((cid, Err(ManagedEndpointError::InvalidConfig(reason))))
+                    if cid == silent && reason.contains("deadline expired"))
+                );
+                for pending in &mut endpoint.pending_authenticated_accept {
+                    pending.next_pto = now
+                        + Duration::from_millis(if pending.local_cid == first { 20 } else { 10 });
+                }
+                let earliest = now + Duration::from_millis(10);
+                let expected = endpoint
+                    .connection_router
+                    .next_timer_deadline()
+                    .map_or(earliest, |established| established.min(earliest));
+                endpoint.refresh_timer(&cx).await.unwrap();
+                assert_eq!(
+                    endpoint.timer_scheduler.current_deadline(),
+                    Some(expected),
+                    "the nearest of every admission and established deadline drives wakeup"
+                );
+                endpoint.shutdown(&cx).await.unwrap();
+                assert_eq!(
+                    endpoint.authenticated_accept_result.len(),
+                    2,
+                    "shutdown retains one terminal receipt for each remaining owner"
+                );
+                assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn managed_accept_failed_peer_does_not_discard_another_real_initial() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, timer, mut endpoint, peer, established) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                enable_admission_mechanics(&mut endpoint);
+                endpoint.config.packet_batch_size = 2;
+                endpoint.set_authenticated_accept_limit(2).unwrap();
+                let peer = peer.local_addr().unwrap();
+                let first = ConnectionId::new(&[0xc1; 8]).unwrap();
+                let second = ConnectionId::new(&[0xc2; 8]).unwrap();
+                let first_initial = ConnectionId::new(&[0xd1; 8]).unwrap();
+                let second_initial = ConnectionId::new(&[0xd2; 8]).unwrap();
+                for (initial, local) in [(first_initial, first), (second_initial, second)] {
+                    endpoint
+                        .begin_authenticated_accept(
+                            &cx,
+                            server_driver(None),
+                            peer,
+                            initial,
+                            local,
+                            b"atp/1",
+                        )
+                        .unwrap();
+                }
+                endpoint
+                    .pending_authenticated_accept
+                    .front_mut()
+                    .unwrap()
+                    .received_packets = ACCEPT_MAX_PACKETS;
+                endpoint
+                    .pending_outgoing
+                    .push_back(routed_packet(established, peer, 7));
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                endpoint
+                    .process_packet_batch(
+                        &cx,
+                        vec![
+                            initial_packet(peer, first_initial, now),
+                            initial_packet(peer, second_initial, now),
+                        ],
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(endpoint.pending_authenticated_accept.len(), 1);
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                assert_eq!(pending.local_cid, second);
+                assert_eq!(pending.received_packets, 1);
+                assert!(
+                    !pending.last_flight.is_empty(),
+                    "second peer generated real TLS output"
+                );
+                assert_eq!(endpoint.pending_outgoing[0].connection_id, established);
+                assert!(
+                    matches!(endpoint.take_authenticated_accept_result_with_id(),
+                    Some((cid, Err(ManagedEndpointError::InvalidConfig(reason))))
+                    if cid == first && reason.contains("packet bound exhausted"))
+                );
                 endpoint.shutdown(&cx).await.unwrap();
                 assert_eq!(timer.pending_count(), 0);
             }));
@@ -3671,7 +4135,7 @@ mod tests {
                     transmit_time: None,
                 };
                 {
-                    let pending = endpoint.pending_authenticated_accept.as_mut().unwrap();
+                    let pending = endpoint.pending_authenticated_accept.front_mut().unwrap();
                     pending
                         .receive(corrupted, 16_384, now)
                         .expect("a corrupted datagram is discarded, not fatal");
@@ -3687,7 +4151,7 @@ mod tests {
                     .process_packet_batch(&cx, vec![incoming])
                     .await
                     .unwrap();
-                let pending = endpoint.pending_authenticated_accept.as_ref().unwrap();
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
                 assert_eq!(pending.authenticated_received_bytes, initial_bytes);
                 assert_eq!(pending.received_packets, 1);
                 endpoint.shutdown(&cx).await.unwrap();
@@ -3714,7 +4178,7 @@ mod tests {
                 let incoming = initial_packet(peer, initial, now);
                 let initial_bytes = incoming.data.len() as u64;
                 endpoint.process_packet_batch(&cx, vec![incoming.clone()]).await.unwrap();
-                let pending = endpoint.pending_authenticated_accept.as_ref().unwrap();
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
                 assert_eq!(pending.authenticated_received_bytes, initial_bytes);
                 assert!(!pending.address_validated);
                 assert!(!pending.last_flight.is_empty(), "actual TLS server output");
@@ -3725,7 +4189,7 @@ mod tests {
                     endpoint.process_packet_batch(&cx, vec![incoming.clone()]).await.unwrap();
                 }
                 let received_bytes = initial_bytes * input_count;
-                let pending = endpoint.pending_authenticated_accept.as_ref().unwrap();
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
                 assert_eq!(pending.authenticated_received_bytes, received_bytes);
                 assert_eq!(pending.received_packets as u64, input_count);
                 assert_eq!(pending.flights, 1, "duplicates grant byte credit without new TLS output");
@@ -3734,13 +4198,13 @@ mod tests {
                 let mut charged = 0usize;
                 let mut pto_replays = 0usize;
                 for _ in 0..ACCEPT_MAX_FLIGHTS {
-                    while endpoint.pending_authenticated_accept.as_ref().unwrap()
+                    while endpoint.pending_authenticated_accept.front().unwrap()
                         .outbound.front().is_some_and(|packet| endpoint
-                            .pending_authenticated_accept.as_ref().unwrap().can_queue(packet.data.len()))
+                            .pending_authenticated_accept.front().unwrap().can_queue(packet.data.len()))
                     {
                         endpoint.queue_accept_output();
                     }
-                    let pending = endpoint.pending_authenticated_accept.as_ref().unwrap();
+                    let pending = endpoint.pending_authenticated_accept.front().unwrap();
                     assert!(pending.sent_bytes + pending.socket_pending_bytes as u64 <= received_bytes * 3);
                     let queued = endpoint.pending_outgoing.len();
                     endpoint.queue_accept_output();
@@ -3749,26 +4213,26 @@ mod tests {
                     for packet in endpoint.pending_outgoing.drain(..) {
                         assert_eq!(packet.connection_id, b);
                         charged += packet.packet.data.len();
-                        endpoint.pending_authenticated_accept.as_mut().unwrap().sent(packet.packet.data.len());
+                        endpoint.pending_authenticated_accept.front_mut().unwrap().sent(packet.packet.data.len());
                     }
-                    let pending = endpoint.pending_authenticated_accept.as_ref().unwrap();
+                    let pending = endpoint.pending_authenticated_accept.front().unwrap();
                     if !pending.outbound.is_empty() {
                         let retained = pending.outbound.len();
                         let due = pending.next_pto;
                         assert!(!endpoint.advance_authenticated_accept(&cx, due));
-                        assert_eq!(endpoint.pending_authenticated_accept.as_ref().unwrap().outbound.len(), retained,
+                        assert_eq!(endpoint.pending_authenticated_accept.front().unwrap().outbound.len(), retained,
                             "credit-blocked flight must not duplicate on PTO");
                         break;
                     }
                     let due = pending.next_pto;
                     let before_flights = pending.flights;
                     assert!(!endpoint.advance_authenticated_accept(&cx, due));
-                    let pending = endpoint.pending_authenticated_accept.as_ref().unwrap();
+                    let pending = endpoint.pending_authenticated_accept.front().unwrap();
                     assert_eq!(pending.flights, before_flights + 1);
                     assert!(!pending.outbound.is_empty(), "actual PTO enqueues retained TLS flight");
                     pto_replays += 1;
                 }
-                let pending = endpoint.pending_authenticated_accept.as_ref().unwrap();
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
                 assert!(!pending.outbound.is_empty(), "actual bounded credit becomes decisive");
                 assert!(charged > 0, "the credit guard must admit a real positive prefix");
                 assert!(pto_replays > 0, "at least one actual PTO replay must precede blocking");
@@ -3780,7 +4244,7 @@ mod tests {
                 assert_eq!(endpoint.pending_outgoing.len(), 1);
                 assert_eq!(endpoint.pending_outgoing[0].connection_id, a,
                     "blocked B never occupies the shared socket queue ahead of A");
-                let expires = endpoint.pending_authenticated_accept.as_ref().unwrap().expires;
+                let expires = endpoint.pending_authenticated_accept.front().unwrap().expires;
                 assert!(endpoint.advance_authenticated_accept(&cx, expires));
                 assert!(matches!(endpoint.take_authenticated_accept_result(),
                     Some(Err(ManagedEndpointError::InvalidConfig(reason))) if reason.contains("deadline expired")));
@@ -3835,7 +4299,7 @@ mod tests {
                 assert_eq!(
                     endpoint
                         .pending_authenticated_accept
-                        .as_ref()
+                        .front()
                         .unwrap()
                         .received_packets,
                     1
