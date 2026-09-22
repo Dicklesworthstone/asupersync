@@ -217,6 +217,16 @@ pub mod prelude;
 pub mod raptorq;
 pub mod record;
 pub mod remote;
+/// Async future utilities.
+///
+/// Re-exports the runtime's cooperative [`yield_now`](crate::runtime::yield_now)
+/// so `crate::future::yield_now()` resolves the way callers reach for it by
+/// analogy with `std::future`. Additive convenience; the canonical
+/// `crate::runtime::yield_now` remains valid.
+/// br-asupersync-server-stack-hardening-eeexl1.10.
+pub mod future {
+    pub use crate::runtime::yield_now;
+}
 pub mod runtime;
 pub mod security;
 pub mod service;
