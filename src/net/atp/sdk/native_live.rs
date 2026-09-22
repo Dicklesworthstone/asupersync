@@ -748,6 +748,11 @@ pub mod commit;
 #[path = "native_live/service.rs"]
 pub mod service;
 
+/// Bounded, pull-based receipt of authenticated live epochs.
+#[path = "native_live/reader.rs"]
+pub mod reader;
+pub use reader::{LiveStreamReader, LiveStreamReaderTerminal};
+
 async fn write_epoch<W: AsyncWrite + Unpin>(
     sink: &mut W,
     data: &[u8],

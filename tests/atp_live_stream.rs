@@ -30,6 +30,394 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+mod live_reader {
+    use super::*;
+    use asupersync::net::atp::sdk::native_auth::live::LiveStreamReader;
+    use std::future::poll_fn;
+
+    struct CountedSource {
+        data: &'static [u8],
+        reads: Arc<AtomicUsize>,
+    }
+    impl AsyncRead for CountedSource {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let count = buffer.remaining().min(self.data.len());
+            buffer.put_slice(&self.data[..count]);
+            self.data = &self.data[count..];
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn buffered(cx: &Cx, reader: &LiveStreamReader, expected: usize) {
+        asupersync::time::timeout(cx.now(), Duration::from_secs(5), async {
+            while reader.buffered_bytes() != expected {
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("receiver must actually fill its bounded output pipe");
+    }
+
+    #[test]
+    fn read_consumption_backpressures_the_live_peer_and_eof_requires_its_receipt() {
+        for workers in [1, 2] {
+            run(workers, async {
+                let cx = Cx::current().unwrap();
+                let scope = cx.scope();
+                let send = sender(config(8, 100));
+                let receive = receiver(config(8, 100));
+                let listener = receive
+                    .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                    .await
+                    .unwrap();
+                let address = listener.local_addr().unwrap();
+                let mut reader = listener.open_reader(&cx, &scope).unwrap();
+                assert_eq!(receive.active_streams(), 1);
+
+                // A cancelled empty read owns no hidden bytes and cannot invent EOF.
+                let mut first = [0; 4];
+                poll_fn(|ctx| {
+                    let mut buffer = ReadBuf::new(&mut first);
+                    assert!(
+                        Pin::new(&mut reader)
+                            .poll_read(ctx, &mut buffer)
+                            .is_pending()
+                    );
+                    assert!(buffer.filled().is_empty());
+                    Poll::Ready(())
+                })
+                .await;
+
+                let reads = Arc::new(AtomicUsize::new(0));
+                let mut sending = send
+                    .spawn_send_reader(
+                        &cx,
+                        &scope,
+                        address,
+                        CountedSource {
+                            data: b"0123456789abcdef",
+                            reads: Arc::clone(&reads),
+                        },
+                    )
+                    .unwrap();
+                buffered(&cx, &reader, 8).await;
+                for _ in 0..32 {
+                    yield_now().await;
+                }
+                assert_eq!(reads.load(Ordering::SeqCst), 1);
+                assert_eq!(reader.buffer_capacity(), 8);
+                assert_eq!(reader.received_bytes(), 8);
+                assert_eq!(reader.consumed_bytes(), 0);
+                assert!(reader.terminal().is_none());
+                reader.read_exact(&mut first).await.unwrap();
+                assert_eq!(&first, b"0123");
+                assert_eq!(reader.buffered_bytes(), 4);
+                for _ in 0..32 {
+                    yield_now().await;
+                }
+                assert_eq!(reads.load(Ordering::SeqCst), 1);
+                assert!(!sending.is_finished());
+
+                let mut remaining = Vec::new();
+                reader.read_to_end(&mut remaining).await.unwrap();
+                assert_eq!(remaining, b"456789abcdef");
+                assert_eq!((reader.received_bytes(), reader.consumed_bytes()), (16, 16));
+                assert_eq!(reader.buffer_high_water(), 8);
+                let receipt = reader
+                    .terminal()
+                    .expect("EOF requires a canonical join")
+                    .as_ref()
+                    .unwrap()
+                    .outcome
+                    .as_ref()
+                    .unwrap()
+                    .clone();
+                assert_eq!(receipt, sending.join(&cx).await.unwrap().outcome.unwrap());
+                assert_eq!(reader.read(&mut first).await.unwrap(), 0);
+                assert_eq!(
+                    reader
+                        .wait_terminal()
+                        .await
+                        .as_ref()
+                        .unwrap()
+                        .outcome
+                        .as_ref()
+                        .unwrap(),
+                    &receipt
+                );
+                assert_eq!((send.active_streams(), receive.active_streams()), (0, 0));
+            });
+        }
+    }
+
+    #[test]
+    fn explicit_empty_finalization_returns_eof_and_retains_the_empty_receipt() {
+        run(1, async {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let send = sender(config(8, 0));
+            let receive = receiver(config(8, 0));
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut reader = listener.open_reader(&cx, &scope).unwrap();
+            let mut output = Vec::new();
+            let (sent, read) = zip(
+                send.send_reader(&cx, address, b"".as_slice()),
+                reader.read_to_end(&mut output),
+            )
+            .await;
+            assert_eq!(read.unwrap(), 0);
+            assert!(output.is_empty());
+            let received = reader
+                .terminal()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .outcome
+                .as_ref()
+                .unwrap();
+            assert_eq!(&sent.outcome.unwrap(), received);
+            assert_eq!((received.prefix.bytes, received.prefix.epochs), (0, 0));
+            assert_eq!(receive.active_streams(), 0);
+        });
+    }
+
+    #[test]
+    fn cancellation_drains_a_receiver_parked_on_an_unread_verified_epoch() {
+        for workers in [1, 2] {
+            run(workers, async {
+                let cx = Cx::current().unwrap();
+                let scope = cx.scope();
+                let mut limits = config(8, 100);
+                limits.operation_timeout = Duration::from_secs(3600);
+                let send = sender(limits.clone());
+                let receive = receiver(limits);
+                let listener = receive
+                    .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                    .await
+                    .unwrap();
+                let address = listener.local_addr().unwrap();
+                let mut reader = listener.open_reader(&cx, &scope).unwrap();
+                let reads = Arc::new(AtomicUsize::new(0));
+                let mut sending = send
+                    .spawn_send_reader(
+                        &cx,
+                        &scope,
+                        address,
+                        CountedSource {
+                            data: b"0123456789abcdef",
+                            reads: Arc::clone(&reads),
+                        },
+                    )
+                    .unwrap();
+                buffered(&cx, &reader, 8).await;
+                for _ in 0..32 {
+                    yield_now().await;
+                }
+                assert_eq!(reads.load(Ordering::SeqCst), 1);
+                let reason = CancelReason::user("cancel live pull reader while epoch is unread");
+                let report = asupersync::time::timeout(
+                    cx.now(),
+                    Duration::from_secs(5),
+                    reader.cancel_and_wait(reason.clone()),
+                )
+                .await
+                .expect("cancellation must wake the parked worker")
+                .as_ref()
+                .expect("cooperative receiver retains its domain result");
+                assert!(
+                    matches!(&report.outcome, Err(LiveStreamError::Cancelled(Some(actual))) if actual == &reason)
+                );
+                assert_eq!(report.sink_written_bytes, 8);
+                assert_eq!(report.prefix.as_ref().unwrap().bytes, 0);
+                assert_eq!(reader.buffered_bytes(), 0);
+                assert_eq!(reader.consumed_bytes(), 0);
+                assert_eq!(receive.active_streams(), 0);
+                let mut bytes = [0; 8];
+                let error = reader.read(&mut bytes).await.unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+                let report = reader
+                    .cancel_and_wait(CancelReason::user("repeat cancel"))
+                    .await
+                    .as_ref()
+                    .unwrap();
+                assert!(
+                    matches!(&report.outcome, Err(LiveStreamError::Cancelled(Some(actual))) if actual == &reason)
+                );
+                let sent =
+                    asupersync::time::timeout(cx.now(), Duration::from_secs(5), sending.join(&cx))
+                        .await
+                        .expect("receiver cancellation must close the peer connection")
+                        .unwrap();
+                assert!(sent.outcome.is_err());
+                assert_eq!(send.active_streams(), 0);
+            });
+        }
+    }
+
+    #[test]
+    fn dropping_a_full_reader_releases_the_real_listener_and_sender() {
+        run(2, async {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let mut limits = config(8, 100);
+            limits.operation_timeout = Duration::from_secs(3600);
+            let send = sender(limits.clone());
+            let receive = receiver(limits);
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let reader = listener.open_reader(&cx, &scope).unwrap();
+            let mut sending = send
+                .spawn_send_reader(
+                    &cx,
+                    &scope,
+                    address,
+                    CountedSource {
+                        data: b"0123456789abcdef",
+                        reads: Arc::new(AtomicUsize::new(0)),
+                    },
+                )
+                .unwrap();
+            buffered(&cx, &reader, 8).await;
+            drop(reader);
+            asupersync::time::timeout(cx.now(), Duration::from_secs(5), async {
+                while receive.active_streams() != 0 {
+                    yield_now().await;
+                }
+            })
+            .await
+            .expect("dropped reader worker must release its original admission");
+            let sent =
+                asupersync::time::timeout(cx.now(), Duration::from_secs(5), sending.join(&cx))
+                    .await
+                    .expect("dropped reader must close the peer connection")
+                    .unwrap();
+            assert!(sent.outcome.is_err());
+            let replacement = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            drop(replacement);
+            assert_eq!((send.active_streams(), receive.active_streams()), (0, 0));
+        });
+    }
+
+    #[test]
+    fn authentication_failure_is_an_error_before_any_reader_bytes() {
+        run(1, async {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let send = sender_with("localhost", "unlisted", config(8, 100));
+            let receive = receiver(config(8, 100));
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut reader = listener.open_reader(&cx, &scope).unwrap();
+            let mut bytes = Vec::new();
+            let (sent, read) = zip(
+                send.send_reader(&cx, address, b"forbidden".as_slice()),
+                reader.read_to_end(&mut bytes),
+            )
+            .await;
+            assert!(sent.outcome.is_err());
+            assert!(read.is_err());
+            assert!(bytes.is_empty());
+            let received = reader.terminal().unwrap().as_ref().unwrap();
+            assert!(matches!(received.outcome, Err(LiveStreamError::Tls(_))));
+            assert!(received.prefix.is_none());
+            assert_eq!(reader.received_bytes(), 0);
+            assert_eq!(receive.active_streams(), 0);
+        });
+    }
+
+    #[test]
+    fn corrupt_epochs_raw_eof_and_invalid_final_commitments_never_become_reader_eof() {
+        use asupersync::net::atp::protocol::frames::FrameType;
+        for case in ["digest", "final", "eof"] {
+            run(1, async move {
+                let cx = Cx::current().unwrap();
+                let scope = cx.scope();
+                let receive = receiver(config(8, 100));
+                let listener = receive
+                    .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                    .await
+                    .unwrap();
+                let address = listener.local_addr().unwrap();
+                let mut reader = listener.open_reader(&cx, &scope).unwrap();
+                let peer = async {
+                    let tcp = asupersync::net::TcpStream::connect(address).await.unwrap();
+                    let connector = asupersync::tls::TlsConnector::new(raw_client_config());
+                    let mut wire = RawWire::new(connector.connect("localhost", tcp).await.unwrap());
+                    let mut hello = b"ATPLIVE1".to_vec();
+                    hello.extend_from_slice(&[7; 32]);
+                    hello.extend_from_slice(&8u32.to_be_bytes());
+                    hello.extend_from_slice(&100u64.to_be_bytes());
+                    wire.send(FrameType::Handshake, hello.clone()).await;
+                    let ack = wire.receive().await;
+                    assert_eq!(ack.frame_type(), FrameType::HandshakeAck);
+                    assert_eq!(ack.payload(), hello);
+                    if case == "eof" {
+                        return;
+                    }
+                    let mut initial = Sha256::new();
+                    initial.update(b"asupersync.atp.live.hello.v1");
+                    initial.update(&hello);
+                    let mut epoch = vec![0; 16];
+                    epoch.extend_from_slice(&initial.finalize());
+                    epoch.extend_from_slice(&Sha256::digest(b"verified"));
+                    epoch.extend_from_slice(b"verified");
+                    if case == "digest" {
+                        epoch[87] ^= 1;
+                    }
+                    wire.send(FrameType::ObjectData, epoch).await;
+                    if case == "final" {
+                        // This acknowledgement cannot arrive until AsyncRead consumed the epoch.
+                        let ack = wire.receive().await;
+                        assert_eq!(ack.frame_type(), FrameType::Control);
+                        let mut final_payload = ack.payload().to_vec();
+                        final_payload.extend_from_slice(&[0; 32]);
+                        wire.send(FrameType::ObjectComplete, final_payload).await;
+                    }
+                };
+                let mut bytes = Vec::new();
+                let (_, read) = zip(peer, reader.read_to_end(&mut bytes)).await;
+                let error = read.expect_err("stream failure cannot be successful EOF");
+                if case == "eof" {
+                    assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+                } else {
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                }
+                assert_eq!(
+                    bytes.as_slice(),
+                    if case == "final" {
+                        b"verified".as_slice()
+                    } else {
+                        b"".as_slice()
+                    }
+                );
+                let report = reader.terminal().unwrap().as_ref().unwrap();
+                assert!(report.outcome.is_err());
+                assert_eq!(report.sink_written_bytes as usize, bytes.len());
+                assert_eq!(reader.consumed_bytes() as usize, bytes.len());
+                assert_eq!(receive.active_streams(), 0);
+            });
+        }
+    }
+}
+
 fn fixtures() -> serde_json::Value {
     serde_json::from_str(include_str!("fixtures/atp_native_auth_identities.json")).unwrap()
 }
