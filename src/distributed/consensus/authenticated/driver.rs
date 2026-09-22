@@ -292,7 +292,7 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
     pub async fn run(&mut self, cx: &Cx) -> Result<()> {
         loop {
             self.receive_one(cx).await?;
-            crate::future::yield_now().await;
+            crate::runtime::yield_now().await;
         }
     }
 
@@ -317,7 +317,7 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                 return Ok(response);
             }
             self.receive_one(cx).await?;
-            crate::future::yield_now().await;
+            crate::runtime::yield_now().await;
         }
     }
 
@@ -414,7 +414,7 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             self.driver.process_message(cx, next.message()).await?;
             inbox.lock().acknowledge(&next);
             delivered += 1;
-            if delivered % 64 == 0 { crate::future::yield_now().await; }
+            if delivered % 64 == 0 { crate::runtime::yield_now().await; }
         }
     }
 

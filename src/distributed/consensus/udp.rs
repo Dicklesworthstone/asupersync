@@ -225,7 +225,7 @@ impl PbftPacketTransport for UdpPbftTransport {
                     // Winsock reports truncation as WSAEMSGSIZE instead of a
                     // full buffer. It must not turn a large unsigned datagram
                     // into a fatal error for the authenticated message pump.
-                    crate::future::yield_now().await;
+                    crate::runtime::yield_now().await;
                     continue;
                 }
                 Err(error) => return Err(socket_error(error)),
@@ -239,7 +239,7 @@ impl PbftPacketTransport for UdpPbftTransport {
             }
             // Keep the exact allocation bound while retiring a possibly
             // truncated datagram. Never authenticate only its retained prefix.
-            crate::future::yield_now().await;
+            crate::runtime::yield_now().await;
         }
     }
 }
@@ -357,7 +357,7 @@ mod tests {
                                         return Ok::<_, Error>(response);
                                     }
                                     node.receive_one(cx).await?;
-                                    crate::future::yield_now().await;
+                                    crate::runtime::yield_now().await;
                                 }
                             })
                         }).collect();
