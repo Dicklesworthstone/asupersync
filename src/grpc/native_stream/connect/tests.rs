@@ -149,7 +149,8 @@ fn admitted_call_keeps_original_deadline_and_forwards_only_remaining_time() {
     assert!(matches!(connection.next_frame(), Some(Frame::Settings(_))));
     let Some(Frame::Headers(head)) = connection.next_frame() else { panic!("request HEADERS") };
     let headers = HpackDecoder::new().decode(&mut head.header_block.clone()).unwrap();
-    assert_eq!(headers.iter().find(|head| head.name == "grpc-timeout").unwrap().value, "6000000u");
+    let timeout = &headers.iter().find(|head| head.name == "grpc-timeout").unwrap().value;
+    assert_eq!(crate::grpc::server::parse_grpc_timeout(timeout), Some(Duration::from_secs(6)));
     drop(stream);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert!(!cx.is_cancel_requested());
@@ -199,6 +200,26 @@ where
         finished.store(true, Ordering::Release);
     }));
     assert!(observed.load(Ordering::Acquire), "native setup assertions did not finish");
+}
+
+#[test]
+fn native_driver_admission_respects_runtime_io_restriction() {
+    for multithread in [false, true] {
+        runtime_case(multithread, |mut cx| async move {
+            assert!(cx.io_driver_handle().is_some(), "native reactor is explicit");
+            assert!(!cx.has_io(), "native contexts need no generic IoCap adapter");
+            let endpoint = NativeStreamEndpoint::new(
+                "127.0.0.1:9".parse().unwrap(), "localhost", Duration::from_secs(1),
+            ).unwrap();
+            let request = Request::new(Bytes::new());
+            assert!(endpoint.admit(&cx, "/svc/Watch", &request, &NativeStreamConfig::default()).is_ok());
+            cx.runtime_mask = crate::cx::cap::CapMask::none();
+            assert!(cx.io_driver_handle().is_some(), "restriction retains the physical driver");
+            let error = endpoint.admit(&cx, "/svc/Watch", &request, &NativeStreamConfig::default())
+                .err().expect("a retained driver must not bypass the runtime mask");
+            assert_eq!(error.code(), Code::FailedPrecondition);
+        });
+    }
 }
 
 #[test]

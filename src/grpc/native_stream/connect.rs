@@ -216,7 +216,10 @@ impl NativeStreamEndpoint {
         config: &NativeStreamConfig,
     ) -> Result<(CallDeadline, Setup), Status> {
         check_cancellation(cx)?;
-        if !cx.has_io() || cx.io_driver_handle().is_none() {
+        // Native socket operations use the explicitly attached reactor driver,
+        // not the separate generic IoCap adapter used by virtual/browser I/O.
+        // A driver alone must not restore authority removed by restriction.
+        if !cx.runtime_mask.has(crate::cx::cap::CapMask::IO) || cx.io_driver_handle().is_none() {
             return Err(Status::failed_precondition("native streaming connect requires explicit I/O authority"));
         }
         let clock = cx.timer_driver().ok_or_else(|| {

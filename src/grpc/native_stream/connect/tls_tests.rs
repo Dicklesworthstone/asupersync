@@ -196,6 +196,7 @@ fn assert_request(fields: &[Header]) {
 fn native_tls_endpoint_authenticates_streams_and_retains_metadata() {
     for multithread in [false, true] {
         let (listener, address) = listener();
+        let (consumed, consumed_rx) = sync_channel(1);
         let peer = std::thread::spawn(move || {
             let mut socket = server(accept(&listener), true);
             assert_request(&request(&mut socket));
@@ -203,6 +204,8 @@ fn native_tls_endpoint_authenticates_streams_and_retains_metadata() {
             assert_eq!(socket.conn.server_name(), Some("localhost"));
             response_head(&mut socket);
             response_body(&mut socket);
+            // Keep unread client control frames from turning teardown into a reset.
+            consumed_rx.recv_timeout(WATCHDOG).expect("client consumed terminal trailers");
         });
         let done = native(multithread, move |cx| async move {
             let endpoint = endpoint(address, Duration::from_secs(3));
@@ -217,6 +220,7 @@ fn native_tls_endpoint_authenticates_streams_and_retains_metadata() {
             assert_eq!(stream.status().unwrap().code(), Code::Ok);
             assert!(stream.trailers().unwrap().get("x-end").is_some());
             assert!(!cx.is_cancel_requested());
+            consumed.send(()).unwrap();
         });
         peer.join().expect("native TLS assertions");
         assert!(done);
@@ -282,12 +286,15 @@ fn tls_setup_rejects_invalid_inputs_without_dialing_or_borrowing_ambient_authori
 fn successful_tls_setup_does_not_limit_the_lifetime_of_an_unbounded_stream() {
     let (listener, address) = listener();
     let (release, released) = sync_channel(1);
+    let (consumed, consumed_rx) = sync_channel(1);
     let peer = std::thread::spawn(move || {
         let mut socket = server(accept(&listener), true);
         assert_request(&request(&mut socket));
         response_head(&mut socket);
         released.recv_timeout(WATCHDOG).unwrap();
         response_body(&mut socket);
+        // Keep unread client control frames from turning teardown into a reset.
+        consumed_rx.recv_timeout(WATCHDOG).expect("client consumed terminal trailers");
     });
     let done = native(false, move |cx| async move {
         let clock = cx.timer_driver().unwrap();
@@ -304,6 +311,7 @@ fn successful_tls_setup_does_not_limit_the_lifetime_of_an_unbounded_stream() {
         assert!(stream.message().await.unwrap().unwrap().is_empty());
         assert!(stream.message().await.unwrap().is_none());
         assert_eq!(stream.status().unwrap().code(), Code::Ok);
+        consumed.send(()).unwrap();
     });
     peer.join().unwrap();
     assert!(done);
