@@ -715,9 +715,11 @@ function settleHostWebTransportState(state, outcome, closeReason = undefined) {
     return;
   }
   state.settled = true;
-  INFLIGHT_WEBTRANSPORTS.delete(state.sessionKey);
   closeHostWebTransportState(state, closeReason);
-  void task_join(state.taskHandle, outcome, state.consumerVersion);
+  // Release the task immediately, but retain its inbox until the caller drains
+  // accepted datagrams and the canonical terminal outcome (or closes its owner).
+  state.terminalOutcome = task_join(state.taskHandle, outcome, state.consumerVersion);
+  queueWebTransportOutcome(state, state.terminalOutcome, { terminal: true });
 }
 
 function closeHostWebTransportState(state, reason = undefined) {
@@ -725,6 +727,7 @@ function closeHostWebTransportState(state, reason = undefined) {
     return;
   }
   state.closed = true;
+  state.pendingWrites.length = 0;
   if (state.reader && typeof state.reader.cancel === "function") {
     Promise.resolve(state.reader.cancel(reason ?? WEBTRANSPORT_CLOSE_KIND)).catch(() => {});
   }
@@ -1229,6 +1232,7 @@ export function webtransport_open(request, consumerVersion = null) {
       closed: false,
       settled: false,
       terminalQueued: false,
+      terminalOutcome: null,
       reader: null,
       writer: null,
       flushPromise: null,
@@ -1330,6 +1334,9 @@ export function webtransport_close(request, consumerVersion = null) {
       "webtransport_close rejected: unknown WebTransport session handle",
     );
   }
+  if (taken.state.settled) {
+    return taken.state.terminalOutcome;
+  }
   taken.state.settled = true;
   closeHostWebTransportState(taken.state, request.reason);
   const outcome = cancelOut(
@@ -1342,6 +1349,22 @@ export function webtransport_close(request, consumerVersion = null) {
 }
 
 export function webtransport_cancel(request, consumerVersion = null) {
+  // Background completion has already released the task. Consume its retained
+  // result without sending another cancellation or join through a stale handle.
+  try {
+    const sessionKey = keyOf(request.session, "request.session", "task");
+    const state = INFLIGHT_WEBTRANSPORTS.get(sessionKey);
+    if (state?.settled) {
+      INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+      return state.terminalOutcome;
+    }
+  } catch (error) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      `webtransport_cancel rejected: ${errorMessage(error)}`,
+    );
+  }
   const cancelled = task_cancel(
     {
       task: request.session,
