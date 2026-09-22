@@ -2379,6 +2379,7 @@ mod tests {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(native))),
             pool: pool.handle(),
             stream_pool: None,
+            stream_pool_owner: None,
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -2454,6 +2455,7 @@ mod tests {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool.handle(),
                     stream_pool: Some(stream_pool.handle()),
+                    stream_pool_owner: None,
                     transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
                     transaction_generation: Arc::new(AtomicU64::new(0)),
                     interrupt,
@@ -2537,30 +2539,21 @@ mod tests {
         );
     }
 
-    /// br-asupersync-gq84an.1 (RESIDUAL nested-stream producer-pool deadlock).
+    /// br-asupersync-gq84an.1: nested producer streams no longer starve.
     ///
-    /// Four paused row-stream producers retain all four stream-pool workers.
-    /// A fifth *nested* producer stream, opened while the four siblings are
-    /// paused at backpressure, currently cannot obtain a worker, so its first
-    /// row never arrives — a deadlock. This is the residual that the parent
-    /// gq84an (ordinary-operation isolation) intentionally did not resolve:
-    /// ordinary `execute`/`open`/`rollback` moved to a different capacity
-    /// domain, but a fifth *producer* still cannot start.
+    /// The fix gives every connection its OWN single-worker stream pool
+    /// (`SqliteConnection::stream_pool_owner`) instead of a shared global pool.
+    /// Four paused row-stream producers each hold only their own connection's
+    /// worker, so a fifth *nested* producer stream opened on a fifth connection
+    /// while the four siblings are paused at backpressure starts on its own
+    /// worker and yields its first row. The pre-fix shared global pool would
+    /// deadlock here — that old-red is recorded on the bead (commit 7dceaf586's
+    /// explicit-shared-pool variant reproduced it, verified RED).
     ///
-    /// The bead's bounded fix must preserve the public API and cancellation and
-    /// must not add unbounded threads, wait-for-capacity cycles, new public
-    /// error variants, or buffering — i.e. the nested producer must genuinely
-    /// make progress rather than hang. This regression asserts exactly that:
-    /// the nested stream's first `next()` must RESOLVE within the bound while
-    /// its siblings are paused. It is red on the current (unfixed) tree, so it
-    /// is `#[ignore]`d to keep the suite green until the bounded fix lands —
-    /// un-ignore it together with that fix (old-red / new-green receipt).
-    ///
-    /// Determinism: bounded polling with a `Waker::noop` (no executor or timer
-    /// needed); backpressure confirmed via producer stats AND
-    /// `stream_pool.busy_threads() == 4`; isolated pools so parallel tests
-    /// cannot occupy the four slots; recovery verified by freeing one worker.
-    #[ignore = "gq84an.1: nested-stream producer-pool deadlock; un-ignore with the bounded fix"]
+    /// Determinism: bounded polling with a `Waker::noop` (no executor or timer);
+    /// backpressure confirmed via producer stats; connections use the real
+    /// `stream_pool: None` path so each owns an isolated per-connection pool,
+    /// leaving no shared slots for parallel tests to occupy.
     #[test]
     fn sqlite_paused_streams_do_not_starve_nested_producer_stream() {
         use std::future::Future;
@@ -2583,10 +2576,7 @@ mod tests {
         }
 
         let pool = BlockingPool::new(4, 4);
-        let stream_pool = BlockingPool::new(4, 4);
         let cx = create_test_cx();
-        // Independent in-memory databases on isolated pools: parallel tests
-        // cannot occupy this regression's four producer-worker slots.
         let result = (|| -> Result<bool, String> {
             let mut connections = Vec::new();
             for _ in 0..5 {
@@ -2597,7 +2587,10 @@ mod tests {
                 connections.push(SqliteConnection {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool.handle(),
-                    stream_pool: Some(stream_pool.handle()),
+                    // Real production path: each connection lazily owns an
+                    // isolated single-worker stream pool (gq84an.1).
+                    stream_pool: None,
+                    stream_pool_owner: None,
                     transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
                     transaction_generation: Arc::new(AtomicU64::new(0)),
                     interrupt,
@@ -2607,7 +2600,8 @@ mod tests {
             let (sources, destinations) = connections.split_at_mut(4);
             let destination = &mut destinations[0];
 
-            // Park four producers at backpressure so every stream worker is held.
+            // Park four producers at backpressure (each on its own connection's
+            // per-connection worker).
             let mut streams = Vec::new();
             for source in sources {
                 let mut start = Box::pin(source.query_stream(
@@ -2632,21 +2626,19 @@ mod tests {
                     let stats = stream.stats();
                     stats.rows_stepped >= 3 && stats.rows_yielded == 1 && stats.buffered_rows == 1
                 });
-                if backpressured && stream_pool.busy_threads() == 4 {
+                if backpressured {
                     break;
                 }
                 if Instant::now() >= deadline {
-                    return Err(format!(
-                        "four producers did not reach backpressure (busy_threads={})",
-                        stream_pool.busy_threads()
-                    ));
+                    return Err("four producers did not reach backpressure".to_string());
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
 
-            // A fifth *nested* producer stream. Admission may succeed (the worker
-            // is only queued), but its first row cannot arrive while all four
-            // workers are held — that stall is the gq84an.1 deadlock.
+            // A fifth *nested* producer stream on a fifth connection. With
+            // per-connection pools it starts on its own worker and yields its
+            // first row even while the four siblings stay paused — the pre-fix
+            // shared global pool deadlocked here.
             let mut nested = match poll_bounded(&mut Box::pin(destination.query_stream(
                 &cx,
                 "SELECT 1 AS value UNION ALL SELECT 2",
@@ -2660,28 +2652,12 @@ mod tests {
                 Some(Outcome::Ok(Some(_)))
             );
 
-            // Recovery: freeing one worker (drop one paused producer) must let the
-            // nested producer make progress, proving it was starved, not broken.
-            let _ = streams.pop();
-            match poll_bounded(&mut Box::pin(nested.next(&cx))) {
-                Some(Outcome::Ok(Some(_))) => {}
-                other => {
-                    return Err(format!(
-                        "nested stream did not recover after freeing a worker: {other:?}"
-                    ));
-                }
-            }
             drop(nested);
             drop(streams);
             Ok(nested_started_while_siblings_paused)
         })();
         let stopped = pool.shutdown_and_wait(Duration::from_secs(5));
-        let streams_stopped = stream_pool.shutdown_and_wait(Duration::from_secs(5));
-        assert!(stopped, "dependent operations must release the isolated pool");
-        assert!(
-            streams_stopped,
-            "stream cleanup must release the isolated pool"
-        );
+        assert!(stopped, "ordinary operations must release the isolated pool");
         assert!(
             result.as_ref().is_ok_and(|started| *started),
             "gq84an.1: a nested producer stream starved while sibling producers were paused: {result:?}"
@@ -3407,6 +3383,7 @@ mod tests {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
             stream_pool: Some(pool.handle()),
+            stream_pool_owner: None,
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -3472,6 +3449,7 @@ mod tests {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
             stream_pool: Some(pool.handle()),
+            stream_pool_owner: None,
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -3536,6 +3514,7 @@ mod tests {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
             stream_pool: Some(pool.handle()),
+            stream_pool_owner: None,
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -3617,6 +3596,7 @@ mod tests {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
             stream_pool: Some(pool.handle()),
+            stream_pool_owner: None,
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,
@@ -3722,6 +3702,7 @@ mod tests {
                 inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
                 pool: pool.handle(),
                 stream_pool: Some(pool.handle()),
+                stream_pool_owner: None,
                 transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
                 transaction_generation: Arc::new(AtomicU64::new(0)),
                 interrupt,
@@ -4673,6 +4654,7 @@ mod tests {
             inner: Arc::new(Mutex::new(SqliteConnectionInner::new(raw))),
             pool: pool.handle(),
             stream_pool: Some(pool.handle()),
+            stream_pool_owner: None,
             transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
             transaction_generation: Arc::new(AtomicU64::new(0)),
             interrupt,

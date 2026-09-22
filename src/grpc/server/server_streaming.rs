@@ -417,6 +417,8 @@ impl Server {
         }
         let trailers = bounded_terminal_trailers(result, config.max_trailer_bytes);
         match crate::time::timeout(
+            cx.timer_driver()
+                .map_or_else(crate::time::wall_now, |timer| timer.now()),
             config.terminal_timeout,
             sender.send_trailers(&cx, trailers),
         )

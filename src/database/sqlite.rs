@@ -58,11 +58,10 @@ use std::time::Duration;
 /// `BlockingPoolHandle` would drop the pool immediately and put the
 /// handle into permanent shutdown state.
 static SQLITE_POOL: OnceLock<BlockingPool> = OnceLock::new();
-// Consumer-paced streams can retain a worker while their bounded channel is
-// full. They must not occupy the workers needed by execute/open/rollback.
-// This isolates ordinary operations; it does not resolve dependencies among
-// streams when every stream worker is occupied, or SQLite database-lock cycles.
-static SQLITE_STREAM_POOL: OnceLock<BlockingPool> = OnceLock::new();
+// Row-stream producers no longer share a global pool: each connection owns a
+// single-worker `BlockingPool` (see `SqliteConnection::stream_pool_owner`,
+// br-asupersync-gq84an.1) so a paused producer cannot starve a nested stream
+// on another connection. Ordinary operations still use `SQLITE_POOL`.
 const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_STATEMENT_CACHE_CAPACITY: usize = 64;
 const SQLITE_ROW_STREAM_CHANNEL_CAPACITY: usize = 1;
@@ -121,12 +120,6 @@ fn wal_checkpoint_i64(row: &SqliteRow, column: &str) -> Result<i64, SqliteError>
 
 fn get_sqlite_pool() -> BlockingPoolHandle {
     SQLITE_POOL.get_or_init(|| BlockingPool::new(1, 4)).handle()
-}
-
-fn get_sqlite_stream_pool() -> BlockingPoolHandle {
-    SQLITE_STREAM_POOL
-        .get_or_init(|| BlockingPool::new(0, 4))
-        .handle()
 }
 
 fn configure_connection_defaults(
@@ -2619,6 +2612,18 @@ pub struct SqliteConnection {
     /// Lazily selected producer pool, separate from ordinary operations.
     /// Opening a connection alone does not allocate or start stream workers.
     stream_pool: Option<BlockingPoolHandle>,
+    /// Per-connection owned row-stream pool (br-asupersync-gq84an.1). When
+    /// `stream_pool` is unset (the production path), `query_stream` lazily
+    /// creates a connection-owned `BlockingPool::new(0, 1)` here and installs
+    /// its handle above. A paused producer then holds its OWN worker instead of
+    /// a shared global slot, so a fifth nested stream opened on another
+    /// connection can no longer starve. Dropped with the connection — safe
+    /// because `query_stream` borrows `&'connection mut self`, so every stream
+    /// (and thus every worker) has already ended before this field drops, and
+    /// `BlockingPool::drop`'s bounded `shutdown_and_wait` only joins idle
+    /// threads. Tests may still pin an explicit `stream_pool` to exercise a
+    /// shared-pool configuration deliberately.
+    stream_pool_owner: Option<BlockingPool>,
     /// Mutex-guarded transaction state to prevent concurrency races.
     transaction_state: Arc<Mutex<TransactionState>>,
     /// Generation of the physical transaction currently owned by a managed
@@ -3074,6 +3079,7 @@ impl SqliteConnection {
                     inner: Arc::new(Mutex::new(SqliteConnectionInner::new(conn))),
                     pool: pool_clone,
                     stream_pool: None,
+                    stream_pool_owner: None,
                     transaction_state: Arc::new(Mutex::new(TransactionState::Autocommit)),
                     transaction_generation: Arc::new(AtomicU64::new(0)),
                     interrupt,
@@ -3875,7 +3881,22 @@ impl SqliteConnection {
         let phase = Arc::new(Mutex::new(SqliteConnectionOpPhase::Queued));
         let worker_phase = Arc::clone(&phase);
 
-        let stream_pool = self.stream_pool.get_or_insert_with(get_sqlite_stream_pool);
+        // br-asupersync-gq84an.1: give each connection its OWN single-worker
+        // stream pool rather than a shared global one. A paused producer then
+        // retains only its own worker, so a fifth nested stream opened on
+        // another connection cannot starve on an exhausted shared pool. The
+        // owned pool is dropped with the connection (streams, and thus workers,
+        // have already ended by the `&'connection mut self` borrow). Tests may
+        // pre-install an explicit `stream_pool` to force a shared configuration.
+        if self.stream_pool.is_none() {
+            let owned = BlockingPool::new(0, 1);
+            self.stream_pool = Some(owned.handle());
+            self.stream_pool_owner = Some(owned);
+        }
+        let stream_pool = self
+            .stream_pool
+            .as_ref()
+            .expect("stream_pool installed above");
         let handle = stream_pool.spawn(move || {
             /// SQLite VM instructions between deadline checks — see
             /// `run_connection_op`.

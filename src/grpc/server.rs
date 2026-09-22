@@ -2,6 +2,20 @@
 //!
 //! Provides the server-side infrastructure for hosting gRPC services.
 
+/// Native registered-service server streaming with bounded produced bodies.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod server_streaming;
+
+// Re-export the server-streaming config at the `grpc::server` level, where
+// `health_rpc` (and other callers) import it via
+// `crate::grpc::server::ServerStreamingConfig`. The type is already `pub` in
+// `server_streaming`, but the re-export was missing, so that import failed to
+// resolve (E0432) and left the whole lib-test target red. Fleet-red heal by
+// SapphireHill for the owner of the server-streaming work
+// (br-asupersync-server-stack-hardening-eeexl1.10).
+#[cfg(not(target_arch = "wasm32"))]
+pub use server_streaming::ServerStreamingConfig;
+
 use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -1987,7 +2001,7 @@ impl Server {
         F: Future<Output = Result<Response<Bytes>, Status>>,
     {
         // ── Phase 0: stream registration (br-asupersync-8vn9iu). ─────────
-        // Enforce the in-memory registration count and purge stale accounting
+        // Enforce the in-memory registration count and purge stale
         // entries BEFORE metadata validation and interceptor execution.
         let registered_at = match self.connection_registry.enforce_stream_limits(
             &connection_id,
@@ -2014,7 +2028,7 @@ impl Server {
         //
         // SECURITY FIX: The guard now tracks the registration timestamp
         // to prevent race conditions where multiple cleanup operations
-        // could attempt to remove the same stream ID.
+        // could both attempt to remove the same stream ID.
         let _stream_guard = StreamRegistrationGuard {
             registry: Arc::clone(&self.connection_registry),
             connection_id: connection_id.clone(),
@@ -2510,6 +2524,8 @@ impl CallContext {
 
     /// Formats the remaining deadline as a `grpc-timeout` header value using
     /// an explicit clock sample.
+    ///
+    /// Expired deadlines are forwarded as `0n`.
     #[must_use]
     pub fn timeout_header_value_at(&self, now: Instant) -> Option<String> {
         self.deadline

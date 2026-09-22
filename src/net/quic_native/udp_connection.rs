@@ -1295,7 +1295,7 @@ mod tests {
     use crate::net::atp::protocol::varint::VarInt;
     use crate::net::quic_native::connection::NativeQuicConnection;
     use crate::net::quic_native::connection_manager::{
-        ConnectionRouter, RoutingResult, assemble_protected_1rtt_packet,
+        ConnectionRouter, RoutingResult, assemble_protected_1rtt_packet, unprotect_1rtt_packet,
     };
     use crate::net::quic_native::handshake_driver::tests::{
         CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert,

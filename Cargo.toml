@@ -695,6 +695,46 @@ path = "tests/lock_contention_atlas_contract.rs"
 name = "timer_wheel_advance_invariants"
 path = "tests/metamorphic/timer_wheel_advance_invariants.rs"
 
+# Native integration tests that drive real runtime scenarios through the
+# opt-in internal test helpers `block_on_with_cx` / `recv_uninterruptible`
+# (test-internals `visibility::make(pub)`). Gated so default `--all-targets`
+# skips them cleanly instead of failing on the pub(crate) helpers. They run in
+# the standard `--features test-internals` lane. br-asupersync-ymj7j3.
+[[test]]
+name = "ack_queue_native"
+path = "tests/ack_queue_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "copy_session_native"
+path = "tests/copy_session_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "dynamic_supervisor_service_native"
+path = "tests/dynamic_supervisor_service_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "replay_archive_native"
+path = "tests/replay_archive_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "replay_group_native"
+path = "tests/replay_group_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "resource_bracket_native"
+path = "tests/resource_bracket_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "resource_stack_native"
+path = "tests/resource_stack_native.rs"
+required-features = ["test-internals"]
+
 [[test]]
 name = "atp_quic_bounded_memory"
 path = "tests/atp_quic_bounded_memory.rs"

@@ -108,7 +108,9 @@ fn cancellation(multithread: bool, drop_handle: bool) {
                         let mut ack = [0; 1];
                         witness_pending(socket.read_exact(&mut ack), cleanup_parked).await.unwrap();
                         assert_eq!(&ack, b"A");
-                        socket.shutdown().await.unwrap();
+                        // Async write-half shutdown (AsyncWriteExt); the inherent
+                        // TcpStream::shutdown(how) would shadow it. br-asupersync-ymj7j3.
+                        AsyncWriteExt::shutdown(&mut socket).await.unwrap();
                         socket_events.lock().unwrap().push("socket");
                         // Even a typed release failure must not skip the older resource.
                         Outcome::Err("newer release application failure")

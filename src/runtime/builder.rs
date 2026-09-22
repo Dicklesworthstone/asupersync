@@ -4118,6 +4118,11 @@ impl Runtime {
     /// rather than through the scheduler, but still need `Cx::current()` to
     /// reflect the active request/task context.
     #[allow(dead_code)]
+    // Exposed to native integration tests (which drive real runtime scenarios
+    // with a caller-supplied Cx, the companion to the public
+    // `request_cx_with_budget`) under the opt-in test-internals feature, not the
+    // stable public API. br-asupersync-ymj7j3.
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn block_on_with_cx<F: Future>(
         &self,
         request_cx: crate::cx::Cx,
