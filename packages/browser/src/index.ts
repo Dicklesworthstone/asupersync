@@ -51,10 +51,17 @@ import initWasm, {
   type WebSocketRecvRequest,
   type WebSocketSendRequest,
   type WebTransportCancelRequest,
+  type WebTransportBidirectionalStream,
+  type WebTransportByteStream,
   type WebTransportCloseRequest,
   type WebTransportOpenRequest,
+  type WebTransportReadableStream,
   type WebTransportRecvRequest,
   type WebTransportSendRequest,
+  type WebTransportStreamAcceptRequest,
+  type WebTransportStreamOpenRequest,
+  type WebTransportStreamRead,
+  type WebTransportWritableStream,
   websocketClose,
   websocketOpen,
   websocketRecv,
@@ -65,6 +72,7 @@ import initWasm, {
   webtransportRecv,
   webtransportSend,
 } from "@asupersync/browser-core";
+import { createReliableStreamManager } from "@asupersync/browser-core/webtransport-streams";
 import type { BrowserTraceRecord } from "./tracing.js";
 
 export type {
@@ -89,10 +97,17 @@ export type {
   WebSocketRecvRequest,
   WebSocketSendRequest,
   WebTransportCancelRequest,
+  WebTransportBidirectionalStream,
+  WebTransportByteStream,
   WebTransportCloseRequest,
   WebTransportOpenRequest,
+  WebTransportReadableStream,
   WebTransportRecvRequest,
   WebTransportSendRequest,
+  WebTransportStreamAcceptRequest,
+  WebTransportStreamOpenRequest,
+  WebTransportStreamRead,
+  WebTransportWritableStream,
 };
 export {
   abiFingerprint,
@@ -1292,6 +1307,11 @@ interface BrowserWebTransportState {
   reader: Promise<BrowserWebTransportReaderLike>;
   ready: Promise<void>;
   session: BrowserWebTransportSessionLike;
+  streamSession: {
+    transport: BrowserWebTransportSessionLike;
+    sessionOrigin: string;
+    closed: boolean;
+  };
   settled: boolean;
   scopeKey: string;
   writer: Promise<BrowserWebTransportWriterLike>;
@@ -4984,6 +5004,34 @@ function lookupWebTransportState(handle: CoreTaskHandle): BrowserWebTransportSta
   return INFLIGHT_WEBTRANSPORTS.get(browserWebTransportStateKey(handle)) ?? null;
 }
 
+// Reliable streams share the existing SDK session and its task/region owner.
+// This stable adapter is the shared manager's identity; it creates no transport
+// or additional runtime task and never exposes the handle's authority token.
+const SDK_WEBTRANSPORT_STREAMS = createReliableStreamManager({
+  lookup: (session: unknown) =>
+    lookupWebTransportState(session as CoreTaskHandle)?.streamSession ?? null,
+  ok: OutcomeFactory.ok,
+  fail: OutcomeFactory.err,
+  cancelled: (reason: string, origin: string | null) =>
+    webTransportCancellationOutcome("webtransport_stream_cancel", reason, "completed", origin),
+});
+
+function stopWebTransportStreams(
+  state: BrowserWebTransportState,
+  outcome: BrowserOutcome<WasmValue>,
+): void {
+  state.streamSession.closed = true;
+  // A completed owner cannot admit a new stream. Preserve error/cancellation
+  // detail, while preventing an owner's unrelated success payload from being
+  // mistaken for successful stream admission or a readable byte chunk.
+  SDK_WEBTRANSPORT_STREAMS.closeSession(
+    state.streamSession,
+    outcome.outcome === "ok"
+      ? webTransportCancellationOutcome("webtransport_close", "WebTransport session completed.")
+      : outcome,
+  );
+}
+
 function takeTerminalWebTransportOutcome(
   handle: BrowserHandleLike,
 ): BrowserOutcome<WasmValue> | null {
@@ -5021,12 +5069,13 @@ function webTransportCancellationOutcome(
   kind: string,
   message?: string,
   phase: AbiCancellation["phase"] = "completed",
+  originTask: string | null = null,
 ): BrowserOutcome<never> {
   return OutcomeFactory.cancelled({
     kind,
     phase,
     origin_region: "browser-sdk",
-    origin_task: null,
+    origin_task: originTask,
     timestamp_nanos: 0,
     message: message ?? null,
     truncated: false,
@@ -5048,6 +5097,7 @@ function settleWebTransportTask(
   const key = browserWebTransportStateKey(handle);
   const state = lookupWebTransportState(handle);
   if (state) {
+    stopWebTransportStreams(state, outcome);
     state.settled = true;
     TERMINAL_WEBTRANSPORTS.set(key, {
       outcome,
@@ -5063,7 +5113,15 @@ function settleWebTransportTask(
   return taskJoin(handle, outcome, consumerVersion);
 }
 
-function cleanupWebTransportState(state: BrowserWebTransportState, reason?: string): void {
+function cleanupWebTransportState(
+  state: BrowserWebTransportState,
+  reason?: string,
+  outcome: BrowserOutcome<WasmValue> = webTransportCancellationOutcome(
+    "webtransport_close",
+    reason ?? "WebTransport session closed.",
+  ),
+): void {
+  stopWebTransportStreams(state, outcome);
   // Best-effort cleanup must close/abort before releasing the lock; otherwise
   // Web Streams can reject with a released-reader/writer error on teardown.
   void state.reader
@@ -5104,6 +5162,31 @@ function closeTrackedWebTransportState(state: BrowserWebTransportState, reason?:
   } catch {
     // Ignore close races during scope/runtime teardown.
   }
+}
+
+function cancelBrowserTask(
+  task: CoreTaskHandle,
+  kind: string,
+  message: string | undefined,
+  consumerVersion: AbiVersion | null,
+): BrowserOutcome<void> {
+  const requested = taskCancel({ task, kind, message }, consumerVersion);
+  if (requested.outcome !== "ok") {
+    return requested;
+  }
+  const state = lookupWebTransportState(task);
+  if (state && !state.settled) {
+    const terminal = webTransportCancellationOutcome(kind, message, "cancelling");
+    cleanupWebTransportState(state, message, terminal);
+    try {
+      state.session.close(message === undefined ? undefined : { reason: message });
+    } catch {
+      // The admitted task cancellation still owns and initiates all stream
+      // cleanup, even when the host session's best-effort close throws.
+    }
+    settleWebTransportTask(task, terminal, consumerVersion);
+  }
+  return requested;
 }
 
 function closeOwnedWebTransports(ownerKeys: Set<string>, reason?: string): void {
@@ -5157,12 +5240,18 @@ function createBrowserWebTransportState(
     return writable.getWriter();
   });
   const ready = Promise.all([reader, writer]).then(() => undefined);
+  const origin = handle.toJSON();
 
   const state: BrowserWebTransportState = {
     consumerVersion,
     reader,
     ready,
     session,
+    streamSession: {
+      transport: session,
+      sessionOrigin: `${origin.kind}:${origin.slot}:${origin.generation}`,
+      closed: false,
+    },
     settled: false,
     scopeKey,
     writer,
@@ -5172,12 +5261,13 @@ function createBrowserWebTransportState(
     if (state.settled) {
       return;
     }
-    cleanupWebTransportState(state, errorMessage(error));
+    const failure = webTransportFailureOutcome(
+      `browser WebTransport failed during ready(): ${errorMessage(error)}`,
+    );
+    cleanupWebTransportState(state, errorMessage(error), failure);
     settleWebTransportTask(
       handle,
-      webTransportFailureOutcome(
-        `browser WebTransport failed during ready(): ${errorMessage(error)}`,
-      ),
+      failure,
       consumerVersion,
     );
   });
@@ -5198,12 +5288,13 @@ function createBrowserWebTransportState(
       if (state.settled) {
         return;
       }
-      cleanupWebTransportState(state, errorMessage(error));
+      const failure = webTransportFailureOutcome(
+        `browser WebTransport closed with error: ${errorMessage(error)}`,
+      );
+      cleanupWebTransportState(state, errorMessage(error), failure);
       settleWebTransportTask(
         handle,
-        webTransportFailureOutcome(
-          `browser WebTransport closed with error: ${errorMessage(error)}`,
-        ),
+        failure,
         consumerVersion,
       );
     });
@@ -5561,7 +5652,7 @@ export class TaskHandle {
     if (tokenOrKind instanceof CancellationToken) {
       return tokenOrKind.cancel(this, consumerVersion);
     }
-    return taskCancel({ task: this.core, kind: tokenOrKind, message }, consumerVersion);
+    return cancelBrowserTask(this.core, tokenOrKind, message, consumerVersion);
   }
 }
 
@@ -5584,6 +5675,34 @@ export class WebTransportHandle {
 
   toJSON(): HandleRef {
     return this.core.toJSON();
+  }
+
+  /**
+   * Open a reliable bidirectional byte stream on this admitted session.
+   * All open streams and pending admissions share the core's bounded session
+   * capacity. Await a stream's `closed` promise to observe cleanup settlement
+   * after the synchronous session, scope, or runtime close methods.
+   */
+  openStream(): Promise<BrowserOutcome<WebTransportBidirectionalStream>> {
+    return SDK_WEBTRANSPORT_STREAMS.open({ session: this.core }, "bidirectional");
+  }
+
+  /** Open a reliable send-only stream; `finish()` sends its final byte boundary. */
+  openUnidirectionalStream(): Promise<BrowserOutcome<WebTransportWritableStream>> {
+    return SDK_WEBTRANSPORT_STREAMS.open({ session: this.core }, "unidirectional");
+  }
+
+  /**
+   * Wait for a peer-created bidirectional stream. `ok(null)` means the host's
+   * incoming collection reached EOF. Only one accept per direction may wait.
+   */
+  acceptBidirectionalStream(): Promise<BrowserOutcome<WebTransportBidirectionalStream | null>> {
+    return SDK_WEBTRANSPORT_STREAMS.accept({ session: this.core }, "bidirectional");
+  }
+
+  /** Wait for a peer-created receive-only stream, or `ok(null)` at collection EOF. */
+  acceptUnidirectionalStream(): Promise<BrowserOutcome<WebTransportReadableStream | null>> {
+    return SDK_WEBTRANSPORT_STREAMS.accept({ session: this.core }, "unidirectional");
   }
 
   async ready(
@@ -5731,8 +5850,9 @@ export class WebTransportHandle {
       return cancelOutcome;
     }
 
+    const terminal = webTransportCancellationOutcome(token.kind, token.message, "cancelling");
     try {
-      cleanupWebTransportState(state, token.message);
+      cleanupWebTransportState(state, token.message, terminal);
       state.session.close(token.message === undefined ? undefined : { reason: token.message });
     } catch (error) {
       return webTransportFailureOutcome(
@@ -5743,11 +5863,7 @@ export class WebTransportHandle {
     return collapseTaskOutcome(
       settleWebTransportTask(
         this.core,
-        webTransportCancellationOutcome(
-          token.kind,
-          token.message,
-          "cancelling",
-        ) as BrowserOutcome<WasmValue>,
+        terminal,
         consumerVersion,
       ),
     );
@@ -7920,12 +8036,10 @@ export class CancellationToken {
     task: TaskHandle | CoreTaskHandle | HandleRef,
     consumerVersion: AbiVersion | null = this.consumerVersion,
   ): BrowserOutcome<void> {
-    return taskCancel(
-      {
-        task: asCoreTaskHandle(task),
-        kind: this.kind,
-        message: this.message,
-      },
+    return cancelBrowserTask(
+      asCoreTaskHandle(task),
+      this.kind,
+      this.message,
       consumerVersion,
     );
   }

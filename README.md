@@ -2122,9 +2122,12 @@ promises and event loop; no Rust future is polled inside the wasm module.
   hashes the wasm binary built on 2026-06-19, the last recorded headless-browser
   runs date from March 2026, and no browser-engine test runs in CI; read the GA
   label as a package-integrity statement, not as fresh runtime evidence.
-- **Capability-gated browser transports**: shipped browser networking uses
-  `fetch`, `WebSocket`, and an explicit WebTransport datagram lane when the
-  host exposes `globalThis.WebTransport` over HTTPS.
+- **Capability-gated browser transports**: browser networking supports
+  `fetch`, `WebSocket`, and WebTransport datagrams plus reliable byte streams
+  when the host exposes `globalThis.WebTransport` over HTTPS. Existing sessions
+  can open bidirectional or send-only streams and accept server-initiated
+  bidirectional or receive-only streams. The high-level `WebTransportHandle`
+  and low-level `@asupersync/browser-core` facade share the same stream owner.
 - **Browser-native application-boundary helpers**: `@asupersync/browser` now
   exposes guarded `MessageChannel` / `MessagePort` / `BroadcastChannel` helpers
   and WHATWG `ReadableStream` / `WritableStream` byte wrappers. Construction
@@ -2161,6 +2164,37 @@ promises and event loop; no Rust future is polled inside the wasm module.
   event loop, and there is no wasm-side scheduler loop yet; `docs/WASM.md`
   tracks the lane pump as designed but not exposed.
 
+### Reliable WebTransport streams
+
+Given a live SDK `WebTransportHandle`, `openStream()` creates a bidirectional
+stream and `openUnidirectionalStream()` creates a send-only stream.
+`acceptBidirectionalStream()` and `acceptUnidirectionalStream()` receive one
+server-initiated stream, returning `Outcome.ok(null)` when that incoming
+collection ends. Each method reuses the existing authenticated session and
+owning task; it does not create another WebTransport connection.
+
+Stream `read()`, `write()`, `finish()`, and `cancel()` operations return typed
+Outcomes. One read and one write may run concurrently on a bidirectional stream;
+send-only and receive-only handles expose only their permitted operations.
+Writes copy at most 1 MiB and await host backpressure. Pending opens, pending
+accepts, and live streams share a 64-stream session limit. Only one accept may
+wait per direction, and the adapter does not prefetch incoming streams.
+
+Byte streams preserve order, not application message boundaries. `finish()`
+sends FIN after admitted writes; a bidirectional stream can still receive data
+afterward. Session cancellation and successful scope/runtime closure initiate
+child-stream cleanup. Await pending admission operations and each stream's
+`closed` promise to observe host cleanup settlement, including blocked writes
+and streams delivered after cancellation. These receipts cannot force a host
+promise that never settles to complete.
+
+The maintained Node regressions in
+`scripts/test_browser_webtransport_lifecycle.mjs` and
+`scripts/test_browser_sdk_webtransport_streams.mjs` exercise the actual JS/TS
+facades with native WHATWG streams and an intentional task-ABI recorder. They
+cover this host boundary; packaged WASM execution, browser-engine behavior,
+and live HTTP/3 interoperability require their separate integration lanes.
+
 ### What does not work yet
 
 - **Stable Rust-authored Browser Edition runtime lane**: external Rust
@@ -2187,7 +2221,7 @@ promises and event loop; no Rust future is polled inside the wasm module.
   cannot enable.
 - **Raw TCP/UDP, filesystem, process/signal**: these native-only surfaces
   are `cfg`-gated out on `wasm32`. Browser networking uses `fetch`,
-  `WebSocket`, and capability-gated `WebTransport` datagrams instead.
+  `WebSocket`, and capability-gated `WebTransport` datagrams and streams instead.
 - **Native host parity from browser-native helpers**: the public
   `MessageChannel` / `BroadcastChannel` / WHATWG stream helpers are guarded
   same-browser wrappers only. They do not imply raw transport parity,
