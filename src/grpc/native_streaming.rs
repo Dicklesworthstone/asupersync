@@ -515,9 +515,9 @@ impl ResponseState {
             if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(Status::internal("malformed grpc-status"));
             }
-            let code = raw.parse::<i32>().ok().and_then(Code::from_i32)
+            let code = raw.parse::<i32>().ok().map(Code::from_i32)
                 .ok_or_else(|| Status::internal("unknown grpc-status"))?;
-            let message = message.map(super::status::percent_decode_grpc_message).transpose()?.unwrap_or_default();
+            let message = message.map(super::status::percent_decode_grpc_message).transpose().map_err(GrpcError::into_status)?.unwrap_or_default();
             self.status = Some(match details {
                 Some(details) => Status::with_details(code, message, decode_binary(details)?),
                 None => Status::new(code, message),
