@@ -236,12 +236,11 @@ impl SparseWriter {
                 size: chunk.size,
             });
         }
-        state.expected_size = Some(size);
-
         // Trigger preallocation if enabled and file is open
         if self.config.enable_preallocation && state.temp_file.is_some() {
             self.preallocate_internal(&mut state, size)?;
         }
+        state.expected_size = Some(size);
 
         Ok(())
     }
@@ -1273,6 +1272,50 @@ mod tests {
             let stats = writer.get_stats();
             // Note: actual preallocation depends on platform support
             assert!(stats.allocated_size <= 1024 * 1024);
+        });
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn failed_preallocation_preserves_expected_size_and_completion() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let mut writer = SparseWriter::new(
+                &cx,
+                test_object_id("failed-preallocation"),
+                unique_temp_path("failed_preallocation"),
+                SparseWriterConfig {
+                    enable_preallocation: true,
+                    ..SparseWriterConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            Arc::make_mut(&mut writer.platform)
+                .filesystem
+                .supports_preallocation = true;
+            writer.set_expected_size(4).unwrap();
+            writer
+                .write_chunk(&cx, 0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+            assert!(writer.is_complete());
+            let before = writer.get_stats();
+            assert!(matches!(
+                writer.set_expected_size(u64::MAX),
+                Err(SparseWriterError::PreallocationTooLarge { size: u64::MAX })
+            ));
+            let state = writer.lock_state();
+            assert_eq!(state.expected_size, Some(4));
+            assert_eq!(
+                std::fs::read(state.temp_path.as_ref().unwrap()).unwrap(),
+                b"data"
+            );
+            drop(state);
+            assert!(writer.is_complete());
+            let after = writer.get_stats();
+            assert_eq!(before.allocated_size, after.allocated_size);
+            assert_eq!(before.total_bytes_written, after.total_bytes_written);
         });
     }
 
