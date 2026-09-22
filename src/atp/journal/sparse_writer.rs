@@ -221,9 +221,21 @@ impl SparseWriter {
         self.state.lock()
     }
 
-    /// Set expected final size for preallocation
+    /// Set expected final size for preallocation.
+    /// Reject sizes that would exclude an already-written chunk.
     pub fn set_expected_size(&self, size: u64) -> Result<(), SparseWriterError> {
         let mut state = self.lock_state();
+        if let Some(chunk) = state.written_chunks.values().find(|chunk| {
+            chunk
+                .offset
+                .checked_add(chunk.size)
+                .is_none_or(|end| end > size)
+        }) {
+            return Err(SparseWriterError::InvalidRange {
+                offset: chunk.offset,
+                size: chunk.size,
+            });
+        }
         state.expected_size = Some(size);
 
         // Trigger preallocation if enabled and file is open
@@ -1161,6 +1173,56 @@ mod tests {
             assert!(writer.is_complete());
             writer.verify(&cx, &manifest).await.unwrap();
             assert_eq!(std::fs::read(&temp_path).unwrap(), content);
+        });
+    }
+
+    #[test]
+    fn expected_size_cannot_exclude_previously_written_bytes() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let writer = SparseWriter::new(
+                &cx,
+                test_object_id("resize-boundary"),
+                unique_temp_path("resize_boundary"),
+                SparseWriterConfig {
+                    enable_preallocation: false,
+                    ..SparseWriterConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            writer
+                .write_chunk(&cx, 4, b"efgh", WriteOptions::default())
+                .await
+                .unwrap();
+            assert!(writer.set_expected_size(4).is_err());
+            assert_eq!(writer.lock_state().expected_size, None);
+            writer.set_expected_size(8).unwrap();
+            let path = writer.lock_state().temp_path.clone().unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            for size in [0, 4, 7] {
+                assert!(matches!(
+                    writer.set_expected_size(size),
+                    Err(SparseWriterError::InvalidRange { offset: 4, size: 4 })
+                ));
+                assert_eq!(writer.lock_state().expected_size, Some(8));
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(writer.get_stats().total_bytes_written, 4);
+                assert!(!writer.is_complete());
+            }
+            writer
+                .write_chunk(&cx, 0, b"abcd", WriteOptions::default())
+                .await
+                .unwrap();
+            assert!(writer.is_complete());
+            writer.set_expected_size(12).unwrap();
+            assert!(!writer.is_complete());
+            writer
+                .write_chunk(&cx, 8, b"ijkl", WriteOptions::default())
+                .await
+                .unwrap();
+            assert!(writer.is_complete());
+            assert_eq!(std::fs::read(path).unwrap(), b"abcdefghijkl");
         });
     }
 
