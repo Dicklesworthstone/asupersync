@@ -128,9 +128,7 @@ impl RecoveryContext {
             self.stats.duplicates_skipped += 1;
             return Ok(false);
         }
-        self.seen_records.insert(fingerprint);
-
-        match record {
+        let result = match record {
             JournalRecord::Offer {
                 transfer_id,
                 total_size,
@@ -254,7 +252,14 @@ impl RecoveryContext {
                 self.ensure_transfer(transfer_id);
                 Ok(true)
             }
+        };
+        // A rejected transition has not been applied. Do not suppress a later
+        // retry after its prerequisite arrives, or count another rejection as
+        // a successfully deduplicated record.
+        if result.is_ok() {
+            self.seen_records.insert(fingerprint);
         }
+        result
     }
 
     /// Finalize recovery and return reconstructed state.
@@ -864,6 +869,50 @@ mod tests {
         let (_, stats) = ctx.finalize();
         assert_eq!(stats.total_records, 2);
         assert_eq!(stats.duplicates_skipped, 1);
+    }
+
+    #[test]
+    fn rejected_record_remains_retryable_until_successfully_applied() {
+        let mut ctx = RecoveryContext::new();
+        let key = test_auth_key();
+        let transfer_id = "retry-rejected".to_string();
+        let verified = signed_record(JournalRecord::ChunkVerified {
+            transfer_id: transfer_id.clone(),
+            chunk_offset: 0,
+            chunk_size: 1024,
+            verified_hash: [7; 32],
+            timestamp: 3000,
+            auth_tag: unsigned_tag(),
+        });
+
+        // The real replay adapter skips invalid transitions, preserving later
+        // records. Repeating a rejected record must still count as rejection.
+        process_recovery_record(&mut ctx, &verified, &key).unwrap();
+        process_recovery_record(&mut ctx, &verified, &key).unwrap();
+        assert_eq!(ctx.stats.corrupted_skipped, 2);
+        assert_eq!(ctx.stats.duplicates_skipped, 0);
+
+        let received = signed_record(JournalRecord::ChunkReceived {
+            transfer_id: transfer_id.clone(),
+            chunk_offset: 0,
+            chunk_size: 1024,
+            chunk_hash: [7; 32],
+            timestamp: 2000,
+            auth_tag: unsigned_tag(),
+        });
+        process_recovery_record(&mut ctx, &received, &key).unwrap();
+        assert!(ctx.process_record(&verified, &key).unwrap());
+        assert!(!ctx.process_record(&verified, &key).unwrap());
+
+        let (bitmaps, stats) = ctx.finalize();
+        assert_eq!(stats.total_records, 5);
+        assert_eq!(stats.corrupted_skipped, 2);
+        assert_eq!(stats.duplicates_skipped, 1);
+        assert_eq!(stats.chunks_recovered, 1);
+        assert_eq!(
+            bitmaps[&transfer_id].get_chunk_state(0),
+            Some(ChunkState::Verified)
+        );
     }
 
     #[test]
