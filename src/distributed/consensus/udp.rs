@@ -410,7 +410,15 @@ mod tests {
                 let mut node = AuthenticatedPbftNode::new(
                     PbftConfig::new(4, 1).unwrap(), wire, authority, Application::default(),
                 ).unwrap();
-                let stop = Cx::detached_cancel_context();
+                // `receive_one` uses this context only as a cancel token
+                // (`until_stopped`); the socket recv parks on the ambient
+                // reactor, not on `cx`. A full-cap testing context supplies the
+                // independent cancel node this branch needs while satisfying
+                // `receive_one(&Cx)`, mirroring driver.rs
+                // `parked_receive_is_woken_by_cancellation_and_its_future_is_dropped`.
+                // `Cx::detached_cancel_context()` is `Cx<cap::None>` and does
+                // not type-check against the full-cap `&Cx` parameter.
+                let stop = Cx::for_testing();
                 {
                     let mut receive = Box::pin(node.receive_one(&stop));
                     let wakes = Arc::new(AtomicUsize::new(0));
