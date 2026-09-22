@@ -6297,6 +6297,18 @@ impl RemoteComputationClient {
         cx: &Cx,
         request: &RemoteServiceWireRequest,
     ) -> Result<RemoteServiceWireResponse, RemoteComputationClientAttemptError> {
+        if request.hello().protocol_version() == RemoteProtocolVersion::V3 {
+            // V3 sends an Accepted/Terminal session envelope, not the bare
+            // V1/V2 response. Retain the session's framed decoder through
+            // terminal collection so buffered events are not discarded.
+            return match self.start_session_once(endpoint, cx, request).await? {
+                RemoteComputationSessionStart::Running(session) => session
+                    .wait(cx)
+                    .await
+                    .map_err(RemoteComputationClientAttemptError::Session),
+                RemoteComputationSessionStart::Terminal(response) => Ok(response),
+            };
+        }
         let stream = TcpStreamBuilder::new(endpoint)
             .connect_timeout(self.config.connect_timeout)
             .nodelay(self.config.tcp_nodelay)
