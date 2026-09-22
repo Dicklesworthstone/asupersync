@@ -332,3 +332,9 @@ impl CompiledSupervisor {
 
 #[cfg(test)]
 mod tests;
+
+mod launch;
+pub use launch::{
+    InitializedExit, InitializedStartCause, InitializedStartConfig, InitializedStartError,
+    InitializedSupervisor, RunningInitializedSupervisor,
+};
