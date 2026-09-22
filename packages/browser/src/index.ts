@@ -3645,17 +3645,6 @@ function decodeBrowserStorageSegment(
   value: string,
   globalObject: Record<string, unknown> | undefined,
 ): string | null {
-  const decoded = decodeBrowserStorageBytes(value, globalObject);
-  if (decoded === null) {
-    return null;
-  }
-  return browserTextDecoder(globalObject).decode(decoded);
-}
-
-function decodeCanonicalIndexedDbStorageSegment(
-  value: string,
-  globalObject: Record<string, unknown> | undefined,
-): string | null {
   try {
     const decoded = decodeBrowserStorageBytes(value, globalObject);
     if (decoded === null) {
@@ -3867,7 +3856,7 @@ function decodeIndexedDbStorageKey(
   if (!encoded.startsWith(prefix)) {
     return null;
   }
-  return decodeCanonicalIndexedDbStorageSegment(encoded.slice(prefix.length), globalObject);
+  return decodeBrowserStorageSegment(encoded.slice(prefix.length), globalObject);
 }
 
 function encodeLocalStorageKey(
@@ -3895,6 +3884,34 @@ function decodeLocalStorageKey(
     return null;
   }
   return decodeBrowserStorageSegment(encoded.slice(prefix.length), globalObject);
+}
+
+function clearLocalStorageNamespace(
+  storage: Storage,
+  namespace: string,
+  globalObject: Record<string, unknown> | undefined,
+): number {
+  const prefix = localStorageNamespacePrefix(namespace, globalObject);
+  const rawKeys: string[] = [];
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index);
+    if (key !== null && key.startsWith(prefix)) {
+      rawKeys.push(key);
+    }
+  }
+
+  // Recovery must remove the actual persisted keys, including corrupt and
+  // noncanonical encodings. Deleting logical re-encodings leaves those behind.
+  // Keep enumeration and deletion synchronous so same-turn clears cannot
+  // both report a stale snapshot; other browser contexts remain independent.
+  let removed = 0;
+  for (const key of rawKeys) {
+    if (storage.getItem(key) !== null) {
+      storage.removeItem(key);
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 function browserStorageLabel(backend: BrowserStorageBackend): string {
@@ -6020,11 +6037,7 @@ export class BrowserStorage {
       if (!storage) {
         throw createBrowserStorageUnsupportedError(this.diagnostics());
       }
-      const keys = await this.listKeys(normalizedNamespace);
-      for (const key of keys) {
-        storage.removeItem(encodeLocalStorageKey(normalizedNamespace, key, this.globalObject));
-      }
-      return keys.length;
+      return clearLocalStorageNamespace(storage, normalizedNamespace, this.globalObject);
     } catch (error) {
       throw createBrowserStorageOperationError(
         createBrowserStorageOperationDiagnostics(
@@ -7536,18 +7549,12 @@ export class BrowserServiceWorkerBrokerStore {
     }
 
     try {
-      const keys = await this.listNamespaceKeys(operation);
-      if (keys.length === 0) {
-        return 0;
-      }
+      this.assertSupported();
       const storage = browserLocalStorage(this.globalObject);
       if (!storage) {
         throw new Error("localStorage is unavailable in this browser/runtime");
       }
-      for (const key of keys) {
-        storage.removeItem(encodeLocalStorageKey(this.namespace, key, this.globalObject));
-      }
-      return keys.length;
+      return clearLocalStorageNamespace(storage, this.namespace, this.globalObject);
     } catch (error) {
       throw this.operationError(operation, "storage_failed", errorMessage(error));
     }
