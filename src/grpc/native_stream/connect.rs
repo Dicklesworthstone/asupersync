@@ -8,6 +8,8 @@ use crate::cx::{CancelWakerToken, Cx};
 use crate::grpc::codec::Codec;
 use crate::grpc::{Request, Status};
 use crate::net::TcpStream;
+#[cfg(feature = "tls")]
+use crate::tls::{TlsConnector, TlsStream};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::Time;
 use std::future::{Future, poll_fn};
@@ -23,7 +25,7 @@ use std::time::Duration;
 /// no detached tasks. Each call owns a fresh TCP connection. The address chooses
 /// where bytes go; the authority is an HTTP routing label, not authentication.
 ///
-/// The setup timeout covers dialing, codec setup and initial response headers.
+/// The setup timeout covers dialing, optional TLS, codec setup and initial headers.
 /// It is separate from the optional whole-call timeout: a Watch with no call
 /// deadline can continue after successful setup. Every phase observes one
 /// absolute setup deadline, met with the request and caller's whole-call bound.
@@ -112,6 +114,96 @@ impl NativeStreamEndpoint {
         let mut stream = NativeServerStream::new_admitted(
             cx, io, &self.authority, path, request, codec, config, Some(admitted),
         )?;
+        setup.run(async { stream.headers().await.map(|_| ()) }).await?;
+        Ok(stream)
+    }
+
+    /// Connect with a caller-owned TLS policy and require negotiated HTTP/2.
+    ///
+    /// The resolved address selects the socket, `server_name` selects the TLS
+    /// identity, and the endpoint's authority selects HTTP routing. The supplied
+    /// connector retains its certificate, client-authentication and pinning
+    /// policy; no trust store or verifier is substituted here. Configure it to
+    /// offer `h2` ALPN. TLS success without `h2` refuses before any gRPC bytes.
+    /// This method accepts only the `https` scheme and never retries plaintext.
+    ///
+    /// One setup deadline covers TCP, handshake, codec setup and initial headers.
+    /// The original whole-call deadline then remains on the returned stream,
+    /// including time spent connecting. With no whole-call deadline, a Watch
+    /// may outlive the setup interval after its headers have arrived. A shorter
+    /// timeout configured on the TLS connector remains effective too.
+    ///
+    /// Each stage is polled under the explicit `cx`, not an unrelated ambient
+    /// task. Dropping setup retires its acquired transport, without cancelling
+    /// the parent or promising acknowledged remote cleanup. Synchronous codec
+    /// callbacks cannot be preempted; late results are rejected at the boundary.
+    /// Existing plaintext and preconnected-transport APIs are unchanged.
+    ///
+    /// # Errors
+    /// Invalid scheme, server name, configuration, metadata or missing explicit
+    /// capabilities refuse before dialing. TLS/certificate/ALPN failures return
+    /// `UNAVAILABLE`; observed cancellation or elapsed setup takes precedence.
+    /// A successful return proves initial headers, not a successful RPC: consume
+    /// `message()` through the terminal status as for [`Self::connect_tcp`].
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, bytes::Bytes, tls::TlsConnector};
+    /// use asupersync::grpc::{Request, Status, codec::IdentityCodec};
+    /// use asupersync::grpc::native_stream::{NativeStreamEndpoint, NativeStreamConfig};
+    /// use std::time::Duration;
+    ///
+    /// async fn watch(cx: &Cx, connector: &TlsConnector) -> Result<(), Status> {
+    ///     // The deployment supplies the resolved address and trust policy.
+    ///     let endpoint = NativeStreamEndpoint::new(
+    ///         "127.0.0.1:8443".parse().unwrap(), "service.example:8443",
+    ///         Duration::from_secs(5),
+    ///     )?;
+    ///     let mut stream = endpoint.connect_tls(
+    ///         cx, "service.example", connector, "/example.Service/Watch",
+    ///         Request::new(Bytes::new()), IdentityCodec,
+    ///         NativeStreamConfig { scheme: "https", ..Default::default() },
+    ///     ).await?;
+    ///     while let Some(message) = stream.message().await? {
+    ///         cx.trace(&format!("received {} bytes", message.len()));
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    #[cfg(feature = "tls")]
+    #[allow(clippy::too_many_arguments)] // Keep TLS authority explicit at this boundary.
+    pub async fn connect_tls<C: Codec>(
+        &self,
+        cx: &Cx,
+        server_name: &str,
+        connector: &TlsConnector,
+        path: &str,
+        request: Request<C::Encode>,
+        codec: C,
+        config: NativeStreamConfig,
+    ) -> Result<NativeServerStream<TlsStream<TcpStream>, C>, Status> {
+        if config.scheme != "https" {
+            return Err(Status::invalid_argument("TLS streaming requires the https scheme"));
+        }
+        TlsConnector::validate_domain(server_name)
+            .map_err(|_| Status::invalid_argument("invalid gRPC TLS server name"))?;
+        let (admitted, mut setup) = self.admit(cx, path, &request, &config)?;
+        let remaining = setup.remaining();
+        let tcp = setup.run(async {
+            TcpStream::connect_timeout(self.address, remaining).await.map_err(io_status)
+        }).await?;
+        let tls = setup.run(async {
+            let tls = connector.connect(server_name, tcp).await
+                .map_err(|_| Status::unavailable("native gRPC TLS handshake failed"))?;
+            if tls.alpn_protocol() != Some(b"h2".as_slice()) {
+                return Err(Status::unavailable("native gRPC TLS peer did not negotiate h2"));
+            }
+            Ok(tls)
+        }).await?;
+        let mut stream = setup.run(async {
+            NativeServerStream::new_admitted(
+                cx, tls, &self.authority, path, request, codec, config, Some(admitted),
+            )
+        }).await?;
         setup.run(async { stream.headers().await.map(|_| ()) }).await?;
         Ok(stream)
     }
@@ -213,3 +305,6 @@ impl Drop for Setup {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "tls"))]
+mod tls_tests;
