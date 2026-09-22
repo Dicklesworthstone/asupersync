@@ -2030,9 +2030,9 @@ impl HttpClient {
                 default_headers
                     .iter()
                     .filter(|(name, _)| {
-                        !name.eq_ignore_ascii_case("host")
-                            && !has_header(extra_headers, name)
-                            && !(cross_origin && is_sensitive_redirect_header(name))
+                        !(name.eq_ignore_ascii_case("host")
+                            || has_header(extra_headers, name)
+                            || cross_origin && is_sensitive_redirect_header(name))
                     })
                     .cloned(),
             )

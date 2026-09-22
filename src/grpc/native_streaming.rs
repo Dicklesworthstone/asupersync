@@ -187,7 +187,7 @@ where
             connection,
             frames: FrameCodec::new(),
             inbound: BytesMut::new(),
-            outbound: BytesMut::from(&CLIENT_PREFACE[..]),
+            outbound: BytesMut::from(CLIENT_PREFACE),
             written: 0,
             body: BytesMut::new(),
             codec: Box::new(codec),
@@ -489,7 +489,7 @@ impl ResponseState {
             if code != 200 { return Err(http_status(code)); }
             let content = unique(&headers, "content-type")?.unwrap_or("");
             let media = content.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-            if media != "application/grpc" && !media.strip_prefix("application/grpc+").is_some_and(|suffix| !suffix.is_empty()) {
+            if media != "application/grpc" && media.strip_prefix("application/grpc+").is_none_or(|suffix| suffix.is_empty()) {
                 return Err(Status::internal("response is not native gRPC"));
             }
             if let Some(encoding) = unique(&headers, "grpc-encoding")? {

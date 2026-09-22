@@ -154,9 +154,11 @@ impl<C> ResourceCleanupReport<C> {
 struct Active<C> { index: usize, future: EvaluatedRelease<C> }
 
 /// Exclusive owner of heterogeneous `Send` resources; neither Clone nor Sync is
-/// required on those resources or their cleanup errors. Registration metadata and
-/// result slots are reserved BEFORE a slot is returned. Resource/future boxes and
-/// caller payload memory are separate from the registration-count bound.
+/// required on those resources or their cleanup errors.
+///
+/// Registration metadata and result slots are reserved BEFORE a slot is returned.
+/// Resource/future boxes and caller payload memory are separate from the
+/// registration-count bound.
 #[must_use = "close after quiescence; Drop does not perform asynchronous release"]
 pub struct ResourceStack<C> {
     owner: Arc<()>,

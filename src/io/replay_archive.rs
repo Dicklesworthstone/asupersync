@@ -40,9 +40,11 @@ const OVERHEAD: usize = HEADER + TAG;
 const SESSION: u8 = 1;
 const ORDERED: u8 = 2;
 
-/// Expected external identity of a replay archive. These are public commitments,
-/// not secret values or attestations. Compare against trusted caller metadata,
-/// not identities copied from the untrusted envelope being opened.
+/// Expected external identity of a replay archive.
+///
+/// These are public commitments, not secret values or attestations. Compare
+/// against trusted caller metadata, not identities copied from the untrusted
+/// envelope being opened.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ReplayArchiveBinding {
     /// Caller-defined fingerprint of source/build/configuration and capture scope.
@@ -310,8 +312,10 @@ impl ReplayArchiveSealer {
 }
 
 /// Ciphertext ready for caller-controlled storage/transport, not an implicitly
-/// persisted file. Debug is size-only; temporary plaintext in this owner is
-/// zeroized even when sealing fails. Caller copies are outside its ownership.
+/// persisted file.
+///
+/// Debug is size-only; temporary plaintext in this owner is zeroized even when
+/// sealing fails. Caller copies are outside its ownership.
 pub struct EncryptedReplayArchive(Zeroizing<Vec<u8>>);
 
 impl fmt::Debug for EncryptedReplayArchive {
