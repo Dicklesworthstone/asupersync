@@ -63,7 +63,8 @@ impl NativeStreamEndpoint {
 
     /// Connect over plaintext TCP and wait for the response's initial headers.
     ///
-    /// Requires I/O and a timer driver on the explicit `cx`. Another task's
+    /// Requires a native I/O driver, an enabled I/O capability mask, and a timer
+    /// driver on the explicit `cx`; no virtual `IoCap` is needed. Another task's
     /// ambient context cannot supply either. Configuration and metadata are
     /// validated before dialing; user codec encoding runs after connection and
     /// before sending request bytes. An encoding error closes that connection.
@@ -216,7 +217,12 @@ impl NativeStreamEndpoint {
         config: &NativeStreamConfig,
     ) -> Result<(CallDeadline, Setup), Status> {
         check_cancellation(cx)?;
-        if !cx.has_io() || cx.io_driver_handle().is_none() {
+        // Native tasks carry a reactor, not the optional virtual/browser IoCap.
+        // The raw driver accessor is also used for inheritance and does not
+        // apply attenuation, so require the explicit context's IO mask here.
+        if !cx.runtime_mask.has(crate::cx::cap::CapMask::IO)
+            || cx.io_driver_handle().is_none()
+        {
             return Err(Status::failed_precondition("native streaming connect requires explicit I/O authority"));
         }
         let clock = cx.timer_driver().ok_or_else(|| {

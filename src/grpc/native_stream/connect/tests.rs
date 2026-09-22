@@ -149,7 +149,7 @@ fn admitted_call_keeps_original_deadline_and_forwards_only_remaining_time() {
     assert!(matches!(connection.next_frame(), Some(Frame::Settings(_))));
     let Some(Frame::Headers(head)) = connection.next_frame() else { panic!("request HEADERS") };
     let headers = HpackDecoder::new().decode(&mut head.header_block.clone()).unwrap();
-    assert_eq!(headers.iter().find(|head| head.name == "grpc-timeout").unwrap().value, "6000000u");
+    assert_eq!(headers.iter().find(|head| head.name == "grpc-timeout").unwrap().value, "6S");
     drop(stream);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     assert!(!cx.is_cancel_requested());
@@ -234,6 +234,8 @@ fn native_endpoint_dials_health_watch_and_closes_its_owned_connection() {
             let client = handle.spawn(async move {
                 let _stop = stop;
                 let cx = Cx::current().unwrap();
+                assert!(!cx.has_io(), "native task must not need a virtual IoCap");
+                assert!(cx.io_driver_handle().is_some(), "actual native reactor");
                 let mut request = Request::new(Bytes::from_static(b"\x0a\x03svc"));
                 assert!(request.metadata_mut().insert("authorization", "Bearer endpoint-secret"));
                 let mut stream = endpoint.connect_tcp(&cx, "/grpc.health.v1.Health/Watch", request,
@@ -342,5 +344,82 @@ fn native_cancel_and_dropped_setup_retire_a_witnessed_pending_header_wait() {
             });
             peer.join().expect("peer observed setup connection retirement");
         }
+    }
+}
+
+// has_io() census at 98ec112d: cx.rs tests/docs and the capability conformance
+// tests query the optional IoCap; methodology_baselines benchmarks that query.
+// NativeStreamEndpoint needs native reactor authority instead. ATP rendezvous
+// has four separate logical candidate-policy uses, not gRPC transport checks.
+// Keep that distinction: globally broadening has_io() would change virtual and
+// browser semantics and would still fail to enforce the runtime IO mask.
+#[test]
+fn native_admission_uses_reactor_authority_without_a_virtual_provider() {
+    for multithread in [false, true] {
+        runtime_case(multithread, move |cx| async move {
+            assert!(!cx.has_io(), "normal native task has no optional virtual IoCap");
+            assert!(cx.io_driver_handle().is_some());
+            let endpoint = NativeStreamEndpoint::new(
+                "127.0.0.1:50051".parse().unwrap(), "localhost", Duration::from_secs(3),
+            ).unwrap();
+            let admitted = endpoint.admit(
+                &cx, "/svc/Watch", &Request::new(Bytes::new()), &NativeStreamConfig::default(),
+            );
+            assert!(admitted.is_ok(), "native task must pass admission: {:?}", admitted.err());
+            assert!(!cx.is_cancel_requested());
+            eprintln!("scenario=native-grpc-admission workers={} virtual_io=false native_io=true admitted=true", if multithread { 2 } else { 1 });
+        });
+    }
+}
+
+#[test]
+fn native_dial_refuses_missing_or_masked_authority_before_opening_a_socket() {
+    use crate::cx::cap::CapSet;
+    type NoIo = CapSet<true, true, true, false, true>;
+    type NoTime = CapSet<true, false, true, true, true>;
+    for multithread in [false, true] {
+        runtime_case(multithread, move |cx| async move {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = NativeStreamEndpoint::new(
+                listener.local_addr().unwrap(), "localhost", Duration::from_secs(3),
+            ).unwrap();
+            // Obtain the restricted All-typed context through the public ambient
+            // path. The raw reactor handle is retained for inheritance; only
+            // the effective mask can prevent it from authorizing a new dial.
+            let no_io = {
+                let _guard = cx.clone().restrict::<NoIo>().set_current_restricted();
+                Cx::current().unwrap()
+            };
+            let no_time = {
+                let _guard = cx.clone().restrict::<NoTime>().set_current_restricted();
+                Cx::current().unwrap()
+            };
+            assert!(no_io.io_driver_handle().is_some());
+            assert!(no_time.io_driver_handle().is_some());
+            assert!(no_io.timer_driver().is_some());
+            let timer_only = virtual_cx().0;
+            let virtual_only = Cx::for_testing_with_io();
+            assert!(virtual_only.has_io());
+            assert!(virtual_only.io_driver_handle().is_none());
+            for (scenario, explicit, message) in [
+                ("masked-io", no_io, "native streaming connect requires explicit I/O authority"),
+                ("timer-only", timer_only, "native streaming connect requires explicit I/O authority"),
+                ("virtual-only", virtual_only, "native streaming connect requires explicit I/O authority"),
+                ("masked-time", no_time, "native streaming setup requires an explicit timer driver"),
+            ] {
+                // Poll under the still fully-authorized native context. It
+                // must not fill in the explicit caller's missing authority.
+                let error = ready(endpoint.connect_tcp(
+                    &explicit, "/svc/Watch", Request::new(Bytes::new()),
+                    IdentityCodec, NativeStreamConfig::default(),
+                )).unwrap_err();
+                assert_eq!(error.code(), Code::FailedPrecondition, "{scenario}");
+                assert_eq!(error.message(), message, "{scenario}");
+                assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock), "{scenario}: refused dial reached listener");
+                assert!(!cx.is_cancel_requested());
+                eprintln!("scenario={scenario} outcome=failed-precondition accepted_connections=0");
+            }
+        });
     }
 }
