@@ -6051,6 +6051,25 @@ impl Drop for RuntimeInner {
             for handle in handles {
                 let _ = handle.join();
             }
+            // Diagnostics and retained contexts can keep state alive after the
+            // runtime dies. Explicitly detach stopped task ownership, then let
+            // TaskTable retire futures/records and release join barriers outside
+            // every runtime and shard lock. Keep the tables owned through mailbox
+            // denial dispatch, including if that dispatch unwinds.
+            let retired_tasks = {
+                let mut state = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let unified = std::mem::take(&mut state.tasks);
+                let sharded = sharded_state.as_ref().map(|sharded| {
+                    let mut tasks = sharded
+                        .tasks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    std::mem::take(&mut *tasks)
+                });
+                (unified, sharded)
+            };
             if let Some(mailbox) = gateway_mailbox {
                 let mut cancelled = Vec::new();
                 while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
@@ -6066,6 +6085,7 @@ impl Drop for RuntimeInner {
                         .resolve_failed(SpawnError::RuntimeUnavailable);
                 }
             }
+            drop(retired_tasks);
             drop(sharded_state);
             drop(state);
         };
@@ -6662,6 +6682,129 @@ mod tests {
         finished_rx.try_recv().expect("teardown ran exactly once");
         assert!(finished_rx.try_recv().is_err());
         assert!(weak_payload.upgrade().is_none());
+    }
+
+    #[test]
+    fn runtime_teardown_releases_parked_task_join_barriers() {
+        struct Retired(Arc<AtomicBool>);
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        struct JoinWake {
+            signal: std::sync::mpsc::SyncSender<()>,
+            state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        }
+        impl std::task::Wake for JoinWake {
+            fn wake(self: Arc<Self>) {
+                let state = self
+                    .state
+                    .try_lock()
+                    .expect("join wake must run outside the state lock");
+                assert!(
+                    state.tasks.is_empty(),
+                    "stopped tasks must be detached even when state is retained"
+                );
+                drop(state);
+                let _ = self.signal.try_send(());
+            }
+        }
+
+        for (workers, sharded) in [(1, false), (1, true), (2, false), (2, true)] {
+            for background in [false, true] {
+                let runtime = if workers == 1 {
+                    RuntimeBuilder::current_thread()
+                        .with_sharded_state(sharded)
+                        .build()
+                        .unwrap()
+                } else {
+                    RuntimeBuilder::multi_thread()
+                        .worker_threads(workers)
+                        .with_sharded_state(sharded)
+                        .build()
+                        .unwrap()
+                };
+                let retired = Arc::new(AtomicBool::new(false));
+                let parked = Arc::new(AtomicBool::new(false));
+                let changed = Arc::new(crate::sync::Notify::new());
+                let mut handle = runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let child_retired = Arc::clone(&retired);
+                    let child_parked = Arc::clone(&parked);
+                    let child_changed = Arc::clone(&changed);
+                    let handle = cx
+                        .spawn(move |_| async move {
+                            let _retired = Retired(child_retired);
+                            std::future::poll_fn(|_| {
+                                if !child_parked.swap(true, Ordering::AcqRel) {
+                                    child_changed.notify_waiters();
+                                }
+                                Poll::<()>::Pending
+                            })
+                            .await;
+                        })
+                        .unwrap();
+                    crate::time::timeout(
+                        cx.now(),
+                        Duration::from_secs(5),
+                        changed.wait_until(|| parked.load(Ordering::Acquire)),
+                    )
+                    .await
+                    .expect("child must park without waking itself");
+                    handle
+                });
+                let (woken, wake) = std::sync::mpsc::sync_channel(1);
+                let waker = Waker::from(Arc::new(JoinWake {
+                    signal: woken,
+                    state: Arc::clone(&runtime.inner.state),
+                }));
+                assert!(
+                    handle
+                        .poll_join(&mut Context::from_waker(&waker))
+                        .is_pending()
+                );
+                assert!(!handle.is_finished());
+                assert!(!retired.load(Ordering::Acquire));
+                let started = Instant::now();
+                eprintln!(
+                    "teardown_join workers={workers} sharded={sharded} background={background} task={:?} parked=true trigger=shutdown",
+                    handle.task_id()
+                );
+                if background {
+                    let _ = runtime.shutdown_timeout(Duration::ZERO);
+                } else {
+                    drop(runtime);
+                }
+                let wake_result = wake.recv_timeout(Duration::from_secs(5));
+                eprintln!(
+                    "teardown_join workers={workers} sharded={sharded} background={background} wake={wake_result:?} retired={} elapsed={:?}",
+                    retired.load(Ordering::Acquire),
+                    started.elapsed()
+                );
+                wake_result.expect("runtime teardown must wake the parked join consumer");
+                assert!(
+                    retired.load(Ordering::Acquire),
+                    "task future must retire before join wakes"
+                );
+                assert!(
+                    handle.is_finished(),
+                    "retired task must be observably finished"
+                );
+                let observer = RuntimeBuilder::current_thread().build().unwrap();
+                let result = observer.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    crate::time::timeout(cx.now(), Duration::from_secs(5), handle.join(&cx))
+                        .await
+                        .expect("a different runtime must observe the terminal join")
+                });
+                assert!(
+                    matches!(&result, Err(crate::runtime::task_handle::JoinError::Cancelled(reason))
+                    if reason.kind == crate::types::CancelKind::Shutdown),
+                    "{result:?}"
+                );
+            }
+        }
     }
 
     #[test]
