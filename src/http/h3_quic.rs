@@ -13,7 +13,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::task::{Context as TaskContext, Poll};
+use std::num::NonZeroUsize;
+use std::task::{Context as TaskContext, Poll, Waker};
 
 use crate::bytes::Bytes;
 use crate::cx::Cx;
@@ -21,6 +22,10 @@ use crate::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError, decode_varint, encod
 use crate::net::quic_native::connection::NativeQuicConnectionError;
 use crate::net::quic_native::endpoint_api::QuicConnection;
 use crate::net::quic_native::streams::{StreamDirection, StreamId, StreamReadiness, StreamRole};
+
+#[path = "h3_receive_frame.rs"]
+mod receive_frame;
+use receive_frame::{DataFrameCursor, FrameHeader, FrameHeaderError};
 
 use super::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
@@ -37,6 +42,8 @@ pub const H3_REQUEST_CANCELLED: u64 = 0x010c;
 const H3_CONTROL_STREAM_TYPE: u64 = 0x00;
 const FRAME_HEADER_MAX_BYTES: usize = 16;
 const MAX_SPARSE_TERMINAL_STREAMS: usize = 4096;
+const STREAMING_READINESS_BATCH: usize = 32;
+const STREAMING_POLL_STEPS: usize = 32;
 
 /// Established-session composition errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +65,8 @@ pub enum NativeH3SessionError {
     TruncatedStream {
         /// Truncated stream.
         stream_id: StreamId,
-        /// Bytes left undecoded at FIN.
+        /// Bytes left undecoded at FIN. This can be zero in streaming mode
+        /// when a DATA header declared payload bytes that never arrived.
         buffered_bytes: usize,
     },
 }
@@ -133,7 +141,10 @@ pub enum NativeH3Event {
     Data {
         /// QUIC request stream.
         stream_id: StreamId,
-        /// Frame payload.
+        /// Frame payload. With [`NativeH3Session::enable_streaming_receive`],
+        /// this may be one bounded piece of a DATA frame whose remaining bytes
+        /// have not arrived yet. DATA frame boundaries are not preserved in
+        /// that opt-in mode; HTTP message completion still requires `Finished`.
         bytes: Bytes,
     },
     /// Peer sent GOAWAY on its control stream.
@@ -178,6 +189,16 @@ struct IncomingStream {
     bytes: Vec<u8>,
     header_blocks_seen: u8,
     final_response_headers_seen: bool,
+    data_frame: Option<DataFrameCursor>,
+}
+
+#[derive(Debug, Clone)]
+struct StreamingReceive {
+    max_chunk_bytes: NonZeroUsize,
+    ready: BTreeMap<StreamId, StreamReadiness>,
+    paused: BTreeSet<StreamId>,
+    poll_after: Option<StreamId>,
+    waker: Option<Waker>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,6 +264,7 @@ impl IncomingStream {
             bytes: Vec::new(),
             header_blocks_seen: 0,
             final_response_headers_seen: false,
+            data_frame: None,
         }
     }
 }
@@ -488,6 +510,7 @@ pub struct NativeH3Session {
     initialized: bool,
     closing: bool,
     next_local_request_stream_id: u64,
+    streaming_receive: Option<StreamingReceive>,
 }
 
 impl NativeH3Session {
@@ -525,7 +548,94 @@ impl NativeH3Session {
             initialized: false,
             closing: false,
             next_local_request_stream_id: 0,
+            streaming_receive: None,
         }
+    }
+
+    /// Enable bounded DATA delivery before initializing this session.
+    ///
+    /// Each native stream read and each emitted DATA event is bounded by
+    /// `max_chunk_bytes`. DATA can be delivered before the rest of its wire
+    /// frame arrives. HEADERS and other non-DATA frames retain the configured
+    /// `max_frame_payload_size` bound, and every DATA frame's declared length
+    /// is checked against that same limit before any payload is emitted.
+    ///
+    /// The session emits at most one application event per decoding step.
+    /// After observing HEADERS or DATA, callers can pause that request stream
+    /// while their bounded consumer is full. Pausing leaves further bytes in
+    /// QUIC, so receive credit grows only for bytes actually read; the parser
+    /// may retain at most one read's lookahead beyond an emitted event.
+    ///
+    /// This changes DATA event boundaries only for this explicit opt-in. The
+    /// default session continues to deliver complete DATA frames. Framing
+    /// validation remains session-owned; application message rules such as
+    /// Content-Length and request-body policy remain the caller's obligation.
+    pub fn enable_streaming_receive(
+        &mut self,
+        max_chunk_bytes: NonZeroUsize,
+    ) -> Result<(), NativeH3SessionError> {
+        if self.initialized {
+            return Err(NativeH3SessionError::InvalidState(
+                "streaming receive must be configured before initialization",
+            ));
+        }
+        self.streaming_receive = Some(StreamingReceive {
+            max_chunk_bytes,
+            ready: BTreeMap::new(),
+            paused: BTreeSet::new(),
+            poll_after: None,
+            waker: None,
+        });
+        Ok(())
+    }
+
+    /// Pause one decoded request/response stream without pausing its peers.
+    ///
+    /// Call after its initial HEADERS event. Further DATA, trailers and FIN
+    /// wait for [`Self::resume_request_stream`]. A peer reset or local receive
+    /// stop is still processed while paused. Critical control/QPACK streams
+    /// cannot be paused through this API.
+    pub fn pause_request_stream(
+        &mut self,
+        stream_id: StreamId,
+    ) -> Result<(), NativeH3SessionError> {
+        if !self.incoming.get(&stream_id).is_some_and(|stream| {
+            stream.kind == IncomingStreamKind::RequestResponse && stream.header_blocks_seen > 0
+        }) {
+            return Err(NativeH3SessionError::InvalidState(
+                "only an active decoded request stream can be paused",
+            ));
+        }
+        let streaming =
+            self.streaming_receive
+                .as_mut()
+                .ok_or(NativeH3SessionError::InvalidState(
+                    "streaming receive is not enabled",
+                ))?;
+        streaming.paused.insert(stream_id);
+        Ok(())
+    }
+
+    /// Resume a paused stream and wake the event consumer without a new packet.
+    ///
+    /// Returns whether the stream was paused. Resuming a stream already reset
+    /// or finished is a harmless no-op. Buffered readiness and a deferred FIN
+    /// remain owned by the session while the stream is paused.
+    pub fn resume_request_stream(
+        &mut self,
+        stream_id: StreamId,
+    ) -> Result<bool, NativeH3SessionError> {
+        let streaming =
+            self.streaming_receive
+                .as_mut()
+                .ok_or(NativeH3SessionError::InvalidState(
+                    "streaming receive is not enabled",
+                ))?;
+        let resumed = streaming.paused.remove(&stream_id);
+        if resumed && let Some(waker) = streaming.waker.take() {
+            waker.wake();
+        }
+        Ok(resumed)
     }
 
     /// Open the mandatory local control stream and queue SETTINGS first.
@@ -781,12 +891,27 @@ impl NativeH3Session {
     }
 
     /// Consume one already-buffered or immediately-readable event.
+    ///
+    /// In streaming mode this synchronous method may perform several bounded
+    /// reads to complete a non-DATA frame. Async drivers should use
+    /// [`Self::poll_event`], which also bounds decoding steps per poll and
+    /// arranges a wake when buffered work needs another turn.
     pub fn next_event(
         &mut self,
         cx: &Cx,
         connection: &mut QuicConnection,
     ) -> Result<Option<NativeH3Event>, NativeH3SessionError> {
         self.ensure_ready_for_messages(connection)?;
+        if self.streaming_receive.is_some() {
+            loop {
+                if let Some(event) = self.events.pop_front() {
+                    return Ok(Some(event));
+                }
+                if !self.drive_streaming_receive(cx, connection)? {
+                    return Ok(None);
+                }
+            }
+        }
         loop {
             if let Some(event) = self.events.pop_front() {
                 return Ok(Some(event));
@@ -808,6 +933,9 @@ impl NativeH3Session {
         if let Err(error) = self.ensure_ready_for_messages(connection) {
             return Poll::Ready(Err(error));
         }
+        if self.streaming_receive.is_some() {
+            return self.poll_streaming_event(cx, connection, task_cx);
+        }
         loop {
             if let Some(event) = self.events.pop_front() {
                 return Poll::Ready(Ok(event));
@@ -822,6 +950,184 @@ impl NativeH3Session {
             if let Err(error) = self.process_readiness(cx, connection, readiness) {
                 return Poll::Ready(Err(error));
             }
+        }
+    }
+
+    fn poll_streaming_event(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<NativeH3Event, NativeH3SessionError>> {
+        let streaming = self.streaming_receive.as_mut().expect("streaming enabled");
+        if streaming
+            .waker
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(task_cx.waker()))
+        {
+            streaming.waker = Some(task_cx.waker().clone());
+        }
+        // Large non-DATA frames and streams that only carry ignored bytes
+        // must yield as well. Chunk size alone does not bound poll work.
+        for _ in 0..STREAMING_POLL_STEPS {
+            if let Some(event) = self.events.pop_front() {
+                return Poll::Ready(Ok(event));
+            }
+            match self.drive_streaming_receive(cx, connection) {
+                Err(error) => return Poll::Ready(Err(error)),
+                Ok(true) => {}
+                Ok(false) => match connection.poll_next_readable_stream(cx, task_cx) {
+                    Poll::Ready(Ok(readiness)) => {
+                        if let Err(error) =
+                            self.queue_streaming_readiness(cx, connection, readiness)
+                        {
+                            return Poll::Ready(Err(error));
+                        }
+                    }
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                    Poll::Pending => return Poll::Pending,
+                },
+            }
+        }
+        if let Some(event) = self.events.pop_front() {
+            return Poll::Ready(Ok(event));
+        }
+        task_cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+
+    fn queue_streaming_readiness(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        readiness: StreamReadiness,
+    ) -> Result<(), NativeH3SessionError> {
+        self.terminal_streams.ensure_healthy()?;
+        if readiness.reset.is_some() || readiness.receive_stopped.is_some() {
+            // Terminal transport edges bypass paused streams. Processing the
+            // real readiness edge also preserves QUIC's exactly-once reset
+            // notification, including a reset following a delivered FIN.
+            return self.process_readiness(cx, connection, readiness);
+        }
+        if !self.terminal_streams.contains(readiness.stream_id) {
+            self.streaming_receive
+                .as_mut()
+                .expect("streaming enabled")
+                .ready
+                .insert(readiness.stream_id, readiness);
+        }
+        Ok(())
+    }
+
+    fn drive_streaming_receive(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+    ) -> Result<bool, NativeH3SessionError> {
+        let mut progress = false;
+        // Capture edges before reading. Partial QUIC reads requeue their
+        // stream; a private deduplicated map both preserves paused edges and
+        // lets higher stream IDs progress alongside a continually readable
+        // low stream ID.
+        for _ in 0..STREAMING_READINESS_BATCH {
+            let Some(readiness) = connection.next_readable_stream(cx)? else {
+                break;
+            };
+            progress = true;
+            self.queue_streaming_readiness(cx, connection, readiness)?;
+            if !self.events.is_empty() {
+                return Ok(true);
+            }
+        }
+
+        let streaming = self.streaming_receive.as_ref().expect("streaming enabled");
+        let mut first = None;
+        let mut next = None;
+        for id in streaming.ready.keys() {
+            if streaming.paused.contains(id)
+                || !connection
+                    .inner()
+                    .streams()
+                    .stream(*id)
+                    .is_ok_and(|stream| {
+                        // A fresh reset may be deeper in QUIC's readiness queue.
+                        // Never read through its sticky state using a cached old
+                        // edge; wait to consume the real terminal notification.
+                        stream.recv_reset.is_none() && stream.receive_stopped_error_code.is_none()
+                    })
+            {
+                continue;
+            }
+            first.get_or_insert(*id);
+            if streaming.poll_after.is_none_or(|after| *id > after) {
+                next = Some(*id);
+                break;
+            }
+        }
+        let Some(stream_id) = next.or(first) else {
+            return Ok(progress);
+        };
+        let streaming = self.streaming_receive.as_mut().expect("streaming enabled");
+        let mut readiness = streaming
+            .ready
+            .remove(&stream_id)
+            .expect("ready stream selected");
+        streaming.poll_after = Some(stream_id);
+        let max_read = streaming.max_chunk_bytes.get();
+
+        self.incoming
+            .entry(stream_id)
+            .or_insert_with(|| IncomingStream::new(stream_id));
+        // Consume parser lookahead before reading more transport bytes. This
+        // prevents each small frame from adding another read of lookahead.
+        self.decode_stream(stream_id)?;
+        if self.events.is_empty() && readiness.readable_bytes > 0 {
+            let limit = usize::try_from(readiness.readable_bytes)
+                .unwrap_or(usize::MAX)
+                .min(max_read);
+            let bytes = connection.read_stream(cx, stream_id, limit)?;
+            readiness.readable_bytes = if bytes.is_empty() {
+                0
+            } else {
+                readiness.readable_bytes.saturating_sub(bytes.len() as u64)
+            };
+            self.incoming
+                .get_mut(&stream_id)
+                .expect("stream inserted above")
+                .bytes
+                .extend_from_slice(&bytes);
+            self.decode_stream(stream_id)?;
+        }
+
+        let emitted = !self.events.is_empty();
+        let eof = readiness.fin_received && connection.is_stream_eof(stream_id)?;
+        if !emitted && eof {
+            // A partial DATA cursor, even with no buffered payload bytes,
+            // is truncation. FIN is never inferred from Content-Length or an
+            // empty read and never overtakes a preceding application event.
+            self.finish_stream(stream_id)?;
+            return Ok(true);
+        }
+        let has_lookahead = !self
+            .incoming
+            .get(&stream_id)
+            .expect("stream exists")
+            .bytes
+            .is_empty();
+        if readiness.readable_bytes > 0 || (emitted && (has_lookahead || eof)) {
+            self.streaming_receive
+                .as_mut()
+                .expect("streaming enabled")
+                .ready
+                .insert(stream_id, readiness);
+        }
+        Ok(true)
+    }
+
+    fn forget_streaming_readiness(&mut self, stream_id: StreamId) {
+        if let Some(streaming) = &mut self.streaming_receive {
+            streaming.ready.remove(&stream_id);
+            streaming.paused.remove(&stream_id);
         }
     }
 
@@ -874,6 +1180,7 @@ impl NativeH3Session {
                 | None => {}
             }
             self.incoming.remove(&stream_id);
+            self.forget_streaming_readiness(stream_id);
             self.terminal_streams.insert(stream_id)?;
             self.events.push_back(NativeH3Event::StreamReset {
                 stream_id,
@@ -887,6 +1194,7 @@ impl NativeH3Session {
                 self.state.abort_request_stream(stream_id.0)?;
             }
             self.incoming.remove(&stream_id);
+            self.forget_streaming_readiness(stream_id);
             self.terminal_streams.insert(stream_id)?;
             return Ok(());
         }
@@ -947,6 +1255,11 @@ impl NativeH3Session {
 
     fn decode_stream(&mut self, stream_id: StreamId) -> Result<(), NativeH3SessionError> {
         loop {
+            // Streaming callers can pause immediately after each event. Do
+            // not decode the next DATA/trailer/FIN behind their back.
+            if self.streaming_receive.is_some() && !self.events.is_empty() {
+                return Ok(());
+            }
             let kind = self
                 .incoming
                 .get(&stream_id)
@@ -1036,6 +1349,46 @@ impl NativeH3Session {
                 return Err(NativeH3SessionError::InvalidState(
                     "server push is not supported by the static transport adapter",
                 ));
+            }
+
+            if let Some(streaming) = &self.streaming_receive
+                && kind == IncomingStreamKind::RequestResponse
+            {
+                let max_chunk_bytes = streaming.max_chunk_bytes.get();
+                let stream = self
+                    .incoming
+                    .get_mut(&stream_id)
+                    .expect("stream checked above");
+                if let Some(cursor) = &mut stream.data_frame {
+                    let len = cursor.take_len(stream.bytes.len(), max_chunk_bytes);
+                    if len == 0 && !cursor.is_complete() {
+                        return Ok(());
+                    }
+                    let bytes = Bytes::from(stream.bytes.drain(..len).collect::<Vec<_>>());
+                    if cursor.is_complete() {
+                        stream.data_frame = None;
+                    }
+                    self.events
+                        .push_back(NativeH3Event::Data { stream_id, bytes });
+                    return Ok(());
+                }
+                let Some(header) = frame_header(&stream.bytes, self.config.max_frame_payload_size)?
+                else {
+                    return Ok(());
+                };
+                if header.kind == 0 {
+                    // Validate progression once at the wire-frame boundary,
+                    // before publishing any part of its payload.
+                    self.state
+                        .on_request_stream_frame(stream_id.0, &H3Frame::Data(Vec::new()))?;
+                    let stream = self
+                        .incoming
+                        .get_mut(&stream_id)
+                        .expect("stream checked above");
+                    stream.bytes.drain(..header.header_len);
+                    stream.data_frame = Some(DataFrameCursor::new(header.payload_len));
+                    continue;
+                }
             }
 
             let Some(frame_len) = complete_frame_len(
@@ -1206,7 +1559,10 @@ impl NativeH3Session {
                 .ok_or(NativeH3SessionError::InvalidState(
                     "FIN arrived for an unknown HTTP/3 stream",
                 ))?;
-        if !incoming.bytes.is_empty() || incoming.kind == IncomingStreamKind::AwaitingUniType {
+        if !incoming.bytes.is_empty()
+            || incoming.data_frame.is_some()
+            || incoming.kind == IncomingStreamKind::AwaitingUniType
+        {
             return Err(NativeH3SessionError::TruncatedStream {
                 stream_id,
                 buffered_bytes: incoming.bytes.len(),
@@ -1239,6 +1595,7 @@ impl NativeH3Session {
             IncomingStreamKind::AwaitingUniType => unreachable!("handled above"),
         }
         self.terminal_streams.insert(stream_id)?;
+        self.forget_streaming_readiness(stream_id);
         Ok(())
     }
 
@@ -1303,40 +1660,32 @@ fn complete_frame_len(
     input: &[u8],
     max_payload_size: usize,
 ) -> Result<Option<usize>, NativeH3SessionError> {
-    let Some((_, type_len)) = decode_prefix(input)? else {
+    let Some(header) = frame_header(input, max_payload_size)? else {
         return Ok(None);
     };
-    let Some((payload_len, length_len)) = decode_prefix(&input[type_len..])? else {
-        return Ok(None);
-    };
-    let payload_len = usize::try_from(payload_len).map_err(|_| {
-        NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
-            "HTTP/3 frame length exceeds addressable range",
-        ))
-    })?;
-    if payload_len > max_payload_size {
-        return Err(NativeH3SessionError::Protocol(
-            H3NativeError::FrameTooLarge {
-                payload_size: payload_len,
-                max_size: max_payload_size,
-            },
-        ));
-    }
-    let header_len = type_len
-        .checked_add(length_len)
-        .ok_or(NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
-            "HTTP/3 frame header length overflow",
-        )))?;
-    debug_assert!(header_len <= FRAME_HEADER_MAX_BYTES);
-    let total = header_len
-        .checked_add(payload_len)
-        .ok_or(NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
-            "HTTP/3 frame length overflow",
-        )))?;
-    if input.len() < total {
-        return Ok(None);
-    }
-    Ok(Some(total))
+    debug_assert!(header.header_len <= FRAME_HEADER_MAX_BYTES);
+    Ok((input.len() >= header.wire_len).then_some(header.wire_len))
+}
+
+fn frame_header(
+    input: &[u8],
+    max_payload_size: usize,
+) -> Result<Option<FrameHeader>, NativeH3SessionError> {
+    FrameHeader::decode(input, max_payload_size).map_err(|error| match error {
+        FrameHeaderError::AddressOverflow => NativeH3SessionError::Protocol(
+            H3NativeError::InvalidFrame("HTTP/3 frame length exceeds addressable range"),
+        ),
+        FrameHeaderError::LengthOverflow => NativeH3SessionError::Protocol(
+            H3NativeError::InvalidFrame("HTTP/3 frame length overflow"),
+        ),
+        FrameHeaderError::PayloadTooLarge {
+            payload_size,
+            max_size,
+        } => NativeH3SessionError::Protocol(H3NativeError::FrameTooLarge {
+            payload_size,
+            max_size,
+        }),
+    })
 }
 
 fn is_client_bidi(stream_id: StreamId) -> bool {
