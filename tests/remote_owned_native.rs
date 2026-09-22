@@ -162,7 +162,7 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
         if matches!(case, Case::Success) {
             let report = invoke(executor.as_ref(), &cx, "worker", "echo",
                 RemoteInput::new(b"native-secret".to_vec()), config()).await.unwrap();
-            assert!(report.is_success(), "{report:?}");
+            assert!(report.is_success(), "{report:?}; proxy error: {:?}", report.task.as_ref().err());
             assert!(!format!("{report:?}").contains("native-secret"));
             assert!(matches!(report.task.unwrap().outcome, Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == b"native-secret"));
             assert_eq!(remote.active_operations(), 0);
