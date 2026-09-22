@@ -443,3 +443,5 @@ impl<E: Send + 'static> DynamicSupervisor<E> {
 
 #[cfg(test)]
 mod tests;
+
+pub mod dependencies;
