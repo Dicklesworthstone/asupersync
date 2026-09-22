@@ -292,6 +292,46 @@ async fn wait_for_lease(cx: &Cx, diagnostics: &asupersync::observability::diagno
 }
 
 #[test]
+fn native_child_remote_authority_respects_parent_presence_and_runtime_mask() {
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+        };
+        runtime.block_on(async {
+            let base = Cx::current().unwrap();
+            assert!(base.remote().is_none());
+            let unprivileged = base.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            assert!(unprivileged.cx().remote().is_none());
+            unprivileged.close().await.unwrap();
+
+            let parent = base.with_remote_cap(RemoteCap::new());
+            let child = parent.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            assert!(std::ptr::eq(parent.remote().unwrap(), child.cx().remote().unwrap()));
+            assert_ne!(parent.region_id(), child.region_id());
+            child.close().await.unwrap();
+
+            // Capture the ambient runtime mask without retaining a thread-local
+            // guard across await (the multi-thread runtime may migrate the task).
+            let restricted = {
+                type LocalCaps = asupersync::cx::cap::CapSet<true, true, true, true, false>;
+                let _guard = parent.restrict::<LocalCaps>().set_current_restricted();
+                Cx::current().unwrap()
+            };
+            assert!(parent.remote().is_some());
+            assert!(restricted.remote().is_none());
+            let child = restricted.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            assert!(child.cx().remote().is_none());
+            let grandchild = child.cx().open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            assert!(grandchild.cx().remote().is_none());
+            grandchild.close().await.unwrap();
+            child.close().await.unwrap();
+        });
+    }
+}
+
+#[test]
 fn native_v3_success_has_a_checked_commit_and_closed_local_child() {
     for workers in [1, 2] { exercise(workers, Case::Success); }
 }
