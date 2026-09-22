@@ -4642,6 +4642,18 @@ impl LabRuntime {
                     }
                 }
 
+                // Capture this task's retirement barrier BEFORE task_completed
+                // recycles the record: reading it afterward (as this site used
+                // to) finds the record already removed and never opens it,
+                // hanging a consumer parked on gated terminal-result visibility
+                // (br-asupersync-yhueis). The scheduler (A-tier) lock is not yet
+                // held here, so this cx_inner (E-tier) read respects E -> A.
+                let retirement_barrier = self
+                    .state
+                    .task(task_id)
+                    .and_then(|record| record.cx_inner.as_ref())
+                    .and_then(|inner| inner.read().retirement_barrier.clone());
+
                 // Notify waiters
                 let (waiters, completion_observer) =
                     self.state.task_completed(task_id).into_parts();
@@ -4680,14 +4692,9 @@ impl LabRuntime {
                 // that received its terminal result early can now surface
                 // completion (br-asupersync-yhueis). The record has committed
                 // terminal; `open_and_wake` may run a foreign consumer waker, so
-                // it must follow the scheduler unlock, and reading cx_inner here
-                // (E-tier) respects the E -> A lock order now that A is dropped.
-                if let Some(barrier) = self
-                    .state
-                    .task(task_id)
-                    .and_then(|record| record.cx_inner.as_ref())
-                    .and_then(|inner| inner.read().retirement_barrier.clone())
-                {
+                // it must follow the scheduler unlock. The barrier was captured
+                // above, before task_completed recycled the record.
+                if let Some(barrier) = retirement_barrier {
                     barrier.open_and_wake();
                 }
                 completion_observer.dispatch();

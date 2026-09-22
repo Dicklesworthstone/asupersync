@@ -23,12 +23,12 @@ use std::sync::{Arc, Weak};
 ///
 /// The barrier lets consumers *see* a received terminal result only once the
 /// scheduler has opened it in the post-lock completion dispatch, after the
-/// record terminal transition. It gates the DATA, not merely a wake: the join
-/// handle waits on the oneshot receiver rather than the record's waiter set, so
-/// consuming/stashing the value removes the oneshot wake source. A parked
-/// consumer therefore registers its waker here (register-before-recheck to
-/// avoid a lost wake against a concurrent open) and the scheduler wakes it when
-/// the barrier opens.
+/// record terminal transition. It gates the DATA, not merely a wake: while the
+/// barrier is closed a join handle does not poll its oneshot receiver at all,
+/// so an early terminal is never consumed or surfaced. A parked consumer
+/// registers its waker here (register-before-recheck to avoid a lost wake
+/// against a concurrent open) and the scheduler wakes it when the barrier
+/// opens, at which point it consumes the receiver normally.
 ///
 /// Tasks with no record to retire — admission denial (the sender publishes an
 /// `Err` value rather than closing the channel) and the standalone public
@@ -411,12 +411,10 @@ pub struct TaskHandle<T> {
     /// Runtime-minted, record-backed handles are wired to a `pending` barrier
     /// the scheduler opens post-retirement; standalone and admission-denied
     /// handles start open, so their results surface immediately as before.
+    /// While the barrier is closed the consumer paths never poll the oneshot,
+    /// so an early terminal stays in the channel — unconsumed and unobservable
+    /// — until the scheduler opens the barrier.
     barrier: Arc<RetirementBarrier>,
-    /// A terminal result received from the join oneshot while the barrier was
-    /// still closed, held here until the barrier opens. Prevents an early
-    /// observation (`poll_join`/`join`/`try_join`) from surfacing completion —
-    /// and letting a joined owner close its region — before the record commits.
-    stash: Option<Result<T, JoinError>>,
 }
 
 /// Creates the inseparable result-publication capability and handle pair for
@@ -633,7 +631,6 @@ impl<T> TaskHandle<T> {
             // Standalone public constructor: no runtime record to retire, so
             // the barrier is open and terminal results surface immediately.
             barrier: RetirementBarrier::open_now(),
-            stash: None,
         }
     }
 
@@ -665,7 +662,6 @@ impl<T> TaskHandle<T> {
             requested_cancel_reason,
             terminal_consumed: false,
             barrier,
-            stash: None,
         }
     }
 
@@ -708,15 +704,13 @@ impl<T> TaskHandle<T> {
     #[must_use]
     pub fn is_finished(&self) -> bool {
         // A record-backed task is only observably finished once its retirement
-        // barrier has opened: a terminal buffered in the join channel (or the
-        // stash) before the record commits must not report completion, or a
-        // caller could act on it before retirement. Peeks only; never consumes
-        // or mutates the receiver.
+        // barrier has opened: a terminal buffered in the join channel before
+        // the record commits must not report completion, or a caller could act
+        // on it before retirement. Peeks only; never consumes or mutates the
+        // receiver.
         self.terminal_consumed
             || (self.barrier.is_open()
-                && (self.stash.is_some()
-                    || self.receiver.is_ready()
-                    || self.receiver.is_closed()))
+                && (self.receiver.is_ready() || self.receiver.is_closed()))
     }
 
     /// Waits for the task to complete and returns its result.
@@ -754,7 +748,6 @@ impl<T> TaskHandle<T> {
             .map_or_else(Weak::new, |arc| std::sync::Arc::downgrade(&arc));
         let receiver = &mut self.receiver;
         let terminal_state = &mut self.terminal_consumed;
-        let stash = &mut self.stash;
         let barrier = std::sync::Arc::clone(&self.barrier);
         JoinFuture {
             inner: receiver.recv_uninterruptible(),
@@ -764,7 +757,6 @@ impl<T> TaskHandle<T> {
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             barrier,
-            stash,
             drop_abort_defused: false,
             drop_reason: None,
         }
@@ -795,7 +787,6 @@ impl<T> TaskHandle<T> {
             .map_or_else(Weak::new, |arc| std::sync::Arc::downgrade(&arc));
         let receiver = &mut self.receiver;
         let terminal_state = &mut self.terminal_consumed;
-        let stash = &mut self.stash;
         let barrier = std::sync::Arc::clone(&self.barrier);
         JoinFuture {
             inner: receiver.recv_uninterruptible(),
@@ -805,7 +796,6 @@ impl<T> TaskHandle<T> {
             requested_cancel_reason: self.requested_cancel_reason.as_ref(),
             terminal_state,
             barrier,
-            stash,
             drop_abort_defused: false,
             drop_reason: Some(reason),
         }
@@ -824,43 +814,23 @@ impl<T> TaskHandle<T> {
         if self.terminal_consumed {
             return Err(JoinError::PolledAfterCompletion);
         }
-        // Registration-free: `try_join` never registers a retirement waker. A
-        // terminal received while the barrier is still closed is stashed and
-        // reported as not-ready (`Ok(None)`) until the barrier opens.
-        if self.stash.is_some() {
-            if self.barrier.is_open() {
-                self.terminal_consumed = true;
-                return self
-                    .stash
-                    .take()
-                    .expect("stashed terminal result")
-                    .map(Some);
-            }
+        // Gate on the retirement barrier BEFORE touching the oneshot, and
+        // registration-free: while the barrier is closed, report not-ready
+        // (`Ok(None)`) without consuming the receiver, so an early terminal is
+        // never surfaced before the record commits. The unconsumed value stays
+        // in the channel until a later call observes the opened barrier.
+        if !self.barrier.is_open() {
             return Ok(None);
         }
         match self.receiver.try_recv() {
             Ok(result) => {
-                let result: Result<T, JoinError> =
-                    strengthen_cancelled_result(result, &self.requested_cancel_reason);
-                if self.barrier.is_open() {
-                    self.terminal_consumed = true;
-                    result.map(Some)
-                } else {
-                    self.stash = Some(result);
-                    Ok(None)
-                }
+                self.terminal_consumed = true;
+                strengthen_cancelled_result(result, &self.requested_cancel_reason).map(Some)
             }
             Err(oneshot::TryRecvError::Empty) => Ok(None),
             Err(oneshot::TryRecvError::Closed) => {
-                let result: Result<T, JoinError> =
-                    Err(JoinError::Cancelled(self.closed_reason()));
-                if self.barrier.is_open() {
-                    self.terminal_consumed = true;
-                    result.map(Some)
-                } else {
-                    self.stash = Some(result);
-                    Ok(None)
-                }
+                self.terminal_consumed = true;
+                Err(JoinError::Cancelled(self.closed_reason()))
             }
         }
     }
@@ -909,20 +879,27 @@ impl<T> TaskHandle<T> {
         if self.terminal_consumed {
             return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
         }
-        // A terminal received while the retirement barrier was still closed is
-        // held in `stash`; release it once the barrier opens, re-registering
-        // for the open wake meanwhile. The consumed receiver is never polled
-        // again in this state.
-        if self.stash.is_some() {
-            return self.poll_release_stashed(ctx);
+        // Gate on the retirement barrier BEFORE consuming the oneshot: while
+        // the barrier is closed, register for its open-wake (register-then-
+        // recheck closes the lost-wake race) and park WITHOUT polling the
+        // receiver, so an early terminal is never surfaced before the record
+        // commits (br-asupersync-yhueis). The value stays in the channel; only
+        // once the barrier opens do we consume it. Standalone and denial
+        // handles start open, so this gate is a no-op for them.
+        if !self.barrier.is_open() && !self.barrier.register_and_is_open(ctx.waker()) {
+            return std::task::Poll::Pending;
         }
         match self.receiver.poll_recv_uninterruptible(ctx) {
-            std::task::Poll::Ready(Ok(result)) => self.gate_terminal(
-                ctx,
-                strengthen_cancelled_result(result, &self.requested_cancel_reason),
-            ),
+            std::task::Poll::Ready(Ok(result)) => {
+                self.terminal_consumed = true;
+                std::task::Poll::Ready(strengthen_cancelled_result(
+                    result,
+                    &self.requested_cancel_reason,
+                ))
+            }
             std::task::Poll::Ready(Err(oneshot::RecvError::Closed)) => {
-                self.gate_terminal(ctx, Err(JoinError::Cancelled(self.closed_reason())))
+                self.terminal_consumed = true;
+                std::task::Poll::Ready(Err(JoinError::Cancelled(self.closed_reason())))
             }
             std::task::Poll::Ready(Err(oneshot::RecvError::Cancelled)) => {
                 unreachable!("an uninterruptible receive cannot return Cancelled");
@@ -934,45 +911,6 @@ impl<T> TaskHandle<T> {
                 );
             }
             std::task::Poll::Pending => std::task::Poll::Pending,
-        }
-    }
-
-    /// Gates a freshly received terminal result on the retirement barrier.
-    ///
-    /// An open barrier delivers immediately (standalone handles, admission
-    /// denial, and record-backed tasks whose record has been committed). A
-    /// closed barrier stashes the result and parks the caller until the
-    /// scheduler opens the barrier after the record terminal commit, so
-    /// completion is never surfaced — and a joined owner never closes its
-    /// region — before the record is committed (br-asupersync-yhueis).
-    fn gate_terminal(
-        &mut self,
-        ctx: &mut std::task::Context<'_>,
-        result: Result<T, JoinError>,
-    ) -> std::task::Poll<Result<T, JoinError>> {
-        if self.barrier.is_open() {
-            self.terminal_consumed = true;
-            return std::task::Poll::Ready(result);
-        }
-        self.stash = Some(result);
-        if self.barrier.register_and_is_open(ctx.waker()) {
-            self.terminal_consumed = true;
-            std::task::Poll::Ready(self.stash.take().expect("stashed terminal result"))
-        } else {
-            std::task::Poll::Pending
-        }
-    }
-
-    /// Releases a stashed terminal result once the retirement barrier opens.
-    fn poll_release_stashed(
-        &mut self,
-        ctx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<T, JoinError>> {
-        if self.barrier.register_and_is_open(ctx.waker()) {
-            self.terminal_consumed = true;
-            std::task::Poll::Ready(self.stash.take().expect("stashed terminal result"))
-        } else {
-            std::task::Poll::Pending
         }
     }
 
@@ -1044,38 +982,15 @@ pub struct JoinFuture<'a, T> {
     admitted: Option<&'a Arc<crate::runtime::spawn_mailbox::AdmittedTaskSlot>>,
     requested_cancel_reason: &'a RwLock<Option<CancelReason>>,
     terminal_state: &'a mut bool,
-    /// Retirement barrier shared with the originating handle: a received
-    /// terminal is gated on this until the scheduler opens it post-retirement.
+    /// Retirement barrier shared with the originating handle: while it is
+    /// closed this future does not poll the receiver, so an early terminal is
+    /// never consumed or surfaced until the scheduler opens it post-retirement.
     barrier: Arc<RetirementBarrier>,
-    /// The originating handle's stash slot, so a terminal received through this
-    /// future (or a sibling `poll_join`) survives across polls until released.
-    stash: &'a mut Option<Result<T, JoinError>>,
     drop_abort_defused: bool,
     drop_reason: Option<CancelReason>,
 }
 
 impl<T> JoinFuture<'_, T> {
-    /// Gates a freshly received terminal on the retirement barrier: deliver if
-    /// open, otherwise stash it on the originating handle and park until the
-    /// scheduler opens the barrier after the record terminal commit.
-    fn gate(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-        result: Result<T, JoinError>,
-    ) -> std::task::Poll<Result<T, JoinError>> {
-        if self.barrier.is_open() {
-            *self.terminal_state = true;
-            return std::task::Poll::Ready(result);
-        }
-        *self.stash = Some(result);
-        if self.barrier.register_and_is_open(cx.waker()) {
-            *self.terminal_state = true;
-            std::task::Poll::Ready(self.stash.take().expect("stashed terminal result"))
-        } else {
-            std::task::Poll::Pending
-        }
-    }
-
     fn live_inner(&self) -> Option<Arc<RwLock<CxInner>>> {
         if let Some(admitted) = self.admitted.and_then(|slot| slot.get()) {
             return admitted.cx_inner.upgrade();
@@ -1120,28 +1035,27 @@ impl<T> std::future::Future for JoinFuture<'_, T> {
         if *this.terminal_state {
             return std::task::Poll::Ready(Err(JoinError::PolledAfterCompletion));
         }
-        // A terminal received (here or via a sibling `poll_join`) while the
-        // retirement barrier was closed is held in the shared stash; release it
-        // once the barrier opens, re-registering for the open wake meanwhile.
-        // The consumed receiver is never re-polled in this state.
-        if this.stash.is_some() {
-            if this.barrier.register_and_is_open(cx.waker()) {
-                *this.terminal_state = true;
-                return std::task::Poll::Ready(
-                    this.stash.take().expect("stashed terminal result"),
-                );
-            }
+        // Gate on the retirement barrier BEFORE polling the inner oneshot recv:
+        // while the barrier is closed, register for its open-wake (register-
+        // then-recheck closes the lost-wake race) and park WITHOUT consuming
+        // the receiver, so an early terminal is never surfaced before the
+        // record commits (br-asupersync-yhueis). The value stays in the
+        // channel, so the unpolled-ready drop fast path still observes it.
+        if !this.barrier.is_open() && !this.barrier.register_and_is_open(cx.waker()) {
             return std::task::Poll::Pending;
         }
         // JoinError needs to be mapped if recv fails with RecvError
         match std::pin::Pin::new(&mut this.inner).poll(cx) {
             std::task::Poll::Ready(Ok(res)) => {
-                let result = strengthen_cancelled_result(res, this.requested_cancel_reason);
-                this.gate(cx, result)
+                *this.terminal_state = true;
+                std::task::Poll::Ready(strengthen_cancelled_result(
+                    res,
+                    this.requested_cancel_reason,
+                ))
             }
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Closed)) => {
-                let reason = this.closed_reason();
-                this.gate(cx, Err(JoinError::Cancelled(reason)))
+                *this.terminal_state = true;
+                std::task::Poll::Ready(Err(JoinError::Cancelled(this.closed_reason())))
             }
             std::task::Poll::Ready(Err(crate::channel::oneshot::RecvError::Cancelled)) => {
                 unreachable!("RecvUninterruptibleFuture cannot return Cancelled");
@@ -1163,13 +1077,13 @@ impl<T> Drop for JoinFuture<'_, T> {
         // Abort the task if we stop waiting for it.
         // This makes TaskHandle::join cancel-safe and race-safe.
         if !*self.terminal_state && !self.drop_abort_defused {
-            // Completion already happened if a terminal was received and is
-            // held in the stash (gated behind retirement), or the oneshot is
-            // already ready but this future was never polled. In either case
-            // dropping must not stamp cancellation between producer publication
-            // and record retirement (br-asupersync-yhueis / 6976): key the
-            // drop-abort off a received terminal, not mere channel readiness.
-            if self.stash.is_some() || self.inner.receiver_finished() {
+            // Completion already happened if the oneshot is already ready (or
+            // closed) — even if this future never polled it because the barrier
+            // was still closed. Gate-first never consumes the value while
+            // gated, so the receiver still reflects readiness here; dropping
+            // must not stamp cancellation between producer publication and
+            // record retirement (br-asupersync-yhueis / 6976).
+            if self.inner.receiver_finished() {
                 return;
             }
             if let Some(reason) = self.drop_reason.take() {
@@ -2340,7 +2254,6 @@ mod tests {
             requested_cancel_reason: std::sync::Arc::new(RwLock::new(None)),
             terminal_consumed: false,
             barrier,
-            stash: None,
         }
     }
 
@@ -2349,8 +2262,8 @@ mod tests {
     // consumer cannot surface completion (and a joined owner cannot close its
     // region) before the record commits. Deterministic: no runtime, no sleep.
     #[test]
-    fn retirement_barrier_gates_terminal_until_opened_then_delivers_stashed_value() {
-        init_test("retirement_barrier_gates_terminal_until_opened_then_delivers_stashed_value");
+    fn retirement_barrier_gates_terminal_until_opened_then_delivers_value() {
+        init_test("retirement_barrier_gates_terminal_until_opened_then_delivers_value");
         let cx = test_cx();
         let task_id = TaskId::from_arena(ArenaIndex::new(41, 1));
         let (tx, rx) = task_result_channel::<i32>();
@@ -2376,7 +2289,7 @@ mod tests {
         );
 
         // Opening the barrier (as the scheduler does after the record commits)
-        // wakes the parked consumer and releases the stashed value unchanged.
+        // wakes the parked consumer and releases the gated value unchanged.
         let before = wakes.load(std::sync::atomic::Ordering::SeqCst);
         barrier.open_and_wake();
         assert!(
@@ -2386,10 +2299,10 @@ mod tests {
         assert!(handle.is_finished(), "opened barrier with a result reports finished");
         match handle.poll_join(&mut poll_cx) {
             Poll::Ready(Ok(value)) => assert_eq!(value, 42),
-            other => panic!("expected the stashed Ok(42) after open, got {other:?}"),
+            other => panic!("expected the gated Ok(42) after open, got {other:?}"),
         }
         crate::test_complete!(
-            "retirement_barrier_gates_terminal_until_opened_then_delivers_stashed_value"
+            "retirement_barrier_gates_terminal_until_opened_then_delivers_value"
         );
     }
 

@@ -4353,6 +4353,12 @@ struct PolledCompletionArtifacts {
     completion_observer: crate::runtime::state::TaskCompletionObserver,
     cancel_wakes: crate::types::task_context::CancelWakeEffects,
     detached_record: Option<crate::record::task::TaskRecord>,
+    /// The completed task's `CxInner`, captured as a cheap `Arc` clone under
+    /// the runtime lock so the retirement barrier can be opened post-lock. The
+    /// unified table layout never detaches the record, so it cannot be reached
+    /// through `detached_record` there; capturing the `CxInner` handle covers
+    /// both layouts uniformly (br-asupersync-yhueis).
+    retirement_cx_inner: Option<Arc<RwLock<CxInner>>>,
     finalizer_publication: ReadyFinalizerPublication,
 }
 
@@ -4365,7 +4371,7 @@ impl PolledCompletionArtifacts {
         // consumer that received the terminal result early can now surface
         // completion — the record has committed terminal. Post-lock, because
         // `open_and_wake` may run a foreign consumer waker (br-asupersync-yhueis).
-        ThreeLaneWorker::open_retirement_barrier(self.detached_record.as_ref());
+        ThreeLaneWorker::open_retirement_barrier(self.retirement_cx_inner.as_ref());
         ThreeLaneWorker::retire_detached_task_record(self.detached_record);
         worker.finish_ready_finalizer_publication(self.finalizer_publication);
         self.completion_observer.dispatch();
@@ -4379,6 +4385,10 @@ impl PolledCompletionArtifacts {
 struct UnwindCompletionArtifacts {
     cancel_waker_retirements: crate::runtime::state::TaskCompletionRetirements,
     detached_record: Option<crate::record::task::TaskRecord>,
+    /// The panicked task's `CxInner`, captured under the runtime lock so its
+    /// retirement barrier can be opened post-lock across both table layouts
+    /// (br-asupersync-yhueis).
+    retirement_cx_inner: Option<Arc<RwLock<CxInner>>>,
     finalizer_publication: ReadyFinalizerPublication,
 }
 
@@ -4391,7 +4401,7 @@ impl UnwindCompletionArtifacts {
         self.cancel_waker_retirements.retire();
         // Release any consumer parked on this panicked task's retirement
         // barrier before retiring the record (br-asupersync-yhueis).
-        ThreeLaneWorker::open_retirement_barrier(self.detached_record.as_ref());
+        ThreeLaneWorker::open_retirement_barrier(self.retirement_cx_inner.as_ref());
         ThreeLaneWorker::retire_detached_task_record(self.detached_record);
     }
 }
@@ -8244,10 +8254,14 @@ impl ThreeLaneWorker {
             self.wake_dependents_locked(&state, waiters);
             let finalizer_publication = self.publish_ready_finalizers(finalizers);
             drop(state);
+            let retirement_cx_inner = detached_record
+                .as_ref()
+                .and_then(|record| record.cx_inner.clone());
             PolledCompletionArtifacts {
                 completion_observer,
                 cancel_wakes,
                 detached_record,
+                retirement_cx_inner,
                 finalizer_publication,
             }
         } else {
@@ -8264,6 +8278,13 @@ impl ThreeLaneWorker {
             let _ = state.update_task(task_id, |record| {
                 Self::apply_polled_completion(record, completion, ack_materialized);
             });
+            // Capture the CxInner (a cheap Arc clone, never an E-tier read
+            // under the A-tier state lock) before task_completed recycles the
+            // record, so the retirement barrier can be opened post-lock on this
+            // non-detaching layout (br-asupersync-yhueis).
+            let retirement_cx_inner = state
+                .task(task_id)
+                .and_then(|record| record.cx_inner.clone());
             let (waiters, completion_observer) = state.task_completed(task_id).into_parts();
             let finalizers = self.drain_ready_finalizers_locked(&mut state);
             self.wake_dependents_locked(&state, waiters);
@@ -8273,6 +8294,7 @@ impl ThreeLaneWorker {
                 completion_observer,
                 cancel_wakes,
                 detached_record: None,
+                retirement_cx_inner,
                 finalizer_publication,
             }
         }
@@ -8322,6 +8344,15 @@ impl ThreeLaneWorker {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Capture the CxInner before completion recycles the record, so the
+        // retirement barrier can be opened post-lock across both table layouts
+        // (br-asupersync-yhueis): from the detached record on the sharded
+        // layout, else from the still-live record on the unified layout — a
+        // cheap Arc clone, never an E-tier read under the A-tier state lock.
+        let retirement_cx_inner = detached_record
+            .as_ref()
+            .and_then(|record| record.cx_inner.clone())
+            .or_else(|| state.task(task_id).and_then(|record| record.cx_inner.clone()));
         let completion = match detached_record.as_mut() {
             Some(record) => state.task_completed_from_external_record(record),
             None => state.task_completed(task_id),
@@ -8335,6 +8366,7 @@ impl ThreeLaneWorker {
         UnwindCompletionArtifacts {
             cancel_waker_retirements,
             detached_record,
+            retirement_cx_inner,
             finalizer_publication,
         }
     }
@@ -8393,11 +8425,14 @@ impl ThreeLaneWorker {
     /// post-lock completion dispatch, where `open_and_wake` may invoke a foreign
     /// consumer waker (br-asupersync-yhueis). A `None` barrier (open handles,
     /// admission denial, unwired paths) is a no-op.
-    fn open_retirement_barrier(record: Option<&crate::record::task::TaskRecord>) {
-        let Some(record) = record else {
-            return;
-        };
-        let Some(inner) = record.cx_inner.as_ref() else {
+    /// Opens the retirement barrier held in a completed task's `CxInner`, if
+    /// any, waking a consumer parked on gated terminal-result visibility. The
+    /// `CxInner` handle is captured under the runtime lock as a cheap `Arc`
+    /// clone (never an E-tier read under A); this reads it only AFTER that lock
+    /// is dropped, honoring the E-after-A(dropped) order, and `open_and_wake`
+    /// may run a foreign consumer waker (br-asupersync-yhueis).
+    fn open_retirement_barrier(cx_inner: Option<&Arc<RwLock<CxInner>>>) {
+        let Some(inner) = cx_inner else {
             return;
         };
         let barrier = inner.read().retirement_barrier.clone();
