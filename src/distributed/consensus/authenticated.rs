@@ -15,6 +15,9 @@
 //! old signed traffic to replay. View-change and new-view packets remain
 //! unsupported. The unauthenticated legacy APIs remain unchanged.
 
+mod driver;
+pub use driver::{AuthenticatedPbftNode, PbftIngressOutcome};
+
 use super::pbft::{PbftMessage, PbftTransport};
 use super::types::ReplicaId;
 use crate::error::{Error, ErrorKind, Result};

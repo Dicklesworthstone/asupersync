@@ -14,8 +14,8 @@ pub mod pbft;
 pub mod types;
 
 pub use authenticated::{
-    AuthenticatedPbftTransport, PbftAuthError, PbftAuthenticator, PbftMembership,
-    PbftPacketTransport,
+    AuthenticatedPbftNode, AuthenticatedPbftTransport, PbftAuthError, PbftAuthenticator,
+    PbftIngressOutcome, PbftMembership, PbftPacketTransport,
 };
 pub use pbft::{PbftConfig, PbftConsensus, PbftNode, PbftState};
 pub use types::{
