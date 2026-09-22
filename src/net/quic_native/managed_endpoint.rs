@@ -40,6 +40,10 @@ const ACCEPT_MAX_FLIGHTS: usize = 64;
 const ACCEPT_MAX_PACKETS: usize = 1024;
 #[cfg(feature = "tls")]
 const ACCEPT_MAX_BYTES: usize = 2 * 1024 * 1024;
+#[cfg(feature = "tls")]
+const ACCEPT_MIN_INITIAL_BYTES: usize = 1200;
+#[cfg(feature = "tls")]
+const ACCEPT_CID_ATTEMPTS: usize = 16;
 
 #[cfg(feature = "tls")]
 fn accept_error(reason: impl std::fmt::Display) -> ManagedEndpointError {
@@ -82,6 +86,7 @@ struct PendingAuthenticatedAccept {
     authenticated_received_bytes: u64,
     sent_bytes: u64,
     address_validated: bool,
+    peer_max_udp_payload_size: Option<u64>,
     early: Vec<ReceivedPacket>,
     early_bytes: usize,
 }
@@ -92,6 +97,22 @@ struct AuthenticatedAcceptResult {
     initial_cid: ConnectionId,
     local_cid: ConnectionId,
     result: Result<ConnectionId, ManagedEndpointError>,
+}
+
+#[cfg(feature = "tls")]
+struct AuthenticatedServerPolicy {
+    tls: Arc<rustls::ServerConfig>,
+    transport_parameters: crate::net::quic_core::TransportParameters,
+    required_alpn: Vec<u8>,
+}
+
+#[cfg(feature = "tls")]
+impl std::fmt::Debug for AuthenticatedServerPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticatedServerPolicy")
+            .field("required_alpn", &self.required_alpn)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(feature = "tls")]
@@ -257,39 +278,84 @@ impl PendingAuthenticatedAccept {
             .authenticated_received_bytes
             .saturating_add(packet.data.len() as u64);
         self.address_validated |= header.packet_type == LongPacketType::Handshake;
+        // The peer's receive ceiling constrains our output, not our local
+        // receive buffer. Until ClientHello parameters are available, retain
+        // QUIC's minimum supported datagram size as the conservative send cap.
+        if self.peer_max_udp_payload_size.is_none() {
+            if let Some(bytes) = self.driver.peer_transport_parameters() {
+                if bytes.len() > ACCEPT_MAX_BYTES {
+                    return Err(accept_error(
+                        "peer transport parameter byte bound exhausted",
+                    ));
+                }
+                let parameters = crate::net::quic_core::TransportParameters::decode(bytes)
+                    .map_err(accept_error)?;
+                self.peer_max_udp_payload_size =
+                    Some(parameters.max_udp_payload_size.unwrap_or(65_527));
+            }
+        }
+        let send_packet_size = self
+            .peer_max_udp_payload_size
+            .map_or(max_packet_size.min(ACCEPT_MIN_INITIAL_BYTES), |peer_max| {
+                max_packet_size.min(usize::try_from(peer_max).unwrap_or(usize::MAX))
+            });
         let segments = self.driver.pump_outbound().map_err(accept_error)?;
+        let plaintext_bytes = segments
+            .iter()
+            .filter(|segment| segment.level != HandshakeLevel::OneRtt)
+            .try_fold(0usize, |total, segment| {
+                total.checked_add(segment.data.len())
+            })
+            .ok_or_else(|| accept_error("TLS plaintext flight byte overflow"))?;
+        if plaintext_bytes > ACCEPT_MAX_BYTES {
+            return Err(accept_error("TLS plaintext flight byte bound exhausted"));
+        }
+        // Leave room for full 20-byte source/destination CIDs, maximal CRYPTO
+        // offset/length varints, long-header length, packet number and AEAD tag.
+        // The driver advances per-space CRYPTO offsets across these segments.
+        let chunk_bytes = send_packet_size
+            .checked_sub(128)
+            .filter(|size| *size != 0)
+            .ok_or_else(|| accept_error("datagram bound cannot encode a TLS flight"))?;
         let mut packets = Vec::new();
         let mut bytes = 0usize;
         for segment in segments {
             if segment.level == HandshakeLevel::OneRtt {
                 continue;
             }
-            // Bound the plaintext before the packet encoder allocates its copies.
-            if segment.data.len() > max_packet_size.saturating_sub(64) {
-                return Err(accept_error("TLS flight exceeds configured datagram bound"));
+            for chunk in segment.data.chunks(chunk_bytes) {
+                if packets.len() == ACCEPT_MAX_PACKETS {
+                    return Err(accept_error("TLS flight packet bound exhausted"));
+                }
+                let segment = super::handshake_driver::HandshakeSegment {
+                    level: segment.level,
+                    data: chunk.to_vec(),
+                };
+                let data = self
+                    .driver
+                    .assemble_handshake_packet(
+                        &segment,
+                        peer_cid,
+                        self.local_cid,
+                        self.packet_number,
+                    )
+                    .map_err(accept_error)?;
+                self.packet_number = self
+                    .packet_number
+                    .checked_add(1)
+                    .ok_or_else(|| accept_error("packet number exhausted"))?;
+                bytes = bytes
+                    .checked_add(data.len())
+                    .ok_or_else(|| accept_error("flight byte overflow"))?;
+                if data.len() > send_packet_size || bytes > ACCEPT_MAX_BYTES {
+                    return Err(accept_error("TLS flight bound exhausted"));
+                }
+                packets.push(OutgoingPacket {
+                    dst_addr: self.peer,
+                    data,
+                    send_time: None,
+                });
             }
-            let data = self
-                .driver
-                .assemble_handshake_packet(&segment, peer_cid, self.local_cid, self.packet_number)
-                .map_err(accept_error)?;
-            self.packet_number = self
-                .packet_number
-                .checked_add(1)
-                .ok_or_else(|| accept_error("packet number exhausted"))?;
-            bytes = bytes
-                .checked_add(data.len())
-                .ok_or_else(|| accept_error("flight byte overflow"))?;
-            if data.len() > max_packet_size
-                || bytes > ACCEPT_MAX_BYTES
-                || packets.len() == ACCEPT_MAX_PACKETS
-            {
-                return Err(accept_error("TLS flight bound exhausted"));
-            }
-            packets.push(OutgoingPacket {
-                dst_addr: self.peer,
-                data,
-                send_time: None,
-            });
         }
         if !packets.is_empty() {
             self.flights += 1;
@@ -335,6 +401,15 @@ pub struct ManagedQuicEndpoint {
     #[cfg(feature = "tls")]
     authenticated_accept_limit: usize,
     #[cfg(feature = "tls")]
+    authenticated_accept_closed: bool,
+    /// Explicit authority to create TLS admissions from unknown Initials.
+    #[cfg(feature = "tls")]
+    authenticated_server: Option<AuthenticatedServerPolicy>,
+    /// Original Initial aliases stay reserved while their authenticated route
+    /// exists, even after its completion receipt has been consumed.
+    #[cfg(feature = "tls")]
+    authenticated_initial_routes: Vec<(ConnectionId, ConnectionId)>,
+    #[cfg(feature = "tls")]
     prefer_accept_output: bool,
     /// Alternate ready read/write batches; timers and cancellation always get a turn.
     prefer_send: bool,
@@ -360,6 +435,8 @@ struct ManagedShutdownCleanup<'a>(&'a mut ManagedQuicEndpoint);
 impl Drop for ManagedShutdownCleanup<'_> {
     fn drop(&mut self) {
         self.0.connection_router.discard_all();
+        #[cfg(feature = "tls")]
+        self.0.authenticated_initial_routes.clear();
         self.0.pending_outgoing.clear();
         self.0.pending_incoming.clear();
         self.0.timer_scheduler.cancel_pending();
@@ -645,6 +722,12 @@ impl ManagedQuicEndpoint {
             #[cfg(feature = "tls")]
             authenticated_accept_limit: 1,
             #[cfg(feature = "tls")]
+            authenticated_accept_closed: false,
+            #[cfg(feature = "tls")]
+            authenticated_server: None,
+            #[cfg(feature = "tls")]
+            authenticated_initial_routes: Vec::new(),
+            #[cfg(feature = "tls")]
             prefer_accept_output: true,
             prefer_send: true,
         })
@@ -717,6 +800,120 @@ impl ManagedQuicEndpoint {
         Ok(())
     }
 
+    /// Enable automatic authenticated server admission on the bound UDP socket.
+    ///
+    /// Call after [`Self::bind`] with `is_server: true`. No imported connection,
+    /// peer address or client-selected connection ID is required. Only bounded,
+    /// version-1 Initial datagrams of at least 1200 bytes can create an admission,
+    /// and their first packet must authenticate before retaining a slot. The
+    /// managed loop drives each TLS exchange and publishes its generated server
+    /// CID through [`Self::take_authenticated_accept_result_with_id`]. Configure
+    /// concurrency separately with [`Self::set_authenticated_accept_limit`].
+    ///
+    /// The TLS configuration must advertise `required_alpn`. Client identity is
+    /// required only if its certificate verifier requires it. The supplied
+    /// transport-parameter template is validated before changing the endpoint;
+    /// original-destination and initial-source CID fields are replaced for each
+    /// admission. Retry, shared stateless-reset tokens and preferred-address
+    /// parameters are unsupported and refused. Server IDs use the driving Cx's
+    /// explicit entropy source with bounded collision retries, never a peer ID.
+    ///
+    /// Configuration requires no pending admission or unread receipt. An active
+    /// endpoint may be reconfigured only if it already has authenticated-only
+    /// routing; existing connections retain their negotiated configuration.
+    /// Automatic admission does not enable the legacy unauthenticated path,
+    /// Retry, address migration, or acceptance of 0-RTT application data.
+    #[cfg(feature = "tls")]
+    pub fn configure_authenticated_server(
+        &mut self,
+        cx: &Cx,
+        tls: Arc<rustls::ServerConfig>,
+        transport_parameters: Vec<u8>,
+        required_alpn: &[u8],
+    ) -> Result<(), ManagedEndpointError> {
+        cx.checkpoint()
+            .map_err(|_| ManagedEndpointError::Cancelled)?;
+        if self.shutting_down || self.authenticated_accept_closed {
+            return Err(ManagedEndpointError::ShuttingDown);
+        }
+        if !self.config.is_server
+            || (!self.authenticated_only && self.connection_stats().active_connections != 0)
+            || !self.pending_authenticated_accept.is_empty()
+            || !self.authenticated_accept_result.is_empty()
+        {
+            return Err(accept_error(
+                "server policy requires an idle admission surface and no unauthenticated connections",
+            ));
+        }
+        if self.config.udp_config.max_packet_size < ACCEPT_MIN_INITIAL_BYTES {
+            return Err(accept_error(
+                "server datagram bound must admit a 1200-byte Initial",
+            ));
+        }
+        if required_alpn.is_empty()
+            || required_alpn.len() > 255
+            || !tls
+                .alpn_protocols
+                .iter()
+                .any(|alpn| alpn.as_slice() == required_alpn)
+        {
+            return Err(accept_error(
+                "required ALPN must contain 1..=255 bytes and be advertised by the server",
+            ));
+        }
+        // Reserve room for two maximum-length per-connection CID parameters.
+        if transport_parameters.len() > ACCEPT_MAX_BYTES - 64 {
+            return Err(accept_error(
+                "server transport parameter template exceeds admission byte bound",
+            ));
+        }
+        let mut parameters =
+            crate::net::quic_core::TransportParameters::decode(&transport_parameters)
+                .map_err(accept_error)?;
+        if parameters
+            .unknown
+            .iter()
+            .any(|parameter| matches!(parameter.id, 0x02 | 0x0d | 0x10))
+        {
+            return Err(accept_error(
+                "automatic admission does not support reset tokens, preferred addresses or Retry parameters",
+            ));
+        }
+        parameters
+            .unknown
+            .retain(|parameter| !matches!(parameter.id, 0x00 | 0x0f));
+        let mut encoded = Vec::new();
+        parameters.encode(&mut encoded).map_err(accept_error)?;
+        // Validate rustls QUIC/version/cipher configuration now. No peer input
+        // or certificate resolver is invoked by creating this fresh driver.
+        QuicHandshakeDriver::server(Arc::clone(&tls), encoded).map_err(accept_error)?;
+        cx.checkpoint()
+            .map_err(|_| ManagedEndpointError::Cancelled)?;
+        self.authenticated_server = Some(AuthenticatedServerPolicy {
+            tls,
+            transport_parameters: parameters,
+            required_alpn: required_alpn.to_vec(),
+        });
+        self.authenticated_only = true;
+        Ok(())
+    }
+
+    /// Permanently stop authenticated admission while established peers drain.
+    ///
+    /// Clears the automatic policy and resolves every pending handshake as
+    /// [`ManagedEndpointError::ShuttingDown`]. Their attributed receipts remain
+    /// available to the owner. Returns the number of pending admissions stopped.
+    /// Established application traffic and protocol timers continue until the
+    /// owner finishes its graceful work and calls [`Self::shutdown`].
+    #[cfg(feature = "tls")]
+    pub fn stop_authenticated_accepts(&mut self) -> usize {
+        self.authenticated_accept_closed = true;
+        self.authenticated_server = None;
+        let stopped = self.pending_authenticated_accept.len();
+        self.fail_authenticated_accept(ManagedEndpointError::ShuttingDown);
+        stopped
+    }
+
     /// Admit one fresh server TLS handshake on this endpoint's existing socket.
     ///
     /// The caller must drive the managed event loop and consume
@@ -726,7 +923,8 @@ impl ManagedQuicEndpoint {
     /// handshake, and unread receipts continue charging the configured limit.
     /// Established peers continue using that same receive/send/timer loop.
     /// Only the configured source address and destination CID aliases reach
-    /// this driver; unknown Initial packets retain the existing refusal policy.
+    /// this driver; unknown Initial packets are refused unless an automatic
+    /// server policy has been configured separately.
     /// The required ALPN must be nonempty and at most 255 bytes. TLS completion,
     /// key installation and negotiated transport parameters are checked before
     /// publication. The supplied driver must be fresh and have the server role.
@@ -745,21 +943,41 @@ impl ManagedQuicEndpoint {
     pub fn begin_authenticated_accept(
         &mut self,
         cx: &Cx,
-        mut driver: QuicHandshakeDriver,
+        driver: QuicHandshakeDriver,
         expected_peer: SocketAddr,
         initial_dcid: ConnectionId,
         local_cid: ConnectionId,
         required_alpn: &[u8],
     ) -> Result<(), ManagedEndpointError> {
+        let pending = self.prepare_authenticated_accept(
+            cx,
+            driver,
+            expected_peer,
+            initial_dcid,
+            local_cid,
+            required_alpn,
+        )?;
+        self.pending_authenticated_accept.push_back(pending);
+        Ok(())
+    }
+
+    #[cfg(feature = "tls")]
+    fn prepare_authenticated_accept(
+        &mut self,
+        cx: &Cx,
+        mut driver: QuicHandshakeDriver,
+        expected_peer: SocketAddr,
+        initial_dcid: ConnectionId,
+        local_cid: ConnectionId,
+        required_alpn: &[u8],
+    ) -> Result<PendingAuthenticatedAccept, ManagedEndpointError> {
         cx.checkpoint()
             .map_err(|_| ManagedEndpointError::Cancelled)?;
-        if self.shutting_down {
+        if self.shutting_down || self.authenticated_accept_closed {
             return Err(ManagedEndpointError::ShuttingDown);
         }
         if !self.authenticated_only || !self.config.is_server {
-            return Err(accept_error(
-                "requires an imported authenticated server socket",
-            ));
+            return Err(accept_error("requires an authenticated server socket"));
         }
         if self.pending_authenticated_accept.len()
             >= self
@@ -793,25 +1011,8 @@ impl ManagedQuicEndpoint {
         }
         self.connection_router
             .validate_authenticated_cids(initial_dcid, local_cid)?;
-        // Short headers carry no CID length. Prefix-related local IDs cannot be
-        // routed unambiguously; long-header aliases must not name another owner.
-        // Keep aliases reserved through receipt consumption, including failure.
-        let conflicts = |initial: ConnectionId, local: ConnectionId| {
-            initial_dcid == initial
-                || initial_dcid == local
-                || local_cid == initial
-                || local_cid.as_bytes().starts_with(local.as_bytes())
-                || local.as_bytes().starts_with(local_cid.as_bytes())
-        };
-        if self
-            .pending_authenticated_accept
-            .iter()
-            .any(|pending| conflicts(pending.initial_cid, pending.local_cid))
-            || self
-                .authenticated_accept_result
-                .iter()
-                .any(|receipt| conflicts(receipt.initial_cid, receipt.local_cid))
-        {
+        self.prune_authenticated_initial_routes();
+        if self.authenticated_cids_reserved(initial_dcid, local_cid) {
             return Err(accept_error("occupied or ambiguous admitted connection ID"));
         }
         if driver.local_transport_parameters().len() > ACCEPT_MAX_BYTES {
@@ -844,30 +1045,174 @@ impl ManagedQuicEndpoint {
         driver
             .install_initial_keys(initial_dcid.as_bytes())
             .map_err(accept_error)?;
+        Ok(PendingAuthenticatedAccept {
+            driver,
+            peer: expected_peer,
+            initial_cid: initial_dcid,
+            local_cid,
+            required_alpn: required_alpn.to_vec(),
+            packet_number: 0,
+            received_packets: 0,
+            flights: 0,
+            next_pto,
+            expires,
+            last_flight: Vec::new(),
+            outbound: VecDeque::new(),
+            outstanding_packets: 0,
+            outstanding_bytes: 0,
+            socket_pending_bytes: 0,
+            authenticated_received_bytes: 0,
+            sent_bytes: 0,
+            address_validated: false,
+            peer_max_udp_payload_size: None,
+            early: Vec::new(),
+            early_bytes: 0,
+        })
+    }
+
+    #[cfg(feature = "tls")]
+    fn prune_authenticated_initial_routes(&mut self) {
+        let router = &self.connection_router;
+        self.authenticated_initial_routes
+            .retain(|(_, local)| router.negotiated_alpn(*local).is_ok());
+    }
+
+    #[cfg(feature = "tls")]
+    fn authenticated_cids_reserved(
+        &self,
+        initial_dcid: ConnectionId,
+        local_cid: ConnectionId,
+    ) -> bool {
+        // Short headers carry no CID length. Prefix-related local IDs cannot be
+        // routed unambiguously; long-header aliases must not name another owner.
+        let conflicts = |initial: ConnectionId, local: ConnectionId| {
+            initial_dcid == initial
+                || initial_dcid == local
+                || local_cid == initial
+                || local_cid.as_bytes().starts_with(local.as_bytes())
+                || local.as_bytes().starts_with(local_cid.as_bytes())
+        };
         self.pending_authenticated_accept
-            .push_back(PendingAuthenticatedAccept {
-                driver,
-                peer: expected_peer,
-                initial_cid: initial_dcid,
-                local_cid,
-                required_alpn: required_alpn.to_vec(),
-                packet_number: 0,
-                received_packets: 0,
-                flights: 0,
-                next_pto,
-                expires,
-                last_flight: Vec::new(),
-                outbound: VecDeque::new(),
-                outstanding_packets: 0,
-                outstanding_bytes: 0,
-                socket_pending_bytes: 0,
-                authenticated_received_bytes: 0,
-                sent_bytes: 0,
-                address_validated: false,
-                early: Vec::new(),
-                early_bytes: 0,
-            });
-        Ok(())
+            .iter()
+            .any(|pending| conflicts(pending.initial_cid, pending.local_cid))
+            || self
+                .authenticated_accept_result
+                .iter()
+                .any(|receipt| conflicts(receipt.initial_cid, receipt.local_cid))
+            || self
+                .authenticated_initial_routes
+                .iter()
+                .any(|&(initial, local)| conflicts(initial, local))
+    }
+
+    /// Returns true when automatic admission consumed or refused this Initial.
+    /// Malformed unauthenticated input never acquires a slot or result receipt.
+    #[cfg(feature = "tls")]
+    fn try_automatic_authenticated_accept(
+        &mut self,
+        cx: &Cx,
+        packet: &ReceivedPacket,
+    ) -> Result<bool, ManagedEndpointError> {
+        if self.authenticated_server.is_none() {
+            return Ok(false);
+        }
+        let Ok(ProtectedHeaderPrefix::Long(header)) =
+            ProtectedHeaderPrefix::decode(&packet.data, 0)
+        else {
+            return Ok(false);
+        };
+        if header.packet_type != LongPacketType::Initial {
+            return Ok(false);
+        }
+        // Existing authenticated ownership always wins over admission. An old
+        // original DCID is retained separately because the router keys by the
+        // negotiated server CID after TLS completes.
+        if self
+            .connection_router
+            .negotiated_alpn(header.dst_cid)
+            .is_ok()
+        {
+            return Ok(false);
+        }
+        self.prune_authenticated_initial_routes();
+        if header.version != 1
+            || header.dst_cid.len() < 8
+            || packet.data.len() < ACCEPT_MIN_INITIAL_BYTES
+            || packet.data.len() > self.config.udp_config.max_packet_size
+            || self
+                .authenticated_initial_routes
+                .iter()
+                .any(|(initial, _)| *initial == header.dst_cid)
+            || self.pending_authenticated_accept.len()
+                >= self
+                    .authenticated_accept_limit
+                    .saturating_sub(self.authenticated_accept_result.len())
+            || self.connection_stats().active_connections
+                >= self
+                    .config
+                    .max_connections
+                    .saturating_sub(self.pending_authenticated_accept.len())
+        {
+            return Ok(true);
+        }
+        let mut local_cid = None;
+        for _ in 0..ACCEPT_CID_ATTEMPTS {
+            let mut bytes = [0; ConnectionId::MAX_LEN];
+            cx.random_bytes(&mut bytes);
+            cx.checkpoint()
+                .map_err(|_| ManagedEndpointError::Cancelled)?;
+            let candidate = ConnectionId::new(&bytes).map_err(accept_error)?;
+            if candidate != header.src_cid
+                && candidate != header.dst_cid
+                && self
+                    .connection_router
+                    .validate_authenticated_cids(header.dst_cid, candidate)
+                    .is_ok()
+                && !self.authenticated_cids_reserved(header.dst_cid, candidate)
+            {
+                local_cid = Some(candidate);
+                break;
+            }
+        }
+        let Some(local_cid) = local_cid else {
+            return Ok(true);
+        };
+        let policy = self
+            .authenticated_server
+            .as_ref()
+            .expect("configured automatic admission");
+        let mut parameters = policy.transport_parameters.clone();
+        for (id, cid) in [(0x00, header.dst_cid), (0x0f, local_cid)] {
+            parameters
+                .unknown
+                .push(crate::net::quic_core::UnknownTransportParameter {
+                    id,
+                    value: cid.as_bytes().to_vec(),
+                });
+        }
+        let mut encoded = Vec::new();
+        parameters.encode(&mut encoded).map_err(accept_error)?;
+        let driver =
+            QuicHandshakeDriver::server(Arc::clone(&policy.tls), encoded).map_err(accept_error)?;
+        let required_alpn = policy.required_alpn.clone();
+        let mut pending = self.prepare_authenticated_accept(
+            cx,
+            driver,
+            packet.src_addr,
+            header.dst_cid,
+            local_cid,
+            &required_alpn,
+        )?;
+        let now = self.timer_scheduler.now(cx)?;
+        let result = pending.receive(packet.clone(), self.config.udp_config.max_packet_size, now);
+        // Certificate resolution and other TLS hooks can cancel the owner. Do
+        // not publish even a successfully authenticated first packet afterward.
+        cx.checkpoint()
+            .map_err(|_| ManagedEndpointError::Cancelled)?;
+        if result.is_ok() && pending.received_packets != 0 {
+            self.pending_authenticated_accept.push_back(pending);
+        }
+        Ok(true)
     }
 
     /// Consume the oldest completed accept receipt after managed-loop progress.
@@ -921,6 +1266,7 @@ impl ManagedQuicEndpoint {
 
     #[cfg(feature = "tls")]
     fn advance_authenticated_accept(&mut self, cx: &Cx, now: Instant) -> bool {
+        self.prune_authenticated_initial_routes();
         let mut completed = false;
         let mut index = 0;
         while index < self.pending_authenticated_accept.len() {
@@ -1003,6 +1349,8 @@ impl ManagedQuicEndpoint {
                     .map_err(accept_router_error)
             });
             if result.is_ok() {
+                self.authenticated_initial_routes
+                    .push((pending.initial_cid, pending.local_cid));
                 // Early ciphertext still requires the real 1-RTT authentication
                 // and replay checks. It is never treated as accepted plaintext.
                 for packet in pending.early.into_iter().rev() {
@@ -1114,6 +1462,8 @@ impl ManagedQuicEndpoint {
         }
         self.connection_router
             .remove_connection(cx, connection_id)?;
+        #[cfg(feature = "tls")]
+        self.prune_authenticated_initial_routes();
         let mut ids = retained_ids.into_iter();
         self.pending_incoming
             .retain(|_| ids.next().flatten() != Some(connection_id));
@@ -1193,6 +1543,12 @@ impl ManagedQuicEndpoint {
             #[cfg(feature = "tls")]
             authenticated_accept_limit: 1,
             #[cfg(feature = "tls")]
+            authenticated_accept_closed: false,
+            #[cfg(feature = "tls")]
+            authenticated_server: None,
+            #[cfg(feature = "tls")]
+            authenticated_initial_routes: Vec::new(),
+            #[cfg(feature = "tls")]
             prefer_accept_output: true,
             prefer_send: true,
         })
@@ -1211,6 +1567,17 @@ impl ManagedQuicEndpoint {
     /// Get connection router statistics.
     pub fn connection_stats(&self) -> ConnectionRouterStats {
         self.connection_router.connection_stats()
+    }
+
+    /// Protected datagrams assembled and retained until UDP confirms a send.
+    ///
+    /// This does not count stream data or control frames still owned by a
+    /// connection and not yet assembled. During graceful application shutdown,
+    /// first finish those producers, keep driving the loop, then wait for this
+    /// queue to empty before closing the endpoint.
+    #[must_use]
+    pub fn pending_datagram_count(&self) -> usize {
+        self.pending_outgoing.len()
     }
 
     /// Route a native connection into this endpoint for integration tests.
@@ -1249,6 +1616,8 @@ impl ManagedQuicEndpoint {
             .connection_router
             .take_connection(cx, connection_id)
             .map_err(ManagedEndpointError::from)?;
+        #[cfg(feature = "tls")]
+        self.prune_authenticated_initial_routes();
         self.pending_outgoing
             .retain(|packet| packet.connection_id != connection_id);
         self.timer_scheduler.cancel_pending();
@@ -1272,6 +1641,8 @@ impl ManagedQuicEndpoint {
             .connection_router
             .take_next_connection(cx)
             .map_err(ManagedEndpointError::from)?;
+        #[cfg(feature = "tls")]
+        self.prune_authenticated_initial_routes();
         if let Some(connection) = &connection {
             self.pending_outgoing
                 .retain(|packet| packet.connection_id != connection.connection_id);
@@ -1546,6 +1917,8 @@ impl ManagedQuicEndpoint {
                             self.pending_incoming
                                 .retain(|packet| packet.packet.src_addr != peer);
                             let retired = self.connection_router.discard_peer_connections(peer);
+                            #[cfg(feature = "tls")]
+                            self.prune_authenticated_initial_routes();
                             cx.trace(&format!("QUIC peer {peer} send failed ({error}); retired {retired} connections and {} unsent packets", queued - self.pending_outgoing.len()));
                         }
                     } else {
@@ -1678,6 +2051,13 @@ impl ManagedQuicEndpoint {
                 }
                 continue;
             }
+            #[cfg(feature = "tls")]
+            if self.try_automatic_authenticated_accept(cx, &packet)? {
+                self.pending_incoming.pop_front();
+                cx.checkpoint()
+                    .map_err(|_| ManagedEndpointError::Cancelled)?;
+                continue;
+            }
             // Route packet through connection router
             let emit_output = self.pending_outgoing.len() < self.config.packet_batch_size;
             let routed = match self
@@ -1712,7 +2092,7 @@ impl ManagedQuicEndpoint {
                 } => {
                     if self.authenticated_only {
                         cx.trace(
-                            "Dropped an unauthenticated Initial on an imported managed socket",
+                            "Dropped an unauthenticated Initial on an authenticated-only managed socket",
                         );
                         continue;
                     }
@@ -3481,7 +3861,7 @@ mod tests {
             endpoint.config.udp_config.max_packet_size = 16_384;
         }
 
-        fn server_driver(cancel_on_certificate: Option<Cx>) -> QuicHandshakeDriver {
+        fn server_policy(cancel_on_certificate: Option<Cx>) -> Arc<rustls::ServerConfig> {
             use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 
             #[derive(Debug)]
@@ -3528,7 +3908,11 @@ mod tests {
                     inner: Arc::clone(&config.cert_resolver),
                 });
             }
-            QuicHandshakeDriver::server(config, Vec::new()).unwrap()
+            config
+        }
+
+        fn server_driver(cancel_on_certificate: Option<Cx>) -> QuicHandshakeDriver {
+            QuicHandshakeDriver::server(server_policy(cancel_on_certificate), Vec::new()).unwrap()
         }
 
         fn initial_packet(peer: SocketAddr, initial: ConnectionId, now: Instant) -> ReceivedPacket {
@@ -3592,6 +3976,315 @@ mod tests {
                 receive_time: now,
                 transmit_time: None,
             }
+        }
+
+        #[test]
+        fn managed_accept_automatic_policy_preflight_and_malformed_initials_are_atomic() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, timer, mut endpoint, peer, existing) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                endpoint.remove_connection(&cx, existing).unwrap();
+                endpoint.config.is_server = true;
+                let peer = peer.local_addr().unwrap();
+                for (parameters, alpn) in [
+                    (Vec::new(), b"absent".as_slice()),
+                    (vec![0xff], b"atp/1".as_slice()),
+                    (vec![0x02, 0], b"atp/1".as_slice()),
+                    (vec![0x0d, 0], b"atp/1".as_slice()),
+                    (vec![0x10, 0], b"atp/1".as_slice()),
+                ] {
+                    assert!(
+                        endpoint
+                            .configure_authenticated_server(
+                                &cx,
+                                server_policy(None),
+                                parameters,
+                                alpn,
+                            )
+                            .is_err()
+                    );
+                    assert!(!endpoint.authenticated_only);
+                    assert!(endpoint.authenticated_server.is_none());
+                }
+                endpoint
+                    .configure_authenticated_server(
+                        &cx,
+                        server_policy(None),
+                        vec![0x00, 1, 9, 0x0f, 1, 8],
+                        b"atp/1",
+                    )
+                    .unwrap();
+                assert!(endpoint.authenticated_only);
+                assert!(
+                    endpoint
+                        .configure_authenticated_server(
+                            &cx,
+                            server_policy(None),
+                            Vec::new(),
+                            b"absent",
+                        )
+                        .is_err()
+                );
+                assert_eq!(
+                    endpoint
+                        .authenticated_server
+                        .as_ref()
+                        .unwrap()
+                        .required_alpn,
+                    b"atp/1"
+                );
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                let initial = ConnectionId::new(&[0xe1; 8]).unwrap();
+                let packet = initial_packet(peer, initial, now);
+                let mut corrupt = packet.clone();
+                *corrupt.data.last_mut().unwrap() ^= 1;
+                let mut undersized = packet.clone();
+                undersized.data.truncate(1199);
+                let mut wrong_version = packet.clone();
+                wrong_version.data[1..5].copy_from_slice(&2u32.to_be_bytes());
+                for invalid in [
+                    corrupt,
+                    undersized,
+                    wrong_version,
+                    initial_packet(peer, ConnectionId::new(&[0xe2; 4]).unwrap(), now),
+                ] {
+                    assert!(
+                        endpoint
+                            .try_automatic_authenticated_accept(&cx, &invalid)
+                            .unwrap()
+                    );
+                    assert!(endpoint.pending_authenticated_accept.is_empty());
+                    assert!(endpoint.authenticated_accept_result.is_empty());
+                    assert!(endpoint.pending_outgoing.is_empty());
+                    assert_eq!(endpoint.connection_stats().active_connections, 0);
+                }
+                assert!(
+                    endpoint
+                        .try_automatic_authenticated_accept(&cx, &packet)
+                        .unwrap()
+                );
+                assert_eq!(endpoint.pending_authenticated_accept.len(), 1);
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                let local = pending.local_cid;
+                assert_eq!(local.len(), ConnectionId::MAX_LEN);
+                assert_ne!(local, initial);
+                assert_eq!(pending.peer, peer);
+                assert_eq!(pending.received_packets, 1);
+                assert!(
+                    !pending.outbound.is_empty(),
+                    "actual TLS flight was produced"
+                );
+                let parameters = crate::net::quic_core::TransportParameters::decode(
+                    pending.driver.local_transport_parameters(),
+                )
+                .unwrap();
+                for (id, expected) in [(0x00, initial), (0x0f, local)] {
+                    assert_eq!(
+                        parameters
+                            .unknown
+                            .iter()
+                            .find(|p| p.id == id)
+                            .unwrap()
+                            .value,
+                        expected.as_bytes(),
+                        "each admitted CID replaces the static template value"
+                    );
+                }
+                let mut wrong_peer = packet;
+                wrong_peer.src_addr = "127.0.0.1:1".parse().unwrap();
+                endpoint
+                    .process_packet_batch(&cx, vec![wrong_peer])
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    endpoint
+                        .pending_authenticated_accept
+                        .front()
+                        .unwrap()
+                        .received_packets,
+                    1
+                );
+                assert_eq!(endpoint.stop_authenticated_accepts(), 1);
+                assert_eq!(endpoint.stop_authenticated_accepts(), 0);
+                assert_eq!(
+                    endpoint.take_authenticated_accept_result_with_id(),
+                    Some((local, Err(ManagedEndpointError::ShuttingDown)))
+                );
+                assert!(endpoint.pending_outgoing.is_empty());
+                assert!(
+                    endpoint.authenticated_only,
+                    "closing admission never restores the plaintext path"
+                );
+                assert_eq!(
+                    endpoint.configure_authenticated_server(
+                        &cx,
+                        server_policy(None),
+                        Vec::new(),
+                        b"atp/1",
+                    ),
+                    Err(ManagedEndpointError::ShuttingDown)
+                );
+                endpoint.shutdown(&cx).await.unwrap();
+                assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn managed_accept_automatic_cancellation_before_publication_retains_no_owner() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, timer, mut endpoint, peer, existing) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                endpoint.remove_connection(&cx, existing).unwrap();
+                endpoint.config.is_server = true;
+                endpoint
+                    .configure_authenticated_server(
+                        &cx,
+                        server_policy(Some(cx.clone())),
+                        Vec::new(),
+                        b"atp/1",
+                    )
+                    .unwrap();
+                let packet = initial_packet(
+                    peer.local_addr().unwrap(),
+                    ConnectionId::new(&[0xe3; 8]).unwrap(),
+                    endpoint.timer_scheduler.now(&cx).unwrap(),
+                );
+                assert_eq!(
+                    endpoint.try_automatic_authenticated_accept(&cx, &packet),
+                    Err(ManagedEndpointError::Cancelled)
+                );
+                assert!(endpoint.pending_authenticated_accept.is_empty());
+                assert!(endpoint.authenticated_accept_result.is_empty());
+                assert!(endpoint.pending_outgoing.is_empty());
+                assert_eq!(endpoint.connection_stats().active_connections, 0);
+                let _ = endpoint.shutdown(&cx).await;
+                assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn managed_accept_segments_large_tls_flights_with_full_size_cids() {
+            use super::super::super::handshake_driver::{
+                client_config, server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, timer, mut endpoint, peer, existing) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                endpoint.remove_connection(&cx, existing).unwrap();
+                endpoint.config.is_server = true;
+                endpoint.config.udp_config.max_packet_size = 1500;
+                let mut parameters = crate::net::quic_core::TransportParameters::default();
+                parameters
+                    .unknown
+                    .push(crate::net::quic_core::UnknownTransportParameter {
+                        id: 0x173e,
+                        value: vec![7; 4096],
+                    });
+                let mut encoded = Vec::new();
+                parameters.encode(&mut encoded).unwrap();
+                let tls = server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![b"atp/1".to_vec()],
+                )
+                .unwrap();
+                endpoint
+                    .configure_authenticated_server(&cx, tls, encoded, b"atp/1")
+                    .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                let peer_parameters = crate::net::quic_core::TransportParameters {
+                    max_udp_payload_size: Some(1200),
+                    ..crate::net::quic_core::TransportParameters::default()
+                };
+                let mut peer_encoded = Vec::new();
+                peer_parameters.encode(&mut peer_encoded).unwrap();
+                let mut client = QuicHandshakeDriver::client(
+                    client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"atp/1".to_vec()])
+                        .unwrap(),
+                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                    peer_encoded,
+                )
+                .unwrap();
+                let initial_cid = ConnectionId::new(&[0xe4; 20]).unwrap();
+                let client_cid = ConnectionId::new(&[0xe5; 20]).unwrap();
+                client.install_initial_keys(initial_cid.as_bytes()).unwrap();
+                let segments = client.pump_outbound().unwrap();
+                assert_eq!(segments.len(), 1);
+                let packet = ReceivedPacket {
+                    src_addr: peer.local_addr().unwrap(),
+                    data: client
+                        .assemble_handshake_packet(&segments[0], initial_cid, client_cid, 0)
+                        .unwrap(),
+                    receive_time: now,
+                    transmit_time: None,
+                };
+                assert!(
+                    endpoint
+                        .try_automatic_authenticated_accept(&cx, &packet)
+                        .unwrap()
+                );
+                let pending = endpoint
+                    .pending_authenticated_accept
+                    .front()
+                    .expect("large valid TLS flight remains admitted");
+                assert_eq!(pending.local_cid.len(), 20);
+                assert!(
+                    pending.last_flight.len() >= 5,
+                    "TLS bytes split across bounded datagrams"
+                );
+                assert!(
+                    pending
+                        .last_flight
+                        .iter()
+                        .all(|packet| packet.data.len() <= 1200)
+                );
+                assert!(pending.outstanding_bytes > 4096);
+                assert_eq!(
+                    pending.outstanding_bytes,
+                    pending
+                        .last_flight
+                        .iter()
+                        .map(|packet| packet.data.len())
+                        .sum::<usize>()
+                );
+                assert!(pending.outstanding_bytes <= ACCEPT_MAX_BYTES);
+                // Real decryption and CRYPTO reassembly must reach the end of
+                // the server's enlarged TLS flight without an offset gap.
+                for packet in &pending.last_flight {
+                    assert_eq!(
+                        client.recv_handshake_packet(&packet.data).unwrap(),
+                        pending.local_cid
+                    );
+                    let _ = client.pump_outbound().unwrap();
+                }
+                assert!(client.is_complete());
+                assert!(client.one_rtt_keys_installed());
+                let server_parameters = crate::net::quic_core::TransportParameters::decode(
+                    client.peer_transport_parameters().unwrap(),
+                )
+                .unwrap();
+                assert!(server_parameters.unknown.iter().any(|parameter| {
+                    parameter.id == 0x173e && parameter.value == vec![7; 4096]
+                }));
+                endpoint.queue_accept_output();
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                assert!(
+                    pending.socket_pending_bytes as u64 <= pending.authenticated_received_bytes * 3
+                );
+                endpoint.shutdown(&cx).await.unwrap();
+                assert_eq!(timer.pending_count(), 0);
+            }));
         }
 
         #[test]
