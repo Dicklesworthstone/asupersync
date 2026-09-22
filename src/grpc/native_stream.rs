@@ -5,8 +5,9 @@
 //! reader, fabricate loopback responses, or change `GrpcClient`'s legacy APIs.
 //! The transport may be `TcpStream` or a caller-authenticated TLS stream. The
 //! caller must verify TLS identity and negotiate `h2` before passing TLS here;
-//! setting `scheme = "https"` is not authentication. DNS, connect and TLS time
-//! are outside this call's deadline because they precede construction.
+//! setting `scheme = "https"` is not authentication. For this constructor,
+//! connection establishment precedes the call. [`NativeStreamEndpoint`] instead
+//! dials a resolved address under a deadline that includes setup and headers.
 //!
 //! Polling [`NativeServerStream::message`] supplies receive demand. Dropping
 //! that borrowing future preserves partial request writes, frame decoding and
@@ -67,6 +68,8 @@ use std::time::Duration;
 
 mod response;
 use response::ResponseHead;
+mod connect;
+pub use connect::NativeStreamEndpoint;
 
 const FRAME_BYTES: usize = 16 * 1024;
 const POLL_STEPS: usize = 32;
@@ -108,6 +111,69 @@ impl Default for NativeStreamConfig {
             send_compression: CompressionEncoding::Identity,
             accept_gzip: false,
         }
+    }
+}
+
+impl NativeStreamConfig {
+    fn validate(&self) -> Result<usize, Status> {
+        if !matches!(self.scheme, "http" | "https")
+            || self.max_metadata_bytes < 128
+            || u32::try_from(self.max_metadata_bytes).is_err()
+            || u32::try_from(self.max_send_message_size).is_err()
+            || u32::try_from(self.max_recv_message_size).is_err()
+        {
+            return Err(Status::invalid_argument("invalid native gRPC stream limits or scheme"));
+        }
+        if self.max_send_message_size.checked_add(5).is_none() {
+            return Err(Status::invalid_argument("native send limit overflows address space"));
+        }
+        self.max_recv_message_size.checked_add(5 + FRAME_BYTES)
+            .ok_or_else(|| Status::invalid_argument("native receive limit overflows address space"))
+    }
+
+    fn frame_hooks(&self) -> Result<(
+        Option<crate::grpc::codec::FrameCompressor>,
+        Option<crate::grpc::codec::FrameDecompressor>,
+    ), Status> {
+        let compressor = match self.send_compression {
+            CompressionEncoding::Identity => None,
+            CompressionEncoding::Gzip => Some(CompressionEncoding::Gzip.frame_compressor()
+                .ok_or_else(|| Status::unimplemented("gzip compression is not compiled in"))?),
+        };
+        let decompressor = if self.accept_gzip {
+            Some(CompressionEncoding::Gzip.frame_decompressor()
+                .ok_or_else(|| Status::unimplemented("gzip decompression is not compiled in"))?)
+        } else { None };
+        Ok((compressor, decompressor))
+    }
+}
+
+// A connected call may have already spent part of its budget dialing. Keep
+// the original absolute value AND its clock; never reconstruct it as now + TTL.
+struct CallDeadline {
+    clock: Option<TimerDriverHandle>,
+    at: Option<Time>,
+}
+
+impl CallDeadline {
+    fn capture(cx: &Cx, metadata: &Metadata, configured: Option<Duration>) -> Result<Self, Status> {
+        let clock = cx.timer_driver();
+        let timeout = request_timeout(metadata, configured)?;
+        if (timeout.is_some() || cx.budget().deadline.is_some()) && clock.is_none() {
+            return Err(Status::failed_precondition("native gRPC deadline requires an explicit timer"));
+        }
+        let now = clock.as_ref().map(TimerDriverHandle::now);
+        let at = earlier(cx.budget().deadline, timeout.zip(now).map(|(timeout, now)| now + timeout));
+        let deadline = Self { clock, at };
+        deadline.check()?;
+        Ok(deadline)
+    }
+
+    fn check(&self) -> Result<(), Status> {
+        if self.at.zip(self.clock.as_ref()).is_some_and(|(at, clock)| clock.now() >= at) {
+            return Err(Status::deadline_exceeded("native gRPC deadline expired before dispatch"));
+        }
+        Ok(())
     }
 }
 
@@ -201,43 +267,33 @@ where
         codec: C,
         config: NativeStreamConfig,
     ) -> Result<Self, Status> {
+        Self::new_admitted(cx, io, authority, path, request, codec, config, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_admitted(
+        cx: &Cx,
+        io: IO,
+        authority: &str,
+        path: &str,
+        request: Request<C::Encode>,
+        codec: C,
+        config: NativeStreamConfig,
+        admitted: Option<CallDeadline>,
+    ) -> Result<Self, Status> {
         // Codec setup/encoding is user code too. Never let a different ambient
         // task silently supply its capabilities during synchronous construction.
         let _ambient = Cx::set_current(Some(cx.clone()));
         check_cancellation(cx)?;
-        if !matches!(config.scheme, "http" | "https")
-            || config.max_metadata_bytes < 128
-            || u32::try_from(config.max_metadata_bytes).is_err()
-            || u32::try_from(config.max_send_message_size).is_err()
-            || u32::try_from(config.max_recv_message_size).is_err()
-        {
-            return Err(Status::invalid_argument("invalid native gRPC stream limits or scheme"));
-        }
-        let body_limit = config.max_recv_message_size.checked_add(5 + FRAME_BYTES)
-            .ok_or_else(|| Status::invalid_argument("native receive limit overflows address space"))?;
-        if config.max_send_message_size.checked_add(5).is_none() {
-            return Err(Status::invalid_argument("native send limit overflows address space"));
-        }
-        let compressor = match config.send_compression {
-            CompressionEncoding::Identity => None,
-            CompressionEncoding::Gzip => Some(CompressionEncoding::Gzip.frame_compressor()
-                .ok_or_else(|| Status::unimplemented("gzip compression is not compiled in"))?),
+        let body_limit = config.validate()?;
+        let (compressor, decompressor) = config.frame_hooks()?;
+        let admitted = match admitted {
+            Some(admitted) => admitted,
+            None => CallDeadline::capture(cx, request.metadata(), config.timeout)?,
         };
-        let decompressor = if config.accept_gzip {
-            Some(CompressionEncoding::Gzip.frame_decompressor()
-                .ok_or_else(|| Status::unimplemented("gzip decompression is not compiled in"))?)
-        } else { None };
-        let clock = cx.timer_driver();
-        let timeout = request_timeout(request.metadata(), config.timeout)?;
-        if (timeout.is_some() || cx.budget().deadline.is_some()) && clock.is_none() {
-            return Err(Status::failed_precondition("native gRPC deadline requires an explicit timer"));
-        }
-        let now = clock.as_ref().map(TimerDriverHandle::now);
-        let deadline = earlier(cx.budget().deadline, timeout.zip(now).map(|(timeout, now)| now + timeout));
-        if deadline.zip(now).is_some_and(|(deadline, now)| now >= deadline) {
-            return Err(Status::deadline_exceeded("native gRPC deadline expired before admission"));
-        }
-        let headers = request_headers(authority, path, request.metadata(), &config, deadline.zip(now))?;
+        admitted.check()?;
+        let now = admitted.clock.as_ref().map(TimerDriverHandle::now);
+        let mut headers = request_headers(authority, path, request.metadata(), &config, admitted.at.zip(now))?;
         let mut codec = FramedCodec::with_message_size_limits(
             codec, config.max_send_message_size, config.max_recv_message_size,
         ).with_frame_hooks(compressor, decompressor);
@@ -245,6 +301,21 @@ where
         codec.encode_message(&request.into_inner(), &mut request_body)
             .map_err(GrpcError::into_status)?;
         check_cancellation(cx)?;
+        // Both connection setup and synchronous codec work consume the same
+        // absolute allowance. Refresh the wire TTL before any request I/O.
+        admitted.check()?;
+        let CallDeadline { clock, at: deadline } = admitted;
+        if let Some((at, clock)) = deadline.zip(clock.as_ref()) {
+            let header = headers.iter_mut().find(|header| header.name == "grpc-timeout")
+                .expect("an admitted deadline always emits grpc-timeout");
+            header.value = format_grpc_timeout(Duration::from_nanos(at.duration_since(clock.now())));
+            let used = headers.iter().try_fold(0usize, |sum, header| {
+                sum.checked_add(header.name.len())?.checked_add(header.value.len())?.checked_add(32)
+            });
+            if used.is_none_or(|used| used > config.max_metadata_bytes) {
+                return Err(Status::resource_exhausted("outbound gRPC metadata exceeds its byte limit"));
+            }
+        }
         let settings = Settings {
             max_header_list_size: u32::try_from(config.max_metadata_bytes)
                 .map_err(|_| Status::invalid_argument("metadata limit exceeds H2 representation"))?,
