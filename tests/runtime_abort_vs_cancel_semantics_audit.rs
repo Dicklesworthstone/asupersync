@@ -1198,24 +1198,37 @@ fn cross_thread_abort_on_multi_worker_runtime_preserves_mutex_cancellation_and_w
 
 #[test]
 fn abort_before_first_poll_keeps_task_level_cancellation_attribution() {
+    assert_abort_before_first_poll_keeps_task_level_cancellation(false);
+}
+
+#[test]
+fn local_abort_before_first_poll_keeps_task_level_cancellation_attribution() {
+    assert_abort_before_first_poll_keeps_task_level_cancellation(true);
+}
+
+fn assert_abort_before_first_poll_keeps_task_level_cancellation(local: bool) {
     let runtime = RuntimeBuilder::current_thread()
         .build()
         .expect("build current-thread runtime");
 
-    runtime.block_on(runtime.handle().spawn(async {
+    runtime.block_on(runtime.handle().spawn(async move {
         let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
         let polls = Arc::new(AtomicUsize::new(0));
         let child_polls = Arc::clone(&polls);
-        let mut child = cx
-            .spawn(move |child_cx| async move {
-                child_polls.fetch_add(1, Ordering::AcqRel);
-                assert!(
-                    child_cx.checkpoint().is_err(),
-                    "an abort requested before first poll must be visible to the child"
-                );
-                "cancelled-before-first-work"
-            })
-            .expect("runtime-backed Cx must admit child task");
+        let child_body = move |child_cx: Cx| async move {
+            child_polls.fetch_add(1, Ordering::AcqRel);
+            assert!(
+                child_cx.checkpoint().is_err(),
+                "an abort requested before first poll must be visible to the child"
+            );
+            "cancelled-before-first-work"
+        };
+        let mut child = if local {
+            cx.spawn_local(child_body)
+        } else {
+            cx.spawn(child_body)
+        }
+        .expect("runtime-backed Cx must admit child task");
 
         // The current task retains the only worker until it awaits below, so
         // this abort is deterministically published before the child's first
