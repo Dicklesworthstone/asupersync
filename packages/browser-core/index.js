@@ -697,10 +697,10 @@ function encodeWebTransportDatagram(value, label) {
 }
 
 function queueWebTransportOutcome(state, outcome, { terminal = false } = {}) {
+  if (state.terminalQueued) {
+    return;
+  }
   if (terminal) {
-    if (state.terminalQueued) {
-      return;
-    }
     state.terminalQueued = true;
   }
   state.inbox.push(outcome);
@@ -728,35 +728,39 @@ function closeHostWebTransportState(state, reason = undefined) {
   }
   state.closed = true;
   state.pendingWrites.length = 0;
-  if (state.reader && typeof state.reader.cancel === "function") {
-    Promise.resolve(state.reader.cancel(reason ?? WEBTRANSPORT_CLOSE_KIND)).catch(() => {});
-  }
-  if (state.reader && typeof state.reader.releaseLock === "function") {
-    try {
-      state.reader.releaseLock();
-    } catch {}
-  }
-  if (state.writer && typeof state.writer.close === "function") {
-    Promise.resolve(state.writer.close()).catch(() => {});
-  }
-  if (state.writer && typeof state.writer.releaseLock === "function") {
-    try {
-      state.writer.releaseLock();
-    } catch {}
-  }
-  if (state.transport && typeof state.transport.close === "function") {
-    if (reason) {
-      try {
-        state.transport.close({ reason });
-      } catch {
-        try {
-          state.transport.close();
-        } catch {}
-      }
-      return;
+  // Each host operation may throw synchronously as well as reject. A failed
+  // cleanup must not skip the remaining resources or the task's terminal join.
+  try {
+    if (typeof state.reader?.cancel === "function") {
+      Promise.resolve(state.reader.cancel(reason ?? WEBTRANSPORT_CLOSE_KIND)).catch(() => {});
     }
+  } catch {}
+  try {
+    if (typeof state.reader?.releaseLock === "function") {
+      state.reader.releaseLock();
+    }
+  } catch {}
+  try {
+    if (typeof state.writer?.close === "function") {
+      Promise.resolve(state.writer.close()).catch(() => {});
+    }
+  } catch {}
+  try {
+    if (typeof state.writer?.releaseLock === "function") {
+      state.writer.releaseLock();
+    }
+  } catch {}
+  try {
+    if (typeof state.transport?.close === "function") {
+      if (reason) {
+        state.transport.close({ reason });
+      } else {
+        state.transport.close();
+      }
+    }
+  } catch {
     try {
-      state.transport.close();
+      state.transport?.close();
     } catch {}
   }
 }
@@ -810,6 +814,9 @@ async function pumpWebTransportReads(state, sessionOrigin) {
   while (!state.closed && state.reader) {
     try {
       const { value, done } = await state.reader.read();
+      if (state.closed) {
+        return;
+      }
       if (done) {
         settleHostWebTransportState(
           state,
@@ -881,6 +888,9 @@ function monitorWebTransportClosure(state, sessionOrigin) {
 
 async function initializeWebTransportState(state, sessionOrigin) {
   try {
+    // Observe closure before waiting for readiness: failure or owner teardown
+    // can reject `closed` without ever reaching the connected datagram lane.
+    monitorWebTransportClosure(state, sessionOrigin);
     await state.transport.ready;
     if (state.closed) {
       return;
@@ -903,7 +913,6 @@ async function initializeWebTransportState(state, sessionOrigin) {
     state.ready = true;
     flushPendingWebTransportWrites(state, sessionOrigin);
     void pumpWebTransportReads(state, sessionOrigin);
-    monitorWebTransportClosure(state, sessionOrigin);
   } catch (error) {
     if (state.closed) {
       return;
@@ -920,13 +929,12 @@ async function initializeWebTransportState(state, sessionOrigin) {
   }
 }
 
-function takeWebTransportState(sessionHandle) {
+function lookupWebTransportState(sessionHandle) {
   const sessionKey = keyOf(sessionHandle, "sessionHandle", "task");
   const state = INFLIGHT_WEBTRANSPORTS.get(sessionKey);
   if (!state) {
     return { sessionKey, state: null };
   }
-  INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
   return { sessionKey, state };
 }
 
@@ -1317,9 +1325,9 @@ export function webtransport_recv(request, _consumerVersion = null) {
 }
 
 export function webtransport_close(request, consumerVersion = null) {
-  let taken;
+  let found;
   try {
-    taken = takeWebTransportState(request.session);
+    found = lookupWebTransportState(request.session);
   } catch (error) {
     return failOut(
       "invalid_handle",
@@ -1327,37 +1335,58 @@ export function webtransport_close(request, consumerVersion = null) {
       `webtransport_close rejected: ${errorMessage(error)}`,
     );
   }
-  if (!taken.state) {
+  if (!found.state) {
     return failOut(
       "invalid_handle",
       "permanent",
       "webtransport_close rejected: unknown WebTransport session handle",
     );
   }
-  if (taken.state.settled) {
-    return taken.state.terminalOutcome;
+  const { sessionKey, state } = found;
+  if (state.settled) {
+    INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+    return state.terminalOutcome;
   }
-  taken.state.settled = true;
-  closeHostWebTransportState(taken.state, request.reason);
+  let reason;
+  try {
+    reason = request.reason;
+    if (reason !== undefined && reason !== null && typeof reason !== "string") {
+      throw new TypeError("request.reason must be a string when provided");
+    }
+  } catch (error) {
+    return failOut(
+      "compatibility_rejected",
+      "permanent",
+      `webtransport_close rejected: ${errorMessage(error)}`,
+    );
+  }
+  // An option getter can reenter the API and close this session or its owner.
+  if (INFLIGHT_WEBTRANSPORTS.get(sessionKey) !== state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_close rejected: session closed during request processing",
+    );
+  }
+  INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+  if (state.settled) {
+    return state.terminalOutcome;
+  }
+  state.settled = true;
+  closeHostWebTransportState(state, reason);
   const outcome = cancelOut(
     WEBTRANSPORT_CLOSE_KIND,
     "completed",
-    request.reason ?? "webtransport session closed by caller",
-    taken.state.sessionOrigin,
+    reason ?? "webtransport session closed by caller",
+    state.sessionOrigin,
   );
-  return task_join(request.session, outcome, consumerVersion);
+  return task_join(state.taskHandle, outcome, consumerVersion);
 }
 
 export function webtransport_cancel(request, consumerVersion = null) {
-  // Background completion has already released the task. Consume its retained
-  // result without sending another cancellation or join through a stale handle.
+  let found;
   try {
-    const sessionKey = keyOf(request.session, "request.session", "task");
-    const state = INFLIGHT_WEBTRANSPORTS.get(sessionKey);
-    if (state?.settled) {
-      INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
-      return state.terminalOutcome;
-    }
+    found = lookupWebTransportState(request.session);
   } catch (error) {
     return failOut(
       "invalid_handle",
@@ -1365,38 +1394,60 @@ export function webtransport_cancel(request, consumerVersion = null) {
       `webtransport_cancel rejected: ${errorMessage(error)}`,
     );
   }
+  if (!found.state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_cancel rejected: unknown WebTransport session handle",
+    );
+  }
+  const { sessionKey, state } = found;
+  // Background completion has already released the task. Consume its retained
+  // result without sending another cancellation or join through a stale handle.
+  if (state.settled) {
+    INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+    return state.terminalOutcome;
+  }
+  let kind;
+  let message;
+  try {
+    kind = request.kind;
+    message = request.message ?? undefined;
+  } catch (error) {
+    return failOut(
+      "compatibility_rejected",
+      "permanent",
+      `webtransport_cancel rejected: ${errorMessage(error)}`,
+    );
+  }
+  if (INFLIGHT_WEBTRANSPORTS.get(sessionKey) !== state) {
+    return failOut(
+      "invalid_handle",
+      "permanent",
+      "webtransport_cancel rejected: session closed during request processing",
+    );
+  }
+  if (state.settled) {
+    INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+    return state.terminalOutcome;
+  }
   const cancelled = task_cancel(
-    {
-      task: request.session,
-      kind: request.kind,
-      message: request.message ?? undefined,
-    },
+    { task: state.taskHandle, kind, message },
     consumerVersion,
   );
   if (cancelled.outcome !== "ok") {
     return cancelled;
   }
-  let taken;
-  try {
-    taken = takeWebTransportState(request.session);
-  } catch (error) {
-    return failOut(
-      "invalid_handle",
-      "permanent",
-      `webtransport_cancel rejected: ${errorMessage(error)}`,
-    );
-  }
-  if (taken.state) {
-    taken.state.settled = true;
-    closeHostWebTransportState(taken.state, request.message);
-  }
+  INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
+  state.settled = true;
+  closeHostWebTransportState(state, message);
   return task_join(
-    request.session,
+    state.taskHandle,
     cancelOut(
-      request.kind,
+      kind,
       "cancelling",
-      request.message ?? null,
-      taken.state?.sessionOrigin ?? displayKeyOf(request.session, "request.session", "task"),
+      message ?? null,
+      state.sessionOrigin,
     ),
     consumerVersion,
   );

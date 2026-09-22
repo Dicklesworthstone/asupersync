@@ -40,8 +40,9 @@ const unitJson = '{"outcome":"ok","value":{"kind":"unit"}}';
 
 async function fixture(options = {}) {
   const hosts = [];
-  const calls = { join: [], cancel: [], scopeClose: [] };
+  const calls = { join: [], cancel: [], scopeClose: [], runtimeClose: [] };
   let nextTask = 1;
+  let nextRegion = 100;
 
   // Real stream locking, queued reads, cancellation and write rejection;
   // a controlled session lifecycle, not an HTTP/3 implementation.
@@ -50,7 +51,9 @@ async function fixture(options = {}) {
       this.events = [];
       this.completion = deferred();
       this.closed = this.completion.promise;
-      this.ready = Promise.resolve();
+      this.handshake = deferred();
+      this.ready = this.handshake.promise;
+      if (!options.pendingHandshake) this.handshake.resolve();
       this.datagrams = {
         readable: new ReadableStream({
           start: (controller) => { this.input = controller; },
@@ -69,7 +72,8 @@ async function fixture(options = {}) {
 
     close(info = {}) {
       this.events.push(["close", info.reason]);
-      this.completion.resolve(info);
+      if (options.closeError) this.completion.reject(options.closeError);
+      else this.completion.resolve(info);
     }
   }
 
@@ -84,6 +88,16 @@ async function fixture(options = {}) {
     "websocket_close", "websocket_open", "websocket_recv", "websocket_send",
   ];
   const implementations = {
+    runtime_create: () => JSON.stringify({
+      kind: "runtime", slot: 0, generation: 1, owner_token: "42",
+    }),
+    scope_enter: () => JSON.stringify({
+      kind: "region", slot: nextRegion++, generation: 1, owner_token: "42",
+    }),
+    runtime_close: (handle) => {
+      calls.runtimeClose.push(JSON.parse(handle));
+      return unitJson;
+    },
     task_spawn: () => JSON.stringify({
       kind: "task", slot: nextTask++, generation: 1, owner_token: "42",
     }),
@@ -119,13 +133,16 @@ async function fixture(options = {}) {
   });
   await module.evaluate();
   const core = module.namespace;
-  const scope = new core.RegionHandle({
-    kind: "region", slot: 100, generation: 1, owner_token: "42",
-  });
+  const created = core.runtime_create();
+  assert.equal(created.outcome, "ok");
+  const runtime = created.value;
+  const entered = core.scope_enter({ parent: runtime });
+  assert.equal(entered.outcome, "ok");
+  const scope = entered.value;
   const opened = core.webtransport_open({ scope, url: "https://transport.example.test/" });
   assert.equal(opened.outcome, "ok");
   await turn();
-  return { core, calls, hosts, host: hosts[0], scope, session: opened.value };
+  return { core, calls, hosts, host: hosts[0], runtime, scope, session: opened.value };
 }
 
 function assertReleased(core, session) {
@@ -295,5 +312,259 @@ test("WT-CANCEL-REJECTED: failed cancellation preserves an active host session",
   assert.equal(core.scope_close(scope).outcome, "ok");
   await turn();
   assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-UNKNOWN-CANCEL: reject ordinary task handles without ABI side effects", async () => {
+  const { core, calls, host, scope, session } = await fixture();
+  const ordinary = core.task_spawn({ scope, label: "not-a-webtransport-session" });
+  assert.equal(ordinary.outcome, "ok");
+  const result = core.webtransport_cancel({ session: ordinary.value, kind: "abort_signal" });
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.code, "invalid_handle");
+  assert.equal(calls.cancel.length, 0);
+  assert.equal(calls.join.length, 0);
+  assert.equal(host.events.length, 0);
+  assert.equal(core.scope_close(scope).outcome, "ok");
+  await turn();
+  assertReleased(core, session);
+});
+
+test("WT-UNKNOWN-FIELDS: unknown sessions never evaluate cancellation payload getters", async () => {
+  const { core, calls, scope } = await fixture();
+  const unknown = new core.TaskHandle({ kind: "task", slot: 500, generation: 1, owner_token: "42" });
+  const result = core.webtransport_cancel({
+    session: unknown,
+    get kind() { throw new Error("kind must not be read"); },
+    get message() { throw new Error("message must not be read"); },
+  });
+  assert.equal(result.failure.code, "invalid_handle");
+  assert.equal(calls.cancel.length, 0);
+  assert.equal(calls.join.length, 0);
+  assert.equal(core.scope_close(scope).outcome, "ok");
+});
+
+test("WT-CANCEL-SNAPSHOT: evaluate the session handle exactly once", async () => {
+  const { core, calls, host, session } = await fixture();
+  let reads = 0;
+  const result = core.webtransport_cancel({
+    get session() {
+      reads += 1;
+      if (reads > 1) throw new Error("session was read twice");
+      return session;
+    },
+    kind: "abort_signal",
+    message: "snapshot cancel",
+  });
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(reads, 1);
+  assert.equal(calls.cancel.length, 1);
+  assert.equal(calls.join.length, 1);
+  assert.deepEqual(calls.join[0].handle, calls.cancel[0].task);
+  await turn();
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-CLOSE-SNAPSHOT: evaluate the session handle exactly once", async () => {
+  const { core, calls, host, session } = await fixture();
+  let reads = 0;
+  const result = core.webtransport_close({
+    get session() {
+      reads += 1;
+      if (reads > 1) throw new Error("session was read twice");
+      return session;
+    },
+    reason: "snapshot close",
+  });
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(reads, 1);
+  assert.equal(calls.join.length, 1);
+  await turn();
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-CLOSE-OPTIONS: reject a throwing reason before detaching host state", async () => {
+  const { core, calls, host, scope, session } = await fixture();
+  const result = core.webtransport_close({
+    session,
+    get reason() { throw new Error("reason getter failed"); },
+  });
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.code, "compatibility_rejected");
+  assert.match(result.failure.message, /reason getter failed/);
+  assert.equal(core.hostSessions.size, 1);
+  assert.equal(calls.join.length, 0);
+  assert.equal(host.events.length, 0);
+  assert.equal(core.webtransport_send({ session, value: [9] }).outcome, "ok");
+  assert.equal(core.scope_close(scope).outcome, "ok");
+  await turn();
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-CLOSE-TYPE: reject invalid reason types without closing the session", async () => {
+  const { core, calls, host, scope, session } = await fixture();
+  for (const reason of [123, false, {}, Symbol("reason")]) {
+    const result = core.webtransport_close({ session, reason });
+    assert.equal(result.outcome, "err");
+    assert.equal(result.failure.code, "compatibility_rejected");
+    assert.equal(core.hostSessions.size, 1);
+    assert.equal(calls.join.length, 0);
+    assert.equal(host.events.length, 0);
+  }
+  assert.equal(core.scope_close(scope).outcome, "ok");
+  await turn();
+  assertReleased(core, session);
+});
+
+test("WT-CLEANUP-THROW: synchronous host cleanup failures do not skip join or other resources", async () => {
+  const { core, calls, host, session } = await fixture();
+  const state = [...core.hostSessions.values()][0];
+  const attempted = [];
+  // The streams and lock release remain native; only the failing host methods
+  // are injected to exercise synchronous exception containment.
+  state.reader.cancel = () => { attempted.push("reader-cancel"); throw new Error("cancel failed"); };
+  state.writer.close = () => { attempted.push("writer-close"); throw new Error("close failed"); };
+  const result = core.webtransport_close({ session, reason: "shutdown" });
+  assert.equal(result.outcome, "cancelled");
+  assert.deepEqual(attempted, ["reader-cancel", "writer-close"]);
+  assert.equal(calls.join.length, 1);
+  await turn();
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-HANDSHAKE-FAIL: observe closed rejection even when readiness fails", async () => {
+  const { core, calls, host, session } = await fixture({
+    pendingHandshake: true, closeError: new Error("closed after handshake failure"),
+  });
+  host.handshake.reject(new Error("handshake denied"));
+  await turn();
+  assert.equal(calls.join.length, 1);
+  const result = core.webtransport_recv({ session });
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.code, "compatibility_rejected");
+  assert.match(result.failure.message, /webtransport handshake failed: handshake denied/);
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-EARLY-CLOSE: closing during handshake observes rejection and never acquires streams", async () => {
+  const { core, calls, host, session } = await fixture({
+    pendingHandshake: true, closeError: new Error("closed before ready"),
+  });
+  assert.equal(core.webtransport_send({ session, value: [1] }).outcome, "ok");
+  assert.equal(core.webtransport_close({ session }).outcome, "cancelled");
+  await turn();
+  host.handshake.resolve();
+  await turn();
+  assert.equal(calls.join.length, 1);
+  assert.equal(host.events.filter(([kind]) => kind === "write").length, 0);
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-EARLY-SCOPE: owner teardown during handshake consumes later promise rejection", async () => {
+  const { core, calls, host, scope, session } = await fixture({
+    pendingHandshake: true, closeError: new Error("scope closed before ready"),
+  });
+  assert.equal(core.scope_close(scope).outcome, "ok");
+  host.handshake.reject(new Error("late handshake failure"));
+  await turn();
+  assert.equal(calls.join.length, 0, "owner already released its child tasks");
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-REENTRANT-CLOSE: a reason getter that closes the owner cannot join twice", async () => {
+  const { core, calls, host, scope, session } = await fixture();
+  const result = core.webtransport_close({
+    session,
+    get reason() {
+      assert.equal(core.scope_close(scope).outcome, "ok");
+      return "owner already closed";
+    },
+  });
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.code, "invalid_handle");
+  assert.equal(calls.join.length, 0);
+  assert.equal(calls.scopeClose.length, 1);
+  await turn();
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-REENTRANT-CANCEL: a message getter that closes the owner cannot cancel a stale task", async () => {
+  const { core, calls, host, scope, session } = await fixture();
+  const result = core.webtransport_cancel({
+    session,
+    kind: "abort_signal",
+    get message() {
+      assert.equal(core.scope_close(scope).outcome, "ok");
+      return "owner already closed";
+    },
+  });
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.code, "invalid_handle");
+  assert.equal(calls.cancel.length, 0);
+  assert.equal(calls.join.length, 0);
+  await turn();
+  assertHostClosed(host);
+  assertReleased(core, session);
+});
+
+test("WT-RUNTIME: close nested active and retained sessions without duplicate joins", async () => {
+  const { core, calls, hosts, host, runtime, scope, session } = await fixture();
+  const child = core.scope_enter({ parent: scope });
+  assert.equal(child.outcome, "ok");
+  const opened = core.webtransport_open({ scope: child.value, url: "https://transport.example.test/child" });
+  assert.equal(opened.outcome, "ok");
+  await turn();
+  host.completion.resolve({ reason: "peer shutdown" });
+  await turn();
+  assert.equal(core.hostSessions.size, 2);
+  assert.equal(calls.join.length, 1);
+  assert.equal(core.runtime_close(runtime).outcome, "ok");
+  await turn();
+  assert.equal(calls.runtimeClose.length, 1);
+  assert.equal(calls.join.length, 1);
+  hosts.forEach(assertHostClosed);
+  assertReleased(core, session);
+  assertReleased(core, opened.value);
+});
+
+test("WT-SUBTREE: closing one scope preserves an unrelated sibling session", async () => {
+  const { core, hosts, runtime, scope, session } = await fixture();
+  const sibling = core.scope_enter({ parent: runtime });
+  assert.equal(sibling.outcome, "ok");
+  const opened = core.webtransport_open({ scope: sibling.value, url: "https://transport.example.test/sibling" });
+  assert.equal(opened.outcome, "ok");
+  await turn();
+  assert.equal(core.scope_close(scope).outcome, "ok");
+  await turn();
+  assert.equal(core.hostSessions.size, 1);
+  assert.equal(core.webtransport_recv({ session }).failure.code, "invalid_handle");
+  assert.equal(core.webtransport_send({ session: opened.value, value: [7] }).outcome, "ok");
+  await turn();
+  assert.deepEqual(hosts[1].events, [["write", [7]]]);
+  assert.equal(core.runtime_close(runtime).outcome, "ok");
+  await turn();
+  hosts.forEach(assertHostClosed);
+  assertReleased(core, opened.value);
+});
+
+test("WT-LATE-READ: a pending read never appends data behind a terminal outcome", async () => {
+  const { core, calls, host, session } = await fixture();
+  host.completion.resolve({ reason: "peer finished" });
+  host.input.enqueue(new Uint8Array([8]));
+  await turn();
+  const state = [...core.hostSessions.values()][0];
+  assert.ok(state);
+  assert.equal(state.inbox.length, 1);
+  assert.equal(state.inbox[0].outcome, "cancelled");
+  assert.equal(calls.join.length, 1);
+  assert.equal(core.webtransport_recv({ session }).outcome, "cancelled");
   assertReleased(core, session);
 });
