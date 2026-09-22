@@ -65,6 +65,7 @@ pub enum IoGroupTapeError {
 }
 
 /// Sensitive plaintext bytes, zeroized on drop. No persistence is implicit.
+///
 /// The checksum is NOT authentication or encryption. Prefer the authenticated
 /// archive adapter or caller-controlled protected storage for real captures.
 pub struct IoGroupBytes(Zeroizing<Vec<u8>>);

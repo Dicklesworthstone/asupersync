@@ -187,7 +187,7 @@ where
             connection,
             frames: FrameCodec::new(),
             inbound: BytesMut::new(),
-            outbound: BytesMut::from(&CLIENT_PREFACE[..]),
+            outbound: BytesMut::from(CLIENT_PREFACE),
             written: 0,
             body: BytesMut::new(),
             codec: Box::new(codec),
@@ -489,7 +489,7 @@ impl ResponseState {
             if code != 200 { return Err(http_status(code)); }
             let content = unique(&headers, "content-type")?.unwrap_or("");
             let media = content.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-            if media != "application/grpc" && !media.strip_prefix("application/grpc+").is_some_and(|suffix| !suffix.is_empty()) {
+            if media != "application/grpc" && media.strip_prefix("application/grpc+").is_none_or(|suffix| suffix.is_empty()) {
                 return Err(Status::internal("response is not native gRPC"));
             }
             if let Some(encoding) = unique(&headers, "grpc-encoding")? {
@@ -515,9 +515,9 @@ impl ResponseState {
             if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(Status::internal("malformed grpc-status"));
             }
-            let code = raw.parse::<i32>().ok().and_then(Code::from_i32)
+            let code = raw.parse::<i32>().ok().map(Code::from_i32)
                 .ok_or_else(|| Status::internal("unknown grpc-status"))?;
-            let message = message.map(super::status::percent_decode_grpc_message).transpose()?.unwrap_or_default();
+            let message = message.map(super::status::percent_decode_grpc_message).transpose().map_err(GrpcError::into_status)?.unwrap_or_default();
             self.status = Some(match details {
                 Some(details) => Status::with_details(code, message, decode_binary(details)?),
                 None => Status::new(code, message),
