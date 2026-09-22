@@ -292,6 +292,46 @@ async fn wait_for_lease(cx: &Cx, diagnostics: &asupersync::observability::diagno
 }
 
 #[test]
+fn lab_spawn_join_releases_after_task_record_retirement() {
+    use asupersync::{Budget, LabConfig, LabRuntime};
+
+    let mut lab = LabRuntime::new(LabConfig::new(0x59_48_55).max_steps(256));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let completed = Arc::new(AtomicBool::new(false));
+    let completed_task = Arc::clone(&completed);
+    let (owner, mut owner_join) = lab.state.create_task(root, Budget::INFINITE, async move {
+        let cx = Cx::current().unwrap();
+        let mut child = cx.spawn(|_| async { 42_u8 }).unwrap();
+        assert_eq!(child.join(&cx).await.unwrap(), 42);
+        completed_task.store(true, Ordering::Release);
+    }).unwrap();
+    lab.scheduler.lock().schedule(owner, 0);
+
+    // A lost retirement wake leaves the owner parked. A bounded Lab run lets
+    // the assertion expose that failure without an unbounded native join.
+    lab.run_until_idle();
+    assert!(completed.load(Ordering::Acquire), "join stayed parked after child retirement");
+    assert!(matches!(owner_join.try_join(), Ok(Some(()))));
+}
+
+#[test]
+fn join_handles_preserve_auto_traits_for_non_sync_and_pinned_results() {
+    use asupersync::runtime::task_handle::{JoinFuture, TaskHandle};
+    use std::cell::Cell;
+    use std::marker::PhantomPinned;
+
+    fn assert_sync<T: Sync>() {}
+    fn assert_unpin<T: Unpin>() {}
+
+    // Result storage was originally behind the oneshot's mutex. Buffering a
+    // result until retirement must preserve these public auto-trait bounds.
+    assert_sync::<TaskHandle<Cell<u8>>>();
+    assert_sync::<JoinFuture<'static, Cell<u8>>>();
+    assert_unpin::<TaskHandle<PhantomPinned>>();
+    assert_unpin::<JoinFuture<'static, PhantomPinned>>();
+}
+
+#[test]
 fn native_child_remote_authority_respects_parent_presence_and_runtime_mask() {
     for workers in [1, 2] {
         let runtime = if workers == 1 {
