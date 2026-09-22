@@ -64,11 +64,15 @@ use crate::http::body::{Body, Frame as BodyFrame};
 use crate::http::h1::OutgoingBody;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::server::{Http1Response, Http1Upgrade};
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+use crate::http::h1::stream::RequestHead;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h1::stream::{Http1ProducedResponse, StreamingServerRequest};
 use crate::http::h1::types::{Request as HttpRequest, Response as HttpResponse};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http::h2::listener::Http2ProducedResponse;
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+use crate::http::h2::listener::Http2StreamingListenerConfig;
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::http::h3::{
     H3Error, H3RequestHead, H3ResponseHead, NativeH3Event, NativeH3ResponseWriter, NativeH3Session,
@@ -3143,6 +3147,89 @@ impl Router {
         }
     }
 
+    /// Convert this router into an HTTP/2 handler with live request bodies.
+    ///
+    /// Use with [`crate::http::h2::listener::Http2Listener::bind_streaming`]
+    /// and `run_streaming`. The listener installs the actual request task's
+    /// [`Cx`]. Handlers can extract [`crate::web::StreamingRawBody`] or use an
+    /// asynchronous body collector. Synchronous buffered extractors refuse a
+    /// live body. To apply static route limits before allocating a body or
+    /// request region, use [`Self::into_http2_streaming_parts`].
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn into_http2_streaming_handler(
+        self,
+    ) -> impl Fn(StreamingServerRequest) -> HttpHandlerFuture + Clone + Send + Sync + 'static {
+        let router = Arc::new(self);
+        move |request| {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                let Some(cx) = Cx::current() else {
+                    return http_response_from_web(http1_stream_refusal_response(
+                        "request context unavailable",
+                    ));
+                };
+                router
+                    .handle_http2_streaming_request_with_cx(&cx, request)
+                    .await
+            })
+        }
+    }
+
+    /// Bind static route admission and live-body dispatch to the same router.
+    ///
+    /// Pass the returned handler and configuration to
+    /// [`crate::http::h2::listener::Http2Listener::bind_streaming_with_config`].
+    /// Static body limits are resolved at HEADERS using ordinary route and
+    /// nested-mount precedence, before the listener creates a request region.
+    /// Request-local middleware may tighten the limit during dispatch.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    #[must_use]
+    pub fn into_http2_streaming_parts(
+        self,
+        config: Http2StreamingListenerConfig,
+    ) -> (
+        impl Fn(StreamingServerRequest) -> HttpHandlerFuture + Clone + Send + Sync + 'static,
+        Http2StreamingListenerConfig,
+    ) {
+        let router = Arc::new(self);
+        let admission = Arc::clone(&router);
+        let config = config
+            .with_request_body_policy(move |head| admission.http2_streaming_body_policy(head));
+        let handler = move |request| -> HttpHandlerFuture {
+            let router = Arc::clone(&router);
+            Box::pin(async move {
+                let Some(cx) = Cx::current() else {
+                    return http_response_from_web(http1_stream_refusal_response(
+                        "request context unavailable",
+                    ));
+                };
+                router
+                    .handle_http2_streaming_request_with_cx(&cx, request)
+                    .await
+            })
+        };
+        (handler, config)
+    }
+
+    /// Resolve a validated HTTP/2 request head's static route body limit.
+    ///
+    /// This runs no handler or middleware and creates no live body. `None`
+    /// leaves the listener's total body ceiling in force. The listener is
+    /// responsible for validating protocol headers and enforcing declared
+    /// lengths against the returned ceiling before admission.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    pub fn http2_streaming_body_policy(
+        &self,
+        head: &RequestHead,
+    ) -> Result<Option<u64>, HttpResponse> {
+        let (path, _) = split_http_request_target(&head.uri);
+        let request = Request::new(head.method.as_str(), path);
+        self.streaming_body_policy_limit(&request)
+            .map(|limit| limit.map(|bytes| bytes as u64))
+            .map_err(http_response_from_web)
+    }
+
     /// Convert this router into a production HTTP/2 produced-response handler.
     ///
     /// Existing buffered routes retain the ordinary H2 response path. A route
@@ -3247,6 +3334,25 @@ impl Router {
             )
             .with_header("content-type", "text/plain; charset=utf-8")
             .with_header("connection", "close");
+        };
+        http_response_from_web(self.handle_with_cx(cx, request).await)
+    }
+
+    /// Dispatch a live HTTP/2 request with the listener's actual request Cx.
+    ///
+    /// The body remains in the private one-shot extractor slot throughout
+    /// dispatch. An unclaimed body is dropped when dispatch ends, including
+    /// when middleware retains a clone of the compatibility request.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    pub async fn handle_http2_streaming_request_with_cx(
+        &self,
+        cx: &Cx,
+        request: StreamingServerRequest,
+    ) -> HttpResponse {
+        let Some((request, _body_control)) = web_request_from_streaming_http(request) else {
+            return http_response_from_web(http1_stream_refusal_response(
+                "streaming request body slot collision",
+            ));
         };
         http_response_from_web(self.handle_with_cx(cx, request).await)
     }
@@ -3427,15 +3533,27 @@ impl Router {
         }
     }
 
-    /// Resolve static body policy for a HEADERS-only H3 admission. Run the
-    /// ordinary policy merger on an empty, header-free probe, following the
-    /// exact route/nest precedence used by dispatch. No handler, request body,
-    /// request region, or request-local middleware is created in this phase.
     #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
     fn h3_streaming_body_policy_limit(
         &self,
         request: &Request,
     ) -> Result<Option<usize>, NativeH3RouterRefusal> {
+        self.streaming_body_policy_limit(request).map_err(|_| {
+            NativeH3RouterRefusal::InvalidRequestProgression(
+                "HTTP/3 static body policy admission failed",
+            )
+        })
+    }
+
+    /// Resolve static body policy for HEADERS-only admission. Run the
+    /// ordinary policy merger on an empty, header-free probe, following the
+    /// exact route/nest precedence used by dispatch. No handler, request body,
+    /// request region, or request-local middleware is created in this phase.
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
+    fn streaming_body_policy_limit(&self, request: &Request) -> Result<Option<usize>, Response> {
         fn extend_policy_extensions(target: &mut Extensions, source: &Extensions) {
             // Carry only policy types: copying unrelated extensions could
             // retain a body slot or another application's live resource.
@@ -3457,15 +3575,11 @@ impl Router {
             probe: &mut Request,
             inherited: Option<RequestBodyPolicyState>,
             local: Option<RequestBodyPolicyState>,
-        ) -> Result<(), NativeH3RouterRefusal> {
+        ) -> Result<(), Response> {
             // With no body or Content-Length this should always succeed, even
             // at a zero-byte ceiling. Preserve a fail-closed boundary if the
             // shared policy implementation gains another admission check.
-            apply_request_body_policy(probe, inherited, local).map_err(|_| {
-                NativeH3RouterRefusal::InvalidRequestProgression(
-                    "HTTP/3 static body policy admission failed",
-                )
-            })
+            apply_request_body_policy(probe, inherited, local)
         }
 
         let mut probe = Request::new(request.method.clone(), request.path.clone());
@@ -5102,6 +5216,95 @@ mod tests {
             3,
         )
         .expect("valid HTTP/3 request semantics");
+    }
+
+    #[test]
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    fn h2_streaming_admission_matches_route_and_nested_policy() {
+        let route = |limit| {
+            post(FnHandler::new(ok_handler))
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(limit))
+        };
+        let router = Router::new()
+            .route("/files/*", route(80))
+            .route("/files/:id", route(40))
+            .route("/files/fixed", route(20))
+            .route("/files/:other", route(10))
+            .nest(
+                "/api",
+                Router::new().with_body_policy(RequestBodyPolicy::new().max_total_body_size(50)),
+            )
+            .nest(
+                "/api/private",
+                Router::new().with_body_policy(RequestBodyPolicy::new().max_total_body_size(7)),
+            )
+            .nest(
+                "/api/private/",
+                Router::new().with_body_policy(RequestBodyPolicy::new().max_total_body_size(2)),
+            );
+        for (uri, expected) in [
+            ("/files/fixed?version=2", 20),
+            ("/files/object", 40),
+            ("/files/nested/object", 80),
+            ("/api/missing", 50),
+            ("/api/private/missing", 7),
+        ] {
+            let head = RequestHead {
+                method: crate::http::h1::types::Method::Delete,
+                uri: uri.to_string(),
+                version: crate::http::h1::types::Version::Http2,
+                headers: Vec::new(),
+            };
+            assert_eq!(
+                router
+                    .http2_streaming_body_policy(&head)
+                    .expect("static policy"),
+                Some(expected)
+            );
+            let (path, _) = split_http_request_target(uri);
+            let response = router.handle(
+                Request::new("DELETE", path)
+                    .with_header("content-length", (expected + 1).to_string()),
+            );
+            assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    fn h2_streaming_admission_preserves_transport_and_explicit_limits() {
+        let head = RequestHead {
+            method: crate::http::h1::types::Method::Post,
+            uri: "/upload".to_string(),
+            version: crate::http::h1::types::Version::Http2,
+            headers: Vec::new(),
+        };
+        assert_eq!(
+            Router::new()
+                .http2_streaming_body_policy(&head)
+                .expect("no static policy"),
+            None
+        );
+        let limit = 64 * 1024 * 1024;
+        let router = Router::new().route(
+            "/upload",
+            post(FnHandler::new(ok_handler))
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(limit)),
+        );
+        assert_eq!(
+            router
+                .http2_streaming_body_policy(&head)
+                .expect("route policy"),
+            Some(limit as u64)
+        );
+        let router =
+            router.with_server_body_policy(RequestBodyPolicy::new().max_total_body_size(4));
+        assert_eq!(
+            router
+                .http2_streaming_body_policy(&head)
+                .expect("server ceiling"),
+            Some(4)
+        );
     }
 
     #[test]
