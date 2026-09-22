@@ -394,15 +394,20 @@ impl ChunkBitmap {
 
     /// Convert sorted chunk offsets to sparse ranges
     fn offsets_to_ranges(&self, offsets: &[u64]) -> Vec<SparseRange> {
-        if offsets.is_empty() {
+        // Public mutation/import APIs retain invalid entries for diagnostics.
+        // As with get_stats, they must not contribute valid byte coverage.
+        let mut offsets = offsets
+            .iter()
+            .copied()
+            .filter(|offset| self.is_valid_chunk_offset(*offset));
+        let Some(mut start) = offsets.next() else {
             return Vec::new();
-        }
+        };
 
         let mut ranges = Vec::new();
-        let mut start = offsets[0];
         let mut end = start.saturating_add(self.chunk_size).min(self.total_size);
 
-        for &offset in offsets.iter().skip(1) {
+        for offset in offsets {
             if offset == end {
                 // Contiguous chunk
                 end = offset.saturating_add(self.chunk_size).min(self.total_size);
@@ -1000,6 +1005,43 @@ mod tests {
                 SparseRange::new(3 * chunk_size, u64::MAX),
             ]
         );
+    }
+
+    #[test]
+    fn range_queries_exclude_invalid_entries_without_discarding_them() {
+        let mut bitmap = ChunkBitmap::new("invalid-ranges".to_string(), 600, 256, 1);
+        for offset in [0, 1, 256, 512, 600, 768, u64::MAX] {
+            assert!(bitmap.update_chunk_state(offset, ChunkState::Verified, 2, None));
+        }
+        let expected = vec![SparseRange::new(0, 600)];
+        assert_eq!(bitmap.get_ranges_in_state(ChunkState::Verified), expected);
+        assert_eq!(
+            bitmap.get_ranges_in_states(&[ChunkState::Verified, ChunkState::Committed]),
+            expected
+        );
+        assert_eq!(bitmap.entry_count(), 7);
+        assert_eq!(bitmap.get_chunk_state(u64::MAX), Some(ChunkState::Verified));
+        assert_eq!(bitmap.get_stats().verified_chunks, 3);
+        assert!(!bitmap.is_complete());
+        assert!(ChunkBitmap::deserialize_from_bytes(&bitmap.serialize_to_bytes()).is_err());
+
+        let mut imported = ChunkBitmap::new("imported-ranges".to_string(), 600, 256, 1);
+        imported.import_state(bitmap.export_state());
+        assert_eq!(imported.get_ranges_in_state(ChunkState::Verified), expected);
+        assert_eq!(imported.entry_count(), 7);
+
+        for (total_size, chunk_size, offset) in [(0, 256, 0), (512, 0, 0), (512, 256, 768)] {
+            let mut invalid =
+                ChunkBitmap::new("invalid-only".to_string(), total_size, chunk_size, 1);
+            assert!(invalid.update_chunk_state(offset, ChunkState::Verified, 2, None));
+            assert!(invalid.get_ranges_in_state(ChunkState::Verified).is_empty());
+            assert!(
+                invalid
+                    .get_ranges_in_states(&[ChunkState::Verified])
+                    .is_empty()
+            );
+            assert_eq!(invalid.entry_count(), 1);
+        }
     }
 
     #[test]
