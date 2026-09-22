@@ -24,15 +24,19 @@ const corePath = process.env.ASUPERSYNC_BROWSER_CORE_SOURCE
   ?? fileURLToPath(new URL("../packages/browser-core/index.js", import.meta.url));
 const managerPath = process.env.ASUPERSYNC_WEBTRANSPORT_STREAM_SOURCE
   ?? fileURLToPath(new URL("../packages/browser-core/webtransport-streams.js", import.meta.url));
+const fetchPath = process.env.ASUPERSYNC_BROWSER_FETCH_SOURCE
+  ?? fileURLToPath(new URL("../packages/browser/src/fetch.ts", import.meta.url));
 const sdkSource = readFileSync(sdkPath, "utf8");
 const coreSource = readFileSync(corePath, "utf8");
 const managerSource = readFileSync(managerPath, "utf8");
+const fetchSource = readFileSync(fetchPath, "utf8");
 const sdkJavaScript = stripTypeScriptTypes(sdkSource, { mode: "transform" });
+const fetchJavaScript = stripTypeScriptTypes(fetchSource, { mode: "transform" });
 
 console.log(JSON.stringify({
   scenario_id: "browser-sdk-webtransport-reliable-streams",
   sources: Object.fromEntries([
-    ["sdk", sdkSource], ["core", coreSource], ["streams", managerSource],
+    ["sdk", sdkSource], ["core", coreSource], ["streams", managerSource], ["fetch", fetchSource],
   ].map(([name, source]) => [name, createHash("sha256").update(source).digest("hex")])),
   evidence_scope: "actual SDK/core/shared manager, native WHATWG streams, intentional WASM ABI recorder",
   no_claim: ["Rust dispatcher execution", "packaged WASM", "browser conformance", "live HTTP/3"],
@@ -196,9 +200,11 @@ async function fixture(t, options = {}) {
   }, { context });
   const coreModule = new SourceTextModule(coreSource, { context, identifier: corePath });
   const managerModule = new SourceTextModule(managerSource, { context, identifier: managerPath });
+  const fetchModule = new SourceTextModule(fetchJavaScript, { context, identifier: fetchPath });
   const sdkModule = new SourceTextModule(sdkJavaScript, { context, identifier: sdkPath });
   await sdkModule.link((specifier) => {
     if (specifier === "@asupersync/browser-core") return coreModule;
+    if (specifier === "./fetch.js") return fetchModule;
     if (specifier === "@asupersync/browser-core/webtransport-streams"
       || specifier === "@asupersync/browser-core/webtransport-streams.js"
       || specifier === "./webtransport-streams.js") return managerModule;

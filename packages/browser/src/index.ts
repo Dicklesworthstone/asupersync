@@ -73,6 +73,15 @@ import initWasm, {
   webtransportSend,
 } from "@asupersync/browser-core";
 import { createReliableStreamManager } from "@asupersync/browser-core/webtransport-streams";
+import {
+  createBrowserFetchManager,
+  prepareBrowserFetchAuthority,
+  type BrowserFetchGrant,
+  type BrowserFetchOptions,
+  type FetchStreamHandle,
+} from "./fetch.js";
+export { BROWSER_FETCH_LIMITS } from "./fetch.js";
+export type { BrowserFetchOptions, BrowserFetchResponse, BrowserFetchRead, FetchStreamHandle } from "./fetch.js";
 import type { BrowserTraceRecord } from "./tracing.js";
 
 export type {
@@ -1337,6 +1346,7 @@ interface BrowserStorageGlobalLike {
 }
 
 const REGION_PARENTS = new Map<string, string>();
+const RUNTIME_FETCH_GRANTS = new Map<string, BrowserFetchGrant>();
 const INFLIGHT_WEBTRANSPORTS = new Map<string, BrowserWebTransportState>();
 const TERMINAL_WEBTRANSPORTS = new Map<string, BrowserWebTransportTerminalState>();
 const BROWSER_LANE_HEALTH_REGISTRY = new Map<
@@ -4905,6 +4915,18 @@ function asCoreRegionHandle(handle: RegionHandle | CoreRegionHandle | HandleRef)
   return new CoreRegionHandle(handle);
 }
 
+function snapshotRuntimeHandle(handle: CoreRuntimeHandle): CoreRuntimeHandle {
+  const raw = handle.toJSON();
+  return new CoreRuntimeHandle({ kind: raw.kind, slot: raw.slot,
+    generation: raw.generation, owner_token: raw.owner_token } as import("@asupersync/browser-core").RuntimeHandleRef);
+}
+
+function snapshotRegionHandle(handle: CoreRegionHandle): CoreRegionHandle {
+  const raw = handle.toJSON();
+  return new CoreRegionHandle({ kind: raw.kind, slot: raw.slot,
+    generation: raw.generation, owner_token: raw.owner_token } as import("@asupersync/browser-core").RegionHandleRef);
+}
+
 function asCoreTaskHandle(handle: TaskHandle | CoreTaskHandle | HandleRef): CoreTaskHandle {
   if (handle instanceof TaskHandle) {
     return handle.core;
@@ -5003,6 +5025,21 @@ function deleteOwnedRegionKeys(rootKey: string): Set<string> {
 function lookupWebTransportState(handle: CoreTaskHandle): BrowserWebTransportState | null {
   return INFLIGHT_WEBTRANSPORTS.get(browserWebTransportStateKey(handle)) ?? null;
 }
+
+const SDK_FETCHES = createBrowserFetchManager({
+  globalObject: defaultGlobalObject,
+  lookup(scopeKey) {
+    const visited = new Set<string>();
+    let current: string | undefined = scopeKey;
+    while (current !== undefined && !visited.has(current)) {
+      visited.add(current);
+      const grant = RUNTIME_FETCH_GRANTS.get(current);
+      if (grant) return grant;
+      current = REGION_PARENTS.get(current);
+    }
+    return null;
+  },
+});
 
 // Reliable streams share the existing SDK session and its task/region owner.
 // This stable adapter is the shared manager's identity; it creates no transport
@@ -5174,6 +5211,7 @@ function cancelBrowserTask(
   if (requested.outcome !== "ok") {
     return requested;
   }
+  SDK_FETCHES.cancelTask(browserWebTransportStateKey(task), kind, message);
   const state = lookupWebTransportState(task);
   if (state && !state.settled) {
     const terminal = webTransportCancellationOutcome(kind, message, "cancelling");
@@ -5205,17 +5243,17 @@ function closeOwnedWebTransports(ownerKeys: Set<string>, reason?: string): void 
 }
 
 function cleanupScopeOwnedWebTransports(handle: CoreRegionHandle): void {
-  closeOwnedWebTransports(
-    deleteOwnedRegionKeys(browserWebTransportStateKey(handle)),
-    "scope_close",
-  );
+  const ownerKeys = deleteOwnedRegionKeys(browserWebTransportStateKey(handle));
+  SDK_FETCHES.closeScopes(ownerKeys, "scope_close");
+  closeOwnedWebTransports(ownerKeys, "scope_close");
 }
 
 function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
-  closeOwnedWebTransports(
-    deleteOwnedRegionKeys(browserWebTransportStateKey(handle)),
-    "runtime_close",
-  );
+  const rootKey = browserWebTransportStateKey(handle);
+  const ownerKeys = deleteOwnedRegionKeys(rootKey);
+  RUNTIME_FETCH_GRANTS.delete(rootKey);
+  SDK_FETCHES.closeScopes(ownerKeys, "runtime_close");
+  closeOwnedWebTransports(ownerKeys, "runtime_close");
 }
 
 function createBrowserWebTransportState(
@@ -5433,9 +5471,12 @@ export class BrowserRuntime {
   }
 
   close(consumerVersion: AbiVersion | null = this.consumerVersion): BrowserOutcome<void> {
-    const closed = runtimeClose(this.core, consumerVersion);
+    let core: CoreRuntimeHandle;
+    try { core = snapshotRuntimeHandle(this.core); }
+    catch (error) { return OutcomeFactory.err("internal_failure", "unknown", `runtime_close failed: ${errorMessage(error)}`); }
+    const closed = runtimeClose(core, consumerVersion);
     if (closed.outcome === "ok") {
-      cleanupRuntimeOwnedWebTransports(this.core);
+      cleanupRuntimeOwnedWebTransports(core);
     }
     return closed;
   }
@@ -5448,11 +5489,14 @@ export class BrowserRuntime {
     if (laneOutcome) {
       return laneOutcome;
     }
-    const entered = scopeEnter({ parent: this.core, label }, consumerVersion);
+    let core: CoreRuntimeHandle;
+    try { core = snapshotRuntimeHandle(this.core); }
+    catch (error) { return OutcomeFactory.err("internal_failure", "unknown", `scope_enter failed: ${errorMessage(error)}`); }
+    const entered = scopeEnter({ parent: core, label }, consumerVersion);
     if (entered.outcome !== "ok") {
       return entered;
     }
-    recordRegionParent(this.core, entered.value);
+    recordRegionParent(core, entered.value);
     return OutcomeFactory.ok(new RegionHandle(entered.value, consumerVersion, this));
   }
 
@@ -5486,9 +5530,12 @@ export class RegionHandle {
   }
 
   close(consumerVersion: AbiVersion | null = this.consumerVersion): BrowserOutcome<void> {
-    const closed = scopeClose(this.core, consumerVersion);
+    let core: CoreRegionHandle;
+    try { core = snapshotRegionHandle(this.core); }
+    catch (error) { return OutcomeFactory.err("internal_failure", "unknown", `scope_close failed: ${errorMessage(error)}`); }
+    const closed = scopeClose(core, consumerVersion);
     if (closed.outcome === "ok") {
-      cleanupScopeOwnedWebTransports(this.core);
+      cleanupScopeOwnedWebTransports(core);
     }
     return closed;
   }
@@ -5503,11 +5550,14 @@ export class RegionHandle {
     if (laneOutcome) {
       return laneOutcome;
     }
-    const entered = scopeEnter({ parent: this.core, label }, consumerVersion);
+    let core: CoreRegionHandle;
+    try { core = snapshotRegionHandle(this.core); }
+    catch (error) { return OutcomeFactory.err("internal_failure", "unknown", `scope_enter failed: ${errorMessage(error)}`); }
+    const entered = scopeEnter({ parent: core, label }, consumerVersion);
     if (entered.outcome !== "ok") {
       return entered;
     }
-    recordRegionParent(this.core, entered.value);
+    recordRegionParent(core, entered.value);
     return OutcomeFactory.ok(new RegionHandle(entered.value, consumerVersion, this.runtime));
   }
 
@@ -5541,6 +5591,21 @@ export class RegionHandle {
       fetchRequest({ scope: this.core, ...options }, consumerVersion),
       (handle) => new FetchHandle(handle, consumerVersion),
     );
+  }
+
+  /**
+   * Admit one host fetch using this scope's retained runtime authority.
+   * The returned handle exposes headers and bounded, on-demand response bytes.
+   * Redirects are refused. Cancel/finish the response before synchronous owner
+   * close, which preserves the ABI's refusal while owned work remains active.
+   */
+  fetch(
+    options: BrowserFetchOptions,
+    consumerVersion: AbiVersion | null = this.consumerVersion,
+  ): BrowserOutcome<FetchStreamHandle> {
+    const laneOutcome = this.runtime?.laneAvailabilityOutcome("issue streamed fetch work");
+    if (laneOutcome) return laneOutcome;
+    return SDK_FETCHES.start(this.core, options, consumerVersion);
   }
 
   openWebSocket(
@@ -8654,14 +8719,19 @@ export async function createBrowserRuntimeSelection(
     }
   }
 
+  let fetchAuthority = prepareBrowserFetchAuthority();
+  let created: BrowserOutcome<CoreRuntimeHandle>;
+  try {
+    fetchAuthority = prepareBrowserFetchAuthority(options.fetchAuthority);
+    created = runtimeCreate({ fetchAuthority }, consumerVersion);
+  } catch (error) {
+    created = OutcomeFactory.err("compatibility_rejected", "permanent", errorMessage(error));
+  }
   const outcome = mapOutcome(
-    runtimeCreate(
-      {
-        fetchAuthority: options.fetchAuthority,
-      },
-      consumerVersion,
-    ),
+    created,
     (handle) => {
+      const rootKey = browserWebTransportStateKey(handle);
+      RUNTIME_FETCH_GRANTS.set(rootKey, Object.freeze({ rootKey, authority: fetchAuthority }));
       const stableLaneHealth = clearBrowserLaneHealth(
         executionLadder.health.laneId,
         options.healthScopeKey,

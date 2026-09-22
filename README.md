@@ -2164,6 +2164,26 @@ promises and event loop; no Rust future is polled inside the wasm module.
   event loop, and there is no wasm-side scheduler loop yet; `docs/WASM.md`
   tracks the lane pump as designed but not exposed.
 
+### Scoped fetch response streams
+
+Create a runtime with explicit `fetchAuthority.allowedOrigins` and
+`fetchAuthority.allowedMethods`, then use `scope.fetch({ url, method })` for
+streamed response consumption. The returned `FetchStreamHandle` exposes
+`response()` for status and headers, `read()` for the next byte chunk, `cancel()`
+for awaited teardown, and `closed` for the terminal cleanup outcome. HTTP error
+statuses remain ordinary responses. The existing `fetchRequest()` ABI operation
+retains its original behavior.
+
+Each streamed fetch owns one ledger task and starts one host request. Authority
+is captured at runtime creation and follows the recorded scope ancestry;
+requests outside the origin, method, credential, or header-count grant are
+refused before network I/O. Redirects are refused, and credentials are omitted
+unless explicitly requested and granted. Reads pull on demand and count actual
+response bytes, with a 16 MiB default response limit, a 1 MiB chunk limit, and
+at most 64 active requests per runtime. Read to EOF or await cancellation before
+closing the owner. Pending cleanup retains admission capacity, including when
+the host delivers a response after cancellation.
+
 ### Reliable WebTransport streams
 
 Given a live SDK `WebTransportHandle`, `openStream()` creates a bidirectional
