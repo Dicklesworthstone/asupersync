@@ -1,4 +1,592 @@
-# Asupersync Bridge Plan — reality check refreshed 2026-09-15
+# Asupersync Bridge Plan — reality check refreshed 2026-09-22
+
+## September 22 assessment: validation debt now dominates delivery
+
+**Verdict: the kernel's release-blocking native cancellation contract is green, and the entire
+workspace compiles cleanly under default and all features. But implementation volume has outrun
+execution by roughly an order of magnitude, and the September 15 instruction to restore trustworthy
+execution first was not followed.** In the seven days after the September 15 refresh, 98,389 lines
+were added to `src/` (the crate is now 2.27M lines of Rust plus 1.05M lines of tests). 61,060 of
+those lines (62%) arrived in commits whose own messages say the code and tests were never compiled or
+executed. 64% of non-tracker commits cite no bead. GitHub Actions is disabled at the repository level,
+and one agent classified RCH itself as a no-deletion violation (`bi2462.81`), so much of the swarm had
+no sanctioned validation path and kept landing source anyway. The heal commits made that code compile;
+execution is a separate, still-missing step. When the never-run suites were finally executed (the
+09-22 remote suites; the 09-22 root lib run), they came up red, and several of the reds are real
+production defects, two of them already shipped in v0.5.0.
+
+The vision itself has not moved backwards: Phase 0 (deterministic kernel) and Phase 1 (parallel
+scheduler) are real; the core `Cx`/region/cancellation/obligation machinery works on the paths the
+native contract exercises. What is missing is the same thing the last two refreshes found, now larger:
+proof of the new surfaces, closure of the kernel's default-path gaps, and honest public documentation.
+This refresh therefore puts an execution gate in front of all further feature work and converts every
+concrete defect found into a bead.
+
+### Assessment basis and limits
+
+- Read AGENTS.md (1,439 lines) and README.md (2,626 lines) completely, the v4 design bible, the
+  formal-semantics outline, and this plan's September 4 and September 15 sections.
+- Ten read-only subsystem audits (kernel; scheduler/lab/replay/formal; combinators/supervision/AppSpec;
+  network/server; data/IO/observability; distributed/remote; ATP/RaptorQ; Browser Edition;
+  governance/CI/release/tracker; docs/examples/dependencies) traced implementation and tests against
+  README/plan claims. Reports: `/data/tmp/rc_20260922/audit_*.md`. Every high-severity claim cited
+  below was re-read by the root at `8525d7055` unless marked "auditor-reported".
+- Audit base: `8525d70554dd7cb7ab02ea16b461c5a6767e9e01` (main at session start). Main advanced
+  during the session (runtime retirement-barrier fixes, HTTP/3 streaming bodies, replay capture); tip
+  re-runs are labelled with their own SHA.
+- All execution used `RCH_REQUIRE_REMOTE=1 rch exec --base <sha> --clean-overlay --no-overlay`:
+  the exact committed tree, no working-tree overlay, no local fallback. Logs are retained under
+  `/data/tmp/rc_20260922/lanes/`.
+
+### Fresh execution evidence (pristine `8525d7055`, worker hz3)
+
+| Lane | Result |
+|---|---|
+| Native parked-task cancellation contract (`--test runtime_abort_vs_cancel_semantics_audit`) | **42 passed, 0 failed, 0 ignored, 0 filtered**, exit 0 |
+| `cargo check --all-targets --keep-going` (default features) | exit 0, 0 errors, **0 warnings** |
+| `cargo check --all-targets --all-features --keep-going` | exit 0, 0 errors, **0 warnings** |
+| `cargo test -p asupersync --lib --features test-internals` | 23,602 tests: **23,562 passed, 17 failed**, 23 ignored |
+| `cargo run --example onramp_level0` | printed `hello from asupersync`, remote exit 0 (RCH then returned 102 = RCH-E309 artifact-retrieval timeout after success) |
+
+The 17 lib failures classify as: one real runtime regression (retirement barrier installed after
+inheritance overlay, fixed on main by `094bbe890`, rerun pending); three runtime test drifts;
+one real native gRPC defect behind three failures (`cx.has_io()` checks a virtual IoCap native tasks
+never carry, so native `connect_tcp`/`connect_tls` always refuse); one gRPC test bug (lossless
+`grpc-timeout` unit); one stale QUIC test plus an encoder-validation gap; one resource-bracket
+contract disagreement in never-run code; two never-root-caused worker-readiness failures; four RaptorQ
+decoder golden-transcript mismatches in a module unchanged since 09-08 (root-cause required; no
+reflexive regeneration); and ambient-authority inventory drift from new test threads.
+
+(Feature-gated suite lanes F1-F5 and tip re-runs are recorded in the phase execution record below.)
+
+### Systemic findings (these explain most of the product gaps below)
+
+- **S1. No working validation path for much of the swarm.** GitHub Actions is disabled at the
+  repository level (`actions/permissions` → `enabled:false`); the last run of any workflow was
+  2026-09-07 and the `CI` workflow has zero successful runs in its history. README/AGENTS text that
+  cites CI jobs (`lint-build`, `lean-build`, `tla-tlc`, real-server services, Phase-6 PR gates) describes
+  gates that do not currently execute. `bi2462.81` (P0, blocked since 09-15) records one agent's position
+  that RCH's own worker-cache pruning violates the no-deletion rule; the owner granted a local `-j2`
+  exception to that agent only. Other agents ran RCH normally. This split is an owner decision, not an
+  engineering one. The concrete mechanism: 157 of the 161 self-declared-uncompiled commits come from the
+  `…@users.noreply.github.com` identity (commits created through GitHub's API/web by an agent with no
+  compile path). They bypass `.githooks/pre-push` entirely, and with Actions disabled nothing else checks
+  them. The suite-level `/data/projects/AGENTS.md` that RULE 0.5 cites does not exist.
+- **S2. Source-only landing became normal.** 161 of 474 non-merge commits since 09-15 state that their
+  code/tests were not compiled or executed; they carry 61,060 of 98,389 added `src/` lines (62%). Heal
+  commits restored compilation (the pristine default and all-features checks are now clean), but most of
+  the new feature-gated suites have no terminal run. First runs so far were mostly red (remote 0/8, 0/4,
+  0/2, 0/4 on 09-22; seven lib failures in new modules), and two of the defects they exposed shipped in
+  v0.5.0. Feature-gated tests have no `[[test]]` entry, so a default `cargo test` silently selects zero
+  of them and passes.
+- **S3. The work graph and the code stream decoupled.** 259 of 404 non-tracker commits since 09-15 cite no
+  bead. Whole subsystems landed without any bead (`atpd-live` 7.6k lines, `cx::worker_readiness`
+  2.6k, dynamic supervision/services ~4.5k, browser-core Rust executor). Meanwhile the beads that do
+  describe this work were not updated: every distributed bead (`bi2462.10/.11/.12/.16/.48-.50/.77/.78`)
+  still shows its 09-04 state despite ~60 commits; `bi2462.51/.57/.59` likewise. In-progress beads
+  untouched for >30 days: 110 of 171. 408 of 635 unfinished beads are P0/P1, so priority no longer ranks.
+- **S4. Proof artifacts that cannot fail.** 231 of 317 top-level `src/*.rs` files (~257k lines, 225 named
+  `real_*_e2e_tests.rs`) are declared as a module nowhere and never compile; root hardening reports mark
+  many of them passing. Further examples: the fail-closed production replay driver exists only as an
+  undeclared file plus a `wiring.patch`; `run_raptorq_e2e.sh` records PASS for a scenario that selected zero
+  tests; the TLC end-to-end test passes by printing SKIP when the jar is absent and two of its three
+  invariants are vacuous; a libraptorq "differential" compares a fixture with itself; the ATP CLI journey
+  test simulates the daemon with `cp`/`mv`; five of eight WebSocket RFC 6455 conformance submodules return
+  `Ok(())`; `examples/macros_{basic,nested,race}.rs` use fake `Cx`/`Scope` types yet README cites them for
+  loser drain.
+- **S5. Public truth drifted in both directions.** The CHANGELOG labels v0.6.0 a published "Release"
+  although it was never tagged, released or published (crates.io and GitHub latest = 0.5.0). README tells
+  users `asupersync = "0.5.0"`, lists the pre-09-14 default feature set, and ships Rust samples that do not
+  compile against current signatures (LabConfig builder methods, `join!` over `TaskHandle`, un-awaited
+  async `BondedTransfer` calls, `cx.sleep_until`, a six-variant `CancelKind`). In the other direction it
+  still says tree-level supervisor restart is pending (ManagedSupervisor exists) and that no Rust future is
+  polled in wasm (a wasm32 executor exists in the core crate).
+- **S6. Kernel promises still have default-path holes.** The checked obligation APIs admit before
+  success, but the default APIs the README teaches (`reserve`, `acquire`) still post a Reserve and return
+  the permit first; a later refusal only increments a counter, so the permit is untracked and the quota
+  unenforced. Outside the entry macros, `block_on`, `Runtime` drop and `shutdown_timeout` still never
+  cancel or drain the root region. `race!`/blocking `select!` spawn each prebuilt branch and discard the
+  child `Cx`, so a branch written with the caller's `cx` (the natural style) never observes loser
+  cancellation and the drain waits for natural completion or forever. These are exactly the headline
+  guarantees (no orphans, losers drained, no obligation leaks) on the paths a first-time user takes.
+
+### Phase 1 answers
+
+1. **What works now, with fresh evidence:** the native parked-task cancellation contract (42/42); a clean
+   compile of every target under default and all features with zero warnings; 23,562 of 23,602 lib tests;
+   the `#[main]` on-ramp program. By code reading plus older receipts: executing pipeline/map-reduce,
+   ManagedSupervisor live restart trees, quorum/first_ok loser drain, gRPC server streaming (its 20 lib tests
+   passed in this run), RFC-exact RaptorQ encoding byte-matched against an independent crate to K=2048,
+   canonical ATP frames, native ATP CLI transfer over TCP/RQ/QUIC loopback, the V3 mTLS remote service
+   (08-31 two-host receipt), h2spec 147/147 on 09-06.
+2. **What does not work or is not implemented:** the crosswalk rows marked PARTIAL/STUB/REGRESSED/
+   UNPROVEN above, most sharply: loser cancellation for naturally written `race!`/`select!` branches;
+   default-path obligation admission; root drain outside the entry macros; production schedule capture;
+   native gRPC streaming connect; PostgreSQL server-side cancel; process-wide signal takeover; a coherent
+   browser package; the tracked ATP SDK API and 13 CLI commands; AppSpec enforcement; bounded remote
+   liveness; and every feature-gated suite that has never run.
+3. **What blocks progress:** no sanctioned validation path for a large part of the swarm (S1/S2), a work
+   graph no longer attached to the work (S3), proof artifacts that cannot fail (S4), and pending owner
+   decisions (G1 validation path, R30 default transport, R31 `atpd-live`, R33 browser GA label, R35 0.5.1
+   and compatibility policy, R36 orphan sources).
+4. **Would finishing every open and in-progress bead close the gap? No.** Dozens of the defects found here
+   had no bead (below). Several beads' acceptance requires GitHub Actions runs that current policy forbids
+   (`aoovsx`, `gxv3dy`, `48ukyp`, `qoir1r`), so they cannot close as written. And nothing in the backlog
+   addressed the validation path, the uncompiled-landing mechanism or the orphaned source.
+5. **Vision goals with no covering bead before this refresh:** loser cancellation for caller-`cx` branches;
+   retirement-barrier liveness after teardown; explicit-runtime root drain; the frozen production clock in
+   the default scheduler reward; Poll/Wake emission for replay; vacuous formal theorems and TLC skips; H2/H1
+   bounded waits; QUIC Retry and queue caps; native gRPC admission; PostgreSQL cancel; MySQL TLS/full auth;
+   signal dispositions; zombie reaping; OTLP composition; remote silent-peer bounds and lease renewal;
+   supervisor dependency fail-open; ATP plaintext default and legacy fake successes; `atpd-live`; browser
+   glue/binary integrity and the Pages module; supply-chain lane drift; the Tokio carve-out in
+   `benchmark-adapters`; 0.5.1 and the false 0.6.0 release label; the real 0.5.0 compatibility break; the
+   proof-freshness time bomb; 231 orphaned source files; and a validation gate for API-created commits.
+
+### Vision crosswalk: changes since September 15
+
+Rows keep the September 4 numbering. Status words: WORKING_SCOPED (a real journey has a fresh receipt),
+PARTIAL, STUB, UNPROVEN (code exists; no execution), REGRESSED, DOC_STALE (code ahead of docs).
+
+| # | Goal | September 22 reality | Owner (existing / new) |
+|---|---|---|---|
+| 1 | Cooperative cancellation preserves typed results and cleanup | WORKING_SCOPED: 42/42 native contract at `8525d7055`. New risk: a `TaskHandle` that outlives its runtime can hang because teardown never opens the retirement barrier (auditor-reported, suspected). | native lane; NEW R16 |
+| 2 | Root closure drains children/finalizers/obligations | PARTIAL: `#[main]` drains but discards the result and skips the drain on panic; `block_on`, `Runtime` drop and `shutdown_timeout` remain abort-by-drop; `spawn_with_cx` docs promise shutdown cancellation that never happens; `0sd3cp` acceptance (drain outcome in trace/report; handles observe `CancelReason::shutdown()`) not met. | NEW R17 |
+| 3 | Stock permits obey obligation admission | PARTIAL, unchanged since 09-05: checked APIs correct; default APIs return untracked success on refusal. | `bi2462.28/.29` (revise) |
+| 4 | Cleanup bounds inspectable for stock primitives | PARTIAL: `ResponsivenessRegistry` is a declared table (44 entries, finite ones hard-coded `polls: 1`), consulted by no primitive; its native conformance test has no receipt. | `bi2462.30/.31` |
+| 5 | Pipeline/map-reduce execute structured work | WORKING_SCOPED by reading (real executors, bounded, drained); no fresh receipt; map error still reported as `Cancelled` (`04jqgn`). | `bi2462.32/.33`, `04jqgn` |
+| 6 | Region heap has a runtime consumer | PARTIAL, unchanged. | `bi2462.39-.41` |
+| 7 | Scheduler scaling with fairness | PARTIAL: README's "slot within `limit+1` = 17 steps" is wrong under the default adaptive selector (limit reaches 64); the default-on UCB1 reward reads `RuntimeState::now`, which production never advances, so its deadline/age terms are inert. | NEW R18; sharding beads |
+| 8 | Production failures replay in the lab | NOT DELIVERED: production emits no Poll/Wake events, so `ProductionSchedule::from_runtime_trace` yields zero steps; exhausted replay silently falls back; the strict driver is an undeclared file. New `io::replay_session*` code is I/O replay, not schedule capture. | `bi2462.8/.9` (revise); NEW R19 |
+| 9 | DPOR explores distinct schedules | PARTIAL: lab forces Lamport clocks, so every cross-task conflicting pair is reported as a race; `estimated_classes` over-counts. | `vemwug`, `bi2462.44/.45`; NEW R19 |
+| 10 | Formal claims match executable assumptions | PARTIAL: Lean has 189 theorems, 0 `sorry`, but some are vacuous (holder authority holds for any committer; propagation proves `n < n+1`); TLC e2e is vacuous for two invariants and false-green on skip; no CI job runs either. | NEW R20; `bi2462.37` |
+| 11 | HTTP/body/WS/gRPC/H3 against independent peers | PARTIAL: h2spec 147/147 on 09-06 (receipts not retained; six H2 commits since). H2 has DoS/drain gaps (no preface timeout, unbounded `pump_writes`, detached handlers not cancelled on RST, unbounded shutdown wait); H1 streaming responses have no write timeout; native gRPC streaming connect refuses on every native call; gRPC client-/bidi-streaming unimplemented on real transports; QUIC has no Retry, so 16 spoofed Initials exhaust H3 handshake slots. | `bi2462.36`; NEW R21-R23 |
+| 12 | Files, databases, telemetry for consumers | PARTIAL / REGRESSED: PostgreSQL cancellation of a query parked on the socket never sends CancelRequest (server keeps running it); MySQL has no TLS and no caching_sha2 full auth, and its KILL-on-drop can never run; Kafka teardown hangs in ~half of CI runs; OTLP `export` always errors so `MultiExporter` cannot compose it; production poll counts are always 0; one `ctrl_c()` call disables default termination for all signals process-wide. Real-server evidence ends 09-07. | NEW R24-R26; `bi2462.19` |
+| 13 | Remote handles follow region ownership | PARTIAL: default `spawn_remote` is not region-owned; opt-in `run_remote` is, but a silent peer hangs region close (no deadline/keepalive; uninterruptible close) and the origin never renews leases (30 s default). v0.5.0 shipped two remote defects (V3 reply decode; `RemoteCap` lost across `open_child_region`), fixed on main, unreleased. | `bi2462.16`; NEW R27; NEW R35 patch release |
+| 14 | Snapshot distribution survives failed peers | UNPROVEN: real mTLS transport and two-process tests exist; never executed; acceptance scale (4 MiB, symbol loss) not met. | `bi2462.10`; G2.2 first execution |
+| 15 | Membership drives discovery and revocation | PARTIAL: SWIM still an island; authenticated authority path opt-in and unexecuted. | `bi2462.11/.12` |
+| 16 | Supervisor trees restart and escalate | WORKING_SCOPED by reading (ManagedSupervisor), DOC_STALE in README/rustdoc; new fail-open: a required Permanent child whose dependency is gone is silently never restarted and the report ends `Ok`; named children refused; AppSpec still uses the legacy non-restarting supervisor. | `bi2462.34/.35/.46`; NEW R29 |
+| 17 | Secure ATP moves real files with bounded resources | PARTIAL: `atp send` defaults to plaintext unauthenticated TCP; RQ control transcript and NeedMore frames unauthenticated; `e880xo` (P0) has had no implementation since 06-15. | `e880xo`; NEW R30 |
+| 18 | ATP SDK and CLI expose the promised workflows | STUB for the tracked API: legacy `AtpSession` methods still `NotImplemented`, the older `crate::atp::sdk` fakes success and its `verify_object` never reads content; a parallel native SDK plus `atpd-live` (~21k lines, no bead for `atpd-live`) moves data but has not executed since 09-19; 13 `asupersync atp` commands refuse with E701. | `bi2462.51-.74`; NEW R31 |
+| 19 | ATP performance measured honestly | UNPROVEN/STALE: no re-measure since 09-04; `bi2462.4` closed without HyStart++/BDP credit or a WAN receipt; README quotes only the better WAN path; possible tree_small/bad regression (5.9 s → 32-41 s, different host, uninvestigated); scorecards do not bind the measured binary. | `bi2462.5`, `et48up`; NEW R32 |
+| 20 | Browser users run, cancel, ship | REGRESSED packaging: committed JS glue calls wasm exports the committed binary lacks (callbacks throw); Pages workflow omits a newly imported module (next deploy breaks the demo); "GA" label contradicted by the artifact's own `RELEASE_CANDIDATE_NOT_GA_SIGNOFF` and 58-day-stale readiness rows; nothing on npm; no browser engine or browser-core compile in any gate; WebTransport datagram queues unbounded. A real wasm32 executor exists in the core crate but is neither exported nor run. | `94g51y`, `yxwno1`; NEW R33 |
+| 21 | Dependency sovereignty loses no capability | STALLED (identical counts since 09-04); supply-chain contract lane red on HEAD (hash-pinned manifest drifted); undocumented `benchmark-adapters` Tokio edge inside core `src/`. | `ir2uf0`/`62jqi3`; NEW R34 |
+| 22 | RABS consumes a sound substrate | PARTIAL: §44.1 done; 44.2/44.5 partial; 44.4 not started. | unchanged |
+| 23 | Default/stable/feature/platform promises compile | Compile GREEN at `8525d7055` for default and all-features (first fresh evidence in weeks); stable, non-Linux and browser-core remain unproven; no CI. | `bi2462.19-.21`; S1 decision |
+| 24 | Release consumers receive proved source | REGRESSED: v0.5.0 carries two remote defects fixed only on main; 0.6.0 is unpublished but documented as released; compatibility policy text covers 0.4.x only; 615 commits since v0.5.0. | `yqlhh7`; NEW R35 |
+| 25 | Examples/docs/gates describe reachable behavior | PARTIAL, worse: non-compiling README samples; fake-type macro examples cited as proof; 231 never-compiled src files; feature table covers 26 of 64 features. | `bi2462.37/.38`; NEW R36 |
+| 26 | Canonical ATP frames | WORKING_SCOPED (unit). | closed `.42/.43` |
+| 27 | AppSpec enacts services and authority | STUB: metadata only; legacy supervisor. | `bi2462.46/.47` |
+| 28 | Snapshot restore resumes supported work | PARTIAL, narrow, unexecuted. | `bi2462.48-.50` |
+| 29 | Managed QUIC progresses on packets/deadlines | PARTIAL: `.75` closed; `.76` proof open; plus uncapped PATH_CHALLENGE/DATAGRAM queues and no Retry (row 11). | `bi2462.76`; NEW R23 |
+| 30 | Remote admission protects peers | PARTIAL: opt-in executors ran 10/10 locally before HEAD; not integrated into `NativeRemoteRuntime`. | `bi2462.77/.78` |
+| 31 | NEW: a validation path runs for every landed change | BROKEN (S1/S2). | NEW G1-G3 |
+| 32 | NEW: every source file is compiled or deliberately archived | BROKEN: 231 orphan files. | NEW R36 |
+| 33 | NEW: the tracker reflects the work | BROKEN (S3). | NEW G4 |
+
+### Bridge order (supersedes the September 15 order where they conflict)
+
+1. **Gate: one validation path for every agent (G1), then pay the execution debt (G2) before new
+   feature families land.** New beadless subsystems are paused until their first terminal run exists.
+   This is not ceremony: first runs of the September code found shipped defects.
+2. **Fix the defects that break headline guarantees or ship to users:** `race!`/`select!` loser
+   cancellation (R37), default-path obligation admission (`bi2462.28`), retirement-barrier liveness
+   (R16), silent-peer remote hangs and lease renewal (R27), supervisor dependency fail-open (R29),
+   process-wide signal takeover (R26a), PostgreSQL cancel (R24), native gRPC connect (R22a), browser
+   package integrity (R33a/b), HTTP/2 and HTTP/1 slot/shutdown DoS (R21), QUIC queue caps and handshake
+   exhaustion (R23a), ATP plaintext default and legacy fake successes (R30).
+3. **Release hygiene:** decide and cut a 0.5.1 carrying the remote fixes, correct the false 0.6.0
+   release claim, and state the compatibility boundary for 0.5/0.6 (R35).
+4. **Make proof unable to lie:** zero-selection and vacuous-lane fixes, orphan-source disposition,
+   README samples compiled as doctests (G3, R36, R38, R20).
+5. **Then resume vision work** through the existing pairs (`bi2462.8` replay, `.10-.12` distributed,
+   `.51-.74` ATP SDK/CLI, `.39-.41` heap, `.44-.50`), now with honest prerequisites (R19, R31).
+
+### New work packages
+
+Every implementation package names its independent proof; "done" means landed code plus a terminal
+receipt with positive selected/passed counts and zero ignored/filtered for the named tests, bound to a
+commit SHA. Public API changes stay additive unless the owner approves a break (AGENTS compatibility gate).
+
+- **G1 — OWNER: authorize one validation path for all agents (P0 decision).** Decide whether RCH's
+  worker-side cache pruning is acceptable under the no-deletion rule (then `bi2462.81` closes as
+  "authorized"), or require the retained-artifact route `bi2462.81` describes. Decide whether GitHub
+  Actions stays disabled; if so, README/AGENTS must stop citing CI jobs as enforcement and name the RCH
+  lanes instead. Until decided, agents without a path must not land code (G3).
+- **G2 — Execution-debt burn-down (P0 epic).** One child per area; each runs the exact targets with the
+  features they require, records counts, files one bug per red, and treats a zero-test selection as a
+  failure: G2.1 runtime/cx additions (resource bracket, worker readiness, dynamic supervision/services,
+  `channel::ack`, JoinSet drain) including the seven lib failures in new modules; G2.2 distributed
+  (remote_owned, symbol service, two-process distribution/durability, membership authority/owned/scoped/
+  persistent, admission, continuation, PBFT); G2.3 ATP native SDK, `atp-live/1` profile and `atpd-live`
+  subprocess suites; G2.4 network (gRPC native streams incl. TLS, H3 live UDP, H3 streaming bodies, h2spec
+  rerun at HEAD); G2.5 I/O replay sessions and native journeys; G2.6 browser-core Rust (local executor,
+  fetch client) plus wasm32 check; G2.7 data (OTLP sender change, SQLite additions) plus the full
+  real-server suite at HEAD.
+- **G3 — Make never-run code visible and unmergeable (P1).** Every file-level `#![cfg(feature=…)]` test gets
+  a `[[test]] required-features` entry; a census test fails on any gated test file without one; the proof
+  wrappers reject zero-selection; the pre-push hook refuses pushes whose touched feature-gated targets were
+  not checked (via RCH) with an explicit, logged override. No new signoff artifacts.
+- **G4 — Tracker truth reconciliation (P1).** Record landed-but-unrecorded work on its beads, attach
+  receipts before closing shipped-unclosed beads, open follow-ups for false-closed beads with unmet
+  acceptance, clear stale `blocked`/obsolete P0s, and re-rank: at most a few dozen P0/P1 should remain.
+
+- **R16 — Retirement barrier never strands a join (P1 bug).** Teardown (`RuntimeInner::drop`, scheduler
+  shutdown) must open or poison every pending barrier so a `TaskHandle` that outlives its runtime resolves
+  `JoinError::Cancelled` as documented; add a census of completion paths that must open the barrier.
+  Proof: native test that drops runtime A and joins its handle from runtime B under a timeout; a
+  never-waking parked task variant; `try_join`/`is_finished` semantics documented.
+- **R17 — Explicit runtime lifecycle drains the root region (P1).** Additive `Runtime` shutdown API that
+  cancels and drains the root with a budget and returns a drain report; `#[main]` surfaces its drain result
+  and drains on the panic path; `spawn_with_cx` docs corrected; `0sd3cp`'s unmet acceptance (drain outcome
+  in trace/report, handles observe `CancelReason::shutdown()`) delivered or re-scoped with the owner.
+- **R18 — Scheduler reward uses a real clock; fairness bound stated correctly (P1 bug + doc).** The
+  Lyapunov snapshot must read the timer-driver time in production; add a test that the deadline/age terms
+  move on the native runtime. Replace README's "limit+1 = 17 steps" with the adaptive worst case and add a
+  native test measuring `max_cancel_streak` under the default selector.
+- **R19 — Production schedule capture prerequisites for `bi2462.8` (P1).** R19a: opt-in production
+  emission of Poll/Wake/CancelAck events with bounded overhead; R19b: declare and review the strict replay
+  driver (`production_strict.rs` + `wiring.patch`), exhaustion fails closed; R19c: lab DPOR uses vector
+  clocks with per-task identities, and `estimated_classes` becomes a true lower bound. Proofs: a
+  multi-thread native capture replayed in the lab with an injected divergence caught; a truncated trace
+  rejected; a counterexample for the class estimate.
+- **R20 — Formal claims that can fail (P2).** Strengthen or reclassify the vacuous Lean theorems
+  (`commit_holder_authority`, `cancel_propagation_bounded`, `cancel_protocol_terminates`) in the coverage
+  inventory; make the TLC e2e check obligations and region close and fail (not SKIP) inside proof lanes.
+- **R21 — HTTP/2 and HTTP/1 servers bound every wait (P1 bugs).** H2: preface timeout, bounded
+  `pump_writes` with force-close race, handlers cancelled on RST, an in-flight admission cap, server-
+  generated stream errors counted by the reset limiter, bounded shutdown join (N1-N3). H1: streaming
+  response write timeout and bounded error-path flushes (N4-N5; `hw83se` was closed on an unmet fix).
+  Proof: slow-reader, partial-preface, rapid-reset and shutdown-under-stall tests on real sockets.
+- **R22 — gRPC native truth (P1/P2).** R22a: `NativeStreamEndpoint` admits on the real I/O driver
+  capability, not the virtual `IoCap` (same predicate audit for ATP rendezvous); R22b: native
+  client-streaming/bidi on real transports and hostname dialing; R22c: `Server::serve` probe is clearly
+  labelled and the real serving entry point documented. Proof: native plaintext and TLS dial tests.
+- **R23 — QUIC/H3 resource and protocol hardening (P1/P2).** R23a (P1): address validation/Retry for the
+  managed endpoint, PATH_CHALLENGE and DATAGRAM caps, DATAGRAM rejected unless negotiated (N6, N10,
+  N11); R23b (P2): managed key-update initiation and AES-GCM limit, received MAX_STREAMS honored, idle
+  timeout in the UDP driver, client Retry handling, encoder-side parameter validation (N12-N15, N23);
+  R23c (P2): one request's finalizer failure must not stop the H3 listener (N7).
+- **R24 — PostgreSQL cancellation reaches the server (P1 bug, regression).** Send CancelRequest when a
+  query parked on the socket is cancelled; real-server test asserts via `pg_stat_activity` that the backend
+  stopped. Also TLS trust options (`sslrootcert`, verify-ca/full) and a handshake timeout (P2).
+- **R25 — MySQL authentication, TLS and KILL (P2).** TLS and caching_sha2 full authentication so a cold
+  MySQL 8 server works; fix the unsatisfiable KILL-on-drop predicate and bound its join.
+- **R26 — Process, signal and observability correctness.** R26a (P1): register only requested signals and
+  preserve default dispositions for the rest; R26b (P2): reap dropped still-running children; R26c (P1):
+  root-cause the Kafka consumer teardown hang; R26d (P2): production poll counts and a correct
+  `find_leaked_obligations`; R26e (P2): OTLP exporter composable in `MultiExporter`; R26f (P2): file poll
+  traits and `write_atomic` never block a worker under a SPAWN-restricted context.
+- **R27 — Remote liveness bounded by leases (P1, children of `bi2462.16`).** A silent peer after `Accepted`
+  cannot hang region close: deadline/keepalive, interruptible close bounded by lease plus drain budget;
+  origins renew leases automatically; the server echoes the clamped lease. Proof: a TLS listener that
+  accepts then goes silent, driven by `run_remote` inside a closing parent region.
+- **R29 — Supervision correctness (P1/P2).** Required dependents whose dependency is unavailable escalate
+  or fail instead of being silently dropped (P1); managed supervisors support registered names (P2); lab and
+  native agree on panic-path loser drain (P2); README/rustdoc describe ManagedSupervisor.
+- **R30 — ATP secure and truthful defaults (P1).** Owner decision on the `atp send` default transport
+  (authenticated default with explicit plaintext opt-in versus loud refusal off-loopback); remove fake
+  successes and the tautological/false-failing `verify_object` in both legacy SDK surfaces; report
+  cancellation as cancellation; fix the literal `./~/.atp` path. Compatibility-preserving where public.
+- **R31 — `atpd-live` scope decision and SDK convergence (P1).** Decide whether `atpd-live` is a supported
+  product, how it relates to `atpd` and SDK daemon delegation (`bi2462.61`), and whether the native SDK
+  replaces the legacy `AtpSession` surface; record it before more parallel surfaces land.
+- **R32 — ATP measurement honesty (P2).** Scorecards bind the measured binary SHA; investigate the
+  tree_small/bad 5.9 s → 32-41 s result; README quotes both WAN paths; reopen `bi2462.4`'s unmet
+  HyStart++/BDP/WAN acceptance as a follow-up.
+- **R33 — Browser package integrity (P1).** R33a: rebuild and commit matching glue and wasm, plus a check
+  that every glue import exists in the binary; R33b: Pages ships every module `index.js` imports; R33c:
+  bounded WebTransport queues; R33d: demote the GA label to what the artifact supports (owner via
+  `94g51y`); R33e: browser-core compiled in the validation lanes.
+- **R34 — Supply-chain lane and Tokio carve-outs truthful (P2).** Refresh the fingerprint contract through
+  its reviewed path; document or relocate the `benchmark-adapters` Tokio edge in core `src/`.
+- **R35 — Release truth (P1).** Owner decision on a 0.5.1 patch carrying `7883e09ee`/`479d67ed6`; fix the
+  CHANGELOG's false v0.6.0 release label, its empty `[Unreleased]` section and the README version lines
+  (the git snippet `version = "0.5.0"` cannot resolve against 0.6.0 main); state the compatibility
+  boundary policy for 0.5.x/0.6.x; correct README's "all four Phase 6 gates are live" and CI-job claims
+  (16 flamegraph-triggering and 8 unsafe-touching commits since 09-15 produced no flamegraph or proof
+  note).
+- **R36 — Source and sample hygiene (P2).** Owner disposition for the 231 never-compiled `src/*.rs` files
+  (wire, archive outside `src/`, or delete with permission); compile README Rust samples as doctests;
+  rewrite the fake-type macro examples against the real API.
+- **R37 — `race!`/`select!` losers observe cancellation (P1 bug).** Branches built on the caller's `cx`
+  must be cancellable when they lose: additive closure form that hands each branch its child `Cx`, a
+  migration note, and detection of the hazardous form; drain-correct `Cx`-level hedge; `timeout!`
+  rustdoc corrected. Proof: native current-thread and multi-worker tests with a never-waking caller-cx
+  `recv` loser and a long `sleep` loser, each under a wall-clock bound.
+- **R39 — Find the real 0.5.0 compatibility break (P1, escaped-defect protocol).** The CHANGELOG blames
+  `Outcome`'s conditional `Debug` for a downstream break, but that derive is identical at v0.4.3, so the
+  true cause is unknown and an unapproved v0.4.3-surface break may be live in 0.5.0. Diff rustdoc JSON of
+  v0.4.3, v0.4.11, v0.5.0 and HEAD; reproduce the consumer failure through the same public API; follow
+  AGENTS' escaped-defect protocol (old-red/new-green receipt, census, gap analysis); add a public-surface
+  diff lane (the root-export-name map alone cannot detect signature breaks) and repair the red
+  `api_surface_map_contract`.
+- **R40 — Proof-status freshness time bomb (P1, due 2026-09-23 00:00 UTC).** The two remaining `fresh`
+  rows (dated 08-23) exceed the 30-day window tonight, failing `proof_status_snapshot_contract`; demoting
+  them trips hard-coded `fresh-rch-pass` assertions in two other contracts (the `bi2462.80` trap, fixed
+  only for the native row). Either rerun those lanes on RCH and record honest new receipts, or generalize
+  the `.80` demotion fix. Also stop wall-clock-dependent contract tests from turning red by date alone.
+- **R38 — Proof lanes that cannot report false green (P2).** `run_raptorq_e2e.sh` rejects zero-test
+  scenarios; replace the self-comparing libraptorq differential; replace the `cp`/`mv` ATP journey test;
+  fill or unregister hollow WebSocket/TLS/DNS conformance modules; root-cause the four RaptorQ decoder
+  golden mismatches before any regeneration.
+
+
+### Ambition pass 1: kill the test-blindness classes, not just the instances
+
+The defects above were not random. Almost every one survived because the test suite has a structural
+blind spot of one of six kinds. Fixing the instances without the classes guarantees recurrence, so each
+class gets a mechanical detector and a replacement pattern.
+
+| Class | Instances found on 09-22 | Detector (fails CI-equivalent lanes) | Replacement pattern |
+|---|---|---|---|
+| B1. Self-waking or caller-measured cancellation tests | `race!`/`select!` drain tests use `Cx::current()` losers; PostgreSQL cancel test measures only client wait time; `pc_03_wait_async_cancel_safe` never cancels | A census keyed by the `ResponsivenessRegistry` entries: every cancel-aware stock primitive must have at least one native test whose waiter is a never-waking parked future and whose assertion observes the *remote/owned side effect* (server backend stopped, waiter queue empty), not just the caller's return | Parked-state witness plus side-effect oracle; this also makes the registry consulted by tests instead of decorative |
+| B2. Lab-only proof of native behavior | Panic-path loser drain (lab records a drain that never happened), the frozen production scheduler clock, schedule replay | A lab/native differential harness (new R45): each kernel scenario runs on LabRuntime, native current-thread and native multi-worker; outcome kinds and cleanup counts must agree | Metamorphic relation "same program, different runtime ⇒ same outcome class" |
+| B3. Tests that are never selected | Every whole-file feature-gated suite without a `[[test]]` entry; 231 orphan `src/*.rs` files; the `run_raptorq_e2e.sh` 0-test PASS | G3 census plus zero-selection refusal plus the orphan census (R36a) | Registered required-features; ratchet on orphan count |
+| B4. Tests that assert text instead of behavior | 274 of 397 contract tests never import the crate; README samples never compiled; hollow conformance modules | Freeze (holding: one contract added since 09-01) and compile README as doctests (R36b) | Behavior-first tests; meta tests excluded from any count used as evidence |
+| B5. Goldens and oracles without a failure control | UCB1 "determinism golden" with no frozen values; vacuous Lean theorems; TLC invariants over traces with no obligations | Mutation controls (new R47): for kernel hot spots, a mutant must be killed by the named test before the test counts as proof | Mutation-backed acceptance on R16, R37, R29a, `bi2462.28`, R24, R26a |
+| B6. Tests whose verdict depends on the calendar or host | Proof-status freshness contracts (R40); host-dependent benchmark deltas (R32) | "now" and host identity are explicit inputs; freshness is a separate named lane | Deterministic verdicts, with dated evidence judged by an explicit as-of input |
+
+Added packages from this pass:
+- **R45 — Lab/native differential harness for kernel semantics (P1).** A table of kernel scenarios (spawn/join,
+  race/select with parked losers, quorum, hedge, pipeline, map-reduce, region close with finalizers and
+  obligations, panic in winner/loser, cancel before first poll) run on all three runtimes with a comparison of
+  terminal outcome kinds, cancellation attributions, finalizer counts and obligation conservation. Divergence
+  is a failure. Seeds are logged; native runs repeat N times to expose schedule sensitivity.
+- **R46 — Main watchdog as the CI substitute (P0).** Until G1 settles CI, an agent-run loop checks every new
+  `main` commit on the authorized path (default check, all-features check, the native cancellation contract,
+  and the targeted tests of the touched area), posts a receipt on the owning bead, and on red files a P0 bead
+  naming the commit and author identity and pings Agent Mail. It is the only mechanism that also covers
+  API-created commits.
+- **R47 — Mutation-backed proof for kernel hot spots (P2).** Install `cargo-mutants` on a worker (dev tool,
+  not a crate dependency) and run it restricted to `Cx::race_drained`, `Scope::race_all`, the obligation
+  mailbox admission path, the retirement barrier, the ManagedSupervisor restart loop and the signal
+  dispatcher, against their named tests. Surviving mutants become test gaps with beads.
+
+Upgraded acceptance on existing packages from this pass: R16, R37, R29a, R24, R26a and `bi2462.28/.29` each
+require one B1-style never-waking side-effect test and one B5 mutation kill; R19a/R19b require a B2
+differential run once capture exists.
+
+
+### Ambition pass 2: measurable exit, parallel tracks, islands and duplicate surfaces
+
+**Exit criteria for this refresh.** R46 (the main watchdog) records each metric, and each has a number:
+- Zero self-declared-uncompiled code commits on `main` for 7 consecutive days. At least 95% of `main` commits
+  get a green watchdog receipt within 2 hours.
+- All seven G2 areas have receipts; every red from them has a bead with a root-cause verdict.
+- Every P1 defect in this refresh (R16, R17, R18a, R21a, R21b, R22a, R23a, R24, R26a, R26c, R27a, R27b, R29a,
+  R30b, R33a, R33b, R37, R38b, R39, R40) is closed with old-red plus new-green receipts, or explicitly
+  re-prioritized by the owner.
+- P0 plus P1 unfinished beads fall to 60 or fewer; in-progress beads untouched for more than 30 days fall
+  to 10 or fewer; the count of blocked beads with no blocking edge is 0.
+- The orphan-source count never increases (ratchet), and the owner decision R36a is executed.
+- Vision rows 1, 2, 3, 13, 16 and 20 reach WORKING_SCOPED with receipts.
+
+**Parallel tracks for the swarm.** Each track has an internal order; tracks do not block each other except
+where marked.
+- T1 Validation: G1 → R46 → G3 → R33e/R38/R47. Everything else consumes its receipts.
+- T2 Kernel: R37 → R37b → R36c; R16; R17; `bi2462.28` → `.29`; R29a → `bi2462.34/.35/.46`; R29c; R18a → R18b; R45.
+- T3 Network: R22a (G2.4 old-red first); R21a; R21b; R23a → R23b/R23c; R41a-c.
+- T4 Data and process: R26a; R24 → R24b; R26c (needs G2.7 services); R25; R26b/d/e/f.
+- T5 Distributed: G2.2 → R27a → R27b → `bi2462.16`; `.10/.11/.77` receipts; R42; R43.
+- T6 ATP: G2.3; R31 (owner) → `bi2462.51-.74` re-targeting; R30a (owner) and R30b; R32 → `bi2462.5`.
+- T7 Browser: R33a → R33b; R33c; R33d (owner via `94g51y`).
+- T8 Release and truth: R40 (due now); R39 → R35a; R35b; R34; R36a (owner) / R36b; R44; G4.
+
+**Islands (new R48).** Four audits independently found public machinery with no runtime consumer: the lab
+e-process monitor (created, never fed); conformal calibration unused by oracles; evidence ledger and sheaf
+checks used only by tests; SWIM; PBFT; the region heap; the plan rewrite engine; the hardened ATP journal;
+`MultiExporter`; `TaskInspector` poll counts; the session-typed remote protocol state machines. An island is
+fine when labelled; it is a defect when the README describes it as working. R48 produces a census and a
+verdict for each island: wire it, label it experimental, or retire it (with owner permission).
+
+**Duplicate surfaces (new R49).** Parallel surfaces that must each be canonicalized or explicitly deprecated
+(deprecation allowed, removal not without owner approval): two ATP SDK sessions (one refusing, one faking
+success) plus the native SDK; `atpd` and `atpd-live`; three journal implementations; legacy
+`CompiledSupervisor::spawn` and `ManagedSupervisor`; standalone `hedge()`, `Scope::hedge` and the proposed
+Cx hedge; `Cx::race*` (drop) and `race_drained` (drain). R31 covers the ATP pieces; R49 covers the runtime
+pieces and states the migration story for each pair in README.
+
+**Release gates.** `yqlhh7` gets these concrete gates for the next release: an exact candidate SHA; the
+native cancellation contract at that SHA; G2 receipts for any area touched since the last release; the
+public-surface diff (R39) against the previous release; downstream canaries; CHANGELOG truth (R35b).
+
+
+### Ambition pass 3: make the design bible's mathematics check the implementation
+
+The v4 design bible already specifies the right mathematics: obligations as a Petri net/VASS (§8.7), schedules
+up to Mazurkiewicz equivalence with optimal DPOR as the target (§3.2, §18), and small-step semantics as the
+normative model (§19, `asupersync_v4_formal_semantics.md`). Today these are mostly descriptions or islands.
+This pass turns each into a checker that runs against the real runtime, where it would have caught a defect
+found on 09-22.
+
+- **R51 — Obligation conservation as an online place invariant (P1).** Per region, maintain the P-invariant
+  `reserved = committed + aborted + leaked + live` over the obligation mailbox *and* the runtime table,
+  including queued admission credits and generation identity. Enforce it at every mailbox drain and at region
+  close: always in lab, and in production behind a cheap debug/opt-in flag (atomic counters; benchmark-gated).
+  A refused-after-success reservation (the `bi2462.28` default-path defect) violates the invariant at the
+  first drain, so the defect class becomes self-reporting instead of silent. Proof: the invariant fires on
+  the planted default-path refusal at 8525d7055 (old-red) and holds after the fix; a property test
+  (proptest state machine) generates reserve/commit/abort/cancel/close interleavings on lab and native.
+- **R52 — Model-based conformance to the operational semantics (P2).** Encode the normative rules (SPAWN,
+  SCHEDULE, COMPLETE-*, CANCEL-REQUEST/ACKNOWLEDGE/DRAIN/FINALIZE, CLOSE-*, RESERVE/COMMIT/ABORT/LEAK) as a
+  small pure Rust reference state machine. Replay LabRuntime traces, and native traces once R19a capture
+  exists, through it in lockstep: any transition the model forbids is a refinement violation with the exact
+  event. This is the practical bridge between the Lean-checked model and the Rust runtime that README
+  explicitly says does not exist, and it replaces "the Lean model is proved" with "the runtime is checked
+  against the model on every lab run". The model is test-only code; it must not become another island
+  (it runs in the default lab test lane).
+- **Optimal DPOR as the concrete target for R19c/`bi2462.44`.** Use source-set DPOR with wakeup trees
+  (Abdulla, Aronis, Jonsson, Sagonas, 2014) over vector-clock happens-before with per-task identities.
+  Validate against exhaustive enumeration of Mazurkiewicz classes on small programs, where each class must be
+  explored exactly once. An early stop reports `incomplete`, never "exhaustive".
+- **Resource-bounded protocol state (R21a/R23a acceptance upgrade).** Give each connection an explicit
+  potential function Φ (buffered bytes + queued control frames + live handlers + pending handshakes) with a
+  configured bound. Add a stateful fuzz harness (adversarial frame sequences: rapid reset, PING/PATH_CHALLENGE
+  floods, window games, partial prefaces, spoofed Initials) whose oracle asserts `Φ ≤ bound` after every
+  step and that shutdown completes. This proves the DoS fixes as a class, not per exploit.
+- **Anytime-valid flake verdicts (R26c, NATS flake, any intermittent red).** Instead of "run it N times",
+  decide "fixed" with a sequential e-value test (the runtime's own `eprocess` machinery). Accept at α = 0.01
+  once the product of per-run likelihood ratios against the observed pre-fix hang rate exceeds 100; reject
+  at the first hang. This makes the machinery dogfood itself and bounds the false-"fixed" rate.
+- **Mutation score as the evidence weight (R47).** A test counts as proof of a kernel property only if it
+  kills the relevant mutants (e.g. delete the barrier open on teardown; skip the RST handler cancel;
+  `continue` → escalate). Record survivors as gaps.
+
+None of these add a new public API or a new signoff artifact. Each runs in an existing test lane, and each
+has a planted defect it must catch.
+
+
+### Packages added during refinement (not listed above)
+
+- **R41a-c (P2):** DNS in connect is uncancellable and `connect_timeout` spends its budget on the first
+  address; WebSocket `ping_interval` is dead config, the handshake read is unbounded and an extension is
+  echoed that cannot be implemented; `DesktopRuntimeProfile` installs `BrowserReactor` on native and reactor
+  poll errors are swallowed.
+- **R42 (P2):** PBFT src docs claim Byzantine-fault-tolerant safety while view change and checkpoints are
+  missing and the deprecated `submit` returns a hardcoded result. **R43 (P3):** restart-durable remote
+  idempotency. **R44 (P2):** AGENTS RULE 0.5 cites a file that does not exist.
+- **R53 (P2):** data-layer batch (NATS lone-subscriber progress and flake, PostgreSQL LISTEN receive API,
+  pool outcome mapping, ambient-`Cx` cancel wakers). **R54 (P2):** our RaptorQ decoder on reference packets
+  at K ≥ 2048 in default builds, plus a full Table 2 check. **R55 (P2):** runtime-level `spawn_blocking` has no
+  owning region. **R23d (P2):** verify the production handshake applies every peer transport parameter that
+  the test-only `apply_peer_transport_parameters` handles.
+
+### Phase execution record (September 22)
+
+- Phase 1 (reality check): ten subsystem audits plus root verification of every high-severity claim, and
+  eight pinned RCH lanes: the native contract at `8525d7055` (42/42) and at `021cdecaf` (42/42);
+  default and all-features checks (clean, 0 warnings); the full lib suite (23,562/23,602, 17 failures
+  classified); a filtered tip re-run (16 failures, the real runtime regression confirmed fixed); the on-ramp
+  example (ran). The feature-gated suite lanes (tls/test-internals/http3/remote-service; default-feature
+  integration; atp-cli; browser-core; rustfmt) were queued behind these and report into G2.
+- Phase 2: this section, written in place.
+- Phase 3a: 69 beads created under `bi2462` using the frozen generation instructions and only `br`. 24 existing
+  beads received evidence comments (landed-but-unrecorded work, unmet acceptance, new prerequisites), and 27
+  dependency/related edges were added.
+- Phase 4: three ambition passes (test-blindness classes; exit metrics, tracks, islands, duplicate surfaces;
+  online invariants, model-based conformance, optimal DPOR, resource-bounded protocol state, sequential flake
+  verdicts, mutation-backed proof), then Phase 3a again: 7 more beads (R45-R49, R51, R52) and acceptance
+  upgrades on 13 beads.
+- Phase 5: five refinement passes. Pass 1 relaxed nine over-strict blocking edges so that execution-debt,
+  watchdog and census work does not wait on owner decisions, added four beads for audit gaps that had been
+  missed (R53-R55, R23d), and added scope and test-runner requirements to 25 beads. Pass 2 linked four overlaps
+  with open beads (`eeexl1.11`, `eeexl1.10`, `qoir1r`, `43zovx`) instead of duplicating them. Pass 3 confirmed
+  71 of the 80 new beads are dependency-ready and the other nine are blocked only by deliberate prerequisites.
+  Pass 4 corrected R37's deliberate-failure control and attached the tip receipts. Pass 5 found no further
+  bead changes (convergence).
+- Validation: `br dep cycles` reports 0 active cycles; `bv --robot-insights --label reality-check-20260922`
+  computed its cycle metric and found 0.
+
+### Created task index (September 22)
+
+| Key | Bead | Type | Priority | Title |
+|---|---|---|---|---|
+| G1 | `asupersync-bi2462.85` | task | P0 | OWNER: authorize one validation path that every agent (including API-created commits) can use |
+| G2 | `asupersync-bi2462.86` | epic | P0 | Execution-debt burn-down: first terminal run of every suite landed without execution since 2026-09-15 |
+| G2.1 | `asupersync-bi2462.86.1` | task | P0 | Execution debt: runtime/cx additions (resource bracket, worker readiness, dynamic supervision, channel ack, Jo |
+| G2.2 | `asupersync-bi2462.86.2` | task | P0 | Execution debt: distributed suites (remote_owned, symbol service, two-process distribution/durability, members |
+| G2.3 | `asupersync-bi2462.86.3` | task | P0 | Execution debt: ATP native SDK, atp-live/1 profile and atpd-live subprocess suites |
+| G2.4 | `asupersync-bi2462.86.4` | task | P1 | Execution debt: network suites (gRPC native streams incl. TLS, H3 live UDP, H3 streaming bodies, h2spec rerun  |
+| G2.5 | `asupersync-bi2462.86.5` | task | P1 | Execution debt: I/O replay sessions (io::replay_session, replay_group, replay_group_session) and their native  |
+| G2.6 | `asupersync-bi2462.86.6` | task | P1 | Execution debt: browser-core Rust (local executor, fetch client) and wasm32 build of the core crate |
+| G2.7 | `asupersync-bi2462.86.7` | task | P1 | Execution debt: data layer (OTLP sender change, SQLite additions) and the full real-server suite at HEAD |
+| G3 | `asupersync-bi2462.87` | task | P1 | Make never-run code visible and unmergeable: required-features registration census, zero-selection refusal, fe |
+| G4 | `asupersync-bi2462.88` | task | P1 | Tracker truth reconciliation after the 2026-09-22 reality check (record landed work, fix false/stale states, r |
+| R16 | `asupersync-bi2462.91` | bug | P1 | Retirement barrier can strand TaskHandle join forever when a runtime is torn down before the task completes |
+| R17 | `asupersync-bi2462.92` | feature | P1 | Explicit Runtime lifecycle drains the root region; #[main] surfaces its drain result and drains on panic |
+| R18a | `asupersync-bi2462.93` | bug | P1 | Default-on UCB1/Lyapunov scheduler reward reads RuntimeState::now, which production never advances |
+| R18b | `asupersync-bi2462.94` | task | P2 | State the real cancel-preemption fairness bound under the default adaptive selector and measure it on native |
+| R19a | `asupersync-bi2462.95` | feature | P1 | Opt-in production emission of Poll/Wake/CancelAck trace events so production schedules can be captured |
+| R19b | `asupersync-bi2462.96` | task | P1 | Wire (or retire with owner approval) the fail-closed production replay driver; replay exhaustion must not sile |
+| R19c | `asupersync-bi2462.97` | bug | P2 | DPOR race detection degenerate under the lab's forced Lamport clocks; estimated_classes over-counts |
+| R20 | `asupersync-bi2462.98` | task | P2 | Formal claims that can fail: strengthen or reclassify vacuous Lean theorems; TLC e2e checks real invariants an |
+| R21a | `asupersync-bi2462.102` | bug | P1 | HTTP/2 listener: unbounded preface read and pump_writes, handlers orphaned on RST (Rapid-Reset amplification), |
+| R21b | `asupersync-bi2462.103` | bug | P1 | HTTP/1 streaming responses and buffered error-path flushes have no write timeout (slot pinned, shutdown join h |
+| R22a | `asupersync-bi2462.104` | bug | P1 | Native gRPC streaming connect_tcp/connect_tls always refuse on the native runtime (wrong capability predicate  |
+| R22b | `asupersync-bi2462.105` | feature | P2 | gRPC client-streaming and bidi on real transports; Channel dials hostnames |
+| R22c | `asupersync-bi2462.106` | docs | P3 | grpc::Server::serve is a legacy probe that binds and returns Ok without serving; make the real serving entry p |
+| R23a | `asupersync-bi2462.107` | bug | P1 | QUIC/H3 remote resource exhaustion: no Retry/address validation, uncapped PATH_CHALLENGE queue, un-negotiated  |
+| R23b | `asupersync-bi2462.108` | bug | P2 | QUIC protocol correctness gaps: managed key update/AES-GCM limit, MAX_STREAMS ignored, UDP-driver idle timeout |
+| R23c | `asupersync-bi2462.109` | bug | P2 | One request's finalizer/cleanup failure stops the whole NativeH3Listener for every peer |
+| R23d | `asupersync-bi2462.157` | bug | P2 | QUIC: verify production applies every peer transport parameter that apply_peer_transport_parameters handles (D |
+| R24 | `asupersync-bi2462.110` | bug | P1 | PostgreSQL: cancelling a query parked on the socket never sends CancelRequest (server keeps executing and hold |
+| R24b | `asupersync-bi2462.111` | task | P2 | PostgreSQL TLS trust options (sslrootcert, verify-ca/verify-full) and a TLS handshake timeout |
+| R25 | `asupersync-bi2462.112` | feature | P2 | MySQL: TLS, caching_sha2 full authentication (cold MySQL 8 login), working KILL-on-drop, less brittle SQL heur |
+| R26a | `asupersync-bi2462.113` | bug | P1 | First ctrl_c()/signal() call installs handlers for all ten signals, disabling default termination process-wide |
+| R26b | `asupersync-bi2462.114` | bug | P2 | Dropped still-running child processes without kill_on_drop become unreaped zombies; wait_async cancel path unt |
+| R26c | `asupersync-bi2462.115` | bug | P1 | Kafka consumer teardown hangs in about half of CI runs after the test body passes |
+| R26d | `asupersync-bi2462.116` | bug | P2 | Observability truth: production poll counts always 0; find_leaked_obligations reports healthy obligations and  |
+| R26e | `asupersync-bi2462.117` | bug | P2 | OTLP exporters cannot compose in MultiExporter (export always errors); MultiExporter has no production caller |
+| R26f | `asupersync-bi2462.118` | bug | P2 | File poll traits and write_atomic block an async worker when the Cx lacks SPAWN or no blocking pool exists |
+| R27a | `asupersync-bi2462.122` | bug | P1 | Remote: a silent peer after Accepted hangs region close (no deadline/keepalive; uninterruptible RemoteHandle c |
+| R27b | `asupersync-bi2462.123` | bug | P1 | Remote origins never renew leases; any native remote computation over 30 s ends LeaseExpired |
+| R29a | `asupersync-bi2462.99` | bug | P1 | ManagedSupervisor silently never restarts a required child whose dependency is unavailable (report ends Ok) |
+| R29b | `asupersync-bi2462.100` | feature | P2 | ManagedSupervisor supports registered (named) children |
+| R29c | `asupersync-bi2462.101` | bug | P2 | Lab and native disagree on panic-path loser drain in Scope::race/race_all/hedge (lab records a drain that did  |
+| R30a | `asupersync-bi2462.126` | task | P1 | ATP: decide and implement secure defaults (atp send defaults to plaintext unauthenticated TCP) |
+| R30b | `asupersync-bi2462.127` | bug | P1 | ATP legacy SDK surfaces fake success and give false integrity verdicts (send_object no I/O, verify_object taut |
+| R30c | `asupersync-bi2462.128` | bug | P2 | asupersync atp serve writes to a literal ./~/.atp/inbox (no tilde expansion) |
+| R31 | `asupersync-bi2462.129` | task | P1 | ATP: decide the canonical SDK/daemon surface (legacy AtpSession vs native SDK vs atpd-live) before more parall |
+| R32 | `asupersync-bi2462.130` | task | P2 | ATP measurement honesty: bind scorecards to the measured binary, investigate tree_small/bad 5.9s→32-41s, quote |
+| R33a | `asupersync-bi2462.131` | bug | P1 | Browser: committed JS glue calls wasm exports the committed binary does not have (callbacks throw TypeError) |
+| R33b | `asupersync-bi2462.132` | bug | P1 | Browser: Pages workflow does not ship webtransport-streams.js, which index.js now imports (next deploy breaks  |
+| R33c | `asupersync-bi2462.133` | bug | P2 | Browser WebTransport datagram inbox and pending-write queues are unbounded |
+| R33d | `asupersync-bi2462.134` | docs | P1 | Browser: the README "GA" label contradicts its own signoff artifact and 58-day-stale readiness rows; demote to |
+| R33e | `asupersync-bi2462.135` | task | P2 | Browser: compile and test asupersync-browser-core and the wasm32 builds in the validation lanes |
+| R34 | `asupersync-bi2462.136` | task | P2 | Supply-chain contract lane red on HEAD; undocumented Tokio edge in core src via benchmark-adapters |
+| R35a | `asupersync-bi2462.137` | task | P1 | Release decision: publish a 0.5.1 carrying the remote defects fixed only on main (V3 reply decode, RemoteCap a |
+| R35b | `asupersync-bi2462.138` | docs | P1 | Release truth: CHANGELOG labels unpublished v0.6.0 a "Release"; README version lines and the git snippet do no |
+| R36a | `asupersync-bi2462.141` | task | P2 | OWNER: disposition for 231 never-compiled top-level src/*.rs files (~257k lines, 225 real_*_e2e_tests.rs) |
+| R36b | `asupersync-bi2462.142` | task | P2 | Compile README Rust samples as doctests; fix the ones that do not compile against current signatures |
+| R36c | `asupersync-bi2462.143` | task | P2 | Rewrite fake-type macro examples cited as proof (macros_basic/nested/race use fake Cx/Scope and drop futures u |
+| R37 | `asupersync-bi2462.89` | bug | P1 | race!/select! losers built on the caller's cx never observe loser cancellation (drain hangs or stalls) |
+| R37b | `asupersync-bi2462.90` | task | P2 | Drain-correct hedge usable from a real runtime task; timeout! rustdoc no longer claims drain |
+| R38 | `asupersync-bi2462.144` | task | P2 | Proof lanes that cannot report false green (zero-test PASS, self-comparing differential, cp/mv journey, hollow |
+| R38b | `asupersync-bi2462.145` | bug | P1 | RaptorQ decoder golden-transcript mismatches (4 lib tests) in a module unchanged since 09-08: root-cause befor |
+| R39 | `asupersync-bi2462.139` | bug | P1 | Escaped defect: identify the real 0.5.0 public-API/behavior break (CHANGELOG blames an unchanged Outcome Debug |
+| R40 | `asupersync-bi2462.140` | bug | P1 | Proof-status freshness time bomb: two fresh rows expire 2026-09-23 00:00 UTC; demotion trips hard-coded fresh- |
+| R41a | `asupersync-bi2462.119` | bug | P2 | DNS in connect is uncancellable and untimed; connect_timeout spends its whole budget on the first address |
+| R41b | `asupersync-bi2462.120` | bug | P2 | WebSocket ping_interval is dead config (30 s default never read); client handshake response read has no timeou |
+| R41c | `asupersync-bi2462.121` | bug | P2 | Reactor fail-open: DesktopRuntimeProfile installs BrowserReactor on native (sockets park forever); reactor pol |
+| R42 | `asupersync-bi2462.124` | docs | P2 | PBFT: src docs claim Byzantine-fault-tolerant safety; exported deprecated submit returns hardcoded "consensus  |
+| R43 | `asupersync-bi2462.125` | feature | P3 | Restart-durable remote idempotency (dedup survives service restart) |
+| R44 | `asupersync-bi2462.146` | docs | P2 | AGENTS.md RULE 0.5 cites /data/projects/AGENTS.md, which does not exist |
+| R45 | `asupersync-bi2462.148` | task | P1 | Lab/native differential harness for kernel semantics (same program, three runtimes, same outcome class) |
+| R46 | `asupersync-bi2462.147` | task | P0 | Main watchdog: every new main commit gets an authorized-path check and targeted tests; red files a P0 naming c |
+| R47 | `asupersync-bi2462.149` | task | P2 | Mutation-backed proof for kernel hot spots (cargo-mutants restricted to named functions and their tests) |
+| R48 | `asupersync-bi2462.150` | task | P2 | Island census: public machinery with no runtime consumer — wire, label experimental, or retire (with owner per |
+| R49 | `asupersync-bi2462.151` | task | P2 | Canonicalize duplicate runtime surfaces (supervisor spawn vs managed, hedge variants, race vs race_drained) wi |
+| R51 | `asupersync-bi2462.152` | feature | P1 | Obligation conservation as an online place invariant (reserved = committed + aborted + leaked + live) in lab a |
+| R52 | `asupersync-bi2462.153` | task | P2 | Model-based conformance: executable reference model of the small-step semantics checked against lab (and captu |
+| R53 | `asupersync-bi2462.154` | bug | P2 | Data-layer correctness batch: NATS Subscription::next socket reads, PostgreSQL LISTEN receive API, DB pool out |
+| R54 | `asupersync-bi2462.155` | task | P2 | RaptorQ: prove our decoder on reference-encoder packets at K ≥ 2048 in default builds (and fix the gated/ignor |
+| R55 | `asupersync-bi2462.156` | bug | P2 | Runtime-level spawn_blocking work has no owning region (outside structured concurrency) |
+
+---
+
+*The September 15 and September 4 sections below are retained as history. Where they conflict
+with the September 22 section above, the September 22 section governs.*
 
 ## September 15 assessment: implementation ahead of validated delivery
 
