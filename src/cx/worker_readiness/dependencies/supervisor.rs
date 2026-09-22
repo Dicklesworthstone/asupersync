@@ -8,13 +8,14 @@
 use super::{DependencyError, DependencyScopeConfig, DependencyScopeError, DependencyScopeReport};
 use super::WorkerDependencies;
 use super::super::{initialized_worker, notify, WorkerReadiness, WorkerReadinessPhase};
-use crate::cx::Cx;
+use crate::cx::{Cx, Scope};
+use crate::runtime::{RuntimeState, SpawnError};
 use crate::supervision::{
-    ChildName, CompiledSupervisor, ManagedChildBinding, ManagedChildFactory, ManagedGeneration,
+    ChildName, ChildSpec, ChildStart, CompiledSupervisor, ManagedChildBinding, ManagedChildFactory, ManagedGeneration,
     ManagedRestartMode, ManagedSupervisor, ManagedSupervisorBindError, SupervisionConfig,
     SupervisorBuilder,
 };
-use crate::types::{Budget, Outcome};
+use crate::types::{Budget, Outcome, TaskId, policy::FailFast};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
@@ -75,10 +76,26 @@ impl<E> fmt::Debug for InitializedChildBinding<E> {
     }
 }
 
-// A factory can remain retained by a supervisor after its last eligible attempt.
-// Without terminal publication, its dependents could wait forever for a restart
-// that Temporary/Transient policy will never perform. This guard also covers a
-// Temporary attempt whose classifier panics or whose driving future is dropped.
+// A declarative spec must carry the incumbent legacy slot, but this path never
+// uses it. Refuse mistaken legacy execution; never manufacture a successful ID.
+struct InitializedOnly;
+
+impl ChildStart for InitializedOnly {
+    fn start(
+        &mut self,
+        _: &Scope<'static, FailFast>,
+        _: &mut RuntimeState,
+        _: &Cx,
+    ) -> Result<TaskId, SpawnError> {
+        Err(SpawnError::RuntimeUnavailable)
+    }
+}
+
+// A Temporary factory can remain retained after its only attempt. Withdraw its
+// readiness even on classifier panic or abandoned driving future. Never infer
+// finality for Transient from its returned outcome: a concurrent controller
+// shutdown can select a collateral restart under OneForAll/RestForOne. Only the
+// managed controller owns that decision; factory Drop closes reusable views.
 struct TerminalReadiness {
     readiness: WorkerReadiness,
     close: bool,
@@ -104,14 +121,6 @@ impl Drop for TerminalReadiness {
     }
 }
 
-fn can_restart<E>(mode: ManagedRestartMode, outcome: &Outcome<(), E>) -> bool {
-    match mode {
-        ManagedRestartMode::Permanent => true,
-        ManagedRestartMode::Transient => matches!(outcome, Outcome::Err(_) | Outcome::Panicked(_)),
-        ManagedRestartMode::Temporary => false,
-    }
-}
-
 impl<E: Send + 'static> InitializedChildBinding<E> {
     /// Bind one initialize/run handoff and an explicit post-drain classification.
     ///
@@ -125,7 +134,8 @@ impl<E: Send + 'static> InitializedChildBinding<E> {
     /// The initializer receives the actual inner task/region identity; its
     /// generation number is inherited from the enclosing managed attempt. The
     /// controller's report identifies the outer task, not that inner work task.
-    /// All descendants drain before this attempt can be classified or replaced.
+    /// Classification follows the close attempt; a failed close does NOT prove
+    /// quiescence. The existing managed outer-region barrier gates replacement.
     /// No factory, region or effect is started by constructing this binding.
     pub fn new<R, W, I, IF, U, UF, C>(
         name: impl Into<ChildName>,
@@ -154,12 +164,14 @@ impl<E: Send + 'static> InitializedChildBinding<E> {
                 let dependencies = dependencies.clone();
                 let worker = Arc::clone(&worker);
                 let classify = Arc::clone(&classify);
-                let readiness = terminal.clone();
+                // Own retirement before the first poll, including cancellation
+                // or a notifier panic between factory construction and polling.
+                let retirement = TerminalReadiness {
+                    readiness: terminal.clone(),
+                    close: mode == ManagedRestartMode::Temporary,
+                };
                 async move {
-                    let mut terminal = TerminalReadiness {
-                        readiness,
-                        close: mode == ManagedRestartMode::Temporary,
-                    };
+                    let _terminal = retirement;
                     let result = dependencies.run(
                         &cx,
                         DependencyScopeConfig::new(shutdown_budget),
@@ -172,9 +184,7 @@ impl<E: Send + 'static> InitializedChildBinding<E> {
                             worker.start(inner, identity)
                         },
                     ).await;
-                    let outcome = classify(result);
-                    terminal.close = !can_restart(mode, &outcome);
-                    outcome
+                    classify(result)
                 }
             };
             ManagedChildBinding::new(binding_name, mode, factory)
@@ -187,6 +197,15 @@ impl<E: Send + 'static> InitializedChildBinding<E> {
     #[must_use]
     pub fn readiness(&self) -> WorkerReadiness {
         self.readiness.clone()
+    }
+
+    /// Produce matching declarative metadata for the existing topology builder.
+    /// Add dependencies and shutdown budgets with ordinary `ChildSpec` methods,
+    /// then use `CompiledSupervisor::bind_initialized`. This spec intentionally
+    /// refuses the legacy `ChildStart` path instead of creating a dummy task.
+    #[must_use]
+    pub fn spec(&self) -> ChildSpec {
+        ChildSpec::new(self.name.clone(), InitializedOnly)
     }
 }
 
@@ -230,6 +249,11 @@ impl CompiledSupervisor {
     /// `SupervisorReadiness` alone neither owns workers nor proves quiescence.
     /// Deferred children are refused explicitly. Repeated declared edges are
     /// counted against the bound, then deduplicated as in the original compiler.
+    ///
+    /// # Errors
+    /// Returns metadata-limit, topology, binding, deferred-child or dependency
+    /// allocation errors. Existing managed registration/configuration refusals
+    /// remain errors; no validation path invokes application factories.
     pub fn bind_initialized<E: Send + 'static>(
         self,
         bindings: Vec<InitializedChildBinding<E>>,

@@ -2,7 +2,7 @@ use super::*;
 use crate::cx::Scope;
 use crate::runtime::{RuntimeState, SpawnError};
 use crate::supervision::{ChildSpec, ChildStart, RestartPolicy, SupervisorCompileError};
-use crate::types::{CancelReason, PanicPayload, TaskId, policy::FailFast};
+use crate::types::{TaskId, policy::FailFast};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -42,7 +42,7 @@ fn binding(name: &str, calls: &Arc<AtomicUsize>) -> InitializedChildBinding<()> 
     InitializedChildBinding::new(name, ManagedRestartMode::Temporary,
         move |_, _| {
             initialized.fetch_add(1, Ordering::SeqCst);
-            // Deliberately Send but neither Clone nor Sync.
+            // Deliberately not Sync; the work error is not Clone either.
             async { Outcome::<_, Cell<String>>::Ok(Cell::new(41u32)) }
         },
         move |_, _, value: Cell<u32>| {
@@ -176,15 +176,29 @@ fn terminal_readiness_withdrawal_does_not_claim_live_body_retirement() {
 }
 
 #[test]
-fn terminal_publication_uses_the_existing_managed_restart_eligibility() {
-    let cases = [
-        Outcome::Ok(()), Outcome::Err("failure"),
-        Outcome::Cancelled(CancelReason::shutdown()),
-        Outcome::Panicked(PanicPayload::new("panic")),
-    ];
-    for (index, outcome) in cases.iter().enumerate() {
-        assert!(can_restart(ManagedRestartMode::Permanent, outcome));
-        assert!(!can_restart(ManagedRestartMode::Temporary, outcome));
-        assert_eq!(can_restart(ManagedRestartMode::Transient, outcome), index == 1 || index == 3);
-    }
+fn nonclosing_terminal_guard_leaves_reusable_factory_authority_intact() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let retained = binding("reusable", &calls);
+    let readiness = retained.readiness();
+    drop(TerminalReadiness { readiness: readiness.clone(), close: false });
+    assert!(readiness.shared.state.lock().factory_alive);
+    assert_eq!(readiness.state().phase, WorkerReadinessPhase::NotStarted);
+    drop(retained);
+    assert_eq!(readiness.state().phase, WorkerReadinessPhase::Closed);
+}
+
+#[test]
+fn temporary_retirement_is_owned_before_a_future_is_first_polled() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let retained = binding("unpolled", &calls);
+    let readiness = retained.readiness();
+    let retirement = TerminalReadiness { readiness: readiness.clone(), close: true };
+    let future = async move {
+        let _terminal = retirement;
+        std::future::pending::<()>().await;
+    };
+    drop(future);
+    assert_eq!(readiness.state().phase, WorkerReadinessPhase::Closed);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    drop(retained);
 }
