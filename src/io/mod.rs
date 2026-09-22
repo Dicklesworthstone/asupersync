@@ -132,3 +132,6 @@ pub mod replay_session;
 pub mod replay_archive;
 
 pub mod replay_group;
+
+/// Joint multi-stream, clock, and entropy capture with ordered offline replay.
+pub mod replay_group_session;
