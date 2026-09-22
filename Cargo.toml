@@ -736,6 +736,11 @@ path = "tests/resource_stack_native.rs"
 required-features = ["test-internals"]
 
 [[test]]
+name = "worker_readiness_native"
+path = "tests/worker_readiness_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
 name = "atp_quic_bounded_memory"
 path = "tests/atp_quic_bounded_memory.rs"
 required-features = ["tls", "test-internals"]

@@ -1285,6 +1285,9 @@ impl<T> Receiver<T> {
     /// Callers that need to tell those apart track terminality themselves; see
     /// [`TaskHandle::poll_join`](crate::runtime::TaskHandle::poll_join).
     #[inline]
+    // Exposed to native integration tests under the opt-in test-internals feature,
+    // not the stable public API. br-asupersync-server-stack-hardening-eeexl1.10.
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn poll_recv_uninterruptible(
         &mut self,
         ctx: &mut Context<'_>,

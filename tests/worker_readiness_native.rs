@@ -85,7 +85,7 @@ async fn start_and_cancel_observer(cx: Cx) {
             async move {
                 incoming.recv(&worker).await.unwrap();
                 stream.write_all(b"DONE").await.unwrap();
-                stream.shutdown().await.unwrap();
+                AsyncWriteExt::shutdown(&mut stream).await.unwrap();
                 Outcome::Ok(())
             }
         },
@@ -168,7 +168,7 @@ async fn restart_after_descendant_drain(cx: Cx) {
                 command.recv(&worker).await.unwrap();
                 let failed = generation.number == 1;
                 stream.write_all(if failed { b"FAIL" } else { b"DONE" }).await.unwrap();
-                stream.shutdown().await.unwrap();
+                AsyncWriteExt::shutdown(&mut stream).await.unwrap();
                 if failed { Outcome::Err("restart this initialized worker") } else { Outcome::Ok(()) }
             }
         },
