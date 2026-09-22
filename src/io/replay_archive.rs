@@ -334,3 +334,6 @@ mod tests;
 
 mod io_group;
 pub use io_group::IoGroupArchiveError;
+
+mod group_session;
+pub use group_session::GroupSessionArchiveError;
