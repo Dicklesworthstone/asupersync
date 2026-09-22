@@ -502,6 +502,30 @@ rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target
 for you: grepping a workflow proves a step *exists*, never that it *ran*
 (`br-asupersync-c6ppu4`). Check that the job actually reached the step.
 
+### Pre-push compile gate (opt-in but strongly recommended)
+
+`main` takes **direct pushes** (no PR gate), and the CI `lint-build` job runs only
+*after* a push lands. So never-compiled code reaches `main` and breaks every
+`cargo build` / `cargo test --lib` fleet-wide before CI can flag it — this has
+caused multiple fleet-blocking red-`main` incidents in a single day, all from
+commits whose authors lacked compile access ("rch was not found (exit 127)").
+
+A committed pre-push hook at [`.githooks/pre-push`](./.githooks/pre-push) verifies
+`cargo check --all-targets --keep-going` (default features — the fleet-critical
+build) BEFORE the push completes, and refuses the push on failure. Enable it once
+per clone (git cannot auto-share hooks):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+If you genuinely cannot compile locally, either get `rch` access or gate your
+work-in-progress module behind a cargo feature so a break cannot reach the default
+build — do **not** push never-compiled default (`pub mod ...`) code to `main`.
+`git push --no-verify` bypasses the hook for a change you have verified another
+way (e.g. docs-only). The hook runs only the default set, not the full
+`--all-features` clippy gate (too slow to block every push); CI still covers that.
+
 ---
 
 ## Testing

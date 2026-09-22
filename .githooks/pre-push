@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Opt-in pre-push compile gate for asupersync (br-asupersync-server-stack-hardening).
+#
+# WHY: main takes direct pushes (no PR gating) and GitHub Actions run only AFTER
+# a push lands, so never-compiled code reaches main and breaks every `cargo build`
+# / `cargo test --lib` fleet-wide before CI can flag it. Three such fleet-blocking
+# reds landed in a single day from agents that lacked compile access. This hook
+# verifies the DEFAULT compile gate BEFORE the push completes.
+#
+# ENABLE (per clone, opt-in — git cannot auto-share hooks):
+#     git config core.hooksPath .githooks
+# BYPASS a single push you have verified another way (or a docs-only change):
+#     git push --no-verify
+#
+# Scope: only guards pushes that update `main` (or `master`). Runs the DEFAULT
+# feature set — the fleet-critical build — not the full --all-features/clippy gate
+# (too slow to block every push); CI's lint-build job still covers that post-hoc.
+set -euo pipefail
+
+remote="${1:-}"
+guarded=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/master) guarded=1 ;;
+    esac
+done
+[ "$guarded" -eq 1 ] || exit 0
+
+echo "[pre-push] verifying the default compile gate before pushing to main..." >&2
+
+target="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_prepush_gate"
+run_gate() {
+    if command -v rch >/dev/null 2>&1; then
+        rch exec -- env CARGO_TARGET_DIR="$target" CARGO_INCREMENTAL=0 \
+            RUSTFLAGS='-C debuginfo=0' cargo check --all-targets --keep-going
+    elif command -v cargo >/dev/null 2>&1; then
+        env CARGO_TARGET_DIR="$target" CARGO_INCREMENTAL=0 \
+            RUSTFLAGS='-C debuginfo=0' cargo check --all-targets --keep-going
+    else
+        return 127
+    fi
+}
+
+if run_gate; then
+    echo "[pre-push] compile gate PASSED." >&2
+    exit 0
+fi
+rc=$?
+if [ "$rc" -eq 127 ]; then
+    echo "[pre-push] REFUSED: neither rch nor cargo is available, so this push could" >&2
+    echo "           not be verified. Do NOT push never-compiled code to main." >&2
+    echo "           Get compile access (rch), or re-run with --no-verify only if you" >&2
+    echo "           have verified compilation another way." >&2
+    exit 1
+fi
+echo "[pre-push] REFUSED: 'cargo check --all-targets' FAILED — this would break main" >&2
+echo "           for the whole fleet. Fix the errors above, or --no-verify to override." >&2
+exit 1
