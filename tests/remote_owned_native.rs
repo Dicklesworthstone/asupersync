@@ -162,7 +162,11 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
         if matches!(case, Case::Success) {
             let report = invoke(executor.as_ref(), &cx, "worker", "echo",
                 RemoteInput::new(b"native-secret".to_vec()), config()).await.unwrap();
-            assert!(report.is_success(), "{report:?}; proxy error: {:?}", report.task.as_ref().err());
+            assert!(
+                report.is_success(),
+                "{report:?}; proxy error: {:?}",
+                report.task.as_ref().err()
+            );
             assert!(!format!("{report:?}").contains("native-secret"));
             assert!(matches!(report.task.unwrap().outcome, Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == b"native-secret"));
             assert_eq!(remote.active_operations(), 0);
@@ -211,9 +215,6 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
             asupersync::time::timeout(cx.now(), Duration::from_secs(3),
                 witness.changed.wait_until(|| witness.cancelled.load(Ordering::Acquire))).await.expect("remote observed cancellation");
             let early = invocation.try_join().unwrap();
-            if let Some(Ok(report)) = &early {
-                eprintln!("early proxy outcome: {:?}; close: {:?}", report.task.as_ref().map(|reply| &reply.outcome), report.close);
-            }
             assert!(early.is_none(), "sending Cancel is not terminal collection: {early:?}");
             assert!(holds_lease(&diagnostics, region, holder));
             assert_eq!(remote.active_operations(), 1);
@@ -223,7 +224,12 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
             let destination = if bounded { "other" } else { "worker" };
             let other = invoke(executor.as_ref(), &cx, destination, "echo",
                 RemoteInput::new(b"unrelated".to_vec()), config()).await.unwrap();
-            assert!(other.is_success(), "{other:?}; proxy error: {:?}; reply: {:?}; close: {:?}", other.task.as_ref().err(), other.task.as_ref().ok(), other.close); assert_eq!(remote.active_operations(), 1);
+            assert!(
+                other.is_success(),
+                "{other:?}; proxy error: {:?}; reply: {:?}; close: {:?}",
+                other.task.as_ref().err(), other.task.as_ref().ok(), other.close
+            );
+            assert_eq!(remote.active_operations(), 1);
             witness.release.store(true, Ordering::Release); witness.changed.notify_waiters();
             let report = asupersync::time::timeout(cx.now(), Duration::from_secs(3), invocation.join(&cx)).await
                 .expect("invocation drain deadline").expect("typed owner result").expect("scope admission");
@@ -263,7 +269,11 @@ async fn assert_peer_still_charged(executor: &RemoteExecutor, cx: &Cx) {
     let oversized = executor.run(cx, NodeId::new("other"), ComputationName::new("echo"), RemoteInput::new(vec![0; 33]), config()).await;
     assert!(matches!(oversized, Err(RemoteExecutorError::Admission(RemoteAdmissionError::RequestBytes))));
     let other = executor.run(cx, NodeId::new("other"), ComputationName::new("echo"), RemoteInput::new(vec![7; 32]), config()).await.unwrap();
-    assert!(other.is_success(), "{other:?}; proxy error: {:?}; reply: {:?}; close: {:?}", other.task.as_ref().err(), other.task.as_ref().ok(), other.close);
+    assert!(
+        other.is_success(),
+        "{other:?}; proxy error: {:?}; reply: {:?}; close: {:?}",
+        other.task.as_ref().err(), other.task.as_ref().ok(), other.close
+    );
     assert_eq!(executor.usage(), RemoteAdmissionUsage { in_flight: 1, input_bytes: 8 });
 }
 
