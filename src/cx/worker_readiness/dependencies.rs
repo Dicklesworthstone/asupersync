@@ -253,3 +253,5 @@ pub use scope::{
     DependencyRegionOutcome, DependencyScopeConfig, DependencyScopeError,
     DependencyScopeReport, DependencyStop,
 };
+
+pub mod supervisor;
