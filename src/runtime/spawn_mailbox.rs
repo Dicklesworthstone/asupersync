@@ -4441,6 +4441,39 @@ mod tests {
         ScopedLocalSpawnLaneOwner::new(Arc::clone(gateway.mailbox()))
     }
 
+    fn retire_manually_polled_local_task<T: Send + 'static>(
+        lab: &mut LabRuntime,
+        parent_cx: &crate::cx::Cx,
+        handle: &mut crate::runtime::TaskHandle<T>,
+        task_id: TaskId,
+        outcome: crate::record::task::TaskOutcome,
+    ) {
+        let mut poll_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            Pin::new(&mut handle.join(parent_cx))
+                .poll(&mut poll_cx)
+                .is_pending()
+        );
+        let record = lab.state.task_mut(task_id).expect("unretired local record");
+        let barrier = record
+            .cx_inner
+            .as_ref()
+            .expect("local task context")
+            .read()
+            .retirement_barrier
+            .clone()
+            .expect("admission installed retirement barrier");
+        assert!(!barrier.is_open());
+        assert!(record.complete(outcome));
+        let (waiters, observer) = lab.state.task_completed(task_id).into_parts();
+        assert!(waiters.is_empty());
+        assert!(lab.state.task(task_id).is_none());
+        // Manual polling bypasses the scheduler, so the fixture must also
+        // perform its post-retirement publication before attempting to join.
+        barrier.open_and_wake();
+        observer.dispatch();
+    }
+
     /// A runtime-wired Cx still fails closed when called off-worker: a
     /// `!Send` factory cannot be parked anywhere unless an owner worker is
     /// currently draining that thread-local lane.
@@ -4598,6 +4631,13 @@ mod tests {
             local_task.poll(&mut poll_cx),
             std::task::Poll::Ready(Outcome::Ok(()))
         ));
+        retire_manually_polled_local_task(
+            &mut lab,
+            &parent_cx,
+            &mut handle,
+            task_id,
+            Outcome::Ok(()),
+        );
         let result = poll_join_with_lab(&mut lab, &parent_cx, &mut handle);
         assert_eq!(result.expect("joined value"), 42);
         assert_eq!(cell.get(), 11, "non-Send future ran on owner thread");
@@ -4650,10 +4690,16 @@ mod tests {
             .expect("local task stored on owner thread");
         let waker = std::task::Waker::noop();
         let mut poll_cx = std::task::Context::from_waker(waker);
-        assert!(matches!(
-            local_task.poll(&mut poll_cx),
-            Poll::Ready(Outcome::Panicked(_))
-        ));
+        let Poll::Ready(Outcome::Panicked(payload)) = local_task.poll(&mut poll_cx) else {
+            panic!("synchronous local factory panic must terminate the stored task");
+        };
+        retire_manually_polled_local_task(
+            &mut lab,
+            &parent_cx,
+            &mut handle,
+            task_id,
+            Outcome::Panicked(payload),
+        );
         match poll_join_with_lab(&mut lab, &parent_cx, &mut handle) {
             Err(crate::runtime::task_handle::JoinError::Panicked(payload)) => {
                 assert_eq!(payload.message(), "synchronous local factory panic");
