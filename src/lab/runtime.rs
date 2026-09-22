@@ -4676,6 +4676,20 @@ impl LabRuntime {
                     sched.schedule(waiter, prio);
                 }
                 drop(sched);
+                // Open this task's retirement barrier post-lock so a consumer
+                // that received its terminal result early can now surface
+                // completion (br-asupersync-yhueis). The record has committed
+                // terminal; `open_and_wake` may run a foreign consumer waker, so
+                // it must follow the scheduler unlock, and reading cx_inner here
+                // (E-tier) respects the E -> A lock order now that A is dropped.
+                if let Some(barrier) = self
+                    .state
+                    .task(task_id)
+                    .and_then(|record| record.cx_inner.as_ref())
+                    .and_then(|inner| inner.read().retirement_barrier.clone())
+                {
+                    barrier.open_and_wake();
+                }
                 completion_observer.dispatch();
                 cancel_wakes.dispatch();
             }

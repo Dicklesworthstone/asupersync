@@ -266,6 +266,13 @@ pub struct AdmittedTaskSlot {
     // before admission publishes it. Keeping it private preserves the public
     // request structs' existing construction surface.
     runtime_mask: crate::cx::cap::CapMask,
+    /// Retirement barrier shared with this task's join handle and, at
+    /// admission, its `CxInner`, so the scheduler (which opens it after the
+    /// record terminal commit) and the handle (which gates terminal-result
+    /// visibility on it) observe the same signal (br-asupersync-yhueis).
+    /// `None` until a record-backed spawn producer installs one; a handle
+    /// reading `None` falls back to an open barrier and delivers immediately.
+    retirement_barrier: Option<Arc<crate::runtime::task_handle::RetirementBarrier>>,
     /// Strongest cancellation requested while canonical identity publication
     /// is still pending. The cache is initialized per slot, so unrelated
     /// spawn producers never serialize through process-global state.
@@ -299,6 +306,7 @@ impl AdmittedTaskSlot {
             reserved: AtomicBool::new(false),
             cancel_gateway: None,
             runtime_mask: crate::cx::cap::CapMask::all(),
+            retirement_barrier: None,
             pending_cancel_reason: OnceLock::new(),
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
@@ -312,6 +320,7 @@ impl AdmittedTaskSlot {
             reserved: AtomicBool::new(false),
             cancel_gateway: Some(Arc::downgrade(&cancel_gateway)),
             runtime_mask: crate::cx::cap::CapMask::all(),
+            retirement_barrier: None,
             pending_cancel_reason: OnceLock::new(),
             spawn_effects: Mutex::new(SpawnEffectHandoff::new()),
         }
@@ -324,6 +333,25 @@ impl AdmittedTaskSlot {
 
     pub(crate) fn runtime_mask(&self) -> crate::cx::cap::CapMask {
         self.runtime_mask
+    }
+
+    /// Installs the retirement barrier for a record-backed spawn, shared with
+    /// the join handle (which gates terminal-result visibility) and the task's
+    /// `CxInner` (which the scheduler opens after the record terminal commit).
+    pub(crate) fn with_retirement_barrier(
+        mut self,
+        barrier: Arc<crate::runtime::task_handle::RetirementBarrier>,
+    ) -> Self {
+        self.retirement_barrier = Some(barrier);
+        self
+    }
+
+    /// Returns this task's retirement barrier if a record-backed spawn producer
+    /// installed one; `None` for slots that carry no gated record.
+    pub(crate) fn retirement_barrier(
+        &self,
+    ) -> Option<Arc<crate::runtime::task_handle::RetirementBarrier>> {
+        self.retirement_barrier.clone()
     }
 
     /// Returns the canonical identity once admission has published it.

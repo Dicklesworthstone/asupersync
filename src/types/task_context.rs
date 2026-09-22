@@ -905,6 +905,14 @@ pub struct CxInner {
     /// or when the materialised view is requested. Stored as a plain
     /// `AtomicU64` because [`Time`] is just a `u64` nanos counter.
     pub fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64,
+    /// Retirement barrier the scheduler opens after this task's record reaches
+    /// a terminal state in the post-lock completion dispatch, releasing any
+    /// consumer that received the task's terminal result early
+    /// (br-asupersync-yhueis). `None` for tasks whose join handles already
+    /// carry an open barrier (standalone handles, admission denial), or paths
+    /// not yet wired — those deliver immediately as before.
+    pub(crate) retirement_barrier:
+        Option<std::sync::Arc<crate::runtime::task_handle::RetirementBarrier>>,
 }
 
 impl CxInner {
@@ -939,6 +947,7 @@ impl CxInner {
             cancellation,
             fast_path_count: std::sync::atomic::AtomicU64::new(0),
             fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64::new(0),
+            retirement_barrier: None,
         }
     }
 

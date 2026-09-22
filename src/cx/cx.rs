@@ -4898,9 +4898,16 @@ where
         }
 
         let provisional = gateway.mailbox().allocate_task_id();
+        // Retirement barrier shared by this task's join handle (via the slot),
+        // its `CxInner` (installed on first poll below), and the scheduler
+        // (which opens it after the record commits terminal). Keeps a joined
+        // owner from observing completion — and closing its region — before the
+        // record is committed (br-asupersync-yhueis).
+        let barrier = crate::runtime::task_handle::RetirementBarrier::pending();
         let admitted_slot = Arc::new(
             AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
-                .with_runtime_mask(self.runtime_mask),
+                .with_runtime_mask(self.runtime_mask)
+                .with_retirement_barrier(Arc::clone(&barrier)),
         );
         let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
             Fut::Output,
@@ -4911,6 +4918,7 @@ where
 
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
+        let factory_barrier = Arc::clone(&barrier);
         let factory: LocalSpawnFactoryFn = Box::new(move |admission_cx: Cx| {
             Box::pin(async move {
                 match (crate::cx::scope::CatchUnwind {
@@ -4921,6 +4929,10 @@ where
                             task_id,
                             capability_budget,
                         );
+                        // Install the shared retirement barrier into this task's
+                        // CxInner so the scheduler can open it after the record
+                        // commits terminal (br-asupersync-yhueis).
+                        child.install_retirement_barrier(std::sync::Arc::clone(&factory_barrier));
                         let completion_cx = child.retype::<cap::All>();
                         crate::runtime::task_handle::observe_spawn_completion(
                             f(child),
@@ -4963,6 +4975,12 @@ where
 
         let cancel_tx = Arc::clone(&shared_tx);
         let error_tx = Arc::clone(&shared_tx);
+        // A denied task is never minted into a record, so the scheduler never
+        // opens its retirement barrier. Open it when the denial publishes its
+        // terminal Err, or a handle gating on that value would wait forever
+        // (br-asupersync-yhueis, admission-denial hazard).
+        let cancel_barrier = Arc::clone(&barrier);
+        let error_barrier = Arc::clone(&barrier);
         let request = LocalSpawnRequest {
             task_id: provisional,
             region,
@@ -4974,6 +4992,7 @@ where
                         tx,
                         Err(JoinError::Cancelled(reason)),
                     );
+                    cancel_barrier.open_and_wake();
                 }
             })),
             on_admission_error: Some(Box::new(move |error| {
@@ -4984,6 +5003,7 @@ where
                         tx,
                         Err(JoinError::Cancelled(reason)),
                     );
+                    error_barrier.open_and_wake();
                 }
             })),
             pending_reservation: Some(pending.reserve()),
@@ -5035,9 +5055,16 @@ where
         };
 
         let provisional = gateway.mailbox().allocate_task_id();
+        // Retirement barrier shared by this task's join handle (via the slot),
+        // its `CxInner` (installed on first poll below), and the scheduler
+        // (which opens it after the record commits terminal). Keeps a joined
+        // owner from observing completion — and closing its region — before the
+        // record is committed (br-asupersync-yhueis).
+        let barrier = crate::runtime::task_handle::RetirementBarrier::pending();
         let admitted_slot = Arc::new(
             AdmittedTaskSlot::new_with_cancel_gateway(Arc::clone(gateway))
-                .with_runtime_mask(self.runtime_mask),
+                .with_runtime_mask(self.runtime_mask)
+                .with_retirement_barrier(Arc::clone(&barrier)),
         );
         let (result_tx, handle) = crate::runtime::task_handle::pending_task_handle_channel::<
             Fut::Output,
@@ -5050,6 +5077,7 @@ where
         // Parent snapshot for capability inheritance (cheap Arc clones).
         let parent = self.clone();
         let factory_tx = Arc::clone(&shared_tx);
+        let factory_barrier = Arc::clone(&barrier);
         let factory: SpawnFactoryFn = Box::new(move |admission_cx: Cx| {
             Box::pin(async move {
                 match (crate::cx::scope::CatchUnwind {
@@ -5060,6 +5088,10 @@ where
                             task_id,
                             capability_budget,
                         );
+                        // Install the shared retirement barrier into this task's
+                        // CxInner so the scheduler can open it after the record
+                        // commits terminal (br-asupersync-yhueis).
+                        child.install_retirement_barrier(std::sync::Arc::clone(&factory_barrier));
                         let completion_cx = child.retype::<cap::All>();
                         crate::runtime::task_handle::observe_spawn_completion(
                             f(child),
@@ -5099,6 +5131,12 @@ where
 
         let cancel_tx = Arc::clone(&shared_tx);
         let error_tx = Arc::clone(&shared_tx);
+        // A denied task is never minted into a record, so the scheduler never
+        // opens its retirement barrier. Open it when the denial publishes its
+        // terminal Err, or a handle gating on that value would wait forever
+        // (br-asupersync-yhueis, admission-denial hazard).
+        let cancel_barrier = Arc::clone(&barrier);
+        let error_barrier = Arc::clone(&barrier);
         let request = SpawnRequest::new_with_factory(provisional, region, budget, factory)
             .with_admitted_slot(Arc::clone(&admitted_slot))
             .with_pending_reservation(pending.reserve())
@@ -5108,6 +5146,7 @@ where
                         tx,
                         Err(JoinError::Cancelled(reason)),
                     );
+                    cancel_barrier.open_and_wake();
                 }
             }))
             .with_admission_error_slot(Box::new(move |error| {
@@ -5118,6 +5157,7 @@ where
                         tx,
                         Err(JoinError::Cancelled(reason)),
                     );
+                    error_barrier.open_and_wake();
                 }
             }));
 
@@ -5166,6 +5206,18 @@ where
         let mut typed = self.retype::<Out>();
         typed.runtime_mask = parent.runtime_mask;
         typed
+    }
+
+    /// Installs this task's retirement barrier into its `CxInner`, so the
+    /// scheduler can open it after the record commits terminal, releasing any
+    /// consumer that received the terminal result early (br-asupersync-yhueis).
+    /// Shares the barrier the spawn producer also handed the join handle; the
+    /// two therefore gate on one signal.
+    pub(crate) fn install_retirement_barrier(
+        &self,
+        barrier: std::sync::Arc<crate::runtime::task_handle::RetirementBarrier>,
+    ) {
+        self.inner.write().retirement_barrier = Some(barrier);
     }
 }
 

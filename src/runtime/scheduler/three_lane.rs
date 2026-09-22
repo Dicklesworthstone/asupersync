@@ -4361,6 +4361,11 @@ impl PolledCompletionArtifacts {
     /// detached-record destruction, finalizer publication, then the observer
     /// and cancellation wakes (which may run foreign callbacks).
     fn dispatch_post_lock(self, worker: &ThreeLaneWorker) {
+        // Open the task's retirement barrier before retiring the record, so a
+        // consumer that received the terminal result early can now surface
+        // completion — the record has committed terminal. Post-lock, because
+        // `open_and_wake` may run a foreign consumer waker (br-asupersync-yhueis).
+        ThreeLaneWorker::open_retirement_barrier(self.detached_record.as_ref());
         ThreeLaneWorker::retire_detached_task_record(self.detached_record);
         worker.finish_ready_finalizer_publication(self.finalizer_publication);
         self.completion_observer.dispatch();
@@ -4384,6 +4389,9 @@ impl UnwindCompletionArtifacts {
     fn dispatch_post_lock(self, worker: &ThreeLaneWorker) {
         worker.finish_ready_finalizer_publication(self.finalizer_publication);
         self.cancel_waker_retirements.retire();
+        // Release any consumer parked on this panicked task's retirement
+        // barrier before retiring the record (br-asupersync-yhueis).
+        ThreeLaneWorker::open_retirement_barrier(self.detached_record.as_ref());
         ThreeLaneWorker::retire_detached_task_record(self.detached_record);
     }
 }
@@ -8376,6 +8384,25 @@ impl ThreeLaneWorker {
         Self::emit_cancel_diagnostic(|| self.coordinator.wake_many(tasks.len()));
         for effects in spawn_effects {
             effects.dispatch();
+        }
+    }
+
+    /// Opens a completed task's retirement barrier so any consumer that
+    /// received its terminal result early can now surface completion: the
+    /// record has committed terminal and is about to be retired. Runs from the
+    /// post-lock completion dispatch, where `open_and_wake` may invoke a foreign
+    /// consumer waker (br-asupersync-yhueis). A `None` barrier (open handles,
+    /// admission denial, unwired paths) is a no-op.
+    fn open_retirement_barrier(record: Option<&crate::record::task::TaskRecord>) {
+        let Some(record) = record else {
+            return;
+        };
+        let Some(inner) = record.cx_inner.as_ref() else {
+            return;
+        };
+        let barrier = inner.read().retirement_barrier.clone();
+        if let Some(barrier) = barrier {
+            barrier.open_and_wake();
         }
     }
 
