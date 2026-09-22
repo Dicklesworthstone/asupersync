@@ -247,3 +247,9 @@ impl ReadyDependencies {
 
 #[cfg(test)]
 mod tests;
+
+mod scope;
+pub use scope::{
+    DependencyRegionOutcome, DependencyScopeConfig, DependencyScopeError,
+    DependencyScopeReport, DependencyStop,
+};

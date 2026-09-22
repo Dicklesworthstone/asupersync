@@ -227,7 +227,7 @@ fn invalid_generation_is_terminal_even_with_other_pending_dependencies() {
         number: 2, region: cb.region_id(), task: cb.task_id(),
     }).is_none());
     assert!(matches!(WorkerDependencies::new(vec![a, b], 2).unwrap().try_ready(),
-        Err(DependencyError::Worker { index: 1, cause: WorkerReadinessError::InvalidGeneration }))));
+        Err(DependencyError::Worker { index: 1, cause: WorkerReadinessError::InvalidGeneration })));
 }
 
 #[test]
