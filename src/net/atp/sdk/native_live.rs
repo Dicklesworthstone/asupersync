@@ -388,6 +388,12 @@ async fn bounded<T, E: Into<LiveStreamError>>(
         .map_err(|_| LiveStreamError::Timeout(operation))?
 }
 
+// Internal pipe notification after exact peer Control validation. This is not
+// a caller callback, and local source consumption must never advance it.
+trait SendObserver: Send + Sync {
+    fn acknowledged(&self, bytes: u64);
+}
+
 impl LiveStreamSender {
     /// Number of active/queued streams across clones of this sender.
     #[must_use]
@@ -408,7 +414,7 @@ impl LiveStreamSender {
         let mut progress = Progress::default();
         let outcome = match authorize(cx).and_then(|()| self.admission.reserve()) {
             Ok(_permit) => {
-                self.send_inner(cx, remote, &mut reader, &mut progress)
+                self.send_inner(cx, remote, &mut reader, &mut progress, None)
                     .await
             }
             Err(error) => Err(error),
@@ -436,7 +442,7 @@ impl LiveStreamSender {
                     let outcome = match authorize(&child) {
                         Ok(()) => {
                             sender
-                                .send_inner(&child, remote, &mut reader, &mut progress)
+                                .send_inner(&child, remote, &mut reader, &mut progress, None)
                                 .await
                         }
                         Err(error) => Err(error),
@@ -454,6 +460,7 @@ impl LiveStreamSender {
         remote: SocketAddr,
         reader: &mut R,
         progress: &mut Progress,
+        observer: Option<&dyn SendObserver>,
     ) -> Result<LiveStreamReceipt, LiveStreamError> {
         let timeout = self.config.operation_timeout;
         let tcp = bounded(cx, timeout, "connect", TcpStream::connect(remote)).await?;
@@ -528,6 +535,9 @@ impl LiveStreamSender {
             hash.update(&buffer[..count]);
             prefix = next;
             progress.prefix = Some(prefix.clone());
+            if let Some(observer) = observer {
+                observer.acknowledged(prefix.bytes);
+            }
         }
         let receipt = LiveStreamReceipt {
             prefix,
@@ -752,6 +762,11 @@ pub mod service;
 #[path = "native_live/reader.rs"]
 pub mod reader;
 pub use reader::{LiveStreamReader, LiveStreamReaderTerminal};
+
+/// Bounded writable input with verified peer-acknowledgement flush barriers.
+#[path = "native_live/writer.rs"]
+pub mod writer;
+pub use writer::{LiveStreamWriter, LiveStreamWriterTerminal};
 
 async fn write_epoch<W: AsyncWrite + Unpin>(
     sink: &mut W,

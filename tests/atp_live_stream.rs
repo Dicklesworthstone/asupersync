@@ -418,6 +418,366 @@ mod live_reader {
     }
 }
 
+mod live_writer {
+    use super::*;
+    use std::future::poll_fn;
+
+    #[test]
+    fn writable_live_prefix_arrives_before_finish_and_matches_the_reader_receipt() {
+        for workers in [1, 2] {
+            run(workers, async {
+                let cx = Cx::current().unwrap();
+                let scope = cx.scope();
+                let send = sender(config(8, 100));
+                let receive = receiver(config(8, 100));
+                let listener = receive
+                    .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                    .await
+                    .unwrap();
+                let address = listener.local_addr().unwrap();
+                let mut reader = listener.open_reader(&cx, &scope).unwrap();
+                let mut writer = send.open_writer(&cx, &scope, address).unwrap();
+                writer.write_all(b"first").await.unwrap();
+                let mut first = [0; 5];
+                let (flushed, read) = zip(writer.flush(), reader.read_exact(&mut first)).await;
+                flushed.unwrap();
+                read.unwrap();
+                assert_eq!(&first, b"first");
+                assert_eq!(
+                    (writer.accepted_bytes(), writer.acknowledged_bytes()),
+                    (5, 5)
+                );
+                assert!(writer.terminal().is_none());
+                assert!(reader.terminal().is_none());
+
+                writer.write_all(b"-last").await.unwrap();
+                let mut last = [0; 5];
+                let (flushed, read) = zip(writer.flush(), reader.read_exact(&mut last)).await;
+                flushed.unwrap();
+                read.unwrap();
+                assert_eq!(&last, b"-last");
+                let mut trailing = Vec::new();
+                let (sent, read) = zip(writer.finish(), reader.read_to_end(&mut trailing)).await;
+                let sent = sent.as_ref().unwrap().outcome.as_ref().unwrap().clone();
+                assert_eq!(read.unwrap(), 0);
+                assert!(trailing.is_empty());
+                let received = reader
+                    .terminal()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .outcome
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(&sent, received);
+                assert_eq!((sent.prefix.bytes, sent.prefix.epochs), (10, 2));
+                let digest: [u8; 32] = Sha256::digest(b"first-last").into();
+                assert_eq!(sent.source_sha256, digest);
+                assert!(writer.buffer_high_water() <= writer.buffer_capacity());
+                assert_eq!(
+                    writer
+                        .finish()
+                        .await
+                        .as_ref()
+                        .unwrap()
+                        .outcome
+                        .as_ref()
+                        .unwrap(),
+                    &sent
+                );
+                assert_eq!(
+                    writer.write(b"late").await.unwrap_err().kind(),
+                    io::ErrorKind::BrokenPipe
+                );
+                assert_eq!((send.active_streams(), receive.active_streams()), (0, 0));
+            });
+        }
+    }
+
+    #[test]
+    fn full_input_parks_writes_and_flush_waits_for_the_actual_remote_sink_barrier() {
+        run(2, async {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let send = sender(config(8, 100));
+            let receive = receiver(config(8, 100));
+            let listener = receive
+                .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let probe = Arc::new(Probe::default());
+            let mut output = sink(&probe);
+            output.gate_flush = true;
+            let mut receiving = listener.spawn_receive_into(&cx, &scope, output).unwrap();
+            let mut writer = send.open_writer(&cx, &scope, address).unwrap();
+            writer.write_all(b"01234567").await.unwrap();
+            witness(&cx, &probe.flush_parked).await;
+            assert_eq!(
+                writer.buffered_bytes(),
+                0,
+                "local consumption has already happened"
+            );
+            assert_eq!(
+                writer.acknowledged_bytes(),
+                0,
+                "sink has not acknowledged the epoch"
+            );
+            poll_fn(|ctx| {
+                assert!(Pin::new(&mut writer).poll_flush(ctx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            // One more epoch fits locally while the first is in flight; a third cannot.
+            writer.write_all(b"89abcdef").await.unwrap();
+            assert_eq!(writer.buffered_bytes(), 8);
+            poll_fn(|ctx| {
+                assert!(
+                    Pin::new(&mut writer)
+                        .poll_write(ctx, b"not-admitted")
+                        .is_pending()
+                );
+                Poll::Ready(())
+            })
+            .await;
+            assert_eq!(writer.accepted_bytes(), 16);
+            assert_eq!(writer.buffer_high_water(), 8);
+            assert!(writer.terminal().is_none());
+            probe.release_flush.store(true, Ordering::SeqCst);
+            let wake = probe.flush_waiter.lock().unwrap().take();
+            if let Some(wake) = wake {
+                wake.wake();
+            }
+            writer.flush().await.unwrap();
+            assert_eq!(writer.acknowledged_bytes(), 16);
+            assert_eq!(*probe.bytes.lock().unwrap(), b"0123456789abcdef");
+            let (sent, received) = zip(writer.finish(), receiving.join(&cx)).await;
+            assert_eq!(
+                sent.as_ref().unwrap().outcome.as_ref().unwrap(),
+                &received.unwrap().outcome.unwrap(),
+            );
+            assert_eq!((send.active_streams(), receive.active_streams()), (0, 0));
+        });
+    }
+
+    #[test]
+    fn cancel_and_drop_wake_a_live_worker_waiting_for_more_producer_input() {
+        for drop_writer in [false, true] {
+            for workers in [1, 2] {
+                run(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let scope = cx.scope();
+                    let mut limits = config(8, 100);
+                    limits.operation_timeout = Duration::from_secs(3600);
+                    let send = sender(limits.clone());
+                    let receive = receiver(limits);
+                    let listener = receive
+                        .bind(&cx, "127.0.0.1:0".parse().unwrap())
+                        .await
+                        .unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let probe = Arc::new(Probe::default());
+                    let mut receiving = listener
+                        .spawn_receive_into(&cx, &scope, sink(&probe))
+                        .unwrap();
+                    let mut writer = send.open_writer(&cx, &scope, address).unwrap();
+                    writer.write_all(b"first").await.unwrap();
+                    writer.flush().await.unwrap();
+                    for _ in 0..32 {
+                        yield_now().await;
+                    }
+                    assert!(writer.terminal().is_none());
+                    assert_eq!(writer.buffered_bytes(), 0);
+                    assert_eq!(writer.acknowledged_bytes(), 5);
+                    if drop_writer {
+                        drop(writer);
+                    } else {
+                        let reason =
+                            CancelReason::user("cancel live writer while producer is idle");
+                        let report = asupersync::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(5),
+                            writer.cancel_and_wait(reason.clone()),
+                        )
+                        .await
+                        .expect("cancel must wake the one-hour source read")
+                        .as_ref()
+                        .expect("cooperative sender must retain its domain report");
+                        assert!(
+                            matches!(&report.outcome, Err(LiveStreamError::Cancelled(Some(actual))) if actual == &reason)
+                        );
+                        assert_eq!(report.prefix.as_ref().unwrap().bytes, 5);
+                        assert_eq!(writer.acknowledged_bytes(), 5);
+                        let repeated = writer
+                            .cancel_and_wait(CancelReason::user("repeat"))
+                            .await
+                            .as_ref()
+                            .unwrap();
+                        assert!(
+                            matches!(&repeated.outcome, Err(LiveStreamError::Cancelled(Some(actual))) if actual == &reason)
+                        );
+                    }
+                    let received = asupersync::time::timeout(
+                        cx.now(),
+                        Duration::from_secs(5),
+                        receiving.join(&cx),
+                    )
+                    .await
+                    .expect("abandoned input must close the connection, not fake source EOF")
+                    .unwrap();
+                    assert!(received.outcome.is_err());
+                    assert_eq!(received.prefix.unwrap().bytes, 5);
+                    assert_eq!(*probe.bytes.lock().unwrap(), b"first");
+                    asupersync::time::timeout(cx.now(), Duration::from_secs(5), async {
+                        while send.active_streams() != 0 {
+                            yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("writer child must release its original admission");
+                    assert_eq!(receive.active_streams(), 0);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn writer_capacity_precedes_enqueue_and_denied_work_cannot_admit_input() {
+        run(1, async {
+            let cx = Cx::current().unwrap();
+            let scope = cx.scope();
+            let send = sender(config(8, 100));
+            let address = "127.0.0.1:9".parse().unwrap();
+            let mut writer = send.open_writer(&cx, &scope, address).unwrap();
+            assert_eq!(send.active_streams(), 1);
+            assert!(matches!(
+                send.clone().open_writer(&cx, &scope, address),
+                Err(LiveStreamError::Capacity)
+            ));
+            // Before the current-thread scheduler polls the child, queued bytes
+            // remain local and abort must retain task-level admission semantics.
+            writer.write_all(b"queued").await.unwrap();
+            let reason = CancelReason::user("cancel queued live writer");
+            assert!(matches!(
+                writer.cancel_and_wait(reason.clone()).await,
+                Err(JoinError::Cancelled(actual)) if actual == &reason
+            ));
+            assert_eq!(writer.acknowledged_bytes(), 0);
+            assert_eq!(writer.buffered_bytes(), 0);
+            assert_eq!(send.active_streams(), 0);
+            let denied = {
+                let _restriction = Cx::push_restriction(asupersync::cx::cap::CapMask::none());
+                Cx::current().unwrap()
+            };
+            assert!(matches!(
+                send.open_writer(&denied, &scope, address),
+                Err(LiveStreamError::MissingCapability)
+            ));
+            assert_eq!(send.active_streams(), 0);
+        });
+    }
+
+    fn raw_server_config() -> rustls::ServerConfig {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots()),
+            Arc::clone(&provider),
+        )
+        .build()
+        .unwrap();
+        let fixtures = fixtures();
+        let key = fixtures["identities"]["server"]["key"].as_str().unwrap();
+        let key = PrivateKeyDer::pem_reader_iter(&mut io::BufReader::new(key.as_bytes()))
+            .next()
+            .unwrap()
+            .unwrap();
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .unwrap()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(vec![certificate("server")], key)
+            .unwrap();
+        config.alpn_protocols = vec![LIVE_STREAM_ALPN.to_vec()];
+        config.send_tls13_tickets = 0;
+        config
+    }
+
+    #[test]
+    fn forged_epoch_acknowledgements_and_wrong_final_proofs_never_satisfy_writer_barriers() {
+        use asupersync::net::atp::protocol::frames::FrameType;
+        for wrong_ack in [false, true] {
+            run(1, async move {
+                let cx = Cx::current().unwrap();
+                let scope = cx.scope();
+                let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .unwrap();
+                let address = listener.local_addr().unwrap();
+                let send = sender(config(8, 100));
+                let mut writer = send.open_writer(&cx, &scope, address).unwrap();
+                writer.write_all(b"first").await.unwrap();
+                let peer = async {
+                    let acceptor = asupersync::tls::TlsAcceptor::new(raw_server_config());
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    let mut wire = RawWire::new(acceptor.accept(tcp).await.unwrap());
+                    let hello = wire.receive().await;
+                    assert_eq!(hello.frame_type(), FrameType::Handshake);
+                    wire.send(FrameType::HandshakeAck, hello.payload().to_vec())
+                        .await;
+                    let epoch = wire.receive().await;
+                    assert_eq!(epoch.frame_type(), FrameType::ObjectData);
+                    assert_eq!(&epoch.payload()[80..], b"first");
+                    let mut chain = Sha256::new();
+                    chain.update(b"asupersync.atp.live.epoch.v1");
+                    chain.update(&epoch.payload()[16..48]);
+                    chain.update(epoch.payload());
+                    let mut ack = 1u64.to_be_bytes().to_vec();
+                    ack.extend_from_slice(&5u64.to_be_bytes());
+                    ack.extend_from_slice(&chain.finalize());
+                    if wrong_ack {
+                        ack[47] ^= 1;
+                    }
+                    wire.send(FrameType::Control, ack).await;
+                    if !wrong_ack {
+                        let final_frame = wire.receive().await;
+                        assert_eq!(final_frame.frame_type(), FrameType::ObjectComplete);
+                        let mut proof = final_frame.payload().to_vec();
+                        proof[79] ^= 1;
+                        wire.send(FrameType::Proof, proof).await;
+                    }
+                };
+                let client = async {
+                    let flushed = writer.flush().await;
+                    if wrong_ack {
+                        assert_eq!(flushed.unwrap_err().kind(), io::ErrorKind::InvalidData);
+                        assert_eq!(writer.acknowledged_bytes(), 0);
+                    } else {
+                        flushed.unwrap();
+                        assert_eq!(writer.acknowledged_bytes(), 5);
+                        assert!(writer.terminal().is_none());
+                    }
+                    let report = writer.finish().await.as_ref().unwrap();
+                    let expected = if wrong_ack {
+                        "wrong epoch acknowledgement"
+                    } else {
+                        "wrong final proof"
+                    };
+                    assert!(
+                        matches!(&report.outcome, Err(LiveStreamError::Protocol(actual)) if *actual == expected)
+                    );
+                    assert_eq!(
+                        report.prefix.as_ref().unwrap().bytes,
+                        if wrong_ack { 0 } else { 5 }
+                    );
+                };
+                zip(peer, client).await;
+                assert_eq!(send.active_streams(), 0);
+            });
+        }
+    }
+}
+
 fn fixtures() -> serde_json::Value {
     serde_json::from_str(include_str!("fixtures/atp_native_auth_identities.json")).unwrap()
 }
