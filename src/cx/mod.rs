@@ -69,6 +69,7 @@ pub mod resource_bracket;
 pub mod scope;
 pub mod scoped_cpu;
 pub mod supervisor_service;
+pub mod worker_readiness;
 pub mod wrappers;
 
 pub use cancelled::Cancelled;
