@@ -20,6 +20,71 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
+#[test]
+fn mailbox_admission_installs_retirement_barrier_before_factory_poll() {
+    use crate::runtime::spawn_mailbox::{
+        AdmittedTaskSlot, LocalSpawnRequest, SpawnMailbox, SpawnRequest,
+    };
+    use crate::runtime::task_handle::RetirementBarrier;
+
+    for local in [false, true] {
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let provisional = SpawnMailbox::new().allocate_task_id();
+        let barrier = RetirementBarrier::pending();
+        let slot = Arc::new(AdmittedTaskSlot::new().with_retirement_barrier(Arc::clone(&barrier)));
+        let task_id = if local {
+            let _worker = crate::runtime::scheduler::three_lane::ScopedWorkerId::new(0);
+            let request = LocalSpawnRequest {
+                task_id: provisional,
+                region,
+                budget: Budget::INFINITE,
+                factory: Box::new(|_| panic!("admission must not invoke the local factory")),
+                on_unadmitted_cancel: None,
+                on_admission_error: None,
+                pending_reservation: None,
+                admitted_slot: Some(slot),
+            };
+            match state.admit_local_spawn_request_in(
+                request,
+                &mut AdmissionTaskTarget::Embedded,
+                &AdmissionRegionTarget::Embedded,
+            ) {
+                LocalSpawnAdmission::Admitted { task_id, .. } => task_id,
+                LocalSpawnAdmission::Denied { .. } => panic!("local admission was denied"),
+            }
+        } else {
+            let request = SpawnRequest::new_with_factory(
+                provisional,
+                region,
+                Budget::INFINITE,
+                Box::new(|_| panic!("admission must not invoke the Send factory")),
+            )
+            .with_admitted_slot(slot);
+            match state.admit_spawn_request(request.into_parts()) {
+                SpawnAdmission::Admitted { task_id, .. } => task_id,
+                SpawnAdmission::Denied { .. } => panic!("Send admission was denied"),
+            }
+        };
+        let inner = state
+            .task(task_id)
+            .unwrap()
+            .cx_inner
+            .as_ref()
+            .unwrap()
+            .read();
+        let installed = inner
+            .retirement_barrier
+            .as_ref()
+            .expect("the scheduler needs the barrier even when retirement precedes the first poll");
+        assert!(Arc::ptr_eq(installed, &barrier));
+        assert!(
+            !installed.is_open(),
+            "admission must not publish completion"
+        );
+    }
+}
+
 #[derive(Default)]
 struct CancellationWakeAudit {
     attempts: AtomicUsize,
