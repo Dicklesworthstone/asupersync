@@ -1535,3 +1535,259 @@ fn owned_metrics_external_otel_collector_accepts_and_exports_request() {
     assert!(!canonical_output.contains("auth.token"));
     assert!(!canonical_output.contains("must-not-reach-collector"));
 }
+
+#[cfg(all(feature = "metrics", feature = "test-internals"))]
+mod collector_response_tests {
+    use asupersync::cx::Cx;
+    use asupersync::observability::OtlpHttpExporter;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// Retain the collector until the exporter returns, answering any duplicate
+    /// submissions so an accidental retry is counted instead of hidden by a
+    /// connection-refused error. All waits have a finite watchdog.
+    fn response_collector(
+        path: &str,
+        response_body: Vec<u8>,
+    ) -> (String, mpsc::Sender<()>, std::thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind response collector");
+        listener.set_nonblocking(true).expect("nonblocking accept");
+        let endpoint = format!(
+            "http://{}{path}",
+            listener.local_addr().expect("local addr")
+        );
+        let (done_tx, done_rx) = mpsc::channel();
+        let collector = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut requests = 0;
+            loop {
+                assert!(Instant::now() < deadline, "collector watchdog expired");
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        match done_rx.recv_timeout(Duration::from_millis(1)) {
+                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return requests,
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        }
+                    }
+                    Err(error) => panic!("collector accept failed: {error}"),
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking accepted socket");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .expect("read watchdog");
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .expect("write watchdog");
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                let expected_len = loop {
+                    let read = stream.read(&mut buffer).expect("read request head");
+                    assert_ne!(read, 0, "request ended before headers");
+                    request.extend_from_slice(&buffer[..read]);
+                    assert!(
+                        request.len() <= 16 * 1024,
+                        "unexpectedly large test request"
+                    );
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let head_len = end + 4;
+                        let headers = std::str::from_utf8(&request[..head_len])
+                            .expect("request headers are UTF-8");
+                        let body_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().expect("body length"))
+                            })
+                            .expect("request Content-Length");
+                        assert!(body_len <= 4096, "bounded test request body");
+                        break head_len + body_len;
+                    }
+                };
+                while request.len() < expected_len {
+                    let read = stream.read(&mut buffer).expect("read request body");
+                    assert_ne!(read, 0, "request body truncated");
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                requests += 1;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                )
+                .expect("write response headers");
+                // An oversize response must be refused from its headers before
+                // all bytes are read, so peer closure here is expected.
+                if let Err(error) = stream.write_all(&response_body) {
+                    assert!(
+                        matches!(
+                            error.kind(),
+                            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                        ),
+                        "unexpected response write error: {error}"
+                    );
+                }
+            }
+        });
+        (endpoint, done_tx, collector)
+    }
+
+    fn export_response(path: &str, body: Vec<u8>) -> Result<(), String> {
+        let (endpoint, done, collector) = response_collector(path, body);
+        let exporter = OtlpHttpExporter::try_new(endpoint)
+            .expect("valid response endpoint")
+            .with_timeout(Duration::from_secs(2))
+            .with_retry_config(2, Duration::from_millis(1), Duration::from_millis(2));
+        let mut result = None;
+        asupersync::test_utils::run_test(|| async {
+            let cx = Cx::current().expect("native runtime Cx");
+            result = Some(exporter.send_otlp_protobuf(&cx, Vec::new()).await);
+        });
+        done.send(()).expect("stop response collector");
+        assert_eq!(
+            collector.join().expect("response collector"),
+            1,
+            "a 200 response must never retry accepted telemetry"
+        );
+        result
+            .expect("export completed")
+            .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn collector_response_partial_rejection_is_not_silently_accepted_or_retried() {
+        use opentelemetry_proto::tonic::collector::logs::v1::{
+            ExportLogsPartialSuccess, ExportLogsServiceResponse,
+        };
+        use opentelemetry_proto::tonic::collector::metrics::v1::{
+            ExportMetricsPartialSuccess, ExportMetricsServiceResponse,
+        };
+        use opentelemetry_proto::tonic::collector::trace::v1::{
+            ExportTracePartialSuccess, ExportTraceServiceResponse,
+        };
+        use prost::Message;
+
+        let private_diagnostic = "collector-secret-must-not-leak";
+        let responses = [
+            (
+                "/v1/metrics",
+                ExportMetricsServiceResponse {
+                    partial_success: Some(ExportMetricsPartialSuccess {
+                        rejected_data_points: 7,
+                        error_message: private_diagnostic.to_owned(),
+                    }),
+                }
+                .encode_to_vec(),
+            ),
+            (
+                "/v1/traces",
+                ExportTraceServiceResponse {
+                    partial_success: Some(ExportTracePartialSuccess {
+                        rejected_spans: 7,
+                        error_message: private_diagnostic.to_owned(),
+                    }),
+                }
+                .encode_to_vec(),
+            ),
+            (
+                "/v1/logs",
+                ExportLogsServiceResponse {
+                    partial_success: Some(ExportLogsPartialSuccess {
+                        rejected_log_records: 7,
+                        error_message: private_diagnostic.to_owned(),
+                    }),
+                }
+                .encode_to_vec(),
+            ),
+        ];
+        for (path, body) in responses {
+            let error = export_response(path, body).expect_err("collector rejected seven items");
+            assert!(
+                error.contains('7'),
+                "rejection count must be visible: {error}"
+            );
+            assert!(
+                !error.contains(private_diagnostic),
+                "untrusted diagnostic must stay out of errors"
+            );
+        }
+    }
+
+    #[test]
+    fn collector_response_empty_and_warning_only_remain_successful() {
+        use opentelemetry_proto::tonic::collector::metrics::v1::{
+            ExportMetricsPartialSuccess, ExportMetricsServiceResponse,
+        };
+        use prost::Message;
+
+        export_response("/v1/metrics", Vec::new()).expect("empty protobuf is full success");
+        let response = ExportMetricsServiceResponse {
+            partial_success: Some(ExportMetricsPartialSuccess {
+                rejected_data_points: 0,
+                error_message: "reduce future batch size".to_owned(),
+            }),
+        };
+        export_response("/v1/metrics", response.encode_to_vec())
+            .expect("all telemetry accepted despite collector warning");
+    }
+
+    #[test]
+    fn collector_response_receipt_preserves_partial_acknowledgement() {
+        use opentelemetry_proto::tonic::collector::trace::v1::{
+            ExportTracePartialSuccess, ExportTraceServiceResponse,
+        };
+        use prost::Message;
+
+        let diagnostic = "private-collector-diagnostic";
+        let body = ExportTraceServiceResponse {
+            partial_success: Some(ExportTracePartialSuccess {
+                rejected_spans: 3,
+                error_message: diagnostic.to_owned(),
+            }),
+        }
+        .encode_to_vec();
+        let (endpoint, done, collector) = response_collector("/v1/traces", body);
+        let exporter = OtlpHttpExporter::try_new(endpoint)
+            .expect("valid response endpoint")
+            .with_timeout(Duration::from_secs(2));
+        let mut receipt = None;
+        asupersync::test_utils::run_test(|| async {
+            let cx = Cx::current().expect("native runtime Cx");
+            receipt = Some(
+                exporter
+                    .send_otlp_protobuf_with_response(&cx, Vec::new())
+                    .await,
+            );
+        });
+        done.send(()).expect("stop response collector");
+        assert_eq!(collector.join().expect("response collector"), 1);
+        let receipt = receipt
+            .expect("export completed")
+            .expect("valid partial acknowledgement");
+        assert!(receipt.is_partial_success());
+        assert_eq!(receipt.rejected_items(), 3);
+        assert_eq!(receipt.error_message(), diagnostic);
+        assert!(!format!("{receipt:?}").contains(diagnostic));
+    }
+
+    #[test]
+    fn collector_response_malformed_success_is_refused_without_retry() {
+        let error = export_response("/v1/traces", vec![0x0a, 0x02, 0x08])
+            .expect_err("truncated partial-success protobuf must fail closed");
+        assert!(
+            error.contains("response"),
+            "response error must identify its boundary: {error}"
+        );
+    }
+
+    #[test]
+    fn collector_response_oversize_success_is_refused_without_retry() {
+        export_response("/v1/logs", vec![0; 4 * 1024 * 1024 + 1])
+            .expect_err("collector response must have a bounded body");
+    }
+}

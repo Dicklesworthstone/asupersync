@@ -229,13 +229,13 @@ fn retry_loop_returns_immediately_on_non_retryable_timeout() {
 
     let impl_marker = "impl OtlpHttpExporter {";
     let impl_start = source.find(impl_marker).expect("OtlpHttpExporter impl");
-    let fn_marker = "pub async fn send_otlp_protobuf(";
+    let fn_marker = "async fn send_otlp_protobuf_response_body(";
     let pos = source[impl_start..]
         .find(fn_marker)
         .map(|offset| impl_start + offset)
         .expect("OtlpHttpExporter::send_otlp_protobuf");
     let body_start = source[pos..]
-        .find("-> Result<(), ExportError> {")
+        .find("-> Result<Vec<u8>, ExportError> {")
         .expect("send_otlp_protobuf return type")
         + pos;
     let body_end = source[body_start..]

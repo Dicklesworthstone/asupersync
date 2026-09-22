@@ -88,13 +88,15 @@ fn otlp_struct_body(source: &str) -> &str {
 }
 
 fn send_otlp_protobuf_body(source: &str) -> &str {
-    // Look for the `send_otlp_protobuf` async fn body.
-    let marker = "pub async fn send_otlp_protobuf(";
-    let mut pos = source.find(marker).expect("send_otlp_protobuf must exist");
+    // Both public acknowledgement APIs share this bounded transport loop.
+    let marker = "async fn send_otlp_protobuf_response_body(";
+    let mut pos = source
+        .find(marker)
+        .expect("shared OTLP retry loop must exist");
     // Find the `{` opening the body. It may be on a different
     // line than the marker (multi-line signature).
     let body_start = source[pos..]
-        .find("-> Result<(), ExportError> {")
+        .find("-> Result<Vec<u8>, ExportError> {")
         .expect("send_otlp_protobuf return type")
         + pos;
     pos = body_start;

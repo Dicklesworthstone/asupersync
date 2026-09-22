@@ -5865,6 +5865,10 @@ pub const OTLP_HTTP_MAX_RESOURCE_VALUE_BYTES: usize = 4096;
 /// Maximum number of bounded retry attempts for one export.
 pub const OTLP_HTTP_MAX_RETRIES: u32 = 16;
 
+/// Maximum collector response body size, enforced while receiving HTTP bytes
+/// and again before decoding the owned protobuf model.
+pub const OTLP_HTTP_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Transport security policy for an OTLP HTTP endpoint.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OtlpTlsPolicy {
@@ -6482,6 +6486,57 @@ fn validate_otlp_http_config(config: &OtlpHttpConfig) -> Result<(), OtlpConfigEr
     Ok(())
 }
 
+/// Validated collector acknowledgement for one OTLP HTTP request.
+///
+/// All supported signals share the same protobuf response shape. Rejected
+/// items are data points for metrics, spans for traces, or records for logs.
+/// A populated `partial_success` is terminal even when some items were
+/// rejected: retrying that request can duplicate the items already accepted.
+/// Collector diagnostic text is available explicitly through
+/// [`Self::error_message`] and is redacted from `Debug` output.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtlpHttpResponse {
+    partial_success: bool,
+    rejected_items: u64,
+    error_message: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OtlpHttpResponse {
+    /// Whether the collector populated the `partial_success` field.
+    #[must_use]
+    pub const fn is_partial_success(&self) -> bool {
+        self.partial_success
+    }
+
+    /// Number of telemetry items the collector rejected from this request.
+    #[must_use]
+    pub const fn rejected_items(&self) -> u64 {
+        self.rejected_items
+    }
+
+    /// Bounded, untrusted collector diagnostic, empty when none was supplied.
+    ///
+    /// It may contain echoed telemetry or credentials. Apply the application's
+    /// privacy policy before logging or displaying it.
+    #[must_use]
+    pub fn error_message(&self) -> &str {
+        &self.error_message
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for OtlpHttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpHttpResponse")
+            .field("partial_success", &self.partial_success)
+            .field("rejected_items", &self.rejected_items)
+            .field("error_message_present", &!self.error_message.is_empty())
+            .finish()
+    }
+}
+
 /// OTLP HTTP exporter with RFC-compliant retry logic.
 ///
 /// Implements OTLP spec requirements for retryable HTTP responses:
@@ -6681,12 +6736,76 @@ impl OtlpHttpExporter {
         self
     }
 
-    /// Send OTLP protobuf request with RFC-compliant retry logic.
+    /// Send an OTLP protobuf request with RFC-compliant retry logic.
+    ///
+    /// On native targets, success requires a valid bounded collector response.
+    /// Collector rejection of any items returns an error without retrying the
+    /// accepted portion. A zero-rejection warning remains successful. Use
+    /// `send_otlp_protobuf_with_response` to inspect the exact native receipt.
     pub async fn send_otlp_protobuf(
         &self,
         cx: &crate::cx::Cx,
         request_body: Vec<u8>,
     ) -> Result<(), ExportError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let response = self
+                .send_otlp_protobuf_with_response(cx, request_body)
+                .await?;
+            if response.rejected_items() != 0 {
+                return Err(ExportError::new(format!(
+                    "otlp.response.partial_success: collector rejected {} telemetry items; request must not be retried",
+                    response.rejected_items()
+                )));
+            }
+            Ok(())
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.send_otlp_protobuf_response_body(cx, request_body)
+            .await
+            .map(|_| ())
+    }
+
+    /// Send one request and return its validated collector acknowledgement.
+    ///
+    /// A partial-success receipt is returned as `Ok`, including when its
+    /// rejected count is nonzero. The caller must inspect that count and must
+    /// not retry the request. HTTP failures retain the existing retry policy;
+    /// malformed, oversized, or unsupported response bodies are terminal.
+    /// Empty protobuf responses remain valid full acknowledgements.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_otlp_protobuf_with_response(
+        &self,
+        cx: &crate::cx::Cx,
+        request_body: Vec<u8>,
+    ) -> Result<OtlpHttpResponse, ExportError> {
+        let body = self
+            .send_otlp_protobuf_response_body(cx, request_body)
+            .await?;
+        let response = decode_otlp_http_response(&body).map_err(ExportError::from)?;
+        if response.is_partial_success() {
+            let rejected = response.rejected_items().to_string();
+            let diagnostic_present = if response.error_message().is_empty() {
+                "false"
+            } else {
+                "true"
+            };
+            cx.trace_with_fields(
+                "otlp.export.partial_success",
+                &[
+                    ("rejected_items", rejected.as_str()),
+                    ("diagnostic_present", diagnostic_present),
+                ],
+            );
+        }
+        Ok(response)
+    }
+
+    async fn send_otlp_protobuf_response_body(
+        &self,
+        cx: &crate::cx::Cx,
+        request_body: Vec<u8>,
+    ) -> Result<Vec<u8>, ExportError> {
         use std::cmp;
 
         // Existing infallible builders remain source-compatible, but every
@@ -6699,7 +6818,7 @@ impl OtlpHttpExporter {
 
         loop {
             match self.send_request_once(cx, &request_body).await {
-                Ok(()) => return Ok(()),
+                Ok(response_body) => return Ok(response_body),
                 Err(OtlpError::Retryable {
                     status_code,
                     retry_after,
@@ -6740,7 +6859,7 @@ impl OtlpHttpExporter {
                             .send_request_with_compression(cx, &request_body, false)
                             .await
                         {
-                            Ok(()) => return Ok(()),
+                            Ok(response_body) => return Ok(response_body),
                             Err(fallback_error) => {
                                 return Err(ExportError::new(format!(
                                     "OTLP compression fallback failed: {} after {}",
@@ -6846,7 +6965,11 @@ impl OtlpHttpExporter {
         Ok(())
     }
 
-    async fn send_request_once(&self, cx: &crate::cx::Cx, body: &[u8]) -> Result<(), OtlpError> {
+    async fn send_request_once(
+        &self,
+        cx: &crate::cx::Cx,
+        body: &[u8],
+    ) -> Result<Vec<u8>, OtlpError> {
         self.send_request_with_compression(cx, body, self.compression)
             .await
     }
@@ -6856,7 +6979,7 @@ impl OtlpHttpExporter {
         cx: &crate::cx::Cx,
         body: &[u8],
         use_compression: bool,
-    ) -> Result<(), OtlpError> {
+    ) -> Result<Vec<u8>, OtlpError> {
         use crate::http::h1::http_client::HttpClient;
         use crate::http::h1::types::Method;
 
@@ -6874,6 +6997,7 @@ impl OtlpHttpExporter {
                 .no_redirects()
                 .no_cookie_store()
                 .no_retries()
+                .max_body_size(OTLP_HTTP_MAX_RESPONSE_BYTES)
                 .build();
 
             // Apply compression if enabled
@@ -6930,8 +7054,79 @@ impl OtlpHttpExporter {
             .map_err(|e| OtlpError::non_retryable(format!("OTLP request failed: {}", e)))?;
 
             // Handle response per OTLP spec
-            classify_otlp_http_response(response.status, &response.headers)
+            classify_otlp_http_response(response.status, &response.headers)?;
+            validate_otlp_response_encoding(&response.headers)?;
+            Ok(response.body)
         }
+    }
+}
+
+fn validate_otlp_response_encoding(headers: &[(String, String)]) -> Result<(), OtlpError> {
+    // Preserve collectors that omit Content-Type, including empty protobuf
+    // acknowledgements. An explicitly conflicting encoding is never accepted.
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("content-type")
+            && !value.split(';').next().is_some_and(|media_type| {
+                media_type
+                    .trim()
+                    .eq_ignore_ascii_case("application/x-protobuf")
+            })
+        {
+            return Err(OtlpError::non_retryable(
+                "otlp.response.invalid_content_type: expected application/x-protobuf",
+            ));
+        }
+        // This transport does not implement response decompression. Refuse an
+        // encoded response instead of interpreting compressed bytes as a
+        // protobuf acknowledgement or performing an unbounded decompression.
+        if name.eq_ignore_ascii_case("content-encoding")
+            && !value.trim().eq_ignore_ascii_case("identity")
+        {
+            return Err(OtlpError::non_retryable(
+                "otlp.response.unsupported_content_encoding: expected an uncompressed response",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_otlp_http_response(body: &[u8]) -> Result<OtlpHttpResponse, OtlpError> {
+    use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceResponse;
+
+    if body.len() > OTLP_HTTP_MAX_RESPONSE_BYTES {
+        return Err(OtlpError::non_retryable(
+            "otlp.response.too_large: collector response exceeds the byte limit",
+        ));
+    }
+    // Metrics, trace and logs responses are wire-identical: field 1 contains
+    // partial_success, whose field 1 is an int64 rejected count and field 2 a
+    // UTF-8 diagnostic. Use one owned schema without guessing from a URL path.
+    // The schema additionally caps diagnostics at 4096 bytes and rejects
+    // negative counts, while these limits bound unknown fields and parse work.
+    let limits = ProtobufWireLimits::for_message_size(OTLP_HTTP_MAX_RESPONSE_BYTES)
+        .with_max_fields(1024)
+        .with_max_depth(8);
+    let response = ExportMetricsServiceResponse::decode_from_bytes(body, limits).map_err(|_| {
+        OtlpError::non_retryable(
+            "otlp.response.invalid_protobuf: malformed collector response or decode limit exceeded",
+        )
+    })?;
+    match response.partial_success {
+        Some(partial) => Ok(OtlpHttpResponse {
+            partial_success: true,
+            rejected_items: u64::try_from(partial.rejected_data_points).map_err(|_| {
+                OtlpError::non_retryable(
+                    "otlp.response.invalid_protobuf: negative rejected item count",
+                )
+            })?,
+            error_message: partial.error_message,
+        }),
+        None => Ok(OtlpHttpResponse {
+            partial_success: false,
+            rejected_items: 0,
+            error_message: String::new(),
+        }),
     }
 }
 
@@ -7230,6 +7425,131 @@ fn deterministic_retry_jitter_ms(retry_count: u32, status_code: u16) -> u64 {
 #[cfg(all(test, feature = "metrics"))]
 mod otlp_retry_tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn otlp_collector_response_preserves_full_partial_and_warning_receipts() {
+        let full = decode_otlp_http_response(&[]).expect("empty protobuf is full success");
+        assert!(!full.is_partial_success());
+        assert_eq!(full.rejected_items(), 0);
+        assert!(full.error_message().is_empty());
+
+        // Wire-identical across metrics, trace and logs: partial_success with
+        // two rejected items and one diagnostic. Construct bytes independently
+        // of the owned encoder so the decoder is tested against the protocol.
+        let partial = decode_otlp_http_response(b"\x0a\x0b\x08\x02\x12\x07private")
+            .expect("valid partial success");
+        assert!(partial.is_partial_success());
+        assert_eq!(partial.rejected_items(), 2);
+        assert_eq!(partial.error_message(), "private");
+        assert!(!format!("{partial:?}").contains("private"));
+
+        let warning = decode_otlp_http_response(b"\x0a\x09\x12\x07private")
+            .expect("zero-rejection collector warning");
+        assert!(warning.is_partial_success());
+        assert_eq!(warning.rejected_items(), 0);
+        assert_eq!(warning.error_message(), "private");
+
+        let empty_partial = decode_otlp_http_response(b"\x0a\x00")
+            .expect("empty partial-success field is a zero-rejection acknowledgement");
+        assert!(empty_partial.is_partial_success());
+        assert_eq!(empty_partial.rejected_items(), 0);
+        assert!(empty_partial.error_message().is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn otlp_collector_response_merges_partial_fields_and_preserves_forward_compatibility() {
+        let response = decode_otlp_http_response(b"\x10\x01\x0a\x02\x08\x03\x0a\x04\x12\x02ok")
+            .expect("unknown root fields and split singular messages remain valid protobuf");
+        assert_eq!(response.rejected_items(), 3);
+        assert_eq!(response.error_message(), "ok");
+
+        let unknown = decode_otlp_http_response(b"\x10\x01")
+            .expect("future response fields must not be mistaken for partial failure");
+        assert!(!unknown.is_partial_success());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn otlp_collector_response_rejects_malformed_and_hostile_protobuf() {
+        let malformed: &[&[u8]] = &[
+            b"\x00",                                                 // Invalid field number.
+            b"\x0a\x02\x08",                                         // Truncated nested message.
+            b"\x08\x01",             // Wrong partial_success wire type.
+            b"\x0a\x03\x12\x01\xff", // Invalid diagnostic UTF-8.
+            b"\x0a\x0b\x08\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01", // Negative int64.
+        ];
+        for body in malformed {
+            let error = decode_otlp_http_response(body).expect_err("malformed receipt must fail");
+            assert!(matches!(error, OtlpError::NonRetryable { .. }));
+            assert!(error.to_string().contains("otlp.response.invalid_protobuf"));
+        }
+
+        let excessive_fields = b"\x10\x00".repeat(1025);
+        assert!(decode_otlp_http_response(&excessive_fields).is_err());
+
+        let mut excessive_depth = vec![0x13; 9];
+        excessive_depth.extend_from_slice(&[0x14; 9]);
+        assert!(decode_otlp_http_response(&excessive_depth).is_err());
+
+        let oversize = vec![0; OTLP_HTTP_MAX_RESPONSE_BYTES + 1];
+        let error = decode_otlp_http_response(&oversize).expect_err("response size ceiling");
+        assert!(error.to_string().contains("otlp.response.too_large"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn otlp_collector_response_bounds_diagnostic_before_owning_it() {
+        use crate::grpc::protobuf::ProtobufWireEncoder;
+
+        for (length, accepted) in [(4096, true), (4097, false)] {
+            let mut encoder = ProtobufWireEncoder::new(ProtobufWireLimits::default());
+            encoder
+                .write_nested_message(1, |nested| nested.write_string(2, &"x".repeat(length)))
+                .expect("wire fixture fits the generic protobuf envelope");
+            let body = encoder.finish().expect("complete protobuf fixture");
+            let result = decode_otlp_http_response(&body);
+            assert_eq!(result.is_ok(), accepted, "diagnostic length {length}");
+        }
+    }
+
+    #[test]
+    fn otlp_collector_response_encoding_fails_closed_without_reflecting_headers() {
+        assert!(validate_otlp_response_encoding(&[]).is_ok());
+        assert!(
+            validate_otlp_response_encoding(&[
+                (
+                    "CONTENT-TYPE".to_owned(),
+                    "Application/X-Protobuf; charset=binary".to_owned()
+                ),
+                ("Content-Encoding".to_owned(), "identity".to_owned()),
+            ])
+            .is_ok()
+        );
+        for headers in [
+            vec![("Content-Type".to_owned(), "text/private-secret".to_owned())],
+            vec![(
+                "Content-Encoding".to_owned(),
+                "gzip-private-secret".to_owned(),
+            )],
+            vec![
+                (
+                    "Content-Type".to_owned(),
+                    "application/x-protobuf".to_owned(),
+                ),
+                (
+                    "content-type".to_owned(),
+                    "application/json-private-secret".to_owned(),
+                ),
+            ],
+        ] {
+            let error = validate_otlp_response_encoding(&headers)
+                .expect_err("unsupported or conflicting response encoding");
+            assert!(matches!(error, OtlpError::NonRetryable { .. }));
+            assert!(!error.to_string().contains("private-secret"));
+        }
+    }
 
     #[test]
     fn otlp_error_display() {
