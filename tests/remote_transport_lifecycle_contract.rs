@@ -5852,13 +5852,24 @@ fn remote_native_client_cancellation_wakes_stalled_exchange() {
 #[cfg(feature = "tls")]
 #[test]
 fn remote_native_client_attempt_timeout_fails_closed_without_replay() {
+    assert_remote_native_client_attempt_timeout_without_replay(RemoteProtocolVersion::V2);
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn remote_native_client_v3_attempt_timeout_fails_closed_without_replay() {
+    assert_remote_native_client_attempt_timeout_without_replay(RemoteProtocolVersion::V3);
+}
+
+#[cfg(feature = "tls")]
+fn assert_remote_native_client_attempt_timeout_without_replay(protocol: RemoteProtocolVersion) {
     let (acceptor, connector) = remote_client_test_mtls_pair();
     let listener = block_on(TcpListener::bind("127.0.0.1:0"))
         .expect("attempt-timeout fixture should bind loopback");
     let endpoint = listener
         .local_addr()
         .expect("attempt-timeout fixture should expose its address");
-    let request = remote_client_test_request(RemoteProtocolVersion::V2, 7206, 0x7206);
+    let request = remote_client_test_request(protocol, 7206, 0x7206);
     let (request_seen_tx, request_seen_rx) = std::sync::mpsc::sync_channel::<()>(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(0);
     let server = thread::spawn(move || {
@@ -5927,7 +5938,11 @@ fn remote_native_client_attempt_timeout_fails_closed_without_replay() {
     ));
 
     ProofLogRow::pass(
-        "remote_native_client_attempt_timeout",
+        if protocol == RemoteProtocolVersion::V3 {
+            "remote_native_client_v3_attempt_timeout"
+        } else {
+            "remote_native_client_attempt_timeout"
+        },
         7206,
         "complete_request_then_stall",
         "bounded_attempt_no_ambiguous_replay",
