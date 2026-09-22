@@ -29,8 +29,17 @@ concrete defect found into a bead.
 - Ten read-only subsystem audits (kernel; scheduler/lab/replay/formal; combinators/supervision/AppSpec;
   network/server; data/IO/observability; distributed/remote; ATP/RaptorQ; Browser Edition;
   governance/CI/release/tracker; docs/examples/dependencies) traced implementation and tests against
-  README/plan claims. Reports: `/data/tmp/rc_20260922/audit_*.md`. Every high-severity claim cited
-  below was re-read by the root at `8525d7055` unless marked "auditor-reported".
+  README/plan claims. Reports: `/data/tmp/rc_20260922/audit_*.md`. The root personally re-read the
+  source at `8525d7055` for these claims: `race!`/`select!` loser cancellation; the remote silent-peer
+  wait and uninterruptible close; the supervisor dependency `continue`; the `atp send` plaintext default;
+  the browser glue/wasm export mismatch; process-wide signal registration; the gRPC `has_io()` predicate;
+  the undeclared strict replay driver; the frozen `RuntimeState::now` in the scheduler reward; peer
+  transport-parameter application (partially refuted, now R23d); orphaned source files; commit identity
+  and "not compiled" counts; the Actions state; versions and releases; the proof-freshness time bomb.
+  Everything else (for example the H2/H1/QUIC DoS paths, PostgreSQL/MySQL/Kafka/OTLP defects, DPOR and
+  Lean vacuity, distributed ownership details) was verified by an auditor reading the cited code and is
+  recorded with file:line in its bead. It still needs the bead's own old-red receipt before being
+  treated as executed fact.
 - Audit base: `8525d70554dd7cb7ab02ea16b461c5a6767e9e01` (main at session start). Main advanced
   during the session (runtime retirement-barrier fixes, HTTP/3 streaming bodies, replay capture); tip
   re-runs are labelled with their own SHA.
@@ -49,7 +58,8 @@ concrete defect found into a bead.
 | `cargo run --example onramp_level0` | printed `hello from asupersync`, remote exit 0 (RCH then returned 102 = RCH-E309 artifact-retrieval timeout after success) |
 
 The 17 lib failures classify as: one real runtime regression (retirement barrier installed after
-inheritance overlay, fixed on main by `094bbe890`, rerun pending); three runtime test drifts;
+inheritance overlay, fixed on main by `094bbe890`; a filtered re-run at `021cdecaf` confirms it passes, and
+the native contract is 42/42 there too); three runtime test drifts;
 one real native gRPC defect behind three failures (`cx.has_io()` checks a virtual IoCap native tasks
 never carry, so native `connect_tcp`/`connect_tls` always refuse); one gRPC test bug (lossless
 `grpc-timeout` unit); one stale QUIC test plus an encoder-validation gap; one resource-bracket
@@ -154,7 +164,7 @@ PARTIAL, STUB, UNPROVEN (code exists; no execution), REGRESSED, DOC_STALE (code 
 | 2 | Root closure drains children/finalizers/obligations | PARTIAL: `#[main]` drains but discards the result and skips the drain on panic; `block_on`, `Runtime` drop and `shutdown_timeout` remain abort-by-drop; `spawn_with_cx` docs promise shutdown cancellation that never happens; `0sd3cp` acceptance (drain outcome in trace/report; handles observe `CancelReason::shutdown()`) not met. | NEW R17 |
 | 3 | Stock permits obey obligation admission | PARTIAL, unchanged since 09-05: checked APIs correct; default APIs return untracked success on refusal. | `bi2462.28/.29` (revise) |
 | 4 | Cleanup bounds inspectable for stock primitives | PARTIAL: `ResponsivenessRegistry` is a declared table (44 entries, finite ones hard-coded `polls: 1`), consulted by no primitive; its native conformance test has no receipt. | `bi2462.30/.31` |
-| 5 | Pipeline/map-reduce execute structured work | WORKING_SCOPED by reading (real executors, bounded, drained); no fresh receipt; map error still reported as `Cancelled` (`04jqgn`). | `bi2462.32/.33`, `04jqgn` |
+| 5 | Pipeline/map-reduce execute structured work | PARTIAL: real executors, bounded and drained; `e2e_stream_pipeline` ran 20/21 at `8525d7055`. On the native multi-worker runtime a stage panic yields `Panicked` but also a stage error in the report, and a map error is still reported as `Cancelled` (`04jqgn`). | `bi2462.32/.33`, `04jqgn` |
 | 6 | Region heap has a runtime consumer | PARTIAL, unchanged. | `bi2462.39-.41` |
 | 7 | Scheduler scaling with fairness | PARTIAL: README's "slot within `limit+1` = 17 steps" is wrong under the default adaptive selector (limit reaches 64); the default-on UCB1 reward reads `RuntimeState::now`, which production never advances, so its deadline/age terms are inert. | NEW R18; sharding beads |
 | 8 | Production failures replay in the lab | NOT DELIVERED: production emits no Poll/Wake events, so `ProductionSchedule::from_runtime_trace` yields zero steps; exhausted replay silently falls back; the strict driver is an undeclared file. New `io::replay_session*` code is I/O replay, not schedule capture. | `bi2462.8/.9` (revise); NEW R19 |
@@ -165,7 +175,7 @@ PARTIAL, STUB, UNPROVEN (code exists; no execution), REGRESSED, DOC_STALE (code 
 | 13 | Remote handles follow region ownership | PARTIAL: default `spawn_remote` is not region-owned; opt-in `run_remote` is, but a silent peer hangs region close (no deadline/keepalive; uninterruptible close) and the origin never renews leases (30 s default). v0.5.0 shipped two remote defects (V3 reply decode; `RemoteCap` lost across `open_child_region`), fixed on main, unreleased. | `bi2462.16`; NEW R27; NEW R35 patch release |
 | 14 | Snapshot distribution survives failed peers | UNPROVEN: real mTLS transport and two-process tests exist; never executed; acceptance scale (4 MiB, symbol loss) not met. | `bi2462.10`; G2.2 first execution |
 | 15 | Membership drives discovery and revocation | PARTIAL: SWIM still an island; authenticated authority path opt-in and unexecuted. | `bi2462.11/.12` |
-| 16 | Supervisor trees restart and escalate | WORKING_SCOPED by reading (ManagedSupervisor), DOC_STALE in README/rustdoc; new fail-open: a required Permanent child whose dependency is gone is silently never restarted and the report ends `Ok`; named children refused; AppSpec still uses the legacy non-restarting supervisor. | `bi2462.34/.35/.46`; NEW R29 |
+| 16 | Supervisor trees restart and escalate | WORKING_SCOPED: `supervision_regression` 6/6 at `8525d7055` (ManagedSupervisor public lab, native and SIGTERM journeys); DOC_STALE in README/rustdoc; new fail-open: a required Permanent child whose dependency is gone is silently never restarted and the report ends `Ok`; named children refused; AppSpec still uses the legacy non-restarting supervisor. | `bi2462.34/.35/.46`; NEW R29 |
 | 17 | Secure ATP moves real files with bounded resources | PARTIAL: `atp send` defaults to plaintext unauthenticated TCP; RQ control transcript and NeedMore frames unauthenticated; `e880xo` (P0) has had no implementation since 06-15. | `e880xo`; NEW R30 |
 | 18 | ATP SDK and CLI expose the promised workflows | STUB for the tracked API: legacy `AtpSession` methods still `NotImplemented`, the older `crate::atp::sdk` fakes success and its `verify_object` never reads content; a parallel native SDK plus `atpd-live` (~21k lines, no bead for `atpd-live`) moves data but has not executed since 09-19; 13 `asupersync atp` commands refuse with E701. | `bi2462.51-.74`; NEW R31 |
 | 19 | ATP performance measured honestly | UNPROVEN/STALE: no re-measure since 09-04; `bi2462.4` closed without HyStart++/BDP credit or a WAN receipt; README quotes only the better WAN path; possible tree_small/bad regression (5.9 s → 32-41 s, different host, uninvestigated); scorecards do not bind the measured binary. | `bi2462.5`, `et48up`; NEW R32 |
@@ -480,6 +490,29 @@ has a planted defect it must catch.
   classified); a filtered tip re-run (16 failures, the real runtime regression confirmed fixed); the on-ramp
   example (ran). The feature-gated suite lanes (tls/test-internals/http3/remote-service; default-feature
   integration; atp-cli; browser-core; rustfmt) were queued behind these and report into G2.
+- First-execution lane F1 (pristine `8525d7055`; `tls,test-internals,http3,remote-service`;
+  `--test-threads=1`; hz3). 116 tests ran across 14 of 17 targets: 110 passed, 6 failed, plus 1 hang.
+  - Green on their first-ever run: `atp_live_stream` 22/22; `remote_owned_native` 11/11; remote
+    queue/priority/admission 10/10; membership authority/owned/scoped 10/10; dynamic supervisor service
+    2/2; two-process `distribution_hedge_process` 2/2; 22 of the remote lifecycle contract's 39 tests,
+    including the cross-process CLI host and probe.
+  - Red: `atp_native_sdk_transfer` 19/20, where the 09-22 writer's shutdown hits a 20 s QUIC handshake
+    timeout; `membership_persistent_native` 1 failure, `AttemptTimeout` after a process restart;
+    `quic_h3_live_udp` 11/15, where two failures are a test-harness executable-size bound and two are
+    request deadlines not attributed to `CancelKind::Deadline`.
+  - Hang: `remote_tls_listener_parent_cancellation_interrupts_stalled_handshake` sat at 0% CPU in a
+    futex wait for more than 12 minutes, so the lane was cancelled; the targets it did not reach were
+    re-queued.
+  - A future-incompatibility lint (`recursion_depth_exceeding_limit`, "will become a hard error") fires
+    in `symbol_service_native`.
+  - Receipts are posted on G2.2/G2.3/G2.4 and R27a. The README's "execution of the new Rust
+    regressions remains unverified" for NativeH3Listener is now answered: 11 of 15 green.
+- First-execution lane F2 (pristine `8525d7055`, default features).
+  - Green: `supervision_regression` 6/6; `dynamic_supervision_native` 2/2 and `resource_bracket_native` 4/4
+    (both first runs); `atp_rq_symbol_auth_e2e_contract` 4/4; RaptorQ K=2048 encoder differential 1/1 and
+    reference vectors 3/3.
+  - Red: `e2e_stream_pipeline` 20/21 (native stage-panic attribution); `browser_ga_final_signoff_contract`
+    6/8 and `wasm_supply_chain_controls` 5/10, both exactly as predicted by the browser audit.
 - Phase 2: this section, written in place.
 - Phase 3a: 69 beads created under `bi2462` using the frozen generation instructions and only `br`. 24 existing
   beads received evidence comments (landed-but-unrecorded work, unmet acceptance, new prerequisites), and 27
