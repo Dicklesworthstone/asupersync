@@ -61,6 +61,13 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
+#[cfg(feature = "http2-streaming")]
+mod streaming;
+#[cfg(feature = "http2-streaming")]
+pub use streaming::Http2StreamingListenerConfig;
+#[cfg(feature = "http2-streaming")]
+use streaming::{StreamingDispatch, StreamingRequests};
+
 /// Tick interval for the listener's drain supervision loop and for the
 /// stage-1 → stage-2 GOAWAY spacing inside the connection driver (one
 /// round-trip-ish window for racing in-flight stream creation, RFC 9113
@@ -374,11 +381,89 @@ fn request_from_h2_parts(
             }
         }
     }
-
     if declared_length.is_some_and(|length| length != body.len() as u64) {
         return Err(H2Error::protocol(
             "request content-length does not match DATA bytes",
         ));
+    }
+    let method_text = method.ok_or_else(|| H2Error::protocol(":method pseudo-header missing"))?;
+    let method = Method::from_bytes(method_text.as_bytes())
+        .ok_or_else(|| H2Error::protocol("invalid :method token"))?;
+    let uri = path.ok_or_else(|| {
+        H2Error::protocol(":path pseudo-header missing (CONNECT is not supported by this listener)")
+    })?;
+    let mut request_headers = Vec::with_capacity(regular.len() + 1);
+    if let Some(authority) = authority
+        && !regular
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        // RFC 9113 §8.3.1: the authority carries what h1 put in Host.
+        request_headers.push(("host".to_owned(), authority));
+    }
+    request_headers.extend(regular);
+    let mut request_trailers = Vec::with_capacity(trailers.len());
+    for trailer in trailers {
+        if trailer.name.starts_with(':') {
+            return Err(H2Error::protocol(format!(
+                "unexpected request trailer pseudo-header {}",
+                trailer.name
+            )));
+        }
+        request_trailers.push((trailer.name, trailer.value));
+    }
+    Ok(Request {
+        method,
+        uri,
+        version: Version::Http2,
+        headers: request_headers,
+        body,
+        trailers: request_trailers,
+        peer_addr,
+    })
+}
+
+#[cfg(feature = "http2-streaming")]
+fn request_head_from_h2_headers(
+    headers: Vec<Header>,
+) -> Result<(crate::http::h1::stream::RequestHead, Option<u64>), H2Error> {
+    let mut method = None;
+    let mut path = None;
+    let mut authority = None;
+    let mut regular = Vec::with_capacity(headers.len());
+    let mut declared_length = None;
+    for header in headers {
+        match header.name.as_str() {
+            ":method" => method = Some(header.value),
+            ":path" => path = Some(header.value),
+            ":authority" => authority = Some(header.value),
+            // `:scheme` has no h1 `Request` equivalent; `:protocol` is the
+            // RFC 8441 extended-CONNECT marker, validated upstream.
+            ":scheme" | ":protocol" => {}
+            name if name.starts_with(':') => {
+                return Err(H2Error::protocol(format!(
+                    "unexpected request pseudo-header {name}"
+                )));
+            }
+            _ => {
+                if header.name == "content-length" {
+                    let value = header.value.as_str();
+                    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return Err(H2Error::protocol("invalid request content-length"));
+                    }
+                    let length = value
+                        .parse::<u64>()
+                        .map_err(|_| H2Error::protocol("invalid request content-length"))?;
+                    if declared_length
+                        .replace(length)
+                        .is_some_and(|old| old != length)
+                    {
+                        return Err(H2Error::protocol("conflicting request content-length"));
+                    }
+                }
+                regular.push((header.name, header.value));
+            }
+        }
     }
 
     let method_text = method.ok_or_else(|| H2Error::protocol(":method pseudo-header missing"))?;
@@ -399,26 +484,15 @@ fn request_from_h2_parts(
     }
     request_headers.extend(regular);
 
-    let mut request_trailers = Vec::with_capacity(trailers.len());
-    for trailer in trailers {
-        if trailer.name.starts_with(':') {
-            return Err(H2Error::protocol(format!(
-                "unexpected request trailer pseudo-header {}",
-                trailer.name
-            )));
-        }
-        request_trailers.push((trailer.name, trailer.value));
-    }
-
-    Ok(Request {
-        method,
-        uri,
-        version: Version::Http2,
-        headers: request_headers,
-        body,
-        trailers: request_trailers,
-        peer_addr,
-    })
+    Ok((
+        crate::http::h1::stream::RequestHead {
+            method,
+            uri,
+            version: Version::Http2,
+            headers: request_headers,
+        },
+        declared_length,
+    ))
 }
 
 fn should_strip_h2_response_header(lowered: &str, value: &str) -> bool {
@@ -1214,6 +1288,25 @@ where
     }
 }
 
+#[cfg(feature = "http2-streaming")]
+async fn run_owned_h2_hop_with_cx<F, Fut>(
+    cx: &Cx,
+    signal: &ShutdownSignal,
+    config: OwnedH2HopConfig,
+    factory: F,
+) -> Result<OwnedH2HopCompletion, String>
+where
+    F: FnOnce(Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
+{
+    run_owned_h2_hop(cx, signal, config, move || {
+        // This factory is invoked by execute_owned_h2_body inside the actual
+        // admitted child task. Its installed context is the body's own Cx.
+        factory(Cx::current().expect("owned HTTP/2 request task context"))
+    })
+    .await
+}
+
 async fn run_owned_h2_hop<F, Fut>(
     cx: &Cx,
     signal: &ShutdownSignal,
@@ -1315,6 +1408,14 @@ where
 
 /// A handler outcome travelling back to the connection driver.
 enum FunnelItem {
+    /// A live request's actual child region has closed before publication.
+    #[cfg(feature = "http2-streaming")]
+    StreamingDone {
+        stream_id: u32,
+        response: Option<Http2Response>,
+        guard: InFlightRequestGuard,
+        suppress_response_body: bool,
+    },
     /// A completed response. The guard is retained until its queued frames
     /// have flushed; `suppress_response_body` records HEAD semantics.
     Response {
@@ -1892,6 +1993,9 @@ fn suppress_response_body_for_head(resp: &mut Response) {
 
 /// One wake-up of the connection driver's event select.
 enum DriverEvent {
+    /// Request-body consumption, source publication, or terminal progress.
+    #[cfg(feature = "http2-streaming")]
+    StreamingProgress,
     /// An incoming frame (or EOF when `None`).
     Frame(Option<Result<DecodedFrame, H2Error>>),
     /// A handler finished and its response is ready to encode.
@@ -2090,7 +2194,9 @@ async fn pump_writes_with_body_diagnostics(
 async fn next_driver_event(
     framed: &mut Framed<TcpStream, ListenerFrameCodec>,
     resp_rx: &mut mpsc::Receiver<FunnelItem>,
-    conn: &Connection,
+    #[cfg(not(feature = "http2-streaming"))] conn: &Connection,
+    #[cfg(feature = "http2-streaming")] conn: &mut Connection,
+    #[cfg(feature = "http2-streaming")] incoming: &mut Option<StreamingRequests>,
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
     produced_poll_after: &mut Option<u32>,
     task_cx: &Cx,
@@ -2181,6 +2287,13 @@ async fn next_driver_event(
             if produced_failure_fut.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(DriverEvent::ProducedDrainTimeout(stream_id));
             }
+        }
+        #[cfg(feature = "http2-streaming")]
+        if incoming
+            .as_mut()
+            .is_some_and(|incoming| incoming.poll(conn, cx))
+        {
+            return Poll::Ready(DriverEvent::StreamingProgress);
         }
         // Cancel-correct channels make dropping a partially-polled recv
         // safe: no item is consumed unless the future completes.
@@ -2603,760 +2716,272 @@ async fn serve_h2_connection<F, Fut>(
     stream_idle_timeout: Option<Duration>,
     time_getter: fn() -> Time,
     owned_request: bool,
+    #[cfg(feature = "http2-streaming")] streaming: Option<StreamingDispatch>,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = H2DispatchResponse> + Send + 'static,
 {
-    let task_cx = Cx::current()
-        .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
+    #[cfg(feature = "http2-streaming")]
+    let mut incoming = streaming.map(StreamingRequests::new);
+    let result = async {
+        let task_cx = Cx::current()
+            .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
 
-    let mut preface = [0u8; CLIENT_PREFACE.len()];
-    stream.read_exact(&mut preface).await?;
-    if preface != *CLIENT_PREFACE {
-        return Err(io::Error::other("invalid HTTP/2 client preface"));
-    }
-
-    // Drive the connection's timeout/rate-limit bookkeeping from the same clock
-    // the listener uses, so a virtual-time driver makes h2 deadlines (idle,
-    // CONTINUATION, RST-window) deterministic in the lab runtime instead of the
-    // connection silently reading the wall clock (br-asupersync-faekxk).
-    // Honor this listener's advertised SETTINGS_MAX_FRAME_SIZE as the inbound
-    // accept limit. Without this the codec keeps the protocol default (16 KiB)
-    // even when the local settings advertise a larger `max_frame_size`, so a
-    // conformant peer frame sized within the advertised limit would be wrongly
-    // rejected with FRAME_SIZE_ERROR. The accept limit is always the LOCAL
-    // advertised value, never the peer's (br-asupersync-i1r9cw).
-    let local_max_frame_size = settings.max_frame_size;
-    let mut conn = Connection::server_with_time_getter(settings, time_getter);
-    conn.queue_initial_settings();
-    conn.set_initial_connection_recv_window(initial_connection_window_size)
-        .map_err(io::Error::other)?;
-    let mut framed = Framed::new(stream, frame_codec_for(local_max_frame_size));
-
-    let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
-    // Per-stream request assembly: headers arrive first, DATA accumulates
-    // until END_STREAM completes the request.
-    let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)> = HashMap::new();
-    // Absolute inactivity deadlines for partially received request streams.
-    // A deadline is replaced only by actual HEADERS/DATA progress, never by
-    // unrelated connection wake-ups.
-    let mut pending_stream_idle_deadlines: HashMap<u32, Time> = HashMap::new();
-    // Fixed stage-2 GOAWAY deadline, armed once when stage-1 is outstanding.
-    let mut finalize_at: Option<Time> = None;
-    let mut response_guards: HashMap<u32, Arc<InFlightRequestGuard>> = HashMap::new();
-    let mut produced_bodies: BTreeMap<u32, ActiveProducedBody> = BTreeMap::new();
-    // Complete requests remain tracked while their handler is in flight so a
-    // peer RST cannot disappear in the dispatch -> response-funnel gap.
-    let mut dispatched_streams: HashSet<u32> = HashSet::new();
-    let mut peer_reset_before_response: HashSet<u32> = HashSet::new();
-    let mut produced_poll_after = None;
-    let mut associated_pushes: HashMap<u32, Vec<u32>> = HashMap::new();
-    // br-asupersync-mfqfst L4: count requests dispatched to the handler on
-    // this connection so it can be recycled once the configured budget is
-    // reached (see the recycle check at the end of the loop body).
-    let mut requests_dispatched: u64 = 0;
-    // br-asupersync-mfqfst L4: absolute idle deadline, armed once when the
-    // connection becomes fully quiescent and cleared as soon as activity
-    // resumes (kept fixed in between so it is not pushed forward by wake-ups).
-    let mut idle_at: Option<Time> = None;
-
-    loop {
-        pump_writes_with_body_diagnostics(
-            &mut conn,
-            &mut framed,
-            &pending_requests,
-            &dispatched_streams,
-            &mut produced_bodies,
-            &response_guards,
-        )
-        .await?;
-        release_flushed_response_guards(&conn, &mut response_guards);
-
-        // Do not close the transport while frames remain queued. Flow-control
-        // -blocked DATA stays in the connection's pending_ops after
-        // pump_writes (its next_frame re-queues it), and neither
-        // graceful_shutdown_complete() nor goaway_received() consult it.
-        // Closing here would truncate an in-flight response and mis-report
-        // the loss as a clean drain. The connection stays open until a
-        // WINDOW_UPDATE unblocks the data or the drain supervisor escalates
-        // to force-close.
-        if !conn.has_pending_frames()
-            && produced_bodies.is_empty()
-            && (conn.graceful_shutdown_complete()
-                || (conn.goaway_received()
-                    && conn.active_stream_count() == 0
-                    && pending_requests.is_empty()))
-        {
-            std::future::poll_fn(|cx| framed.poll_close(cx)).await?;
-            return Ok(());
+        let mut preface = [0u8; CLIENT_PREFACE.len()];
+        stream.read_exact(&mut preface).await?;
+        if preface != *CLIENT_PREFACE {
+            return Err(io::Error::other("invalid HTTP/2 client preface"));
         }
 
-        let watch_drain = !conn.goaway_sent();
-        let now = Cx::current()
-            .and_then(|cx| cx.timer_driver())
-            .map_or_else(crate::time::wall_now, |timer| timer.now());
-        // Arm the stage-2 finalize deadline once, when the stage-1 GOAWAY is
-        // outstanding; keep it fixed across loop iterations so active traffic
-        // cannot reset the window.
-        if conn.graceful_shutdown_pending() {
-            if finalize_at.is_none() {
-                finalize_at = Some(now + DRAIN_SUPERVISION_TICK);
-            }
-        } else {
-            finalize_at = None;
-        }
-        // br-asupersync-mfqfst L4: arm the idle timeout while the connection is
-        // fully quiescent — no active streams, nothing being assembled, no
-        // queued frames, not mid-CONTINUATION, and no GOAWAY in flight (the
-        // shutdown paths own closing once a GOAWAY is sent). A busy connection
-        // never trips it; an idle keep-alive or a client that connects and
-        // makes no progress is reclaimed after the configured budget.
-        let connection_idle = !conn.goaway_sent()
-            && conn.active_stream_count() == 0
-            && pending_requests.is_empty()
-            && produced_bodies.is_empty()
-            && !conn.is_awaiting_continuation()
-            && !conn.has_pending_frames();
-        if let Some(timeout) = idle_timeout.filter(|_| connection_idle) {
-            if idle_at.is_none() {
-                idle_at = Some(now + timeout);
-            }
-        } else {
-            idle_at = None;
-        }
-        // br-asupersync-mfqfst L4: while a header block is mid-CONTINUATION,
-        // arm an absolute deadline from the connection's remaining budget so a
-        // client that opens the block and goes silent is reclaimed instead of
-        // hanging. Recomputed each iteration: as wall time advances the
-        // remaining budget shrinks by the same amount, so `now + remaining`
-        // stays a stable absolute deadline and collapses to `now` once spent.
-        let continuation_at = conn
-            .continuation_timeout_remaining()
-            .map(|remaining| now + remaining);
-        let stream_idle_at = pending_stream_idle_deadlines
-            .iter()
-            .min_by_key(|(stream_id, deadline)| (**deadline, **stream_id))
-            .map(|(stream_id, deadline)| (*stream_id, *deadline));
-        let produced_failure_at = produced_bodies
-            .iter()
-            .filter_map(|(stream_id, state)| {
-                state
-                    .failure_drain_deadline
-                    .map(|deadline| (*stream_id, deadline))
-            })
-            .min_by_key(|(stream_id, deadline)| (*deadline, *stream_id));
-        let event = next_driver_event(
-            &mut framed,
-            &mut resp_rx,
-            &conn,
-            &mut produced_bodies,
-            &mut produced_poll_after,
-            &task_cx,
-            &shutdown_signal,
-            watch_drain,
-            finalize_at,
-            idle_at,
-            continuation_at,
-            stream_idle_at,
-            produced_failure_at,
-        )
-        .await;
+        // Drive the connection's timeout/rate-limit bookkeeping from the same clock
+        // the listener uses, so a virtual-time driver makes h2 deadlines (idle,
+        // CONTINUATION, RST-window) deterministic in the lab runtime instead of the
+        // connection silently reading the wall clock (br-asupersync-faekxk).
+        // Honor this listener's advertised SETTINGS_MAX_FRAME_SIZE as the inbound
+        // accept limit. Without this the codec keeps the protocol default (16 KiB)
+        // even when the local settings advertise a larger `max_frame_size`, so a
+        // conformant peer frame sized within the advertised limit would be wrongly
+        // rejected with FRAME_SIZE_ERROR. The accept limit is always the LOCAL
+        // advertised value, never the peer's (br-asupersync-i1r9cw).
+        let local_max_frame_size = settings.max_frame_size;
+        let mut conn = Connection::server_with_time_getter(settings, time_getter);
+        conn.queue_initial_settings();
+        conn.set_initial_connection_recv_window(initial_connection_window_size)
+            .map_err(io::Error::other)?;
+        let mut framed = Framed::new(stream, frame_codec_for(local_max_frame_size));
 
-        match event {
-            DriverEvent::ForceClose => {
-                // Escalation: drop the transport; spawned handler hops are
-                // raced against ForceClosing and request-region teardown is
-                // the cancellation backstop (h1 parity).
-                cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 connection force-closed");
+        let (resp_tx, mut resp_rx) = mpsc::channel::<FunnelItem>(RESPONSE_FUNNEL_CAPACITY);
+        // Per-stream request assembly: headers arrive first, DATA accumulates
+        // until END_STREAM completes the request.
+        let mut pending_requests: HashMap<u32, (Vec<Header>, Vec<u8>)> = HashMap::new();
+        // Absolute inactivity deadlines for partially received request streams.
+        // A deadline is replaced only by actual HEADERS/DATA progress, never by
+        // unrelated connection wake-ups.
+        let mut pending_stream_idle_deadlines: HashMap<u32, Time> = HashMap::new();
+        // Fixed stage-2 GOAWAY deadline, armed once when stage-1 is outstanding.
+        let mut finalize_at: Option<Time> = None;
+        let mut response_guards: HashMap<u32, Arc<InFlightRequestGuard>> = HashMap::new();
+        let mut produced_bodies: BTreeMap<u32, ActiveProducedBody> = BTreeMap::new();
+        // Complete requests remain tracked while their handler is in flight so a
+        // peer RST cannot disappear in the dispatch -> response-funnel gap.
+        let mut dispatched_streams: HashSet<u32> = HashSet::new();
+        let mut peer_reset_before_response: HashSet<u32> = HashSet::new();
+        let mut produced_poll_after = None;
+        let mut associated_pushes: HashMap<u32, Vec<u32>> = HashMap::new();
+        // br-asupersync-mfqfst L4: count requests dispatched to the handler on
+        // this connection so it can be recycled once the configured budget is
+        // reached (see the recycle check at the end of the loop body).
+        let mut requests_dispatched: u64 = 0;
+        // br-asupersync-mfqfst L4: absolute idle deadline, armed once when the
+        // connection becomes fully quiescent and cleared as soon as activity
+        // resumes (kept fixed in between so it is not pushed forward by wake-ups).
+        let mut idle_at: Option<Time> = None;
+
+        loop {
+            pump_writes_with_body_diagnostics(
+                &mut conn,
+                &mut framed,
+                &pending_requests,
+                &dispatched_streams,
+                &mut produced_bodies,
+                &response_guards,
+            )
+            .await?;
+            release_flushed_response_guards(&conn, &mut response_guards);
+            #[cfg(feature = "http2-streaming")]
+            if let Some(incoming) = &mut incoming {
+                let reset_queued = incoming.after_flush(&mut conn, &response_guards);
+                pending_stream_idle_deadlines.retain(|stream_id, _| incoming.is_active(*stream_id));
+                if reset_queued {
+                    continue;
+                }
+            }
+
+            // Do not close the transport while frames remain queued. Flow-control
+            // -blocked DATA stays in the connection's pending_ops after
+            // pump_writes (its next_frame re-queues it), and neither
+            // graceful_shutdown_complete() nor goaway_received() consult it.
+            // Closing here would truncate an in-flight response and mis-report
+            // the loss as a clean drain. The connection stays open until a
+            // WINDOW_UPDATE unblocks the data or the drain supervisor escalates
+            // to force-close.
+            let can_close = !conn.has_pending_frames()
+                && produced_bodies.is_empty()
+                && (conn.graceful_shutdown_complete()
+                    || (conn.goaway_received()
+                        && conn.active_stream_count() == 0
+                        && pending_requests.is_empty()));
+            #[cfg(feature = "http2-streaming")]
+            let can_close = can_close && incoming.as_ref().is_none_or(StreamingRequests::is_empty);
+            if can_close {
+                std::future::poll_fn(|cx| framed.poll_close(cx)).await?;
                 return Ok(());
             }
-            DriverEvent::DrainRequested => {
-                conn.begin_graceful_shutdown(crate::bytes::Bytes::from_static(b"server draining"));
+
+            let watch_drain = !conn.goaway_sent();
+            let now = Cx::current()
+                .and_then(|cx| cx.timer_driver())
+                .map_or_else(crate::time::wall_now, |timer| timer.now());
+            // Arm the stage-2 finalize deadline once, when the stage-1 GOAWAY is
+            // outstanding; keep it fixed across loop iterations so active traffic
+            // cannot reset the window.
+            if conn.graceful_shutdown_pending() {
+                if finalize_at.is_none() {
+                    finalize_at = Some(now + DRAIN_SUPERVISION_TICK);
+                }
+            } else {
+                finalize_at = None;
             }
-            DriverEvent::FinalizeTick => {
-                conn.finalize_graceful_shutdown(crate::bytes::Bytes::new());
+            // br-asupersync-mfqfst L4: arm the idle timeout while the connection is
+            // fully quiescent — no active streams, nothing being assembled, no
+            // queued frames, not mid-CONTINUATION, and no GOAWAY in flight (the
+            // shutdown paths own closing once a GOAWAY is sent). A busy connection
+            // never trips it; an idle keep-alive or a client that connects and
+            // makes no progress is reclaimed after the configured budget.
+            let connection_idle = !conn.goaway_sent()
+                && conn.active_stream_count() == 0
+                && pending_requests.is_empty()
+                && produced_bodies.is_empty()
+                && !conn.is_awaiting_continuation()
+                && !conn.has_pending_frames();
+            #[cfg(feature = "http2-streaming")]
+            let connection_idle =
+                connection_idle && incoming.as_ref().is_none_or(StreamingRequests::is_empty);
+            if let Some(timeout) = idle_timeout.filter(|_| connection_idle) {
+                if idle_at.is_none() {
+                    idle_at = Some(now + timeout);
+                }
+            } else {
+                idle_at = None;
             }
-            DriverEvent::IdleTimeout => {
-                // br-asupersync-mfqfst L4: the connection has been fully
-                // quiescent past the idle budget (it is only armed when no
-                // stream is active and nothing is queued), so a NO_ERROR
-                // GOAWAY + close strands no in-flight work. h1 parity with
-                // the keep-alive idle timeout.
-                conn.goaway(
-                    ErrorCode::NoError,
-                    crate::bytes::Bytes::from_static(b"idle timeout"),
-                );
-                pump_writes_with_body_diagnostics(
-                    &mut conn,
-                    &mut framed,
-                    &pending_requests,
-                    &dispatched_streams,
-                    &mut produced_bodies,
-                    &response_guards,
-                )
-                .await?;
-                let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
-                cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 connection idle timeout");
-                return Ok(());
-            }
-            DriverEvent::ContinuationTimeout => {
-                // br-asupersync-mfqfst L4: a header block was left incomplete
-                // past the CONTINUATION budget with no further frame. RFC 9113
-                // §6.10 treats a broken CONTINUATION sequence as a connection
-                // PROTOCOL_ERROR, so GOAWAY + close (matching the on-arrival
-                // check in Connection::check_continuation_timeout).
-                conn.goaway(
-                    ErrorCode::ProtocolError,
-                    crate::bytes::Bytes::from_static(b"CONTINUATION timeout"),
-                );
-                pump_writes_with_body_diagnostics(
-                    &mut conn,
-                    &mut framed,
-                    &pending_requests,
-                    &dispatched_streams,
-                    &mut produced_bodies,
-                    &response_guards,
-                )
-                .await?;
-                let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
-                cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 CONTINUATION timeout");
-                return Ok(());
-            }
-            DriverEvent::StreamIdleTimeout(stream_id) => {
-                record_h2_body_diagnostic_code(
-                    stream_id,
-                    WebBodyDiagnostic::Timeout.code(),
-                    "pending request body exceeded its stream idle timeout",
-                );
-                pending_stream_idle_deadlines.remove(&stream_id);
-                pending_requests.remove(&stream_id);
-                conn.reset_stream(stream_id, ErrorCode::Cancel);
-                cancel_produced_body(
-                    &mut produced_bodies,
-                    stream_id,
-                    "HTTP/2 produced response stream idle timeout",
-                );
-                reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
-            }
-            DriverEvent::ProducedDrainTimeout(stream_id) => {
-                match produced_bodies
-                    .get(&stream_id)
-                    .and_then(|state| state.producer_outcome)
-                {
-                    Some(Http2ProducerOutcome::Failed) => record_h2_body_diagnostic(
-                        stream_id,
-                        WebBodyDiagnostic::ResponseProducerFailure,
-                        "failed producer exceeded its bounded drain grace",
-                    ),
-                    Some(Http2ProducerOutcome::DeadlineExceeded) => {
-                        record_h2_body_diagnostic_code(
-                            stream_id,
-                            "ASUP-E501",
-                            "deadline-exhausted producer exceeded its bounded drain grace",
-                        );
-                    }
-                    Some(Http2ProducerOutcome::ConnectionLost) => record_h2_body_diagnostic(
-                        stream_id,
-                        WebBodyDiagnostic::ClientAbort,
-                        "connection-lost producer exceeded its bounded drain grace",
-                    ),
-                    Some(
-                        Http2ProducerOutcome::Cancelled | Http2ProducerOutcome::Finished { .. },
+            // br-asupersync-mfqfst L4: while a header block is mid-CONTINUATION,
+            // arm an absolute deadline from the connection's remaining budget so a
+            // client that opens the block and goes silent is reclaimed instead of
+            // hanging. Recomputed each iteration: as wall time advances the
+            // remaining budget shrinks by the same amount, so `now + remaining`
+            // stays a stable absolute deadline and collapses to `now` once spent.
+            let continuation_at = conn
+                .continuation_timeout_remaining()
+                .map(|remaining| now + remaining);
+            let stream_idle_at = pending_stream_idle_deadlines
+                .iter()
+                .min_by_key(|(stream_id, deadline)| (**deadline, **stream_id))
+                .map(|(stream_id, deadline)| (*stream_id, *deadline));
+            let produced_failure_at = produced_bodies
+                .iter()
+                .filter_map(|(stream_id, state)| {
+                    state
+                        .failure_drain_deadline
+                        .map(|deadline| (*stream_id, deadline))
+                })
+                .min_by_key(|(stream_id, deadline)| (*deadline, *stream_id));
+            let event = next_driver_event(
+                &mut framed,
+                &mut resp_rx,
+                #[cfg(not(feature = "http2-streaming"))]
+                &conn,
+                #[cfg(feature = "http2-streaming")]
+                &mut conn,
+                #[cfg(feature = "http2-streaming")]
+                &mut incoming,
+                &mut produced_bodies,
+                &mut produced_poll_after,
+                &task_cx,
+                &shutdown_signal,
+                watch_drain,
+                finalize_at,
+                idle_at,
+                continuation_at,
+                stream_idle_at,
+                produced_failure_at,
+            )
+            .await;
+
+            match event {
+                #[cfg(feature = "http2-streaming")]
+                DriverEvent::StreamingProgress => {}
+                DriverEvent::ForceClose => {
+                    // Escalation: drop the transport; spawned handler hops are
+                    // raced against ForceClosing and request-region teardown is
+                    // the cancellation backstop (h1 parity).
+                    cancel_all_produced_bodies(
+                        &mut produced_bodies,
+                        "HTTP/2 connection force-closed",
+                    );
+                    return Ok(());
+                }
+                DriverEvent::DrainRequested => {
+                    conn.begin_graceful_shutdown(crate::bytes::Bytes::from_static(
+                        b"server draining",
+                    ));
+                }
+                DriverEvent::FinalizeTick => {
+                    conn.finalize_graceful_shutdown(crate::bytes::Bytes::new());
+                }
+                DriverEvent::IdleTimeout => {
+                    // br-asupersync-mfqfst L4: the connection has been fully
+                    // quiescent past the idle budget (it is only armed when no
+                    // stream is active and nothing is queued), so a NO_ERROR
+                    // GOAWAY + close strands no in-flight work. h1 parity with
+                    // the keep-alive idle timeout.
+                    conn.goaway(
+                        ErrorCode::NoError,
+                        crate::bytes::Bytes::from_static(b"idle timeout"),
+                    );
+                    pump_writes_with_body_diagnostics(
+                        &mut conn,
+                        &mut framed,
+                        &pending_requests,
+                        &dispatched_streams,
+                        &mut produced_bodies,
+                        &response_guards,
                     )
-                    | None => {}
-                }
-                conn.reset_stream(stream_id, ErrorCode::Cancel);
-                cancel_produced_body(
-                    &mut produced_bodies,
-                    stream_id,
-                    "HTTP/2 produced response exceeded failure drain grace",
-                );
-            }
-            DriverEvent::Frame(None) => {
-                // Peer closed the transport.
-                for stream_id in pending_requests.keys().copied() {
-                    record_h2_body_diagnostic(
-                        stream_id,
-                        WebBodyDiagnostic::ClientAbort,
-                        "peer closed the HTTP/2 connection with a pending request body",
-                    );
-                }
-                for stream_id in dispatched_streams.iter().copied() {
-                    record_h2_body_diagnostic(
-                        stream_id,
-                        WebBodyDiagnostic::ClientAbort,
-                        "peer closed the HTTP/2 connection while the handler was in flight",
-                    );
-                }
-                for stream_id in produced_bodies.keys().copied() {
-                    record_h2_body_diagnostic(
-                        stream_id,
-                        WebBodyDiagnostic::ClientAbort,
-                        "peer closed the HTTP/2 connection",
-                    );
-                }
-                cancel_all_produced_bodies(
-                    &mut produced_bodies,
-                    "HTTP/2 peer closed the connection",
-                );
-                return Ok(());
-            }
-            DriverEvent::Frame(Some(Err(decode_error))) => {
-                conn.goaway(decode_error.code, crate::bytes::Bytes::new());
-                pump_writes_with_body_diagnostics(
-                    &mut conn,
-                    &mut framed,
-                    &pending_requests,
-                    &dispatched_streams,
-                    &mut produced_bodies,
-                    &response_guards,
-                )
-                .await?;
-                let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
-                cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 frame decode failed");
-                return Err(io::Error::other(decode_error));
-            }
-            DriverEvent::Frame(Some(Ok(frame))) => match conn.process_decoded_frame(frame) {
-                Err(protocol_error) => {
-                    // Stream-scoped errors (RFC 9113 §5.4.2) reset only the
-                    // offending stream; tearing down the whole multiplexed
-                    // connection would kill every other in-flight request
-                    // (e.g. a single malformed header block, a stream-level
-                    // flow-control error, or the routine race of client DATA
-                    // arriving after the server reset a stream).
-                    if let Some(stream_id) = protocol_error.stream_id {
-                        conn.reset_stream(stream_id, protocol_error.code);
-                        pending_requests.remove(&stream_id);
-                        pending_stream_idle_deadlines.remove(&stream_id);
-                        cancel_produced_body(
-                            &mut produced_bodies,
-                            stream_id,
-                            "HTTP/2 stream protocol error",
-                        );
-                        reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
-                    } else {
-                        conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
-                        pump_writes_with_body_diagnostics(
-                            &mut conn,
-                            &mut framed,
-                            &pending_requests,
-                            &dispatched_streams,
-                            &mut produced_bodies,
-                            &response_guards,
-                        )
-                        .await?;
-                        let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
-                        cancel_all_produced_bodies(
-                            &mut produced_bodies,
-                            "HTTP/2 connection protocol error",
-                        );
-                        return Err(io::Error::other(protocol_error));
-                    }
-                }
-                Ok(Some(ReceivedFrame::Headers {
-                    stream_id,
-                    headers,
-                    end_stream,
-                })) => {
-                    if let Some((req_headers, req_body)) = pending_requests.remove(&stream_id) {
-                        pending_stream_idle_deadlines.remove(&stream_id);
-                        // A second HEADERS block on a stream already
-                        // assembling a body is request trailers (RFC 9113
-                        // §8.1; the connection enforces trailers carry
-                        // END_STREAM). The buffered request is now complete;
-                        // dispatch it with the trailer block kept separate on
-                        // the shared Request type for protocol adapters.
-                        if dispatch_h2_request(
-                            &mut conn,
-                            stream_id,
-                            req_headers,
-                            req_body,
-                            headers,
-                            peer_addr,
-                            &handler,
-                            &resp_tx,
-                            &shutdown_signal,
-                            &in_flight_requests,
-                            &runtime,
-                            &host_policy,
-                            request_timeout,
-                            request_timeout_header_cap,
-                            request_drain_grace,
-                            stream_idle_timeout,
-                            owned_request,
-                        ) {
-                            dispatched_streams.insert(stream_id);
-                            requests_dispatched = requests_dispatched.saturating_add(1);
-                        }
-                    } else if end_stream {
-                        if dispatch_h2_request(
-                            &mut conn,
-                            stream_id,
-                            headers,
-                            Vec::new(),
-                            Vec::new(),
-                            peer_addr,
-                            &handler,
-                            &resp_tx,
-                            &shutdown_signal,
-                            &in_flight_requests,
-                            &runtime,
-                            &host_policy,
-                            request_timeout,
-                            request_timeout_header_cap,
-                            request_drain_grace,
-                            stream_idle_timeout,
-                            owned_request,
-                        ) {
-                            dispatched_streams.insert(stream_id);
-                            requests_dispatched = requests_dispatched.saturating_add(1);
-                        }
-                    } else {
-                        pending_requests.insert(stream_id, (headers, Vec::new()));
-                        // Stream reclamation is opt-in. The connection idle
-                        // budget applies only once all streams are quiescent;
-                        // it must not override an explicitly disabled stream timer.
-                        if let Some(timeout) = stream_idle_timeout {
-                            pending_stream_idle_deadlines
-                                .insert(stream_id, (time_getter)() + timeout);
-                        }
-                    }
-                }
-                Ok(Some(ReceivedFrame::Data {
-                    stream_id,
-                    data,
-                    end_stream,
-                })) => {
-                    // Bytes buffered for every partially received request on
-                    // this connection, computed before the stream's own entry
-                    // is borrowed below.
-                    let pending_body_total: usize =
-                        pending_requests.values().map(|(_, body)| body.len()).sum();
-                    if let Some((_, body)) = pending_requests.get_mut(&stream_id) {
-                        // Progress re-arms the configured per-stream deadline.
-                        if let Some(timeout) = stream_idle_timeout {
-                            pending_stream_idle_deadlines
-                                .insert(stream_id, (time_getter)() + timeout);
-                        }
-                        if body.len().saturating_add(data.len()) > max_body_size
-                            || pending_body_total.saturating_add(data.len())
-                                > connection_pending_body_cap(max_body_size)
-                        {
-                            // Bound request buffering per stream AND per
-                            // connection: HTTP/2 flow control auto-replenishes
-                            // windows, so without the per-stream cap one
-                            // stream could buffer unbounded bytes, and without
-                            // the connection cap one peer could park
-                            // max_concurrent_streams bodies just under the
-                            // stream cap (256 x 16 MiB by default) for as
-                            // long as it keeps the connection open. Refuse
-                            // the stream and drop its partial body.
-                            conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);
-                            pending_requests.remove(&stream_id);
-                            pending_stream_idle_deadlines.remove(&stream_id);
-                        } else {
-                            body.extend_from_slice(&data);
-                            if end_stream {
-                                let (headers, body) = pending_requests
-                                    .remove(&stream_id)
-                                    .expect("pending request present");
-                                pending_stream_idle_deadlines.remove(&stream_id);
-                                if dispatch_h2_request(
-                                    &mut conn,
-                                    stream_id,
-                                    headers,
-                                    body,
-                                    Vec::new(),
-                                    peer_addr,
-                                    &handler,
-                                    &resp_tx,
-                                    &shutdown_signal,
-                                    &in_flight_requests,
-                                    &runtime,
-                                    &host_policy,
-                                    request_timeout,
-                                    request_timeout_header_cap,
-                                    request_drain_grace,
-                                    stream_idle_timeout,
-                                    owned_request,
-                                ) {
-                                    dispatched_streams.insert(stream_id);
-                                    requests_dispatched = requests_dispatched.saturating_add(1);
-                                }
-                            }
-                        }
-                    }
-                }
-                Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
-                    let dispatched = mark_h2_peer_reset_before_response(
-                        &mut dispatched_streams,
-                        &mut peer_reset_before_response,
-                        stream_id,
-                    );
-                    if pending_requests.contains_key(&stream_id)
-                        || dispatched
-                        || produced_bodies.contains_key(&stream_id)
-                    {
-                        record_h2_body_diagnostic(
-                            stream_id,
-                            WebBodyDiagnostic::ClientAbort,
-                            "peer reset the request/response body stream",
-                        );
-                    }
-                    pending_requests.remove(&stream_id);
-                    pending_stream_idle_deadlines.remove(&stream_id);
-                    cancel_produced_body(
+                    .await?;
+                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    cancel_all_produced_bodies(
                         &mut produced_bodies,
-                        stream_id,
-                        "HTTP/2 peer reset the produced response stream",
+                        "HTTP/2 connection idle timeout",
                     );
-                    reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
+                    return Ok(());
                 }
-                Ok(_) => {}
-            },
-            DriverEvent::ProducedBody(event) => match event {
-                ProducedBodyEvent::Frame {
-                    stream_id,
-                    frame: Ok(BodyFrame::Data(data)),
-                } => {
-                    let data = data.into_inner();
-                    let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-                    let Some(state) = produced_bodies.get_mut(&stream_id) else {
-                        continue;
-                    };
-                    let Some(emitted_bytes) = state.emitted_bytes.checked_add(data_len) else {
-                        record_h2_body_diagnostic(
-                            stream_id,
-                            WebBodyDiagnostic::ResponseProducerFailure,
-                            "produced response byte accounting overflowed",
-                        );
-                        conn.reset_stream(stream_id, ErrorCode::InternalError);
-                        cancel_produced_body(
-                            &mut produced_bodies,
-                            stream_id,
-                            "HTTP/2 produced response byte count overflowed",
-                        );
-                        continue;
-                    };
-                    state.emitted_bytes = emitted_bytes;
-                    if conn.send_data(stream_id, data, false).is_err() {
-                        record_h2_body_diagnostic(
-                            stream_id,
-                            WebBodyDiagnostic::ResponseProducerFailure,
-                            "produced DATA could not be queued",
-                        );
-                        conn.reset_stream(stream_id, ErrorCode::InternalError);
-                        cancel_produced_body(
-                            &mut produced_bodies,
-                            stream_id,
-                            "HTTP/2 produced DATA could not be queued",
-                        );
-                    } else {
-                        finalize_produced_body_if_ready(
-                            &mut conn,
-                            stream_id,
-                            &mut produced_bodies,
-                            &mut response_guards,
-                        );
-                    }
-                }
-                ProducedBodyEvent::Frame {
-                    stream_id,
-                    frame: Ok(BodyFrame::Trailers(trailers)),
-                } => {
-                    let Some(state) = produced_bodies.get_mut(&stream_id) else {
-                        continue;
-                    };
-                    if state.pending_trailers.replace(trailers).is_some() || state.body_eof {
-                        record_h2_body_diagnostic(
-                            stream_id,
-                            WebBodyDiagnostic::ResponseProducerFailure,
-                            "produced response emitted duplicate terminal frames",
-                        );
-                        conn.reset_stream(stream_id, ErrorCode::InternalError);
-                        cancel_produced_body(
-                            &mut produced_bodies,
-                            stream_id,
-                            "HTTP/2 produced response emitted duplicate terminal frames",
-                        );
-                    } else {
-                        finalize_produced_body_if_ready(
-                            &mut conn,
-                            stream_id,
-                            &mut produced_bodies,
-                            &mut response_guards,
-                        );
-                    }
-                }
-                ProducedBodyEvent::Frame {
-                    stream_id,
-                    frame: Err(HttpError::BodyCancelled),
-                } => {
-                    // The authoritative producer task owns cancellation-cause
-                    // classification. Keep the stream pending until its
-                    // ProducedDone outcome arrives instead of overwriting a
-                    // deadline or peer-reset acknowledgement with E510.
-                    if let Some(state) = produced_bodies.get_mut(&stream_id) {
-                        state.body_eof = true;
-                    }
-                    finalize_produced_body_if_ready(
+                DriverEvent::ContinuationTimeout => {
+                    // br-asupersync-mfqfst L4: a header block was left incomplete
+                    // past the CONTINUATION budget with no further frame. RFC 9113
+                    // §6.10 treats a broken CONTINUATION sequence as a connection
+                    // PROTOCOL_ERROR, so GOAWAY + close (matching the on-arrival
+                    // check in Connection::check_continuation_timeout).
+                    conn.goaway(
+                        ErrorCode::ProtocolError,
+                        crate::bytes::Bytes::from_static(b"CONTINUATION timeout"),
+                    );
+                    pump_writes_with_body_diagnostics(
                         &mut conn,
-                        stream_id,
+                        &mut framed,
+                        &pending_requests,
+                        &dispatched_streams,
                         &mut produced_bodies,
-                        &mut response_guards,
-                    );
+                        &response_guards,
+                    )
+                    .await?;
+                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 CONTINUATION timeout");
+                    return Ok(());
                 }
-                ProducedBodyEvent::Frame {
-                    stream_id,
-                    frame: Err(_),
-                } => {
-                    record_h2_body_diagnostic(
-                        stream_id,
-                        WebBodyDiagnostic::ResponseProducerFailure,
-                        "produced response body yielded an error frame",
-                    );
-                    if let Some(state) = produced_bodies.get_mut(&stream_id) {
-                        state.producer_outcome = Some(Http2ProducerOutcome::Failed);
-                        state.body_eof = true;
-                    }
-                    finalize_produced_body_if_ready(
-                        &mut conn,
-                        stream_id,
-                        &mut produced_bodies,
-                        &mut response_guards,
-                    );
-                }
-                ProducedBodyEvent::Eof { stream_id } => {
-                    if let Some(state) = produced_bodies.get_mut(&stream_id) {
-                        state.body_eof = true;
-                    }
-                    finalize_produced_body_if_ready(
-                        &mut conn,
-                        stream_id,
-                        &mut produced_bodies,
-                        &mut response_guards,
-                    );
-                }
-            },
-            DriverEvent::Response(item) => match item {
-                FunnelItem::Response {
-                    stream_id,
-                    response,
-                    guard,
-                    suppress_response_body,
-                } => {
-                    dispatched_streams.remove(&stream_id);
-                    if peer_reset_before_response.remove(&stream_id) {
-                        drop(guard);
-                        continue;
-                    }
-                    let outcomes = queue_h2_response(
-                        &mut conn,
-                        stream_id,
-                        response,
-                        guard,
-                        suppress_response_body,
-                        &mut response_guards,
-                    );
-                    record_promised_pushes(&mut associated_pushes, &outcomes);
-                }
-                FunnelItem::ProducedStart {
-                    stream_id,
-                    response,
-                    body,
-                    mut cancellation,
-                    guard,
-                } => {
-                    dispatched_streams.remove(&stream_id);
-                    if peer_reset_before_response.remove(&stream_id) {
-                        cancellation.cancel("HTTP/2 peer reset before produced response start");
-                        drop(guard);
-                        continue;
-                    }
-                    let writable = conn.stream(stream_id).is_some_and(|stream| {
-                        stream.error_code().is_none() && stream.state().can_send()
-                    });
-                    if !writable
-                        || produced_bodies.contains_key(&stream_id)
-                        || validate_h2_produced_response_for_queue(&response).is_err()
-                    {
-                        record_h2_body_diagnostic(
+                DriverEvent::StreamIdleTimeout(stream_id) => {
+                    #[cfg(feature = "http2-streaming")]
+                    if let Some(incoming) = &mut incoming {
+                        incoming.fail(
                             stream_id,
-                            WebBodyDiagnostic::ResponseProducerFailure,
-                            "produced response could not start on a writable stream",
+                            crate::http::h1::stream::IncomingBodyError::Cancelled {
+                                kind: CancelKind::Timeout,
+                            },
                         );
-                        cancellation.cancel("HTTP/2 produced response could not start");
-                        conn.reset_stream(stream_id, ErrorCode::InternalError);
-                        drop(guard);
-                        continue;
                     }
-                    let headers = h2_headers_from_response(&response)
-                        .expect("validated produced response head must encode");
-                    if conn.send_headers(stream_id, headers, false).is_err() {
-                        record_h2_body_diagnostic(
-                            stream_id,
-                            WebBodyDiagnostic::ResponseProducerFailure,
-                            "produced response headers could not be queued",
-                        );
-                        cancellation.cancel("HTTP/2 produced response headers could not be queued");
-                        conn.reset_stream(stream_id, ErrorCode::InternalError);
-                        drop(guard);
-                        continue;
-                    }
-                    let previous = produced_bodies.insert(
-                        stream_id,
-                        ActiveProducedBody {
-                            body,
-                            cancellation,
-                            guard: Some(guard),
-                            producer_outcome: None,
-                            emitted_bytes: 0,
-                            body_eof: false,
-                            pending_trailers: None,
-                            failure_drain_deadline: None,
-                        },
-                    );
-                    debug_assert!(previous.is_none());
-                }
-                FunnelItem::ProducedDone { stream_id, outcome } => {
-                    if let Some(state) = produced_bodies.get_mut(&stream_id) {
-                        if let Some((code, cause)) = h2_producer_outcome_diagnostic(outcome) {
-                            record_h2_body_diagnostic_code(stream_id, code, cause);
-                        }
-                        if state.producer_outcome.replace(outcome).is_some() {
-                            record_h2_body_diagnostic(
-                                stream_id,
-                                WebBodyDiagnostic::ResponseProducerFailure,
-                                "response producer completed more than once",
-                            );
-                            conn.reset_stream(stream_id, ErrorCode::InternalError);
-                            cancel_produced_body(
-                                &mut produced_bodies,
-                                stream_id,
-                                "HTTP/2 produced response completed more than once",
-                            );
-                            continue;
-                        }
-                        if !matches!(outcome, Http2ProducerOutcome::Finished { .. }) {
-                            state.failure_drain_deadline =
-                                Some((time_getter)() + request_drain_grace);
-                        }
-                    }
-                    finalize_produced_body_if_ready(
-                        &mut conn,
-                        stream_id,
-                        &mut produced_bodies,
-                        &mut response_guards,
-                    );
-                }
-                FunnelItem::StreamIdleTimeout { stream_id, guard } => {
-                    dispatched_streams.remove(&stream_id);
-                    peer_reset_before_response.remove(&stream_id);
                     record_h2_body_diagnostic_code(
                         stream_id,
-                        "ASUP-E501",
-                        "request handler exceeded its configured execution timeout",
+                        WebBodyDiagnostic::Timeout.code(),
+                        "pending request body exceeded its stream idle timeout",
                     );
                     pending_stream_idle_deadlines.remove(&stream_id);
                     pending_requests.remove(&stream_id);
@@ -3367,27 +2992,666 @@ where
                         "HTTP/2 produced response stream idle timeout",
                     );
                     reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
-                    drop(guard);
                 }
-            },
-        }
+                DriverEvent::ProducedDrainTimeout(stream_id) => {
+                    match produced_bodies
+                        .get(&stream_id)
+                        .and_then(|state| state.producer_outcome)
+                    {
+                        Some(Http2ProducerOutcome::Failed) => record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "failed producer exceeded its bounded drain grace",
+                        ),
+                        Some(Http2ProducerOutcome::DeadlineExceeded) => {
+                            record_h2_body_diagnostic_code(
+                                stream_id,
+                                "ASUP-E501",
+                                "deadline-exhausted producer exceeded its bounded drain grace",
+                            );
+                        }
+                        Some(Http2ProducerOutcome::ConnectionLost) => record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ClientAbort,
+                            "connection-lost producer exceeded its bounded drain grace",
+                        ),
+                        Some(
+                            Http2ProducerOutcome::Cancelled | Http2ProducerOutcome::Finished { .. },
+                        )
+                        | None => {}
+                    }
+                    conn.reset_stream(stream_id, ErrorCode::Cancel);
+                    cancel_produced_body(
+                        &mut produced_bodies,
+                        stream_id,
+                        "HTTP/2 produced response exceeded failure drain grace",
+                    );
+                }
+                DriverEvent::Frame(None) => {
+                    // Peer closed the transport.
+                    for stream_id in pending_requests.keys().copied() {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ClientAbort,
+                            "peer closed the HTTP/2 connection with a pending request body",
+                        );
+                    }
+                    for stream_id in dispatched_streams.iter().copied() {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ClientAbort,
+                            "peer closed the HTTP/2 connection while the handler was in flight",
+                        );
+                    }
+                    for stream_id in produced_bodies.keys().copied() {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ClientAbort,
+                            "peer closed the HTTP/2 connection",
+                        );
+                    }
+                    cancel_all_produced_bodies(
+                        &mut produced_bodies,
+                        "HTTP/2 peer closed the connection",
+                    );
+                    return Ok(());
+                }
+                DriverEvent::Frame(Some(Err(decode_error))) => {
+                    conn.goaway(decode_error.code, crate::bytes::Bytes::new());
+                    pump_writes_with_body_diagnostics(
+                        &mut conn,
+                        &mut framed,
+                        &pending_requests,
+                        &dispatched_streams,
+                        &mut produced_bodies,
+                        &response_guards,
+                    )
+                    .await?;
+                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 frame decode failed");
+                    return Err(io::Error::other(decode_error));
+                }
+                DriverEvent::Frame(Some(Ok(frame))) => match conn.process_decoded_frame(frame) {
+                    Err(protocol_error) => {
+                        // Stream-scoped errors (RFC 9113 §5.4.2) reset only the
+                        // offending stream; tearing down the whole multiplexed
+                        // connection would kill every other in-flight request
+                        // (e.g. a single malformed header block, a stream-level
+                        // flow-control error, or the routine race of client DATA
+                        // arriving after the server reset a stream).
+                        if let Some(stream_id) = protocol_error.stream_id {
+                            #[cfg(feature = "http2-streaming")]
+                            if let Some(incoming) = &mut incoming {
+                                incoming.fail(
+                                    stream_id,
+                                    crate::http::h1::stream::IncomingBodyError::BadHeader,
+                                );
+                            }
+                            conn.reset_stream(stream_id, protocol_error.code);
+                            pending_requests.remove(&stream_id);
+                            pending_stream_idle_deadlines.remove(&stream_id);
+                            cancel_produced_body(
+                                &mut produced_bodies,
+                                stream_id,
+                                "HTTP/2 stream protocol error",
+                            );
+                            reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
+                        } else {
+                            conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
+                            pump_writes_with_body_diagnostics(
+                                &mut conn,
+                                &mut framed,
+                                &pending_requests,
+                                &dispatched_streams,
+                                &mut produced_bodies,
+                                &response_guards,
+                            )
+                            .await?;
+                            let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                            cancel_all_produced_bodies(
+                                &mut produced_bodies,
+                                "HTTP/2 connection protocol error",
+                            );
+                            return Err(io::Error::other(protocol_error));
+                        }
+                    }
+                    Ok(Some(ReceivedFrame::Headers {
+                        stream_id,
+                        headers,
+                        end_stream,
+                    })) => {
+                        #[cfg(feature = "http2-streaming")]
+                        if let Some(incoming) = &mut incoming {
+                            if incoming.contains(stream_id) {
+                                incoming.trailers(stream_id, headers, end_stream, &mut conn);
+                                if let Some(timeout) = stream_idle_timeout {
+                                    pending_stream_idle_deadlines
+                                        .insert(stream_id, (time_getter)() + timeout);
+                                }
+                            } else if incoming.admit(
+                                &mut conn,
+                                stream_id,
+                                headers,
+                                end_stream,
+                                peer_addr,
+                                &resp_tx,
+                                &shutdown_signal,
+                                &in_flight_requests,
+                                &runtime,
+                                &mut response_guards,
+                            ) {
+                                dispatched_streams.insert(stream_id);
+                                requests_dispatched = requests_dispatched.saturating_add(1);
+                                if let Some(timeout) = stream_idle_timeout {
+                                    pending_stream_idle_deadlines
+                                        .insert(stream_id, (time_getter)() + timeout);
+                                }
+                            }
+                            if !conn.goaway_sent()
+                                && max_requests_per_connection
+                                    .is_some_and(|max| requests_dispatched >= max)
+                            {
+                                conn.begin_graceful_shutdown(crate::bytes::Bytes::from_static(
+                                    b"max requests per connection reached",
+                                ));
+                            }
+                            continue;
+                        }
+                        if let Some((req_headers, req_body)) = pending_requests.remove(&stream_id) {
+                            pending_stream_idle_deadlines.remove(&stream_id);
+                            // A second HEADERS block on a stream already
+                            // assembling a body is request trailers (RFC 9113
+                            // §8.1; the connection enforces trailers carry
+                            // END_STREAM). The buffered request is now complete;
+                            // dispatch it with the trailer block kept separate on
+                            // the shared Request type for protocol adapters.
+                            if dispatch_h2_request(
+                                &mut conn,
+                                stream_id,
+                                req_headers,
+                                req_body,
+                                headers,
+                                peer_addr,
+                                &handler,
+                                &resp_tx,
+                                &shutdown_signal,
+                                &in_flight_requests,
+                                &runtime,
+                                &host_policy,
+                                request_timeout,
+                                request_timeout_header_cap,
+                                request_drain_grace,
+                                stream_idle_timeout,
+                                owned_request,
+                            ) {
+                                dispatched_streams.insert(stream_id);
+                                requests_dispatched = requests_dispatched.saturating_add(1);
+                            }
+                        } else if end_stream {
+                            if dispatch_h2_request(
+                                &mut conn,
+                                stream_id,
+                                headers,
+                                Vec::new(),
+                                Vec::new(),
+                                peer_addr,
+                                &handler,
+                                &resp_tx,
+                                &shutdown_signal,
+                                &in_flight_requests,
+                                &runtime,
+                                &host_policy,
+                                request_timeout,
+                                request_timeout_header_cap,
+                                request_drain_grace,
+                                stream_idle_timeout,
+                                owned_request,
+                            ) {
+                                dispatched_streams.insert(stream_id);
+                                requests_dispatched = requests_dispatched.saturating_add(1);
+                            }
+                        } else {
+                            pending_requests.insert(stream_id, (headers, Vec::new()));
+                            // Stream reclamation is opt-in. The connection idle
+                            // budget applies only once all streams are quiescent;
+                            // it must not override an explicitly disabled stream timer.
+                            if let Some(timeout) = stream_idle_timeout {
+                                pending_stream_idle_deadlines
+                                    .insert(stream_id, (time_getter)() + timeout);
+                            }
+                        }
+                    }
+                    Ok(Some(ReceivedFrame::Data {
+                        stream_id,
+                        data,
+                        end_stream,
+                    })) => {
+                        #[cfg(feature = "http2-streaming")]
+                        if let Some(incoming) = &mut incoming {
+                            incoming.data(stream_id, data, end_stream, &mut conn);
+                            if let Some(timeout) = stream_idle_timeout {
+                                pending_stream_idle_deadlines
+                                    .insert(stream_id, (time_getter)() + timeout);
+                            }
+                            continue;
+                        }
+                        // Bytes buffered for every partially received request on
+                        // this connection, computed before the stream's own entry
+                        // is borrowed below.
+                        let pending_body_total: usize =
+                            pending_requests.values().map(|(_, body)| body.len()).sum();
+                        if let Some((_, body)) = pending_requests.get_mut(&stream_id) {
+                            // Progress re-arms the configured per-stream deadline.
+                            if let Some(timeout) = stream_idle_timeout {
+                                pending_stream_idle_deadlines
+                                    .insert(stream_id, (time_getter)() + timeout);
+                            }
+                            if body.len().saturating_add(data.len()) > max_body_size
+                                || pending_body_total.saturating_add(data.len())
+                                    > connection_pending_body_cap(max_body_size)
+                            {
+                                // Bound request buffering per stream AND per
+                                // connection: HTTP/2 flow control auto-replenishes
+                                // windows, so without the per-stream cap one
+                                // stream could buffer unbounded bytes, and without
+                                // the connection cap one peer could park
+                                // max_concurrent_streams bodies just under the
+                                // stream cap (256 x 16 MiB by default) for as
+                                // long as it keeps the connection open. Refuse
+                                // the stream and drop its partial body.
+                                conn.reset_stream(stream_id, ErrorCode::EnhanceYourCalm);
+                                pending_requests.remove(&stream_id);
+                                pending_stream_idle_deadlines.remove(&stream_id);
+                            } else {
+                                body.extend_from_slice(&data);
+                                if end_stream {
+                                    let (headers, body) = pending_requests
+                                        .remove(&stream_id)
+                                        .expect("pending request present");
+                                    pending_stream_idle_deadlines.remove(&stream_id);
+                                    if dispatch_h2_request(
+                                        &mut conn,
+                                        stream_id,
+                                        headers,
+                                        body,
+                                        Vec::new(),
+                                        peer_addr,
+                                        &handler,
+                                        &resp_tx,
+                                        &shutdown_signal,
+                                        &in_flight_requests,
+                                        &runtime,
+                                        &host_policy,
+                                        request_timeout,
+                                        request_timeout_header_cap,
+                                        request_drain_grace,
+                                        stream_idle_timeout,
+                                        owned_request,
+                                    ) {
+                                        dispatched_streams.insert(stream_id);
+                                        requests_dispatched = requests_dispatched.saturating_add(1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
+                        #[cfg(feature = "http2-streaming")]
+                        if let Some(incoming) = &mut incoming {
+                            incoming.fail(
+                                stream_id,
+                                crate::http::h1::stream::IncomingBodyError::ClientAborted,
+                            );
+                        }
+                        let dispatched = mark_h2_peer_reset_before_response(
+                            &mut dispatched_streams,
+                            &mut peer_reset_before_response,
+                            stream_id,
+                        );
+                        if pending_requests.contains_key(&stream_id)
+                            || dispatched
+                            || produced_bodies.contains_key(&stream_id)
+                        {
+                            record_h2_body_diagnostic(
+                                stream_id,
+                                WebBodyDiagnostic::ClientAbort,
+                                "peer reset the request/response body stream",
+                            );
+                        }
+                        pending_requests.remove(&stream_id);
+                        pending_stream_idle_deadlines.remove(&stream_id);
+                        cancel_produced_body(
+                            &mut produced_bodies,
+                            stream_id,
+                            "HTTP/2 peer reset the produced response stream",
+                        );
+                        reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
+                    }
+                    Ok(_) => {}
+                },
+                DriverEvent::ProducedBody(event) => match event {
+                    ProducedBodyEvent::Frame {
+                        stream_id,
+                        frame: Ok(BodyFrame::Data(data)),
+                    } => {
+                        let data = data.into_inner();
+                        let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+                        let Some(state) = produced_bodies.get_mut(&stream_id) else {
+                            continue;
+                        };
+                        let Some(emitted_bytes) = state.emitted_bytes.checked_add(data_len) else {
+                            record_h2_body_diagnostic(
+                                stream_id,
+                                WebBodyDiagnostic::ResponseProducerFailure,
+                                "produced response byte accounting overflowed",
+                            );
+                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            cancel_produced_body(
+                                &mut produced_bodies,
+                                stream_id,
+                                "HTTP/2 produced response byte count overflowed",
+                            );
+                            continue;
+                        };
+                        state.emitted_bytes = emitted_bytes;
+                        if conn.send_data(stream_id, data, false).is_err() {
+                            record_h2_body_diagnostic(
+                                stream_id,
+                                WebBodyDiagnostic::ResponseProducerFailure,
+                                "produced DATA could not be queued",
+                            );
+                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            cancel_produced_body(
+                                &mut produced_bodies,
+                                stream_id,
+                                "HTTP/2 produced DATA could not be queued",
+                            );
+                        } else {
+                            finalize_produced_body_if_ready(
+                                &mut conn,
+                                stream_id,
+                                &mut produced_bodies,
+                                &mut response_guards,
+                            );
+                        }
+                    }
+                    ProducedBodyEvent::Frame {
+                        stream_id,
+                        frame: Ok(BodyFrame::Trailers(trailers)),
+                    } => {
+                        let Some(state) = produced_bodies.get_mut(&stream_id) else {
+                            continue;
+                        };
+                        if state.pending_trailers.replace(trailers).is_some() || state.body_eof {
+                            record_h2_body_diagnostic(
+                                stream_id,
+                                WebBodyDiagnostic::ResponseProducerFailure,
+                                "produced response emitted duplicate terminal frames",
+                            );
+                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            cancel_produced_body(
+                                &mut produced_bodies,
+                                stream_id,
+                                "HTTP/2 produced response emitted duplicate terminal frames",
+                            );
+                        } else {
+                            finalize_produced_body_if_ready(
+                                &mut conn,
+                                stream_id,
+                                &mut produced_bodies,
+                                &mut response_guards,
+                            );
+                        }
+                    }
+                    ProducedBodyEvent::Frame {
+                        stream_id,
+                        frame: Err(HttpError::BodyCancelled),
+                    } => {
+                        // The authoritative producer task owns cancellation-cause
+                        // classification. Keep the stream pending until its
+                        // ProducedDone outcome arrives instead of overwriting a
+                        // deadline or peer-reset acknowledgement with E510.
+                        if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                            state.body_eof = true;
+                        }
+                        finalize_produced_body_if_ready(
+                            &mut conn,
+                            stream_id,
+                            &mut produced_bodies,
+                            &mut response_guards,
+                        );
+                    }
+                    ProducedBodyEvent::Frame {
+                        stream_id,
+                        frame: Err(_),
+                    } => {
+                        record_h2_body_diagnostic(
+                            stream_id,
+                            WebBodyDiagnostic::ResponseProducerFailure,
+                            "produced response body yielded an error frame",
+                        );
+                        if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                            state.producer_outcome = Some(Http2ProducerOutcome::Failed);
+                            state.body_eof = true;
+                        }
+                        finalize_produced_body_if_ready(
+                            &mut conn,
+                            stream_id,
+                            &mut produced_bodies,
+                            &mut response_guards,
+                        );
+                    }
+                    ProducedBodyEvent::Eof { stream_id } => {
+                        if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                            state.body_eof = true;
+                        }
+                        finalize_produced_body_if_ready(
+                            &mut conn,
+                            stream_id,
+                            &mut produced_bodies,
+                            &mut response_guards,
+                        );
+                    }
+                },
+                DriverEvent::Response(item) => match item {
+                    #[cfg(feature = "http2-streaming")]
+                    FunnelItem::StreamingDone {
+                        stream_id,
+                        response,
+                        guard,
+                        suppress_response_body,
+                    } => {
+                        dispatched_streams.remove(&stream_id);
+                        pending_stream_idle_deadlines.remove(&stream_id);
+                        let peer_reset = peer_reset_before_response.remove(&stream_id);
+                        let accepted = std::future::poll_fn(|poll_cx| {
+                            Poll::Ready(incoming.as_mut().is_some_and(|incoming| {
+                                incoming.complete(stream_id, &mut conn, poll_cx)
+                            }))
+                        })
+                        .await;
+                        if accepted && !peer_reset {
+                            if let Some(response) = response {
+                                let outcomes = queue_h2_response(
+                                    &mut conn,
+                                    stream_id,
+                                    response,
+                                    guard,
+                                    suppress_response_body,
+                                    &mut response_guards,
+                                );
+                                record_promised_pushes(&mut associated_pushes, &outcomes);
+                            } else {
+                                conn.reset_stream(stream_id, ErrorCode::Cancel);
+                            }
+                        }
+                    }
+                    FunnelItem::Response {
+                        stream_id,
+                        response,
+                        guard,
+                        suppress_response_body,
+                    } => {
+                        dispatched_streams.remove(&stream_id);
+                        if peer_reset_before_response.remove(&stream_id) {
+                            drop(guard);
+                            continue;
+                        }
+                        let outcomes = queue_h2_response(
+                            &mut conn,
+                            stream_id,
+                            response,
+                            guard,
+                            suppress_response_body,
+                            &mut response_guards,
+                        );
+                        record_promised_pushes(&mut associated_pushes, &outcomes);
+                    }
+                    FunnelItem::ProducedStart {
+                        stream_id,
+                        response,
+                        body,
+                        mut cancellation,
+                        guard,
+                    } => {
+                        dispatched_streams.remove(&stream_id);
+                        if peer_reset_before_response.remove(&stream_id) {
+                            cancellation.cancel("HTTP/2 peer reset before produced response start");
+                            drop(guard);
+                            continue;
+                        }
+                        let writable = conn.stream(stream_id).is_some_and(|stream| {
+                            stream.error_code().is_none() && stream.state().can_send()
+                        });
+                        if !writable
+                            || produced_bodies.contains_key(&stream_id)
+                            || validate_h2_produced_response_for_queue(&response).is_err()
+                        {
+                            record_h2_body_diagnostic(
+                                stream_id,
+                                WebBodyDiagnostic::ResponseProducerFailure,
+                                "produced response could not start on a writable stream",
+                            );
+                            cancellation.cancel("HTTP/2 produced response could not start");
+                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            drop(guard);
+                            continue;
+                        }
+                        let headers = h2_headers_from_response(&response)
+                            .expect("validated produced response head must encode");
+                        if conn.send_headers(stream_id, headers, false).is_err() {
+                            record_h2_body_diagnostic(
+                                stream_id,
+                                WebBodyDiagnostic::ResponseProducerFailure,
+                                "produced response headers could not be queued",
+                            );
+                            cancellation
+                                .cancel("HTTP/2 produced response headers could not be queued");
+                            conn.reset_stream(stream_id, ErrorCode::InternalError);
+                            drop(guard);
+                            continue;
+                        }
+                        let previous = produced_bodies.insert(
+                            stream_id,
+                            ActiveProducedBody {
+                                body,
+                                cancellation,
+                                guard: Some(guard),
+                                producer_outcome: None,
+                                emitted_bytes: 0,
+                                body_eof: false,
+                                pending_trailers: None,
+                                failure_drain_deadline: None,
+                            },
+                        );
+                        debug_assert!(previous.is_none());
+                    }
+                    FunnelItem::ProducedDone { stream_id, outcome } => {
+                        if let Some(state) = produced_bodies.get_mut(&stream_id) {
+                            if let Some((code, cause)) = h2_producer_outcome_diagnostic(outcome) {
+                                record_h2_body_diagnostic_code(stream_id, code, cause);
+                            }
+                            if state.producer_outcome.replace(outcome).is_some() {
+                                record_h2_body_diagnostic(
+                                    stream_id,
+                                    WebBodyDiagnostic::ResponseProducerFailure,
+                                    "response producer completed more than once",
+                                );
+                                conn.reset_stream(stream_id, ErrorCode::InternalError);
+                                cancel_produced_body(
+                                    &mut produced_bodies,
+                                    stream_id,
+                                    "HTTP/2 produced response completed more than once",
+                                );
+                                continue;
+                            }
+                            if !matches!(outcome, Http2ProducerOutcome::Finished { .. }) {
+                                state.failure_drain_deadline =
+                                    Some((time_getter)() + request_drain_grace);
+                            }
+                        }
+                        finalize_produced_body_if_ready(
+                            &mut conn,
+                            stream_id,
+                            &mut produced_bodies,
+                            &mut response_guards,
+                        );
+                    }
+                    FunnelItem::StreamIdleTimeout { stream_id, guard } => {
+                        dispatched_streams.remove(&stream_id);
+                        peer_reset_before_response.remove(&stream_id);
+                        record_h2_body_diagnostic_code(
+                            stream_id,
+                            "ASUP-E501",
+                            "request handler exceeded its configured execution timeout",
+                        );
+                        pending_stream_idle_deadlines.remove(&stream_id);
+                        pending_requests.remove(&stream_id);
+                        conn.reset_stream(stream_id, ErrorCode::Cancel);
+                        cancel_produced_body(
+                            &mut produced_bodies,
+                            stream_id,
+                            "HTTP/2 produced response stream idle timeout",
+                        );
+                        reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
+                        drop(guard);
+                    }
+                },
+            }
 
-        // br-asupersync-mfqfst L4: recycle the connection once it has served
-        // its configured request budget (h1 parity with
-        // `Http1Config::max_requests_per_connection`). A graceful shutdown
-        // stops admitting new streams while letting the in-flight streams —
-        // including the one that hit the limit — run to completion; the
-        // existing two-stage GOAWAY + drain machinery then closes the
-        // transport. No-op once any GOAWAY is already on the wire (e.g. a
-        // server-initiated drain), so it never double-arms the shutdown.
-        if !conn.goaway_sent()
-            && max_requests_per_connection.is_some_and(|max| requests_dispatched >= max)
-        {
-            conn.begin_graceful_shutdown(crate::bytes::Bytes::from_static(
-                b"max requests per connection reached",
-            ));
+            // br-asupersync-mfqfst L4: recycle the connection once it has served
+            // its configured request budget (h1 parity with
+            // `Http1Config::max_requests_per_connection`). A graceful shutdown
+            // stops admitting new streams while letting the in-flight streams —
+            // including the one that hit the limit — run to completion; the
+            // existing two-stage GOAWAY + drain machinery then closes the
+            // transport. No-op once any GOAWAY is already on the wire (e.g. a
+            // server-initiated drain), so it never double-arms the shutdown.
+            if !conn.goaway_sent()
+                && max_requests_per_connection.is_some_and(|max| requests_dispatched >= max)
+            {
+                conn.begin_graceful_shutdown(crate::bytes::Bytes::from_static(
+                    b"max requests per connection reached",
+                ));
+            }
         }
     }
+    .await;
+    // The frame driver owns both response-funnel endpoints. They are dropped
+    // with the completed async block before close joins request coordinators,
+    // waking even a coordinator blocked on a previously full response funnel.
+    #[cfg(feature = "http2-streaming")]
+    if let Some(incoming) = &mut incoming {
+        let error = if shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+            crate::http::h1::stream::IncomingBodyError::Cancelled {
+                kind: CancelKind::Shutdown,
+            }
+        } else {
+            crate::http::h1::stream::IncomingBodyError::ClientAborted
+        };
+        incoming.close(error).await;
+    }
+    result
 }
 
 /// How many full-size request bodies one connection may hold in partial
@@ -3649,6 +3913,8 @@ pub struct Http2Listener<F> {
     connection_manager: ConnectionManager,
     stats: Arc<Http2ListenerStats>,
     in_flight_requests: Arc<AtomicUsize>,
+    #[cfg(feature = "http2-streaming")]
+    streaming_config: Option<Http2StreamingListenerConfig>,
 }
 
 impl<F, Fut, R> Http2Listener<F>
@@ -3686,14 +3952,102 @@ where
     /// supervision and return the shutdown statistics (including the
     /// graceful-drain report).
     pub async fn run(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
-        self.run_mapped(runtime, true, |handler, request| async move {
-            H2DispatchResponse::Buffered(handler(request).await.into_h2_response())
-        })
+        self.run_mapped(
+            runtime,
+            true,
+            #[cfg(feature = "http2-streaming")]
+            None,
+            |handler, request| async move {
+                H2DispatchResponse::Buffered(handler(request).await.into_h2_response())
+            },
+        )
         .await
     }
 }
 
 impl<F> Http2Listener<F> {
+    /// Bind a native HTTP/2 listener that dispatches live bodies at HEADERS.
+    #[cfg(feature = "http2-streaming")]
+    pub async fn bind_streaming<A, Fut, R>(addr: A, handler: F) -> io::Result<Self>
+    where
+        A: ToSocketAddrs + Send + 'static,
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoHttp2Response + Send + 'static,
+    {
+        Self::bind_streaming_with_config(addr, handler, Http2StreamingListenerConfig::default())
+            .await
+    }
+
+    /// Bind with bounded live request-body queues and admission policy.
+    #[cfg(feature = "http2-streaming")]
+    pub async fn bind_streaming_with_config<A, Fut, R>(
+        addr: A,
+        handler: F,
+        config: Http2StreamingListenerConfig,
+    ) -> io::Result<Self>
+    where
+        A: ToSocketAddrs + Send + 'static,
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoHttp2Response + Send + 'static,
+    {
+        config.validate()?;
+        let tcp_listener = TcpListener::bind(addr).await?;
+        Ok(Self::from_listener_streaming(tcp_listener, handler, config))
+    }
+
+    /// Create a live-body listener from an existing TCP listener. Configuration
+    /// is checked when [`Self::run_streaming`] begins.
+    #[must_use]
+    #[cfg(feature = "http2-streaming")]
+    pub fn from_listener_streaming<Fut, R>(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http2StreamingListenerConfig,
+    ) -> Self
+    where
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoHttp2Response + Send + 'static,
+    {
+        let mut listener = Self::from_parts(tcp_listener, handler, config.listener.clone());
+        listener.streaming_config = Some(config);
+        listener
+    }
+
+    /// Run the opt-in live request-body path with buffered responses. Handler
+    /// bodies retain their admitted request `Cx`; HTTP/2 receive credit follows
+    /// body consumption rather than socket reads.
+    #[cfg(feature = "http2-streaming")]
+    pub async fn run_streaming<Fut, R>(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats>
+    where
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = R> + Send + 'static,
+        R: IntoHttp2Response + Send + 'static,
+    {
+        let config = self.streaming_config.clone().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "run_streaming requires a streaming listener constructor",
+            )
+        })?;
+        config.validate()?;
+        let handler = Arc::clone(&self.handler);
+        let dispatch = StreamingDispatch {
+            config,
+            handler: Arc::new(move |request| {
+                let handler = Arc::clone(&handler);
+                Box::pin(async move { handler(request).await.into_h2_response() })
+            }),
+        };
+        self.run_mapped(runtime, true, Some(dispatch), |_, _| async {
+            // The streaming driver consumes every request HEADERS event.
+            H2DispatchResponse::Buffered(invalid_h2_response_fallback())
+        })
+        .await
+    }
+
     /// Bind a listener whose handler may return a deferred produced body.
     pub async fn bind_produced<A, Fut>(addr: A, handler: F) -> io::Result<Self>
     where
@@ -3749,6 +4103,8 @@ impl<F> Http2Listener<F> {
             connection_manager,
             stats,
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
+            #[cfg(feature = "http2-streaming")]
+            streaming_config: None,
         }
     }
 
@@ -3795,9 +4151,13 @@ impl<F> Http2Listener<F> {
         F: Fn(Request) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
     {
-        self.run_mapped(runtime, false, |handler, request| async move {
-            handler(request).await.into_driver_response()
-        })
+        self.run_mapped(
+            runtime,
+            false,
+            #[cfg(feature = "http2-streaming")]
+            None,
+            |handler, request| async move { handler(request).await.into_driver_response() },
+        )
         .await
     }
 
@@ -3806,6 +4166,7 @@ impl<F> Http2Listener<F> {
         self,
         runtime: &RuntimeHandle,
         owned_request: bool,
+        #[cfg(feature = "http2-streaming")] streaming: Option<StreamingDispatch>,
         map_response: M,
     ) -> io::Result<ShutdownStats>
     where
@@ -3898,6 +4259,8 @@ impl<F> Http2Listener<F> {
             let idle_timeout = self.config.idle_timeout;
             let stream_idle_timeout = self.config.stream_idle_timeout;
             let conn_time_getter = self.config.time_getter;
+            #[cfg(feature = "http2-streaming")]
+            let streaming = streaming.clone();
             // Check the connection's Send boundary once before the runtime's
             // nested task wrappers instantiate it for each handler type.
             let connection: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
@@ -3921,6 +4284,8 @@ impl<F> Http2Listener<F> {
                     stream_idle_timeout,
                     conn_time_getter,
                     owned_request,
+                    #[cfg(feature = "http2-streaming")]
+                    streaming,
                 )
                 .await
                 {

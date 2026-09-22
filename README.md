@@ -613,12 +613,14 @@ compilation and runtime execution remain unverified.
 and a bounded live `StreamingRawBody`; buffered JSON/form collectors can consume
 that body asynchronously. The H1 and H2 produced-handler adapters expose
 bounded `Http1StreamResponder` / `Http2StreamResponder` response producers with
-transport-owned backpressure and terminalization. H2 request bodies remain
-buffered before dispatch. The standalone H3 Router bridge also assembles
-bounded request bodies before dispatch; the native H3 listener's opt-in path
-delivers them incrementally. General full-duplex request/response progress and
-external interoperability remain unverified. The native H3 path also does not
-claim CONNECT, server push, or deployment readiness. WebSocket upgrade authoring is provided separately
+transport-owned backpressure and terminalization. The ordinary H2 request
+adapters buffer before dispatch. The opt-in H2 ingress below supplies live
+request bodies with buffered responses. The standalone H3 Router bridge also
+assembles bounded request bodies before dispatch; the native H3 listener's
+opt-in path delivers them incrementally. General full-duplex request/response
+progress and external interoperability remain unverified. The native H3 path
+also does not claim CONNECT, server push, or deployment readiness. WebSocket
+upgrade authoring is provided separately
 by `web::websocket::WebSocketUpgrade`. The SSE lane is proof-backed:
 `Sse` finite bounded batch responses, plus a `StreamingSse` pull API carrying a
 request-region E2E proof and an HTTP/1 transport drain proof
@@ -629,6 +631,58 @@ trait rather than Tower layers, async handlers use explicit `Cx`-aware wrappers,
 and protocol-specific ingress/egress limits remain explicit. Treat this as
 native web primitives on top of the HTTP and service modules, not framework
 parity.
+
+With the opt-in `http2-streaming` Cargo feature, the native HTTP/2 listener
+supports live uploads with
+`Http2Listener::bind_streaming_with_config` and `run_streaming`.
+`Router::into_http2_streaming_parts` binds the same router to HEADERS-time
+static body-policy admission and to request dispatch:
+
+```rust,ignore
+use asupersync::http::h1::server::HostPolicy;
+use asupersync::http::h2::listener::{Http2Listener, Http2StreamingListenerConfig};
+
+// `router` has handlers that consume StreamingRawBody or async body collectors.
+let mut config = Http2StreamingListenerConfig::default();
+config.listener.allowed_hosts = HostPolicy::AllowList(vec!["localhost".to_string()]);
+let (handler, config) = router.into_http2_streaming_parts(config);
+let listener = Http2Listener::bind_streaming_with_config(
+    "127.0.0.1:8080", handler, config,
+).await?;
+listener.run_streaming(&runtime_handle).await?;
+```
+
+This path validates the request head and declared length before admitting a
+request region. The body channel is created by the actual request task.
+Stream WINDOW_UPDATE credit follows DATA delivered to that body consumer;
+connection credit continues independently so a stalled upload leaves other
+streams and control frames drivable. Padding is accounted on the wire and
+credited internally, without being counted as application DATA. The listener
+reserves bounded queue and pending-input capacity against a connection budget,
+including the initial 65,535-byte receive allowance. The opt-in profile requires
+an initial stream window of at least 65,535 bytes. `listener.max_body_size`
+remains a separate whole-upload ceiling, tightened by static route policy and
+then by request-local policy. H2 request trailers terminate input with
+END_STREAM; merely reaching Content-Length does not terminate a live body.
+
+The lower-level `Connection::defer_stream_receive_window` and
+`release_stream_receive_capacity` APIs expose the same consumption-based flow
+control to custom H2 drivers. Existing callers retain automatic replenishment.
+The original exhaustive `Http2ListenerConfig` remains compatible;
+`Http2StreamingListenerConfig` is a separate opt-in wrapper. The native TCP
+integration target `tests/http2_listener_streaming.rs` covers live upload
+progress, receive-credit exhaustion, trailers, admission budgets, body errors,
+and request cleanup on current-thread and multithread runtimes. Run it with:
+
+```bash
+cargo test -p asupersync --features http2-streaming --test http2_listener_streaming
+```
+
+The implementation and its native tests have source review and formatting
+checks. Full compiler analysis and native execution remain unverified: the
+available build environment exhausted its memory allowance before analysis
+completed. The feature is excluded from the default build pending that
+validation; the existing buffered and produced-response APIs remain available.
 
 Filesystem status is deliberately conservative. `src/fs/` currently exposes
 `File`, buffered readers/writers, metadata, directory/path helpers,
