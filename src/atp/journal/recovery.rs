@@ -83,6 +83,9 @@ struct RecordFingerprint {
     record_type: u8,
     chunk_offset: Option<u64>,
     timestamp: u64,
+    // Verified before duplicate lookup; binds every encoded payload field
+    // without retaining or re-encoding the full record for the seen set.
+    payload_tag: [u8; 32],
 }
 
 #[derive(Debug, Default)]
@@ -404,6 +407,7 @@ impl RecoveryContext {
             record_type,
             chunk_offset,
             timestamp,
+            payload_tag: *record.auth_tag().as_bytes(),
         }
     }
 }
@@ -869,6 +873,55 @@ mod tests {
         let (_, stats) = ctx.finalize();
         assert_eq!(stats.total_records, 2);
         assert_eq!(stats.duplicates_skipped, 1);
+    }
+
+    #[test]
+    fn same_timestamp_distinct_payloads_are_not_duplicates() {
+        let mut ctx = RecoveryContext::new();
+        let key = test_auth_key();
+        let transfer_id = "same-timestamp".to_string();
+        let offer = |total_size| {
+            signed_record(JournalRecord::Offer {
+                transfer_id: transfer_id.clone(),
+                object_id: test_object_id(b"same-timestamp"),
+                manifest_root: test_root(3),
+                total_size,
+                timestamp: 1000,
+                auth_tag: unsigned_tag(),
+            })
+        };
+        let first = offer(1024);
+        let second = offer(2048);
+        assert!(ctx.process_record(&first, &key).unwrap());
+        assert!(ctx.process_record(&second, &key).unwrap());
+        assert!(!ctx.process_record(&first, &key).unwrap());
+        assert!(!ctx.process_record(&second, &key).unwrap());
+
+        // A payload change without re-signing must still fail before lookup.
+        let mut forged = first.clone();
+        if let JournalRecord::Offer { total_size, .. } = &mut forged {
+            *total_size = 4096;
+        }
+        assert!(matches!(
+            ctx.process_record(&forged, &key),
+            Err(RecoveryError::InvalidSignature)
+        ));
+        process_test_record(
+            &mut ctx,
+            JournalRecord::ChunkReceived {
+                transfer_id: transfer_id.clone(),
+                chunk_offset: 0,
+                chunk_size: 1024,
+                chunk_hash: [0; 32],
+                timestamp: 2000,
+                auth_tag: unsigned_tag(),
+            },
+        )
+        .unwrap();
+        let (bitmaps, stats) = ctx.finalize();
+        assert_eq!(bitmaps[&transfer_id].total_size(), 2048);
+        assert_eq!(stats.total_records, 6);
+        assert_eq!(stats.duplicates_skipped, 2);
     }
 
     #[test]
