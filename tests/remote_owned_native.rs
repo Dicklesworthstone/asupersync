@@ -294,24 +294,46 @@ async fn wait_for_lease(cx: &Cx, diagnostics: &asupersync::observability::diagno
 #[test]
 fn lab_spawn_join_releases_after_task_record_retirement() {
     use asupersync::{Budget, LabConfig, LabRuntime};
+    use asupersync::runtime::task_handle::JoinError;
 
-    let mut lab = LabRuntime::new(LabConfig::new(0x59_48_55).max_steps(256));
-    let root = lab.state.create_root_region(Budget::INFINITE);
-    let completed = Arc::new(AtomicBool::new(false));
-    let completed_task = Arc::clone(&completed);
-    let (owner, mut owner_join) = lab.state.create_task(root, Budget::INFINITE, async move {
-        let cx = Cx::current().unwrap();
-        let mut child = cx.spawn(|_| async { 42_u8 }).unwrap();
-        assert_eq!(child.join(&cx).await.unwrap(), 42);
-        completed_task.store(true, Ordering::Release);
-    }).unwrap();
-    lab.scheduler.lock().schedule(owner, 0);
+    for panic_child in [false, true] {
+        let mut lab = LabRuntime::new(LabConfig::new(0x59_48_55).max_steps(256));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_task = Arc::clone(&completed);
+        let child_id = Arc::new(Mutex::new(None));
+        let child_id_task = Arc::clone(&child_id);
+        let (owner, mut owner_join) = lab.state.create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().unwrap();
+            let mut child = cx.spawn(move |child_cx| async move {
+                *child_id_task.lock() = Some(child_cx.task_id());
+                assert!(!panic_child, "retirement regression panic");
+                42_u8
+            }).unwrap();
+            let result = child.join(&cx).await;
+            if panic_child {
+                match result {
+                    Err(JoinError::Panicked(payload)) => {
+                        assert_eq!(payload.message(), "retirement regression panic");
+                    }
+                    other => panic!("expected the child's exact panic, got {other:?}"),
+                }
+            } else {
+                assert_eq!(result.unwrap(), 42);
+            }
+            completed_task.store(true, Ordering::Release);
+        }).unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
 
-    // A lost retirement wake leaves the owner parked. A bounded Lab run lets
-    // the assertion expose that failure without an unbounded native join.
-    lab.run_until_idle();
-    assert!(completed.load(Ordering::Acquire), "join stayed parked after child retirement");
-    assert!(matches!(owner_join.try_join(), Ok(Some(()))));
+        // A lost retirement wake leaves the owner parked. A bounded Lab run lets
+        // the assertion expose that failure without an unbounded native join.
+        lab.run_until_idle();
+        let child_id = child_id.lock().expect("child was actually polled");
+        assert!(lab.state.task(child_id).is_none(), "child record must be retired");
+        assert!(completed.load(Ordering::Acquire), "join stayed parked after child retirement");
+        assert!(matches!(owner_join.try_join(), Ok(Some(()))));
+        assert!(lab.state.task(owner).is_none(), "owner record must be retired");
+    }
 }
 
 #[test]
