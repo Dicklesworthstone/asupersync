@@ -119,3 +119,40 @@ impl UdpMembershipTransport {
         Ok((from, packet))
     }
 }
+
+// The native driver retains encoded packets itself, so a Pending send never
+// reruns gossip selection/encoding. Raw receive allows address/size admission
+// before decoding untrusted data. Public one-packet APIs remain unchanged.
+#[cfg(not(target_arch = "wasm32"))]
+impl UdpMembershipTransport {
+    pub(super) fn is_connected(&self) -> bool {
+        self.socket.peer_addr().is_ok()
+    }
+
+    pub(super) fn poll_raw_recv(
+        &mut self,
+        task: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<(SocketAddr, &[u8])>> {
+        match self.socket.poll_recv_from(task, &mut self.recv_buffer) {
+            std::task::Poll::Ready(Ok((len, source))) => {
+                std::task::Poll::Ready(Ok((source, &self.recv_buffer[..len])))
+            }
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    pub(super) fn poll_raw_send(
+        &mut self,
+        task: &mut std::task::Context<'_>,
+        target: SocketAddr,
+        bytes: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        use std::future::Future;
+        // SocketAddr takes lookup_all's synchronous literal-address path, not
+        // DNS/spawn_blocking. Only the native socket poll can return Pending;
+        // its readiness registration belongs to the socket, not this future.
+        let mut send = std::pin::pin!(self.socket.send_to(bytes, target));
+        send.as_mut().poll(task)
+    }
+}
