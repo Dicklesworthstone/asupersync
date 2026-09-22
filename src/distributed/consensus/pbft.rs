@@ -26,13 +26,17 @@
 //! **not** provide liveness under primary failure or safety against a
 //! Byzantine primary. Do not rely on it for fault tolerance. Tracked by
 //! `asupersync-v8mszr`.
+//!
+//! For application execution on the experimental normal-case path, use
+//! [`PbftExecution`] with an explicit [`PbftStateMachine`]. The legacy
+//! [`PbftConsensus::submit`] remains a deprecated compatibility scaffold.
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 use crate::time::timeout;
 use crate::types::{Outcome, Time};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,7 +69,10 @@ pub struct PbftConfig {
 impl PbftConfig {
     /// Create configuration for n replicas with f Byzantine faults.
     pub fn new(replica_count: usize, fault_tolerance: usize) -> Result<Self> {
-        if replica_count < 3 * fault_tolerance + 1 {
+        if !fault_tolerance
+            .checked_mul(3)
+            .is_some_and(|minimum| replica_count > minimum)
+        {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
 
@@ -83,12 +90,14 @@ impl PbftConfig {
 
     /// Check if we have enough replicas for given fault tolerance.
     pub fn is_valid(&self) -> bool {
-        self.replica_count > 3 * self.fault_tolerance
+        self.fault_tolerance
+            .checked_mul(3)
+            .is_some_and(|minimum| self.replica_count > minimum)
     }
 
     /// Get the minimum number of signatures needed for a quorum.
     pub fn quorum_size(&self) -> usize {
-        2 * self.fault_tolerance + 1
+        self.fault_tolerance.saturating_mul(2).saturating_add(1)
     }
 }
 
@@ -468,7 +477,11 @@ impl<T: PbftTransport> PbftNode<T> {
         replica_id: ReplicaId,
     ) -> Result<()> {
         self.validate_preprepare_primary(view, &replica_id)?;
-        // Validate view and primary
+        // Validate the payload even on the duplicate path, before any state
+        // mutation. Install it under the same lock as the equivocation check.
+        if digest != MessageDigest::of(&batch)? {
+            return Err(Error::new(ErrorKind::InvalidInput));
+        }
         {
             let mut state = self.state.lock().unwrap();
             if view != state.view {
@@ -492,19 +505,6 @@ impl<T: PbftTransport> PbftNode<T> {
                 if entry.preprepared {
                     return Ok(());
                 }
-            }
-        }
-
-        // Verify digest
-        let computed_digest = MessageDigest::of(&batch)?;
-        if digest != computed_digest {
-            return Err(Error::new(ErrorKind::InvalidInput));
-        }
-
-        // Create or mark the log entry without overwriting accumulated messages.
-        {
-            let mut state = self.state.lock().unwrap();
-            if let Some(entry) = state.log.get_mut(&sequence) {
                 entry.batch = batch;
                 entry.preprepared = true;
             } else {
@@ -549,7 +549,7 @@ impl<T: PbftTransport> PbftNode<T> {
         digest: MessageDigest,
         replica_id: ReplicaId,
     ) -> Result<()> {
-        self.validate_remote_replica(&replica_id)?;
+        let replica_id = self.validate_remote_replica(&replica_id)?;
         let should_commit = {
             let mut state = self.state.lock().unwrap();
 
@@ -607,7 +607,7 @@ impl<T: PbftTransport> PbftNode<T> {
         digest: MessageDigest,
         replica_id: ReplicaId,
     ) -> Result<()> {
-        self.validate_remote_replica(&replica_id)?;
+        let replica_id = self.validate_remote_replica(&replica_id)?;
         let should_execute = {
             let mut state = self.state.lock().unwrap();
             let next_to_execute = state.last_executed.next();
@@ -714,14 +714,17 @@ impl<T: PbftTransport> PbftNode<T> {
         Ok(())
     }
 
-    fn validate_remote_replica(&self, replica_id: &ReplicaId) -> Result<()> {
+    fn validate_remote_replica(&self, replica_id: &ReplicaId) -> Result<ReplicaId> {
         let index = parse_replica_index(replica_id, self.config.replica_count)?;
         if index == self.replica_index {
             return Err(Error::new(ErrorKind::InvalidInput).with_message(format!(
                 "PBFT rejected self-authored remote quorum message from {replica_id}"
             )));
         }
-        Ok(())
+        // Count configured replicas, not alternate spellings of the same
+        // numeric id (for example, "2" and "02"). Keep accepting the legacy
+        // spelling at the API boundary while using a canonical quorum key.
+        Ok(ReplicaId::new(index.to_string()))
     }
 
     fn validate_preprepare_primary(&self, view: ViewNumber, replica_id: &ReplicaId) -> Result<()> {
@@ -841,6 +844,307 @@ impl<T: PbftTransport> PbftConsensus<T> {
     }
 }
 
+/// Deterministic application state applied to committed PBFT requests.
+///
+/// Implementations must be bounded, synchronous, and deterministic from the
+/// request and their owned state. They must not perform I/O or re-enter the
+/// execution driver. Return an application error as an [`Outcome::Err`]; a
+/// panic poisons the driver so a possibly applied operation is never retried.
+pub trait PbftStateMachine: Send {
+    /// Apply one request, in the order established by the committed log.
+    fn apply(&mut self, request: &ConsensusRequest) -> Outcome<Vec<u8>, String>;
+}
+
+impl<F> PbftStateMachine for F
+where
+    F: FnMut(&ConsensusRequest) -> Outcome<Vec<u8>, String> + Send,
+{
+    fn apply(&mut self, request: &ConsensusRequest) -> Outcome<Vec<u8>, String> {
+        self(request)
+    }
+}
+
+struct ApplicationState<S> {
+    machine: S,
+    last_applied: SequenceNumber,
+    responses: HashMap<MessageDigest, ConsensusResponse>,
+    identities: HashSet<MessageDigest>,
+}
+
+/// Application execution and real result retrieval for the experimental PBFT
+/// normal-case protocol.
+///
+/// Unlike the deprecated [`PbftConsensus::submit`], this driver only publishes
+/// responses after a request has a local commit certificate and its application
+/// has run. Supply the same deterministic [`PbftStateMachine`] on every replica,
+/// then drive [`Self::process_message`] or [`Self::run`] in an owned task. A
+/// successful [`Self::submit_request`] means admission/forwarding, not consensus;
+/// inspect [`Self::committed_response`] for the actual application outcome.
+///
+/// Exact request replays return the original response without applying twice.
+/// Reusing a client id and timestamp for different operation bytes produces an
+/// application error without invoking the state machine. Receipts and replay
+/// protection are process-local and retained for the driver's lifetime: there
+/// is no durable recovery, pruning, view change, or message authentication here.
+/// The experimental fault-tolerance limitations of this module still apply.
+pub struct PbftExecution<T: PbftTransport, S: PbftStateMachine> {
+    node: PbftNode<T>,
+    application: Mutex<ApplicationState<S>>,
+    // Serialize proposal writers without holding a blocking mutex across
+    // transport awaits. The reserved proposal itself survives cancellation.
+    proposals: crate::sync::Mutex<()>,
+}
+
+impl<T: PbftTransport, S: PbftStateMachine> PbftExecution<T, S> {
+    /// Construct an execution driver with an explicitly supplied application.
+    ///
+    /// This normal-case driver requires exactly `3f + 1` replicas: the legacy
+    /// protocol's `2f + 1` quorum is not sufficient for arbitrary larger sets.
+    pub fn new(
+        replica_id: ReplicaId,
+        config: PbftConfig,
+        transport: T,
+        machine: S,
+    ) -> Result<Self> {
+        if config.max_batch_size == 0 {
+            return Err(Error::new(ErrorKind::InvalidInput)
+                .with_message("PBFT application execution requires a nonzero batch size"));
+        }
+        if config
+            .fault_tolerance
+            .checked_mul(3)
+            .and_then(|replicas| replicas.checked_add(1))
+            != Some(config.replica_count)
+        {
+            return Err(Error::new(ErrorKind::InvalidInput)
+                .with_message("PBFT application execution requires exactly 3f + 1 replicas"));
+        }
+        Ok(Self {
+            node: PbftNode::new(replica_id, config, transport)?,
+            application: Mutex::new(ApplicationState {
+                machine,
+                last_applied: SequenceNumber::new(0),
+                responses: HashMap::new(),
+                identities: HashSet::new(),
+            }),
+            proposals: crate::sync::Mutex::new(()),
+        })
+    }
+
+    /// Highest sequence fully applied to this driver's application.
+    ///
+    /// This is distinct from the protocol's commit watermark. A poisoned
+    /// application returns an error instead of pretending execution completed.
+    pub fn last_applied(&self) -> Result<SequenceNumber> {
+        Ok(self.lock_application()?.last_applied)
+    }
+
+    /// Look up a terminal result for this exact client request.
+    ///
+    /// `None` means no application result is available, never a fabricated
+    /// success. Replays retain the original sequence, view, and timestamp.
+    pub fn committed_response(
+        &self,
+        request: &ConsensusRequest,
+    ) -> Result<Option<ConsensusResponse>> {
+        let digest = MessageDigest::of(request)?;
+        Ok(self.lock_application()?.responses.get(&digest).cloned())
+    }
+
+    /// Admit a request on the primary, or forward it to the current primary.
+    ///
+    /// The caller must also drive incoming messages. Cancellation or a transport
+    /// error does not prove non-delivery; do not interpret it as a rollback of
+    /// committed application effects. An exact replay can recover a retained
+    /// response without executing the application a second time. On the
+    /// primary, retrying an unfinished request retransmits its original
+    /// proposal and sequence, including after cancellation or an ambiguous send.
+    pub async fn submit_request(&self, cx: &Cx, request: ConsensusRequest) -> Result<()> {
+        let _proposal = self.proposals.lock(cx).await.map_err(|error| {
+            let kind = match error {
+                crate::sync::LockError::Cancelled => ErrorKind::Cancelled,
+                _ => ErrorKind::InvalidStateTransition,
+            };
+            Error::new(kind).with_message(format!("PBFT proposal admission failed: {error}"))
+        })?;
+        self.apply_ready(cx)?;
+        if self.committed_response(&request)?.is_some() {
+            return Ok(());
+        }
+
+        if self.node.is_primary() {
+            let message = self.primary_proposal(cx, request)?;
+            timeout(
+                cx.now(),
+                self.node.config.preprepare_timeout,
+                self.node.transport.broadcast(message),
+            )
+            .await
+            .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))??;
+            self.node.drain_committed().await?;
+        } else {
+            let primary = {
+                let state = self.node.state.lock().unwrap();
+                ReplicaId::new(state.view.primary(self.node.config.replica_count).to_string())
+            };
+            timeout(
+                cx.now(),
+                self.node.config.preprepare_timeout,
+                self.node
+                    .transport
+                    .send_to_replica(&primary, PbftMessage::Request(request)),
+            )
+            .await
+            .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))??;
+        }
+        self.apply_ready(cx)
+    }
+
+    fn primary_proposal(&self, cx: &Cx, request: ConsensusRequest) -> Result<PbftMessage> {
+        let mut state = self.node.state.lock().unwrap();
+        // A failed send may already have reached peers. Never roll back or
+        // reassign that sequence; retransmit the exact retained proposal.
+        if let Some((sequence, entry)) = state
+            .log
+            .iter()
+            .filter(|(sequence, entry)| {
+                **sequence > state.last_executed
+                    && entry.batch.requests.iter().any(|existing| {
+                        existing.client_id == request.client_id
+                            && existing.timestamp == request.timestamp
+                            && existing.operation == request.operation
+                    })
+            })
+            .min_by_key(|(sequence, _)| **sequence)
+        {
+            return Ok(PbftMessage::PrePrepare {
+                view: entry.view,
+                sequence: *sequence,
+                digest: entry.digest.clone(),
+                batch: entry.batch.clone(),
+                replica_id: self.node.replica_id.clone(),
+            });
+        }
+
+        let sequence = state.sequence;
+        let next = sequence.0.checked_add(1).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidStateTransition)
+                .with_message("PBFT proposal sequence space is exhausted")
+        })?;
+        let view = state.view;
+        let mut batch = ConsensusBatch::new(vec![request]);
+        batch.timestamp = cx.now();
+        let digest = MessageDigest::of(&batch)?;
+        if state.log.contains_key(&sequence) {
+            return Err(Error::new(ErrorKind::InvalidStateTransition)
+                .with_message(format!("PBFT proposal sequence {sequence} is already reserved")));
+        }
+        state.log.insert(
+            sequence,
+            LogEntry {
+                batch: batch.clone(),
+                digest: digest.clone(),
+                view,
+                preprepared: true,
+                prepare_msgs: HashMap::new(),
+                commit_msgs: HashMap::new(),
+                result: None,
+            },
+        );
+        state.sequence = SequenceNumber::new(next);
+        Ok(PbftMessage::PrePrepare {
+            view,
+            sequence,
+            digest,
+            batch,
+            replica_id: self.node.replica_id.clone(),
+        })
+    }
+
+    /// Advance the protocol and apply every newly committed batch in order.
+    pub async fn process_message(&self, cx: &Cx, message: PbftMessage) -> Result<()> {
+        if let PbftMessage::Request(request) = message {
+            return self.submit_request(cx, request).await;
+        }
+        self.node.process_message(cx, message).await?;
+        self.apply_ready(cx)
+    }
+
+    /// Run the message pump in a caller-owned task.
+    ///
+    /// This does not spawn or detach any work. The transport is responsible for
+    /// terminating its receive operation when its owning task is shutting down.
+    pub async fn run(&self, cx: &Cx) -> Result<()> {
+        loop {
+            let message = self.node.transport.receive().await?;
+            self.process_message(cx, message).await?;
+        }
+    }
+
+    fn lock_application(&self) -> Result<std::sync::MutexGuard<'_, ApplicationState<S>>> {
+        self.application.lock().map_err(|_| {
+            Error::new(ErrorKind::InvalidStateTransition).with_message(
+                "PBFT application panicked; refusing to retry possibly applied operations",
+            )
+        })
+    }
+
+    fn apply_ready(&self, cx: &Cx) -> Result<()> {
+        // There are no awaits while the application is locked. Serializing
+        // application access also makes concurrent message deliveries apply a
+        // committed prefix exactly once, rather than racing on a cloned batch.
+        let mut application = self.lock_application()?;
+        loop {
+            let sequence = application.last_applied.next();
+            let (view, batch) = {
+                let state = self.node.state.lock().unwrap();
+                if sequence > state.last_executed {
+                    return Ok(());
+                }
+                let entry = state.log.get(&sequence).ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidStateTransition)
+                        .with_message(format!("PBFT committed log is missing {sequence}"))
+                })?;
+                if entry.result.is_none() {
+                    return Err(Error::new(ErrorKind::InvalidStateTransition)
+                        .with_message(format!("PBFT committed log is incomplete at {sequence}")));
+                }
+                (entry.view, entry.batch.clone())
+            };
+
+            for request in &batch.requests {
+                let digest = MessageDigest::of(request)?;
+                let identity = MessageDigest::of(&(&request.client_id, request.timestamp))?;
+                let ApplicationState {
+                    machine,
+                    responses,
+                    identities,
+                    ..
+                } = &mut *application;
+                let std::collections::hash_map::Entry::Vacant(slot) = responses.entry(digest) else {
+                    continue;
+                };
+                let result = if identities.insert(identity) {
+                    machine.apply(request)
+                } else {
+                    Outcome::Err(
+                        "PBFT client id and timestamp were reused for a different operation"
+                            .to_owned(),
+                    )
+                };
+                slot.insert(ConsensusResponse {
+                    view,
+                    sequence,
+                    result,
+                    replica_id: self.node.replica_id.clone(),
+                    timestamp: cx.now(),
+                });
+            }
+            application.last_applied = sequence;
+        }
+    }
+}
+
 #[cfg(test)]
 mod progress_tests {
     use super::*;
@@ -849,14 +1153,16 @@ mod progress_tests {
     #[derive(Default)]
     struct RecordingTransport {
         sent: Mutex<Vec<PbftMessage>>,
+        recipients: Mutex<Vec<ReplicaId>>,
     }
 
     impl PbftTransport for RecordingTransport {
         fn send_to_replica(
             &self,
-            _replica_id: &ReplicaId,
+            replica_id: &ReplicaId,
             message: PbftMessage,
         ) -> impl Future<Output = Result<()>> + Send {
+            self.recipients.lock().unwrap().push(replica_id.clone());
             self.sent.lock().unwrap().push(message);
             ready(Ok(()))
         }
@@ -1015,5 +1321,342 @@ mod progress_tests {
                 .unwrap();
         }
         assert_eq!(node.last_executed(), SequenceNumber::new(1));
+    }
+
+    #[test]
+    fn numeric_replica_aliases_cannot_inflate_either_quorum() {
+        let cx = Cx::for_testing();
+        let node = backup();
+        let digest = preprepare(&node, &cx, 1);
+        for alias in ["0", "00", "000"] {
+            for mut message in [vote(1, &digest, 0), vote(1, &digest, 2)] {
+                match &mut message {
+                    PbftMessage::Prepare { replica_id, .. }
+                    | PbftMessage::Commit { replica_id, .. } => {
+                        *replica_id = ReplicaId::new(alias.to_owned());
+                    }
+                    _ => unreachable!(),
+                }
+                futures_lite::future::block_on(node.process_message(&cx, message)).unwrap();
+            }
+        }
+        assert_eq!(node.last_executed(), SequenceNumber::new(0));
+        {
+            let state = node.state.lock().unwrap();
+            let entry = &state.log[&SequenceNumber::new(1)];
+            assert_eq!(entry.prepare_msgs.len(), 1);
+            assert_eq!(entry.commit_msgs.len(), 1);
+        }
+        for event in [3, 1] {
+            futures_lite::future::block_on(node.process_message(&cx, vote(1, &digest, event)))
+                .unwrap();
+        }
+        assert_eq!(node.last_executed(), SequenceNumber::new(1));
+    }
+
+    #[test]
+    fn duplicate_preprepare_still_verifies_the_supplied_payload() {
+        let cx = Cx::for_testing();
+        let node = backup();
+        let digest = preprepare(&node, &cx, 1);
+        let original_batch = node.state.lock().unwrap().log[&SequenceNumber::new(1)]
+            .batch
+            .clone();
+        let mut tampered_batch = original_batch.clone();
+        tampered_batch.requests[0].operation.push(255);
+        let duplicate = |batch| PbftMessage::PrePrepare {
+            view: ViewNumber::new(0),
+            sequence: SequenceNumber::new(1),
+            digest: digest.clone(),
+            batch,
+            replica_id: ReplicaId::new("0".to_owned()),
+        };
+        assert!(
+            futures_lite::future::block_on(node.process_message(&cx, duplicate(tampered_batch)))
+                .is_err()
+        );
+        futures_lite::future::block_on(node.process_message(&cx, duplicate(original_batch)))
+            .unwrap();
+        assert_eq!(
+            MessageDigest::of(&node.state.lock().unwrap().log[&SequenceNumber::new(1)].batch)
+                .unwrap(),
+            digest
+        );
+    }
+
+    #[test]
+    fn configuration_arithmetic_fails_closed_on_overflow() {
+        assert!(PbftConfig::new(usize::MAX, usize::MAX).is_err());
+        assert!(PbftConfig::new(0, 0).is_err());
+        let mut config = PbftConfig::new(4, 1).unwrap();
+        config.fault_tolerance = usize::MAX;
+        assert!(!config.is_valid());
+        assert_eq!(config.quorum_size(), usize::MAX);
+        assert!(
+            PbftNode::new(
+                ReplicaId::new("0".to_owned()),
+                config,
+                RecordingTransport::default(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn execution_rejects_zero_batch_capacity_and_unsafe_quorum_topology() {
+        let mut empty_batch = PbftConfig::new(4, 1).unwrap();
+        empty_batch.max_batch_size = 0;
+        for config in [empty_batch, PbftConfig::new(5, 1).unwrap()] {
+            assert!(
+                PbftExecution::new(
+                    ReplicaId::new("0".to_owned()),
+                    config,
+                    RecordingTransport::default(),
+                    |request: &ConsensusRequest| Outcome::Ok(request.operation.clone()),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    fn execution(
+        calls: Arc<Mutex<Vec<Vec<u8>>>>,
+    ) -> PbftExecution<RecordingTransport, impl PbftStateMachine> {
+        PbftExecution::new(
+            ReplicaId::new("1".to_owned()),
+            PbftConfig::new(4, 1).unwrap(),
+            RecordingTransport::default(),
+            move |request: &ConsensusRequest| {
+                calls.lock().unwrap().push(request.operation.clone());
+                let mut result = request.operation.clone();
+                result.push(99);
+                Outcome::Ok(result)
+            },
+        )
+        .unwrap()
+    }
+
+    fn propose<S: PbftStateMachine>(
+        driver: &PbftExecution<RecordingTransport, S>,
+        cx: &Cx,
+        sequence: u64,
+        requests: Vec<ConsensusRequest>,
+    ) -> MessageDigest {
+        let batch = ConsensusBatch::new(requests);
+        let digest = MessageDigest::of(&batch).unwrap();
+        futures_lite::future::block_on(driver.process_message(
+            cx,
+            PbftMessage::PrePrepare {
+                view: ViewNumber::new(0),
+                sequence: SequenceNumber::new(sequence),
+                digest: digest.clone(),
+                batch,
+                replica_id: ReplicaId::new("0".to_owned()),
+            },
+        ))
+        .unwrap();
+        digest
+    }
+
+    fn finish<S: PbftStateMachine>(
+        driver: &PbftExecution<RecordingTransport, S>,
+        cx: &Cx,
+        sequence: u64,
+        digest: &MessageDigest,
+    ) {
+        // Complete commits before prepares to exercise the repaired path too.
+        for event in [2, 3, 0, 1] {
+            futures_lite::future::block_on(driver.process_message(cx, vote(sequence, digest, event)))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn execution_forwards_to_primary_and_never_fabricates_a_result() {
+        let cx = Cx::for_testing();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = execution(Arc::clone(&calls));
+        let request = ConsensusRequest::new("client".to_owned(), Time::from_millis(1), vec![7]);
+        futures_lite::future::block_on(driver.submit_request(&cx, request.clone())).unwrap();
+        assert_eq!(
+            *driver.node.transport.recipients.lock().unwrap(),
+            vec![ReplicaId::new("0".to_owned())]
+        );
+        assert!(driver.committed_response(&request).unwrap().is_none());
+        assert!(calls.lock().unwrap().is_empty());
+        let digest = propose(&driver, &cx, 1, vec![request.clone()]);
+        assert!(driver.committed_response(&request).unwrap().is_none());
+        let before_execution = cx.now();
+        finish(&driver, &cx, 1, &digest);
+        let response = driver.committed_response(&request).unwrap().unwrap();
+        assert_eq!(response.result, Outcome::Ok(vec![7, 99]));
+        assert_eq!(response.sequence, SequenceNumber::new(1));
+        assert_eq!(response.view, ViewNumber::new(0));
+        assert_eq!(response.replica_id, ReplicaId::new("1".to_owned()));
+        assert!(response.timestamp >= before_execution);
+        assert!(response.timestamp <= cx.now());
+        assert_eq!(driver.last_applied().unwrap(), SequenceNumber::new(1));
+    }
+
+    #[test]
+    fn execution_replays_once_and_rejects_conflicting_client_identity() {
+        let cx = Cx::for_testing();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = execution(Arc::clone(&calls));
+        let request = ConsensusRequest::new("client".to_owned(), Time::from_millis(1), vec![7]);
+        for sequence in 1..=2 {
+            // Include an exact duplicate inside each batch as well as across batches.
+            let digest = propose(&driver, &cx, sequence, vec![request.clone(), request.clone()]);
+            finish(&driver, &cx, sequence, &digest);
+        }
+        let original = driver.committed_response(&request).unwrap().unwrap();
+        assert_eq!(original.sequence, SequenceNumber::new(1));
+        assert_eq!(original.result, Outcome::Ok(vec![7, 99]));
+        let mut conflict = request.clone();
+        conflict.operation = vec![8];
+        let digest = propose(&driver, &cx, 3, vec![conflict.clone()]);
+        finish(&driver, &cx, 3, &digest);
+        let rejected = driver.committed_response(&conflict).unwrap().unwrap();
+        assert!(matches!(rejected.result, Outcome::Err(message) if message.contains("reused")));
+        assert_eq!(rejected.sequence, SequenceNumber::new(3));
+        assert_eq!(*calls.lock().unwrap(), vec![vec![7]]);
+        assert_eq!(driver.last_applied().unwrap(), SequenceNumber::new(3));
+    }
+
+    #[test]
+    fn execution_applies_out_of_order_commits_in_log_order() {
+        let cx = Cx::for_testing();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = execution(Arc::clone(&calls));
+        let first = ConsensusRequest::new("client".to_owned(), Time::from_millis(1), vec![1]);
+        let second = ConsensusRequest::new("client".to_owned(), Time::from_millis(2), vec![2]);
+        let first_digest = propose(&driver, &cx, 1, vec![first.clone()]);
+        let second_digest = propose(&driver, &cx, 2, vec![second.clone()]);
+        finish(&driver, &cx, 2, &second_digest);
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(driver.committed_response(&second).unwrap().is_none());
+        finish(&driver, &cx, 1, &first_digest);
+        assert_eq!(*calls.lock().unwrap(), vec![vec![1], vec![2]]);
+        assert_eq!(driver.last_applied().unwrap(), SequenceNumber::new(2));
+        assert_eq!(
+            driver.committed_response(&second).unwrap().unwrap().result,
+            Outcome::Ok(vec![2, 99])
+        );
+    }
+
+    #[test]
+    fn execution_preserves_application_errors_and_solo_replay_receipts() {
+        let cx = Cx::for_testing();
+        let driver = PbftExecution::new(
+            ReplicaId::new("0".to_owned()),
+            PbftConfig::new(1, 0).unwrap(),
+            RecordingTransport::default(),
+            |request: &ConsensusRequest| {
+                if request.operation.is_empty() {
+                    Outcome::Err("empty operation".to_owned())
+                } else {
+                    Outcome::Ok(request.operation.clone())
+                }
+            },
+        )
+        .unwrap();
+        let invalid = ConsensusRequest::new("client".to_owned(), Time::from_millis(1), vec![]);
+        let valid = ConsensusRequest::new("client".to_owned(), Time::from_millis(2), vec![8]);
+        for request in [&invalid, &valid, &invalid] {
+            futures_lite::future::block_on(driver.submit_request(&cx, request.clone())).unwrap();
+        }
+        assert_eq!(
+            driver.committed_response(&invalid).unwrap().unwrap().result,
+            Outcome::Err("empty operation".to_owned())
+        );
+        assert_eq!(
+            driver.committed_response(&valid).unwrap().unwrap().result,
+            Outcome::Ok(vec![8])
+        );
+        assert_eq!(driver.last_applied().unwrap(), SequenceNumber::new(2));
+    }
+
+    #[test]
+    fn execution_panic_fails_closed_without_reapplying() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cx = Cx::for_testing();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        let driver = PbftExecution::new(
+            ReplicaId::new("0".to_owned()),
+            PbftConfig::new(1, 0).unwrap(),
+            RecordingTransport::default(),
+            move |_request: &ConsensusRequest| -> Outcome<Vec<u8>, String> {
+                seen.fetch_add(1, Ordering::SeqCst);
+                panic!("application failed after mutation")
+            },
+        )
+        .unwrap();
+        let request = ConsensusRequest::new("client".to_owned(), Time::from_millis(1), vec![1]);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures_lite::future::block_on(driver.submit_request(&cx, request.clone()))
+        }));
+        assert!(panicked.is_err());
+        assert!(driver.last_applied().is_err());
+        assert!(driver.committed_response(&request).is_err());
+        assert!(futures_lite::future::block_on(driver.submit_request(&cx, request)).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn execution_retry_retains_proposal_after_ambiguous_transport_error() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Default)]
+        struct AmbiguousTransport {
+            failed_once: AtomicBool,
+            sent: Mutex<Vec<PbftMessage>>,
+        }
+
+        impl PbftTransport for AmbiguousTransport {
+            fn send_to_replica(
+                &self,
+                _replica_id: &ReplicaId,
+                message: PbftMessage,
+            ) -> impl Future<Output = Result<()>> + Send {
+                self.broadcast(message)
+            }
+
+            fn broadcast(&self, message: PbftMessage) -> impl Future<Output = Result<()>> + Send {
+                self.sent.lock().unwrap().push(message);
+                let result = if self.failed_once.swap(true, Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(Error::new(ErrorKind::ConnectionLost))
+                };
+                ready(result)
+            }
+
+            fn receive(&self) -> impl Future<Output = Result<PbftMessage>> + Send {
+                ready(Err(Error::new(ErrorKind::ChannelEmpty)))
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let driver = PbftExecution::new(
+            ReplicaId::new("0".to_owned()),
+            PbftConfig::new(1, 0).unwrap(),
+            AmbiguousTransport::default(),
+            |request: &ConsensusRequest| Outcome::Ok(request.operation.clone()),
+        )
+        .unwrap();
+        let request = ConsensusRequest::new("client".to_owned(), Time::from_millis(1), vec![6]);
+        assert!(
+            futures_lite::future::block_on(driver.submit_request(&cx, request.clone())).is_err()
+        );
+        assert!(driver.committed_response(&request).unwrap().is_none());
+        futures_lite::future::block_on(driver.submit_request(&cx, request.clone())).unwrap();
+        let sent = driver.node.transport.sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].digest().unwrap(), sent[1].digest().unwrap());
+        let response = driver.committed_response(&request).unwrap().unwrap();
+        assert_eq!(response.sequence, SequenceNumber::new(1));
+        assert_eq!(response.result, Outcome::Ok(vec![6]));
+        assert_eq!(driver.last_applied().unwrap(), SequenceNumber::new(1));
     }
 }
