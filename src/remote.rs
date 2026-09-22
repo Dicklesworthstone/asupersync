@@ -9387,8 +9387,15 @@ async fn remote_service_accept_or_shutdown(
 ) -> RemoteServiceAccept {
     let mut accept = core::pin::pin!(listener.accept());
     let mut shutdown = core::pin::pin!(shutdown_rx.wait());
+    let mut cancelled = core::pin::pin!(cx.cancelled());
     std::future::poll_fn(|task_cx| {
         if cx.checkpoint().is_err() || shutdown_signal.is_shutting_down() {
+            return std::task::Poll::Ready(RemoteServiceAccept::Shutdown);
+        }
+        // Accept and shutdown-signal waits do not subscribe to Cx cancellation.
+        // Register separately so an idle listener is repolled on parent cancel;
+        // checkpoint still decides whether cancellation is masked.
+        if cancelled.as_mut().poll(task_cx).is_ready() && cx.checkpoint().is_err() {
             return std::task::Poll::Ready(RemoteServiceAccept::Shutdown);
         }
         if shutdown.as_mut().poll(task_cx).is_ready() {
@@ -9414,10 +9421,14 @@ where
     let mut future = core::pin::pin!(future);
     let mut force_close =
         core::pin::pin!(shutdown_signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    let mut cancelled = core::pin::pin!(cx.cancelled());
     std::future::poll_fn(|task_cx| {
         if cx.checkpoint().is_err()
             || shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
         {
+            return std::task::Poll::Ready(None);
+        }
+        if cancelled.as_mut().poll(task_cx).is_ready() && cx.checkpoint().is_err() {
             return std::task::Poll::Ready(None);
         }
         if force_close.as_mut().poll(task_cx).is_ready() {
