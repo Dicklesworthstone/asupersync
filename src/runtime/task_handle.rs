@@ -81,7 +81,11 @@ impl RetirementBarrier {
         if self.open.swap(true, Ordering::Release) {
             return;
         }
-        if let Some(waker) = self.waker.lock().take() {
+        // Take the waker out under the lock, then drop the guard BEFORE waking:
+        // `Waker::wake` is a foreign callback and must not run while the barrier
+        // mutex is held (br-asupersync-yhueis).
+        let waker = self.waker.lock().take();
+        if let Some(waker) = waker {
             waker.wake();
         }
     }
@@ -91,13 +95,19 @@ impl RetirementBarrier {
     /// caller that parks on a `false` return still receives a wake if the
     /// barrier opens concurrently.
     pub(crate) fn register_and_is_open(&self, waker: &std::task::Waker) -> bool {
-        {
+        // Clone the incoming waker BEFORE locking and retire any displaced waker
+        // AFTER unlocking, so no foreign `Waker` clone or `Drop` runs under the
+        // barrier mutex (`will_wake` is a cheap pointer comparison, lock-safe).
+        let candidate = waker.clone();
+        let displaced = {
             let mut slot = self.waker.lock();
-            match slot.as_ref() {
-                Some(existing) if existing.will_wake(waker) => {}
-                _ => *slot = Some(waker.clone()),
+            if slot.as_ref().is_some_and(|existing| existing.will_wake(waker)) {
+                None
+            } else {
+                slot.replace(candidate)
             }
-        }
+        };
+        drop(displaced);
         self.is_open()
     }
 }
