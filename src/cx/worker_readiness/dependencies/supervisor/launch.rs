@@ -91,7 +91,7 @@ impl InitializedStartCause {
 pub struct InitializedExit<E> {
     /// Boundary enclosing the controller, all workers, and all their descendants.
     pub region: RegionId,
-    /// None only when immediate controller submission failed.
+    /// None when startup was refused before controller submission.
     pub controller: Option<Result<ManagedSupervisorReport<E>, JoinError>>,
     /// Err does not establish quiescence, even if a controller report exists.
     pub close: Result<DependencyRegionOutcome, ChildRegionError>,
@@ -300,6 +300,20 @@ impl StartupWatch<'_> {
         }
         None
     }
+
+    fn poll_controlled<T>(
+        &mut self,
+        task: &mut Context<'_>,
+        poll: impl FnOnce(&mut Context<'_>) -> Poll<T>,
+    ) -> Poll<Result<T, InitializedStartCause>> {
+        if let Some(cause) = self.refusal(task) { return Poll::Ready(Err(cause)); }
+        let observed = poll(task);
+        // Readiness/join polling may run wake callbacks, consume checkpoint
+        // budget, or race clock advancement. Control refusal must still win
+        // before accepting that result, including a readiness cancellation.
+        if let Some(cause) = self.refusal(task) { return Poll::Ready(Err(cause)); }
+        observed.map(Ok)
+    }
 }
 
 impl<E: Send + 'static> InitializedSupervisor<E> {
@@ -383,17 +397,12 @@ impl<E: Send + 'static> InitializedSupervisor<E> {
             let readiness = running.readiness.clone();
             let mut ready = std::pin::pin!(readiness.all().wait_ready(cx));
             let accepted = poll_fn(|task| {
-                if let Some(cause) = watch.refusal(task) { return Poll::Ready(Err(cause)); }
-                if running.poll_controller(task).is_ready() {
-                    return Poll::Ready(Err(InitializedStartCause::ControllerTerminated));
-                }
-                let selected = match ready.as_mut().poll(task) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(InitializedStartCause::Readiness(error))),
-                    Poll::Ready(Ok(selected)) => selected,
-                };
-                if let Some(cause) = watch.refusal(task) { return Poll::Ready(Err(cause)); }
-                Poll::Ready(Ok(selected))
+                watch.poll_controlled(task, |task| {
+                    if running.poll_controller(task).is_ready() {
+                        return Poll::Ready(Err(InitializedStartCause::ControllerTerminated));
+                    }
+                    ready.as_mut().poll(task).map(|result| result.map_err(InitializedStartCause::Readiness))
+                }).map(|result| result.and_then(std::convert::identity))
             }).await;
             match accepted {
                 Ok(selected) => { running.selected = Some(selected); return Ok(running); }

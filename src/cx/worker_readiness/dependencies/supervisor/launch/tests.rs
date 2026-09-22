@@ -48,7 +48,9 @@ where
         factory(Cx::current().expect("registered startup test owner")).await;
     }).unwrap();
     lab.scheduler.lock().schedule(task, 0);
-    lab.run_until_idle();
+    // These journeys include pending timers, not only runnable tasks/channel
+    // wakes. Drive virtual-time progress as well as the scheduler ready queue.
+    lab.run_until_quiescent();
     join.try_join().unwrap().expect("startup test finished in lab budget");
     assert_eq!(lab.state.live_task_count(), 0);
     assert_eq!(lab.state.pending_obligation_count(), 0);
@@ -236,4 +238,38 @@ fn dropped_shutdown_wait_retains_the_same_pending_cleanup_and_report() {
         let report = exit.controller.unwrap().unwrap();
         assert_eq!((report.started, report.joined), (1, 1));
     });
+}
+
+#[test]
+fn deadline_crossed_inside_a_ready_poll_refuses_that_same_result() {
+    let cx = Cx::for_testing();
+    let clock = Arc::new(crate::time::VirtualClock::new());
+    let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+    let limit = Time::from_secs(1);
+    let mut watch = StartupWatch {
+        cancellation: Cancellation { cx: &cx, token: None }, observed_cancel: None,
+        timer: timer.clone(), sleep: Box::pin(Sleep::with_timer_driver(limit, timer)), deadline: limit,
+    };
+    let result = watch.poll_controlled(&mut Context::from_waker(Waker::noop()), |_| {
+        clock.advance_to(limit);
+        Poll::Ready(42u32)
+    });
+    assert!(matches!(result, Poll::Ready(Err(InitializedStartCause::Deadline { deadline })) if deadline == limit));
+}
+
+#[test]
+fn cancellation_during_readiness_poll_keeps_caller_attribution() {
+    let cx = Cx::for_testing();
+    let timer = TimerDriverHandle::with_virtual_clock(Arc::new(crate::time::VirtualClock::new()));
+    let limit = Time::from_secs(1);
+    let mut watch = StartupWatch {
+        cancellation: Cancellation { cx: &cx, token: None }, observed_cancel: None,
+        timer: timer.clone(), sleep: Box::pin(Sleep::with_timer_driver(limit, timer)), deadline: limit,
+    };
+    let result = watch.poll_controlled(&mut Context::from_waker(Waker::noop()), |_| {
+        cx.cancel_with(crate::types::CancelKind::User, Some("cancel within readiness poll"));
+        Poll::Ready(Err::<(), _>(DependencyError::Cancelled))
+    });
+    assert!(matches!(result, Poll::Ready(Err(InitializedStartCause::Cancelled(_)))));
+    assert!(watch.observed_cancel.is_some());
 }
