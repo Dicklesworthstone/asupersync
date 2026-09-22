@@ -67,7 +67,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     if (!ctx) {
       const incoming = () => ({ reader: null, pending: false, ended: false, terminal: null, cleanup: null });
       ctx = {
-        state, entries: new Set(), readyWaiters: new Set(), stopped: null,
+        state, entries: new Set(), readyWaiters: new Set(), stopped: null, drained: deferred(),
         incoming: { bidirectional: incoming(), unidirectional: incoming() },
       };
       sessions.set(state, ctx);
@@ -81,12 +81,28 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
     const ctx = context(state);
     if (ctx.stopped) return;
     ctx.stopped = outcome;
+    // Snapshot before any host cleanup callback can reenter. No new admission
+    // can pass the stopped latch; late host results stay owned by these entries.
+    const entries = [...ctx.entries];
+    const pending = entries.flatMap((entry) => [entry.released.promise, entry.admitted.promise]);
     for (const notify of ctx.readyWaiters) notify();
     ctx.readyWaiters.clear();
-    for (const source of Object.values(ctx.incoming)) void closeCollection(source, outcome);
+    for (const source of Object.values(ctx.incoming)) pending.push(closeCollection(source, outcome));
     // Pending host creations/accepts retain their reservations until the host
     // settles and any late stream has completed its own cleanup.
-    for (const entry of ctx.entries) entry.stop?.(outcome);
+    for (const entry of entries) entry.stop?.(outcome);
+    // All members observe rejection internally and still settle only after
+    // cleanup/lock release. Report the first owner outcome, not a second join.
+    void Promise.all(pending).then(() => ctx.drained.resolve(outcome));
+  }
+
+  function whenClosed(state) {
+    return context(state).drained.promise;
+  }
+
+  function closeSessionAndDrain(state, outcome) {
+    closeSession(state, outcome);
+    return whenClosed(state);
   }
 
   function closeCollection(source, outcome) {
@@ -152,12 +168,14 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       finished = true;
       release(reader);
       release(writer);
-      ctx.entries.delete(entry);
+      entry.finished = true;
+      if (entry.admissionFinished) ctx.entries.delete(entry);
       entry.stop = null;
       ctx = null;
       reader = null;
       writer = null;
       completion.resolve(outcome);
+      entry.released.resolve();
     }
 
     function stop(outcome) {
@@ -315,7 +333,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       return { outcome: error("webtransport session stream capacity exhausted", true) };
     }
     // No host getter or await occurs between checking and reserving both bounds.
-    const entry = {};
+    const entry = { released: deferred(), admitted: deferred() };
     ctx.entries.add(entry);
     if (source) source.pending = true;
     return { ctx, entry, source };
@@ -381,7 +399,7 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       await discard(host, null, null, cause, direction, false);
       return ctx.stopped ?? hostError("open", cause);
     } finally {
-      if (!entry.bound) ctx.entries.delete(entry);
+      finishAdmission(ctx, entry);
     }
   }
 
@@ -440,10 +458,20 @@ export function createReliableStreamManager({ lookup, ok, fail, cancelled }) {
       if (ctx.stopped || source.terminal) {
         await closeCollection(source, ctx.stopped ?? source.terminal);
       }
-      if (!entry.bound) ctx.entries.delete(entry);
       source.pending = false;
+      finishAdmission(ctx, entry);
     }
   }
 
-  return Object.freeze({ open, accept, closeSession });
+  function finishAdmission(ctx, entry) {
+    if (!entry.bound) {
+      entry.finished = true;
+      entry.released.resolve();
+    }
+    entry.admissionFinished = true;
+    entry.admitted.resolve();
+    if (entry.finished) ctx.entries.delete(entry);
+  }
+
+  return Object.freeze({ open, accept, closeSession, whenClosed, closeSessionAndDrain });
 }

@@ -1493,6 +1493,22 @@ export const webtransportOpenUnidirectionalStream = webtransport_open_unidirecti
 export const webtransportAcceptBidirectionalStream = webtransport_accept_bidirectional_stream;
 export const webtransportAcceptUnidirectionalStream = webtransport_accept_unidirectional_stream;
 
+// Capture before an owner-close operation invalidates the session handle.
+// This observes reliable streams only; it does not drain datagram or fetch I/O.
+export function webtransport_streams_closed(request) {
+  try {
+    const { state } = lookupWebTransportState(request.session);
+    if (state) return reliableStreams.whenClosed(state);
+    return Promise.resolve(failOut("invalid_handle", "permanent", "webtransport_streams_closed requires a known session"));
+  } catch (error) {
+    let detail = "unreadable session handle";
+    try { detail = errorMessage(error); } catch {}
+    return Promise.resolve(failOut("invalid_handle", "permanent", `webtransport_streams_closed rejected: ${detail}`));
+  }
+}
+
+export const webtransportStreamsClosed = webtransport_streams_closed;
+
 export const runtimeCreate = runtime_create;
 export const runtimeClose = runtime_close;
 export const scopeEnter = scope_enter;

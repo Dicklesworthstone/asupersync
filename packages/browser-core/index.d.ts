@@ -474,3 +474,24 @@ export declare function webtransport_accept_unidirectional_stream(
 ): Promise<Outcome<WebTransportReadableStream | null>>;
 export declare const webtransportAcceptUnidirectionalStream:
   typeof webtransport_accept_unidirectional_stream;
+
+/**
+ * Capture an awaitable reliable-stream shutdown barrier for a known session.
+ * Call before closing its session/scope/runtime, because those operations
+ * invalidate the handle. Observation does not close or reserve the session.
+ * All observers share one promise, which remains pending while the owner is
+ * live, even when it currently has no streams.
+ *
+ * After owner closure this resolves with the first owner outcome only when
+ * every admitted reliable stream, pending open/accept, late-delivered endpoint,
+ * and acquired incoming collection reader has settled its cleanup and released
+ * its locks. Cleanup rejections are observed without replacing the owner cause.
+ * This is not an aggregate child-result report or a deadline guarantee, and it
+ * does not cover datagrams, fetches, WebSockets, unaccepted browser-buffered
+ * streams, the underlying connection, or arbitrary user work. It cannot force
+ * a non-settling host creation/write/cancellation promise to complete.
+ */
+export declare function webtransport_streams_closed(
+  request: WebTransportStreamAcceptRequest,
+): Promise<Outcome<void>>;
+export declare const webtransportStreamsClosed: typeof webtransport_streams_closed;

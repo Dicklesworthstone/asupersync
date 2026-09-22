@@ -79,6 +79,19 @@ export interface ReliableStreamManager<
    * promises that never settle cannot be converted into a deadline guarantee.
    */
   closeSession(state: State, outcome: Outcome<never>): void;
+
+  /**
+   * Observe the single reliable-stream drain promise. It stays pending until
+   * closeSession is called, then waits for all active/admitting streams and
+   * acquired incoming readers to settle cleanup and release locks. It preserves
+   * the first owner outcome, not an aggregate of child failures. This excludes
+   * datagrams, the transport connection, unaccepted browser-owned endpoints,
+   * and arbitrary caller work, and cannot force host promises to settle.
+   */
+  whenClosed(state: State): Promise<Outcome<never>>;
+
+  /** Latch closure and return the same barrier, without changing closeSession. */
+  closeSessionAndDrain(state: State, outcome: Outcome<never>): Promise<Outcome<never>>;
 }
 
 /** Create a manager using only the provided session lookup and Outcome helpers. */

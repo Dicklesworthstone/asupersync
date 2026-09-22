@@ -19,7 +19,8 @@ import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 const sourcePath = process.env.ASUPERSYNC_BROWSER_CORE_SOURCE
   ?? fileURLToPath(new URL("../packages/browser-core/index.js", import.meta.url));
 const source = readFileSync(sourcePath, "utf8");
-const streamSourcePath = fileURLToPath(new URL("../packages/browser-core/webtransport-streams.js", import.meta.url));
+const streamSourcePath = process.env.ASUPERSYNC_WEBTRANSPORT_STREAM_SOURCE
+  ?? fileURLToPath(new URL("../packages/browser-core/webtransport-streams.js", import.meta.url));
 const streamSource = readFileSync(streamSourcePath, "utf8");
 console.log(JSON.stringify({
   scenario_id: "browser-webtransport-host-lifecycle",
@@ -1461,4 +1462,224 @@ test("WTS-READ-RESULT-GETTER-CLOSE: sample result fields once and suppress bytes
     assert.equal(wire.writable.locked, false);
     assertReleased(core, session);
   }
+});
+
+test("WTS-DRAIN-EMPTY: share a passive barrier and preserve the first owner outcome", async () => {
+  const { core, session, scope, host } = await fixture();
+  assert.equal(core.webtransportStreamsClosed, core.webtransport_streams_closed);
+  const state = [...core.hostSessions.values()][0];
+  const barrier = core.webtransport_streams_closed({ session });
+  assert.equal(core.webtransport_streams_closed({ session }), barrier);
+  assert.equal(core.streamManager.whenClosed(state), barrier);
+  let drained = false;
+  void barrier.then(() => { drained = true; });
+  await turn();
+  assert.equal(drained, false, "zero live streams must not imply a closed owner");
+  assert.equal(host.events.length, 0, "observation neither closes nor admits host work");
+  const primary = core.Outcome.err("internal_failure", "transient", "primary shutdown cause");
+  assert.equal(core.streamManager.closeSessionAndDrain(state, primary), barrier);
+  assert.equal(core.streamManager.closeSession(state, core.Outcome.panicked("later cause")), undefined);
+  assert.equal(await barrier, primary);
+  assert.equal(await core.streamManager.whenClosed(state), primary);
+  assert.equal((await core.webtransport_open_stream({ session })).outcome, "err");
+  core.scope_close(scope);
+  assert.equal(await barrier, primary);
+});
+
+test("WTS-DRAIN-ALL: await active I/O, both admission receipts, and late cleanup together", async () => {
+  const writeGate = deferred();
+  const collectionGate = deferred();
+  const creationGate = deferred();
+  const lateGate = deferred();
+  const active = duplex({ write: () => writeGate.promise });
+  const late = duplex({ cancel: () => lateGate.promise });
+  let creations = 0;
+  const { core, session, scope, host, calls } = await fixture({
+    createStream: () => ++creations === 1 ? active : creationGate.promise,
+    cancelIncoming: () => collectionGate.promise,
+  });
+  const stream = await openedStream(core, session);
+  const writing = stream.write(new Uint8Array([1, 2]));
+  const opening = core.webtransport_open_stream({ session });
+  const accepting = core.webtransport_accept_unidirectional_stream({ session });
+  const barrier = core.webtransport_streams_closed({ session });
+  await turn();
+  assert.deepEqual(active.events, [["write", [1, 2]]]);
+  assert.equal(creations, 2, "creation reached the host before shutdown");
+  assert.equal(host.events.filter(([kind]) => kind === "incoming-unidirectional-pull").length, 1);
+  core.scope_close(scope);
+  let drained = false;
+  void barrier.then(() => { drained = true; });
+  await turn();
+  assert.equal(drained, false);
+  writeGate.resolve();
+  assert.equal((await writing).outcome, "cancelled");
+  assert.equal((await stream.closed).outcome, "cancelled");
+  await turn();
+  assert.equal(drained, false, "active stream cleanup is not the whole session barrier");
+  collectionGate.resolve();
+  assert.equal((await accepting).outcome, "cancelled");
+  await turn();
+  assert.equal(drained, false, "an outstanding host creation still owns a reservation");
+  creationGate.resolve(late);
+  await turn();
+  assert.equal(late.events.filter(([kind]) => kind === "cancel").length, 1);
+  assert.equal(drained, false, "late creation must finish its cleanup too");
+  lateGate.resolve();
+  const opened = await opening;
+  const terminal = await barrier;
+  assert.equal(opened.outcome, "cancelled");
+  assert.deepEqual(normalize(terminal), normalize(opened));
+  assert.equal(terminal.cancellation.message, "scope_close");
+  assert.equal(active.readable.locked, false);
+  assert.equal(active.writable.locked, false);
+  assert.equal(late.readable.locked, false);
+  assert.equal(late.writable.locked, false);
+  assert.equal(host.incomingUnidirectionalStreams.locked, false);
+  assert.equal(calls.join.length, 0, "barrier must not publish another task terminal result");
+  assertReleased(core, session);
+});
+
+test("WTS-DRAIN-IDLE-SOURCE: include collection cleanup even after all child streams finish", async () => {
+  const cleanup = deferred();
+  const { core, session, scope, host } = await fixture({ cancelIncoming: () => cleanup.promise });
+  const wire = duplex();
+  wire.input.close();
+  host.incomingUni.enqueue(wire.readable);
+  const child = await incomingStream(core, session, "unidirectional");
+  await child.read();
+  assert.equal((await child.closed).outcome, "ok");
+  const barrier = core.webtransport_streams_closed({ session });
+  core.scope_close(scope);
+  let drained = false;
+  void barrier.then(() => { drained = true; });
+  await turn();
+  assert.equal(drained, false);
+  assert.equal(host.incomingUnidirectionalStreams.locked, true);
+  assert.equal(host.events.filter(([kind]) => kind === "incoming-unidirectional-cancel").length, 1);
+  cleanup.resolve();
+  assert.equal((await barrier).outcome, "cancelled");
+  assert.equal(host.incomingUnidirectionalStreams.locked, false);
+});
+
+test("WTS-DRAIN-REENTRANT-ADMISSION: include a collection reader acquired after close was latched", async () => {
+  const cleanup = deferred();
+  const { core, session, scope, host } = await fixture({ cancelIncoming: () => cleanup.promise });
+  const collection = host.incomingBidirectionalStreams;
+  const nativeAcquire = collection.getReader.bind(collection);
+  collection.getReader = () => {
+    core.scope_close(scope);
+    return nativeAcquire();
+  };
+  const barrier = core.webtransport_streams_closed({ session });
+  const pending = core.webtransport_accept_bidirectional_stream({ session });
+  let drained = false;
+  void barrier.then(() => { drained = true; });
+  await turn();
+  assert.equal(collection.locked, true);
+  assert.equal(drained, false, "the snapshot must retain the in-progress admission, not just acquired resources");
+  assert.equal(host.events.filter(([kind]) => kind === "incoming-bidirectional-pull").length, 0);
+  cleanup.resolve();
+  assert.equal((await pending).outcome, "cancelled");
+  assert.equal((await barrier).outcome, "cancelled");
+  assert.equal(collection.locked, false);
+});
+
+test("WTS-DRAIN-PREFLIGHT: preserve the barrier across pre-handshake owner closure", async () => {
+  const { core, session, scope, host } = await fixture({ pendingHandshake: true });
+  const barrier = core.webtransport_streams_closed({ session });
+  const opening = core.webtransport_open_unidirectional_stream({ session });
+  const accepting = core.webtransport_accept_bidirectional_stream({ session });
+  core.scope_close(scope);
+  for (const result of await Promise.all([opening, accepting, barrier])) {
+    assert.equal(result.outcome, "cancelled");
+    assert.equal(result.cancellation.message, "scope_close");
+  }
+  assert.equal(host.events.some(([kind]) => kind.startsWith("create-") || kind.startsWith("incoming-")), false);
+  assert.equal((await core.webtransport_streams_closed({ session })).failure.code, "invalid_handle");
+  host.handshake.resolve();
+  await turn();
+  assert.equal(host.datagrams.readable.locked, false);
+  assert.equal(host.datagrams.writable.locked, false);
+});
+
+test("WTS-DRAIN-FAILURE: retain the parent transport failure and isolate a sibling barrier", async () => {
+  const cleanup = deferred();
+  const wire = duplex({ cancel: () => cleanup.promise });
+  const { core, session, scope, runtime, host } = await fixture({ createStream: () => wire });
+  const child = await openedStream(core, session);
+  const siblingScope = core.scope_enter({ parent: runtime }).value;
+  const siblingSession = core.webtransport_open({ scope: siblingScope, url: "https://transport.example.test/sibling" }).value;
+  const barrier = core.webtransport_streams_closed({ session });
+  const siblingBarrier = core.webtransport_streams_closed({ session: siblingSession });
+  let siblingEnded = false;
+  void siblingBarrier.then(() => { siblingEnded = true; });
+  host.completion.reject(new Error("session lost during shutdown"));
+  let drained = false;
+  void barrier.then(() => { drained = true; });
+  await turn();
+  assert.equal(drained, false);
+  assert.equal(siblingEnded, false);
+  cleanup.resolve();
+  const terminal = await barrier;
+  assert.equal(terminal.outcome, "err");
+  assert.match(terminal.failure.message, /session lost during shutdown/);
+  assert.deepEqual(normalize(await child.closed), normalize(terminal));
+  assert.equal(siblingEnded, false);
+  assert.equal(core.webtransport_send({ session: siblingSession, value: [1] }).outcome, "ok");
+  core.scope_close(scope);
+  core.runtime_close(runtime);
+  assert.equal((await siblingBarrier).outcome, "cancelled");
+});
+
+test("WTS-DRAIN-CLEANUP-REJECTIONS: await every attempt while preserving the owner cause", async () => {
+  const cleanup = deferred();
+  const { core, session, scope, host } = await fixture({ cancelIncoming: () => cleanup.promise });
+  const wire = duplex({
+    cancel: () => Promise.reject(new Error("read cleanup rejected")),
+    abort: () => Promise.reject(new Error("write cleanup rejected")),
+  });
+  host.incomingBidi.enqueue(wire);
+  const child = await incomingStream(core, session);
+  const barrier = core.webtransport_streams_closed({ session });
+  const pending = core.webtransport_accept_unidirectional_stream({ session });
+  await turn();
+  core.scope_close(scope);
+  let drained = false;
+  void barrier.then(() => { drained = true; });
+  await child.closed;
+  assert.equal(drained, false, "rejected child cleanup does not bypass the remaining collection cleanup");
+  cleanup.reject(new Error("collection cleanup rejected"));
+  const terminal = await barrier;
+  assert.equal(terminal.outcome, "cancelled");
+  assert.equal(terminal.cancellation.message, "scope_close");
+  assert.equal((await pending).outcome, "cancelled");
+  assert.equal(wire.readable.locked, false);
+  assert.equal(wire.writable.locked, false);
+  assert.equal(host.incomingBidirectionalStreams.locked, false);
+  assert.equal(host.incomingUnidirectionalStreams.locked, false);
+});
+
+test("WTS-DRAIN-AUTHORITY: reject unrelated and throwing handles without changing live sessions", async () => {
+  const { core, session, scope, host, calls } = await fixture();
+  const unrelated = core.task_spawn({ scope }).value;
+  const unprintable = { toString() { throw new Error("printing failed"); } };
+  for (const request of [
+    { session: unrelated },
+    { get session() { throw new Error("getter failed"); } },
+    { get session() { throw unprintable; } },
+  ]) {
+    const result = await core.webtransport_streams_closed(request);
+    assert.equal(result.outcome, "err");
+    assert.equal(result.failure.code, "invalid_handle");
+  }
+  const barrier = core.webtransport_streams_closed({ session });
+  let reads = 0;
+  assert.equal(core.webtransport_streams_closed({ get session() { reads += 1; return session; } }), barrier);
+  assert.equal(reads, 1);
+  assert.equal(host.events.length, 0);
+  assert.equal(calls.cancel.length, 0);
+  assert.equal(calls.join.length, 0);
+  core.scope_close(scope);
+  assert.equal((await barrier).outcome, "cancelled");
 });
