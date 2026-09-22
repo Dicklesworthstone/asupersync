@@ -4133,11 +4133,21 @@ impl RuntimeState {
             .admitted_slot
             .as_ref()
             .map_or_else(crate::cx::cap::CapMask::all, |slot| slot.runtime_mask());
-        let (task_id, cx, now) =
-            match self.admit_spawn_record_in(region, budget, runtime_mask, tasks, regions) {
-                Ok(admitted) => admitted,
-                Err(error) => return SpawnAdmission::Denied { parts, error },
-            };
+        let retirement_barrier = parts
+            .admitted_slot
+            .as_ref()
+            .and_then(|slot| slot.retirement_barrier());
+        let (task_id, cx, now) = match self.admit_spawn_record_in(
+            region,
+            budget,
+            runtime_mask,
+            retirement_barrier,
+            tasks,
+            regions,
+        ) {
+            Ok(admitted) => admitted,
+            Err(error) => return SpawnAdmission::Denied { parts, error },
+        };
         self.finish_send_spawn_admission_in(parts, task_id, &cx, now, tasks)
     }
 
@@ -4152,6 +4162,7 @@ impl RuntimeState {
         region: RegionId,
         budget: Budget,
         runtime_mask: crate::cx::cap::CapMask,
+        retirement_barrier: Option<Arc<crate::runtime::task_handle::RetirementBarrier>>,
         tasks: &mut AdmissionTaskTarget<'_>,
         regions: &AdmissionRegionTarget<'_>,
     ) -> Result<(TaskId, crate::cx::Cx, Time), SpawnError> {
@@ -4276,8 +4287,15 @@ impl RuntimeState {
         // The scheduler must install the inherited authority for the entire
         // task lifetime, including factory construction and panic cleanup.
         cx.runtime_mask = runtime_mask;
-        cx.inner.write().runnable_publication =
-            crate::types::task_context::RunnablePublication::Unpublished;
+        {
+            // This context is still private to admission. Install the join
+            // barrier before publishing it in the task record: retirement may
+            // precede the lazy factory's first poll (br-asupersync-yhueis).
+            let mut inner = cx.inner.write();
+            inner.runnable_publication =
+                crate::types::task_context::RunnablePublication::Unpublished;
+            inner.retirement_barrier = retirement_barrier;
+        }
         cx.set_trace_buffer(self.trace_handle());
         cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         tasks
@@ -4575,11 +4593,21 @@ impl RuntimeState {
             .admitted_slot
             .as_ref()
             .map_or_else(crate::cx::cap::CapMask::all, |slot| slot.runtime_mask());
-        let (task_id, cx, now) =
-            match self.admit_spawn_record_in(region, budget, runtime_mask, tasks, regions) {
-                Ok(admitted) => admitted,
-                Err(error) => return LocalSpawnAdmission::Denied { request, error },
-            };
+        let retirement_barrier = request
+            .admitted_slot
+            .as_ref()
+            .and_then(|slot| slot.retirement_barrier());
+        let (task_id, cx, now) = match self.admit_spawn_record_in(
+            region,
+            budget,
+            runtime_mask,
+            retirement_barrier,
+            tasks,
+            regions,
+        ) {
+            Ok(admitted) => admitted,
+            Err(error) => return LocalSpawnAdmission::Denied { request, error },
+        };
         tasks
             .resolve(&mut self.tasks)
             .update_task(task_id, |record| {
