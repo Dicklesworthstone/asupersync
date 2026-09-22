@@ -12,8 +12,9 @@
 //! the entire capture, without changing successful or failed live I/O results.
 //! Replay has no provider. An early poll on another stream parks until its turn;
 //! changing the next operation on the SAME stream is a sticky error. In
-//! particular this strict interface does not permit independently reordered
-//! read/write halves of one stream. Pending live polls are not captured.
+//! particular the unsplit interface rejects reordered read/write operations.
+//! [`ReplayGroupIo::into_split`] permits independent polling of owned directions
+//! without reordering their completions. Pending live polls are not captured.
 //!
 //! This records only byte I/O. It does not capture connection establishment,
 //! clocks, entropy, cancellation, task lifetimes, or effects outside these
@@ -358,6 +359,24 @@ pub enum IoGroupReplayError {
         /// Unconsumed operations in that stream.
         remaining: usize,
     },
+    /// One independently owned direction has no captured operations remaining.
+    #[error("replay stream {stream} {direction:?} half polled after exhaustion")]
+    ExhaustedHalf {
+        /// Caller-selected stream identity.
+        stream: u64,
+        /// Exhausted direction.
+        direction: ReplayDirection,
+    },
+    /// A direction owner was dropped before consuming its observations.
+    #[error("replay stream {stream} {direction:?} half dropped with {remaining} operations outstanding")]
+    AbandonedHalf {
+        /// Caller-selected stream identity.
+        stream: u64,
+        /// Abandoned direction.
+        direction: ReplayDirection,
+        /// Unconsumed observations belonging to this direction.
+        remaining: usize,
+    },
     /// The eligible replay poll unwound. Unknown local progress is never retried.
     #[error("replay stream {0} poll unwound")]
     InterruptedPoll(u64),
@@ -472,8 +491,7 @@ impl fmt::Debug for IoReplayGroup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.shared.state.lock();
         f.debug_struct("IoReplayGroup").field("streams", &state.slots.len())
-            .field("consumed", &state.index).field("events", &state.order.len())
-            .field("failure", &state.failure).finish_non_exhaustive()
+            .field("consumed", &state.index).field("events", &state.order.len()).field("failure", &state.failure).finish_non_exhaustive()
     }
 }
 impl IoReplayGroup {
@@ -562,3 +580,6 @@ mod tests;
 
 mod codec;
 pub use codec::{IoGroupBytes, IoGroupDecodeLimits, IoGroupTapeError};
+
+mod duplex;
+pub use duplex::{ReplayDirection, ReplayGroupReadHalf, ReplayGroupWriteHalf};
