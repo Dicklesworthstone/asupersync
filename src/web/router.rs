@@ -784,6 +784,8 @@ pub struct NativeH3RouterDispatch {
     router: Arc<Router>,
     request: Request,
     suppress_body_for_head: bool,
+    #[cfg(feature = "tls")]
+    streaming_body_limit: Option<u64>,
 }
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
@@ -809,6 +811,41 @@ impl NativeH3RouterDispatch {
     #[must_use]
     pub fn cancellation_token(&self) -> NativeH3RouterDispatchToken {
         self.token.clone()
+    }
+
+    /// Declared length already validated at streaming HEADERS admission.
+    #[cfg(feature = "tls")]
+    fn declared_content_length(&self) -> Option<u64> {
+        self.request
+            .header("content-length")
+            .and_then(|value| value.parse().ok())
+    }
+
+    /// Effective static policy and transport ceiling for the live body.
+    #[cfg(feature = "tls")]
+    fn max_request_body_size(&self) -> u64 {
+        self.streaming_body_limit.unwrap_or(u64::MAX)
+    }
+
+    /// Install the live body created by the actual admitted request task.
+    #[cfg(feature = "tls")]
+    async fn run_produced_streaming(
+        mut self,
+        cx: &Cx,
+        body: crate::http::h1::stream::IncomingRequestBody,
+    ) -> NativeH3RouterProducedDispatch {
+        let Ok(_body_control) = insert_streaming_raw_body(&mut self.request, body) else {
+            let response = http1_stream_refusal_response("streaming request body slot collision");
+            let status = response.status.as_u16();
+            return NativeH3RouterProducedDispatch::Buffered(NativeH3RouterPreparedResponse {
+                token: self.token,
+                response: h3_response_from_web(response, self.suppress_body_for_head)
+                    .map(|(head, body)| (status, head, body)),
+            });
+        };
+        // This guard outlives handler dispatch even when an extension clone
+        // survives it. A body taken by a producer or child stays owned there.
+        self.run_produced(cx).await
     }
 
     /// Run the Router handler without borrowing the H3 session or QUIC
@@ -837,6 +874,7 @@ impl NativeH3RouterDispatch {
             router,
             mut request,
             suppress_body_for_head,
+            ..
         } = self;
         let slot = Http3StreamSlot::default();
         request.extensions.insert_typed(slot.clone());
@@ -1183,6 +1221,8 @@ pub struct NativeH3Router {
     discard_order: std::collections::VecDeque<StreamId>,
     retained_request_body_bytes: usize,
     in_flight: BTreeMap<StreamId, usize>,
+    #[cfg(feature = "tls")]
+    streaming_owned: BTreeSet<StreamId>,
     reset_during_dispatch: BTreeSet<StreamId>,
     produced: BTreeMap<StreamId, ActiveNativeH3ProducedResponse>,
     produced_poll_after: Option<StreamId>,
@@ -1224,6 +1264,8 @@ impl NativeH3Router {
             discard_order: std::collections::VecDeque::new(),
             retained_request_body_bytes: 0,
             in_flight: BTreeMap::new(),
+            #[cfg(feature = "tls")]
+            streaming_owned: BTreeSet::new(),
             reset_during_dispatch: BTreeSet::new(),
             produced: BTreeMap::new(),
             produced_poll_after: None,
@@ -1241,6 +1283,100 @@ impl NativeH3Router {
     #[must_use]
     pub fn in_flight_dispatch_count(&self) -> usize {
         self.in_flight.len()
+    }
+
+    /// Reserve a listener-owned dispatch at HEADERS, before creating a body
+    /// channel or a request region. The ordinary established-session bridge
+    /// keeps its complete-body ingress contract.
+    #[cfg(feature = "tls")]
+    fn begin_streaming_request_with_cx(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        stream_id: StreamId,
+        head: H3RequestHead,
+        retained_bytes: usize,
+    ) -> Result<NativeH3RouterIngress, crate::http::h3::NativeH3SessionError> {
+        if self.discarding.contains(&stream_id) {
+            return Ok(NativeH3RouterIngress::Event(
+                NativeH3RouterEvent::RequestDiscarded { stream_id },
+            ));
+        }
+        let admitted = (|| {
+            if head.pseudo.method.as_deref() == Some(METHOD_CONNECT) {
+                return Err(NativeH3RouterRefusal::ConnectUnsupported);
+            }
+            if self.pending.contains_key(&stream_id)
+                || self.in_flight.contains_key(&stream_id)
+                || self.produced.contains_key(&stream_id)
+            {
+                return Err(NativeH3RouterRefusal::InvalidRequestProgression(
+                    "duplicate request HEADERS",
+                ));
+            }
+            let declared = validate_h3_request_head_semantics(&head)?;
+            let suppress_body_for_head = head.pseudo.method.as_deref() == Some(METHOD_HEAD);
+            let request = web_request_from_h3(head, Vec::new());
+            let body_limit = self
+                .router
+                .h3_streaming_body_policy_limit(&request)?
+                .map_or(self.config.max_buffered_body_bytes, |limit| {
+                    limit.min(self.config.max_buffered_body_bytes)
+                });
+            if declared.is_some_and(|length| length > body_limit) {
+                return Err(NativeH3RouterRefusal::RequestBodyTooLarge { limit: body_limit });
+            }
+            if self.in_flight.len() >= self.config.max_in_flight_dispatches {
+                return Err(NativeH3RouterRefusal::TooManyInFlightDispatches {
+                    limit: self.config.max_in_flight_dispatches,
+                });
+            }
+            let aggregate = self.retained_request_body_bytes.checked_add(retained_bytes);
+            if aggregate.is_none_or(|bytes| bytes > self.config.max_total_buffered_body_bytes) {
+                return Err(NativeH3RouterRefusal::ConnectionBodyBudgetExhausted {
+                    limit: self.config.max_total_buffered_body_bytes,
+                });
+            }
+            Ok((request, suppress_body_for_head, body_limit))
+        })();
+        let (request, suppress_body_for_head, body_limit) = match admitted {
+            Ok(admitted) => admitted,
+            Err(
+                reason @ (NativeH3RouterRefusal::InvalidContentLength
+                | NativeH3RouterRefusal::InvalidTransferEncoding),
+            ) => {
+                // RFC 9114 section 4.1.2 distinguishes malformed HTTP
+                // messages from an application's voluntary cancellation.
+                connection.reset_stream(cx, stream_id, 0x10e)?;
+                connection.stop_stream_receiving(cx, stream_id, 0x10e)?;
+                self.remember_discarding(stream_id);
+                return Ok(NativeH3RouterIngress::Event(
+                    NativeH3RouterEvent::RequestRefused { stream_id, reason },
+                ));
+            }
+            Err(reason) => {
+                return self
+                    .refuse_request(cx, session, connection, stream_id, reason, true)
+                    .map(NativeH3RouterIngress::Event);
+            }
+        };
+        // Charge the queue plus the listener's one retained DATA chunk for the
+        // entire dispatch. A slow consumer or a reset cannot reclaim this
+        // admission credit while its request task is still owned.
+        self.retained_request_body_bytes += retained_bytes;
+        self.in_flight.insert(stream_id, retained_bytes);
+        self.streaming_owned.insert(stream_id);
+        Ok(NativeH3RouterIngress::Dispatch(NativeH3RouterDispatch {
+            token: NativeH3RouterDispatchToken {
+                bridge_identity: Arc::clone(&self.identity),
+                stream_id,
+            },
+            router: Arc::clone(&self.router),
+            request,
+            suppress_body_for_head,
+            streaming_body_limit: Some(u64::try_from(body_limit).unwrap_or(u64::MAX)),
+        }))
     }
 
     /// Ingest one decoded HTTP/3 session event with an explicit capability
@@ -1485,6 +1621,8 @@ impl NativeH3Router {
                     router: Arc::clone(&self.router),
                     request,
                     suppress_body_for_head: is_head,
+                    #[cfg(feature = "tls")]
+                    streaming_body_limit: None,
                 }))
             }
             NativeH3Event::StreamReset {
@@ -1851,6 +1989,49 @@ impl NativeH3Router {
         Ok(event)
     }
 
+    /// Preserve a framed input failure through produced-response cleanup.
+    /// Native QUIC reset calls can replace an earlier application error code,
+    /// so mark the response as reset before any generic cancellation path runs.
+    #[cfg(feature = "tls")]
+    fn cancel_streaming_dispatch_with_error(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        token: &NativeH3RouterDispatchToken,
+        error_code: u64,
+    ) -> Result<(), crate::http::h3::NativeH3SessionError> {
+        let stream_id = token.stream_id;
+        if !Arc::ptr_eq(&self.identity, &token.bridge_identity)
+            || !self.streaming_owned.contains(&stream_id)
+        {
+            return Err(crate::http::h3::NativeH3SessionError::InvalidState(
+                "HTTP/3 streaming cancellation does not own this dispatch",
+            ));
+        }
+        let already_reset = self.reset_during_dispatch.contains(&stream_id)
+            || self
+                .produced
+                .get(&stream_id)
+                .is_some_and(|state| state.reset_queued);
+        let (reset, stopped) =
+            if !already_reset && connection.state() == QuicConnectionState::Established {
+                (
+                    connection.reset_stream(cx, stream_id, error_code),
+                    connection.stop_stream_receiving(cx, stream_id, error_code),
+                )
+            } else {
+                (Ok(()), Ok(()))
+            };
+        if let Some(state) = self.produced.get_mut(&stream_id) {
+            mark_native_h3_produced_cancelled(state, "HTTP/3 request body failed");
+        }
+        self.reset_during_dispatch.insert(stream_id);
+        self.remember_discarding(stream_id);
+        reset?;
+        stopped?;
+        Ok(())
+    }
+
     fn refuse_request(
         &mut self,
         cx: &Cx,
@@ -1877,9 +2058,23 @@ impl NativeH3Router {
     }
 
     fn release_in_flight(&mut self, stream_id: StreamId) {
+        #[cfg(feature = "tls")]
+        if self.streaming_owned.contains(&stream_id) {
+            // Response completion and cancellation can precede request-task
+            // and child-region cleanup. Their body queues still own memory.
+            return;
+        }
         if let Some(body_bytes) = self.in_flight.remove(&stream_id) {
             self.retained_request_body_bytes =
                 self.retained_request_body_bytes.saturating_sub(body_bytes);
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    fn release_streaming_dispatch_after_close(&mut self, stream_id: StreamId) {
+        if self.streaming_owned.remove(&stream_id) {
+            self.reset_during_dispatch.remove(&stream_id);
+            self.release_in_flight(stream_id);
         }
     }
 
@@ -3232,6 +3427,110 @@ impl Router {
         }
     }
 
+    /// Resolve static body policy for a HEADERS-only H3 admission. Run the
+    /// ordinary policy merger on an empty, header-free probe, following the
+    /// exact route/nest precedence used by dispatch. No handler, request body,
+    /// request region, or request-local middleware is created in this phase.
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    fn h3_streaming_body_policy_limit(
+        &self,
+        request: &Request,
+    ) -> Result<Option<usize>, NativeH3RouterRefusal> {
+        fn extend_policy_extensions(target: &mut Extensions, source: &Extensions) {
+            // Carry only policy types: copying unrelated extensions could
+            // retain a body slot or another application's live resource.
+            if let Some(value) = source.get_typed_cloned::<BodyLimits>() {
+                target.insert_typed(value);
+            }
+            if let Some(value) = source.get_typed_cloned::<MultipartLimits>() {
+                target.insert_typed(value);
+            }
+            if let Some(value) = source.get_typed_cloned::<RequestBodyPolicy>() {
+                target.insert_typed(value);
+            }
+            if let Some(value) = source.get_typed_cloned::<RequestBodyPolicyState>() {
+                target.insert_typed(value);
+            }
+        }
+
+        fn apply_probe_policy(
+            probe: &mut Request,
+            inherited: Option<RequestBodyPolicyState>,
+            local: Option<RequestBodyPolicyState>,
+        ) -> Result<(), NativeH3RouterRefusal> {
+            // With no body or Content-Length this should always succeed, even
+            // at a zero-byte ceiling. Preserve a fail-closed boundary if the
+            // shared policy implementation gains another admission check.
+            apply_request_body_policy(probe, inherited, local).map_err(|_| {
+                NativeH3RouterRefusal::InvalidRequestProgression(
+                    "HTTP/3 static body policy admission failed",
+                )
+            })
+        }
+
+        let mut probe = Request::new(request.method.clone(), request.path.clone());
+        extend_policy_extensions(&mut probe.extensions, &request.extensions);
+        let mut router = self;
+        loop {
+            let inherited = explicit_policy_state_from_extensions(&probe.extensions);
+            let extension_policy = explicit_policy_state_from_extensions(&router.extensions);
+            extend_policy_extensions(&mut probe.extensions, &router.extensions);
+            let local = meet_optional_policy_state(
+                extension_policy,
+                meet_optional_policy_state(
+                    router
+                        .server_body_policy
+                        .map(RequestBodyPolicyState::from_policy),
+                    router.body_policy.map(RequestBodyPolicyState::from_policy),
+                ),
+            );
+            apply_probe_policy(&mut probe, inherited, local)?;
+
+            let mut best_route: Option<(RouteSpecificity, &MethodRouter)> = None;
+            for (pattern, method_router) in &router.routes {
+                if let Some(matched) = pattern.matches(&probe.path) {
+                    match best_route {
+                        Some((specificity, _)) if specificity >= matched.specificity => {}
+                        _ => best_route = Some((matched.specificity, method_router)),
+                    }
+                }
+            }
+            if let Some((_, method_router)) = best_route {
+                // MethodRouter applies this before method lookup, including a
+                // 405 response. Admission must select the same policy.
+                apply_probe_policy(
+                    &mut probe,
+                    None,
+                    method_router
+                        .body_policy
+                        .map(RequestBodyPolicyState::from_policy),
+                )?;
+                break;
+            }
+
+            let mut best_nested: Option<(usize, &Self, String)> = None;
+            for (prefix, nested) in &router.nested {
+                if let Some(path) = strip_prefix(&probe.path, prefix) {
+                    let length = prefix.trim_end_matches('/').len();
+                    match &best_nested {
+                        Some((best, _, _)) if *best >= length => {}
+                        _ => best_nested = Some((length, nested, path)),
+                    }
+                }
+            }
+            if let Some((_, nested, path)) = best_nested {
+                router = nested;
+                probe.path = path;
+            } else {
+                // The selected router's fallback/404 uses its inherited
+                // policy; it does not retry a shorter mount or outer fallback.
+                break;
+            }
+        }
+        Ok(explicit_policy_state_from_extensions(&probe.extensions)
+            .map(|state| state.resolved().max_total_body_size))
+    }
+
     /// Route-match and dispatch without trace instrumentation.
     async fn handle_inner(&self, cx: &Cx, mut req: Request) -> Response {
         let inherited_policy = explicit_policy_state_from_extensions(&req.extensions);
@@ -3686,10 +3985,9 @@ fn web_request_from_h3(head: H3RequestHead, body: Vec<u8>) -> Request {
 }
 
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
-fn validate_h3_request_semantics(
+fn validate_h3_request_head_semantics(
     head: &H3RequestHead,
-    body_len: usize,
-) -> Result<(), NativeH3RouterRefusal> {
+) -> Result<Option<usize>, NativeH3RouterRefusal> {
     let mut content_length = None;
     for (name, value) in &head.headers {
         if name == "content-length" {
@@ -3708,6 +4006,15 @@ fn validate_h3_request_semantics(
             return Err(NativeH3RouterRefusal::InvalidTransferEncoding);
         }
     }
+    Ok(content_length)
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn validate_h3_request_semantics(
+    head: &H3RequestHead,
+    body_len: usize,
+) -> Result<(), NativeH3RouterRefusal> {
+    let content_length = validate_h3_request_head_semantics(head)?;
     if content_length.is_some_and(|declared| declared != body_len) {
         return Err(NativeH3RouterRefusal::InvalidContentLength);
     }
@@ -4795,6 +5102,147 @@ mod tests {
             3,
         )
         .expect("valid HTTP/3 request semantics");
+    }
+
+    #[test]
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    fn h3_streaming_policy_uses_actual_route_precedence_before_method_lookup() {
+        let route = |limit| {
+            post(FnHandler::new(ok_handler))
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(limit))
+        };
+        let router = Router::new()
+            .route("/files/*", route(80))
+            .route("/files/:id", route(40))
+            .route("/files/fixed", route(20))
+            .route("/files/:other", route(10))
+            .nest("/files", Router::new().route("/fixed", route(1)));
+        for (path, expected) in [
+            ("/files/fixed", 20),
+            ("/files/object", 40),
+            ("/files/nested/object", 80),
+        ] {
+            let request = Request::new("DELETE", path);
+            assert_eq!(
+                router.h3_streaming_body_policy_limit(&request),
+                Ok(Some(expected)),
+                "HEADERS admission must select the route whose dispatch returns 405"
+            );
+            let response =
+                router.handle(request.with_header("content-length", (expected + 1).to_string()));
+            assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    fn h3_streaming_policy_follows_longest_mount_and_keeps_nested_404_policy() {
+        let router = Router::new()
+            .nest(
+                "/api",
+                Router::new().with_body_policy(RequestBodyPolicy::new().max_total_body_size(50)),
+            )
+            .nest(
+                "/api/private",
+                Router::new().with_body_policy(RequestBodyPolicy::new().max_total_body_size(7)),
+            )
+            .nest(
+                "/api/private/",
+                Router::new().with_body_policy(RequestBodyPolicy::new().max_total_body_size(2)),
+            )
+            .with_server_body_policy(RequestBodyPolicy::new().max_total_body_size(100));
+        for (path, expected) in [("/api/missing", 50), ("/api/private/missing", 7)] {
+            let request = Request::new("POST", path);
+            assert_eq!(
+                router.h3_streaming_body_policy_limit(&request),
+                Ok(Some(expected))
+            );
+            let response =
+                router.handle(request.with_header("content-length", (expected + 1).to_string()));
+            assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    fn h3_streaming_policy_preserves_unconfigured_and_explicit_ceilings() {
+        let unconfigured = Router::new()
+            .with_state(BodyLimits::new().max_raw_body_size(3))
+            .nest(
+                "/nested",
+                Router::new()
+                    .with_state(BodyLimits::new().max_raw_body_size(30))
+                    .route("/upload", post(FnHandler::new(ok_handler))),
+            );
+        let request = Request::new("POST", "/nested/upload");
+        assert_eq!(
+            unconfigured.h3_streaming_body_policy_limit(&request),
+            Ok(None)
+        );
+
+        let large_limit = 64 * 1024 * 1024;
+        let explicit_route = Router::new().route(
+            "/upload",
+            post(FnHandler::new(ok_handler))
+                .with_body_policy(RequestBodyPolicy::new().max_total_body_size(large_limit)),
+        );
+        assert_eq!(
+            explicit_route.h3_streaming_body_policy_limit(&Request::new("POST", "/upload")),
+            Ok(Some(large_limit)),
+            "a static route ceiling is not silently replaced with a default transport limit"
+        );
+
+        let constrained =
+            unconfigured.with_server_body_policy(RequestBodyPolicy::new().max_total_body_size(4));
+        assert_eq!(
+            constrained.h3_streaming_body_policy_limit(&request),
+            Ok(Some(4))
+        );
+        let response = constrained.handle(request.with_header("content-length", "5"));
+        assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    fn h3_streaming_head_validation_does_not_require_body_completion() {
+        use crate::http::h3::H3PseudoHeaders;
+
+        let head = |length: Option<&str>| {
+            H3RequestHead::new(
+                H3PseudoHeaders {
+                    method: Some("POST".to_string()),
+                    scheme: Some("https".to_string()),
+                    authority: Some("example.test".to_string()),
+                    path: Some("/upload".to_string()),
+                    ..H3PseudoHeaders::default()
+                },
+                length
+                    .map(|value| vec![("content-length".to_string(), value.to_string())])
+                    .unwrap_or_default(),
+            )
+            .expect("syntactically valid H3 request head")
+        };
+
+        let unknown = head(None);
+        assert_eq!(validate_h3_request_head_semantics(&unknown), Ok(None));
+        assert_eq!(validate_h3_request_semantics(&unknown, 8), Ok(()));
+
+        for (declared, length) in [("0", 0), ("8", 8)] {
+            let request = head(Some(declared));
+            assert_eq!(
+                validate_h3_request_head_semantics(&request),
+                Ok(Some(length))
+            );
+            assert_eq!(validate_h3_request_semantics(&request, length), Ok(()));
+            assert_eq!(
+                validate_h3_request_semantics(&request, length + 1),
+                Err(NativeH3RouterRefusal::InvalidContentLength)
+            );
+        }
+        assert_eq!(
+            validate_h3_request_semantics(&head(Some("8")), 0),
+            Err(NativeH3RouterRefusal::InvalidContentLength)
+        );
     }
 
     #[test]

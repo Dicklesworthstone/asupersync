@@ -659,3 +659,9 @@ impl TimeSource for GroupReplayClock {
 
 #[cfg(test)]
 mod tests;
+
+mod codec;
+pub use codec::{GroupSessionBytes, GroupSessionDecodeLimits, GroupSessionTapeError};
+
+mod send;
+pub use send::GroupSendConsumerFuture;
