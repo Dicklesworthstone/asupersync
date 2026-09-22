@@ -678,18 +678,14 @@ impl SparseWriter {
 
                 #[cfg(not(target_os = "linux"))]
                 {
-                    // Fallback: seek and write zero
-                    match file.seek(SeekFrom::Start(size.saturating_sub(1))) {
-                        Ok(_) => {
-                            if file.write_all(&[0]).is_ok() {
-                                file.seek(SeekFrom::Start(0)).ok();
-                                state.allocated_size = size;
-                                state.is_preallocated = true;
-                            }
-                        }
-                        Err(_) => {
-                            // Preallocation failed, continue without it
-                        }
+                    // Best-effort logical extension, not a physical-space
+                    // reservation. Never overwrite a payload byte or shrink
+                    // an existing file when this hint is repeated.
+                    if let Ok(metadata) = file.metadata()
+                        && (metadata.len() >= size || file.set_len(size).is_ok())
+                    {
+                        state.allocated_size = metadata.len().max(size);
+                        state.is_preallocated = true;
                     }
                 }
             }
@@ -1277,6 +1273,56 @@ mod tests {
             let stats = writer.get_stats();
             // Note: actual preallocation depends on platform support
             assert!(stats.allocated_size <= 1024 * 1024);
+        });
+    }
+
+    #[test]
+    fn repeated_preallocation_preserves_payload_and_empty_file() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let mut writer = SparseWriter::new(
+                &cx,
+                test_object_id("preallocation-preservation"),
+                unique_temp_path("preallocation_preservation"),
+                SparseWriterConfig {
+                    enable_preallocation: true,
+                    ..SparseWriterConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            // Exercise the platform path even if capability probing on the
+            // test filesystem conservatively reports no preallocation.
+            Arc::make_mut(&mut writer.platform)
+                .filesystem
+                .supports_preallocation = true;
+            writer.set_expected_size(0).unwrap();
+            let path = {
+                let mut state = writer.lock_state();
+                writer.ensure_temp_file_open_locked(&mut state).unwrap();
+                state.temp_path.clone().unwrap()
+            };
+            assert!(std::fs::read(&path).unwrap().is_empty());
+
+            writer.set_expected_size(8).unwrap();
+            writer
+                .write_chunk(&cx, 0, b"abcdefgh", WriteOptions::default())
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                writer.set_expected_size(8).unwrap();
+                assert_eq!(std::fs::read(&path).unwrap(), b"abcdefgh");
+                assert!(writer.is_complete());
+            }
+            writer.set_expected_size(12).unwrap();
+            assert_eq!(&std::fs::read(&path).unwrap()[..8], b"abcdefgh");
+            writer
+                .write_chunk(&cx, 8, b"ijkl", WriteOptions::default())
+                .await
+                .unwrap();
+            writer.set_expected_size(12).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"abcdefghijkl");
+            assert!(writer.is_complete());
         });
     }
 
