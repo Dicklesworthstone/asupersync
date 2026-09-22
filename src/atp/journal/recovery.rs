@@ -368,6 +368,9 @@ impl RecoveryContext {
                 ChunkState::Committed | ChunkState::Quarantined | ChunkState::Invalidated
             )
         });
+        transfer
+            .chunk_sizes
+            .retain(|chunk_id, _| transfer.chunk_states.contains_key(chunk_id));
     }
 
     fn create_fingerprint(&self, record: &JournalRecord) -> RecordFingerprint {
@@ -1347,6 +1350,80 @@ mod tests {
 
         let (bitmaps, _) = ctx.finalize();
         assert!(!bitmaps.contains_key(&transfer_id));
+    }
+
+    #[test]
+    fn rollback_discards_abandoned_geometry_before_retry() {
+        let mut ctx = RecoveryContext::new();
+        let transfer_id = "rollback-geometry".to_string();
+        for offset in [0, 8192] {
+            process_test_record(
+                &mut ctx,
+                JournalRecord::ChunkReceived {
+                    transfer_id: transfer_id.clone(),
+                    chunk_offset: offset,
+                    chunk_size: 1024,
+                    chunk_hash: [0; 32],
+                    timestamp: 1000,
+                    auth_tag: unsigned_tag(),
+                },
+            )
+            .unwrap();
+        }
+        process_test_record(
+            &mut ctx,
+            JournalRecord::Rollback {
+                transfer_id: transfer_id.clone(),
+                rollback_reason: "retry".into(),
+                checkpoint_sequence: 0,
+                timestamp: 2000,
+                auth_tag: unsigned_tag(),
+            },
+        )
+        .unwrap();
+        assert!(ctx.transfers[&transfer_id].chunk_states.is_empty());
+        assert!(ctx.transfers[&transfer_id].chunk_sizes.is_empty());
+        process_test_record(
+            &mut ctx,
+            JournalRecord::ChunkReceived {
+                transfer_id: transfer_id.clone(),
+                chunk_offset: 0,
+                chunk_size: 256,
+                chunk_hash: [1; 32],
+                timestamp: 3000,
+                auth_tag: unsigned_tag(),
+            },
+        )
+        .unwrap();
+        let (bitmaps, _) = ctx.finalize();
+        let bitmap = &bitmaps[&transfer_id];
+        assert_eq!(bitmap.total_size(), 256);
+        assert_eq!(bitmap.chunk_size(), 256);
+        assert_eq!(bitmap.entry_count(), 1);
+        assert_eq!(bitmap.get_chunk_state(0), Some(ChunkState::Received));
+    }
+
+    #[test]
+    fn rollback_keeps_geometry_for_retained_states() {
+        let mut ctx = RecoveryContext::new();
+        let transfer = ctx.ensure_transfer("retained-geometry");
+        for (offset, state) in [
+            (0, ChunkState::Committed),
+            (256, ChunkState::Quarantined),
+            (512, ChunkState::Invalidated),
+            (768, ChunkState::Written),
+        ] {
+            let id = ChunkId::from_u64(offset);
+            transfer.chunk_states.insert(id, state);
+            transfer.record_chunk_geometry(id, 256, 1000);
+        }
+        RecoveryContext::rollback_uncommitted_chunks(transfer);
+        assert_eq!(transfer.chunk_states.len(), 3);
+        assert_eq!(transfer.chunk_sizes.len(), 3);
+        for offset in [0, 256, 512] {
+            assert_eq!(transfer.chunk_sizes[&ChunkId::from_u64(offset)], 256);
+        }
+        assert!(!transfer.chunk_sizes.contains_key(&ChunkId::from_u64(768)));
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
