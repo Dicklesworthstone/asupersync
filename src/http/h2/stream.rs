@@ -206,6 +206,13 @@ pub struct Stream {
     initial_send_window: i32,
     /// Initial receive window size (for auto WINDOW_UPDATE threshold).
     initial_recv_window: i32,
+    /// Received DATA cannot be retroactively moved to consumption accounting.
+    #[cfg(feature = "http2-streaming")]
+    recv_data_started: bool,
+    /// Outstanding receive bytes when the application owns stream credit.
+    /// Includes padding until the connection discards it after frame validation.
+    #[cfg(feature = "http2-streaming")]
+    deferred_recv_bytes: Option<u64>,
     /// Priority specification.
     priority: PrioritySpec,
     /// Pending data to send (buffered due to flow control).
@@ -277,6 +284,10 @@ impl Stream {
             recv_window: initial_recv_window,
             initial_send_window,
             initial_recv_window,
+            #[cfg(feature = "http2-streaming")]
+            recv_data_started: false,
+            #[cfg(feature = "http2-streaming")]
+            deferred_recv_bytes: None,
             priority: PrioritySpec {
                 exclusive: false,
                 dependency: 0,
@@ -407,6 +418,69 @@ impl Stream {
         self.recv_window
     }
 
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn defer_recv_window_updates(&mut self) -> Result<(), H2Error> {
+        if self.error_code.is_some() {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::StreamClosed,
+                "cannot defer receive credit on a reset stream",
+            ));
+        }
+        if self.deferred_recv_bytes.is_some() {
+            return Ok(());
+        }
+        if !self.initial_headers_decoded || !self.headers_complete || self.recv_data_started {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::ProtocolError,
+                "receive credit must be deferred after initial HEADERS and before DATA",
+            ));
+        }
+        self.deferred_recv_bytes = Some(0);
+        Ok(())
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn deferred_recv_bytes(&self) -> Option<u64> {
+        self.deferred_recv_bytes
+    }
+
+    /// Retire consumed bytes, returning only credit still useful to the peer.
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn release_deferred_recv_capacity(&mut self, amount: u32) -> Result<u32, H2Error> {
+        if self.error_code.is_some() {
+            return Ok(0);
+        }
+        let pending = self.deferred_recv_bytes.ok_or_else(|| {
+            H2Error::stream(
+                self.id,
+                ErrorCode::ProtocolError,
+                "stream receive credit is not deferred",
+            )
+        })?;
+        let remaining = pending.checked_sub(u64::from(amount)).ok_or_else(|| {
+            H2Error::stream(
+                self.id,
+                ErrorCode::FlowControlError,
+                "released receive capacity exceeds unconsumed DATA",
+            )
+        })?;
+        let increment = if self.state.can_recv() { amount } else { 0 };
+        if increment != 0 {
+            let delta = i32::try_from(increment).map_err(|_| {
+                H2Error::stream(
+                    self.id,
+                    ErrorCode::FlowControlError,
+                    "window increment too large",
+                )
+            })?;
+            self.update_recv_window(delta)?;
+        }
+        self.deferred_recv_bytes = Some(remaining);
+        Ok(increment)
+    }
+
     /// Get the priority specification.
     #[must_use]
     pub fn priority(&self) -> &PrioritySpec {
@@ -532,6 +606,10 @@ impl Stream {
     /// memory buffering.
     #[must_use]
     pub fn auto_window_update_increment(&self) -> Option<u32> {
+        #[cfg(feature = "http2-streaming")]
+        if self.deferred_recv_bytes.is_some() {
+            return None;
+        }
         // Use 25% threshold instead of 50% to be more conservative about flow control
         let low_watermark = self.initial_recv_window / 4;
         if self.recv_window < low_watermark {
@@ -849,6 +927,20 @@ impl Stream {
             ));
         }
 
+        #[cfg(feature = "http2-streaming")]
+        let deferred_recv_bytes = self
+            .deferred_recv_bytes
+            .map(|pending| {
+                pending.checked_add(u64::from(len)).ok_or_else(|| {
+                    H2Error::stream(
+                        self.id,
+                        ErrorCode::FlowControlError,
+                        "unconsumed receive capacity overflow",
+                    )
+                })
+            })
+            .transpose()?;
+
         // br-asupersync-kaqld3: propagate FLOW_CONTROL_ERROR if the
         // window underflows below i32::MIN. The check at line 582
         // guards against the common overshoot, but a SETTINGS shrink
@@ -856,6 +948,11 @@ impl Stream {
         // arithmetic-bound check inside consume_recv_window is the
         // last line of defence.
         self.consume_recv_window(len)?;
+        #[cfg(feature = "http2-streaming")]
+        {
+            self.recv_data_started = true;
+            self.deferred_recv_bytes = deferred_recv_bytes;
+        }
 
         if end_stream {
             match self.state {
@@ -877,6 +974,10 @@ impl Stream {
         self.header_fragments.clear();
         self.header_fragments_bytes = 0;
         self.pending_data.clear();
+        #[cfg(feature = "http2-streaming")]
+        if let Some(pending) = &mut self.deferred_recv_bytes {
+            *pending = 0;
+        }
     }
 
     /// Queue data for sending (when flow control blocks).
