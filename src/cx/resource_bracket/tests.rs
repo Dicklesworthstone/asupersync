@@ -275,7 +275,18 @@ fn cancellation_before_first_poll_never_acquires_a_resource() {
             async { Outcome::<_, &'static str>::Ok(Resource(Cell::new(0))) }
         }, use_resource, |_, _| async { Outcome::<(), ()>::Ok(()) }).unwrap();
         handle.abort(); // No yield: the lab has not admitted/polled the controller.
-        assert!(matches!(handle.join().await, Err(JoinError::Cancelled(_))));
+        // The controller can publish its cleanup report even when its task
+        // terminal is cancellation. Joining retains that report, rather than
+        // discarding it behind an outer JoinError.
+        let report = handle.join().await.expect("cancelled controller retained its report");
+        assert!(matches!(report.controller_task, Err(JoinError::Cancelled(_))));
+        assert!(report.cancellation.is_some());
+        assert!(!report.is_success());
+        assert!(report.acquisition.is_none());
+        assert!(report.usage.is_none());
+        assert!(report.release.is_none());
+        assert!(report.unreleased.is_none());
+        assert!(matches!(report.close, Some(Ok(_))));
         assert_eq!(acquisitions.load(Ordering::SeqCst), 0);
     });
 }
