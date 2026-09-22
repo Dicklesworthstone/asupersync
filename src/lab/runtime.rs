@@ -6394,6 +6394,69 @@ mod tests {
 
     #[cfg(unix)]
     struct TestFdSource;
+
+    #[test]
+    fn lab_teardown_releases_parked_task_join_barrier() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Retired(Arc<AtomicBool>);
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let mut lab = LabRuntime::new(LabConfig::new(0x16).max_steps(256));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let parked = Arc::new(AtomicBool::new(false));
+        let retired = Arc::new(AtomicBool::new(false));
+        let child_parked = Arc::clone(&parked);
+        let child_retired = Arc::clone(&retired);
+        let published = Arc::new(Mutex::new(None));
+        let publish = Arc::clone(&published);
+        let (owner, _owner_join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = crate::Cx::current().unwrap();
+                let child = cx
+                    .spawn(move |_| async move {
+                        let _retired = Retired(child_retired);
+                        std::future::poll_fn(|_| {
+                            child_parked.store(true, Ordering::Release);
+                            std::task::Poll::<()>::Pending
+                        })
+                        .await;
+                    })
+                    .unwrap();
+                *publish.lock() = Some(child);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        lab.run_until_idle();
+        assert!(parked.load(Ordering::Acquire));
+        let mut handle = published.lock().take().expect("published child handle");
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(FlagWaker(Arc::clone(&woken))));
+        assert!(
+            handle
+                .poll_join(&mut std::task::Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert!(!handle.is_finished());
+        eprintln!(
+            "teardown_join scenario=lab task={:?} parked=true trigger=drop",
+            handle.task_id()
+        );
+        drop(lab);
+        assert!(retired.load(Ordering::Acquire));
+        assert!(woken.load(Ordering::Acquire));
+        assert!(handle.is_finished());
+        let result = handle.try_join();
+        eprintln!("teardown_join scenario=lab retired=true woken=true result={result:?}");
+        assert!(
+            matches!(result, Err(crate::runtime::task_handle::JoinError::Cancelled(reason))
+            if reason.kind == CancelKind::Shutdown)
+        );
+    }
     #[cfg(unix)]
     impl std::os::fd::AsRawFd for TestFdSource {
         fn as_raw_fd(&self) -> std::os::fd::RawFd {

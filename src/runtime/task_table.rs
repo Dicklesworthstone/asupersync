@@ -647,6 +647,58 @@ impl TaskTable {
     }
 }
 
+impl Drop for TaskTable {
+    fn drop(&mut self) {
+        // The table is the final owner of admitted tasks, including in the lab.
+        // Native teardown detaches it after worker joins, outside state/shard
+        // locks. Keep barriers alive while destroying futures and records;
+        // opening them sooner would expose completion before retirement.
+        fn isolate(cleanup: impl FnOnce()) {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup)) {
+                // An arbitrary panic payload may itself panic on destruction.
+                std::mem::forget(payload);
+            }
+        }
+
+        let mut barriers = Vec::new();
+        for (_, record) in self.tasks.iter_mut() {
+            if let Some(barrier) = record
+                .cx_inner
+                .as_ref()
+                .and_then(|inner| inner.read().retirement_barrier.clone())
+            {
+                barriers.push(barrier);
+            }
+            isolate(|| {
+                let (_, wakes) = record
+                    .request_cancel(crate::types::CancelReason::shutdown())
+                    .into_parts();
+                // Workers have stopped; retire registrations without enqueueing
+                // more work or delivering cancellation observers during Drop.
+                wakes.retire_without_dispatch();
+            });
+        }
+        for slot in &mut self.stored_futures {
+            if let Some(stored) = slot.take() {
+                isolate(|| drop(stored));
+            }
+        }
+        self.stored_future_len = 0;
+        for mut record in self.tasks.drain_values() {
+            isolate(|| {
+                record.complete(crate::types::Outcome::Cancelled(
+                    crate::types::CancelReason::shutdown(),
+                ));
+                drop(record);
+            });
+        }
+        for barrier in barriers {
+            // One hostile consumer must not strand the remaining consumers.
+            isolate(|| barrier.open_after_shutdown());
+        }
+    }
+}
+
 impl Default for TaskTable {
     #[inline]
     fn default() -> Self {
@@ -676,6 +728,68 @@ mod tests {
 
     fn live_phase_sum(table: &TaskTable) -> usize {
         table.phase_counts.iter().sum()
+    }
+
+    #[test]
+    fn shutdown_retires_all_tasks_despite_destructor_and_join_waker_panics() {
+        use crate::runtime::task_handle::RetirementBarrier;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Retired(Arc<AtomicUsize>, bool);
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                assert!(!self.1, "injected task destructor panic");
+            }
+        }
+        struct Joined(Arc<AtomicUsize>, Arc<AtomicUsize>, bool);
+        impl std::task::Wake for Joined {
+            fn wake(self: Arc<Self>) {
+                assert_eq!(
+                    self.0.load(Ordering::SeqCst),
+                    2,
+                    "all futures retire before publication"
+                );
+                self.1.fetch_add(1, Ordering::SeqCst);
+                assert!(!self.2, "injected join waker panic");
+            }
+        }
+        let retired = Arc::new(AtomicUsize::new(0));
+        let joined = Arc::new(AtomicUsize::new(0));
+        let mut table = TaskTable::new();
+        let mut barriers = Vec::new();
+        for hostile in [true, false] {
+            let owner = RegionId::testing_default();
+            let mut record = make_task_record(owner);
+            let barrier = RetirementBarrier::pending();
+            let mut inner = crate::types::CxInner::new(owner, record.id, Budget::INFINITE);
+            inner.retirement_barrier = Some(Arc::clone(&barrier));
+            record.cx_inner = Some(Arc::new(parking_lot::RwLock::new(inner)));
+            let task = TaskId::from_arena(table.insert_task(record));
+            let guard = Retired(Arc::clone(&retired), hostile);
+            table.store_spawned_task(
+                task,
+                StoredTask::new_with_id(
+                    async move {
+                        let _guard = guard;
+                        std::future::pending::<()>().await;
+                        Outcome::Ok(())
+                    },
+                    task,
+                ),
+            );
+            let waker = std::task::Waker::from(Arc::new(Joined(
+                Arc::clone(&retired),
+                Arc::clone(&joined),
+                hostile,
+            )));
+            assert!(!barrier.register_and_is_open(&waker));
+            barriers.push(barrier);
+        }
+        drop(table);
+        assert_eq!(retired.load(Ordering::SeqCst), 2);
+        assert_eq!(joined.load(Ordering::SeqCst), 2);
+        assert!(barriers.iter().all(|barrier| barrier.is_open()));
     }
 
     #[test]

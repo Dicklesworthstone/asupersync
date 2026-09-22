@@ -36,6 +36,7 @@ use std::sync::{Arc, Weak};
 /// surface immediately and never wait for a retirement that will not happen.
 pub(crate) struct RetirementBarrier {
     open: AtomicBool,
+    shutdown: AtomicBool,
     waker: Mutex<Option<std::task::Waker>>,
 }
 
@@ -53,6 +54,7 @@ impl RetirementBarrier {
     pub(crate) fn pending() -> Arc<Self> {
         Arc::new(Self {
             open: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
             waker: Mutex::new(None),
         })
     }
@@ -62,6 +64,7 @@ impl RetirementBarrier {
     pub(crate) fn open_now() -> Arc<Self> {
         Arc::new(Self {
             open: AtomicBool::new(true),
+            shutdown: AtomicBool::new(false),
             waker: Mutex::new(None),
         })
     }
@@ -69,6 +72,21 @@ impl RetirementBarrier {
     #[inline]
     pub(crate) fn is_open(&self) -> bool {
         self.open.load(Ordering::Acquire)
+    }
+
+    /// Releases a task destroyed during teardown. The shutdown attribution
+    /// outlives its CxInner, so a closed result channel still has a reason.
+    /// Call only after retiring task storage, outside runtime and shard locks.
+    pub(crate) fn open_after_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.open_and_wake();
+    }
+
+    fn strengthen_shutdown_reason(&self, mut reason: CancelReason) -> CancelReason {
+        if self.shutdown.load(Ordering::Acquire) {
+            reason.strengthen(&CancelReason::shutdown());
+        }
+        reason
     }
 
     /// Opens the barrier and wakes any parked consumer. Called by the scheduler
@@ -101,7 +119,10 @@ impl RetirementBarrier {
         let candidate = waker.clone();
         let displaced = {
             let mut slot = self.waker.lock();
-            if slot.as_ref().is_some_and(|existing| existing.will_wake(waker)) {
+            if slot
+                .as_ref()
+                .is_some_and(|existing| existing.will_wake(waker))
+            {
                 None
             } else {
                 slot.replace(candidate)
@@ -709,8 +730,7 @@ impl<T> TaskHandle<T> {
         // on it before retirement. Peeks only; never consumes or mutates the
         // receiver.
         self.terminal_consumed
-            || (self.barrier.is_open()
-                && (self.receiver.is_ready() || self.receiver.is_closed()))
+            || (self.barrier.is_open() && (self.receiver.is_ready() || self.receiver.is_closed()))
     }
 
     /// Waits for the task to complete and returns its result.
@@ -964,10 +984,12 @@ impl<T> TaskHandle<T> {
 
     #[inline]
     fn closed_reason(&self) -> CancelReason {
-        self.live_inner()
+        let reason = self
+            .live_inner()
             .and_then(|inner| inner.read().cancel_reason.clone())
             .or_else(|| self.requested_cancel_reason.read().clone())
-            .unwrap_or_else(|| CancelReason::user("join channel closed"))
+            .unwrap_or_else(|| CancelReason::user("join channel closed"));
+        self.barrier.strengthen_shutdown_reason(reason)
     }
 }
 
@@ -1000,10 +1022,12 @@ impl<T> JoinFuture<'_, T> {
 
     #[inline]
     fn closed_reason(&self) -> CancelReason {
-        self.live_inner()
+        let reason = self
+            .live_inner()
             .and_then(|inner| inner.read().cancel_reason.clone())
             .or_else(|| self.requested_cancel_reason.read().clone())
-            .unwrap_or_else(|| CancelReason::user("join channel closed"))
+            .unwrap_or_else(|| CancelReason::user("join channel closed"));
+        self.barrier.strengthen_shutdown_reason(reason)
     }
 
     fn abort_with_reason(&self, reason: CancelReason) {
@@ -2268,8 +2292,12 @@ mod tests {
         let task_id = TaskId::from_arena(ArenaIndex::new(41, 1));
         let (tx, rx) = task_result_channel::<i32>();
         let barrier = RetirementBarrier::pending();
-        let mut handle =
-            handle_with_barrier(task_id, rx, std::sync::Arc::downgrade(&cx.inner), std::sync::Arc::clone(&barrier));
+        let mut handle = handle_with_barrier(
+            task_id,
+            rx,
+            std::sync::Arc::downgrade(&cx.inner),
+            std::sync::Arc::clone(&barrier),
+        );
 
         // Producer publishes the terminal result up front (pre-retirement).
         publish_terminal_result(tx, Ok(42));
@@ -2282,7 +2310,10 @@ mod tests {
             handle.poll_join(&mut poll_cx).is_pending(),
             "a received terminal must stay gated while the barrier is closed"
         );
-        assert!(!handle.is_finished(), "gated result must not report finished");
+        assert!(
+            !handle.is_finished(),
+            "gated result must not report finished"
+        );
         assert!(
             matches!(handle.try_join(), Ok(None)),
             "try_join must report not-ready while gated, registration-free"
@@ -2296,14 +2327,15 @@ mod tests {
             wakes.load(std::sync::atomic::Ordering::SeqCst) > before,
             "opening the barrier must wake the parked poll_join waker"
         );
-        assert!(handle.is_finished(), "opened barrier with a result reports finished");
+        assert!(
+            handle.is_finished(),
+            "opened barrier with a result reports finished"
+        );
         match handle.poll_join(&mut poll_cx) {
             Poll::Ready(Ok(value)) => assert_eq!(value, 42),
             other => panic!("expected the gated Ok(42) after open, got {other:?}"),
         }
-        crate::test_complete!(
-            "retirement_barrier_gates_terminal_until_opened_then_delivers_value"
-        );
+        crate::test_complete!("retirement_barrier_gates_terminal_until_opened_then_delivers_value");
     }
 
     // An open barrier (standalone handle, admission denial, unwired paths) must
