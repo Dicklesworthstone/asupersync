@@ -113,6 +113,38 @@ fn scope_declares_encrypted_content(scope: &str) -> bool {
         })
 }
 
+/// Whole-value match of an envelope's declared AEAD algorithm against a known
+/// allowlist (br-asupersync-28i28f). The previous
+/// `contains("aes"|"chacha"|"gcm")` substring test failed OPEN — e.g.
+/// `"definitely-not-a-real-gcm"` passed. Separators and case are normalized so
+/// canonical spellings and their hyphen/underscore variants all match, but
+/// arbitrary strings that merely embed an AEAD token no longer do. This is a
+/// well-formedness / anti-forgery ratchet, NOT a cryptographic verification.
+fn is_known_aead_algorithm(algorithm: &str) -> bool {
+    let normalized: String = algorithm
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "aes128gcm"
+            | "aes192gcm"
+            | "aes256gcm"
+            | "aes128gcmsiv"
+            | "aes256gcmsiv"
+            | "chacha20poly1305"
+            | "xchacha20poly1305"
+            | "aeadaes128gcm"
+            | "aeadaes256gcm"
+            | "aeadchacha20poly1305"
+            | "aeadxchacha20poly1305"
+            | "a128gcm"
+            | "a192gcm"
+            | "a256gcm"
+    )
+}
+
 fn content_has_encrypted_envelope(content: &[u8]) -> bool {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
         return false;
@@ -128,16 +160,22 @@ fn content_has_encrypted_envelope(content: &[u8]) -> bool {
         .get("algorithm")
         .or_else(|| object.get("cipher"))
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|algorithm| {
-            let algorithm = algorithm.to_ascii_lowercase();
-            algorithm.contains("aes") || algorithm.contains("chacha") || algorithm.contains("gcm")
-        });
+        .is_some_and(is_known_aead_algorithm);
 
     has_ciphertext && has_nonce && has_tag && has_algorithm
 }
 
-fn derive_cache_entry_encryption_status(key: &CacheKey, content: &[u8]) -> bool {
-    key.declares_encrypted_content() || content_has_encrypted_envelope(content)
+fn derive_cache_entry_encryption_status(_key: &CacheKey, content: &[u8]) -> bool {
+    // br-asupersync-28i28f: an attacker-controlled grant-scope STRING (e.g.
+    // `team:encrypted`) must NOT satisfy the shared-cache encryption gate on its
+    // own, or a seeder stores plaintext under an "encrypted" scope and it leaks
+    // on an encryption-required shared/relay/CDN cache. Only a real AEAD envelope
+    // counts here; `CacheKey::declares_encrypted_content()` stays a public
+    // advisory predicate but is no longer proof and no longer gates storage.
+    // NOTE: this byte heuristic is still not a cryptographic proof — the full fix
+    // (28i28f mitigation (c)) is an authenticated encryption status bound to the
+    // actual encryption operation, which this does not yet provide.
+    content_has_encrypted_envelope(content)
 }
 
 /// Verification metadata for cached content.
@@ -656,17 +694,22 @@ mod tests {
     }
 
     #[test]
-    fn cache_entry_encryption_status_is_derived_from_scope_or_envelope() {
-        let encrypted_key = CacheKey::new(
+    fn cache_entry_encryption_status_requires_a_real_aead_envelope_not_scope_name() {
+        // br-asupersync-28i28f: a grant-scope string and a forged-algorithm
+        // envelope are both attacker-controlled and must NOT mark content as
+        // encrypted; only a well-formed AEAD envelope counts.
+        let scope_encrypted_key = CacheKey::new(
             "manifest123".to_string(),
             "content456".to_string(),
             Some("team:engineering:encrypted".to_string()),
         );
-        assert!(derive_cache_entry_encryption_status(
-            &encrypted_key,
+        // OLD BUG: a scope named "encrypted" marked PLAINTEXT as encrypted.
+        assert!(!derive_cache_entry_encryption_status(
+            &scope_encrypted_key,
             b"plaintext"
         ));
 
+        // A real AEAD envelope is recognized regardless of scope.
         let envelope_key = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
         let envelope = br#"{
             "algorithm": "aes-256-gcm",
@@ -679,12 +722,54 @@ mod tests {
             envelope
         ));
 
+        // OLD BUG: a forged envelope whose algorithm merely EMBEDS an AEAD token
+        // (substring "gcm") passed. It must now be rejected.
+        let forged = br#"{
+            "algorithm": "definitely-not-a-real-gcm",
+            "nonce": "00",
+            "ciphertext": "deadbeef",
+            "tag": "cafebabe"
+        }"#;
+        assert!(!derive_cache_entry_encryption_status(&envelope_key, forged));
+
+        // Plaintext with no scope and no envelope is not encrypted.
         let plaintext_key =
             CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
         assert!(!derive_cache_entry_encryption_status(
             &plaintext_key,
             b"plaintext"
         ));
+    }
+
+    #[test]
+    fn is_known_aead_algorithm_allowlists_canonical_forms_and_rejects_forgeries() {
+        // br-asupersync-28i28f: separator/case-insensitive whole-value match.
+        for ok in [
+            "aes-256-gcm",
+            "AES256GCM",
+            "aes_256_gcm",
+            "ChaCha20-Poly1305",
+            "chacha20poly1305",
+            "AEAD_AES_256_GCM",
+            "xchacha20-poly1305",
+            "aes-128-gcm-siv",
+            "A256GCM",
+        ] {
+            assert!(is_known_aead_algorithm(ok), "should accept {ok}");
+        }
+        for bad in [
+            "definitely-not-a-real-gcm",
+            "aes",
+            "gcm",
+            "rot13",
+            "plaintext",
+            "my-aes-ish",
+            "",
+            "chacha",
+            "aes-999-gcm",
+        ] {
+            assert!(!is_known_aead_algorithm(bad), "should reject {bad}");
+        }
     }
 
     #[test]
