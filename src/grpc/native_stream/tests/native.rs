@@ -245,3 +245,222 @@ fn native_client_cross_thread_cancel_wakes_witnessed_partial_message_read() {
         assert!(observed.load(Ordering::Acquire), "cancelled client assertions did not finish");
     }
 }
+
+// This transport delegates every byte to a real native TCP socket. A controlled
+// write/flush gate reproduces adapters whose output cannot advance before input
+// is driven (for example, a duplex buffered transport). No response is fabricated
+// by the adapter. The peer waits for BOTH an observed Pending and the caller's
+// dropped borrowing wait before sending its response.
+struct NativeDuplexGate {
+    open: AtomicBool,
+    parked: AtomicBool,
+    witness: std::sync::mpsc::SyncSender<()>,
+    wake: Mutex<Option<Waker>>,
+    drops: AtomicUsize,
+}
+
+impl NativeDuplexGate {
+    fn park(&self, task: &Context<'_>) {
+        *self.wake.lock().unwrap() = Some(task.waker().clone());
+        if !self.parked.swap(true, Ordering::SeqCst) {
+            self.witness.try_send(()).expect("one native duplex Pending witness");
+        }
+    }
+
+    fn release(&self) {
+        self.open.store(true, Ordering::SeqCst);
+        let wake = self.wake.lock().unwrap().take();
+        if let Some(wake) = wake { wake.wake(); }
+    }
+}
+
+struct NativeDuplexIo {
+    inner: TcpStream,
+    gate: Arc<NativeDuplexGate>,
+    block_flush: bool,
+    frame_remaining: usize,
+    request_headers: bool,
+    headers_written: bool,
+}
+
+impl AsyncRead for NativeDuplexIo {
+    fn poll_read(self: Pin<&mut Self>, task: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(task, buf);
+        if buf.filled().len() > before { this.gate.release(); }
+        result
+    }
+}
+
+impl AsyncWrite for NativeDuplexIo {
+    fn poll_write(self: Pin<&mut Self>, task: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        if !this.block_flush && this.headers_written && !this.gate.open.load(Ordering::SeqCst) {
+            this.gate.park(task);
+            return Poll::Pending;
+        }
+        if this.frame_remaining == 0 {
+            // NativeServerStream retains a single encoded frame across writes.
+            // Track its remainder so actual partial TCP writes cannot make us
+            // mistake payload bytes for another frame header.
+            assert!(bytes.len() >= 9);
+            this.frame_remaining = bytes.len();
+            this.request_headers = bytes[3] == 1 && bytes[4] & 4 != 0;
+        }
+        let result = Pin::new(&mut this.inner).poll_write(task, bytes);
+        if let Poll::Ready(Ok(written)) = &result {
+            assert!(*written <= this.frame_remaining);
+            this.frame_remaining -= *written;
+            if this.frame_remaining == 0 && this.request_headers {
+                this.headers_written = true;
+            }
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.block_flush && !this.gate.open.load(Ordering::SeqCst) {
+            this.gate.park(task);
+            return Poll::Pending;
+        }
+        Pin::new(&mut this.inner).poll_flush(task)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(task)
+    }
+}
+
+impl Drop for NativeDuplexIo {
+    fn drop(&mut self) { self.gate.drops.fetch_add(1, Ordering::SeqCst); }
+}
+
+fn duplex_peer_frame(socket: &mut std::net::TcpStream) -> (u8, u8, Vec<u8>) {
+    let mut header = [0_u8; 9];
+    socket.read_exact(&mut header).expect("native duplex frame header");
+    let length = (usize::from(header[0]) << 16) | (usize::from(header[1]) << 8) | usize::from(header[2]);
+    assert!(length <= FRAME_BYTES);
+    let mut payload = vec![0; length];
+    socket.read_exact(&mut payload).expect("native duplex frame payload");
+    (header[3], header[4], payload)
+}
+
+fn duplex_peer_request_head(socket: &mut std::net::TcpStream) {
+    let mut preface = [0_u8; 24];
+    socket.read_exact(&mut preface).unwrap();
+    assert_eq!(&preface, CLIENT_PREFACE);
+    for _ in 0..16 {
+        let (kind, flags, payload) = duplex_peer_frame(socket);
+        if kind == 1 {
+            assert_ne!(flags & 4, 0, "bounded fixture headers fit one frame");
+            let fields = crate::http::h2::HpackDecoder::new().decode(&mut Bytes::from(payload)).unwrap();
+            assert!(fields.iter().any(|header| header.name == ":path" && header.value == "/test.Service/Watch"));
+            return;
+        }
+        assert_eq!(kind, 4, "only initial SETTINGS precede request HEADERS");
+    }
+    panic!("missing native duplex request headers");
+}
+
+fn duplex_peer_request_body(socket: &mut std::net::TcpStream) {
+    let mut body = Vec::new();
+    for _ in 0..64 {
+        let (kind, flags, payload) = duplex_peer_frame(socket);
+        assert_ne!(kind, 1, "interrupted wait must not repeat request HEADERS");
+        if kind == 0 {
+            body.extend(payload);
+            assert!(body.len() <= message(b"native-request").len());
+            if flags & 1 != 0 {
+                assert_eq!(body, message(b"native-request"));
+                return;
+            }
+        }
+    }
+    panic!("missing native duplex request completion");
+}
+
+#[test]
+fn native_duplex_pending_write_and_flush_resume_after_interrupted_header_wait() {
+    for multithread in [false, true] {
+        for block_flush in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let (witness, witnessed) = sync_channel(1);
+            let (release_peer, peer_released) = sync_channel(1);
+            let gate = Arc::new(NativeDuplexGate {
+                open: AtomicBool::new(false), parked: AtomicBool::new(false), witness,
+                wake: Mutex::new(None), drops: AtomicUsize::new(0),
+            });
+            let observed_gate = Arc::clone(&gate);
+            let peer = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "native duplex accept watchdog");
+                            std::thread::park_timeout(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("native duplex accept: {error}"),
+                    }
+                };
+                socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+                duplex_peer_request_head(&mut socket);
+                if block_flush { duplex_peer_request_body(&mut socket); }
+                witnessed.recv_timeout(Duration::from_secs(3)).expect("write/flush actually reached Pending");
+                peer_released.recv_timeout(Duration::from_secs(3)).expect("borrowing header wait was dropped");
+                let mut response = start();
+                response.extend(frame(0, 0, &message(b"native-duplex-response")));
+                response.extend(headers(&[("grpc-status", "0")], true));
+                socket.write_all(&response).unwrap();
+                if !block_flush { duplex_peer_request_body(&mut socket); }
+                let mut scratch = [0_u8; 1024];
+                for _ in 0..32 {
+                    if socket.read(&mut scratch).unwrap() == 0 { return; }
+                }
+                panic!("native client did not retire duplex transport");
+            });
+            let runtime = if multithread {
+                RuntimeBuilder::new().worker_threads(2).build().unwrap()
+            } else { RuntimeBuilder::current_thread().build().unwrap() };
+            let complete = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&complete);
+            let _ = runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let inner = TcpStream::connect_timeout(address, Duration::from_secs(3)).await.unwrap();
+                let io = NativeDuplexIo {
+                    inner, gate: Arc::clone(&gate), block_flush,
+                    frame_remaining: CLIENT_PREFACE.len(), request_headers: false, headers_written: false,
+                };
+                let mut stream = NativeServerStream::new(&cx, io, "localhost", "/test.Service/Watch",
+                    Request::new(Bytes::from_static(b"native-request")), IdentityCodec,
+                    NativeStreamConfig { timeout: Some(Duration::from_secs(5)), ..NativeStreamConfig::default() }).unwrap();
+                {
+                    let mut wait = Box::pin(stream.headers());
+                    poll_fn(|task| {
+                        assert!(wait.as_mut().poll(task).is_pending(), "peer is gated until this wait is dropped");
+                        if gate.parked.load(Ordering::SeqCst) { Poll::Ready(()) } else { Poll::Pending }
+                    }).await;
+                }
+                assert!(!gate.open.load(Ordering::SeqCst));
+                release_peer.try_send(()).expect("release native response after interrupted wait");
+                stream.headers().await.unwrap();
+                assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"native-duplex-response");
+                assert!(stream.message().await.unwrap().is_none());
+                assert_eq!(stream.status().unwrap().code(), Code::Ok);
+                assert!(gate.open.load(Ordering::SeqCst), "native read released the writer");
+                assert_eq!(gate.drops.load(Ordering::SeqCst), 1);
+                assert!(!cx.is_cancel_requested());
+                complete.store(true, Ordering::Release);
+            }));
+            peer.join().expect("native duplex peer assertions");
+            assert!(observed.load(Ordering::Acquire), "native duplex client assertions did not finish");
+            assert!(observed_gate.parked.load(Ordering::SeqCst));
+            assert_eq!(observed_gate.drops.load(Ordering::SeqCst), 1);
+        }
+    }
+}

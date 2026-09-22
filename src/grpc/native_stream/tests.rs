@@ -371,3 +371,239 @@ fn codec_setup_and_decode_use_the_explicit_context_not_an_unrelated_ambient_task
     assert!(run(stream.message()).unwrap().is_none());
     assert_eq!(Cx::current().unwrap().task_id(), unrelated.task_id());
 }
+
+mod duplex {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[derive(Default)]
+    struct Gate {
+        open: AtomicBool,
+        blocked: AtomicUsize,
+        waker: Mutex<Option<Waker>>,
+    }
+
+    impl Gate {
+        fn park(&self, task: &Context<'_>) {
+            *self.waker.lock().unwrap() = Some(task.waker().clone());
+            self.blocked.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn release(&self) {
+            self.open.store(true, Ordering::SeqCst);
+            let wake = self.waker.lock().unwrap().take();
+            if let Some(wake) = wake { wake.wake(); }
+        }
+    }
+
+    struct DuplexIo {
+        inner: FixtureIo,
+        gate: Arc<Gate>,
+        prefix: usize,
+        block_flush: bool,
+        read_releases_write: bool,
+    }
+
+    impl AsyncRead for DuplexIo {
+        fn poll_read(self: Pin<&mut Self>, task: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let before = buf.filled().len();
+            let result = Pin::new(&mut this.inner).poll_read(task, buf);
+            if buf.filled().len() > before && this.read_releases_write {
+                this.gate.release();
+            }
+            result
+        }
+    }
+
+    impl AsyncWrite for DuplexIo {
+        fn poll_write(self: Pin<&mut Self>, task: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if !this.block_flush && !this.gate.open.load(Ordering::SeqCst) {
+                let written = this.inner.probe.writes.lock().unwrap().len();
+                let available = this.prefix.saturating_sub(written).min(bytes.len());
+                if available == 0 {
+                    this.gate.park(task);
+                    return Poll::Pending;
+                }
+                return Pin::new(&mut this.inner).poll_write(task, &bytes[..available]);
+            }
+            Pin::new(&mut this.inner).poll_write(task, bytes)
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.block_flush && !this.gate.open.load(Ordering::SeqCst) {
+                this.gate.park(task);
+                return Poll::Pending;
+            }
+            Pin::new(&mut this.inner).poll_flush(task)
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.get_mut().inner).poll_shutdown(task)
+        }
+    }
+
+    fn gated(bytes: Vec<u8>, block_flush: bool, read_releases_write: bool) -> (DuplexIo, Arc<Probe>, Arc<Gate>) {
+        let (inner, probe) = fixture(bytes, FRAME_BYTES, false);
+        let gate = Arc::new(Gate::default());
+        (DuplexIo {
+            inner, gate: Arc::clone(&gate), prefix: 3, block_flush, read_releases_write,
+        }, probe, gate)
+    }
+
+    fn duplex_call(io: DuplexIo) -> NativeServerStream<DuplexIo, IdentityCodec> {
+        NativeServerStream::new(&Cx::for_testing(), io, "localhost", "/test.Service/Watch",
+            Request::new(Bytes::from_static(b"request-once")), IdentityCodec,
+            NativeStreamConfig::default()).unwrap()
+    }
+
+    fn success() -> Vec<u8> {
+        let mut bytes = start();
+        bytes.extend(frame(0, 0, &message(b"duplex-response")));
+        bytes.extend(headers(&[("grpc-status", "0")], true));
+        bytes
+    }
+
+    fn ping() -> Vec<u8> {
+        let mut bytes = frame(6, 0, b"duplex!!");
+        bytes[5..9].copy_from_slice(&0_u32.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn blocked_write_and_flush_read_the_peer_without_replaying_request_bytes() {
+        let bytes = success();
+        let (ordinary, expected) = fixture(bytes.clone(), FRAME_BYTES, false);
+        let mut ordinary = call(ordinary);
+        assert_eq!(run(ordinary.message()).unwrap().unwrap().as_ref(), b"duplex-response");
+        assert!(run(ordinary.message()).unwrap().is_none());
+        for block_flush in [false, true] {
+            let (io, probe, gate) = gated(bytes.clone(), block_flush, true);
+            let mut stream = duplex_call(io);
+            assert_eq!(run(stream.message()).unwrap().unwrap().as_ref(), b"duplex-response");
+            assert!(gate.blocked.load(Ordering::SeqCst) > 0, "must first reach real fixture Pending");
+            assert!(gate.open.load(Ordering::SeqCst), "reading is the only gate release");
+            assert!(run(stream.message()).unwrap().is_none());
+            assert_eq!(stream.status().unwrap().code(), Code::Ok);
+            assert_eq!(*probe.writes.lock().unwrap(), *expected.writes.lock().unwrap());
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn interrupted_duplex_header_wait_keeps_both_partial_directions() {
+        let bytes = success();
+        let (ordinary, expected) = fixture(bytes.clone(), FRAME_BYTES, false);
+        let mut ordinary = call(ordinary);
+        assert!(run(ordinary.message()).unwrap().is_some());
+        assert!(run(ordinary.message()).unwrap().is_none());
+        let (io, probe, gate) = gated(bytes, false, true);
+        probe.readable.store(3, Ordering::SeqCst); // Partial peer SETTINGS header.
+        let mut stream = duplex_call(io);
+        {
+            let mut wait = Box::pin(stream.headers());
+            assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        }
+        assert!(gate.blocked.load(Ordering::SeqCst) > 0);
+        assert_eq!(probe.position.load(Ordering::SeqCst), 3, "read even while write is parked");
+        assert_eq!(probe.writes.lock().unwrap().len(), 3, "partial preface retained");
+        probe.readable.store(usize::MAX, Ordering::SeqCst);
+        assert!(run(stream.headers()).unwrap().get("x-initial").is_some());
+        assert_eq!(run(stream.message()).unwrap().unwrap().as_ref(), b"duplex-response");
+        assert!(run(stream.message()).unwrap().is_none());
+        assert_eq!(*probe.writes.lock().unwrap(), *expected.writes.lock().unwrap());
+    }
+
+    #[test]
+    fn early_status_and_reset_retire_a_call_even_when_writes_never_resume() {
+        for reset in [false, true] {
+            let mut bytes = frame(4, 0, &[]);
+            let expected = if reset {
+                bytes.extend(frame(3, 0, &8_u32.to_be_bytes()));
+                Code::Cancelled
+            } else {
+                bytes.extend(headers(&[(":status", "200"), ("content-type", "application/grpc"),
+                    ("grpc-status", "7"), ("grpc-message", "refused")], true));
+                Code::PermissionDenied
+            };
+            let (io, probe, gate) = gated(bytes, false, false);
+            let mut stream = duplex_call(io);
+            let error = run(stream.message()).unwrap_err();
+            assert_eq!(error.code(), expected);
+            if !reset { assert_eq!(error.message(), "refused"); }
+            assert!(!gate.open.load(Ordering::SeqCst));
+            assert!(gate.blocked.load(Ordering::SeqCst) > 0);
+            assert_eq!(probe.writes.lock().unwrap().len(), 3);
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            assert!(stream.connection.is_none());
+            assert!(stream.outbound.is_empty());
+            assert_eq!(stream.status().unwrap().code(), expected);
+            assert!(run(stream.message()).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn blocked_writer_caps_control_replies_across_waits_and_resumes_on_write_wake() {
+        let mut bytes = start();
+        for _ in 0..MAX_UNFLUSHED_READ_FRAMES * 3 { bytes.extend(ping()); }
+        bytes.extend(frame(0, 0, &message(b"resumed")));
+        bytes.extend(headers(&[("grpc-status", "0")], true));
+        let (io, probe, gate) = gated(bytes, false, false);
+        let mut stream = duplex_call(io);
+        assert!(run(stream.headers()).unwrap().get("x-initial").is_some());
+        let mut task = Context::from_waker(Waker::noop());
+        // Repeatedly drop and recreate the borrowing wait: the quota belongs
+        // to the call, not the temporary wait, so this cannot renew admission.
+        for _ in 0..4 {
+            let mut wait = Box::pin(stream.message());
+            assert!(wait.as_mut().poll(&mut task).is_pending());
+        }
+        assert_eq!(stream.unflushed_read_frames, MAX_UNFLUSHED_READ_FRAMES);
+        let reads = probe.read_calls.load(Ordering::SeqCst);
+        let received = probe.position.load(Ordering::SeqCst);
+        assert!(stream.inbound.len() <= 2 * FRAME_BYTES);
+        for _ in 0..8 { assert!(stream.poll_message(&mut task).is_pending()); }
+        assert_eq!(probe.read_calls.load(Ordering::SeqCst), reads);
+        assert_eq!(probe.position.load(Ordering::SeqCst), received);
+        assert_eq!(stream.unflushed_read_frames, MAX_UNFLUSHED_READ_FRAMES);
+        assert!(gate.waker.lock().unwrap().is_some(), "writer owns the pending wake");
+        gate.release();
+        assert_eq!(run(stream.message()).unwrap().unwrap().as_ref(), b"resumed");
+        assert!(run(stream.message()).unwrap().is_none());
+        assert_eq!(stream.status().unwrap().code(), Code::Ok);
+        assert_eq!(stream.unflushed_read_frames, 0);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancellation_and_deadline_still_retire_a_call_at_the_control_reply_limit() {
+        for cancel in [false, true] {
+            let mut bytes = frame(4, 0, &[]);
+            for _ in 0..MAX_UNFLUSHED_READ_FRAMES * 2 { bytes.extend(ping()); }
+            let (io, probe, _) = gated(bytes, false, false);
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+            let cx = timed_cx(&clock);
+            let mut stream = NativeServerStream::new(&cx, io, "localhost", "/test.Service/Watch",
+                Request::new(Bytes::new()), IdentityCodec,
+                NativeStreamConfig { timeout: Some(Duration::from_secs(2)), ..NativeStreamConfig::default() }).unwrap();
+            let mut task = Context::from_waker(Waker::noop());
+            for _ in 0..4 { assert!(stream.poll_headers(&mut task).is_pending()); }
+            assert_eq!(stream.unflushed_read_frames, MAX_UNFLUSHED_READ_FRAMES);
+            let expected = if cancel {
+                cx.cancel_with(CancelKind::User, Some("parked duplex cancellation"));
+                Code::Cancelled
+            } else {
+                clock.advance_to(Time::from_secs(22));
+                Code::DeadlineExceeded
+            };
+            assert!(matches!(stream.poll_message(&mut task),
+                Poll::Ready(Some(Err(status))) if status.code() == expected));
+            assert_eq!(stream.status().unwrap().code(), expected);
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            assert_eq!(cx.is_cancel_requested(), cancel);
+            assert!(stream.io.is_none() && stream.connection.is_none());
+        }
+    }
+}

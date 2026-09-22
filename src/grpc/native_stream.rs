@@ -70,6 +70,10 @@ use response::ResponseHead;
 
 const FRAME_BYTES: usize = 16 * 1024;
 const POLL_STEPS: usize = 32;
+// Reading while writes are parked is necessary for full-duplex progress, but
+// each peer control frame may enqueue a reply. Do not let a non-reading peer
+// turn a demanded response into an unbounded SETTINGS/PING acknowledgement queue.
+const MAX_UNFLUSHED_READ_FRAMES: usize = 32;
 
 /// Independent bounds and wire policy for one native response stream.
 #[derive(Debug, Clone)]
@@ -124,6 +128,12 @@ impl Default for NativeStreamConfig {
 /// outside those byte counts. No bound on memory internal to an arbitrary
 /// user-supplied codec or transport is implied.
 ///
+/// A parked write or flush does not prevent response reads: an early refusal
+/// or a flow-control update can arrive before the whole request is accepted.
+/// At most 32 peer frames are processed without flushing queued output. At
+/// that limit, read demand parks behind the writer instead of growing control
+/// replies without bound. This accounting survives interrupted borrowing waits.
+///
 /// The object is movable because it never exposes a structurally pinned field;
 /// the I/O trait implementation requires the transport to be `Unpin`.
 pub struct NativeServerStream<IO, C> {
@@ -144,6 +154,7 @@ pub struct NativeServerStream<IO, C> {
     stream_id: u32,
     final_status: Option<Status>,
     ready_messages: usize,
+    unflushed_read_frames: usize,
 }
 
 impl<IO: Unpin, C> Unpin for NativeServerStream<IO, C> {}
@@ -254,6 +265,7 @@ where
             inbound: BytesMut::new(), outbound: BytesMut::from(CLIENT_PREFACE),
             body: BytesMut::new(), response: ResponseHead::new(config.max_metadata_bytes, config.accept_gzip),
             body_limit, stream_id, final_status: None, ready_messages: 0,
+            unflushed_read_frames: 0,
         })
     }
 
@@ -375,16 +387,24 @@ where
     }
 
     fn poll_received(&mut self, task: &mut Context<'_>) -> Poll<Result<(), Status>> {
-        // Draining one encoded frame at a time keeps queued control output
-        // bounded. A flow-control-blocked request yields no frame, allowing
-        // reads to receive the WINDOW_UPDATE needed to resume its write.
+        // Keep attempting writes first, but never require a socket/TLS write
+        // to finish before looking for the peer's response. Both peers may be
+        // waiting for the other direction to drain. The write cursor remains
+        // in `outbound`, including across a dropped headers()/message() wait.
         match self.poll_outbound(task) {
-            Poll::Ready(Ok(())) => {}
-            other => return other,
+            Poll::Ready(Ok(())) => self.unflushed_read_frames = 0,
+            Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+            Poll::Pending if self.unflushed_read_frames >= MAX_UNFLUSHED_READ_FRAMES => {
+                // poll_outbound registered the write/flush waker (or requested
+                // a cooperative continuation). Do not self-wake a parked writer.
+                return Poll::Pending;
+            }
+            Poll::Pending => {}
         }
         for _ in 0..POLL_STEPS {
             match self.frames.decode(&mut self.inbound) {
                 Ok(Some(frame)) => {
+                    self.unflushed_read_frames += 1;
                     let received = self.connection.as_mut().expect("live connection")
                         .process_frame(frame)
                         .map_err(|error| Status::internal(format!("invalid HTTP/2 response: {error}")));
@@ -481,6 +501,7 @@ where
         self.inbound = BytesMut::new();
         self.outbound = BytesMut::new();
         self.body = BytesMut::new();
+        self.unflushed_read_frames = 0;
         status
     }
 }
