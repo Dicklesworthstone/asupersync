@@ -1476,7 +1476,22 @@ export function webtransport_open_stream(request) {
   return reliableStreams.open(request);
 }
 
+export function webtransport_open_unidirectional_stream(request) {
+  return reliableStreams.open(request, "unidirectional");
+}
+
+export function webtransport_accept_bidirectional_stream(request) {
+  return reliableStreams.accept(request, "bidirectional");
+}
+
+export function webtransport_accept_unidirectional_stream(request) {
+  return reliableStreams.accept(request, "unidirectional");
+}
+
 export const webtransportOpenStream = webtransport_open_stream;
+export const webtransportOpenUnidirectionalStream = webtransport_open_unidirectional_stream;
+export const webtransportAcceptBidirectionalStream = webtransport_accept_bidirectional_stream;
+export const webtransportAcceptUnidirectionalStream = webtransport_accept_unidirectional_stream;
 
 export const runtimeCreate = runtime_create;
 export const runtimeClose = runtime_close;

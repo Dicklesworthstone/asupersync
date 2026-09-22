@@ -405,6 +405,32 @@ export interface WebTransportStreamOpenRequest {
   session: TaskHandleLike;
 }
 
+/** Explicit name for the existing bidirectional byte-stream contract. */
+export type WebTransportBidirectionalStream = WebTransportByteStream;
+
+/** An incoming unidirectional stream. No write authority is exposed. */
+export interface WebTransportReadableStream {
+  readonly direction: "unidirectional";
+  readonly closed: Promise<Outcome<void>>;
+  read(): Promise<Outcome<WebTransportStreamRead>>;
+  /** Stops reception and waits for host cleanup before releasing capacity. */
+  cancel(reason?: string): Promise<Outcome<void>>;
+}
+
+/** An outgoing unidirectional stream. No read authority is exposed. */
+export interface WebTransportWritableStream {
+  readonly direction: "unidirectional";
+  readonly closed: Promise<Outcome<void>>;
+  write(bytes: ArrayBuffer | ArrayBufferView): Promise<Outcome<void>>;
+  /** Sends FIN after admitted bytes and completes this one-way stream. */
+  finish(): Promise<Outcome<void>>;
+  cancel(reason?: string): Promise<Outcome<void>>;
+}
+
+export interface WebTransportStreamAcceptRequest {
+  session: TaskHandleLike;
+}
+
 /**
  * Open an outgoing bidirectional stream. Pending creations count against the
  * session's 64-stream cap. Closing the owner before admission disposes any late
@@ -415,3 +441,36 @@ export declare function webtransport_open_stream(
   request: WebTransportStreamOpenRequest,
 ): Promise<Outcome<WebTransportByteStream>>;
 export declare const webtransportOpenStream: typeof webtransport_open_stream;
+
+/**
+ * Open a send-only stream under the same session capacity and cleanup rules as
+ * webtransport_open_stream. FIN completes this stream without a receive half.
+ */
+export declare function webtransport_open_unidirectional_stream(
+  request: WebTransportStreamOpenRequest,
+): Promise<Outcome<WebTransportWritableStream>>;
+export declare const webtransportOpenUnidirectionalStream:
+  typeof webtransport_open_unidirectional_stream;
+
+/**
+ * Accept one server-initiated bidirectional stream, or null when the incoming
+ * collection ends. Only one accept per direction may wait at a time. Pending
+ * accepts share the session's 64-stream capacity with pending opens and live
+ * streams. The adapter does not prefetch incoming streams.
+ *
+ * Session/scope close cancels a waiting accept and disposes any late stream.
+ * Await the accept and admitted streams' closed promises for cleanup; the
+ * synchronous owner-close APIs do not wait for host I/O to settle.
+ */
+export declare function webtransport_accept_bidirectional_stream(
+  request: WebTransportStreamAcceptRequest,
+): Promise<Outcome<WebTransportByteStream | null>>;
+export declare const webtransportAcceptBidirectionalStream:
+  typeof webtransport_accept_bidirectional_stream;
+
+/** Accept one server-initiated receive-only stream, or null at collection EOF. */
+export declare function webtransport_accept_unidirectional_stream(
+  request: WebTransportStreamAcceptRequest,
+): Promise<Outcome<WebTransportReadableStream | null>>;
+export declare const webtransportAcceptUnidirectionalStream:
+  typeof webtransport_accept_unidirectional_stream;

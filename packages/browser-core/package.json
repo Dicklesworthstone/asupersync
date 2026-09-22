@@ -26,6 +26,11 @@
       "import": "./index.js",
       "default": "./index.js"
     },
+    "./webtransport-streams": {
+      "types": "./webtransport-streams.d.ts",
+      "import": "./webtransport-streams.js",
+      "default": "./webtransport-streams.js"
+    },
     "./asupersync.js": "./asupersync.js",
     "./asupersync_bg.wasm": "./asupersync_bg.wasm",
     "./abi-metadata.json": "./abi-metadata.json",
@@ -34,6 +39,7 @@
   "files": [
     "index.js",
     "webtransport-streams.js",
+    "webtransport-streams.d.ts",
     "index.d.ts",
     "asupersync.js",
     "asupersync.d.ts",
