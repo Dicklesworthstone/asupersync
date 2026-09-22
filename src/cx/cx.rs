@@ -4115,7 +4115,12 @@ impl<Caps> Cx<Caps> {
         {
             return ChildRegionOpening::failed(ChildRegionError::RuntimeUnavailable);
         }
-        ChildRegionOpening::new(slot, gateway.runtime_liveness_weak(), self.runtime_mask)
+        ChildRegionOpening::new(
+            slot,
+            gateway.runtime_liveness_weak(),
+            self.runtime_mask,
+            self.remote_cap_handle(),
+        )
     }
 
     /// Creates a [`Scope`](super::Scope) bound to this context's region with a custom budget.

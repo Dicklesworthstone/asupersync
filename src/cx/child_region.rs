@@ -142,6 +142,7 @@ pub struct ChildRegionOpening {
     pending: Option<(Arc<AdmittedRegionSlot>, Weak<()>)>,
     failure: Option<ChildRegionError>,
     parent_mask: crate::cx::cap::CapMask,
+    parent_remote: Option<Arc<crate::remote::RemoteCap>>,
 }
 
 impl ChildRegionOpening {
@@ -149,11 +150,13 @@ impl ChildRegionOpening {
         slot: Arc<AdmittedRegionSlot>,
         liveness: Weak<()>,
         parent_mask: crate::cx::cap::CapMask,
+        parent_remote: Option<Arc<crate::remote::RemoteCap>>,
     ) -> Self {
         Self {
             pending: Some((slot, liveness)),
             failure: None,
             parent_mask,
+            parent_remote,
         }
     }
 
@@ -162,6 +165,7 @@ impl ChildRegionOpening {
             pending: None,
             failure: Some(error),
             parent_mask: crate::cx::cap::CapMask::none(),
+            parent_remote: None,
         }
     }
 }
@@ -185,6 +189,11 @@ impl Future for ChildRegionOpening {
                     // Publication must not restore capabilities that the
                     // opener's ambient context had already relinquished.
                     admitted.cx.runtime_mask = admitted.cx.runtime_mask.intersect(this.parent_mask);
+                    // The scheduler cannot recover handles attached to this
+                    // particular caller from the region record. Inherit the
+                    // explicit remote handle without widening the mask or
+                    // replacing the freshly minted identity and gateways.
+                    admitted.cx = admitted.cx.with_remote_cap_handle(this.parent_remote.take());
                     Ok(ChildRegion::from_admitted(admitted))
                 }
                 Err(error) => Err(ChildRegionError::Create(error)),
