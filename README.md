@@ -566,22 +566,55 @@ per-poll application work, request deadlines, and shutdown grace. Buffered
 responses and `Http3StreamResponder` producers retain a real request task and
 its spawn gateway through transport completion. Request timeout/reset cancels
 that request, and awaited service exit joins admitted request regions and
-checks their cleanup outcomes. The live multi-peer, stalled-response, and
-receive-credit regressions are in `tests/quic_h3_live_udp.rs`. The production
-library and this integration target pass
-`cargo check -p asupersync --locked --test quic_h3_live_udp --features http3,tls`
-with no warnings; execution of the new Rust regressions remains unverified.
+checks their cleanup outcomes.
+
+The native H3 listener also has an opt-in live request-body path:
+
+```rust,ignore
+let config = NativeH3ListenerConfig {
+    streaming_request_body_buffer_bytes: std::num::NonZeroUsize::new(64 * 1024),
+    ..NativeH3ListenerConfig::default()
+};
+```
+
+With `http3,tls` enabled, this path resolves the static route/body policy and
+validates declared lengths at HEADERS, before admitting a request region. Its
+actual request task creates a bounded `StreamingRawBody` with that task's
+`Cx`, so handlers can consume DATA before peer FIN. Queue pressure pauses
+the affected request stream; consumer progress wakes the connection driver
+without requiring another peer packet. Each request reserves its queue capacity
+plus one bounded pending frame against the connection aggregate, and retains
+that charge through request-region closure. The existing
+`router.max_buffered_body_bytes` remains a total body-size ceiling, tightened
+by the resolved Router policy.
+
+Framed input reaches EOF only after actual protocol FIN, including bodies with
+Content-Length zero or already-consumed declared lengths. Length mismatches
+reset the request with `H3_MESSAGE_ERROR`; FIN inside a frame closes the
+connection with `H3_FRAME_ERROR`. Early body abandonment stops input with
+`H3_NO_ERROR` while allowing the response to finish, including when the peer
+acknowledges that input stop with RESET_STREAM. Request trailers remain refused
+in this initial listener streaming profile. Handlers on this opt-in path use
+`StreamingRawBody` or the async body collectors; synchronous buffered
+extractors fail closed. The default `None` keeps buffered request dispatch.
+
+The live multi-peer, stalled-response, and receive-credit regressions are in
+`tests/quic_h3_live_udp.rs`; the streaming request journeys are in
+`tests/quic_h3_listener_streaming.rs`. The earlier buffered listener passed its
+focused production-library/integration compile check. The new streaming path
+has source/API review and authored native regression journeys; its full native
+compilation and runtime execution remain unverified.
 
 `Router::into_http1_streaming_handler` bridges validated H1 heads
 and a bounded live `StreamingRawBody`; buffered JSON/form collectors can consume
 that body asynchronously. The H1 and H2 produced-handler adapters expose
 bounded `Http1StreamResponder` / `Http2StreamResponder` response producers with
 transport-owned backpressure and terminalization. H2 request bodies remain
-buffered before dispatch, and the H3 Router bridge assembles bounded request
-bodies before handler dispatch, so none of these surfaces claims general
-full-duplex request/response progress. The native H3 path also does not claim
-CONNECT, server push, deployment readiness, or
-external interoperability. WebSocket upgrade authoring is provided separately
+buffered before dispatch. The standalone H3 Router bridge also assembles
+bounded request bodies before dispatch; the native H3 listener's opt-in path
+delivers them incrementally. General full-duplex request/response progress and
+external interoperability remain unverified. The native H3 path also does not
+claim CONNECT, server push, or deployment readiness. WebSocket upgrade authoring is provided separately
 by `web::websocket::WebSocketUpgrade`. The SSE lane is proof-backed:
 `Sse` finite bounded batch responses, plus a `StreamingSse` pull API carrying a
 request-region E2E proof and an HTTP/1 transport drain proof
@@ -2326,7 +2359,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | I/O reactor (Linux epoll + optional io_uring primary path; BSD/Windows reactors have narrower interest support) | ✅ Implemented |
 | TCP, HTTP/1.1, HTTP/2, TLS | ✅ Implemented |
 | WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
-| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. The production library and new live regression target compile; regression execution remains unverified. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, streaming request bodies, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
+| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. Opt-in streaming request ingress admits handlers at HEADERS, applies static body policy before admission, and uses bounded request-task-owned DATA queues with per-stream backpressure and FIN validation. The earlier buffered listener compiled; the new request-streaming implementation and native regressions have source review, with full native compilation/execution still unverified. Request trailers remain refused on this initial listener streaming path. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |

@@ -546,6 +546,10 @@ struct IncomingBodyShared {
     queued_bytes: Arc<QueuedByteBudget>,
     abandoned_frames: AtomicU64,
     abandoned_bytes: AtomicU64,
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    framed_consumer_waker: Mutex<Option<Waker>>,
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    framed_consumer_error: Mutex<Option<IncomingBodyError>>,
 }
 
 fn queued_frame_bytes(frame: &Frame<BytesCursor>) -> Result<usize, IncomingBodyError> {
@@ -568,6 +572,14 @@ fn queued_frame_bytes(frame: &Frame<BytesCursor>) -> Result<usize, IncomingBodyE
 impl IncomingBodyShared {
     fn consumer_dropped(&self) -> bool {
         self.consumer_terminal.load(Ordering::Acquire) == IncomingConsumerTerminal::Dropped as u8
+    }
+
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    fn wake_framed_producer(&self) {
+        let waker = self.framed_consumer_waker.lock().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 }
 
@@ -644,6 +656,8 @@ pub struct IncomingRequestBody {
     received: u64,
     size_hint: SizeHint,
     kind: BodyKind,
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    framed: bool,
 }
 
 impl IncomingRequestBody {
@@ -690,6 +704,10 @@ impl IncomingRequestBody {
             queued_bytes: QueuedByteBudget::new(queued_byte_limit),
             abandoned_frames: AtomicU64::new(0),
             abandoned_bytes: AtomicU64::new(0),
+            #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+            framed_consumer_waker: Mutex::new(None),
+            #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+            framed_consumer_error: Mutex::new(None),
         });
         let body = Self {
             receiver: rx,
@@ -700,8 +718,45 @@ impl IncomingRequestBody {
             received: 0,
             size_hint: kind.size_hint(),
             kind,
+            #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+            framed: false,
         };
         let writer = IncomingRequestBodyWriter::new(tx, kind, shared);
+        (writer, body)
+    }
+
+    /// Adapt already decoded protocol frames without parsing HTTP/1 bytes.
+    ///
+    /// Only the protocol driver's explicit `finish` publishes EOF. A declared
+    /// length of zero, the last declared data byte, and trailers all remain
+    /// open until that signal. The existing body-kind descriptor reports
+    /// `ContentLength` when known and `Chunked` for unknown-length streaming;
+    /// this adapter never interprets chunked transfer syntax.
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    pub(crate) fn framed_channel_with_limits(
+        cx: &Cx,
+        declared_length: Option<u64>,
+        frame_capacity: usize,
+        queued_byte_limit: usize,
+    ) -> (FramedIncomingRequestBodyWriter, Self) {
+        // Construct an open channel even for Content-Length: 0. The ordinary
+        // HTTP/1 constructor legitimately closes that case before any I/O.
+        let (mut wire_writer, mut body) =
+            Self::channel_with_limits(cx, BodyKind::Chunked, frame_capacity, queued_byte_limit);
+        body.kind = declared_length.map_or(BodyKind::Chunked, BodyKind::ContentLength);
+        body.size_hint = body.kind.size_hint();
+        body.framed = true;
+        let writer = FramedIncomingRequestBodyWriter {
+            sender: wire_writer.sender.take(),
+            shared: Arc::clone(&body.shared),
+            pending: None,
+            cancel_registration: None,
+            declared_length,
+            total_bytes: 0,
+            trailers_sent: false,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+            max_trailers_size: DEFAULT_MAX_TRAILERS_SIZE,
+        };
         (writer, body)
     }
 
@@ -757,6 +812,16 @@ impl IncomingRequestBody {
             .policy_max_body_size
             .fetch_min(bytes, Ordering::AcqRel);
     }
+
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    fn record_framed_consumer_error(&self, error: IncomingBodyError) {
+        if self.framed {
+            self.shared
+                .framed_consumer_error
+                .lock()
+                .get_or_insert(error);
+        }
+    }
 }
 
 impl Body for IncomingRequestBody {
@@ -786,7 +851,11 @@ impl Body for IncomingRequestBody {
                     _byte_permit,
                 } = queued;
                 drop(_byte_permit);
-                if frame.is_trailers() {
+                #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+                let trailers_finish = frame.is_trailers() && !self.framed;
+                #[cfg(not(all(feature = "http3", feature = "tls", not(target_arch = "wasm32"))))]
+                let trailers_finish = frame.is_trailers();
+                if trailers_finish {
                     // Trailers mark the end of a chunked body.
                     self.done = true;
                     self.size_hint = SizeHint::with_exact(0);
@@ -795,18 +864,42 @@ impl Body for IncomingRequestBody {
                         self.done = true;
                         self.size_hint = SizeHint::with_exact(0);
                         self.terminal_observed = true;
+                        #[cfg(all(
+                            feature = "http3",
+                            feature = "tls",
+                            not(target_arch = "wasm32")
+                        ))]
+                        self.record_framed_consumer_error(IncomingBodyError::AccountingOverflow);
                         self.shared
                             .consumer_terminal
                             .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
+                        #[cfg(all(
+                            feature = "http3",
+                            feature = "tls",
+                            not(target_arch = "wasm32")
+                        ))]
+                        self.shared.wake_framed_producer();
                         return Poll::Ready(Some(Err(IncomingBodyError::AccountingOverflow)));
                     };
                     let Some(received) = self.received.checked_add(data_len) else {
                         self.done = true;
                         self.size_hint = SizeHint::with_exact(0);
                         self.terminal_observed = true;
+                        #[cfg(all(
+                            feature = "http3",
+                            feature = "tls",
+                            not(target_arch = "wasm32")
+                        ))]
+                        self.record_framed_consumer_error(IncomingBodyError::AccountingOverflow);
                         self.shared
                             .consumer_terminal
                             .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
+                        #[cfg(all(
+                            feature = "http3",
+                            feature = "tls",
+                            not(target_arch = "wasm32")
+                        ))]
+                        self.shared.wake_framed_producer();
                         return Poll::Ready(Some(Err(IncomingBodyError::AccountingOverflow)));
                     };
                     let policy_limit = self.shared.policy_max_body_size.load(Ordering::Acquire);
@@ -814,9 +907,24 @@ impl Body for IncomingRequestBody {
                         self.done = true;
                         self.size_hint = SizeHint::with_exact(0);
                         self.terminal_observed = true;
+                        #[cfg(all(
+                            feature = "http3",
+                            feature = "tls",
+                            not(target_arch = "wasm32")
+                        ))]
+                        self.record_framed_consumer_error(IncomingBodyError::BodyTooLarge {
+                            actual: Some(received),
+                            limit: policy_limit,
+                        });
                         self.shared
                             .consumer_terminal
                             .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
+                        #[cfg(all(
+                            feature = "http3",
+                            feature = "tls",
+                            not(target_arch = "wasm32")
+                        ))]
+                        self.shared.wake_framed_producer();
                         return Poll::Ready(Some(Err(IncomingBodyError::BodyTooLarge {
                             actual: Some(received),
                             limit: policy_limit,
@@ -827,13 +935,33 @@ impl Body for IncomingRequestBody {
                             self.done = true;
                             self.size_hint = SizeHint::with_exact(0);
                             self.terminal_observed = true;
+                            #[cfg(all(
+                                feature = "http3",
+                                feature = "tls",
+                                not(target_arch = "wasm32")
+                            ))]
+                            self.record_framed_consumer_error(IncomingBodyError::BadContentLength);
                             self.shared
                                 .consumer_terminal
                                 .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
+                            #[cfg(all(
+                                feature = "http3",
+                                feature = "tls",
+                                not(target_arch = "wasm32")
+                            ))]
+                            self.shared.wake_framed_producer();
                             return Poll::Ready(Some(Err(IncomingBodyError::BadContentLength)));
                         }
                         if received == expected {
                             self.done = true;
+                            #[cfg(all(
+                                feature = "http3",
+                                feature = "tls",
+                                not(target_arch = "wasm32")
+                            ))]
+                            if self.framed {
+                                self.done = false;
+                            }
                         }
                         self.size_hint = SizeHint::with_exact(expected - received);
                     }
@@ -842,13 +970,31 @@ impl Body for IncomingRequestBody {
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Err(RecvError::Cancelled)) => {
+                let error = IncomingBodyError::cancelled(&self.cx);
+                // The driver publishes a peer/reset/framing cause before
+                // cancelling its owned handler. Preserve that earlier cause
+                // instead of turning a concrete transport failure into the
+                // subsequent region's generic cancellation classification.
+                #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+                let error = if self.framed
+                    && IncomingProducerTerminal::load(&self.shared.producer_terminal)
+                        == IncomingProducerTerminal::Failed
+                {
+                    self.shared.terminal_error.lock().clone().unwrap_or(error)
+                } else {
+                    error
+                };
                 self.done = true;
                 self.terminal_observed = true;
                 self.size_hint = SizeHint::with_exact(0);
+                #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+                self.record_framed_consumer_error(error.clone());
                 self.shared
                     .consumer_terminal
                     .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
-                Poll::Ready(Some(Err(IncomingBodyError::cancelled(&self.cx))))
+                #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+                self.shared.wake_framed_producer();
+                Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(Err(RecvError::Disconnected)) => {
                 self.done = true;
@@ -863,15 +1009,27 @@ impl Body for IncomingRequestBody {
                     }
                     IncomingProducerTerminal::Open | IncomingProducerTerminal::Failed => {
                         self.terminal_observed = true;
-                        self.shared
-                            .consumer_terminal
-                            .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
                         let error = self
                             .shared
                             .terminal_error
                             .lock()
                             .clone()
                             .unwrap_or(IncomingBodyError::SourceDisconnected);
+                        #[cfg(all(
+                            feature = "http3",
+                            feature = "tls",
+                            not(target_arch = "wasm32")
+                        ))]
+                        self.record_framed_consumer_error(error.clone());
+                        self.shared
+                            .consumer_terminal
+                            .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
+                        #[cfg(all(
+                            feature = "http3",
+                            feature = "tls",
+                            not(target_arch = "wasm32")
+                        ))]
+                        self.shared.wake_framed_producer();
                         Poll::Ready(Some(Err(error)))
                     }
                 }
@@ -926,7 +1084,377 @@ impl Drop for IncomingRequestBody {
             self.shared
                 .consumer_terminal
                 .store(IncomingConsumerTerminal::Dropped as u8, Ordering::Release);
+            #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+            self.shared.wake_framed_producer();
         }
+    }
+}
+
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+type FramedIncomingSend =
+    Pin<Box<dyn Future<Output = Result<(), IncomingBodyError>> + Send + 'static>>;
+
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+struct FramedIncomingCancellation {
+    cx: Cx,
+    token: CancelWakerToken,
+}
+
+/// Bounded producer for protocol-validated DATA and trailers.
+///
+/// The listener owns this value; the handler only receives
+/// [`IncomingRequestBody`]. One pending send retains its exact frame across
+/// polls, so pausing a native request stream never requires replaying bytes.
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+pub(crate) struct FramedIncomingRequestBodyWriter {
+    sender: Option<mpsc::Sender<QueuedIncomingFrame>>,
+    shared: Arc<IncomingBodyShared>,
+    pending: Option<FramedIncomingSend>,
+    cancel_registration: Option<FramedIncomingCancellation>,
+    declared_length: Option<u64>,
+    total_bytes: u64,
+    trailers_sent: bool,
+    max_body_size: u64,
+    max_trailers_size: usize,
+}
+
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+impl std::fmt::Debug for FramedIncomingRequestBodyWriter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FramedIncomingRequestBodyWriter")
+            .field("declared_length", &self.declared_length)
+            .field("total_bytes", &self.total_bytes)
+            .field("pending", &self.pending.is_some())
+            .field("done", &self.is_done())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+impl FramedIncomingRequestBodyWriter {
+    #[must_use]
+    pub(crate) fn max_body_size(mut self, bytes: u64) -> Self {
+        self.max_body_size = bytes;
+        self
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) fn max_trailers_size(mut self, bytes: usize) -> Self {
+        self.max_trailers_size = bytes;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn is_done(&self) -> bool {
+        IncomingProducerTerminal::load(&self.shared.producer_terminal)
+            != IncomingProducerTerminal::Open
+    }
+
+    #[must_use]
+    pub(crate) fn has_pending_frame(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Whether the handler abandoned the body without first observing an error.
+    #[must_use]
+    pub(crate) fn consumer_dropped(&self) -> bool {
+        self.shared.consumer_dropped()
+    }
+
+    /// Register the transport driver's waker even when no DATA send is pending.
+    /// This makes an idle handler's early body drop stop receive promptly.
+    /// A body failure returns its exact error, so a listener cannot mistake a
+    /// caught validation error for an ordinary early response.
+    pub(crate) fn poll_consumer_dropped(
+        &self,
+        task_cx: &mut Context<'_>,
+    ) -> Poll<Result<(), IncomingBodyError>> {
+        let mut incoming = Some(task_cx.waker().clone());
+        let mut registered = self.shared.framed_consumer_waker.lock();
+        let terminal = self.shared.consumer_terminal.load(Ordering::Acquire);
+        if terminal == IncomingConsumerTerminal::Dropped as u8
+            || terminal == IncomingConsumerTerminal::Failed as u8
+        {
+            let result = if terminal == IncomingConsumerTerminal::Failed as u8 {
+                Err(self
+                    .shared
+                    .framed_consumer_error
+                    .lock()
+                    .clone()
+                    .unwrap_or(IncomingBodyError::SourceDisconnected))
+            } else {
+                Ok(())
+            };
+            let retired = registered.take();
+            drop(registered);
+            drop(retired);
+            drop(incoming);
+            return Poll::Ready(result);
+        }
+        let retired = if registered
+            .as_ref()
+            .is_some_and(|waker| waker.will_wake(task_cx.waker()))
+        {
+            None
+        } else {
+            std::mem::replace(&mut *registered, incoming.take())
+        };
+        drop(registered);
+        drop(retired);
+        drop(incoming);
+        Poll::Pending
+    }
+
+    fn terminal_error(&self) -> IncomingBodyError {
+        self.shared
+            .terminal_error
+            .lock()
+            .clone()
+            .unwrap_or(IncomingBodyError::AlreadyTerminal)
+    }
+
+    fn refresh_cancellation(&mut self, cx: &Cx, waker: &Waker) {
+        if let Some(registered) = &mut self.cancel_registration {
+            registered.token = registered
+                .cx
+                .refresh_cancel_waker(Some(registered.token), waker);
+        } else {
+            self.cancel_registration = Some(FramedIncomingCancellation {
+                cx: cx.clone(),
+                token: cx.refresh_cancel_waker(None, waker),
+            });
+        }
+    }
+
+    fn clear_cancellation(&mut self) {
+        if let Some(registered) = self.cancel_registration.take() {
+            registered.cx.clear_cancel_waker(registered.token);
+        }
+    }
+
+    fn validate_frame(&self, frame: &Frame<BytesCursor>) -> Result<u64, IncomingBodyError> {
+        if self.trailers_sent {
+            return Err(IncomingBodyError::BadHeader);
+        }
+        let retained_bytes = queued_frame_bytes(frame)?;
+        if retained_bytes > self.shared.queued_bytes.limit {
+            return Err(IncomingBodyError::QueueFrameTooLarge {
+                actual: retained_bytes,
+                limit: self.shared.queued_bytes.limit,
+            });
+        }
+        match frame {
+            Frame::Data(data) => {
+                let bytes = u64::try_from(data.remaining())
+                    .map_err(|_| IncomingBodyError::AccountingOverflow)?;
+                let total = self
+                    .total_bytes
+                    .checked_add(bytes)
+                    .ok_or(IncomingBodyError::AccountingOverflow)?;
+                let limit = self
+                    .max_body_size
+                    .min(self.shared.policy_max_body_size.load(Ordering::Acquire));
+                if total > limit {
+                    return Err(IncomingBodyError::BodyTooLarge {
+                        actual: Some(total),
+                        limit,
+                    });
+                }
+                if self.declared_length.is_some_and(|length| total > length) {
+                    return Err(IncomingBodyError::BadContentLength);
+                }
+                Ok(total)
+            }
+            Frame::Trailers(trailers) => {
+                if retained_bytes > self.max_trailers_size {
+                    return Err(IncomingBodyError::TrailersTooLarge);
+                }
+                for (name, value) in trailers.iter() {
+                    let value = value
+                        .to_str()
+                        .map_err(|_| IncomingBodyError::InvalidHeaderValue)?;
+                    validate_header_field(name.as_str(), value).map_err(|error| {
+                        IncomingBodyError::from_http_error(&error, self.max_body_size)
+                    })?;
+                    if is_forbidden_trailer(name.as_str()) {
+                        return Err(IncomingBodyError::BadHeader);
+                    }
+                }
+                Ok(self.total_bytes)
+            }
+        }
+    }
+
+    /// Start or continue one frame send without blocking the connection pump.
+    ///
+    /// The first poll takes `frame`; a pending send owns it until completion.
+    /// Retry with the same now-empty slot and do not supply another frame until
+    /// this returns `Ready`. Queue-byte and channel-capacity wakeups rearm the
+    /// supplied transport-driver waker. A rejected frame remains in the slot.
+    pub(crate) fn poll_send_frame(
+        &mut self,
+        cx: &Cx,
+        task_cx: &mut Context<'_>,
+        frame: &mut Option<Frame<BytesCursor>>,
+    ) -> Poll<Result<(), IncomingBodyError>> {
+        assert!(
+            self.pending.is_none() || frame.is_none(),
+            "a framed body send must complete before accepting another frame"
+        );
+        if self.is_done() {
+            return Poll::Ready(Err(self.terminal_error()));
+        }
+        if let Poll::Ready(result) = self.poll_consumer_dropped(task_cx) {
+            let error = result.err().unwrap_or(IncomingBodyError::ConsumerDropped);
+            self.fail(error.clone());
+            return Poll::Ready(Err(error));
+        }
+        if self.pending.is_none() && frame.is_none() {
+            return Poll::Ready(Ok(()));
+        }
+        // The connection driver polls this send with the request's Cx. MPSC
+        // normally relies on its owning task's cancellation wakeup, but that
+        // task is not the connection driver. Retain an explicit registration
+        // through both byte-credit waits and frame-capacity waits.
+        self.refresh_cancellation(cx, task_cx.waker());
+        if cx.checkpoint().is_err() {
+            let error = IncomingBodyError::cancelled(cx);
+            self.fail(error.clone());
+            return Poll::Ready(Err(error));
+        }
+        if self.pending.is_none() {
+            let Some(offered) = frame.as_ref() else {
+                return Poll::Ready(Ok(()));
+            };
+            let total = match self.validate_frame(offered) {
+                Ok(total) => total,
+                Err(error) => {
+                    self.fail(error.clone());
+                    return Poll::Ready(Err(error));
+                }
+            };
+            self.total_bytes = total;
+            self.trailers_sent = offered.is_trailers();
+            let frame = frame.take().expect("offered frame just validated");
+            let retained_bytes =
+                queued_frame_bytes(&frame).expect("validated frame has checked byte accounting");
+            let sender = self.sender.as_ref().expect("open framed writer").clone();
+            let shared = Arc::clone(&self.shared);
+            let cx = cx.clone();
+            self.pending = Some(Box::pin(async move {
+                let byte_permit = shared.queued_bytes.reserve(&cx, retained_bytes).await?;
+                let limit = shared.policy_max_body_size.load(Ordering::Acquire);
+                if total > limit {
+                    return Err(IncomingBodyError::BodyTooLarge {
+                        actual: Some(total),
+                        limit,
+                    });
+                }
+                let queued = QueuedIncomingFrame {
+                    frame,
+                    _byte_permit: byte_permit,
+                };
+                match sender.send(&cx, queued).await {
+                    Ok(()) => Ok(()),
+                    Err(SendError::Disconnected(_) | SendError::Full(_)) => {
+                        let error = shared.framed_consumer_error.lock().clone();
+                        Err(error.unwrap_or(IncomingBodyError::ConsumerDropped))
+                    }
+                    Err(SendError::Cancelled(_)) => {
+                        let error = shared.framed_consumer_error.lock().clone();
+                        Err(error.unwrap_or_else(|| IncomingBodyError::cancelled(&cx)))
+                    }
+                }
+            }));
+        }
+        match self
+            .pending
+            .as_mut()
+            .expect("frame installed or send already pending")
+            .as_mut()
+            .poll(task_cx)
+        {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                self.pending.take();
+                self.clear_cancellation();
+                if let Err(error) = &result {
+                    self.fail(error.clone());
+                }
+                Poll::Ready(result)
+            }
+        }
+    }
+
+    /// Certify validated protocol FIN after the final pending frame completed.
+    /// An in-flight frame is a caller sequencing error and remains retryable.
+    pub(crate) fn finish(&mut self, cx: &Cx) -> Result<(), IncomingBodyError> {
+        match IncomingProducerTerminal::load(&self.shared.producer_terminal) {
+            IncomingProducerTerminal::Finished => return Ok(()),
+            IncomingProducerTerminal::Failed => return Err(self.terminal_error()),
+            IncomingProducerTerminal::Open => {}
+        }
+        if self.pending.is_some() {
+            return Err(IncomingBodyError::AlreadyTerminal);
+        }
+        let policy_limit = self
+            .max_body_size
+            .min(self.shared.policy_max_body_size.load(Ordering::Acquire));
+        let error = if let Some(error) = self.shared.framed_consumer_error.lock().clone() {
+            Some(error)
+        } else if cx.checkpoint().is_err() {
+            Some(IncomingBodyError::cancelled(cx))
+        } else if self.total_bytes > policy_limit {
+            Some(IncomingBodyError::BodyTooLarge {
+                actual: Some(self.total_bytes),
+                limit: policy_limit,
+            })
+        } else if self.consumer_dropped() {
+            Some(IncomingBodyError::ConsumerDropped)
+        } else if self
+            .declared_length
+            .is_some_and(|length| length != self.total_bytes)
+        {
+            Some(IncomingBodyError::BadContentLength)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.fail(error.clone());
+            return Err(error);
+        }
+        self.shared
+            .producer_terminal
+            .store(IncomingProducerTerminal::Finished as u8, Ordering::Release);
+        let retired_waker = self.shared.framed_consumer_waker.lock().take();
+        drop(retired_waker);
+        self.clear_cancellation();
+        self.sender.take();
+        Ok(())
+    }
+
+    /// Preserve the first transport failure and release every pending permit.
+    pub(crate) fn fail(&mut self, error: IncomingBodyError) {
+        if !self.is_done() {
+            *self.shared.terminal_error.lock() = Some(error);
+            self.shared
+                .producer_terminal
+                .store(IncomingProducerTerminal::Failed as u8, Ordering::Release);
+        }
+        let retired_waker = self.shared.framed_consumer_waker.lock().take();
+        drop(retired_waker);
+        self.clear_cancellation();
+        self.pending.take();
+        self.sender.take();
+    }
+}
+
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+impl Drop for FramedIncomingRequestBodyWriter {
+    fn drop(&mut self) {
+        self.fail(IncomingBodyError::SourceDisconnected);
     }
 }
 
@@ -2655,6 +3183,410 @@ mod tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => std::thread::yield_now(),
             }
+        }
+    }
+
+    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    mod framed {
+        use super::*;
+
+        fn data(bytes: &'static [u8]) -> Option<Frame<BytesCursor>> {
+            Some(Frame::data(BytesCursor::new(Bytes::from_static(bytes))))
+        }
+
+        fn send(
+            writer: &mut FramedIncomingRequestBodyWriter,
+            cx: &Cx,
+            frame: &mut Option<Frame<BytesCursor>>,
+        ) {
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(matches!(
+                writer.poll_send_frame(cx, &mut task_cx, frame),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(frame.is_none());
+        }
+
+        #[test]
+        fn declared_zero_and_last_data_wait_for_protocol_fin() {
+            let cx = Cx::for_testing();
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            for declared in [0, 3] {
+                let (mut writer, mut body) =
+                    IncomingRequestBody::framed_channel_with_limits(&cx, Some(declared), 1, 16);
+                assert!(!body.is_end_stream());
+                assert!(Pin::new(&mut body).poll_frame(&mut task_cx).is_pending());
+                if declared != 0 {
+                    send(&mut writer, &cx, &mut data(b"abc"));
+                    let frame = poll_body(&mut body).expect("DATA").expect("valid bytes");
+                    assert_eq!(frame.into_data().expect("data").chunk(), b"abc");
+                    assert!(!body.is_end_stream(), "declared bytes do not certify FIN");
+                    assert!(Pin::new(&mut body).poll_frame(&mut task_cx).is_pending());
+                }
+                writer.finish(&cx).expect("validated FIN");
+                assert!(poll_body(&mut body).is_none());
+                assert!(body.is_end_stream());
+                assert!(matches!(
+                    poll_body(&mut body),
+                    Some(Err(IncomingBodyError::AlreadyTerminal))
+                ));
+            }
+        }
+
+        #[test]
+        fn raw_data_and_trailers_are_not_http1_framing_or_eof() {
+            let cx = Cx::for_testing();
+            let (writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, None, 2, 128);
+            let mut writer = writer.max_trailers_size(64);
+            send(&mut writer, &cx, &mut data(b"0\r\n\r\n5\r\nhello\r\n"));
+            let received = poll_body(&mut body).expect("DATA").expect("raw DATA");
+            assert_eq!(
+                received.into_data().expect("data").chunk(),
+                b"0\r\n\r\n5\r\nhello\r\n"
+            );
+            let mut trailers = HeaderMap::new();
+            trailers.append(
+                HeaderName::from_static("x-checksum"),
+                HeaderValue::from_static("ok"),
+            );
+            send(&mut writer, &cx, &mut Some(Frame::trailers(trailers)));
+            assert!(
+                poll_body(&mut body)
+                    .expect("trailers")
+                    .expect("valid fields")
+                    .is_trailers()
+            );
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(!body.is_end_stream());
+            assert!(Pin::new(&mut body).poll_frame(&mut task_cx).is_pending());
+            writer.finish(&cx).expect("validated FIN after trailers");
+            assert!(poll_body(&mut body).is_none());
+        }
+
+        #[test]
+        fn byte_and_frame_backpressure_retain_exact_pending_frame() {
+            let cx = Cx::for_testing();
+            // One case waits for a byte permit; the other already holds its
+            // byte permit and waits for the single MPSC frame slot.
+            for byte_limit in [2, 4] {
+                let (mut writer, mut body) =
+                    IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, byte_limit);
+                send(&mut writer, &cx, &mut data(b"ab"));
+                let wake_count = Arc::new(AtomicUsize::new(0));
+                let waker = counting_waker(Arc::clone(&wake_count));
+                let mut task_cx = Context::from_waker(&waker);
+                let mut offered = data(b"cd");
+                assert!(
+                    writer
+                        .poll_send_frame(&cx, &mut task_cx, &mut offered)
+                        .is_pending()
+                );
+                assert!(offered.is_none(), "writer owns the exact pending frame");
+                assert!(writer.has_pending_frame());
+                assert!(body.queued_bytes() <= byte_limit);
+                assert_eq!(body.queued_frames(), if byte_limit == 2 { 1 } else { 2 });
+                let before = wake_count.load(Ordering::SeqCst);
+                let first = poll_body(&mut body)
+                    .expect("first frame")
+                    .expect("first bytes");
+                assert_eq!(first.into_data().expect("data").chunk(), b"ab");
+                assert!(
+                    wake_count.load(Ordering::SeqCst) > before,
+                    "consumption rearms writer"
+                );
+                assert!(matches!(
+                    writer.poll_send_frame(&cx, &mut task_cx, &mut offered),
+                    Poll::Ready(Ok(()))
+                ));
+                assert!(!writer.has_pending_frame());
+                let second = poll_body(&mut body)
+                    .expect("second frame")
+                    .expect("second bytes");
+                assert_eq!(second.into_data().expect("data").chunk(), b"cd");
+                assert_eq!(body.queued_bytes(), 0);
+                assert_eq!(body.queued_frames(), 0);
+                writer.finish(&cx).expect("FIN");
+                assert!(poll_body(&mut body).is_none());
+            }
+        }
+
+        #[test]
+        fn overrun_underrun_and_forbidden_trailers_fail_closed() {
+            let cx = Cx::for_testing();
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, Some(1), 1, 32);
+            let mut offered = data(b"ab");
+            assert!(matches!(
+                writer.poll_send_frame(&cx, &mut task_cx, &mut offered),
+                Poll::Ready(Err(IncomingBodyError::BadContentLength))
+            ));
+            assert!(offered.is_some(), "rejected bytes never enter channel");
+            assert_eq!(body.queued_bytes(), 0);
+            assert!(matches!(
+                poll_body(&mut body),
+                Some(Err(IncomingBodyError::BadContentLength))
+            ));
+
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, Some(2), 1, 32);
+            send(&mut writer, &cx, &mut data(b"a"));
+            assert!(poll_body(&mut body).expect("prefix").is_ok());
+            assert_eq!(writer.finish(&cx), Err(IncomingBodyError::BadContentLength));
+            assert!(matches!(
+                poll_body(&mut body),
+                Some(Err(IncomingBodyError::BadContentLength))
+            ));
+
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 64);
+            let mut trailers = HeaderMap::new();
+            trailers.append(
+                HeaderName::from_static("content-length"),
+                HeaderValue::from_static("0"),
+            );
+            let mut offered = Some(Frame::trailers(trailers));
+            assert!(matches!(
+                writer.poll_send_frame(&cx, &mut task_cx, &mut offered),
+                Poll::Ready(Err(IncomingBodyError::BadHeader))
+            ));
+            assert!(offered.is_some());
+            assert!(matches!(
+                poll_body(&mut body),
+                Some(Err(IncomingBodyError::BadHeader))
+            ));
+        }
+
+        #[test]
+        fn trailers_do_not_hide_later_source_failure() {
+            let cx = Cx::for_testing();
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, Some(0), 1, 32);
+            send(
+                &mut writer,
+                &cx,
+                &mut Some(Frame::trailers(HeaderMap::new())),
+            );
+            assert!(
+                poll_body(&mut body)
+                    .expect("trailers")
+                    .expect("valid empty fields")
+                    .is_trailers()
+            );
+            drop(writer);
+            assert!(matches!(
+                poll_body(&mut body),
+                Some(Err(IncomingBodyError::SourceDisconnected))
+            ));
+        }
+
+        #[test]
+        fn failed_pending_send_releases_permits_and_preserves_first_error() {
+            let cx = Cx::for_testing();
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 4);
+            send(&mut writer, &cx, &mut data(b"ab"));
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            let mut offered = data(b"cd");
+            assert!(
+                writer
+                    .poll_send_frame(&cx, &mut task_cx, &mut offered)
+                    .is_pending()
+            );
+            assert_eq!(body.queued_bytes(), 4, "pending send owns second permit");
+            assert_eq!(body.queued_frames(), 2);
+            writer.fail(IncomingBodyError::ClientAborted);
+            writer.fail(IncomingBodyError::SourceDisconnected);
+            assert_eq!(body.queued_bytes(), 2);
+            assert_eq!(body.queued_frames(), 1);
+            let first = poll_body(&mut body)
+                .expect("accepted prefix")
+                .expect("valid prefix");
+            assert_eq!(first.into_data().expect("data").chunk(), b"ab");
+            assert!(matches!(
+                poll_body(&mut body),
+                Some(Err(IncomingBodyError::ClientAborted))
+            ));
+            assert_eq!(body.queued_bytes(), 0);
+            assert_eq!(body.queued_frames(), 0);
+        }
+
+        #[test]
+        fn pending_byte_and_frame_waits_wake_on_request_cancellation() {
+            for byte_limit in [2, 4] {
+                let cx = Cx::for_testing();
+                let (mut writer, body) =
+                    IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, byte_limit);
+                send(&mut writer, &cx, &mut data(b"ab"));
+                let wake_count = Arc::new(AtomicUsize::new(0));
+                let waker = counting_waker(Arc::clone(&wake_count));
+                let mut task_cx = Context::from_waker(&waker);
+                let mut offered = data(b"cd");
+                assert!(
+                    writer
+                        .poll_send_frame(&cx, &mut task_cx, &mut offered)
+                        .is_pending()
+                );
+                assert!(offered.is_none());
+                assert_eq!(body.queued_frames(), if byte_limit == 2 { 1 } else { 2 });
+                let before = wake_count.load(Ordering::SeqCst);
+                cx.cancel_fast(CancelKind::Deadline);
+                assert!(wake_count.load(Ordering::SeqCst) > before);
+                assert!(matches!(
+                    writer.poll_send_frame(&cx, &mut task_cx, &mut offered),
+                    Poll::Ready(Err(IncomingBodyError::Cancelled {
+                        kind: CancelKind::Deadline,
+                    }))
+                ));
+                assert!(!writer.has_pending_frame());
+                assert!(writer.cancel_registration.is_none());
+                assert_eq!(body.queued_bytes(), 2);
+                drop(body);
+                assert_eq!(writer.shared.queued_bytes.state.lock().queued, 0);
+                assert_eq!(writer.shared.queued_bytes.state.lock().queued_frames, 0);
+            }
+        }
+
+        #[test]
+        fn typed_transport_failure_precedes_owner_cancellation() {
+            let cx = Cx::for_testing();
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 8);
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(Pin::new(&mut body).poll_frame(&mut task_cx).is_pending());
+            writer.fail(IncomingBodyError::ClientAborted);
+            cx.cancel_fast(CancelKind::ParentCancelled);
+            assert!(matches!(
+                poll_body(&mut body),
+                Some(Err(IncomingBodyError::ClientAborted))
+            ));
+        }
+
+        #[test]
+        fn consumer_policy_failure_wakes_idle_driver_with_exact_error() {
+            let cx = Cx::for_testing();
+            let (writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 8);
+            let mut writer = writer.max_body_size(8);
+            send(&mut writer, &cx, &mut data(b"abc"));
+            let wake_count = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(Arc::clone(&wake_count));
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(writer.poll_consumer_dropped(&mut task_cx).is_pending());
+            body.tighten_max_body_size(2);
+            let expected = IncomingBodyError::BodyTooLarge {
+                actual: Some(3),
+                limit: 2,
+            };
+            assert!(matches!(poll_body(&mut body), Some(Err(error)) if error == expected));
+            assert!(wake_count.load(Ordering::SeqCst) > 0);
+            assert!(
+                !writer.consumer_dropped(),
+                "failure is not normal early response"
+            );
+            assert_eq!(
+                writer.poll_consumer_dropped(&mut task_cx),
+                Poll::Ready(Err(expected))
+            );
+        }
+
+        #[test]
+        fn consumer_cancellation_wakes_idle_driver_with_exact_kind() {
+            let cx = Cx::for_testing();
+            let (writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 8);
+            let wake_count = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(Arc::clone(&wake_count));
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(writer.poll_consumer_dropped(&mut task_cx).is_pending());
+            assert!(Pin::new(&mut body).poll_frame(&mut task_cx).is_pending());
+            cx.cancel_fast(CancelKind::Deadline);
+            let after_cancel = wake_count.load(Ordering::SeqCst);
+            let expected = IncomingBodyError::Cancelled {
+                kind: CancelKind::Deadline,
+            };
+            assert!(matches!(poll_body(&mut body), Some(Err(error)) if error == expected));
+            assert!(wake_count.load(Ordering::SeqCst) > after_cancel);
+            assert!(!writer.consumer_dropped());
+            assert_eq!(
+                writer.poll_consumer_dropped(&mut task_cx),
+                Poll::Ready(Err(expected))
+            );
+        }
+
+        #[test]
+        fn idle_consumer_drop_wakes_outside_shared_locks() {
+            struct InspectWake {
+                shared: Arc<IncomingBodyShared>,
+                wake_count: AtomicUsize,
+            }
+            impl std::task::Wake for InspectWake {
+                fn wake(self: Arc<Self>) {
+                    self.wake_by_ref();
+                }
+                fn wake_by_ref(self: &Arc<Self>) {
+                    assert!(self.shared.framed_consumer_waker.try_lock().is_some());
+                    assert!(self.shared.queued_bytes.state.try_lock().is_some());
+                    assert!(self.shared.framed_consumer_error.try_lock().is_some());
+                    self.wake_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let cx = Cx::for_testing();
+            let (writer, body) = IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 8);
+            let probe = Arc::new(InspectWake {
+                shared: Arc::clone(&writer.shared),
+                wake_count: AtomicUsize::new(0),
+            });
+            let waker = Waker::from(Arc::clone(&probe));
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(writer.poll_consumer_dropped(&mut task_cx).is_pending());
+            drop(body);
+            assert!(probe.wake_count.load(Ordering::SeqCst) > 0);
+            assert!(writer.consumer_dropped());
+            assert_eq!(
+                writer.poll_consumer_dropped(&mut task_cx),
+                Poll::Ready(Ok(()))
+            );
+        }
+
+        #[test]
+        fn replacing_idle_driver_waker_drops_it_outside_shared_lock() {
+            struct DropProbe {
+                shared: Arc<IncomingBodyShared>,
+                drops: Arc<AtomicUsize>,
+            }
+            impl std::task::Wake for DropProbe {
+                fn wake(self: Arc<Self>) {}
+            }
+            impl Drop for DropProbe {
+                fn drop(&mut self) {
+                    assert!(self.shared.framed_consumer_waker.try_lock().is_some());
+                    self.drops.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let cx = Cx::for_testing();
+            let (writer, _body) = IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 8);
+            let drops = Arc::new(AtomicUsize::new(0));
+            {
+                let waker = Waker::from(Arc::new(DropProbe {
+                    shared: Arc::clone(&writer.shared),
+                    drops: Arc::clone(&drops),
+                }));
+                let mut task_cx = Context::from_waker(&waker);
+                assert!(writer.poll_consumer_dropped(&mut task_cx).is_pending());
+            }
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            assert!(writer.poll_consumer_dropped(&mut task_cx).is_pending());
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
         }
     }
 

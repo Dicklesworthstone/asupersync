@@ -1,10 +1,16 @@
 //! Owned, authenticated HTTP/3 service over the native managed UDP endpoint.
 
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 
 use super::*;
+use crate::bytes::BytesCursor;
 use crate::channel::oneshot;
 use crate::cx::{ChildRegion, ChildRegionError, ChildRegionOpening, ChildRegionSpec};
+use crate::http::body::Frame;
+use crate::http::h1::stream::{
+    FramedIncomingRequestBodyWriter, IncomingBodyError, IncomingRequestBody,
+};
 use crate::http::h3::NativeH3SessionError;
 use crate::net::quic_core::{ConnectionId, TransportParameters};
 use crate::net::quic_native::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
@@ -51,6 +57,18 @@ pub struct NativeH3ListenerConfig {
     /// Maximum buffered response body retained after a handler returns.
     /// Larger responses should use [`crate::web::Http3StreamResponder`].
     pub max_buffered_response_bytes: usize,
+    /// Opt in to live request bodies dispatched after validated HEADERS.
+    ///
+    /// This bounds queued body bytes per request. The listener also retains
+    /// at most one pending DATA chunk of `min(bytes, 16 KiB)`; their sum is
+    /// reserved against `router`'s aggregate body budget before admission.
+    /// The per-request body-size limit and matched Router policy still apply
+    /// to the entire upload, independently of this queue size.
+    ///
+    /// Handlers consume [`crate::web::StreamingRawBody`]. Buffered body
+    /// extractors fail closed in this mode. `None` preserves complete-body
+    /// dispatch and the existing buffered extractor behavior.
+    pub streaming_request_body_buffer_bytes: Option<NonZeroUsize>,
 }
 
 impl Default for NativeH3ListenerConfig {
@@ -71,6 +89,7 @@ impl Default for NativeH3ListenerConfig {
             request_drain_timeout: Duration::from_millis(100),
             drain_timeout: Duration::from_secs(5),
             max_buffered_response_bytes: 16 * 1024 * 1024,
+            streaming_request_body_buffer_bytes: None,
         }
     }
 }
@@ -143,10 +162,13 @@ impl From<ManagedEndpointError> for NativeH3ListenerError {
 /// actual scheduler-admitted request [`Cx`], with its spawn gateway intact.
 /// There are no background tasks detached from the caller's region.
 ///
-/// Request bodies are assembled within explicit limits. CONNECT and request
-/// trailers retain the bridge's explicit refusal behavior; response producers
-/// may send DATA and response trailers. Buffered response limits are applied
-/// before listener retention/encoding, after application code creates them.
+/// Request bodies are assembled within explicit limits by default. Enabling
+/// [`NativeH3ListenerConfig::streaming_request_body_buffer_bytes`] dispatches
+/// validated HEADERS before FIN and passes live bounded input to
+/// [`crate::web::StreamingRawBody`]. CONNECT and request trailers retain the
+/// bridge's explicit refusal behavior; response producers may send DATA and
+/// response trailers. Buffered response limits are applied before listener
+/// retention/encoding, after application code creates them.
 pub struct NativeH3Listener {
     endpoint: ManagedQuicEndpoint,
     router: Arc<Router>,
@@ -178,6 +200,14 @@ impl NativeH3Listener {
             || config.request_timeout.is_zero()
             || config.request_drain_timeout.is_zero()
             || config.drain_timeout.is_zero()
+            || config
+                .streaming_request_body_buffer_bytes
+                .is_some_and(|bytes| {
+                    bytes
+                        .get()
+                        .checked_add(streaming_chunk_bytes(bytes))
+                        .is_none()
+                })
         {
             return Err(ManagedEndpointError::InvalidConfig(
                 "HTTP/3 listener counts and lifetime limits must be nonzero".to_string(),
@@ -290,12 +320,140 @@ impl NativeH3Listener {
 
 type RequestReply = (Cx, NativeH3RouterProducedDispatch);
 type RegionClose = Pin<Box<dyn Future<Output = Result<bool, ChildRegionError>> + Send>>;
+type RequestBodySource = (Cx, FramedIncomingRequestBodyWriter);
+
+const STREAMING_REQUEST_FRAME_CAPACITY: usize = 8;
+const MAX_STREAMING_REQUEST_CHUNK_BYTES: usize = 16 * 1024;
+const H3_NO_ERROR: u64 = 0x100;
+const H3_FRAME_ERROR: u64 = 0x106;
+const H3_REQUEST_CANCELLED: u64 = 0x10c;
+const H3_MESSAGE_ERROR: u64 = 0x10e;
+
+fn streaming_chunk_bytes(queue_bytes: NonZeroUsize) -> usize {
+    queue_bytes.get().min(MAX_STREAMING_REQUEST_CHUNK_BYTES)
+}
+
+/// The request task creates this source with its actual admitted Cx. Until
+/// publication, the session keeps this stream paused at HEADERS. Afterwards
+/// the framed writer owns at most one pending DATA frame while its queue is
+/// full, and its capacity waiter wakes the UDP application callback directly.
+struct RequestBodyWork {
+    publication: Option<oneshot::Receiver<RequestBodySource>>,
+    source: Option<RequestBodySource>,
+    paused: bool,
+    finished: bool,
+    stopped: bool,
+    clean_receive_stop: bool,
+}
+
+impl RequestBodyWork {
+    fn new(publication: oneshot::Receiver<RequestBodySource>) -> Self {
+        Self {
+            publication: Some(publication),
+            source: None,
+            paused: true,
+            finished: false,
+            stopped: false,
+            clean_receive_stop: false,
+        }
+    }
+
+    fn fail(&mut self, error: IncomingBodyError) {
+        self.publication.take();
+        if let Some((_, writer)) = &mut self.source {
+            writer.fail(error);
+        }
+        self.stopped = true;
+    }
+
+    /// Returns whether publication or a previously blocked frame advanced.
+    /// No socket event is required for either progress edge.
+    fn poll(&mut self, task_cx: &mut TaskContext<'_>) -> Result<bool, IncomingBodyError> {
+        if self.stopped {
+            return Ok(false);
+        }
+        let mut progress = false;
+        if let Some(publication) = &mut self.publication {
+            match publication.poll_recv_uninterruptible(task_cx) {
+                Poll::Pending => return Ok(false),
+                Poll::Ready(Err(_)) => {
+                    self.publication = None;
+                    return Err(IncomingBodyError::SourceDisconnected);
+                }
+                Poll::Ready(Ok(source)) => {
+                    self.publication = None;
+                    self.source = Some(source);
+                    progress = true;
+                }
+            }
+        }
+        let Some((request_cx, writer)) = &mut self.source else {
+            return Err(IncomingBodyError::SourceDisconnected);
+        };
+        // Register even while the queue is empty, so a handler that rejects
+        // the request without another peer packet still retires receive state.
+        match writer.poll_consumer_dropped(task_cx) {
+            Poll::Ready(Ok(())) => return Err(IncomingBodyError::ConsumerDropped),
+            Poll::Ready(Err(error)) => return Err(error),
+            Poll::Pending => {}
+        }
+        if writer.has_pending_frame() {
+            match writer.poll_send_frame(request_cx, task_cx, &mut None) {
+                Poll::Pending => return Ok(progress),
+                Poll::Ready(Err(error)) => return Err(error),
+                Poll::Ready(Ok(())) => progress = true,
+            }
+        }
+        Ok(progress)
+    }
+
+    fn consumer_failure(&mut self, task_cx: &mut TaskContext<'_>) -> Option<IncomingBodyError> {
+        let (_, writer) = self.source.as_mut()?;
+        match writer.poll_consumer_dropped(task_cx) {
+            Poll::Ready(Err(error)) => Some(error),
+            Poll::Ready(Ok(())) | Poll::Pending => None,
+        }
+    }
+
+    fn ready_to_receive(&self) -> bool {
+        !self.finished
+            && !self.stopped
+            && self
+                .source
+                .as_ref()
+                .is_some_and(|(_, writer)| !writer.has_pending_frame())
+    }
+
+    fn send_data(
+        &mut self,
+        data: Bytes,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), IncomingBodyError>> {
+        let Some((request_cx, writer)) = &mut self.source else {
+            return Poll::Ready(Err(IncomingBodyError::SourceDisconnected));
+        };
+        let mut frame = Some(Frame::Data(BytesCursor::new(data)));
+        writer.poll_send_frame(request_cx, task_cx, &mut frame)
+    }
+
+    fn finish(&mut self) -> Result<(), IncomingBodyError> {
+        let Some((request_cx, writer)) = &mut self.source else {
+            return Err(IncomingBodyError::SourceDisconnected);
+        };
+        writer.finish(request_cx)?;
+        self.finished = true;
+        self.paused = false;
+        Ok(())
+    }
+}
 
 struct RequestWork {
     token: NativeH3RouterDispatchToken,
     opening: Option<ChildRegionOpening>,
     region: Option<ChildRegion>,
     dispatch: Option<NativeH3RouterDispatch>,
+    body: Option<RequestBodyWork>,
+    body_publisher: Option<oneshot::Sender<RequestBodySource>>,
     task: Option<TaskHandle<ServerHopOutcome<bool>>>,
     reply: Option<oneshot::Receiver<RequestReply>>,
     command: Option<oneshot::Sender<Option<NativeH3RouterProducer>>>,
@@ -307,6 +465,7 @@ struct RequestWork {
     task_completed: bool,
     response_started: bool,
     reset_applied: bool,
+    input_error_code: Option<u64>,
 }
 
 impl RequestWork {
@@ -322,11 +481,19 @@ impl RequestWork {
         if let Some(deadline) = assembly_deadline {
             budget = budget.meet(Budget::new().with_deadline(deadline));
         }
+        let (body_publisher, body) = if config.streaming_request_body_buffer_bytes.is_some() {
+            let (sender, receiver) = oneshot::channel();
+            (Some(sender), Some(RequestBodyWork::new(receiver)))
+        } else {
+            (None, None)
+        };
         Self {
             token: dispatch.cancellation_token(),
             opening: Some(cx.open_child_region(ChildRegionSpec::inherit().with_budget(budget))),
             region: None,
             dispatch: Some(dispatch),
+            body,
+            body_publisher,
             task: None,
             reply: None,
             command: None,
@@ -341,6 +508,7 @@ impl RequestWork {
             task_completed: false,
             response_started: false,
             reset_applied: false,
+            input_error_code: None,
         }
     }
 
@@ -354,6 +522,10 @@ impl RequestWork {
         }
         self.terminal = Some(false);
         self.dispatch.take();
+        self.body_publisher.take();
+        if let Some(body) = &mut self.body {
+            body.fail(IncomingBodyError::Cancelled { kind });
+        }
         self.command.take();
         self.completion.take();
         self.buffered.take();
@@ -385,8 +557,27 @@ impl RequestWork {
         true
     }
 
-    fn complete(&mut self) {
+    fn complete(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        stream_id: StreamId,
+    ) -> Result<(), NativeH3SessionError> {
         if self.terminal.is_none() {
+            if let Some(body) = &mut self.body
+                && !body.finished
+                && !body.stopped
+            {
+                // The response can finish while a descendant still owns an
+                // unread body. Stop network input immediately; the existing
+                // request-region close below joins that descendant and keeps
+                // its final body-failure observer alive through cleanup.
+                body.fail(IncomingBodyError::Cancelled {
+                    kind: CancelKind::ParentCancelled,
+                });
+                connection.stop_stream_receiving(cx, stream_id, H3_NO_ERROR)?;
+                body.clean_receive_stop = true;
+            }
             self.terminal = Some(true);
             if let Some(command) = self.command.take() {
                 let _ = command.send_blocking(None);
@@ -395,6 +586,7 @@ impl RequestWork {
                 let _ = completion.send_blocking(());
             }
         }
+        Ok(())
     }
 
     /// Drive only runtime ownership. Application code executes in the spawned
@@ -405,6 +597,24 @@ impl RequestWork {
         config: &NativeH3ListenerConfig,
         task_cx: &mut TaskContext<'_>,
     ) -> Poll<Result<bool, NativeH3ListenerError>> {
+        // A consumer can reject a queued frame after wire FIN, for example
+        // after middleware tightens the body policy. Preserve that failure
+        // even if its handler catches the error and returns a response in the
+        // same driver turn. The observer lives through task/region completion.
+        if let Some(error) = self
+            .body
+            .as_mut()
+            .and_then(|body| body.consumer_failure(task_cx))
+            && self.terminal != Some(false)
+        {
+            self.input_error_code = Some(request_body_error_code(&error));
+            self.body
+                .as_mut()
+                .expect("body observer exists")
+                .fail(error);
+            self.terminal = None;
+            self.cancel(cx, config.request_drain_timeout);
+        }
         self.poll_deadline(cx, config.request_drain_timeout, task_cx);
         if let Some(opening) = &mut self.opening {
             match Pin::new(opening).poll(task_cx) {
@@ -424,6 +634,8 @@ impl RequestWork {
                     task_cx.waker().wake_by_ref();
                     if self.terminal.is_none() {
                         let dispatch = self.dispatch.take().expect("opening request owns dispatch");
+                        let body_publisher = self.body_publisher.take();
+                        let body_queue_bytes = config.streaming_request_body_buffer_bytes;
                         let (reply_tx, reply_rx) = oneshot::channel();
                         let (command_tx, mut command_rx) = oneshot::channel();
                         let (completion_tx, mut completion_rx) = oneshot::channel();
@@ -441,7 +653,29 @@ impl RequestWork {
                                     request_cx.now(),
                                 );
                                 let work = async {
-                                    let prepared = dispatch.run_produced(&request_cx).await;
+                                    let prepared = if let Some(body_publisher) = body_publisher {
+                                        let queue_bytes = body_queue_bytes
+                                            .expect("streaming request has a queue budget")
+                                            .get();
+                                        let (writer, body) =
+                                            IncomingRequestBody::framed_channel_with_limits(
+                                                &request_cx,
+                                                dispatch.declared_content_length(),
+                                                STREAMING_REQUEST_FRAME_CAPACITY,
+                                                queue_bytes,
+                                            );
+                                        let writer =
+                                            writer.max_body_size(dispatch.max_request_body_size());
+                                        if body_publisher
+                                            .send_blocking((request_cx.clone(), writer))
+                                            .is_err()
+                                        {
+                                            return false;
+                                        }
+                                        dispatch.run_produced_streaming(&request_cx, body).await
+                                    } else {
+                                        dispatch.run_produced(&request_cx).await
+                                    };
                                     if reply_tx
                                         .send_blocking((request_cx.clone(), prepared))
                                         .is_ok()
@@ -522,7 +756,21 @@ impl RequestWork {
         }
         if let Some(close) = &mut self.close {
             match close.as_mut().poll(task_cx) {
-                Poll::Ready(Ok(true)) => return Poll::Ready(Ok(true)),
+                Poll::Ready(Ok(true)) => {
+                    if let Some(error) = self
+                        .body
+                        .as_mut()
+                        .and_then(|body| body.consumer_failure(task_cx))
+                    {
+                        self.input_error_code = Some(request_body_error_code(&error));
+                        self.body
+                            .as_mut()
+                            .expect("body observer exists")
+                            .fail(error);
+                        self.terminal = Some(false);
+                    }
+                    return Poll::Ready(Ok(true));
+                }
                 Poll::Ready(Ok(false)) => {
                     return Poll::Ready(Err(NativeH3ListenerError::CleanupFailed));
                 }
@@ -543,6 +791,50 @@ fn cancel_reason(cx: &Cx) -> CancelReason {
 fn shutdown_budget(cx: &Cx, grace: Duration) -> Budget {
     // The cleanup ceiling is independent of an already expired request budget.
     Budget::new().with_timeout(cx.now(), grace)
+}
+
+fn retire_request_input(
+    cx: &Cx,
+    bridge: &mut NativeH3Router,
+    connection: &mut QuicConnection,
+    stream_id: StreamId,
+    request: &mut RequestWork,
+    config: &NativeH3ListenerConfig,
+    error: IncomingBodyError,
+) -> Result<(), NativeH3SessionError> {
+    let consumer_dropped = error == IncomingBodyError::ConsumerDropped;
+    let error_code = request_body_error_code(&error);
+    if let Some(body) = &mut request.body {
+        let need_receive_stop = !body.finished && !body.stopped;
+        body.fail(error);
+        if consumer_dropped && need_receive_stop {
+            // A handler may legitimately reject a request from its HEADERS
+            // or a body prefix. Abandon input without resetting the response
+            // half that carries that rejection.
+            connection.stop_stream_receiving(cx, stream_id, H3_NO_ERROR)?;
+            body.clean_receive_stop = true;
+        }
+    }
+    if !consumer_dropped {
+        // Publish the exact body failure before owner cancellation. The body
+        // observer and eventual request receipt must not turn a length/policy
+        // failure into a successful response merely because it was caught.
+        request.cancel(cx, config.request_drain_timeout);
+        request.input_error_code = Some(error_code);
+        bridge.cancel_streaming_dispatch_with_error(cx, connection, &request.token, error_code)?;
+        request.reset_applied = true;
+    }
+    Ok(())
+}
+
+fn request_body_error_code(error: &IncomingBodyError) -> u64 {
+    match error {
+        IncomingBodyError::BadContentLength
+        | IncomingBodyError::BadHeader
+        | IncomingBodyError::InvalidHeaderName
+        | IncomingBodyError::InvalidHeaderValue => H3_MESSAGE_ERROR,
+        _ => H3_REQUEST_CANCELLED,
+    }
 }
 
 struct BufferedResponse {
@@ -680,10 +972,15 @@ impl ListenerState {
     fn poll_cleanup(&mut self, cx: &Cx, task_cx: &mut TaskContext<'_>) -> Poll<()> {
         let mut completed = Vec::new();
         for connection in &mut self.connections {
-            connection.requests.retain(|_, request| {
+            connection.requests.retain(|stream_id, request| {
                 match request.poll_owner(cx, &self.config, task_cx) {
                     Poll::Ready(result) => {
                         let success = request.terminal == Some(true) && result.is_ok();
+                        if request.body.is_some() {
+                            connection
+                                .bridge
+                                .release_streaming_dispatch_after_close(*stream_id);
+                        }
                         if let Err(error) = result {
                             self.failure.get_or_insert(error);
                         }
@@ -741,6 +1038,12 @@ impl ListenerState {
             }
             let mut session = NativeH3Session::server();
             let initialized = endpoint.with_connection_mut(cx, id, |connection| {
+                if let Some(queue_bytes) = self.config.streaming_request_body_buffer_bytes {
+                    session.enable_streaming_receive(
+                        NonZeroUsize::new(streaming_chunk_bytes(queue_bytes))
+                            .expect("streaming request chunk is nonzero"),
+                    )?;
+                }
                 session
                     .initialize(cx, connection, crate::http::h3::H3Settings::default())
                     .map(|control| {
@@ -812,6 +1115,11 @@ impl ListenerState {
                         task_cx,
                     )
                 });
+                let frame_error_close = self.config.streaming_request_body_buffer_bytes.is_some()
+                    && matches!(
+                        &result,
+                        Ok(Err(NativeH3SessionError::TruncatedStream { .. }))
+                    );
                 match result {
                     Ok(Ok(made_progress)) => progress |= made_progress,
                     _ => {
@@ -820,29 +1128,66 @@ impl ListenerState {
                         connection.retirement_deadline = None;
                         self.report.failed_connections =
                             self.report.failed_connections.saturating_add(1);
-                        let _ = endpoint.remove_connection(cx, connection.id);
+                        let protected_close = frame_error_close
+                            && endpoint
+                                .request_authenticated_close(
+                                    cx,
+                                    connection.id,
+                                    H3_FRAME_ERROR,
+                                    true,
+                                )
+                                .unwrap_or(false);
+                        if protected_close {
+                            // A clean FIN inside an H3 frame is a connection
+                            // H3_FRAME_ERROR. The endpoint retains the
+                            // authenticated route and sends its protected
+                            // close while owned request regions drain here.
+                            retired_connection = true;
+                        } else {
+                            let _ = endpoint.remove_connection(cx, connection.id);
+                        }
                         for request in connection.requests.values_mut() {
+                            if let Some(body) = &mut request.body {
+                                body.fail(IncomingBodyError::ClientAborted);
+                            }
                             request.cancel(cx, self.config.request_drain_timeout);
                         }
                         progress = true;
                     }
                 }
             }
-            connection.requests.retain(|_, request| {
+            connection.requests.retain(|stream_id, request| {
                 match request.poll_owner(cx, &self.config, task_cx) {
                     Poll::Pending => true,
                     Poll::Ready(result) => {
                         let success = request.terminal == Some(true) && result.is_ok();
                         if !success && !request.reset_applied && connection.live {
                             let _ = endpoint.with_connection_mut(cx, connection.id, |transport| {
-                                connection.bridge.cancel_dispatch_with_cx(
-                                    cx,
-                                    &mut connection.session,
-                                    transport,
-                                    &request.token,
-                                )
+                                if let Some(error_code) = request.input_error_code {
+                                    connection.bridge.cancel_streaming_dispatch_with_error(
+                                        cx,
+                                        transport,
+                                        &request.token,
+                                        error_code,
+                                    )
+                                } else {
+                                    connection
+                                        .bridge
+                                        .cancel_dispatch_with_cx(
+                                            cx,
+                                            &mut connection.session,
+                                            transport,
+                                            &request.token,
+                                        )
+                                        .map(|_| ())
+                                }
                             });
                             request.reset_applied = true;
+                        }
+                        if request.body.is_some() {
+                            connection
+                                .bridge
+                                .release_streaming_dispatch_after_close(*stream_id);
                         }
                         if let Err(error) = result {
                             self.failure.get_or_insert(error);
@@ -903,6 +1248,51 @@ impl ListenerState {
 }
 
 impl ListenerConnection {
+    fn poll_request_inputs(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        config: &NativeH3ListenerConfig,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Result<bool, NativeH3SessionError> {
+        let mut progress = false;
+        for (stream_id, request) in &mut self.requests {
+            if request.terminal.is_some() {
+                continue;
+            }
+            let Some(body) = &mut request.body else {
+                continue;
+            };
+            match body.poll(task_cx) {
+                Ok(made_progress) => {
+                    progress |= made_progress;
+                    if body.paused && body.ready_to_receive() {
+                        self.session.resume_request_stream(*stream_id)?;
+                        body.paused = false;
+                        progress = true;
+                    }
+                }
+                Err(error) => {
+                    retire_request_input(
+                        cx,
+                        &mut self.bridge,
+                        connection,
+                        *stream_id,
+                        request,
+                        config,
+                        error,
+                    )?;
+                    // Local receive-stop notifications bypass the session
+                    // pause. Also rearm its consumer so buffered readiness is
+                    // retired without waiting for another network packet.
+                    self.session.resume_request_stream(*stream_id)?;
+                    progress = true;
+                }
+            }
+        }
+        Ok(progress)
+    }
+
     fn observe_streams(
         &mut self,
         cx: &Cx,
@@ -1106,6 +1496,7 @@ impl ListenerConnection {
                 }
             }
         }
+        progress |= self.poll_request_inputs(cx, connection, config, task_cx)?;
         for _ in 0..config.application_batch_size {
             let event = match self.session.poll_event(cx, connection, task_cx) {
                 Poll::Pending => break,
@@ -1134,10 +1525,136 @@ impl ListenerConnection {
                     continue;
                 }
             }
-            match self
-                .bridge
-                .ingest_event_with_cx(cx, &mut self.session, connection, event)?
+            if let NativeH3Event::StreamReset { stream_id, .. } = &event
+                && let Some(body) = self
+                    .requests
+                    .get_mut(stream_id)
+                    .and_then(|request| request.body.as_mut())
             {
+                if body.clean_receive_stop {
+                    // RESET_STREAM is the peer's required answer to our
+                    // STOP_SENDING. Its application error code need not echo
+                    // H3_NO_ERROR. This only completes abandoned input; the
+                    // peer can still cancel the response with STOP_SENDING,
+                    // which is checked independently below.
+                    continue;
+                }
+                body.fail(IncomingBodyError::ClientAborted);
+            }
+            let ingress = match event {
+                NativeH3Event::RequestHeaders { stream_id, head }
+                    if config.streaming_request_body_buffer_bytes.is_some() =>
+                {
+                    let queue_bytes = config
+                        .streaming_request_body_buffer_bytes
+                        .expect("streaming mode checked");
+                    let retained_bytes = queue_bytes
+                        .get()
+                        .checked_add(streaming_chunk_bytes(queue_bytes))
+                        .ok_or(NativeH3SessionError::InvalidState(
+                            "HTTP/3 request queue reservation overflow",
+                        ))?;
+                    self.bridge.begin_streaming_request_with_cx(
+                        cx,
+                        &mut self.session,
+                        connection,
+                        stream_id,
+                        head,
+                        retained_bytes,
+                    )?
+                }
+                NativeH3Event::Data { stream_id, bytes }
+                    if self
+                        .requests
+                        .get(&stream_id)
+                        .is_some_and(|request| request.body.is_some()) =>
+                {
+                    let request = self
+                        .requests
+                        .get_mut(&stream_id)
+                        .expect("streaming request was checked");
+                    if request.terminal.is_none() {
+                        let body = request.body.as_mut().expect("streaming body exists");
+                        if !body.stopped {
+                            match body.send_data(bytes, task_cx) {
+                                Poll::Pending => {
+                                    self.session.pause_request_stream(stream_id)?;
+                                    body.paused = true;
+                                }
+                                Poll::Ready(Ok(())) => {}
+                                Poll::Ready(Err(error)) => {
+                                    retire_request_input(
+                                        cx,
+                                        &mut self.bridge,
+                                        connection,
+                                        stream_id,
+                                        request,
+                                        config,
+                                        error,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                NativeH3Event::Finished { stream_id }
+                    if self
+                        .requests
+                        .get(&stream_id)
+                        .is_some_and(|request| request.body.is_some()) =>
+                {
+                    let request = self
+                        .requests
+                        .get_mut(&stream_id)
+                        .expect("streaming request was checked");
+                    if request.terminal.is_none() {
+                        let body = request.body.as_mut().expect("streaming body exists");
+                        if !body.stopped
+                            && let Err(error) = body.finish()
+                        {
+                            retire_request_input(
+                                cx,
+                                &mut self.bridge,
+                                connection,
+                                stream_id,
+                                request,
+                                config,
+                                error,
+                            )?;
+                        }
+                    }
+                    continue;
+                }
+                NativeH3Event::Trailers { stream_id, .. }
+                    if self
+                        .requests
+                        .get(&stream_id)
+                        .is_some_and(|request| request.body.is_some()) =>
+                {
+                    let request = self
+                        .requests
+                        .get_mut(&stream_id)
+                        .expect("streaming request was checked");
+                    if request.terminal.is_none() {
+                        retire_request_input(
+                            cx,
+                            &mut self.bridge,
+                            connection,
+                            stream_id,
+                            request,
+                            config,
+                            IncomingBodyError::SourceDisconnected,
+                        )?;
+                    }
+                    continue;
+                }
+                event => {
+                    self.bridge
+                        .ingest_event_with_cx(cx, &mut self.session, connection, event)?
+                }
+            };
+            match ingress {
                 NativeH3RouterIngress::Dispatch(dispatch) => {
                     let assembly_deadline = self
                         .assembly
@@ -1150,8 +1667,20 @@ impl ListenerConnection {
                             connection,
                             &dispatch.cancellation_token(),
                         )?;
+                        if config.streaming_request_body_buffer_bytes.is_some() {
+                            // HEADERS reserved credit, but the global owner
+                            // cap refused this request before region opening.
+                            self.bridge
+                                .release_streaming_dispatch_after_close(dispatch.stream_id());
+                        }
                         report.refused_requests = report.refused_requests.saturating_add(1);
                     } else {
+                        if config.streaming_request_body_buffer_bytes.is_some() {
+                            // No DATA is consumed until the request region
+                            // has admitted its task and published a body
+                            // source carrying that exact task's Cx.
+                            self.session.pause_request_stream(dispatch.stream_id())?;
+                        }
                         self.requests.insert(
                             dispatch.stream_id(),
                             RequestWork::new(cx, dispatch, config, assembly_deadline),
@@ -1173,7 +1702,11 @@ impl ListenerConnection {
                     ..
                 }) => {
                     self.assembly.remove(&stream_id);
-                    report.refused_requests = report.refused_requests.saturating_add(1);
+                    if let Some(request) = self.requests.get_mut(&stream_id) {
+                        request.cancel(cx, config.request_drain_timeout);
+                    } else {
+                        report.refused_requests = report.refused_requests.saturating_add(1);
+                    }
                 }
                 NativeH3RouterIngress::Event(_) => {}
             }
@@ -1192,12 +1725,21 @@ impl ListenerConnection {
                 progress = true;
             }
             if request.terminal == Some(false) && !request.reset_applied {
-                let _ = self.bridge.cancel_dispatch_with_cx(
-                    cx,
-                    &mut self.session,
-                    connection,
-                    &request.token,
-                );
+                if let Some(error_code) = request.input_error_code {
+                    let _ = self.bridge.cancel_streaming_dispatch_with_error(
+                        cx,
+                        connection,
+                        &request.token,
+                        error_code,
+                    );
+                } else {
+                    let _ = self.bridge.cancel_dispatch_with_cx(
+                        cx,
+                        &mut self.session,
+                        connection,
+                        &request.token,
+                    );
+                }
                 request.reset_applied = true;
                 progress = true;
             }
@@ -1272,7 +1814,7 @@ impl ListenerConnection {
                         if done {
                             self.bridge.release_in_flight(*stream_id);
                             request.buffered = None;
-                            request.complete();
+                            request.complete(cx, connection, *stream_id)?;
                         }
                     }
                     Poll::Ready(Err(_)) => {
@@ -1326,7 +1868,7 @@ impl ListenerConnection {
                 }
                 NativeH3ProducedEvent::ResponseSent { stream_id, .. } => {
                     if let Some(request) = self.requests.get_mut(&stream_id) {
-                        request.complete();
+                        request.complete(cx, connection, stream_id)?;
                     }
                 }
                 NativeH3ProducedEvent::RequestReset { stream_id } => {
