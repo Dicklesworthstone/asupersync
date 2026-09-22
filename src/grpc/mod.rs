@@ -65,6 +65,8 @@ pub mod health;
 pub mod health_rpc;
 pub mod interceptor;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod native_stream;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod native_streaming;
 pub mod protobuf;
 pub mod reflection;
@@ -107,6 +109,8 @@ pub use interceptor::{
     TracingInterceptor, auth_bearer_interceptor, auth_validator, fn_interceptor,
     logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_stream::NativeStreamConfig;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_streaming::NativeServerStream;
 pub use protobuf::{
