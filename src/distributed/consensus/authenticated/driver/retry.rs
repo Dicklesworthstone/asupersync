@@ -215,7 +215,7 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                 cache.lock().cursor = Some(frame.key);
                 sent += 1;
                 // Bound ready work, even for a transport completing inline.
-                crate::future::yield_now().await;
+                crate::runtime::yield_now().await;
             }
             Ok(sent)
         }).await
@@ -242,7 +242,7 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             let mut deadline = next_deadline(cx.now(), interval)?;
             loop {
                 self.retry_step(cx, &mut deadline, interval, max_packets).await?;
-                crate::future::yield_now().await;
+                crate::runtime::yield_now().await;
             }
         }).await
     }
@@ -274,7 +274,7 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                     return Ok(response);
                 }
                 self.retry_step(cx, &mut deadline, interval, max_packets).await?;
-                crate::future::yield_now().await;
+                crate::runtime::yield_now().await;
             }
         });
         crate::time::timeout(cx.now(), duration, operation).await
