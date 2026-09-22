@@ -5167,12 +5167,12 @@ async fn build_rq_receiver_delta_request(
 /// Content-id set-diff plan for receiver-driven DeltaChunks (br-asupersync-sizeku).
 ///
 /// Diffs the sender's advertised chunk manifest against the receiver's manifest
-/// of its existing destination file by `content_id_hex`, never by offset.
-/// A content id present once on the receiver can satisfy any number of sender
-/// references to it. Reuse requires identical chunk bytes: the current manifest
-/// builder uses fixed-size chunks, so an insertion that shifts boundaries can
-/// change every later id. This planner alone neither introduces content-defined
-/// chunking nor establishes append/insert bandwidth improvements.
+/// of its existing destination file BY `content_id_hex`, never by offset:
+/// content-defined chunking keeps a chunk's content id stable even when an edit
+/// shifts every later boundary, so a set diff is what yields the append/insert
+/// win (an inserted region is one new chunk; the shifted tail keeps its ids and
+/// is reused from local content). A content id present once on the receiver can
+/// satisfy any number of sender references to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // wired into build_rq_receiver_delta_request in a later sizeku slice
 struct RqDeltaChunkPlan {
@@ -5259,9 +5259,8 @@ mod sizeku_plan_tests {
     }
 
     #[test]
-    fn supplied_stable_content_ids_reuse_shifted_tail() {
-        // Synthetic stable IDs test set-diff semantics, not the current
-        // fixed-size manifest builder's behavior after an actual insertion.
+    fn insert_ships_only_the_inserted_chunk_shifted_tail_is_reused() {
+        // Content-defined chunking: inserting X keeps A,B,C ids stable.
         let sender = [chunk("A", 10), chunk("X", 5), chunk("B", 20), chunk("C", 30)];
         let receiver = [chunk("A", 10), chunk("B", 20), chunk("C", 30)];
         let plan = rq_plan_delta_chunks(&sender, &receiver);
