@@ -590,10 +590,10 @@ impl QuicStream {
     ) -> Result<u64, QuicStreamError> {
         // RFC 9000 §3.2 / §3.5: STREAM data that arrives after RESET_STREAM,
         // or after this side sent STOP_SENDING (the peer may keep sending
-        // until it processes it), is discarded, not a connection error; only
-        // a segment past a known final size is a FINAL_SIZE_ERROR. Treating
-        // it as fatal failed the packet (and every frame coalesced with it)
-        // on ordinary reordering.
+        // until it processes it), is discarded. Reordered data must still
+        // respect flow control and the established final size; a FIN must
+        // agree with that final size. Otherwise ordinary reordering is not
+        // an error for this packet or its other coalesced frames.
         if let Some((_, final_size)) = self.recv_reset {
             let end = offset
                 .checked_add(len)
@@ -604,12 +604,12 @@ impl QuicStream {
                     received: end,
                 });
             }
-            return Ok(0);
-        }
-        if self.receive_stopped_error_code.is_some() {
-            offset
-                .checked_add(len)
-                .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
+            if is_fin && end != final_size {
+                return Err(QuicStreamError::InvalidFinalSize {
+                    final_size: end,
+                    received: final_size,
+                });
+            }
             return Ok(0);
         }
         let end = self.validate_receive_segment(offset, len, is_fin)?;
@@ -620,7 +620,7 @@ impl QuicStream {
                 return Err(err);
             }
         }
-        if len > 0 {
+        if len > 0 && self.receive_stopped_error_code.is_none() {
             self.insert_recv_range(offset, end);
             self.advance_contiguous_recv_offset();
         }
@@ -633,8 +633,9 @@ impl QuicStream {
         len: u64,
         is_fin: bool,
     ) -> Result<u64, QuicStreamError> {
-        // Reset and stopped receive sides are handled (discarded) by
-        // `receive_segment` before this validation runs.
+        // A reset receive side is checked against its final size separately.
+        // A locally stopped side still validates and accounts late peer bytes
+        // before discarding their payload.
         let end = offset
             .checked_add(len)
             .ok_or(QuicStreamError::OffsetOverflow { offset, len })?;
@@ -1472,6 +1473,33 @@ impl StreamTable {
     /// Current bounded receive window of `id` (`None` = unbounded).
     pub fn stream_recv_window_bytes(&self, id: StreamId) -> Result<Option<u64>, StreamTableError> {
         Ok(self.stream(id)?.recv_window_bytes)
+    }
+
+    /// Connection receive bytes consumed by reads or terminal discard.
+    ///
+    /// Unread bytes and holes on a live stream do not replenish connection
+    /// credit. A reset or local receive stop discards its retained payload,
+    /// releasing the stream's validated receive high-water mark. Late bytes
+    /// after a local stop count only when transport accounting accepts their
+    /// byte range or final size; this never grants credit from unvalidated
+    /// wire offsets.
+    #[cfg(any(
+        test,
+        all(feature = "http3", feature = "tls", not(target_arch = "wasm32"))
+    ))]
+    pub(crate) fn consumed_connection_receive_bytes(&self) -> u64 {
+        self.streams
+            .values()
+            .fold(0_u64, |consumed, stream| {
+                let released =
+                    if stream.recv_reset.is_some() || stream.receive_stopped_error_code.is_some() {
+                        stream.recv_credit.used()
+                    } else {
+                        stream.read_offset
+                    };
+                consumed.saturating_add(released)
+            })
+            .min(VARINT_MAX)
     }
 
     /// React to the peer's STREAM_DATA_BLOCKED on a bounded-window stream.
@@ -3145,9 +3173,11 @@ mod tests {
         s.stop_receiving(9);
         assert_eq!(
             s.receive_segment(0, 4, false)
-                .expect("data after our STOP_SENDING is discarded"),
-            0
+                .expect("data after our STOP_SENDING is accounted and discarded"),
+            4
         );
+        assert_eq!(s.recv_credit.used(), 4);
+        assert!(s.recv_ranges.is_empty());
     }
 
     #[test]
@@ -3255,6 +3285,15 @@ mod tests {
                 }
             ))
         );
+        assert_eq!(
+            table.receive_stream_bytes(stream, 10, Bytes::from_static(b"tail!"), true),
+            Err(StreamTableError::Stream(
+                QuicStreamError::InvalidFinalSize {
+                    final_size: 15,
+                    received: 16,
+                }
+            ))
+        );
         assert!(
             table
                 .stream(stream)
@@ -3266,6 +3305,9 @@ mod tests {
             table.stream(stream).expect("request").recv_credit.used(),
             16
         );
+        assert_eq!(table.recv_connection_credit.used(), 16);
+        assert_eq!(table.stream(stream).expect("request").final_size, Some(16));
+        assert!(table.take_next_readable_stream().is_none());
     }
 
     #[test]
@@ -3339,6 +3381,259 @@ mod tests {
             table.read_stream_bytes(survivor, 2).expect("survivor body"),
             b"ok"[..]
         );
+    }
+
+    #[test]
+    fn native_h3_listener_receive_credit_tracks_only_reads_and_terminal_discard() {
+        let mut table = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let live = StreamId(0);
+        let reset = StreamId(4);
+        let control = StreamId(2);
+        for stream in [live, reset, control] {
+            table.accept_remote_stream(stream).expect("accept stream");
+        }
+        table
+            .receive_stream_bytes(live, 0, Bytes::from_static(b"abcdefgh"), true)
+            .expect("receive complete but unread request");
+        table
+            .receive_stream_bytes(reset, 6, Bytes::from_static(b"xy"), false)
+            .expect("receive out-of-order request bytes");
+        assert_eq!(table.consumed_connection_receive_bytes(), 0);
+        assert_eq!(
+            table.read_stream_bytes(live, 3).expect("partial read"),
+            b"abc"[..]
+        );
+        assert_eq!(table.consumed_connection_receive_bytes(), 3);
+
+        table
+            .reset_stream_receive(reset, 7, 10)
+            .expect("reset discards holes and payload");
+        assert_eq!(table.consumed_connection_receive_bytes(), 13);
+        table
+            .reset_stream_receive(reset, 7, 10)
+            .expect("duplicate reset");
+        assert_eq!(table.consumed_connection_receive_bytes(), 13);
+        table
+            .stop_receiving(live, 7)
+            .expect("discard unread request remainder");
+        assert_eq!(table.consumed_connection_receive_bytes(), 18);
+        table.stop_receiving(live, 7).expect("duplicate local stop");
+        assert_eq!(table.consumed_connection_receive_bytes(), 18);
+        table
+            .receive_stream_bytes(live, 0, Bytes::from_static(b"abcdefgh"), true)
+            .expect("late duplicate stopped payload");
+        assert_eq!(table.consumed_connection_receive_bytes(), 18);
+
+        table
+            .receive_stream_bytes(control, 0, Bytes::from_static(b"qpack"), false)
+            .expect("receive control bytes");
+        assert_eq!(table.consumed_connection_receive_bytes(), 18);
+        assert_eq!(
+            table
+                .read_stream_bytes(control, 2)
+                .expect("read control prefix"),
+            b"qp"[..]
+        );
+        assert_eq!(table.consumed_connection_receive_bytes(), 20);
+        assert!(table.reset_stream_receive(reset, 7, 11).is_err());
+        assert_eq!(table.consumed_connection_receive_bytes(), 20);
+
+        let mut saturated = StreamTable::new_with_connection_limits(
+            StreamRole::Server,
+            0,
+            0,
+            VARINT_MAX,
+            VARINT_MAX,
+            u64::MAX,
+            u64::MAX,
+        );
+        for stream in [StreamId(0), StreamId(4)] {
+            saturated
+                .accept_remote_stream(stream)
+                .expect("accept large reset");
+            saturated
+                .reset_stream_receive(stream, 7, VARINT_MAX)
+                .expect("validate terminal receive credit without payload allocation");
+        }
+        assert_eq!(saturated.consumed_connection_receive_bytes(), VARINT_MAX);
+    }
+
+    #[test]
+    fn native_h3_listener_stopped_receive_accounts_discarded_bytes_without_refilling_buffers() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Server, 0, 0, 20, 20, 20, 20);
+        let stream = StreamId(0);
+        table.accept_remote_stream(stream).expect("accept request");
+        table
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"abc"), false)
+            .expect("receive request prefix");
+        table.stop_receiving(stream, 7).expect("stop receiving");
+        assert_eq!(
+            table
+                .take_next_readable_stream()
+                .expect("receive-stop edge")
+                .receive_stopped,
+            Some(7)
+        );
+        assert_eq!(table.consumed_connection_receive_bytes(), 3);
+
+        for _ in 0..2 {
+            table
+                .receive_stream_bytes(stream, 7, Bytes::from_static(b"late"), false)
+                .expect("account discarded data, including its preceding gap, exactly once");
+            assert_eq!(
+                table.stream(stream).expect("request").recv_credit.used(),
+                11
+            );
+            assert_eq!(table.recv_connection_credit.used(), 11);
+            assert_eq!(table.consumed_connection_receive_bytes(), 11);
+        }
+        table
+            .receive_stream_segment(stream, 11, 2, false)
+            .expect("account late STREAM without storing payload");
+        for _ in 0..2 {
+            table
+                .receive_stream_bytes(stream, 13, Bytes::new(), true)
+                .expect("record and repeat the discarded request's final size");
+        }
+        let state = table.stream(stream).expect("request remains tracked");
+        assert_eq!(state.recv_credit.used(), 13);
+        assert_eq!(state.final_size, Some(13));
+        assert_eq!(state.recv_offset, 3);
+        assert_eq!(state.read_offset, 0);
+        assert!(state.recv_ranges.is_empty());
+        assert!(state.recv_chunks.is_empty());
+        assert_eq!(table.recv_connection_credit.used(), 13);
+        assert_eq!(table.consumed_connection_receive_bytes(), 13);
+        assert!(table.take_next_readable_stream().is_none());
+
+        table
+            .reset_stream_receive(stream, 7, 13)
+            .expect("reset confirms the already-accounted final size");
+        assert_eq!(table.recv_connection_credit.used(), 13);
+        assert_eq!(table.consumed_connection_receive_bytes(), 13);
+    }
+
+    #[test]
+    fn native_h3_listener_stopped_receive_rejects_invalid_late_frames_atomically() {
+        let mut table =
+            StreamTable::new_with_connection_limits(StreamRole::Server, 0, 0, 12, 12, 100, 100);
+        let stream = StreamId(0);
+        table.accept_remote_stream(stream).expect("accept request");
+        table
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"head"), false)
+            .expect("receive request prefix");
+        table.stop_receiving(stream, 7).expect("stop receiving");
+        table
+            .take_next_readable_stream()
+            .expect("receive-stop edge");
+        table
+            .receive_stream_bytes(stream, 8, Bytes::from_static(b"xy"), false)
+            .expect("account valid late bytes");
+        let assert_unchanged = |table: &StreamTable, final_size| {
+            let state = table.stream(stream).expect("request remains tracked");
+            assert_eq!(state.recv_credit.used(), 10);
+            assert_eq!(state.final_size, final_size);
+            assert_eq!(state.recv_offset, 4);
+            assert_eq!(state.read_offset, 0);
+            assert!(state.recv_ranges.is_empty());
+            assert!(state.recv_chunks.is_empty());
+            assert_eq!(table.recv_connection_credit.used(), 10);
+            assert_eq!(table.consumed_connection_receive_bytes(), 10);
+        };
+        assert_eq!(
+            table.receive_stream_segment(stream, u64::MAX, 1, true),
+            Err(StreamTableError::Stream(QuicStreamError::OffsetOverflow {
+                offset: u64::MAX,
+                len: 1,
+            }))
+        );
+        assert_unchanged(&table, None);
+        assert_eq!(
+            table.receive_stream_bytes(stream, 12, Bytes::from_static(b"x"), true),
+            Err(StreamTableError::Stream(QuicStreamError::Flow(
+                FlowControlError::Exhausted {
+                    attempted: 3,
+                    remaining: 2,
+                }
+            )))
+        );
+        assert_unchanged(&table, None);
+        assert_eq!(
+            table.receive_stream_bytes(stream, 8, Bytes::new(), true),
+            Err(StreamTableError::Stream(
+                QuicStreamError::InvalidFinalSize {
+                    final_size: 8,
+                    received: 10,
+                }
+            ))
+        );
+        assert_unchanged(&table, None);
+        table
+            .receive_stream_segment(stream, 10, 0, true)
+            .expect("valid final size remains admissible after failures");
+        assert_unchanged(&table, Some(10));
+        for (offset, len, fin, final_size, received) in
+            [(10, 1, false, 10, 11), (9, 0, true, 9, 10)]
+        {
+            assert_eq!(
+                table.receive_stream_segment(stream, offset, len, fin),
+                Err(StreamTableError::Stream(
+                    QuicStreamError::InvalidFinalSize {
+                        final_size,
+                        received,
+                    }
+                ))
+            );
+            assert_unchanged(&table, Some(10));
+        }
+        assert!(table.take_next_readable_stream().is_none());
+
+        let mut shared =
+            StreamTable::new_with_connection_limits(StreamRole::Server, 0, 0, 20, 20, 10, 10);
+        let sibling = StreamId(4);
+        shared.accept_remote_stream(stream).expect("accept request");
+        shared
+            .accept_remote_stream(sibling)
+            .expect("accept sibling");
+        shared
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"head"), false)
+            .expect("receive request prefix");
+        shared
+            .receive_stream_bytes(sibling, 0, Bytes::from_static(b"sib"), false)
+            .expect("consume shared connection credit");
+        shared.stop_receiving(stream, 7).expect("stop receiving");
+        assert_eq!(
+            shared.receive_stream_segment(stream, 7, 1, true),
+            Err(StreamTableError::Stream(QuicStreamError::Flow(
+                FlowControlError::Exhausted {
+                    attempted: 4,
+                    remaining: 3,
+                }
+            )))
+        );
+        assert_eq!(
+            shared.stream(stream).expect("request").recv_credit.used(),
+            4
+        );
+        assert_eq!(shared.stream(stream).expect("request").final_size, None);
+        assert_eq!(
+            shared.stream(sibling).expect("sibling").recv_credit.used(),
+            3
+        );
+        assert_eq!(shared.recv_connection_credit.used(), 7);
+        assert_eq!(shared.consumed_connection_receive_bytes(), 4);
+        for _ in 0..2 {
+            shared
+                .receive_stream_bytes(stream, 4, Bytes::from_static(b"end"), true)
+                .expect("consume the remaining shared credit exactly once");
+            assert_eq!(
+                shared.stream(stream).expect("request").recv_credit.used(),
+                7
+            );
+            assert_eq!(shared.recv_connection_credit.used(), 10);
+            assert_eq!(shared.consumed_connection_receive_bytes(), 7);
+        }
     }
 
     #[test]

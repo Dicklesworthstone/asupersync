@@ -67,6 +67,16 @@ pub(crate) struct RoutedOutgoingPacket {
     pub(crate) ack_eliciting: bool,
 }
 
+/// A requested close remains route-owned across asynchronous protection and
+/// socket backpressure. Its sole queued packet is never ordinary stream work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalCloseOutput {
+    #[cfg(all(feature = "tls", any(test, feature = "http3")))]
+    Requested,
+    Queued,
+    Sent,
+}
+
 /// Handle to a managed QUIC connection with timing and lifecycle state.
 #[derive(Debug)]
 pub struct ConnectionHandle {
@@ -87,6 +97,7 @@ pub struct ConnectionHandle {
     /// Input may make output ready while the endpoint's send queue is full.
     deferred_spaces: [bool; 3],
     next_deferred_space: usize,
+    local_close_output: Option<LocalCloseOutput>,
     /// Imported connections keep their negotiated peer CID and recovery epoch.
     peer_connection_id: Option<ConnectionId>,
     clock_origin: Option<Instant>,
@@ -364,6 +375,7 @@ impl ConnectionRouter {
                 next_timer_deadline: deadline,
                 deferred_spaces: [false, false, true],
                 next_deferred_space: 0,
+                local_close_output: None,
                 peer_connection_id: Some(parts.peer_cid),
                 clock_origin: Some(now),
                 authenticated: Some(AuthenticatedRouting {
@@ -428,6 +440,7 @@ impl ConnectionRouter {
                 next_timer_deadline,
                 deferred_spaces: [false, false, true],
                 next_deferred_space: 0,
+                local_close_output: None,
                 peer_connection_id: Some(peer_cid),
                 clock_origin: Some(clock_origin),
                 authenticated: Some(AuthenticatedRouting {
@@ -466,6 +479,87 @@ impl ConnectionRouter {
         Ok(operation(connection))
     }
 
+    /// Start one authenticated route's local drain in its original clock
+    /// domain. The event loop owns protection and delivery of the final close.
+    /// A non-forced request preserves buffered and unacknowledged output.
+    #[cfg(all(feature = "tls", any(test, feature = "http3")))]
+    pub(crate) fn request_authenticated_close(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        now: Instant,
+        app_error_code: u64,
+        force: bool,
+    ) -> Result<bool, ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        if !matches!(
+            crate::net::atp::protocol::varint::VarInt::new(app_error_code),
+            Outcome::Ok(_)
+        ) {
+            return Err(ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "close code exceeds QUIC varint range".to_string(),
+            });
+        }
+        let queued_output = self.pending_datagram_count_for(connection_id) != 0;
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        if !matches!(handle.connection, RoutedConnection::Authenticated(_))
+            || handle.authenticated.is_none()
+            || handle.packet_protection.is_none()
+        {
+            return Err(ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "connection has no authenticated application owner".to_string(),
+            });
+        }
+        if matches!(
+            handle.connection.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            return Ok(true);
+        }
+        if !force
+            && (queued_output
+                || handle.connection.has_pending_stream_frames()
+                || handle.connection.has_pending_control_frames()
+                || handle.connection.pending_outbound_datagram_count() != 0
+                || handle.connection.transport().bytes_in_flight() != 0)
+        {
+            return Ok(false);
+        }
+        let origin = handle.clock_origin.unwrap_or(self.clock_origin);
+        handle
+            .connection
+            .begin_close(cx, instant_micros_from(origin, now), app_error_code)
+            .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: error.to_string(),
+            })?;
+        handle.local_close_output = Some(LocalCloseOutput::Requested);
+        handle.deferred_spaces = [false; 3];
+        handle.next_timer_deadline = None;
+        // A forced deadline retires only this route's ordinary output. Once
+        // locally draining, no further application or recovery packet is made.
+        self.pending_timer_packets
+            .retain(|packet| packet.connection_id != connection_id);
+        self.pending_deferred_packets
+            .retain(|packet| packet.connection_id != connection_id);
+        Ok(true)
+    }
+
+    #[cfg(all(feature = "tls", any(test, feature = "http3")))]
+    pub(crate) fn pending_datagram_count_for(&self, connection_id: ConnectionId) -> usize {
+        self.pending_timer_packets
+            .iter()
+            .chain(self.pending_deferred_packets.iter())
+            .filter(|packet| packet.connection_id == connection_id)
+            .count()
+    }
+
     #[cfg(feature = "tls")]
     pub(crate) fn negotiated_alpn(
         &self,
@@ -489,6 +583,11 @@ impl ConnectionRouter {
     /// is acknowledged. Other application/PTO packets cannot retire that copy.
     pub(crate) fn packet_sent(&mut self, packet: &RoutedOutgoingPacket, now: Option<Instant>) {
         if let Some(handle) = self.connections.get_mut(&packet.connection_id) {
+            if handle.local_close_output == Some(LocalCloseOutput::Queued) {
+                // The close request removed all ordinary packets for this CID
+                // before its sole terminal packet was assembled.
+                handle.local_close_output = Some(LocalCloseOutput::Sent);
+            }
             if let Some(now) = now.filter(|_| packet.ack_eliciting && !handle.sent_since_receive) {
                 handle.last_activity = handle.last_activity.max(now);
                 handle.sent_since_receive = true;
@@ -668,8 +767,11 @@ impl ConnectionRouter {
                                 connection_id,
                                 reason: error.to_string(),
                             })?;
-                        protection.protection.note_peer_key_update(PacketProtectionSpace::OneRtt);
-                        if handle.connection.tls().local_key_phase() != unprotected.header.key_phase {
+                        protection
+                            .protection
+                            .note_peer_key_update(PacketProtectionSpace::OneRtt);
+                        if handle.connection.tls().local_key_phase() != unprotected.header.key_phase
+                        {
                             handle
                                 .connection
                                 .request_local_key_update(cx)
@@ -684,7 +786,9 @@ impl ConnectionRouter {
                                     connection_id,
                                     reason: error.to_string(),
                                 })?;
-                            protection.protection.note_local_key_update(PacketProtectionSpace::OneRtt);
+                            protection
+                                .protection
+                                .note_local_key_update(PacketProtectionSpace::OneRtt);
                         }
                     }
                     handle
@@ -768,8 +872,11 @@ impl ConnectionRouter {
                                 connection_id,
                                 reason: error.to_string(),
                             })?;
-                        packet_protection.protection.note_peer_key_update(PacketProtectionSpace::OneRtt);
-                        if handle.connection.tls().local_key_phase() != unprotected.header.key_phase {
+                        packet_protection
+                            .protection
+                            .note_peer_key_update(PacketProtectionSpace::OneRtt);
+                        if handle.connection.tls().local_key_phase() != unprotected.header.key_phase
+                        {
                             handle
                                 .connection
                                 .request_local_key_update(cx)
@@ -784,7 +891,9 @@ impl ConnectionRouter {
                                     connection_id,
                                     reason: error.to_string(),
                                 })?;
-                            packet_protection.protection.note_local_key_update(PacketProtectionSpace::OneRtt);
+                            packet_protection
+                                .protection
+                                .note_local_key_update(PacketProtectionSpace::OneRtt);
                         }
                     }
                     (unprotected.header.packet_number, unprotected.plaintext)
@@ -929,6 +1038,7 @@ impl ConnectionRouter {
             next_timer_deadline: None,
             deferred_spaces: [false; 3],
             next_deferred_space: 0,
+            local_close_output: None,
             peer_connection_id: None,
             clock_origin: None,
             #[cfg(feature = "tls")]
@@ -1206,8 +1316,34 @@ impl ConnectionRouter {
     ) -> Result<Vec<(OutgoingPacket, Instant)>, ConnectionRouterError> {
         cx.checkpoint()
             .map_err(|_| ConnectionRouterError::Cancelled)?;
-        let mut packets = Vec::new();
+        let retained_deadlines: HashMap<_, _> = self
+            .connections
+            .keys()
+            .filter_map(|cid| {
+                self.queued_local_close_deadline(*cid)
+                    .filter(|deadline| *deadline > now)
+                    .map(|deadline| (*cid, deadline))
+            })
+            .collect();
+        let mut packets: Vec<_> = self
+            .pending_timer_packets
+            .drain(..)
+            .chain(self.pending_deferred_packets.drain(..))
+            .filter_map(|packet| {
+                retained_deadlines
+                    .get(&packet.connection_id)
+                    .map(|deadline| (packet.packet, *deadline))
+            })
+            .collect();
         for (connection_id, handle) in &mut self.connections {
+            if matches!(
+                handle.local_close_output,
+                Some(LocalCloseOutput::Queued | LocalCloseOutput::Sent)
+            ) {
+                // Already committed ciphertext is owned either by this vector
+                // or by the endpoint's retained shutdown packet vector.
+                continue;
+            }
             let origin = handle.clock_origin.unwrap_or(self.clock_origin);
             let now_micros = instant_micros_from(origin, now);
             if !matches!(
@@ -1223,64 +1359,12 @@ impl ConnectionRouter {
                         reason: error.to_string(),
                     })?;
             }
-            let Some(protection) = handle.packet_protection.as_mut() else {
-                // Pre-1RTT shutdown still performs local teardown only.
-                continue;
-            };
-            let Some(code) = handle.connection.transport().close_code() else {
-                continue;
-            };
-            let Outcome::Ok(error_code) = crate::net::atp::protocol::varint::VarInt::new(code)
-            else {
-                return Err(ConnectionRouterError::PacketProcessingFailed {
-                    connection_id: *connection_id,
-                    reason: "close code exceeds QUIC varint range".to_string(),
-                });
-            };
-            let frames = [QuicFrame::ConnectionClose {
-                error_code,
-                frame_type: None,
-                reason_phrase: crate::bytes::Bytes::new(),
-            }];
-            if !handle.connection.is_local_close_frame(&frames) {
-                continue;
+            if let Some(packet) =
+                prepare_local_close_packet(cx, *connection_id, handle, origin, now).await?
+            {
+                packets.push(packet);
+                handle.local_close_output = Some(LocalCloseOutput::Queued);
             }
-            let Some(deadline) = handle
-                .connection
-                .transport()
-                .drain_deadline_micros()
-                .and_then(|micros| origin.checked_add(Duration::from_micros(micros)))
-                .filter(|deadline| *deadline > now)
-            else {
-                continue;
-            };
-            let mut payload = crate::bytes::BytesMut::new();
-            NativeQuicConnection::encode_frames(&frames, &mut payload).map_err(|error| {
-                ConnectionRouterError::PacketProcessingFailed {
-                    connection_id: *connection_id,
-                    reason: error.to_string(),
-                }
-            })?;
-            let data = assemble_protected_1rtt_packet_inner(
-                cx,
-                handle.peer_connection_id.unwrap_or(*connection_id),
-                &mut handle.connection,
-                &mut protection.protection,
-                &frames,
-                payload.as_ref(),
-                now_micros,
-                false,
-                false,
-            )
-            .await?;
-            packets.push((
-                OutgoingPacket {
-                    dst_addr: handle.peer_addr,
-                    data,
-                    send_time: Some(now),
-                },
-                deadline,
-            ));
         }
         Ok(packets)
     }
@@ -1380,12 +1464,31 @@ impl ConnectionRouter {
         })
     }
 
+    /// Ordinary terminal output is discarded. A requested local close is the
+    /// only terminal packet retained until UDP reports that packet was sent.
+    pub(crate) fn connection_can_send_queued(&self, cid: ConnectionId) -> bool {
+        !self.connection_is_terminal(cid)
+            || self
+                .connections
+                .get(&cid)
+                .is_some_and(|handle| handle.local_close_output == Some(LocalCloseOutput::Queued))
+    }
+
+    /// Deadline for the sole committed local-close packet, wherever its current
+    /// owner retained it. Shutdown transfers that ciphertext without reassembly.
+    pub(crate) fn queued_local_close_deadline(&self, cid: ConnectionId) -> Option<Instant> {
+        let handle = self.connections.get(&cid)?;
+        (handle.local_close_output == Some(LocalCloseOutput::Queued))
+            .then(|| self.lifecycle_deadline(handle))
+            .flatten()
+    }
+
     fn discard_terminal_output(&mut self) {
         let terminal: HashSet<_> = self
             .connections
             .keys()
             .copied()
-            .filter(|cid| self.connection_is_terminal(*cid))
+            .filter(|cid| !self.connection_can_send_queued(*cid))
             .collect();
         self.pending_timer_packets
             .retain(|packet| !terminal.contains(&packet.connection_id));
@@ -1583,6 +1686,37 @@ impl ConnectionRouter {
             let now_micros = handle
                 .clock_origin
                 .map_or(now_micros, |origin| instant_micros_from(origin, now));
+            #[cfg(all(feature = "tls", any(test, feature = "http3")))]
+            if handle.local_close_output == Some(LocalCloseOutput::Requested) {
+                let origin = handle.clock_origin.unwrap_or(self.clock_origin);
+                match prepare_local_close_packet(cx, connection_id, handle, origin, now).await {
+                    Ok(Some((packet, _))) => {
+                        // Packet-number/amplification accounting commits inside
+                        // protection. Store the packet before any yield.
+                        self.pending_deferred_packets.push(RoutedOutgoingPacket {
+                            connection_id,
+                            packet,
+                            final_handshake_flight: false,
+                            ack_eliciting: false,
+                        });
+                        handle.local_close_output = Some(LocalCloseOutput::Queued);
+                    }
+                    Ok(None) => handle.local_close_output = None,
+                    Err(error) => {
+                        if cx.checkpoint().is_err() || error == ConnectionRouterError::Cancelled {
+                            return Err(ConnectionRouterError::Cancelled);
+                        }
+                        // A failed close for one peer must not stop healthy
+                        // routes. Its existing drain deadline still retires it.
+                        handle.local_close_output = None;
+                        cx.trace(&format!(
+                            "QUIC local close failed for {connection_id:?}: {error}"
+                        ));
+                    }
+                }
+                self.deferred_cursor = Some(connection_id);
+                continue;
+            }
             let first_space = handle.next_deferred_space;
             for offset in 0..3 {
                 if self.pending_deferred_packets.len() >= max_packets {
@@ -1815,6 +1949,73 @@ fn packet_space_index(space: PacketNumberSpace) -> usize {
         PacketNumberSpace::Handshake => 1,
         PacketNumberSpace::ApplicationData => 2,
     }
+}
+
+/// Protect the already-recorded local close without admitting any application
+/// output. Both endpoint shutdown and per-route retirement use this path.
+async fn prepare_local_close_packet(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    handle: &mut ConnectionHandle,
+    origin: Instant,
+    now: Instant,
+) -> Result<Option<(OutgoingPacket, Instant)>, ConnectionRouterError> {
+    let Some(protection) = handle.packet_protection.as_mut() else {
+        return Ok(None);
+    };
+    let Some(code) = handle.connection.transport().close_code() else {
+        return Ok(None);
+    };
+    let Outcome::Ok(error_code) = crate::net::atp::protocol::varint::VarInt::new(code) else {
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: "close code exceeds QUIC varint range".to_string(),
+        });
+    };
+    let frames = [QuicFrame::ConnectionClose {
+        error_code,
+        frame_type: None,
+        reason_phrase: crate::bytes::Bytes::new(),
+    }];
+    if !handle.connection.is_local_close_frame(&frames) {
+        return Ok(None);
+    }
+    let Some(deadline) = handle
+        .connection
+        .transport()
+        .drain_deadline_micros()
+        .and_then(|micros| origin.checked_add(Duration::from_micros(micros)))
+        .filter(|deadline| *deadline > now)
+    else {
+        return Ok(None);
+    };
+    let mut payload = crate::bytes::BytesMut::new();
+    NativeQuicConnection::encode_frames(&frames, &mut payload).map_err(|error| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: error.to_string(),
+        }
+    })?;
+    let data = assemble_protected_1rtt_packet_inner(
+        cx,
+        handle.peer_connection_id.unwrap_or(connection_id),
+        &mut handle.connection,
+        &mut protection.protection,
+        &frames,
+        payload.as_ref(),
+        instant_micros_from(origin, now),
+        false,
+        false,
+    )
+    .await?;
+    Ok(Some((
+        OutgoingPacket {
+            dst_addr: handle.peer_addr,
+            data,
+            send_time: Some(now),
+        },
+        deadline,
+    )))
 }
 
 async fn drain_connection_frames(
@@ -2314,7 +2515,9 @@ fn unprotect_1rtt_packet_now(
         Some(conn) => {
             key_phase != conn.tls().remote_key_phase()
                 && conn.can_send_1rtt()
-                && conn.tls().peer_key_phase_is_new_update(key_phase, packet_number)
+                && conn
+                    .tls()
+                    .peer_key_phase_is_new_update(key_phase, packet_number)
         }
         None => {
             !packet_protection.next_gen_keys_installed(PacketProtectionSpace::OneRtt, key_phase)
@@ -2325,7 +2528,9 @@ fn unprotect_1rtt_packet_now(
         if let Outcome::Err(err) =
             packet_protection.ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, key_phase)
         {
-            return Err(failed(format!("1-RTT key update derivation failed: {err:?}")));
+            return Err(failed(format!(
+                "1-RTT key update derivation failed: {err:?}"
+            )));
         }
     }
 
@@ -5054,6 +5259,514 @@ mod tests {
                 Err(ConnectionRouterError::PacketProcessingFailed { reason, .. })
                     if reason.contains("ReplayedNonce")),
                 "the fully committed packet is accepted by the replay window exactly once"
+            );
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    async fn add_authenticated_close_test_connection(
+        cx: &Cx,
+        router: &mut ConnectionRouter,
+        cid: ConnectionId,
+        peer_cid: ConnectionId,
+        peer: SocketAddr,
+        origin: Instant,
+    ) {
+        add_protected_test_connection(cx, router, cid, peer).await;
+        // Synthetic authenticated-owner state and deterministic fixture keys
+        // exercise close ownership, protection and timing. Real TLS admission
+        // is covered by the live UDP tests, not by this unit fixture.
+        let mut application = super::super::QuicConnection::client(router.config_template);
+        establish_for_application_data(cx, application.inner_mut());
+        let handle = router.connections.get_mut(&cid).unwrap();
+        handle.connection = RoutedConnection::Authenticated(application);
+        handle.peer_connection_id = Some(peer_cid);
+        handle.clock_origin = Some(origin);
+        handle.last_activity = origin;
+        handle.established_at = Some(origin);
+        handle.deferred_spaces = [false; 3];
+        handle.authenticated = Some(AuthenticatedRouting {
+            negotiated_alpn: b"h3".to_vec(),
+            final_handshake_flight: Vec::new(),
+            last_final_flight_retransmit: None,
+            pending_final_flight_packets: 0,
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_close_waits_for_buffered_output_and_acknowledged_flight() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let cid = ConnectionId::new(b"closing").unwrap();
+            let peer_cid = ConnectionId::new(b"close-peer").unwrap();
+            let peer = "127.0.0.1:4490".parse().unwrap();
+            let origin = router.clock_origin;
+            let now = origin + Duration::from_secs(1);
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+            let stream = router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .open_local_bidi(&cx)
+                .unwrap();
+            router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .write_stream_bytes(
+                    &cx,
+                    stream,
+                    Bytes::from_static(b"keep this response"),
+                    false,
+                )
+                .unwrap();
+
+            assert!(matches!(
+                router.request_authenticated_close(&cx, cid, now, u64::MAX, true),
+                Err(ConnectionRouterError::InvalidConnectionState { connection_id, .. })
+                    if connection_id == cid
+            ));
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_requested(true);
+            assert!(matches!(
+                router.request_authenticated_close(&cancelled, cid, now, 42, true),
+                Err(ConnectionRouterError::Cancelled)
+            ));
+            assert!(
+                !router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert_eq!(handle.connection.state(), QuicConnectionState::Established);
+            assert_eq!(handle.connection.transport().close_code(), None);
+            assert_eq!(handle.local_close_output, None);
+            assert_eq!(handle.connection.pending_stream_data_bytes(), 18);
+            let frames = handle
+                .connection
+                .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+                .unwrap();
+            assert!(frames.iter().any(|frame| matches!(frame,
+                QuicFrame::Stream { data, .. } if data.as_ref() == b"keep this response"
+            )));
+            assert!(!handle.connection.has_pending_stream_frames());
+
+            // Control output alone must also finish before graceful retirement.
+            handle.connection.queue_ping(&cx).unwrap();
+            assert!(
+                !router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert!(handle.connection.has_pending_control_frames());
+            assert_eq!(
+                handle
+                    .connection
+                    .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200,)
+                    .unwrap(),
+                vec![QuicFrame::Ping]
+            );
+
+            handle
+                .connection
+                .send_datagram(&cx, Bytes::from_static(b"queued datagram"))
+                .unwrap();
+            assert!(
+                !router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert_eq!(handle.connection.pending_outbound_datagram_count(), 1);
+            assert_eq!(
+                handle
+                    .connection
+                    .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200,)
+                    .unwrap(),
+                vec![QuicFrame::Datagram {
+                    data: Bytes::from_static(b"queued datagram")
+                }]
+            );
+
+            for timer_queue in [true, false] {
+                let packet = RoutedOutgoingPacket {
+                    connection_id: cid,
+                    packet: OutgoingPacket {
+                        dst_addr: peer,
+                        data: b"already protected output".to_vec(),
+                        send_time: Some(now),
+                    },
+                    final_handshake_flight: false,
+                    ack_eliciting: true,
+                };
+                if timer_queue {
+                    router.pending_timer_packets.push(packet);
+                } else {
+                    router.pending_deferred_packets.push(packet);
+                }
+                assert_eq!(router.pending_datagram_count_for(cid), 1);
+                assert!(
+                    !router
+                        .request_authenticated_close(&cx, cid, now, 42, false)
+                        .unwrap()
+                );
+                assert_eq!(router.pending_datagram_count_for(cid), 1);
+                let retained = if timer_queue {
+                    router.pending_timer_packets.pop().unwrap()
+                } else {
+                    router.pending_deferred_packets.pop().unwrap()
+                };
+                assert_eq!(retained.packet.data, b"already protected output");
+                assert_eq!(retained.packet.send_time, Some(now));
+            }
+
+            // A frame leaving every local queue is still outstanding until the
+            // peer acknowledges its transport packet.
+            let packet_number = router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .on_packet_sent(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    1200,
+                    true,
+                    true,
+                    900_000,
+                )
+                .unwrap();
+            assert!(
+                !router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert_eq!(handle.connection.transport().bytes_in_flight(), 1200);
+            assert_eq!(handle.connection.state(), QuicConnectionState::Established);
+            handle
+                .connection
+                .on_ack_received(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    &[packet_number],
+                    0,
+                    1_000_000,
+                )
+                .unwrap();
+            assert_eq!(handle.connection.transport().bytes_in_flight(), 0);
+            assert!(
+                router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            assert_eq!(
+                router.connections[&cid].local_close_output,
+                Some(LocalCloseOutput::Requested)
+            );
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_forced_close_preserves_other_peer_and_original_drain_clock() {
+        run_test_with_cx(|cx| async move {
+            for acknowledge_close in [false, true] {
+                let config = NativeQuicConnectionConfig {
+                    drain_timeout_micros: 3_000_000,
+                    ..NativeQuicConnectionConfig::default()
+                };
+                let mut router = ConnectionRouter::new(config);
+                router.set_idle_timeout_micros(0);
+                let a = ConnectionId::new(b"close-a").unwrap();
+                let b = ConnectionId::new(b"close-b").unwrap();
+                let peer_a = ConnectionId::new(b"peer-a").unwrap();
+                let peer_b = ConnectionId::new(b"peer-b").unwrap();
+                let address_a = "127.0.0.1:4491".parse().unwrap();
+                let address_b = "127.0.0.1:4492".parse().unwrap();
+                let origin_a = router.clock_origin + Duration::from_secs(17);
+                let origin_b = router.clock_origin;
+                let now = origin_a + Duration::from_secs(7);
+                let deadline = origin_a + Duration::from_secs(10);
+                for (cid, peer_cid, address, origin) in [
+                    (a, peer_a, address_a, origin_a),
+                    (b, peer_b, address_b, origin_b),
+                ] {
+                    add_authenticated_close_test_connection(
+                        &cx,
+                        &mut router,
+                        cid,
+                        peer_cid,
+                        address,
+                        origin,
+                    )
+                    .await;
+                    let handle = router.connections.get_mut(&cid).unwrap();
+                    let stream = handle.connection.open_local_bidi(&cx).unwrap();
+                    handle
+                        .connection
+                        .write_stream_bytes(
+                            &cx,
+                            stream,
+                            Bytes::from_static(b"owned response"),
+                            false,
+                        )
+                        .unwrap();
+                    handle.connection.queue_ping(&cx).unwrap();
+                    for timer_queue in [true, false] {
+                        let packet = RoutedOutgoingPacket {
+                            connection_id: cid,
+                            packet: OutgoingPacket {
+                                dst_addr: address,
+                                data: cid.as_bytes().to_vec(),
+                                send_time: Some(now),
+                            },
+                            final_handshake_flight: false,
+                            ack_eliciting: false,
+                        };
+                        if timer_queue {
+                            router.pending_timer_packets.push(packet);
+                        } else {
+                            router.pending_deferred_packets.push(packet);
+                        }
+                    }
+                }
+                assert!(
+                    router
+                        .request_authenticated_close(&cx, a, now, 42, true)
+                        .unwrap()
+                );
+                assert_eq!(router.pending_datagram_count_for(a), 0);
+                assert_eq!(router.pending_datagram_count_for(b), 2);
+                assert_eq!(
+                    router.connections[&a].connection.state(),
+                    QuicConnectionState::Draining
+                );
+                assert_eq!(
+                    router.connections[&a]
+                        .connection
+                        .transport()
+                        .drain_deadline_micros(),
+                    Some(10_000_000)
+                );
+                assert_eq!(router.next_timer_deadline(), Some(deadline));
+                assert_eq!(
+                    router.connections[&b].connection.state(),
+                    QuicConnectionState::Established
+                );
+                assert_eq!(
+                    router.connections[&b]
+                        .connection
+                        .pending_stream_data_bytes(),
+                    14
+                );
+                assert!(
+                    router.connections[&b]
+                        .connection
+                        .has_pending_control_frames()
+                );
+
+                let packets = router.drain_deferred_output(&cx, now, 8).await.unwrap();
+                assert_eq!(packets.len(), 2);
+                let close = packets
+                    .iter()
+                    .find(|packet| packet.connection_id == a)
+                    .unwrap();
+                assert_eq!(close.packet.dst_addr, address_a);
+                assert!(!close.ack_eliciting);
+                assert!(!close.final_handshake_flight);
+                let ciphertext = close.packet.data.clone();
+                let mut verifier = deterministic_one_rtt_protection(&cx).await;
+                let decoded = unprotect_1rtt_packet(&cx, peer_a, &mut verifier, &ciphertext)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    NativeQuicConnection::decode_frames(&decoded.plaintext).unwrap(),
+                    vec![QuicFrame::ConnectionClose {
+                        error_code: VarInt(42),
+                        frame_type: None,
+                        reason_phrase: Bytes::new(),
+                    },]
+                );
+                router.pending_deferred_packets.extend(packets);
+                router.discard_terminal_output();
+                assert!(router.connection_can_send_queued(a));
+                assert_eq!(
+                    router.connections[&a].local_close_output,
+                    Some(LocalCloseOutput::Queued)
+                );
+                assert_eq!(router.pending_datagram_count_for(a), 1);
+
+                let cancelled = Cx::for_testing();
+                cancelled.set_cancel_requested(true);
+                assert!(matches!(
+                    router.drain_deferred_output(&cancelled, now, 8).await,
+                    Err(ConnectionRouterError::Cancelled)
+                ));
+                assert_eq!(
+                    router
+                        .pending_deferred_packets
+                        .iter()
+                        .find(|packet| packet.connection_id == a)
+                        .unwrap()
+                        .packet
+                        .data,
+                    ciphertext
+                );
+                let other = router.pending_deferred_packets.remove(
+                    router
+                        .pending_deferred_packets
+                        .iter()
+                        .position(|packet| packet.connection_id == b)
+                        .unwrap(),
+                );
+                assert_eq!(other.packet.data, b.as_bytes());
+                router.packet_sent(&other, Some(now));
+                assert_eq!(
+                    router.connections[&a].local_close_output,
+                    Some(LocalCloseOutput::Queued)
+                );
+                assert_eq!(router.connections[&b].local_close_output, None);
+                router.pending_deferred_packets.push(other);
+
+                if acknowledge_close {
+                    let sent = router.pending_deferred_packets.remove(
+                        router
+                            .pending_deferred_packets
+                            .iter()
+                            .position(|packet| packet.connection_id == a)
+                            .unwrap(),
+                    );
+                    router.packet_sent(&sent, Some(now));
+                    router.packet_sent(&sent, Some(now));
+                    assert_eq!(
+                        router.connections[&a].local_close_output,
+                        Some(LocalCloseOutput::Sent)
+                    );
+                    assert!(!router.connection_can_send_queued(a));
+                }
+                // Repeating close neither changes its code/deadline nor makes
+                // another protected packet after the first has been committed.
+                assert!(router.request_authenticated_close(
+                    &cx, a, now + Duration::from_secs(1), 99, true,
+                ).unwrap());
+                assert_eq!(
+                    router.connections[&a].connection.transport().close_code(),
+                    Some(42)
+                );
+                assert_eq!(router.next_timer_deadline(), Some(deadline));
+                assert!(
+                    router
+                        .expired_connections(deadline - Duration::from_micros(1))
+                        .is_empty()
+                );
+                assert_eq!(router.expired_connections(deadline), vec![a]);
+                let remaining = router
+                    .process_managed_timer_events(&cx, deadline, &HashSet::new())
+                    .await
+                    .unwrap();
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(remaining[0].connection_id, b);
+                assert_eq!(remaining[0].packet.data, b.as_bytes());
+                assert!(!router.connections.contains_key(&a));
+                assert_eq!(router.pending_datagram_count_for(a), 0);
+                assert_eq!(router.pending_datagram_count_for(b), 1);
+                assert_eq!(
+                    router.connections[&b].connection.state(),
+                    QuicConnectionState::Established
+                );
+                assert_eq!(
+                    router.connections[&b]
+                        .connection
+                        .pending_stream_data_bytes(),
+                    14
+                );
+                assert!(router.next_timer_deadline().is_none());
+            }
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_close_shutdown_transfers_committed_ciphertext_once() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let cid = ConnectionId::new(b"close-shutdown").unwrap();
+            let peer_cid = ConnectionId::new(b"shutdown-peer").unwrap();
+            let peer = "127.0.0.1:4493".parse().unwrap();
+            let origin = router.clock_origin + Duration::from_secs(17);
+            let now = origin + Duration::from_secs(7);
+            let deadline = origin + Duration::from_secs(10);
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+            assert!(
+                router
+                    .request_authenticated_close(&cx, cid, now, 42, true)
+                    .unwrap()
+            );
+            let packets = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+            assert_eq!(packets.len(), 1);
+            let ciphertext = packets[0].packet.data.clone();
+            router.pending_deferred_packets.extend(packets);
+            assert_eq!(router.queued_local_close_deadline(cid), Some(deadline));
+
+            let mut shutdown = router
+                .prepare_shutdown_close_packets(&cx, now)
+                .await
+                .unwrap();
+            assert_eq!(shutdown.len(), 1);
+            assert_eq!(shutdown[0].0.data, ciphertext);
+            assert_eq!(shutdown[0].0.dst_addr, peer);
+            assert_eq!(shutdown[0].1, deadline);
+            assert_eq!(router.pending_datagram_count_for(cid), 0);
+            assert_eq!(
+                router.connections[&cid].local_close_output,
+                Some(LocalCloseOutput::Queued)
+            );
+            assert!(
+                router
+                    .prepare_shutdown_close_packets(&cx, now)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                router.connections[&cid].connection.transport().close_code(),
+                Some(42)
+            );
+
+            let (packet, _) = shutdown.pop().unwrap();
+            let sent = RoutedOutgoingPacket {
+                connection_id: cid,
+                packet,
+                final_handshake_flight: false,
+                ack_eliciting: false,
+            };
+            router.packet_sent(&sent, Some(now));
+            assert_eq!(
+                router.connections[&cid].local_close_output,
+                Some(LocalCloseOutput::Sent)
+            );
+            assert_eq!(router.queued_local_close_deadline(cid), None);
+            assert!(
+                router
+                    .prepare_shutdown_close_packets(&cx, now + Duration::from_secs(1),)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(sent.packet.data, ciphertext);
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .transport()
+                    .drain_deadline_micros(),
+                Some(10_000_000)
             );
         });
     }

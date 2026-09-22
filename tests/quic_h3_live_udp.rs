@@ -2233,6 +2233,1185 @@ fn authenticated_managed_concurrent_accepts_preserve_h3_survivor() {
     managed_assert_runtime_cleanup(&runtime);
 }
 
+#[test]
+fn authenticated_managed_bound_server_discovers_peers_and_preserves_survivor() {
+    let runtime = managed_runtime();
+    let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+        let cx = Cx::current().unwrap();
+        let config = connection_config();
+        let mut endpoint = ManagedQuicEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            ManagedEndpointConfig {
+                is_server: true,
+                max_connections: 2,
+                packet_batch_size: 1,
+                connection_config: config,
+                ..ManagedEndpointConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        endpoint
+            .configure_authenticated_server(
+                &cx,
+                server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![MANAGED_ALPN.to_vec()],
+                )
+                .unwrap(),
+                transport_parameters(config),
+                MANAGED_ALPN,
+            )
+            .unwrap();
+        endpoint.set_authenticated_accept_limit(2).unwrap();
+        let server_addr = endpoint.local_addr();
+        let endpoint_id = endpoint.endpoint_id();
+        assert_eq!(endpoint.connection_stats().active_connections, 0);
+        let client_driver = || {
+            QuicHandshakeDriver::client(
+                client_config(
+                    vec![parse_one_cert(CA_CERT_PEM)],
+                    vec![MANAGED_ALPN.to_vec()],
+                )
+                .unwrap(),
+                ServerName::try_from("localhost").unwrap(),
+                transport_parameters(config),
+            )
+            .unwrap()
+        };
+        let first_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let first_addr = first_socket.local_addr();
+        let first_metrics = first_socket.metrics();
+        let first_initial = ConnectionId::new(b"discover-initial-a").unwrap();
+        let first_client_cid = ConnectionId::new(b"discover-client-a").unwrap();
+        // The fresh bound server has no imported owner, peer address, or CID
+        // registration. Only this real Initial can start its first handshake.
+        let (first, first_admitted) = asupersync::time::timeout(
+            cx.now(),
+            IO_TIMEOUT,
+            zip(
+                NativeQuicUdpConnection::connect(
+                    &cx,
+                    first_socket,
+                    server_addr,
+                    client_driver(),
+                    first_initial,
+                    first_client_cid,
+                    config,
+                    MANAGED_ALPN,
+                ),
+                endpoint.run_event_loop_with_application(&cx, |_, endpoint, _| {
+                    match endpoint.take_authenticated_accept_result_with_id() {
+                        Some((cid, result)) => Poll::Ready(result.map(|accepted| {
+                            assert_eq!(accepted, cid);
+                            cid
+                        })),
+                        None => Poll::Pending,
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect("an unknown Initial must establish the first authenticated route");
+        let mut first = first.unwrap();
+        let first_server_cid = first_admitted.unwrap();
+        assert_eq!(first_server_cid.len(), 20);
+        assert_eq!(first.peer_connection_id(), first_server_cid);
+        assert_eq!(first.local_connection_id(), first_client_cid);
+        assert_eq!(first.local_addr(), first_addr);
+        assert_eq!(first.peer_addr(), server_addr);
+        assert_eq!(first.negotiated_alpn(), MANAGED_ALPN);
+        assert_eq!(endpoint.connection_stats().active_connections, 1);
+        assert_eq!(endpoint.connection_stats().established_connections, 1);
+        assert!(first_metrics.packets_sent.load(Ordering::SeqCst) > 0);
+        assert!(first_metrics.packets_received.load(Ordering::SeqCst) > 0);
+
+        let second_socket = QuicUdpEndpoint::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let second_addr = second_socket.local_addr();
+        let second_metrics = second_socket.metrics();
+        assert_ne!(second_addr, first_addr);
+        let second_initial = ConnectionId::new(b"discover-initial-b").unwrap();
+        let second_client_cid = ConnectionId::new(b"discover-client-b").unwrap();
+        let mut second_socket = Some(second_socket);
+        let mut second_owner = None;
+        let mut second_server_cid = None;
+        for round in 0..2 {
+            let payload = format!(
+                "bound server survivor round {round}: {}",
+                "udp-data".repeat(64)
+            );
+            let stream = first.connection_mut().open_bidi_stream(&cx).unwrap();
+            first
+                .connection_mut()
+                .write_stream(&cx, stream, Bytes::from(payload.clone()), true)
+                .unwrap();
+            let completed = AtomicUsize::new(0);
+            let first_exchange = async {
+                first.flush(&cx).await.unwrap();
+                let mut received = Vec::new();
+                loop {
+                    first.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    let connection = first.connection_mut();
+                    received.extend_from_slice(&connection.read_stream(&cx, stream, 2048).unwrap());
+                    assert!(received.len() <= payload.len());
+                    if connection.is_control_eof(stream).unwrap() {
+                        assert_eq!(received, payload.as_bytes());
+                        completed.fetch_or(1, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            };
+            let second_handshake = async {
+                let owner = if let Some(socket) = second_socket.take() {
+                    Some(
+                        NativeQuicUdpConnection::connect(
+                            &cx,
+                            socket,
+                            server_addr,
+                            client_driver(),
+                            second_initial,
+                            second_client_cid,
+                            config,
+                            MANAGED_ALPN,
+                        )
+                        .await
+                        .expect("another unknown peer must authenticate on the same bound socket"),
+                    )
+                } else {
+                    None
+                };
+                completed.fetch_or(2, Ordering::SeqCst);
+                owner
+            };
+            let mut received = Vec::new();
+            let mut replied = false;
+            let server_exchange =
+                endpoint.run_event_loop_with_application(&cx, |cx, endpoint, task_cx| {
+                    while let Some((cid, result)) =
+                        endpoint.take_authenticated_accept_result_with_id()
+                    {
+                        assert_eq!(round, 0);
+                        assert_eq!(result.unwrap(), cid);
+                        assert!(second_server_cid.replace(cid).is_none());
+                        assert_eq!(cid.len(), 20);
+                        assert_ne!(cid, first_server_cid);
+                        assert_eq!(endpoint.negotiated_alpn(cid).unwrap(), MANAGED_ALPN);
+                    }
+                    endpoint
+                        .with_connection_mut(cx, first_server_cid, |connection| {
+                            for _ in 0..8 {
+                                let readiness =
+                                    match connection.poll_next_readable_stream(cx, task_cx) {
+                                        Poll::Ready(Ok(readiness)) => readiness,
+                                        Poll::Ready(Err(error)) => {
+                                            panic!("survivor readiness: {error}")
+                                        }
+                                        Poll::Pending => break,
+                                    };
+                                assert_eq!(readiness.stream_id, stream);
+                                received.extend_from_slice(
+                                    &connection.read_stream(cx, stream, 2048).unwrap(),
+                                );
+                                assert!(received.len() <= payload.len());
+                                if connection.is_control_eof(stream).unwrap() && !replied {
+                                    assert_eq!(received, payload.as_bytes());
+                                    connection
+                                        .write_stream(
+                                            cx,
+                                            stream,
+                                            Bytes::from(payload.clone()),
+                                            true,
+                                        )
+                                        .unwrap();
+                                    replied = true;
+                                }
+                            }
+                        })
+                        .unwrap();
+                    if second_server_cid.is_some()
+                        && replied
+                        && completed.load(Ordering::SeqCst) == 3
+                    {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        task_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                });
+            let (((), connected), driven) = asupersync::time::timeout(
+                cx.now(),
+                Duration::from_secs(15),
+                zip(zip(first_exchange, second_handshake), server_exchange),
+            )
+            .await
+            .expect("autonomous admission and survivor traffic must both make progress");
+            driven.unwrap();
+            if let Some(owner) = connected {
+                assert_eq!(owner.local_addr(), second_addr);
+                assert_eq!(owner.local_connection_id(), second_client_cid);
+                assert_eq!(Some(owner.peer_connection_id()), second_server_cid);
+                assert_eq!(owner.peer_addr(), server_addr);
+                assert_eq!(owner.negotiated_alpn(), MANAGED_ALPN);
+                assert!(second_owner.replace(owner).is_none());
+            }
+            assert_eq!(endpoint.local_addr(), server_addr);
+            assert_eq!(endpoint.endpoint_id(), endpoint_id);
+            if round == 0 {
+                assert_eq!(endpoint.connection_stats().established_connections, 2);
+                endpoint
+                    .remove_connection(&cx, second_server_cid.unwrap())
+                    .unwrap();
+                assert!(
+                    endpoint
+                        .take_authenticated_accept_result_with_id()
+                        .is_none()
+                );
+                assert!(
+                    endpoint
+                        .negotiated_alpn(second_server_cid.unwrap())
+                        .is_err()
+                );
+                drop(second_owner.take());
+                // Prove actual parked cancellation, then resume the same
+                // authenticated bound owner for another survivor exchange.
+                endpoint = managed_cancel_parked(&cx, endpoint).await;
+            }
+            assert_eq!(endpoint.connection_stats().active_connections, 1);
+            assert_eq!(
+                endpoint.negotiated_alpn(first_server_cid).unwrap(),
+                MANAGED_ALPN
+            );
+        }
+        assert!(second_metrics.packets_sent.load(Ordering::SeqCst) > 0);
+        assert!(second_metrics.packets_received.load(Ordering::SeqCst) > 0);
+        drop(first);
+        endpoint.shutdown(&cx).await.unwrap();
+        assert_eq!(endpoint.connection_stats().active_connections, 0);
+        assert!(
+            endpoint
+                .take_authenticated_accept_result_with_id()
+                .is_none()
+        );
+        assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+    });
+    runtime.block_on(runtime.handle().spawn(parent));
+    managed_assert_runtime_cleanup(&runtime);
+}
+
+mod native_h3_listener_live {
+    use super::*;
+    use std::num::NonZeroUsize;
+
+    use asupersync::web::{
+        AsyncCxFnHandler, AsyncCxFnHandler1, Http3StreamResponder, NativeH3Listener,
+        NativeH3ListenerConfig,
+    };
+
+    async fn connect(
+        cx: &Cx,
+        server_addr: std::net::SocketAddr,
+        peer: u8,
+    ) -> (NativeQuicUdpConnection, NativeH3Session) {
+        connect_with_config(cx, server_addr, peer, connection_config()).await
+    }
+
+    async fn connect_with_config(
+        cx: &Cx,
+        server_addr: std::net::SocketAddr,
+        peer: u8,
+        config: NativeQuicConnectionConfig,
+    ) -> (NativeQuicUdpConnection, NativeH3Session) {
+        let socket = QuicUdpEndpoint::bind(
+            cx,
+            "127.0.0.1:0".parse().unwrap(),
+            QuicUdpEndpointConfig::default(),
+        )
+        .await
+        .unwrap();
+        let mut owner = NativeQuicUdpConnection::connect(
+            cx,
+            socket,
+            server_addr,
+            QuicHandshakeDriver::client(
+                client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![H3_ALPN.to_vec()]).unwrap(),
+                ServerName::try_from("localhost").unwrap(),
+                transport_parameters(config),
+            )
+            .unwrap(),
+            ConnectionId::new(format!("listener-init-{peer}").as_bytes()).unwrap(),
+            ConnectionId::new(format!("listener-client-{peer}").as_bytes()).unwrap(),
+            config,
+            H3_ALPN,
+        )
+        .await
+        .expect("public listener authenticates an unknown real UDP peer");
+        assert_eq!(owner.negotiated_alpn(), H3_ALPN);
+        assert_eq!(owner.peer_addr(), server_addr);
+        let mut session = NativeH3Session::client();
+        session
+            .initialize(cx, owner.connection_mut(), H3Settings::default())
+            .unwrap();
+        owner.flush(cx).await.unwrap();
+        loop {
+            owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
+            let events = drain_h3_events(cx, &mut session, owner.connection_mut());
+            if !events.is_empty() {
+                assert_eq!(events, vec![NativeH3Event::Settings(H3Settings::default())]);
+                break;
+            }
+        }
+        (owner, session)
+    }
+
+    fn request(path: &str) -> H3RequestHead {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("POST".to_owned()),
+                scheme: Some("https".to_owned()),
+                authority: Some("localhost".to_owned()),
+                path: Some(path.to_owned()),
+                ..H3PseudoHeaders::default()
+            },
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    async fn response(
+        cx: &Cx,
+        owner: &mut NativeQuicUdpConnection,
+        session: &mut NativeH3Session,
+        path: &str,
+        expected_head: &H3ResponseHead,
+        expected_body: &[u8],
+    ) {
+        let stream = session
+            .send_request(cx, owner.connection_mut(), &request(path), Bytes::new())
+            .unwrap();
+        owner.flush(cx).await.unwrap();
+        receive_response(cx, owner, session, stream, expected_head, expected_body).await;
+    }
+
+    async fn receive_response(
+        cx: &Cx,
+        owner: &mut NativeQuicUdpConnection,
+        session: &mut NativeH3Session,
+        stream: asupersync::net::quic_native::StreamId,
+        expected_head: &H3ResponseHead,
+        expected_body: &[u8],
+    ) {
+        let mut received_head = None;
+        let mut received_body = Vec::new();
+        loop {
+            owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
+            for event in drain_h3_events(cx, session, owner.connection_mut()) {
+                match event {
+                    NativeH3Event::ResponseHeaders { stream_id, head } => {
+                        assert_eq!(stream_id, stream);
+                        assert!(received_head.replace(head).is_none());
+                    }
+                    NativeH3Event::Data { stream_id, bytes } => {
+                        assert_eq!(stream_id, stream);
+                        received_body.extend_from_slice(&bytes);
+                        assert!(received_body.len() <= expected_body.len());
+                    }
+                    NativeH3Event::Finished { stream_id } => {
+                        assert_eq!(stream_id, stream);
+                        assert_eq!(received_head.as_ref(), Some(expected_head));
+                        assert_eq!(received_body, expected_body);
+                        return;
+                    }
+                    other => panic!("unexpected listener response event: {other:?}"),
+                }
+            }
+        }
+    }
+
+    async fn acknowledge_shutdown_goaway(
+        cx: &Cx,
+        owner: &mut NativeQuicUdpConnection,
+        session: &mut NativeH3Session,
+        expected_goaway: u64,
+        cancelled_stream: Option<asupersync::net::quic_native::StreamId>,
+    ) {
+        loop {
+            // Receiving also flushes QUIC ACKs. Keep the peer socket alive
+            // until the listener's final GOAWAY is actually acknowledged.
+            owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
+            let mut goaway = false;
+            for event in drain_h3_events(cx, session, owner.connection_mut()) {
+                match event {
+                    NativeH3Event::Goaway(id) => {
+                        assert_eq!(id, expected_goaway);
+                        assert!(!goaway);
+                        goaway = true;
+                    }
+                    NativeH3Event::StreamReset {
+                        stream_id,
+                        error_code,
+                        ..
+                    } => {
+                        assert_eq!(Some(stream_id), cancelled_stream);
+                        assert_eq!(error_code, asupersync::http::h3_quic::H3_REQUEST_CANCELLED);
+                    }
+                    other => panic!("unexpected listener shutdown event: {other:?}"),
+                }
+            }
+            owner.flush(cx).await.unwrap();
+            if goaway {
+                return;
+            }
+        }
+    }
+
+    struct ProducerRetired(Arc<AtomicUsize>);
+
+    impl Drop for ProducerRetired {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn authenticated_listener_large_request_replenishes_stream_and_connection_credit() {
+        use asupersync::http::h3_native::{H3Frame, qpack_encode_request_field_section};
+        use asupersync::web::extract::RawBody;
+
+        const INITIAL_WINDOW: u64 = 64;
+        const RECEIVE_WINDOW: u64 = 128;
+        const BODY_BYTES: usize = 1024;
+        let runtime = managed_runtime();
+        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let expected_body: Vec<u8> = (0..BODY_BYTES)
+                .map(|index| u8::try_from(index % 251).unwrap())
+                .collect();
+            let handler_body = expected_body.clone();
+            let handler_calls = Arc::new(AtomicUsize::new(0));
+            let calls_for_handler = Arc::clone(&handler_calls);
+            let router = Router::new()
+                .route(
+                    "/upload",
+                    post(AsyncCxFnHandler1::<_, RawBody>::new(
+                        move |_cx: Cx, body: RawBody| {
+                            let expected = handler_body.clone();
+                            let calls = Arc::clone(&calls_for_handler);
+                            async move {
+                                assert_eq!(body.0.as_ref(), expected.as_slice());
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                Response::new(StatusCode::OK, body.0)
+                            }
+                        },
+                    )),
+                )
+                .without_default_trace();
+            let transport = NativeQuicConnectionConfig {
+                recv_window: INITIAL_WINDOW,
+                connection_recv_limit: INITIAL_WINDOW,
+                ..connection_config()
+            };
+            let mut config = NativeH3ListenerConfig::default();
+            config.endpoint.max_connections = 1;
+            config.endpoint.packet_batch_size = 1;
+            config.endpoint.connection_config = transport;
+            config.receive_window_bytes = RECEIVE_WINDOW;
+            let listener = NativeH3Listener::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                router,
+                server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![H3_ALPN.to_vec()],
+                )
+                .unwrap(),
+                transport_parameters(transport),
+                config,
+            )
+            .await
+            .unwrap();
+            let address = listener.local_addr();
+            let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+            let serving = listener.serve_with_shutdown(&cx, async {
+                shutdown_rx.recv(&cx).await.unwrap();
+            });
+            let client = async {
+                let (mut owner, mut session) = connect(&cx, address, 21).await;
+                let stream = owner.connection_mut().open_bidi_stream(&cx).unwrap();
+                assert_eq!(
+                    owner
+                        .connection()
+                        .inner()
+                        .streams()
+                        .stream(stream)
+                        .unwrap()
+                        .send_credit
+                        .limit(),
+                    INITIAL_WINDOW
+                );
+                assert!(
+                    owner
+                        .connection()
+                        .inner()
+                        .streams()
+                        .connection_send_remaining()
+                        <= INITIAL_WINDOW
+                );
+                // Frame one logical H3 request, then admit its QUIC byte
+                // fragments only as the peer grants stream AND MAX_DATA credit.
+                let mut wire = Vec::new();
+                H3Frame::Headers(qpack_encode_request_field_section(&request("/upload")).unwrap())
+                    .encode(&mut wire)
+                    .unwrap();
+                H3Frame::Data(expected_body.clone())
+                    .encode(&mut wire)
+                    .unwrap();
+                let mut offset = 0;
+                let mut writes = 0;
+                while offset < wire.len() {
+                    let capacity = {
+                        let mut task_cx = Context::from_waker(Waker::noop());
+                        match owner.connection_mut().poll_stream_write_ready(
+                            &cx,
+                            stream,
+                            1,
+                            &mut task_cx,
+                        ) {
+                            Poll::Ready(Ok(capacity)) => usize::try_from(capacity).unwrap(),
+                            Poll::Ready(Err(error)) => panic!("large request send credit: {error}"),
+                            Poll::Pending => 0,
+                        }
+                    };
+                    if capacity > 0 {
+                        let end = (offset + capacity.min(RECEIVE_WINDOW as usize)).min(wire.len());
+                        owner
+                            .connection_mut()
+                            .write_stream(
+                                &cx,
+                                stream,
+                                Bytes::copy_from_slice(&wire[offset..end]),
+                                end == wire.len(),
+                            )
+                            .unwrap();
+                        offset = end;
+                        writes += 1;
+                        owner.flush(&cx).await.unwrap();
+                    }
+                    if offset < wire.len() {
+                        assert_eq!(
+                            handler_calls.load(Ordering::SeqCst),
+                            0,
+                            "Router must wait for complete request DATA and FIN"
+                        );
+                        owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    }
+                }
+                assert!(writes > 2 && wire.len() > RECEIVE_WINDOW as usize * 4);
+                assert!(
+                    owner
+                        .connection()
+                        .inner()
+                        .streams()
+                        .stream(stream)
+                        .unwrap()
+                        .send_credit
+                        .limit()
+                        > INITIAL_WINDOW
+                );
+                receive_response(
+                    &cx,
+                    &mut owner,
+                    &mut session,
+                    stream,
+                    &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                    &expected_body,
+                )
+                .await;
+                assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
+                shutdown_tx.send(&cx, ()).unwrap();
+                acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, stream.0 + 4, None)
+                    .await;
+            };
+            let (report, ()) =
+                asupersync::time::timeout(cx.now(), Duration::from_secs(20), zip(serving, client))
+                    .await
+                    .expect(
+                        "request larger than both initial windows must recharge and reach Router",
+                    );
+            let report = report.unwrap();
+            assert_eq!(report.accepted_connections, 1);
+            assert_eq!(report.completed_requests, 1);
+            assert_eq!(report.failed_connections, 0);
+            assert_eq!(report.cancelled_requests, 0);
+            assert_eq!(report.refused_requests, 0);
+            assert!(!report.drain_timed_out);
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+        });
+        runtime.block_on(runtime.handle().spawn(parent));
+        managed_assert_runtime_cleanup(&runtime);
+        assert_eq!(runtime.draining_region_count(), 0);
+    }
+
+    #[test]
+    fn authenticated_listener_buffered_response_deadline_reclaims_global_slot() {
+        response_deadline_reclaims_global_slot(false);
+    }
+
+    #[test]
+    fn authenticated_listener_finished_producer_deadline_reclaims_global_slot() {
+        response_deadline_reclaims_global_slot(true);
+    }
+
+    fn response_deadline_reclaims_global_slot(produced: bool) {
+        use asupersync::time::{TimerDriverHandle, VirtualClock};
+        use asupersync::types::Time;
+
+        const WINDOW: u64 = 64;
+        const BODY_BYTES: usize = 256;
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(asupersync::runtime::reactor::create_reactor().unwrap())
+            .with_timer_driver(timer.clone())
+            .build()
+            .unwrap();
+        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+            let cx = Cx::current().unwrap();
+            let body_finished = Arc::new(AtomicUsize::new(0));
+            let request_context = Arc::new(std::sync::Mutex::new(None::<Cx>));
+            let finished_for_handler = Arc::clone(&body_finished);
+            let context_for_handler = Arc::clone(&request_context);
+            let router = if produced {
+                Router::new().route(
+                    "/blocked",
+                    post(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                        move |handler_cx: Cx, responder: Http3StreamResponder| {
+                            let finished = Arc::clone(&finished_for_handler);
+                            let context = Arc::clone(&context_for_handler);
+                            async move {
+                                *context.lock().unwrap() = Some(handler_cx);
+                                responder.streaming(
+                                    StatusCode::OK,
+                                    NonZeroUsize::MIN,
+                                    NonZeroUsize::new(BODY_BYTES).unwrap(),
+                                    move |producer_cx, mut sender| async move {
+                                        sender
+                                            .send_chunk(&producer_cx, &[0x41; BODY_BYTES])
+                                            .await?;
+                                        sender.finish(&producer_cx)?;
+                                        finished.fetch_add(1, Ordering::SeqCst);
+                                        Ok(sender)
+                                    },
+                                )
+                            }
+                        },
+                    )),
+                )
+            } else {
+                Router::new().route(
+                    "/blocked",
+                    post(AsyncCxFnHandler::new(move |handler_cx: Cx| {
+                        let finished = Arc::clone(&finished_for_handler);
+                        let context = Arc::clone(&context_for_handler);
+                        async move {
+                            *context.lock().unwrap() = Some(handler_cx);
+                            finished.fetch_add(1, Ordering::SeqCst);
+                            Response::new(StatusCode::OK, vec![0x41; BODY_BYTES])
+                        }
+                    })),
+                )
+            }
+            .route(
+                "/survivor",
+                post(FnHandler::new(|| {
+                    Response::new(StatusCode::OK, "slot reclaimed")
+                })),
+            )
+            .without_default_trace();
+            let mut config = NativeH3ListenerConfig::default();
+            config.endpoint.max_connections = 2;
+            config.endpoint.packet_batch_size = 1;
+            config.endpoint.connection_config = connection_config();
+            config.max_concurrent_requests = 1;
+            config.request_timeout = Duration::from_secs(1);
+            config.request_drain_timeout = Duration::from_secs(1);
+            let listener = NativeH3Listener::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                router,
+                server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![H3_ALPN.to_vec()],
+                )
+                .unwrap(),
+                transport_parameters(connection_config()),
+                config,
+            )
+            .await
+            .unwrap();
+            let address = listener.local_addr();
+            let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+            let serving = listener.serve_with_shutdown(&cx, async {
+                shutdown_rx.recv(&cx).await.unwrap();
+            });
+            let clients = async {
+                let ((mut blocked, mut blocked_h3), (mut survivor, mut survivor_h3)) = zip(
+                    connect_with_config(
+                        &cx,
+                        address,
+                        11,
+                        NativeQuicConnectionConfig {
+                            recv_window: WINDOW,
+                            ..connection_config()
+                        },
+                    ),
+                    connect(&cx, address, 12),
+                )
+                .await;
+                let stream = blocked_h3
+                    .send_request(
+                        &cx,
+                        blocked.connection_mut(),
+                        &request("/blocked"),
+                        Bytes::new(),
+                    )
+                    .unwrap();
+                blocked.flush(&cx).await.unwrap();
+                loop {
+                    blocked.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    let state = blocked
+                        .connection()
+                        .inner()
+                        .streams()
+                        .stream(stream)
+                        .unwrap();
+                    assert_eq!(
+                        state.read_offset, 0,
+                        "do not replenish response stream credit"
+                    );
+                    assert_eq!(state.recv_credit.limit(), WINDOW);
+                    assert!(state.final_size.is_none() && state.recv_reset.is_none());
+                    if body_finished.load(Ordering::SeqCst) == 1
+                        && if produced {
+                            state.recv_offset > 0
+                        } else {
+                            state.recv_offset == WINDOW
+                        }
+                    {
+                        break;
+                    }
+                }
+                // The real response reached its advertised window (buffered)
+                // or its HEADERS arrived while its completed DATA producer is
+                // blocked by a smaller window. Time has not advanced at all.
+                let request_cx = request_context.lock().unwrap().clone().unwrap();
+                let region = request_cx.region_id();
+                assert_eq!(cx.now(), Time::from_secs(0));
+                assert_eq!(request_cx.budget().deadline, Some(Time::from_secs(1)));
+                assert!(!request_cx.is_cancel_requested());
+                assert!(
+                    asupersync::runtime::Runtime::current_handle()
+                        .unwrap()
+                        .diagnostics()
+                        .unwrap()
+                        .explain_region_open(region)
+                        .region_state
+                        .is_some()
+                );
+                clock.advance_to(Time::from_secs(2));
+                let _ = timer.process_timers();
+                loop {
+                    blocked.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    let state = blocked
+                        .connection()
+                        .inner()
+                        .streams()
+                        .stream(stream)
+                        .unwrap();
+                    if let Some((error_code, final_size)) = state.recv_reset {
+                        assert_eq!(error_code, asupersync::http::h3_quic::H3_REQUEST_CANCELLED);
+                        assert!(final_size <= WINDOW);
+                        break;
+                    }
+                }
+                assert!(request_cx.any_cause_is(CancelKind::Deadline));
+                let mut closed_seen = false;
+                std::future::poll_fn(|task_cx| {
+                    if asupersync::runtime::Runtime::current_handle()
+                        .unwrap()
+                        .diagnostics()
+                        .unwrap()
+                        .explain_region_open(region)
+                        .region_state
+                        .is_none()
+                    {
+                        if closed_seen {
+                            return Poll::Ready(());
+                        }
+                        closed_seen = true;
+                    }
+                    // Give the listener a turn to publish the real region
+                    // close and release its one global request slot.
+                    task_cx.waker().wake_by_ref();
+                    Poll::Pending
+                })
+                .await;
+                response(
+                    &cx,
+                    &mut survivor,
+                    &mut survivor_h3,
+                    "/survivor",
+                    &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                    b"slot reclaimed",
+                )
+                .await;
+                shutdown_tx.send(&cx, ()).unwrap();
+                zip(
+                    acknowledge_shutdown_goaway(
+                        &cx,
+                        &mut blocked,
+                        &mut blocked_h3,
+                        stream.0 + 4,
+                        Some(stream),
+                    ),
+                    acknowledge_shutdown_goaway(&cx, &mut survivor, &mut survivor_h3, 4, None),
+                )
+                .await;
+            };
+            let started = Instant::now();
+            let mut workflow = std::pin::pin!(zip(serving, clients));
+            let (report, ()) = std::future::poll_fn(|task_cx| {
+                assert!(
+                    started.elapsed() < Duration::from_secs(20),
+                    "native virtual-time workflow watchdog"
+                );
+                let result = workflow.as_mut().poll(task_cx);
+                if result.is_pending() {
+                    task_cx.waker().wake_by_ref();
+                }
+                result
+            })
+            .await;
+            let report = report.unwrap();
+            assert_eq!(body_finished.load(Ordering::SeqCst), 1);
+            assert_eq!(report.accepted_connections, 2);
+            assert_eq!(report.failed_connections, 0);
+            assert_eq!(report.completed_requests, 1);
+            assert_eq!(report.cancelled_requests, 1);
+            assert_eq!(report.refused_requests, 0);
+            assert!(!report.drain_timed_out);
+            assert_eq!(timer.pending_count(), 0);
+        });
+        runtime.block_on(runtime.handle().spawn(parent));
+        managed_assert_runtime_cleanup(&runtime);
+        assert_eq!(runtime.draining_region_count(), 0);
+    }
+
+    #[test]
+    fn authenticated_listener_two_peers_produced_reset_and_quiescence() {
+        const FRAME_BYTES: usize = 1024;
+        const BODY_FRAMES: u8 = 16;
+        let runtime = managed_runtime();
+        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let listener_identity = (cx.task_id(), cx.region_id());
+            let buffered_calls = Arc::new(AtomicUsize::new(0));
+            let buffered_identities = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let finite_producer_finished = Arc::new(AtomicUsize::new(0));
+            let live_producer_started = Arc::new(AtomicUsize::new(0));
+            let live_producer_retired = Arc::new(AtomicUsize::new(0));
+            let calls_for_handler = Arc::clone(&buffered_calls);
+            let identities_for_handler = Arc::clone(&buffered_identities);
+            let finished_for_handler = Arc::clone(&finite_producer_finished);
+            let started_for_handler = Arc::clone(&live_producer_started);
+            let retired_for_handler = Arc::clone(&live_producer_retired);
+            let router = Router::new()
+                .route(
+                    "/buffered",
+                    post(AsyncCxFnHandler::new(move |handler_cx: Cx| {
+                        let calls = Arc::clone(&calls_for_handler);
+                        let identities = Arc::clone(&identities_for_handler);
+                        async move {
+                            let identity = (handler_cx.task_id(), handler_cx.region_id());
+                            assert_ne!(identity.0, listener_identity.0);
+                            assert_ne!(identity.1, listener_identity.1);
+                            identities.lock().unwrap().push(identity);
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Response::new(StatusCode::OK, "listener exact buffered response")
+                                .header("x-listener", "buffered")
+                        }
+                    })),
+                )
+                .route(
+                    "/produced",
+                    post(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                        move |handler_cx: Cx, responder: Http3StreamResponder| {
+                            let finished = Arc::clone(&finished_for_handler);
+                            async move {
+                                let request_identity = (handler_cx.task_id(), handler_cx.region_id());
+                                assert_ne!(request_identity.0, listener_identity.0);
+                                assert_ne!(request_identity.1, listener_identity.1);
+                                responder
+                                    .streaming(
+                                        StatusCode::OK,
+                                        NonZeroUsize::MIN,
+                                        NonZeroUsize::new(FRAME_BYTES).unwrap(),
+                                        move |producer_cx, mut sender| async move {
+                                            assert_eq!(
+                                                (producer_cx.task_id(), producer_cx.region_id()),
+                                                request_identity
+                                            );
+                                            let mut child = producer_cx
+                                                .spawn(move |child_cx| async move {
+                                                    assert_ne!(child_cx.task_id(), request_identity.0);
+                                                    assert_eq!(child_cx.region_id(), request_identity.1);
+                                                    42_u8
+                                                })
+                                                .expect("body producer retains its real request spawn gateway");
+                                            assert_eq!(child.join(&producer_cx).await.unwrap(), 42);
+                                            for frame in 0..BODY_FRAMES {
+                                                sender
+                                                    .send_chunk(&producer_cx, &[frame; FRAME_BYTES])
+                                                    .await?;
+                                            }
+                                            sender.finish(&producer_cx)?;
+                                            finished.fetch_add(1, Ordering::SeqCst);
+                                            Ok(sender)
+                                        },
+                                    )
+                                    .header("x-listener", "produced")
+                            }
+                        },
+                    )),
+                )
+                .route(
+                    "/cancel",
+                    post(AsyncCxFnHandler1::<_, Http3StreamResponder>::new(
+                        move |_handler_cx: Cx, responder: Http3StreamResponder| {
+                            let started = Arc::clone(&started_for_handler);
+                            let retired = Arc::clone(&retired_for_handler);
+                            async move {
+                                responder
+                                    .streaming(
+                                        StatusCode::OK,
+                                        NonZeroUsize::MIN,
+                                        NonZeroUsize::new(FRAME_BYTES).unwrap(),
+                                        move |producer_cx, mut sender| async move {
+                                            let _retired = ProducerRetired(retired);
+                                            started.fetch_add(1, Ordering::SeqCst);
+                                            loop {
+                                                sender
+                                                    .send_chunk(&producer_cx, &[0x5a; FRAME_BYTES])
+                                                    .await?;
+                                            }
+                                        },
+                                    )
+                                    .header("x-listener", "cancel")
+                            }
+                        },
+                    )),
+                )
+                .without_default_trace();
+            let mut listener_config = NativeH3ListenerConfig::default();
+            listener_config.endpoint = ManagedEndpointConfig {
+                max_connections: 2,
+                packet_batch_size: 1,
+                connection_config: connection_config(),
+                ..ManagedEndpointConfig::default()
+            };
+            let listener = NativeH3Listener::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                router,
+                server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![H3_ALPN.to_vec()],
+                )
+                .unwrap(),
+                transport_parameters(connection_config()),
+                listener_config,
+            )
+            .await
+            .expect("bind complete public TLS/HTTP3/Router listener");
+            let address = listener.local_addr();
+            assert!(address.ip().is_loopback() && address.port() != 0);
+            let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+            let serving = listener.serve_with_shutdown(&cx, async {
+                shutdown_rx.recv(&cx).await.unwrap();
+            });
+            let clients = async {
+                let ((mut a, mut a_h3), (mut b, mut b_h3)) =
+                    zip(connect(&cx, address, 1), connect(&cx, address, 2)).await;
+                assert_ne!(a.local_addr(), b.local_addr());
+                assert_ne!(a.local_connection_id(), b.local_connection_id());
+                assert_ne!(a.peer_connection_id(), b.peer_connection_id());
+                let buffered_head = H3ResponseHead::new(
+                    200,
+                    vec![("x-listener".to_owned(), "buffered".to_owned())],
+                )
+                .unwrap();
+                zip(
+                    response(
+                        &cx,
+                        &mut a,
+                        &mut a_h3,
+                        "/buffered",
+                        &buffered_head,
+                        b"listener exact buffered response",
+                    ),
+                    response(
+                        &cx,
+                        &mut b,
+                        &mut b_h3,
+                        "/buffered",
+                        &buffered_head,
+                        b"listener exact buffered response",
+                    ),
+                )
+                .await;
+                let expected_body: Vec<u8> = (0..BODY_FRAMES)
+                    .flat_map(|frame| [frame; FRAME_BYTES])
+                    .collect();
+                response(
+                    &cx,
+                    &mut a,
+                    &mut a_h3,
+                    "/produced",
+                    &H3ResponseHead::new(
+                        200,
+                        vec![("x-listener".to_owned(), "produced".to_owned())],
+                    )
+                    .unwrap(),
+                    &expected_body,
+                )
+                .await;
+                assert_eq!(finite_producer_finished.load(Ordering::SeqCst), 1);
+                let cancelled_stream = a_h3
+                    .send_request(&cx, a.connection_mut(), &request("/cancel"), Bytes::new())
+                    .unwrap();
+                a.flush(&cx).await.unwrap();
+                let mut head_seen = false;
+                let mut data_seen = false;
+                while !head_seen || !data_seen {
+                    a.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    for event in drain_h3_events(&cx, &mut a_h3, a.connection_mut()) {
+                        match event {
+                            NativeH3Event::ResponseHeaders { stream_id, head } => {
+                                assert_eq!(stream_id, cancelled_stream);
+                                assert!(!head_seen);
+                                assert_eq!(
+                                    head,
+                                    H3ResponseHead::new(
+                                        200,
+                                        vec![("x-listener".to_owned(), "cancel".to_owned())],
+                                    )
+                                    .unwrap()
+                                );
+                                head_seen = true;
+                            }
+                            NativeH3Event::Data { stream_id, bytes } => {
+                                assert_eq!(stream_id, cancelled_stream);
+                                assert!(
+                                    !bytes.is_empty() && bytes.iter().all(|byte| *byte == 0x5a)
+                                );
+                                data_seen = true;
+                            }
+                            other => {
+                                panic!("live producer must remain open before reset: {other:?}")
+                            }
+                        }
+                    }
+                }
+                assert_eq!(live_producer_started.load(Ordering::SeqCst), 1);
+                assert_eq!(live_producer_retired.load(Ordering::SeqCst), 0);
+                a_h3.cancel_request(&cx, a.connection_mut(), cancelled_stream)
+                    .unwrap();
+                assert!(a.flush(&cx).await.unwrap() > 0);
+                let retired = std::future::poll_fn(|task_cx| {
+                    if live_producer_retired.load(Ordering::SeqCst) == 1 {
+                        Poll::Ready(())
+                    } else {
+                        task_cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                });
+                asupersync::time::timeout(
+                    cx.now(),
+                    IO_TIMEOUT,
+                    zip(
+                        retired,
+                        response(
+                            &cx,
+                            &mut b,
+                            &mut b_h3,
+                            "/buffered",
+                            &buffered_head,
+                            b"listener exact buffered response",
+                        ),
+                    ),
+                )
+                .await
+                .expect("one peer reset must drain its producer while the other peer responds");
+                assert_eq!(buffered_calls.load(Ordering::SeqCst), 3);
+                assert_eq!(live_producer_retired.load(Ordering::SeqCst), 1);
+                shutdown_tx.send(&cx, ()).unwrap();
+                zip(
+                    acknowledge_shutdown_goaway(
+                        &cx,
+                        &mut a,
+                        &mut a_h3,
+                        cancelled_stream.0 + 4,
+                        Some(cancelled_stream),
+                    ),
+                    acknowledge_shutdown_goaway(&cx, &mut b, &mut b_h3, 8, None),
+                )
+                .await;
+            };
+            let (report, ()) =
+                asupersync::time::timeout(cx.now(), Duration::from_secs(30), zip(serving, clients))
+                    .await
+                    .expect("complete listener workflow must finish within its native watchdog");
+            let report = report.expect("listener closes all request regions on shutdown");
+            assert_eq!(report.accepted_connections, 2);
+            assert_eq!(report.failed_connections, 0);
+            assert_eq!(report.completed_requests, 4);
+            assert_eq!(report.refused_requests, 0);
+            assert_eq!(report.cancelled_requests, 1);
+            assert!(!report.drain_timed_out);
+            assert_eq!(live_producer_retired.load(Ordering::SeqCst), 1);
+            let identities = buffered_identities.lock().unwrap();
+            assert_eq!(identities.len(), 3);
+            for (index, identity) in identities.iter().enumerate() {
+                assert!(
+                    identities[index + 1..]
+                        .iter()
+                        .all(|other| { identity.0 != other.0 && identity.1 != other.1 })
+                );
+            }
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+        });
+        runtime.block_on(runtime.handle().spawn(parent));
+        managed_assert_runtime_cleanup(&runtime);
+        assert_eq!(runtime.draining_region_count(), 0);
+    }
+}
+
 fn managed_sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(bytes))

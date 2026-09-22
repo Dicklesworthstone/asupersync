@@ -1580,6 +1580,59 @@ impl ManagedQuicEndpoint {
         self.pending_outgoing.len()
     }
 
+    /// Assembled unsent datagrams for one connection, including output still
+    /// owned by the router after cancellation or a partial managed handoff.
+    #[cfg(all(feature = "tls", feature = "http3"))]
+    pub(crate) fn pending_datagram_count_for(&self, connection_id: ConnectionId) -> usize {
+        self.pending_outgoing
+            .iter()
+            .filter(|packet| packet.connection_id == connection_id)
+            .count()
+            + self
+                .connection_router
+                .pending_datagram_count_for(connection_id)
+    }
+
+    /// Retire one authenticated application's route without stopping its peers.
+    /// Returns false while ordinary buffered or unacknowledged output still
+    /// needs service, preserving response/GOAWAY recovery after packet loss.
+    ///
+    /// After an explicit application drain deadline, `force` discards only this
+    /// connection's unsent ordinary output. A successful request is idempotent:
+    /// the event loop owns its protected close until UDP send or the connection's
+    /// existing drain deadline, then the normal lifecycle timer removes the route.
+    #[cfg(all(feature = "tls", feature = "http3"))]
+    pub(crate) fn request_authenticated_close(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        app_error_code: u64,
+        force: bool,
+    ) -> Result<bool, ManagedEndpointError> {
+        cx.checkpoint()
+            .map_err(|_| ManagedEndpointError::Cancelled)?;
+        if self.shutting_down {
+            return Err(ManagedEndpointError::ShuttingDown);
+        }
+        let was_terminal = self.connection_router.connection_is_terminal(connection_id);
+        if !was_terminal && !force && self.pending_datagram_count_for(connection_id) != 0 {
+            return Ok(false);
+        }
+        let now = self.timer_scheduler.now(cx)?;
+        let accepted = self.connection_router.request_authenticated_close(
+            cx,
+            connection_id,
+            now,
+            app_error_code,
+            force,
+        )?;
+        if accepted && !was_terminal {
+            self.pending_outgoing
+                .retain(|packet| packet.connection_id != connection_id);
+        }
+        Ok(accepted)
+    }
+
     /// Route a native connection into this endpoint for integration tests.
     #[cfg(any(test, feature = "test-internals"))]
     pub async fn create_connection_for_testing(
@@ -1752,12 +1805,11 @@ impl ManagedQuicEndpoint {
                 return Err(ManagedEndpointError::Cancelled);
             }
 
-            // Draining connections retain only their route until the drain
-            // deadline. They must never send already queued application/PTO data.
+            // Draining connections retain their route until the drain deadline.
+            // Only an explicitly queued local close may survive that boundary.
             self.pending_outgoing.retain(|packet| {
-                !self
-                    .connection_router
-                    .connection_is_terminal(packet.connection_id)
+                self.connection_router
+                    .connection_can_send_queued(packet.connection_id)
             });
 
             #[cfg(feature = "tls")]
@@ -2249,9 +2301,8 @@ impl ManagedQuicEndpoint {
             self.remove_connection(cx, cid)?;
         }
         self.pending_outgoing.retain(|packet| {
-            !self
-                .connection_router
-                .connection_is_terminal(packet.connection_id)
+            self.connection_router
+                .connection_can_send_queued(packet.connection_id)
         });
         let pending_connections = self
             .pending_outgoing
@@ -2288,12 +2339,24 @@ impl ManagedQuicEndpoint {
             .timer_scheduler
             .now(cx)
             .unwrap_or_else(|_| Instant::now());
-        self.pending_outgoing.clear();
+        let retained_closes = self
+            .pending_outgoing
+            .drain(..)
+            .filter_map(|packet| {
+                self.connection_router
+                    .queued_local_close_deadline(packet.connection_id)
+                    .filter(|deadline| *deadline > now)
+                    .map(|deadline| (packet.packet, deadline))
+            })
+            .collect();
         self.timer_scheduler.cancel_pending();
         // Hold cleanup across every suspension, including a blocked socket send.
         // Dropping this future must retire ownership on the retained endpoint.
         let cleanup = ManagedShutdownCleanup(self);
-        let close_result = cleanup.0.send_shutdown_closes(cx, now).await;
+        let close_result = cleanup
+            .0
+            .send_shutdown_closes(cx, now, retained_closes)
+            .await;
         let udp_result = cleanup.0.udp_endpoint.shutdown(cx).await;
         drop(cleanup);
         close_result?;
@@ -2315,8 +2378,9 @@ impl ManagedQuicEndpoint {
         &mut self,
         cx: &Cx,
         now: Instant,
+        mut packets: Vec<(OutgoingPacket, Instant)>,
     ) -> Result<(), ManagedEndpointError> {
-        let packets = self
+        let additional_packets = self
             .connection_router
             .prepare_shutdown_close_packets(cx, now)
             .await
@@ -2324,6 +2388,7 @@ impl ManagedQuicEndpoint {
                 ConnectionRouterError::Cancelled => ManagedEndpointError::Cancelled,
                 other => other.into(),
             })?;
+        packets.extend(additional_packets);
         let mut cancel = QuicCancelWake::new(cx);
         for (packet, deadline) in packets {
             self.timer_scheduler.cancel_pending();

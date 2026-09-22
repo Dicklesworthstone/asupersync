@@ -88,6 +88,13 @@ use crate::types::{
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
 
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+mod h3_listener;
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+pub use h3_listener::{
+    NativeH3Listener, NativeH3ListenerConfig, NativeH3ListenerError, NativeH3ListenerReport,
+};
+
 // ─── Method Constants ────────────────────────────────────────────────────────
 
 const METHOD_GET: &str = "GET";
@@ -1127,6 +1134,10 @@ struct ActiveNativeH3ProducedResponse {
     body: Option<OutgoingBody>,
     lifecycle: Option<NativeH3ProducerLifecycle>,
     producer_cx: Option<Cx>,
+    // The managed listener keeps this scheduler-admitted request task alive
+    // from handler entry through producer completion. Caller-driven bridges
+    // retain their existing independently minted producer context.
+    owned_request_cx: Option<Cx>,
     max_data_wire_bytes: u64,
     emitted_bytes: u64,
     terminal: Option<NativeH3BodyTerminal>,
@@ -1696,6 +1707,7 @@ impl NativeH3Router {
                 body: None,
                 lifecycle: None,
                 producer_cx: None,
+                owned_request_cx: None,
                 max_data_wire_bytes,
                 emitted_bytes: 0,
                 terminal: None,
@@ -1989,18 +2001,24 @@ fn native_h3_closed_connection_diagnostic(
 fn make_native_h3_producer(
     connection_cx: &Cx,
     plan: Http3StreamPlan,
+    owned_request_cx: Option<Cx>,
 ) -> (
     OutgoingBody,
     Cx,
     NativeH3ProducerLifecycle,
     NativeH3RouterProducer,
 ) {
-    let region = ServerRequestRegion::mint_from_connection(
-        "h3-produced",
-        connection_cx.budget(),
-        connection_cx.now(),
-        connection_cx,
-    );
+    let region = if let Some(request_cx) = owned_request_cx {
+        let now = request_cx.now();
+        ServerRequestRegion::from_body_cx("h3-produced", request_cx, now)
+    } else {
+        ServerRequestRegion::mint_from_connection(
+            "h3-produced",
+            connection_cx.budget(),
+            connection_cx.now(),
+            connection_cx,
+        )
+    };
     let producer_cx = region.cx().clone();
     let (body, sender, producer_factory): (_, _, Http3StreamProducer) =
         plan.into_parts(&producer_cx);
@@ -2169,7 +2187,7 @@ fn poll_one_native_h3_produced(
                         }
                     };
                     let (body, producer_cx, lifecycle, producer) =
-                        make_native_h3_producer(cx, plan);
+                        make_native_h3_producer(cx, plan, state.owned_request_cx.take());
                     state.body = Some(body);
                     state.producer_cx = Some(producer_cx);
                     state.lifecycle = Some(lifecycle);
@@ -4654,6 +4672,7 @@ mod tests {
                 body: None,
                 lifecycle: None,
                 producer_cx: None,
+                owned_request_cx: None,
                 max_data_wire_bytes: 0,
                 emitted_bytes: 0,
                 terminal: None,

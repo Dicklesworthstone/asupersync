@@ -274,6 +274,10 @@ pub use router::{
     HttpHandlerFuture, MethodRouter, RouteBodyPolicyInfo, RouteInfo, Router, delete, get, patch,
     post, put,
 };
+#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+pub use router::{
+    NativeH3Listener, NativeH3ListenerConfig, NativeH3ListenerError, NativeH3ListenerReport,
+};
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 pub use router::{
     NativeH3ProducedEvent, NativeH3Router, NativeH3RouterConfig, NativeH3RouterDispatch,
