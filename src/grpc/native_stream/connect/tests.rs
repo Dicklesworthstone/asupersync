@@ -202,6 +202,26 @@ where
 }
 
 #[test]
+fn native_driver_admission_respects_runtime_io_restriction() {
+    for multithread in [false, true] {
+        runtime_case(multithread, |mut cx| async move {
+            assert!(cx.io_driver_handle().is_some(), "native reactor is explicit");
+            assert!(!cx.has_io(), "native contexts need no generic IoCap adapter");
+            let endpoint = NativeStreamEndpoint::new(
+                "127.0.0.1:9".parse().unwrap(), "localhost", Duration::from_secs(1),
+            ).unwrap();
+            let request = Request::new(Bytes::new());
+            assert!(endpoint.admit(&cx, "/svc/Watch", &request, &NativeStreamConfig::default()).is_ok());
+            cx.runtime_mask = crate::cx::cap::CapMask::none();
+            assert!(cx.io_driver_handle().is_some(), "restriction retains the physical driver");
+            let error = endpoint.admit(&cx, "/svc/Watch", &request, &NativeStreamConfig::default())
+                .err().expect("a retained driver must not bypass the runtime mask");
+            assert_eq!(error.code(), Code::FailedPrecondition);
+        });
+    }
+}
+
+#[test]
 fn native_endpoint_dials_health_watch_and_closes_its_owned_connection() {
     use crate::grpc::health::{HealthAuthMode, HealthService, ServingStatus};
     use crate::grpc::server::{Server, ServerStreamingConfig};
