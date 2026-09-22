@@ -11,8 +11,9 @@
 //! or reentrant live calls refuse capture instead of inventing a linearization.
 //! Pending polls are not recorded. Within each stream, operation order remains
 //! strict. Use the existing standalone group's duplex halves when only byte-I/O
-//! order is needed. Unwrapped effects and connection establishment are outside
-//! this window; clocks here do not drive a runtime's timers.
+//! order is needed. Opaque connection attempts can be included with
+//! [`Self::connect_with`](RecordingGroupSession::connect_with). Unwrapped effects
+//! remain outside this window; clocks here do not drive a runtime's timers.
 //!
 //! Drain source users before finishing. Limits invalidate capture without
 //! changing live results. Debug omits providers, bytes, timestamps, and entropy;
@@ -199,9 +200,13 @@ impl<S: TimeSource + ?Sized> RecordingGroupSession<S> {
     /// Register an already-open stream. Different provider types may share a session.
     /// The vectored-write capability is queried outside the timeline lock.
     pub fn register<T: AsyncWrite>(&self, id: u64, io: T) -> Result<GroupRecordingIo<T>, GroupSessionRegistrationError<T>> {
+        self.register_with_limits(id, io, self.timeline.limits.per_stream)
+    }
+
+    fn register_with_limits<T: AsyncWrite>(&self, id: u64, io: T, limits: IoCaptureLimits) -> Result<GroupRecordingIo<T>, GroupSessionRegistrationError<T>> {
         let checked = self.timeline.check_registration(&self.timeline.state.lock(), id);
         if let Err(error) = checked { return Err(GroupSessionRegistrationError { error, io }); }
-        let inner = RecordingIo::new(io, self.timeline.limits.per_stream);
+        let inner = RecordingIo::new(io, limits);
         let admitted = {
             let mut state = self.timeline.state.lock();
             self.timeline.check_registration(&state, id).and_then(|()| {
@@ -665,3 +670,7 @@ pub use codec::{GroupSessionBytes, GroupSessionDecodeLimits, GroupSessionTapeErr
 
 mod send;
 pub use send::GroupSendConsumerFuture;
+
+/// Ordered opaque connection attempts and the resulting byte-stream owners.
+pub mod connect;
+pub use connect::{ConnectionAttempt, ConnectionIdentityError, RecordingConnection};
