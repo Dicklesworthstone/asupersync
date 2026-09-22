@@ -6166,6 +6166,18 @@ impl RemoteComputationClient {
         RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
         RemoteComputationClientError,
     > {
+        self.start_session_before_dispatch(cx, request, None).await
+    }
+
+    async fn start_session_before_dispatch(
+        &self,
+        cx: &Cx,
+        request: &RemoteServiceWireRequest,
+        before_dispatch: Option<&(dyn Fn() -> bool + Sync)>,
+    ) -> Result<
+        RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
+        RemoteComputationClientError,
+    > {
         if cx.checkpoint().is_err() {
             return Err(RemoteComputationClientError::Cancelled { attempts: 0 });
         }
@@ -6197,7 +6209,7 @@ impl RemoteComputationClient {
                 crate::time::timeout(
                     cx.now(),
                     self.config.attempt_timeout,
-                    self.start_session_once(endpoint, cx, request),
+                    self.start_session_once(endpoint, cx, request, before_dispatch),
                 ),
             )
             .await
@@ -6301,7 +6313,7 @@ impl RemoteComputationClient {
             // V3 sends an Accepted/Terminal session envelope, not the bare
             // V1/V2 response. Retain the session's framed decoder through
             // terminal collection so buffered events are not discarded.
-            return match self.start_session_once(endpoint, cx, request).await? {
+            return match self.start_session_once(endpoint, cx, request, None).await? {
                 RemoteComputationSessionStart::Running(session) => session
                     .wait(cx)
                     .await
@@ -6330,6 +6342,7 @@ impl RemoteComputationClient {
         endpoint: SocketAddr,
         cx: &Cx,
         request: &RemoteServiceWireRequest,
+        before_dispatch: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<
         RemoteComputationSessionStart<crate::tls::TlsStream<TcpStream>>,
         RemoteComputationClientAttemptError,
@@ -6345,6 +6358,11 @@ impl RemoteComputationClient {
             .connect(&self.server_name, stream)
             .await
             .map_err(RemoteComputationClientAttemptError::Tls)?;
+        if before_dispatch.is_some_and(|admit| !admit()) {
+            return Err(RemoteComputationClientAttemptError::Session(
+                RemoteServiceSessionError::Cancelled,
+            ));
+        }
         RemoteComputationSession::start(cx, stream, request, self.config.wire_limits)
             .await
             .map_err(RemoteComputationClientAttemptError::Session)
@@ -7072,6 +7090,7 @@ struct NativeRemoteTaskEntry {
     control_receiver: Option<mpsc::Receiver<()>>,
     driver_cx: Option<Cx>,
     control_in_flight: bool,
+    request_dispatch_started: bool,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -7125,6 +7144,7 @@ impl NativeRemoteShared {
                 control_receiver: Some(control_receiver),
                 driver_cx: None,
                 control_in_flight: false,
+                request_dispatch_started: false,
             },
         );
     }
@@ -7174,6 +7194,21 @@ impl NativeRemoteShared {
         if let Some(entry) = self.state.lock().tasks.get_mut(&task_id) {
             entry.state = RemoteTaskState::Running;
         }
+    }
+
+    fn begin_request_dispatch(&self, task_id: RemoteTaskId) -> bool {
+        let mut state = self.state.lock();
+        let Some(entry) = state.tasks.get_mut(&task_id) else {
+            return false;
+        };
+        // Serialize against request_cancel before any application bytes are
+        // written. After this point a server may own work even while Accepted
+        // is still in flight, so cancellation must drain through the session.
+        if entry.control.cancel_reason().is_some() {
+            return false;
+        }
+        entry.request_dispatch_started = true;
+        true
     }
 
     fn set_control_in_flight(&self, task_id: RemoteTaskId, in_flight: bool) {
@@ -7253,7 +7288,8 @@ impl NativeRemoteShared {
                 ))
             })?;
             let signaled = entry.control.request_cancel(reason.clone());
-            let pending_driver = (entry.state == RemoteTaskState::Pending
+            let pending_driver = ((entry.state == RemoteTaskState::Pending
+                && !entry.request_dispatch_started)
                 || entry.control_in_flight)
                 .then(|| entry.driver_cx.clone())
                 .flatten();
@@ -7369,8 +7405,9 @@ async fn drive_native_remote_session(
     control: &NativeRemoteControl,
     control_receiver: &mut mpsc::Receiver<()>,
 ) -> Result<RemoteOutcome, RemoteError> {
+    let before_dispatch = || shared.begin_request_dispatch(task_id);
     let started = client
-        .start_session(cx, request)
+        .start_session_before_dispatch(cx, request, Some(&before_dispatch))
         .await
         .map_err(|error| map_native_remote_client_error(cx, error))?;
     let mut session = match started {
