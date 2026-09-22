@@ -368,3 +368,50 @@ export declare const rawBindings: Readonly<{
   abi_version(): string;
   abi_fingerprint(): bigint;
 }>;
+
+/** Limits on adapter-owned resources, not on browser/network buffering. */
+export declare const WEBTRANSPORT_STREAM_LIMITS: Readonly<{
+  maxStreamsPerSession: 64;
+  maxWriteBytes: 1048576;
+}>;
+
+export type WebTransportStreamRead =
+  | { done: true }
+  | { done: false; value: Uint8Array };
+
+/**
+ * A reliable, ordered byte stream owned by an existing WebTransport session.
+ * Write boundaries are not message boundaries; applications must frame messages.
+ * One read and one write may run concurrently. Overlapping reads/writes in the
+ * same direction fail transiently without admitting another host operation.
+ * Cancellation cannot roll back bytes already transmitted. The old synchronous
+ * session/scope close APIs initiate host cleanup; await this stream's closed
+ * promise (and any pending open) to observe reliable-stream cleanup settlement.
+ */
+export interface WebTransportByteStream {
+  readonly direction: "bidirectional";
+  /** Resolves after both halves end, or all cancellation cleanup settles. */
+  readonly closed: Promise<Outcome<void>>;
+  read(): Promise<Outcome<WebTransportStreamRead>>;
+  /** Copies at most maxWriteBytes and awaits host write/backpressure completion. */
+  write(bytes: ArrayBuffer | ArrayBufferView): Promise<Outcome<void>>;
+  /** Sends FIN after an admitted write; leaves the receive half available. */
+  finish(): Promise<Outcome<void>>;
+  /** Idempotently cancels both halves, awaiting in-flight host I/O settlement. */
+  cancel(reason?: string): Promise<Outcome<void>>;
+}
+
+export interface WebTransportStreamOpenRequest {
+  session: TaskHandleLike;
+}
+
+/**
+ * Open an outgoing bidirectional stream. Pending creations count against the
+ * session's 64-stream cap. Closing the owner before admission disposes any late
+ * host stream before this promise resolves. It cannot force a non-settling host
+ * creation/cleanup promise to settle and is not a deadline guarantee.
+ */
+export declare function webtransport_open_stream(
+  request: WebTransportStreamOpenRequest,
+): Promise<Outcome<WebTransportByteStream>>;
+export declare const webtransportOpenStream: typeof webtransport_open_stream;

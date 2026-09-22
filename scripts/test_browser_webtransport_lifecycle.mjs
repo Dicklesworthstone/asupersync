@@ -19,10 +19,13 @@ import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 const sourcePath = process.env.ASUPERSYNC_BROWSER_CORE_SOURCE
   ?? fileURLToPath(new URL("../packages/browser-core/index.js", import.meta.url));
 const source = readFileSync(sourcePath, "utf8");
+const streamSourcePath = fileURLToPath(new URL("../packages/browser-core/webtransport-streams.js", import.meta.url));
+const streamSource = readFileSync(streamSourcePath, "utf8");
 console.log(JSON.stringify({
   scenario_id: "browser-webtransport-host-lifecycle",
   bead_id: "N/A",
   source_sha256: createHash("sha256").update(source).digest("hex"),
+  stream_source_sha256: createHash("sha256").update(streamSource).digest("hex"),
   evidence_scope: "JS facade, native WHATWG streams, intentional task-ABI call recorder",
   no_claim: ["Rust dispatcher execution", "WASM integration", "live HTTP/3", "browser conformance"],
 }));
@@ -49,6 +52,7 @@ async function fixture(options = {}) {
   class ControlledTransport {
     constructor() {
       this.events = [];
+      this.streams = [];
       this.completion = deferred();
       this.closed = this.completion.promise;
       this.handshake = deferred();
@@ -68,6 +72,14 @@ async function fixture(options = {}) {
         }),
       };
       hosts.push(this);
+    }
+
+    createBidirectionalStream() {
+      this.events.push(["create-bidirectional"]);
+      if (options.createStream) return options.createStream(this);
+      const stream = duplex();
+      this.streams.push(stream);
+      return Promise.resolve(stream);
     }
 
     close(info = {}) {
@@ -127,7 +139,9 @@ async function fixture(options = {}) {
     `${source}\nexport { INFLIGHT_WEBTRANSPORTS as hostSessions };`,
     { context, identifier: sourcePath },
   );
+  const streamModule = new SourceTextModule(streamSource, { context, identifier: streamSourcePath });
   await module.link((specifier) => {
+    if (specifier === "./webtransport-streams.js") return streamModule;
     assert.equal(specifier, "./asupersync.js");
     return bindings;
   });
@@ -143,6 +157,37 @@ async function fixture(options = {}) {
   assert.equal(opened.outcome, "ok");
   await turn();
   return { core, calls, hosts, host: hosts[0], runtime, scope, session: opened.value };
+}
+
+function duplex(options = {}) {
+  const events = [];
+  let input;
+  let output;
+  const host = {
+    readable: new ReadableStream({
+      start(controller) { input = controller; },
+      cancel(reason) { events.push(["cancel", reason]); return options.cancel?.(reason); },
+    }),
+    writable: new WritableStream({
+      start(controller) { output = controller; },
+      write(bytes) {
+        events.push(["write", Array.from(bytes)]);
+        return options.write?.(bytes);
+      },
+      close() { events.push(["finish"]); return options.finish?.(); },
+      abort(reason) { events.push(["abort", reason]); return options.abort?.(reason); },
+    }),
+    get input() { return input; },
+    get output() { return output; },
+    events,
+  };
+  return host;
+}
+
+async function openedStream(core, session) {
+  const result = await core.webtransport_open_stream({ session });
+  assert.equal(result.outcome, "ok", JSON.stringify(result));
+  return result.value;
 }
 
 function assertReleased(core, session) {
@@ -567,4 +612,266 @@ test("WT-LATE-READ: a pending read never appends data behind a terminal outcome"
   assert.equal(calls.join.length, 1);
   assert.equal(core.webtransport_recv({ session }).outcome, "cancelled");
   assertReleased(core, session);
+});
+
+test("WTS-BIDI: reliable bytes and both independent half-close orders", async () => {
+  for (const readFirst of [false, true]) {
+    const { core, host, session, scope, calls } = await fixture();
+    const stream = await openedStream(core, session);
+    const wire = host.streams[0];
+    assert.equal(stream.direction, "bidirectional");
+    assert.ok(Object.isFrozen(stream));
+    assert.equal((await stream.write(new Uint8Array([1, 2]))).outcome, "ok");
+    wire.input.enqueue(new Uint8Array([3, 4]));
+    assert.deepEqual(normalize(await stream.read()), { outcome: "ok", value: { done: false, value: new Uint8Array([3, 4]) } });
+    let done = false;
+    void stream.closed.then(() => { done = true; });
+    if (readFirst) {
+      wire.input.close();
+      assert.deepEqual(normalize(await stream.read()), { outcome: "ok", value: { done: true } });
+      assert.equal(done, false, "read EOF is not write FIN");
+      assert.equal((await stream.write(new Uint8Array([5]))).outcome, "ok");
+      assert.equal((await stream.finish()).outcome, "ok");
+    } else {
+      const finishing = stream.finish();
+      assert.equal(stream.finish(), finishing, "FIN is shared by concurrent callers");
+      assert.equal((await finishing).outcome, "ok");
+      assert.equal(done, false, "write FIN must keep receive side available");
+      wire.input.enqueue(new Uint8Array([6]));
+      assert.equal((await stream.read()).value.value[0], 6);
+      wire.input.close();
+      assert.equal((await stream.read()).value.done, true);
+    }
+    assert.equal((await stream.closed).outcome, "ok");
+    assert.equal(wire.readable.locked, false);
+    assert.equal(wire.writable.locked, false);
+    assert.equal(calls.join.length, 0, "stream completion must not finish its owning session");
+    assert.equal((await stream.write(new Uint8Array([9]))).outcome, "err");
+    core.scope_close(scope);
+  }
+});
+
+test("WTS-BACKPRESSURE: own admitted bytes and reject excess writes before host I/O", async () => {
+  const gate = deferred();
+  const wire = duplex({ write: () => gate.promise });
+  const { core, session, scope } = await fixture({ createStream: () => wire });
+  const stream = await openedStream(core, session);
+  const input = new Uint8Array([7, 8]);
+  const first = stream.write(input);
+  input.fill(0);
+  let sent = false;
+  void first.then(() => { sent = true; });
+  await turn();
+  assert.equal(sent, false);
+  assert.deepEqual(wire.events, [["write", [7, 8]]]);
+  const excess = await stream.write(new Uint8Array([9]));
+  assert.equal(excess.failure.recoverability, "transient");
+  const finishing = stream.finish();
+  assert.equal((await stream.write(new Uint8Array([10]))).outcome, "err");
+  assert.equal(wire.events.length, 1, "FIN waits for the admitted write");
+  gate.resolve();
+  assert.equal((await first).outcome, "ok");
+  assert.equal((await finishing).outcome, "ok");
+  assert.deepEqual(wire.events, [["write", [7, 8]], ["finish"]]);
+  wire.input.close();
+  await stream.read();
+  assert.equal((await stream.closed).outcome, "ok");
+  core.scope_close(scope);
+});
+
+test("WTS-QUOTAS: bound live streams, pending creations, and copied write bytes", async () => {
+  const { core, host, session, scope } = await fixture();
+  const streams = [];
+  for (let i = 0; i < core.WEBTRANSPORT_STREAM_LIMITS.maxStreamsPerSession; i++) {
+    streams.push(await openedStream(core, session));
+  }
+  const full = await core.webtransport_open_stream({ session });
+  assert.equal(full.failure.recoverability, "transient");
+  assert.equal(host.streams.length, 64);
+  const oversized = await streams[0].write(new Uint8Array(core.WEBTRANSPORT_STREAM_LIMITS.maxWriteBytes + 1));
+  assert.equal(oversized.outcome, "err");
+  assert.equal(host.streams[0].events.length, 0);
+  assert.equal((await streams[0].write("not bytes")).outcome, "err");
+  assert.equal((await streams[0].cancel()).outcome, "cancelled");
+  const replacement = await openedStream(core, session);
+  assert.equal(host.streams.length, 65);
+  core.scope_close(scope);
+  await Promise.all([...streams, replacement].map((s) => s.closed));
+  for (const wire of host.streams) {
+    assert.equal(wire.readable.locked, false);
+    assert.equal(wire.writable.locked, false);
+  }
+
+  const creation = deferred();
+  const pending = await fixture({ createStream: () => creation.promise });
+  const requests = Array.from({ length: 64 }, () => pending.core.webtransport_open_stream({ session: pending.session }));
+  await turn();
+  assert.equal((await pending.core.webtransport_open_stream({ session: pending.session })).failure.recoverability, "transient");
+  assert.equal(pending.host.events.filter(([kind]) => kind === "create-bidirectional").length, 64);
+  pending.core.scope_close(pending.scope);
+  creation.reject(new Error("session ended"));
+  for (const result of await Promise.all(requests)) assert.equal(result.outcome, "cancelled");
+});
+
+test("WTS-CANCEL-DRAIN: retain capacity and cancellation result until in-flight write settles", async () => {
+  const gate = deferred();
+  const wire = duplex({ write: () => gate.promise });
+  const { core, session, scope } = await fixture({ createStream: () => wire });
+  const stream = await openedStream(core, session);
+  const read = stream.read();
+  assert.equal((await stream.read()).failure.recoverability, "transient");
+  const write = stream.write(new Uint8Array([1]));
+  await turn();
+  const cancellation = stream.cancel("stop transfer");
+  assert.equal(stream.cancel("again"), cancellation);
+  let drained = false;
+  void cancellation.then(() => { drained = true; });
+  await turn();
+  assert.equal(drained, false, "native sink still owns its in-flight write");
+  gate.resolve();
+  const results = await Promise.all([read, write, cancellation, stream.closed]);
+  for (const result of results) {
+    assert.equal(result.outcome, "cancelled");
+    assert.equal(result.cancellation.message, "stop transfer");
+  }
+  assert.equal(wire.events.filter(([kind]) => kind === "abort").length, 1);
+  assert.equal(wire.readable.locked, false);
+  assert.equal(wire.writable.locked, false);
+  core.scope_close(scope);
+});
+
+test("WTS-OWNERSHIP: parent shutdown drains streams without touching sibling sessions", async () => {
+  const { core, session, scope, runtime, host } = await fixture();
+  const sibling = core.scope_enter({ parent: runtime }).value;
+  const siblingSession = core.webtransport_open({ scope: sibling, url: "https://transport.example.test/" }).value;
+  const [first, second] = await Promise.all([openedStream(core, session), openedStream(core, siblingSession)]);
+  const waiting = first.read();
+  core.scope_close(scope);
+  assert.equal((await waiting).outcome, "cancelled");
+  assert.equal((await first.closed).outcome, "cancelled");
+  assert.equal(host.streams[0].readable.locked, false);
+  assert.equal((await second.write(new Uint8Array([1]))).outcome, "ok");
+  core.runtime_close(runtime);
+  assert.equal((await second.closed).outcome, "cancelled");
+});
+
+test("WTS-LATE-ADMISSION: dispose a stream created after its owner closed before returning", async () => {
+  const creation = deferred();
+  const cleanup = deferred();
+  const wire = duplex({ cancel: () => cleanup.promise });
+  const { core, session, scope } = await fixture({ createStream: () => creation.promise });
+  const opening = core.webtransport_open_stream({ session });
+  await turn();
+  core.scope_close(scope);
+  creation.resolve(wire);
+  let finished = false;
+  void opening.then(() => { finished = true; });
+  await turn();
+  assert.equal(finished, false, "late host resource must drain before admission returns");
+  assert.equal(wire.events.filter(([kind]) => kind === "cancel").length, 1);
+  assert.equal(wire.events.filter(([kind]) => kind === "abort").length, 1);
+  cleanup.resolve();
+  assert.equal((await opening).outcome, "cancelled");
+  assert.equal(wire.readable.locked, false);
+  assert.equal(wire.writable.locked, false);
+});
+
+test("WTS-PREFLIGHT: reject unrelated handles and release admission before handshake", async () => {
+  const { core, session, scope, host } = await fixture({ pendingHandshake: true });
+  const unrelated = core.task_spawn({ scope }).value;
+  assert.equal((await core.webtransport_open_stream({ session: unrelated })).failure.code, "invalid_handle");
+  assert.equal((await core.webtransport_open_stream({ get session() { throw new Error("invalid"); } })).failure.code, "invalid_handle");
+  const waiting = core.webtransport_open_stream({ session });
+  core.scope_close(scope);
+  assert.equal((await waiting).outcome, "cancelled");
+  assert.equal(host.events.filter(([kind]) => kind === "create-bidirectional").length, 0);
+  host.handshake.resolve();
+});
+
+test("WTS-ERRORS: stream read/write/FIN failures release both halves and not the session", async () => {
+  for (const operation of ["read", "write", "finish"]) {
+    const failure = new Error(`broken ${operation}`);
+    const wire = duplex({ [operation]: () => { throw failure; } });
+    const { core, session, scope, calls } = await fixture({ createStream: () => wire });
+    const stream = await openedStream(core, session);
+    let result;
+    if (operation === "read") {
+      const reading = stream.read();
+      wire.input.error(failure);
+      result = await reading;
+    } else if (operation === "write") result = await stream.write(new Uint8Array([1]));
+    else result = await stream.finish();
+    assert.equal(result.outcome, "err");
+    assert.match(result.failure.message, new RegExp(`broken ${operation}`));
+    assert.equal((await stream.closed).outcome, "err");
+    assert.equal(wire.readable.locked, false);
+    assert.equal(wire.writable.locked, false);
+    assert.equal(calls.join.length, 0);
+    assert.equal(core.webtransport_send({ session, value: [1] }).outcome, "ok");
+    core.scope_close(scope);
+  }
+});
+
+test("WTS-SESSION-ERROR: propagate the parent failure to pending stream operations", async () => {
+  const { core, session, host } = await fixture();
+  const stream = await openedStream(core, session);
+  const pending = stream.read();
+  host.completion.reject(new Error("lost connection"));
+  const result = await pending;
+  assert.equal(result.outcome, "err");
+  assert.match(result.failure.message, /lost connection/);
+  assert.deepEqual(normalize(await stream.closed), normalize(result));
+  core.webtransport_recv({ session });
+});
+
+test("WTS-ACQUIRE-FAILURE: release a reader when writer acquisition fails", async () => {
+  const wire = duplex();
+  const existingWriter = wire.writable.getWriter();
+  const { core, session, scope } = await fixture({ createStream: () => wire });
+  const result = await core.webtransport_open_stream({ session });
+  assert.equal(result.outcome, "err");
+  assert.equal(wire.readable.locked, false);
+  assert.equal(wire.events.filter(([kind]) => kind === "cancel").length, 1);
+  await existingWriter.abort();
+  existingWriter.releaseLock();
+  core.scope_close(scope);
+});
+
+test("WTS-IDLE-RESET: reclaim an idle reset stream without waiting for another caller operation", async () => {
+  for (const side of ["input", "output"]) {
+    const { core, session, scope, host } = await fixture();
+    const stream = await openedStream(core, session);
+    const wire = host.streams[0];
+    wire[side].error(new Error("peer reset"));
+    const outcome = await stream.closed;
+    assert.equal(outcome.outcome, "err");
+    assert.match(outcome.failure.message, /peer reset/);
+    assert.equal(wire.readable.locked, false);
+    assert.equal(wire.writable.locked, false);
+    core.scope_close(scope);
+  }
+});
+
+test("WTS-BYTE-BOUNDARIES: preserve view offsets and drain queued bytes after peer FIN", async () => {
+  const { core, session, scope, host } = await fixture();
+  const stream = await openedStream(core, session);
+  const wire = host.streams[0];
+  const buffer = new Uint8Array([0, 1, 2, 3]).buffer;
+  assert.equal((await stream.write(new DataView(buffer, 1, 2))).outcome, "ok");
+  assert.deepEqual(wire.events[0], ["write", [1, 2]]);
+  assert.equal((await stream.write(new ArrayBuffer(0))).outcome, "ok");
+  assert.equal((await stream.write(new Uint8Array(core.WEBTRANSPORT_STREAM_LIMITS.maxWriteBytes))).outcome, "ok");
+  wire.input.enqueue(new Uint8Array([9]));
+  wire.input.enqueue(new Uint8Array([10, 11]));
+  wire.input.close();
+  await stream.finish();
+  let complete = false;
+  void stream.closed.then(() => { complete = true; });
+  await turn();
+  assert.equal(complete, false, "peer FIN must not discard queued readable bytes");
+  assert.deepEqual(Array.from((await stream.read()).value.value), [9]);
+  assert.deepEqual(Array.from((await stream.read()).value.value), [10, 11]);
+  assert.equal((await stream.read()).value.done, true);
+  assert.equal((await stream.closed).outcome, "ok");
+  core.scope_close(scope);
 });

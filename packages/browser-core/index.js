@@ -15,6 +15,8 @@ import initWasm, {
   websocket_recv as rawWebSocketRecv,
   websocket_send as rawWebSocketSend,
 } from "./asupersync.js";
+import { createReliableStreamManager } from "./webtransport-streams.js";
+export { WEBTRANSPORT_STREAM_LIMITS } from "./webtransport-streams.js";
 
 const HANDLE_KINDS = new Set(["runtime", "region", "task", "cancel_token", "fetch_request"]);
 
@@ -28,6 +30,12 @@ const MAX_SAFE_INTEGER_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 const REGION_PARENTS = new Map();
 const INFLIGHT_WEBTRANSPORTS = new Map();
+const reliableStreams = createReliableStreamManager({
+  lookup: (session) => lookupWebTransportState(session).state,
+  ok: (value) => Outcome.ok(value),
+  fail: failOut,
+  cancelled: (reason, origin) => cancelOut("webtransport_stream_cancel", "completed", reason, origin),
+});
 const WEBTRANSPORT_TASK_LABEL = "browser-webtransport";
 const WEBTRANSPORT_CANCEL_KIND = "abort_signal";
 const WEBTRANSPORT_CLOSE_KIND = "webtransport_close";
@@ -715,18 +723,22 @@ function settleHostWebTransportState(state, outcome, closeReason = undefined) {
     return;
   }
   state.settled = true;
-  closeHostWebTransportState(state, closeReason);
+  closeHostWebTransportState(state, closeReason, outcome);
   // Release the task immediately, but retain its inbox until the caller drains
   // accepted datagrams and the canonical terminal outcome (or closes its owner).
   state.terminalOutcome = task_join(state.taskHandle, outcome, state.consumerVersion);
   queueWebTransportOutcome(state, state.terminalOutcome, { terminal: true });
 }
 
-function closeHostWebTransportState(state, reason = undefined) {
+function closeHostWebTransportState(state, reason = undefined, outcome = undefined) {
   if (state.closed) {
     return;
   }
   state.closed = true;
+  reliableStreams.closeSession(
+    state,
+    outcome ?? cancelOut(WEBTRANSPORT_CLOSE_KIND, "completed", reason ?? "session closed", state.sessionOrigin),
+  );
   state.pendingWrites.length = 0;
   // Each host operation may throw synchronously as well as reject. A failed
   // cleanup must not skip the remaining resources or the task's terminal join.
@@ -905,7 +917,7 @@ async function initializeWebTransportState(state, sessionOrigin) {
       typeof writable.getWriter !== "function"
     ) {
       throw new Error(
-        "WebTransport datagrams are unavailable. This lane currently exposes explicit datagram transport, not bidirectional streams.",
+        "WebTransport datagrams are unavailable in this host.",
       );
     }
     state.reader = readable.getReader();
@@ -1373,13 +1385,13 @@ export function webtransport_close(request, consumerVersion = null) {
     return state.terminalOutcome;
   }
   state.settled = true;
-  closeHostWebTransportState(state, reason);
   const outcome = cancelOut(
     WEBTRANSPORT_CLOSE_KIND,
     "completed",
     reason ?? "webtransport session closed by caller",
     state.sessionOrigin,
   );
+  closeHostWebTransportState(state, reason, outcome);
   return task_join(state.taskHandle, outcome, consumerVersion);
 }
 
@@ -1440,17 +1452,14 @@ export function webtransport_cancel(request, consumerVersion = null) {
   }
   INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
   state.settled = true;
-  closeHostWebTransportState(state, message);
-  return task_join(
-    state.taskHandle,
-    cancelOut(
-      kind,
-      "cancelling",
-      message ?? null,
-      state.sessionOrigin,
-    ),
-    consumerVersion,
+  const outcome = cancelOut(
+    kind,
+    "cancelling",
+    message ?? null,
+    state.sessionOrigin,
   );
+  closeHostWebTransportState(state, message, outcome);
+  return task_join(state.taskHandle, outcome, consumerVersion);
 }
 
 export function abi_version() {
@@ -1460,6 +1469,14 @@ export function abi_version() {
 export function abi_fingerprint() {
   return rawAbiFingerprint().toString();
 }
+
+// Reliable stream effects inherit the authority and lifetime of this session.
+// Creation waits for host admission; stream.cancel()/closed drain host I/O.
+export function webtransport_open_stream(request) {
+  return reliableStreams.open(request);
+}
+
+export const webtransportOpenStream = webtransport_open_stream;
 
 export const runtimeCreate = runtime_create;
 export const runtimeClose = runtime_close;
