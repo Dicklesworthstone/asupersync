@@ -546,10 +546,20 @@ struct IncomingBodyShared {
     queued_bytes: Arc<QueuedByteBudget>,
     abandoned_frames: AtomicU64,
     abandoned_bytes: AtomicU64,
-    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
     framed_consumer_waker: Mutex<Option<Waker>>,
-    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
     framed_consumer_error: Mutex<Option<IncomingBodyError>>,
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    framed_consumed_data: AtomicU64,
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    framed_consumed_waker: Mutex<Option<Waker>>,
 }
 
 fn queued_frame_bytes(frame: &Frame<BytesCursor>) -> Result<usize, IncomingBodyError> {
@@ -574,7 +584,10 @@ impl IncomingBodyShared {
         self.consumer_terminal.load(Ordering::Acquire) == IncomingConsumerTerminal::Dropped as u8
     }
 
-    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
     fn wake_framed_producer(&self) {
         let waker = self.framed_consumer_waker.lock().take();
         if let Some(waker) = waker {
@@ -656,7 +669,10 @@ pub struct IncomingRequestBody {
     received: u64,
     size_hint: SizeHint,
     kind: BodyKind,
-    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
     framed: bool,
 }
 
@@ -704,10 +720,20 @@ impl IncomingRequestBody {
             queued_bytes: QueuedByteBudget::new(queued_byte_limit),
             abandoned_frames: AtomicU64::new(0),
             abandoned_bytes: AtomicU64::new(0),
-            #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+            ))]
             framed_consumer_waker: Mutex::new(None),
-            #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+            ))]
             framed_consumer_error: Mutex::new(None),
+            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            framed_consumed_data: AtomicU64::new(0),
+            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            framed_consumed_waker: Mutex::new(None),
         });
         let body = Self {
             receiver: rx,
@@ -718,7 +744,10 @@ impl IncomingRequestBody {
             received: 0,
             size_hint: kind.size_hint(),
             kind,
-            #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+            ))]
             framed: false,
         };
         let writer = IncomingRequestBodyWriter::new(tx, kind, shared);
@@ -732,7 +761,10 @@ impl IncomingRequestBody {
     /// open until that signal. The existing body-kind descriptor reports
     /// `ContentLength` when known and `Chunked` for unknown-length streaming;
     /// this adapter never interprets chunked transfer syntax.
-    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
     pub(crate) fn framed_channel_with_limits(
         cx: &Cx,
         declared_length: Option<u64>,
@@ -813,13 +845,32 @@ impl IncomingRequestBody {
             .fetch_min(bytes, Ordering::AcqRel);
     }
 
-    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
     fn record_framed_consumer_error(&self, error: IncomingBodyError) {
         if self.framed {
             self.shared
                 .framed_consumer_error
                 .lock()
                 .get_or_insert(error);
+        }
+    }
+
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    fn record_framed_data_consumed(&self, bytes: u64) {
+        if !self.framed || bytes == 0 {
+            return;
+        }
+        // The sole consumer has already checked its cumulative received-byte
+        // count. This undrained subset therefore cannot overflow that count.
+        self.shared
+            .framed_consumed_data
+            .fetch_add(bytes, Ordering::AcqRel);
+        let waker = self.shared.framed_consumed_waker.lock().take();
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 }
@@ -851,9 +902,15 @@ impl Body for IncomingRequestBody {
                     _byte_permit,
                 } = queued;
                 drop(_byte_permit);
-                #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+                #[cfg(all(
+                    not(target_arch = "wasm32"),
+                    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+                ))]
                 let trailers_finish = frame.is_trailers() && !self.framed;
-                #[cfg(not(all(feature = "http3", feature = "tls", not(target_arch = "wasm32"))))]
+                #[cfg(not(all(
+                    not(target_arch = "wasm32"),
+                    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+                )))]
                 let trailers_finish = frame.is_trailers();
                 if trailers_finish {
                     // Trailers mark the end of a chunked body.
@@ -865,18 +922,22 @@ impl Body for IncomingRequestBody {
                         self.size_hint = SizeHint::with_exact(0);
                         self.terminal_observed = true;
                         #[cfg(all(
-                            feature = "http3",
-                            feature = "tls",
-                            not(target_arch = "wasm32")
+                            not(target_arch = "wasm32"),
+                            any(
+                                feature = "http2-streaming",
+                                all(feature = "http3", feature = "tls")
+                            )
                         ))]
                         self.record_framed_consumer_error(IncomingBodyError::AccountingOverflow);
                         self.shared
                             .consumer_terminal
                             .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
                         #[cfg(all(
-                            feature = "http3",
-                            feature = "tls",
-                            not(target_arch = "wasm32")
+                            not(target_arch = "wasm32"),
+                            any(
+                                feature = "http2-streaming",
+                                all(feature = "http3", feature = "tls")
+                            )
                         ))]
                         self.shared.wake_framed_producer();
                         return Poll::Ready(Some(Err(IncomingBodyError::AccountingOverflow)));
@@ -886,18 +947,22 @@ impl Body for IncomingRequestBody {
                         self.size_hint = SizeHint::with_exact(0);
                         self.terminal_observed = true;
                         #[cfg(all(
-                            feature = "http3",
-                            feature = "tls",
-                            not(target_arch = "wasm32")
+                            not(target_arch = "wasm32"),
+                            any(
+                                feature = "http2-streaming",
+                                all(feature = "http3", feature = "tls")
+                            )
                         ))]
                         self.record_framed_consumer_error(IncomingBodyError::AccountingOverflow);
                         self.shared
                             .consumer_terminal
                             .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
                         #[cfg(all(
-                            feature = "http3",
-                            feature = "tls",
-                            not(target_arch = "wasm32")
+                            not(target_arch = "wasm32"),
+                            any(
+                                feature = "http2-streaming",
+                                all(feature = "http3", feature = "tls")
+                            )
                         ))]
                         self.shared.wake_framed_producer();
                         return Poll::Ready(Some(Err(IncomingBodyError::AccountingOverflow)));
@@ -908,9 +973,11 @@ impl Body for IncomingRequestBody {
                         self.size_hint = SizeHint::with_exact(0);
                         self.terminal_observed = true;
                         #[cfg(all(
-                            feature = "http3",
-                            feature = "tls",
-                            not(target_arch = "wasm32")
+                            not(target_arch = "wasm32"),
+                            any(
+                                feature = "http2-streaming",
+                                all(feature = "http3", feature = "tls")
+                            )
                         ))]
                         self.record_framed_consumer_error(IncomingBodyError::BodyTooLarge {
                             actual: Some(received),
@@ -920,9 +987,11 @@ impl Body for IncomingRequestBody {
                             .consumer_terminal
                             .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
                         #[cfg(all(
-                            feature = "http3",
-                            feature = "tls",
-                            not(target_arch = "wasm32")
+                            not(target_arch = "wasm32"),
+                            any(
+                                feature = "http2-streaming",
+                                all(feature = "http3", feature = "tls")
+                            )
                         ))]
                         self.shared.wake_framed_producer();
                         return Poll::Ready(Some(Err(IncomingBodyError::BodyTooLarge {
@@ -936,18 +1005,22 @@ impl Body for IncomingRequestBody {
                             self.size_hint = SizeHint::with_exact(0);
                             self.terminal_observed = true;
                             #[cfg(all(
-                                feature = "http3",
-                                feature = "tls",
-                                not(target_arch = "wasm32")
+                                not(target_arch = "wasm32"),
+                                any(
+                                    feature = "http2-streaming",
+                                    all(feature = "http3", feature = "tls")
+                                )
                             ))]
                             self.record_framed_consumer_error(IncomingBodyError::BadContentLength);
                             self.shared
                                 .consumer_terminal
                                 .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
                             #[cfg(all(
-                                feature = "http3",
-                                feature = "tls",
-                                not(target_arch = "wasm32")
+                                not(target_arch = "wasm32"),
+                                any(
+                                    feature = "http2-streaming",
+                                    all(feature = "http3", feature = "tls")
+                                )
                             ))]
                             self.shared.wake_framed_producer();
                             return Poll::Ready(Some(Err(IncomingBodyError::BadContentLength)));
@@ -955,9 +1028,11 @@ impl Body for IncomingRequestBody {
                         if received == expected {
                             self.done = true;
                             #[cfg(all(
-                                feature = "http3",
-                                feature = "tls",
-                                not(target_arch = "wasm32")
+                                not(target_arch = "wasm32"),
+                                any(
+                                    feature = "http2-streaming",
+                                    all(feature = "http3", feature = "tls")
+                                )
                             ))]
                             if self.framed {
                                 self.done = false;
@@ -966,6 +1041,8 @@ impl Body for IncomingRequestBody {
                         self.size_hint = SizeHint::with_exact(expected - received);
                     }
                     self.received = received;
+                    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+                    self.record_framed_data_consumed(data_len);
                 }
                 Poll::Ready(Some(Ok(frame)))
             }
@@ -975,7 +1052,10 @@ impl Body for IncomingRequestBody {
                 // cancelling its owned handler. Preserve that earlier cause
                 // instead of turning a concrete transport failure into the
                 // subsequent region's generic cancellation classification.
-                #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+                #[cfg(all(
+                    not(target_arch = "wasm32"),
+                    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+                ))]
                 let error = if self.framed
                     && IncomingProducerTerminal::load(&self.shared.producer_terminal)
                         == IncomingProducerTerminal::Failed
@@ -987,12 +1067,18 @@ impl Body for IncomingRequestBody {
                 self.done = true;
                 self.terminal_observed = true;
                 self.size_hint = SizeHint::with_exact(0);
-                #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+                #[cfg(all(
+                    not(target_arch = "wasm32"),
+                    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+                ))]
                 self.record_framed_consumer_error(error.clone());
                 self.shared
                     .consumer_terminal
                     .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
-                #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+                #[cfg(all(
+                    not(target_arch = "wasm32"),
+                    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+                ))]
                 self.shared.wake_framed_producer();
                 Poll::Ready(Some(Err(error)))
             }
@@ -1016,18 +1102,22 @@ impl Body for IncomingRequestBody {
                             .clone()
                             .unwrap_or(IncomingBodyError::SourceDisconnected);
                         #[cfg(all(
-                            feature = "http3",
-                            feature = "tls",
-                            not(target_arch = "wasm32")
+                            not(target_arch = "wasm32"),
+                            any(
+                                feature = "http2-streaming",
+                                all(feature = "http3", feature = "tls")
+                            )
                         ))]
                         self.record_framed_consumer_error(error.clone());
                         self.shared
                             .consumer_terminal
                             .store(IncomingConsumerTerminal::Failed as u8, Ordering::Release);
                         #[cfg(all(
-                            feature = "http3",
-                            feature = "tls",
-                            not(target_arch = "wasm32")
+                            not(target_arch = "wasm32"),
+                            any(
+                                feature = "http2-streaming",
+                                all(feature = "http3", feature = "tls")
+                            )
                         ))]
                         self.shared.wake_framed_producer();
                         Poll::Ready(Some(Err(error)))
@@ -1084,17 +1174,26 @@ impl Drop for IncomingRequestBody {
             self.shared
                 .consumer_terminal
                 .store(IncomingConsumerTerminal::Dropped as u8, Ordering::Release);
-            #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+            ))]
             self.shared.wake_framed_producer();
         }
     }
 }
 
-#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+))]
 type FramedIncomingSend =
     Pin<Box<dyn Future<Output = Result<(), IncomingBodyError>> + Send + 'static>>;
 
-#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+))]
 struct FramedIncomingCancellation {
     cx: Cx,
     token: CancelWakerToken,
@@ -1105,7 +1204,10 @@ struct FramedIncomingCancellation {
 /// The listener owns this value; the handler only receives
 /// [`IncomingRequestBody`]. One pending send retains its exact frame across
 /// polls, so pausing a native request stream never requires replaying bytes.
-#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+))]
 pub(crate) struct FramedIncomingRequestBodyWriter {
     sender: Option<mpsc::Sender<QueuedIncomingFrame>>,
     shared: Arc<IncomingBodyShared>,
@@ -1118,7 +1220,10 @@ pub(crate) struct FramedIncomingRequestBodyWriter {
     max_trailers_size: usize,
 }
 
-#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+))]
 impl std::fmt::Debug for FramedIncomingRequestBodyWriter {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1131,7 +1236,10 @@ impl std::fmt::Debug for FramedIncomingRequestBodyWriter {
     }
 }
 
-#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+))]
 impl FramedIncomingRequestBodyWriter {
     #[must_use]
     pub(crate) fn max_body_size(mut self, bytes: u64) -> Self {
@@ -1160,6 +1268,36 @@ impl FramedIncomingRequestBodyWriter {
     #[must_use]
     pub(crate) fn consumer_dropped(&self) -> bool {
         self.shared.consumer_dropped()
+    }
+
+    /// Take the DATA bytes delivered to the consumer since the previous call.
+    ///
+    /// Register the connection driver's waker before draining the count so a
+    /// concurrent consumer cannot lose a receive-window wakeup. Only frames
+    /// successfully returned to the caller count: trailer metadata, rejected
+    /// frames, and frames discarded on cancellation or body drop do not.
+    /// Protocol drivers own any credit for padding or discarded stream data.
+    ///
+    /// This remains usable after `finish` or `fail` while accepted DATA drains.
+    /// It has a separate waker from consumer-drop detection because finishing
+    /// the wire body does not mean that its queued DATA has been consumed.
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn poll_consumed_data(&self, task_cx: &mut Context<'_>) -> u64 {
+        let mut incoming = Some(task_cx.waker().clone());
+        let mut registered = self.shared.framed_consumed_waker.lock();
+        let retired = if registered
+            .as_ref()
+            .is_some_and(|waker| waker.will_wake(task_cx.waker()))
+        {
+            None
+        } else {
+            std::mem::replace(&mut *registered, incoming.take())
+        };
+        let consumed = self.shared.framed_consumed_data.swap(0, Ordering::AcqRel);
+        drop(registered);
+        drop(retired);
+        drop(incoming);
+        consumed
     }
 
     /// Register the transport driver's waker even when no DATA send is pending.
@@ -1387,7 +1525,7 @@ impl FramedIncomingRequestBodyWriter {
         }
     }
 
-    /// Certify validated protocol FIN after the final pending frame completed.
+    /// Certify protocol END_STREAM or FIN after the final pending frame completed.
     /// An in-flight frame is a caller sequencing error and remains retryable.
     pub(crate) fn finish(&mut self, cx: &Cx) -> Result<(), IncomingBodyError> {
         match IncomingProducerTerminal::load(&self.shared.producer_terminal) {
@@ -1450,10 +1588,18 @@ impl FramedIncomingRequestBodyWriter {
     }
 }
 
-#[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+))]
 impl Drop for FramedIncomingRequestBodyWriter {
     fn drop(&mut self) {
         self.fail(IncomingBodyError::SourceDisconnected);
+        #[cfg(feature = "http2-streaming")]
+        {
+            let retired_waker = self.shared.framed_consumed_waker.lock().take();
+            drop(retired_waker);
+        }
     }
 }
 
@@ -3185,7 +3331,10 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
+    ))]
     mod framed {
         use super::*;
 
@@ -3264,6 +3413,183 @@ mod tests {
             assert!(Pin::new(&mut body).poll_frame(&mut task_cx).is_pending());
             writer.finish(&cx).expect("validated FIN after trailers");
             assert!(poll_body(&mut body).is_none());
+        }
+
+        #[test]
+        #[cfg(feature = "http2-streaming")]
+        fn receive_capacity_counts_delivered_data_after_wire_finish() {
+            let cx = Cx::for_testing();
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, Some(5), 4, 128);
+            let wake_count = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(Arc::clone(&wake_count));
+            let mut task_cx = Context::from_waker(&waker);
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+
+            send(&mut writer, &cx, &mut data(b"ab"));
+            send(&mut writer, &cx, &mut data(b"cde"));
+            send(&mut writer, &cx, &mut data(b""));
+            let mut trailers = HeaderMap::new();
+            trailers.append(
+                HeaderName::from_static("x-checksum"),
+                HeaderValue::from_static("ok"),
+            );
+            send(&mut writer, &cx, &mut Some(Frame::trailers(trailers)));
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+            writer
+                .finish(&cx)
+                .expect("wire END_STREAM with queued body");
+            assert_eq!(wake_count.load(Ordering::SeqCst), 0);
+
+            let first = poll_body(&mut body)
+                .expect("first DATA")
+                .expect("valid DATA");
+            assert_eq!(first.into_data().expect("DATA").chunk(), b"ab");
+            assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 2);
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+
+            let second = poll_body(&mut body)
+                .expect("second DATA")
+                .expect("valid DATA");
+            assert_eq!(second.into_data().expect("DATA").chunk(), b"cde");
+            assert_eq!(wake_count.load(Ordering::SeqCst), 2);
+            let empty = poll_body(&mut body)
+                .expect("empty DATA")
+                .expect("valid DATA");
+            assert_eq!(empty.into_data().expect("DATA").remaining(), 0);
+            assert!(
+                poll_body(&mut body)
+                    .expect("trailer frame")
+                    .expect("valid trailers")
+                    .is_trailers()
+            );
+            assert_eq!(wake_count.load(Ordering::SeqCst), 2);
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 3);
+            assert!(poll_body(&mut body).is_none());
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+        }
+
+        #[test]
+        #[cfg(feature = "http2-streaming")]
+        fn receive_capacity_excludes_pending_and_abandoned_frames() {
+            for byte_limit in [2, 4] {
+                let cx = Cx::for_testing();
+                let (mut writer, mut body) =
+                    IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, byte_limit);
+                let waker = noop_waker();
+                let mut task_cx = Context::from_waker(&waker);
+                assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+                send(&mut writer, &cx, &mut data(b"x"));
+                let prefix = poll_body(&mut body).expect("prefix").expect("valid DATA");
+                assert_eq!(prefix.into_data().expect("DATA").chunk(), b"x");
+                send(&mut writer, &cx, &mut data(b"ab"));
+                let mut pending = data(b"cd");
+                assert!(
+                    writer
+                        .poll_send_frame(&cx, &mut task_cx, &mut pending)
+                        .is_pending()
+                );
+                assert!(pending.is_none());
+                assert_eq!(body.queued_frames(), if byte_limit == 2 { 1 } else { 2 });
+                writer.fail(IncomingBodyError::ClientAborted);
+                drop(body);
+
+                assert_eq!(writer.shared.queued_bytes.state.lock().queued, 0);
+                assert_eq!(writer.shared.queued_bytes.state.lock().queued_frames, 0);
+                assert_eq!(writer.poll_consumed_data(&mut task_cx), 1);
+                assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+            }
+        }
+
+        #[test]
+        #[cfg(feature = "http2-streaming")]
+        fn receive_capacity_excludes_consumer_policy_rejection() {
+            let cx = Cx::for_testing();
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 8);
+            let waker = noop_waker();
+            let mut task_cx = Context::from_waker(&waker);
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+            send(&mut writer, &cx, &mut data(b"abc"));
+            body.tighten_max_body_size(2);
+            assert_eq!(
+                poll_body(&mut body)
+                    .expect("policy error")
+                    .expect_err("oversize DATA"),
+                IncomingBodyError::BodyTooLarge {
+                    actual: Some(3),
+                    limit: 2,
+                }
+            );
+            assert_eq!(body.queued_bytes(), 0);
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+        }
+
+        #[test]
+        #[cfg(feature = "http2-streaming")]
+        fn receive_capacity_wake_runs_outside_shared_locks() {
+            struct InspectWake {
+                shared: Arc<IncomingBodyShared>,
+                wake_count: AtomicUsize,
+            }
+            impl std::task::Wake for InspectWake {
+                fn wake(self: Arc<Self>) {
+                    assert!(self.shared.framed_consumed_waker.try_lock().is_some());
+                    assert!(self.shared.framed_consumer_waker.try_lock().is_some());
+                    assert!(self.shared.queued_bytes.state.try_lock().is_some());
+                    assert_eq!(self.shared.framed_consumed_data.load(Ordering::Acquire), 2);
+                    self.wake_count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let cx = Cx::for_testing();
+            let (mut writer, mut body) =
+                IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 8);
+            let probe = Arc::new(InspectWake {
+                shared: Arc::clone(&writer.shared),
+                wake_count: AtomicUsize::new(0),
+            });
+            let waker = Waker::from(Arc::clone(&probe));
+            let mut task_cx = Context::from_waker(&waker);
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+            send(&mut writer, &cx, &mut data(b"ab"));
+            let frame = poll_body(&mut body).expect("DATA").expect("valid DATA");
+            assert_eq!(frame.into_data().expect("DATA").chunk(), b"ab");
+            assert_eq!(probe.wake_count.load(Ordering::SeqCst), 1);
+            assert_eq!(writer.poll_consumed_data(&mut task_cx), 2);
+        }
+
+        #[test]
+        #[cfg(feature = "http2-streaming")]
+        fn receive_capacity_waker_replacement_and_writer_drop_release_outside_lock() {
+            struct DropProbe {
+                shared: Arc<IncomingBodyShared>,
+                drops: Arc<AtomicUsize>,
+            }
+            impl std::task::Wake for DropProbe {
+                fn wake(self: Arc<Self>) {}
+            }
+            impl Drop for DropProbe {
+                fn drop(&mut self) {
+                    assert!(self.shared.framed_consumed_waker.try_lock().is_some());
+                    self.drops.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            let cx = Cx::for_testing();
+            let (writer, _body) = IncomingRequestBody::framed_channel_with_limits(&cx, None, 1, 8);
+            let drops = Arc::new(AtomicUsize::new(0));
+            for expected_drops in 0..2 {
+                let waker = Waker::from(Arc::new(DropProbe {
+                    shared: Arc::clone(&writer.shared),
+                    drops: Arc::clone(&drops),
+                }));
+                let mut task_cx = Context::from_waker(&waker);
+                assert_eq!(writer.poll_consumed_data(&mut task_cx), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), expected_drops);
+            }
+            assert_eq!(drops.load(Ordering::SeqCst), 1);
+            drop(writer);
+            assert_eq!(drops.load(Ordering::SeqCst), 2);
         }
 
         #[test]

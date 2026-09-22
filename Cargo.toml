@@ -135,6 +135,9 @@ include = [
 
 [features]
 default = ["proc-macros", "nightly-outcome-try", "runtime-core", "native-runtime"]
+# Opt-in live HTTP/2 request ingress with bounded body queues and
+# consumption-based stream receive credit. Native validation is a separate lane.
+http2-streaming = []
 # Enables the experimental `Try`/residual impls for Outcome while stable Rust
 # call sites are migrated to explicit helpers.
 nightly-outcome-try = []

@@ -649,6 +649,83 @@ impl Connection {
         self.streams.get_mut(id)
     }
 
+    /// Replenish one stream's receive window only as its consumer releases DATA.
+    ///
+    /// Call after the initial [`ReceivedFrame::Headers`] event and before any
+    /// DATA for this stream is processed. Repeating the call is harmless.
+    /// Other streams retain automatic receive-window updates. Connection-level
+    /// credit is still replenished on receipt so a slow stream cannot prevent
+    /// its siblings from making progress.
+    ///
+    /// The caller must bound retained DATA across its admitted streams, continue
+    /// processing connection frames, and call
+    /// [`Self::release_stream_receive_capacity`] as application bytes are
+    /// consumed. Padding is discarded and credited internally; do not include it
+    /// in the released byte count. The initial receive window is unchanged, so
+    /// the caller must be able to retain that much DATA before issuing updates.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stream error when the stream is absent or reset, its initial
+    /// header block is incomplete, or DATA arrived before deferral was enabled.
+    #[cfg(feature = "http2-streaming")]
+    pub fn defer_stream_receive_window(&mut self, stream_id: u32) -> Result<(), H2Error> {
+        self.streams
+            .get_mut(stream_id)
+            .ok_or_else(|| {
+                H2Error::stream(
+                    stream_id,
+                    ErrorCode::StreamClosed,
+                    "cannot defer receive credit on an absent stream",
+                )
+            })?
+            .defer_recv_window_updates()
+    }
+
+    /// Release application DATA consumed from a stream with deferred credit.
+    ///
+    /// `consumed_bytes` counts only bytes surfaced in [`ReceivedFrame::Data`],
+    /// once each. Queuing those bytes for later application consumption does
+    /// not release capacity. A zero count is a no-op. An accepted release queues
+    /// a stream WINDOW_UPDATE while input remains open; after END_STREAM it
+    /// retires accounting without advertising unusable credit. A release that
+    /// races with reset or pruning of a closed stream is harmless.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stream error if receive credit was not deferred, the stream is
+    /// idle, more bytes are released than received and not yet consumed, or the
+    /// receive window would overflow. A rejected release leaves accounting and
+    /// queued WINDOW_UPDATE frames unchanged.
+    #[cfg(feature = "http2-streaming")]
+    pub fn release_stream_receive_capacity(
+        &mut self,
+        stream_id: u32,
+        consumed_bytes: u32,
+    ) -> Result<(), H2Error> {
+        if consumed_bytes == 0 {
+            return Ok(());
+        }
+        if stream_id == 0 || stream_id > 0x7fff_ffff || self.streams.is_idle_stream_id(stream_id) {
+            return Err(H2Error::stream(
+                stream_id,
+                ErrorCode::ProtocolError,
+                "cannot release receive capacity for an invalid or idle stream",
+            ));
+        }
+        let Some(stream) = self.streams.get_mut(stream_id) else {
+            return Ok(());
+        };
+        let increment = stream.release_deferred_recv_capacity(consumed_bytes)?;
+        if increment != 0 {
+            self.pending_ops.push_back(PendingOp::WindowUpdate {
+                stream_id,
+                increment,
+            });
+        }
+        Ok(())
+    }
+
     /// Check if GOAWAY has been received.
     #[must_use]
     pub fn goaway_received(&self) -> bool {
@@ -1203,6 +1280,25 @@ impl Connection {
             )
         })?;
         stream.recv_data(payload_len, frame.end_stream)?;
+
+        #[cfg(feature = "http2-streaming")]
+        if stream.deferred_recv_bytes().is_some() {
+            // Padding occupies wire credit but is never handed to the body
+            // consumer. Reclaim it here so padding-only DATA cannot deadlock
+            // a deferred stream, and the public release API counts DATA only.
+            let data_len = u32::try_from(frame.data.len())
+                .map_err(|_| H2Error::protocol("DATA length exceeds wire payload"))?;
+            let padding_len = payload_len
+                .checked_sub(data_len)
+                .ok_or_else(|| H2Error::protocol("DATA length exceeds wire payload"))?;
+            let increment = stream.release_deferred_recv_capacity(padding_len)?;
+            if increment != 0 {
+                self.pending_ops.push_back(PendingOp::WindowUpdate {
+                    stream_id: frame.stream_id,
+                    increment,
+                });
+            }
+        }
 
         // Auto stream-level WINDOW_UPDATE when recv window drops below 25%.
         if stream.state().can_recv() {
@@ -2189,6 +2285,14 @@ impl Connection {
         let delta = i32::try_from(increment)
             .map_err(|_| H2Error::flow_control("window increment too large"))?;
         if let Some(stream) = self.streams.get_mut(stream_id) {
+            #[cfg(feature = "http2-streaming")]
+            if stream.deferred_recv_bytes().is_some() {
+                return Err(H2Error::stream(
+                    stream_id,
+                    ErrorCode::ProtocolError,
+                    "use release_stream_receive_capacity for deferred receive credit",
+                ));
+            }
             stream.update_recv_window(delta)?;
         } else {
             // Stream already closed/pruned — skip the WINDOW_UPDATE to avoid
@@ -3456,6 +3560,369 @@ mod tests {
         assert!(
             found_stream_update,
             "expected stream-level WINDOW_UPDATE for stream 1"
+        );
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    fn deferred_receive_connection(stream_ids: &[u32]) -> Connection {
+        let mut conn =
+            Connection::server_with_time_getter(Settings::default(), || Time::from_secs(1));
+        conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .expect("peer settings");
+        for &stream_id in stream_ids {
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                test_request_headers("/streaming-upload"),
+                false,
+                true,
+            )))
+            .expect("initial request headers");
+        }
+        while conn.next_frame().is_some() {}
+        conn
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn deferred_receive_credit_waits_for_consumer_and_preserves_sibling_progress() {
+        let mut conn = deferred_receive_connection(&[1, 3]);
+        conn.defer_stream_receive_window(1).expect("defer stream");
+        let data = Bytes::from(vec![7; settings::DEFAULT_INITIAL_WINDOW_SIZE as usize]);
+        let event = conn
+            .process_frame(Frame::Data(DataFrame::new(1, data, false)))
+            .expect("receive full stream window");
+        assert!(matches!(
+            event,
+            Some(ReceivedFrame::Data { stream_id: 1, .. })
+        ));
+        assert_eq!(conn.stream(1).unwrap().recv_window(), 0);
+        assert_eq!(conn.recv_window(), DEFAULT_CONNECTION_WINDOW_SIZE);
+        let update = conn.next_frame().expect("connection credit remains live");
+        assert!(matches!(update, Frame::WindowUpdate(update)
+            if update.stream_id == 0 && update.increment == 65_535));
+        assert!(conn.next_frame().is_none(), "no unconsumed stream credit");
+
+        let sibling = conn
+            .process_frame(Frame::Data(DataFrame::new(
+                3,
+                Bytes::from_static(b"ok"),
+                true,
+            )))
+            .expect("sibling receives while first stream has no credit");
+        assert!(matches!(
+            sibling,
+            Some(ReceivedFrame::Data { stream_id: 3, .. })
+        ));
+        conn.release_stream_receive_capacity(1, 7)
+            .expect("consumer releases a prefix");
+        assert_eq!(conn.stream(1).unwrap().recv_window(), 7);
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::WindowUpdate(update))
+            if update.stream_id == 1 && update.increment == 7)
+        );
+        conn.process_frame(Frame::Data(DataFrame::new(
+            1,
+            Bytes::from_static(b"resumed"),
+            false,
+        )))
+        .expect("exact released capacity permits more input");
+        assert_eq!(conn.stream(1).unwrap().recv_window(), 0);
+        assert!(conn.next_frame().is_none());
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn deferred_receive_credit_rejects_duplicate_and_unearned_releases() {
+        let mut conn = deferred_receive_connection(&[1]);
+        conn.defer_stream_receive_window(1).unwrap();
+        conn.process_frame(Frame::Data(DataFrame::new(
+            1,
+            Bytes::from_static(b"123456789"),
+            false,
+        )))
+        .unwrap();
+        conn.release_stream_receive_capacity(1, 4).unwrap();
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::WindowUpdate(update))
+            if update.stream_id == 1 && update.increment == 4)
+        );
+        conn.defer_stream_receive_window(1)
+            .expect("repeated deferral preserves outstanding bytes");
+
+        let before = conn.stream(1).unwrap().recv_window();
+        let error = conn.release_stream_receive_capacity(1, 6).unwrap_err();
+        assert_eq!(error.code, ErrorCode::FlowControlError);
+        assert_eq!(error.stream_id, Some(1));
+        assert_eq!(conn.stream(1).unwrap().recv_window(), before);
+        assert!(conn.next_frame().is_none());
+        let error = conn.send_stream_window_update(1, 5).unwrap_err();
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert_eq!(conn.stream(1).unwrap().recv_window(), before);
+
+        conn.release_stream_receive_capacity(1, 5).unwrap();
+        assert_eq!(conn.stream(1).unwrap().recv_window(), 65_535);
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::WindowUpdate(update))
+            if update.stream_id == 1 && update.increment == 5)
+        );
+        conn.release_stream_receive_capacity(1, 0).unwrap();
+        assert_eq!(
+            conn.release_stream_receive_capacity(1, 1).unwrap_err().code,
+            ErrorCode::FlowControlError
+        );
+        assert!(conn.next_frame().is_none());
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn deferred_receive_padding_reclaims_only_discarded_wire_bytes() {
+        use crate::http::h2::frame::data_flags;
+
+        let mut conn = deferred_receive_connection(&[1]);
+        conn.defer_stream_receive_window(1).unwrap();
+        let header = FrameHeader {
+            length: 8,
+            frame_type: FrameType::Data as u8,
+            flags: data_flags::PADDED,
+            stream_id: 1,
+        };
+        let frame = DataFrame::parse(
+            &header,
+            Bytes::from_static(&[4, b'a', b'b', b'c', 0, 0, 0, 0]),
+        )
+        .expect("parse actual padded DATA payload");
+        let event = conn.process_frame(Frame::Data(frame)).unwrap();
+        assert!(matches!(event, Some(ReceivedFrame::Data { data, .. })
+            if data.as_ref() == b"abc"));
+        assert_eq!(conn.recv_window(), 65_535 - 8);
+        assert_eq!(conn.stream(1).unwrap().recv_window(), 65_535 - 3);
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::WindowUpdate(update))
+            if update.stream_id == 1 && update.increment == 5)
+        );
+        assert!(conn.next_frame().is_none());
+        assert_eq!(
+            conn.release_stream_receive_capacity(1, 8).unwrap_err().code,
+            ErrorCode::FlowControlError,
+            "padding must never be credited again by the application"
+        );
+        conn.release_stream_receive_capacity(1, 3).unwrap();
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::WindowUpdate(update))
+            if update.stream_id == 1 && update.increment == 3)
+        );
+
+        let header = FrameHeader {
+            length: 1,
+            ..header
+        };
+        let frame = DataFrame::parse(&header, Bytes::from_static(&[0])).unwrap();
+        conn.process_frame(Frame::Data(frame)).unwrap();
+        assert_eq!(conn.stream(1).unwrap().recv_window(), 65_535);
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::WindowUpdate(update))
+            if update.stream_id == 1 && update.increment == 1)
+        );
+        assert!(conn.next_frame().is_none());
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn deferred_receive_credit_after_data_or_trailers_fin_does_not_reopen_input() {
+        for data_fin in [false, true] {
+            let mut conn = deferred_receive_connection(&[1]);
+            conn.defer_stream_receive_window(1).unwrap();
+            conn.process_frame(Frame::Data(DataFrame::new(
+                1,
+                Bytes::from_static(b"end"),
+                data_fin,
+            )))
+            .unwrap();
+            if !data_fin {
+                conn.process_frame(Frame::Headers(HeadersFrame::new(
+                    1,
+                    encode_test_headers(&[("x-checksum", "ok")]),
+                    true,
+                    true,
+                )))
+                .expect("trailers close request input");
+            }
+            assert_eq!(
+                conn.stream(1).unwrap().state(),
+                StreamState::HalfClosedRemote
+            );
+            let before = conn.stream(1).unwrap().recv_window();
+            conn.release_stream_receive_capacity(1, 3).unwrap();
+            assert_eq!(conn.stream(1).unwrap().recv_window(), before);
+            assert!(
+                conn.next_frame().is_none(),
+                "FIN makes receive credit unusable"
+            );
+            assert_eq!(
+                conn.release_stream_receive_capacity(1, 1).unwrap_err().code,
+                ErrorCode::FlowControlError,
+                "retired bytes cannot be released twice"
+            );
+        }
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn deferred_receive_reset_and_pruning_discard_pending_credit() {
+        for peer_reset in [false, true] {
+            let mut conn = deferred_receive_connection(&[1]);
+            conn.defer_stream_receive_window(1).unwrap();
+            conn.process_frame(Frame::Data(DataFrame::new(
+                1,
+                Bytes::from_static(b"reset"),
+                false,
+            )))
+            .unwrap();
+            conn.release_stream_receive_capacity(1, 2).unwrap();
+            if peer_reset {
+                conn.process_frame(Frame::RstStream(RstStreamFrame::new(1, ErrorCode::Cancel)))
+                    .unwrap();
+            } else {
+                conn.reset_stream(1, ErrorCode::Cancel);
+            }
+            conn.release_stream_receive_capacity(1, 3)
+                .expect("a delayed consumer release tolerates reset");
+            while let Some(frame) = conn.next_frame() {
+                assert!(!matches!(frame, Frame::WindowUpdate(update) if update.stream_id == 1));
+            }
+            conn.prune_closed_streams();
+            assert!(conn.stream(1).is_none());
+            conn.release_stream_receive_capacity(1, 3)
+                .expect("a delayed consumer release tolerates pruning");
+            assert!(conn.next_frame().is_none());
+            assert_eq!(
+                conn.release_stream_receive_capacity(3, 1).unwrap_err().code,
+                ErrorCode::ProtocolError,
+                "idle streams must not receive invented credit"
+            );
+        }
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn deferred_receive_requires_completed_headers_before_any_data() {
+        let mut conn = deferred_receive_connection(&[]);
+        assert!(conn.defer_stream_receive_window(1).is_err());
+        for invalid_or_idle in [0, 1, 0x8000_0000] {
+            assert_eq!(
+                conn.release_stream_receive_capacity(invalid_or_idle, 1)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::ProtocolError
+            );
+        }
+        let headers = test_request_headers("/fragmented");
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            1,
+            headers.slice(..1),
+            false,
+            false,
+        )))
+        .unwrap();
+        assert_eq!(
+            conn.defer_stream_receive_window(1).unwrap_err().code,
+            ErrorCode::ProtocolError
+        );
+        conn.process_frame(Frame::Continuation(ContinuationFrame {
+            stream_id: 1,
+            header_block: headers.slice(1..),
+            end_headers: true,
+        }))
+        .unwrap();
+        conn.defer_stream_receive_window(1).unwrap();
+
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            3,
+            test_request_headers("/empty-data"),
+            false,
+            true,
+        )))
+        .unwrap();
+        conn.process_frame(Frame::Data(DataFrame::new(3, Bytes::new(), false)))
+            .unwrap();
+        assert_eq!(
+            conn.defer_stream_receive_window(3).unwrap_err().code,
+            ErrorCode::ProtocolError,
+            "even empty DATA ends the deferral admission boundary"
+        );
+        conn.process_frame(Frame::Headers(HeadersFrame::new(
+            5,
+            test_request_headers("/headers-fin"),
+            true,
+            true,
+        )))
+        .unwrap();
+        conn.defer_stream_receive_window(5)
+            .expect("HEADERS with END_STREAM needs no receive credit");
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn deferred_receive_preserves_automatic_streams_and_rejects_late_switch() {
+        let mut conn = deferred_receive_connection(&[1]);
+        conn.process_frame(Frame::Data(DataFrame::new(
+            1,
+            Bytes::from(vec![0; 50_000]),
+            false,
+        )))
+        .unwrap();
+        assert_eq!(conn.stream(1).unwrap().recv_window(), 65_535);
+        let mut updates = Vec::new();
+        while let Some(frame) = conn.next_frame() {
+            if let Frame::WindowUpdate(update) = frame {
+                updates.push((update.stream_id, update.increment));
+            }
+        }
+        assert_eq!(updates, [(0, 50_000), (1, 50_000)]);
+        assert_eq!(
+            conn.defer_stream_receive_window(1).unwrap_err().code,
+            ErrorCode::ProtocolError,
+            "automatic refill must not disguise earlier DATA receipt"
+        );
+        assert_eq!(
+            conn.release_stream_receive_capacity(1, 1).unwrap_err().code,
+            ErrorCode::ProtocolError
+        );
+        assert!(conn.next_frame().is_none());
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    #[test]
+    fn deferred_receive_rejected_window_overflow_preserves_unconsumed_bytes() {
+        let mut conn = deferred_receive_connection(&[1]);
+        conn.defer_stream_receive_window(1).unwrap();
+        conn.process_frame(Frame::Data(DataFrame::new(
+            1,
+            Bytes::from_static(b"data"),
+            false,
+        )))
+        .unwrap();
+        let previous = conn.stream(1).unwrap().recv_window();
+        let delta = i32::MAX - previous;
+        conn.stream_mut(1)
+            .unwrap()
+            .update_recv_window(delta)
+            .unwrap();
+        assert_eq!(
+            conn.release_stream_receive_capacity(1, 1).unwrap_err().code,
+            ErrorCode::FlowControlError
+        );
+        assert_eq!(conn.stream(1).unwrap().recv_window(), i32::MAX);
+        assert!(conn.next_frame().is_none());
+        conn.stream_mut(1)
+            .unwrap()
+            .update_recv_window(-delta)
+            .unwrap();
+        conn.release_stream_receive_capacity(1, 4)
+            .expect("failed window update did not retire any bytes");
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::WindowUpdate(update))
+            if update.stream_id == 1 && update.increment == 4)
         );
     }
 
