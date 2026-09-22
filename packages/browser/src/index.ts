@@ -1347,6 +1347,7 @@ interface BrowserStorageGlobalLike {
 
 const REGION_PARENTS = new Map<string, string>();
 const RUNTIME_FETCH_GRANTS = new Map<string, BrowserFetchGrant>();
+const FETCH_OWNER_CLOSES = new Map<string, Promise<BrowserOutcome<void>>>();
 const INFLIGHT_WEBTRANSPORTS = new Map<string, BrowserWebTransportState>();
 const TERMINAL_WEBTRANSPORTS = new Map<string, BrowserWebTransportTerminalState>();
 const BROWSER_LANE_HEALTH_REGISTRY = new Map<
@@ -4927,6 +4928,29 @@ function snapshotRegionHandle(handle: CoreRegionHandle): CoreRegionHandle {
     generation: raw.generation, owner_token: raw.owner_token } as import("@asupersync/browser-core").RegionHandleRef);
 }
 
+function snapshotTaskHandle(handle: CoreTaskHandle): CoreTaskHandle {
+  const raw = handle.toJSON();
+  return new CoreTaskHandle({ kind: raw.kind, slot: raw.slot,
+    generation: raw.generation, owner_token: raw.owner_token } as import("@asupersync/browser-core").TaskHandleRef);
+}
+
+function snapshotOwnerCloseVersion(version: AbiVersion | null): AbiVersion | null {
+  if (version === null) return null;
+  const snapshot = { major: version.major, minor: version.minor };
+  if (!Number.isInteger(snapshot.major) || snapshot.major < 0 || snapshot.major > 65_535
+      || !Number.isInteger(snapshot.minor) || snapshot.minor < 0 || snapshot.minor > 65_535) {
+    throw new TypeError("closeAsync ABI version fields must be unsigned 16-bit integers");
+  }
+  return Object.freeze(snapshot);
+}
+
+function ownerCloseFailure(operation: string, error: unknown): BrowserOutcome<never> {
+  let detail: string;
+  try { detail = String(errorMessage(error)); }
+  catch { detail = "unprintable host error"; }
+  return OutcomeFactory.err("internal_failure", "unknown", `${operation} failed: ${detail}`);
+}
+
 function asCoreTaskHandle(handle: TaskHandle | CoreTaskHandle | HandleRef): CoreTaskHandle {
   if (handle instanceof TaskHandle) {
     return handle.core;
@@ -5028,6 +5052,16 @@ function lookupWebTransportState(handle: CoreTaskHandle): BrowserWebTransportSta
 
 const SDK_FETCHES = createBrowserFetchManager({
   globalObject: defaultGlobalObject,
+  isClosing(scopeKey) {
+    const visited = new Set<string>();
+    let current: string | undefined = scopeKey;
+    while (current !== undefined && !visited.has(current)) {
+      if (FETCH_OWNER_CLOSES.has(current)) return true;
+      visited.add(current);
+      current = REGION_PARENTS.get(current);
+    }
+    return false;
+  },
   lookup(scopeKey) {
     const visited = new Set<string>();
     let current: string | undefined = scopeKey;
@@ -5207,12 +5241,15 @@ function cancelBrowserTask(
   message: string | undefined,
   consumerVersion: AbiVersion | null,
 ): BrowserOutcome<void> {
-  const requested = taskCancel({ task, kind, message }, consumerVersion);
+  let ownedTask: CoreTaskHandle;
+  try { ownedTask = snapshotTaskHandle(task); }
+  catch (error) { return ownerCloseFailure("task_cancel", error); }
+  const requested = taskCancel({ task: ownedTask, kind, message }, consumerVersion);
   if (requested.outcome !== "ok") {
     return requested;
   }
-  SDK_FETCHES.cancelTask(browserWebTransportStateKey(task), kind, message);
-  const state = lookupWebTransportState(task);
+  SDK_FETCHES.cancelTask(browserWebTransportStateKey(ownedTask), kind, message);
+  const state = lookupWebTransportState(ownedTask);
   if (state && !state.settled) {
     const terminal = webTransportCancellationOutcome(kind, message, "cancelling");
     cleanupWebTransportState(state, message, terminal);
@@ -5222,7 +5259,7 @@ function cancelBrowserTask(
       // The admitted task cancellation still owns and initiates all stream
       // cleanup, even when the host session's best-effort close throws.
     }
-    settleWebTransportTask(task, terminal, consumerVersion);
+    settleWebTransportTask(ownedTask, terminal, consumerVersion);
   }
   return requested;
 }
@@ -5254,6 +5291,47 @@ function cleanupRuntimeOwnedWebTransports(handle: CoreRuntimeHandle): void {
   RUNTIME_FETCH_GRANTS.delete(rootKey);
   SDK_FETCHES.closeScopes(ownerKeys, "runtime_close");
   closeOwnedWebTransports(ownerKeys, "runtime_close");
+}
+
+function closeFetchOwnerAsync(
+  owner: CoreRegionHandle | CoreRuntimeHandle,
+  version: AbiVersion | null,
+  kind: "scope_close" | "runtime_close",
+): Promise<BrowserOutcome<void>> {
+  const ownerKey = browserWebTransportStateKey(owner);
+  const pending = FETCH_OWNER_CLOSES.get(ownerKey);
+  if (pending) return pending;
+  let resolve!: (outcome: BrowserOutcome<void>) => void;
+  const attempt = new Promise<BrowserOutcome<void>>((done) => { resolve = done; });
+  // Publish the ancestry fence and shared receipt before cancellation can
+  // invoke host callbacks. New descendant scopes inherit this same fence.
+  FETCH_OWNER_CLOSES.set(ownerKey, attempt);
+  void (async () => {
+    try {
+      let drained = await SDK_FETCHES.drainScopes(collectOwnedRegionKeys(ownerKey), kind);
+      if (drained.outcome !== "ok") { resolve(drained); return; }
+      // An already-admitted task can reenter close while taskSpawn is still
+      // returning, before its JS ownership record exists. That stack has now
+      // unwound; sweep it before consulting the actual ABI ledger barrier.
+      drained = await SDK_FETCHES.drainScopes(collectOwnedRegionKeys(ownerKey), kind);
+      if (drained.outcome !== "ok") { resolve(drained); return; }
+      const closed = kind === "runtime_close"
+        ? runtimeClose(owner as CoreRuntimeHandle, version)
+        : scopeClose(owner as CoreRegionHandle, version);
+      if (closed.outcome === "ok") {
+        if (kind === "runtime_close") cleanupRuntimeOwnedWebTransports(owner as CoreRuntimeHandle);
+        else cleanupScopeOwnedWebTransports(owner as CoreRegionHandle);
+      }
+      resolve(closed);
+    } catch (error) {
+      resolve(ownerCloseFailure(`${kind}_async`, error));
+    } finally {
+      // Other owners can still be draining ancestors or descendants. Remove
+      // only this attempt; a refused close leaves authority/lineage intact.
+      if (FETCH_OWNER_CLOSES.get(ownerKey) === attempt) FETCH_OWNER_CLOSES.delete(ownerKey);
+    }
+  })();
+  return attempt;
 }
 
 function createBrowserWebTransportState(
@@ -5481,6 +5559,19 @@ export class BrowserRuntime {
     return closed;
   }
 
+  /**
+   * Cancel and await owned streamed fetches, then close the runtime through
+   * the ABI. Other ABI close restrictions still apply. Failed attempts
+   * restore fetch admission; a host that never settles keeps cleanup pending.
+   */
+  closeAsync(consumerVersion: AbiVersion | null = this.consumerVersion): Promise<BrowserOutcome<void>> {
+    try {
+      const core = snapshotRuntimeHandle(this.core);
+      const version = snapshotOwnerCloseVersion(consumerVersion);
+      return closeFetchOwnerAsync(core, version, "runtime_close");
+    } catch (error) { return Promise.resolve(ownerCloseFailure("runtime_close_async", error)); }
+  }
+
   enterScope(
     label?: string,
     consumerVersion: AbiVersion | null = this.consumerVersion,
@@ -5540,6 +5631,19 @@ export class RegionHandle {
     return closed;
   }
 
+  /**
+   * Drain streamed fetches in this scope and its descendants before the ABI
+   * close. Admission is fenced while draining. ABI close errors propagate
+   * unchanged; synchronous close and withScope keep their existing behavior.
+   */
+  closeAsync(consumerVersion: AbiVersion | null = this.consumerVersion): Promise<BrowserOutcome<void>> {
+    try {
+      const core = snapshotRegionHandle(this.core);
+      const version = snapshotOwnerCloseVersion(consumerVersion);
+      return closeFetchOwnerAsync(core, version, "scope_close");
+    } catch (error) { return Promise.resolve(ownerCloseFailure("scope_close_async", error)); }
+  }
+
   enterScope(
     label?: string,
     consumerVersion: AbiVersion | null = this.consumerVersion,
@@ -5596,8 +5700,8 @@ export class RegionHandle {
   /**
    * Admit one host fetch using this scope's retained runtime authority.
    * The returned handle exposes headers and bounded, on-demand response bytes.
-   * Redirects are refused. Cancel/finish the response before synchronous owner
-   * close, which preserves the ABI's refusal while owned work remains active.
+   * Redirects are refused. Use closeAsync to await response cleanup before
+   * owner release; synchronous close preserves its existing ABI behavior.
    */
   fetch(
     options: BrowserFetchOptions,

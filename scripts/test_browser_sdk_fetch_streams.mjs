@@ -7,8 +7,9 @@
  * WASM ABI is replaced with an intentional call recorder; fetch is a controlled
  * host returning native WHATWG Response/ReadableStream objects. One journey also
  * uses Node's actual fetch against a real, gated localhost HTTP server. The recorder
- * tracks live tasks and refuses owner close until their terminal join, matching
- * the relevant Rust ledger rule without claiming Rust execution. Evidence covers
+ * tracks live tasks and injects owner-close refusal until their terminal join;
+ * a separate mode permits recursive release. These intentionally exercise ABI
+ * result branches, not a complete model of Rust's close rules. Evidence covers
  * the JS host boundary and localhost HTTP integration, not packaged WASM,
  * browser integration or external-network interoperability.
  * No source file is rewritten by the harness.
@@ -97,9 +98,10 @@ function responseBody(options = {}) {
 
 async function fixture(t, options = {}) {
   const calls = { init: 0, runtimeCreate: [], scopeEnter: [], spawn: [], join: [], cancel: [],
-    scopeClose: [], runtimeClose: [], rawFetch: [], network: [] };
+    scopeClose: [], runtimeClose: [], rawFetch: [], network: [], issuedTasks: [], transports: [] };
   const controls = { scopeClose: null, runtimeClose: null, taskCancel: unitJson, taskJoin: null };
   const parents = new Map();
+  const regions = new Map();
   const liveTasks = new Map();
   const handles = [];
   let nextRuntime = 1;
@@ -120,8 +122,17 @@ async function fixture(t, options = {}) {
     return false;
   }
   function closeOwner(raw, override) {
-    if (override !== null) return override;
-    return [...liveTasks.values()].some((scope) => ownedBy(scope, raw)) ? liveTaskFailure : unitJson;
+    const hasLiveTasks = [...liveTasks.values()].some((scope) => ownedBy(scope, raw));
+    const result = override ?? (!options.acceptLiveOwnerClose && hasLiveTasks ? liveTaskFailure : unitJson);
+    if (JSON.parse(result).outcome === "ok") {
+      const descendants = [...regions.values()].filter((region) => ownedBy(region, raw));
+      for (const [task, scope] of liveTasks) if (ownedBy(scope, raw)) liveTasks.delete(task);
+      for (const region of descendants) {
+        parents.delete(key(region));
+        regions.delete(key(region));
+      }
+    }
+    return result;
   }
 
   function hostFetch(url, init) {
@@ -155,12 +166,24 @@ async function fixture(t, options = {}) {
     return headers.promise;
   }
 
+  class ControlledTransport {
+    constructor() {
+      this.ready = Promise.resolve();
+      this.completion = deferred();
+      this.closed = this.completion.promise;
+      this.closes = 0;
+      this.datagrams = { readable: new ReadableStream(), writable: new WritableStream() };
+      calls.transports.push(this);
+    }
+    close(info = {}) { this.closes += 1; this.completion.resolve(info); }
+  }
+
   const context = createContext({
     AbortController, ArrayBuffer, Uint8Array, URL, TextEncoder, TextDecoder,
     ReadableStream, WritableStream, Response, Headers, Request, WebAssembly,
     Error, TypeError, RangeError, DOMException, structuredClone, queueMicrotask,
     setTimeout, clearTimeout, window: {}, document: {}, isSecureContext: true,
-    fetch: hostFetch,
+    fetch: hostFetch, WebTransport: ControlledTransport,
   });
   const names = [
     "default", "abi_fingerprint", "abi_version", "fetch_request",
@@ -182,12 +205,14 @@ async function fixture(t, options = {}) {
       calls.scopeEnter.push(parsed);
       const result = handle("region", nextRegion++);
       parents.set(key(JSON.parse(result)), key(parsed.parent));
+      regions.set(key(JSON.parse(result)), JSON.parse(result));
       return result;
     },
     task_spawn: (request) => {
       const parsed = JSON.parse(request);
       calls.spawn.push(parsed);
       const result = handle("task", nextTask++);
+      calls.issuedTasks.push(JSON.parse(result));
       liveTasks.set(key(JSON.parse(result)), parsed.scope);
       return result;
     },
@@ -446,7 +471,7 @@ test("SDK-FETCH-LATE-RESPONSE: cancellation drains a response delivered after ab
   assert.equal(body.readable.locked, false);
 });
 
-test("SDK-FETCH-OWNERSHIP: live tasks block synchronous owner close until explicit response cancellation", { timeout: 5000 }, async (t) => {
+test("SDK-FETCH-OWNERSHIP: an injected live-task close refusal preserves responses until explicit cancellation", { timeout: 5000 }, async (t) => {
   const { runtime, scope, start, calls, liveTasks } = await fixture(t);
   const child = unwrap(scope.enterScope("child"));
   const grandchild = unwrap(child.enterScope("grandchild"));
@@ -925,3 +950,306 @@ for (const parentKind of ["runtime", "scope"]) {
     assert.equal(liveTasks.size, 0);
   });
 }
+
+test("SDK-FETCH-CLOSE-ASYNC: scope closure drains host cleanup before ABI close and fences new descendants", { timeout: 5000 }, async (t) => {
+  const cleanup = deferred();
+  const { runtime, scope, start, calls, liveTasks } = await fixture(t);
+  const child = unwrap(scope.enterScope("draining-child"));
+  const sibling = unwrap(runtime.enterScope("surviving-sibling"));
+  const draining = start({}, child);
+  const survivor = start({}, sibling);
+  await turn();
+  const body = calls.network[0].respond(responseBody({ cancel: () => cleanup.promise }));
+  const survivingBody = calls.network[1].respond();
+  unwrap(await draining.response());
+  unwrap(await survivor.response());
+  const pending = draining.read();
+  await turn();
+  assert.deepEqual(body.events, [["pull"]]);
+  const firstClose = child.closeAsync();
+  const sameClose = child.closeAsync();
+  let completed = false;
+  const completion = firstClose.then((outcome) => { completed = true; return outcome; });
+  failure(child.fetch({ url: requestUrl }), "capability_denied");
+  const lateChild = unwrap(child.enterScope("created-during-drain"));
+  failure(lateChild.fetch({ url: requestUrl }), "capability_denied");
+  await turn();
+  assert.equal(completed, false);
+  assert.equal(calls.scopeClose.length, 0, "host drain must finish before submitting owner close to the ABI");
+  assert.equal(calls.cancel.length, 1);
+  assert.equal(calls.cancel[0].kind, "scope_close");
+  assert.equal(liveTasks.size, 2);
+  assert.equal(body.readable.locked, true);
+  assert.equal(calls.network[1].init.signal.aborted, false);
+  const survivorRead = survivor.read();
+  survivingBody.input.enqueue(new Uint8Array([80]));
+  assert.deepEqual(bytes(await survivorRead), [80]);
+  cleanup.resolve();
+  unwrap(await completion);
+  unwrap(await sameClose);
+  assert.equal(cancellation(await pending).kind, "scope_close");
+  cancellation(await draining.closed);
+  assert.equal(body.readable.locked, false);
+  assert.equal(calls.scopeClose.length, 1);
+  handleMatches(calls.scopeClose[0], child);
+  assert.equal(liveTasks.size, 1);
+  failure(lateChild.fetch({ url: requestUrl }), "capability_denied");
+  survivingBody.input.close();
+  assert.equal(unwrap(await survivor.read()).done, true);
+  unwrap(await survivor.closed);
+});
+
+test("SDK-FETCH-CLOSE-ASYNC-LATE: runtime closure waits for a late response and owns the entire nested fetch tree", { timeout: 5000 }, async (t) => {
+  const { runtime, scope, start, calls, liveTasks } = await fixture(t, { ignoreAbort: true });
+  const child = unwrap(scope.enterScope("child"));
+  const grandchild = unwrap(child.enterScope("grandchild"));
+  const first = start({}, scope);
+  const second = start({}, grandchild);
+  await turn();
+  const liveBody = calls.network[0].respond();
+  unwrap(await first.response());
+  const pending = first.read();
+  const lateHead = second.response();
+  await turn();
+  const closing = runtime.closeAsync();
+  failure(grandchild.fetch({ url: requestUrl }), "capability_denied");
+  const newlyEntered = unwrap(runtime.enterScope("entered-during-close"));
+  failure(newlyEntered.fetch({ url: requestUrl }), "capability_denied");
+  await turn();
+  assert.ok(calls.network.every((request) => request.init.signal.aborted));
+  assert.equal(calls.runtimeClose.length, 0);
+  assert.equal(cancellation(await pending).kind, "runtime_close");
+  const lateBody = calls.network[1].respond();
+  unwrap(await closing);
+  assert.equal(cancellation(await lateHead).kind, "runtime_close");
+  cancellation(await first.closed);
+  cancellation(await second.closed);
+  assert.equal(liveBody.readable.locked, false);
+  assert.equal(lateBody.readable.locked, false);
+  assert.equal(lateBody.events.filter(([event]) => event === "cancel").length, 1);
+  assert.equal(calls.runtimeClose.length, 1);
+  assert.equal(liveTasks.size, 0);
+});
+
+test("SDK-FETCH-CLOSE-ASYNC-CANCEL-DENIED: cancellation refusal preserves the fetch and permits a later close attempt", { timeout: 5000 }, async (t) => {
+  const { scope, start, calls, controls, liveTasks } = await fixture(t);
+  const operation = start();
+  await turn();
+  const body = calls.network[0].respond();
+  unwrap(await operation.response());
+  const rejected = { outcome: "err", failure: {
+    code: "capability_denied", recoverability: "permanent", message: "drain cancellation denied",
+  } };
+  controls.taskCancel = JSON.stringify(rejected);
+  assert.deepEqual(clone(await scope.closeAsync()), rejected);
+  assert.equal(calls.scopeClose.length, 0);
+  assert.equal(calls.network[0].init.signal.aborted, false);
+  const reading = operation.read();
+  body.input.enqueue(new Uint8Array([81]));
+  assert.deepEqual(bytes(await reading), [81]);
+  const subsequent = start();
+  await turn();
+  assert.equal(calls.network.length, 2, "a failed attempt releases its admission fence");
+  calls.network[1].respond(null, { status: 204, statusText: "No Content" });
+  unwrap(await subsequent.response());
+  unwrap(await subsequent.closed);
+  controls.taskCancel = unitJson;
+  unwrap(await scope.closeAsync());
+  cancellation(await operation.closed);
+  assert.equal(calls.scopeClose.length, 1);
+  assert.equal(liveTasks.size, 0);
+});
+
+test("SDK-FETCH-CLOSE-ASYNC-ABI-DENIED: final owner refusal is returned after cleanup and can be retried", { timeout: 5000 }, async (t) => {
+  const { runtime, start, calls, controls, liveTasks } = await fixture(t);
+  const operation = start();
+  await turn();
+  const rejected = { outcome: "err", failure: {
+    code: "compatibility_rejected", recoverability: "transient", message: "runtime close refused",
+  } };
+  controls.runtimeClose = JSON.stringify(rejected);
+  assert.deepEqual(clone(await runtime.closeAsync()), rejected);
+  cancellation(await operation.closed);
+  assert.equal(liveTasks.size, 0);
+  assert.equal(calls.runtimeClose.length, 1);
+  const retryWork = start();
+  await turn();
+  controls.runtimeClose = null;
+  unwrap(await runtime.closeAsync());
+  cancellation(await retryWork.closed);
+  assert.equal(calls.runtimeClose.length, 2);
+  assert.equal(liveTasks.size, 0);
+});
+
+for (const kind of ["generic-task", "webtransport"]) {
+  test("SDK-FETCH-CLOSE-ASYNC-UNRELATED-" + kind + ": unrelated work preserves an injected ABI close refusal", { timeout: 5000 }, async (t) => {
+    const { sdk, scope, start, calls, liveTasks } = await fixture(t);
+    const fetch = start();
+    const other = kind === "generic-task"
+      ? unwrap(scope.spawnTask({ label: "unrelated-task" }))
+      : unwrap(scope.openWebTransport("https://transport.example.test/session"));
+    await turn();
+    assert.equal(liveTasks.size, 2);
+    failure(await scope.closeAsync(), "compatibility_rejected");
+    cancellation(await fetch.closed);
+    assert.equal(liveTasks.size, 1);
+    assert.equal(calls.cancel.length, 1);
+    assert.equal(calls.cancel[0].task.slot, calls.issuedTasks[0].slot);
+    if (kind === "webtransport") {
+      assert.equal(calls.transports[0].closes, 0);
+      assert.equal(calls.transports[0].datagrams.readable.locked, true);
+      unwrap(await other.ready());
+      cancellation(other.close());
+      await turn();
+    } else {
+      unwrap(other.join(sdk.Outcome.ok(undefined)));
+    }
+    assert.equal(liveTasks.size, 0);
+    unwrap(await scope.closeAsync());
+    assert.equal(calls.scopeClose.length, 2);
+  });
+}
+
+test("SDK-FETCH-CLOSE-ASYNC-PUBLICATION: refused task publication blocks owner close after host cleanup", { timeout: 5000 }, async (t) => {
+  const { scope, start, calls, controls, liveTasks } = await fixture(t);
+  const operation = start();
+  await turn();
+  const rejected = { outcome: "err", failure: {
+    code: "invalid_handle", recoverability: "permanent", message: "drain terminal refused",
+  } };
+  controls.taskJoin = JSON.stringify(rejected);
+  assert.deepEqual(clone(await scope.closeAsync()), rejected);
+  assert.deepEqual(clone(await operation.closed), rejected);
+  assert.equal(calls.network[0].init.signal.aborted, true);
+  assert.equal(calls.scopeClose.length, 0);
+  assert.equal(liveTasks.size, 1);
+});
+
+for (const route of ["task-handle", "cancellation-token"]) {
+  test("SDK-FETCH-GENERIC-CANCEL-SNAPSHOT-" + route + ": host cancellation uses the exact task admitted by the ABI", { timeout: 5000 }, async (t) => {
+    const { sdk, start, calls } = await fixture(t);
+    const first = start();
+    const survivor = start();
+    await turn();
+    const firstBody = calls.network[0].respond();
+    const survivingBody = calls.network[1].respond();
+    unwrap(await first.response());
+    unwrap(await survivor.response());
+    const firstRaw = calls.issuedTasks[0];
+    let supplied = firstRaw;
+    class ChangingTask extends sdk.CoreTaskHandle {
+      toJSON() { return supplied; }
+    }
+    const task = new ChangingTask(firstRaw);
+    let serialized = false;
+    const version = { major: 1, minor: 0, toJSON() {
+      serialized = true;
+      supplied = calls.issuedTasks[1];
+      return { major: 1, minor: 0 };
+    } };
+    const result = route === "task-handle"
+      ? new sdk.TaskHandle(task).cancel("navigation", "cancel original task", version)
+      : new sdk.CancellationToken("navigation", "cancel original task").cancel(task, version);
+    unwrap(result);
+    assert.equal(serialized, true);
+    assert.equal(calls.cancel[0].task.slot, firstRaw.slot);
+    assert.equal(cancellation(await first.closed).kind, "navigation");
+    assert.equal(firstBody.readable.locked, false);
+    assert.equal(calls.network[0].init.signal.aborted, true);
+    assert.equal(calls.network[1].init.signal.aborted, false);
+    const reading = survivor.read();
+    survivingBody.input.enqueue(new Uint8Array([82]));
+    assert.deepEqual(bytes(await reading), [82]);
+    survivingBody.input.close();
+    assert.equal(unwrap(await survivor.read()).done, true);
+    unwrap(await survivor.closed);
+  });
+}
+
+for (const poison of ["outcome-getter", "error-message-getter"]) {
+  test("SDK-FETCH-HOST-REJECTION-" + poison + ": hostile thrown values cannot strand pending response ownership", { timeout: 5000 }, async (t) => {
+    const { start, calls, liveTasks } = await fixture(t);
+    const operation = start();
+    await turn();
+    let rejected;
+    if (poison === "outcome-getter") {
+      rejected = { get outcome() { throw new Error("hostile outcome access"); } };
+    } else {
+      rejected = new Error();
+      Object.defineProperty(rejected, "message", { get() { throw new Error("hostile message access"); } });
+    }
+    calls.network[0].headers.reject(rejected);
+    failure(await operation.response(), "internal_failure");
+    failure(await operation.closed, "internal_failure");
+    assert.equal(calls.join.length, 1);
+    assert.equal(liveTasks.size, 0);
+  });
+}
+
+test("SDK-FETCH-CANCEL-OUTCOME: caller mutation of a pending terminal cannot alter the later task publication", { timeout: 5000 }, async (t) => {
+  const { start, calls } = await fixture(t, { ignoreAbort: true });
+  const operation = start();
+  await turn();
+  const cancelling = operation.cancel("retain original cancellation");
+  const early = await operation.response();
+  const detail = cancellation(early);
+  Reflect.set(early, "outcome", "ok");
+  Reflect.set(early, "value", undefined);
+  Reflect.set(detail, "kind", "forged_success");
+  Reflect.set(detail, "message", "forged result");
+  Reflect.deleteProperty(early, "cancellation");
+  const body = calls.network[0].respond();
+  const terminal = cancellation(await cancelling);
+  assert.equal(terminal.kind, "fetch_cancel");
+  assert.equal(terminal.message, "retain original cancellation");
+  assert.equal(cancellation(await operation.closed).kind, "fetch_cancel");
+  assert.equal(calls.join[0].outcome.outcome, "cancelled");
+  assert.equal(calls.join[0].outcome.cancellation.kind, "fetch_cancel");
+  assert.equal(body.readable.locked, false);
+});
+
+test("SDK-FETCH-HEAD-OUTCOME: caller mutation of shared response metadata cannot poison body reads", { timeout: 5000 }, async (t) => {
+  const { start, calls } = await fixture(t);
+  const operation = start();
+  await turn();
+  const body = calls.network[0].respond();
+  const headers = await operation.response();
+  const metadata = unwrap(headers);
+  Reflect.set(headers, "outcome", "err");
+  Reflect.set(headers, "failure", { code: "internal_failure", recoverability: "permanent", message: "forged failure" });
+  Reflect.set(metadata, "status", 599);
+  const reading = operation.read();
+  body.input.enqueue(new Uint8Array([83]));
+  assert.deepEqual(bytes(await reading), [83]);
+  body.input.close();
+  assert.equal(unwrap(await operation.read()).done, true);
+  unwrap(await operation.closed);
+  assert.equal(unwrap(await operation.response()).status, 200);
+  assert.equal(calls.join[0].outcome.outcome, "ok");
+});
+
+test("SDK-FETCH-CLOSE-ASYNC-PERMISSIVE: host drain still precedes an ABI that permits recursive task release", { timeout: 5000 }, async (t) => {
+  const cleanup = deferred();
+  const { scope, start, calls, liveTasks } = await fixture(t, { acceptLiveOwnerClose: true });
+  const operation = start();
+  unwrap(scope.spawnTask({ label: "recursively-released-generic-task" }));
+  await turn();
+  const body = calls.network[0].respond(responseBody({ cancel: () => cleanup.promise }));
+  unwrap(await operation.response());
+  const pending = operation.read();
+  await turn();
+  const closing = scope.closeAsync();
+  await turn();
+  assert.equal(calls.scopeClose.length, 0, "a permissive ABI must not allow host ownership to escape the drain");
+  assert.equal(liveTasks.size, 2);
+  assert.equal(body.readable.locked, true);
+  cleanup.resolve();
+  unwrap(await closing);
+  cancellation(await pending);
+  cancellation(await operation.closed);
+  assert.equal(calls.scopeClose.length, 1);
+  assert.equal(calls.cancel.length, 1, "only the fetch task needs host cancellation");
+  assert.equal(calls.join.length, 1, "the ABI recursively releases the unrelated generic task");
+  assert.equal(liveTasks.size, 0);
+  assert.equal(body.readable.locked, false);
+});

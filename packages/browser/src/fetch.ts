@@ -48,6 +48,7 @@ export interface FetchStreamHandle {
 
 type Failure = Exclude<Outcome<never>, { outcome: "ok" }>;
 type Deferred<T> = { promise: Promise<T>; resolve(value: T): void };
+const LOCAL_FAILURES = new WeakSet<object>();
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
@@ -56,19 +57,25 @@ function deferred<T>(): Deferred<T> {
 }
 
 function message(error: unknown): string {
-  try { return error instanceof Error ? error.message : String(error); }
+  try { return String(error instanceof Error ? error.message : error); }
   catch { return "unprintable host error"; }
 }
 
 function failure(text: string, code: "capability_denied" | "compatibility_rejected" | "internal_failure" = "compatibility_rejected", transient = false): Failure {
-  return Outcomes.err(code, transient ? "transient" : "permanent", text) as Failure;
+  const outcome = Outcomes.err(code, transient ? "transient" : "permanent", text);
+  if (outcome.outcome === "err") Object.freeze(outcome.failure);
+  Object.freeze(outcome);
+  LOCAL_FAILURES.add(outcome);
+  return outcome as Failure;
 }
 
 function cancelled(kind: string, reason: string | undefined, task: TaskHandle): Failure {
   const raw = task.toJSON();
-  return Outcomes.cancelled({ kind, phase: "completed", origin_region: "browser-sdk",
+  const outcome = Outcomes.cancelled({ kind, phase: "completed", origin_region: "browser-sdk",
     origin_task: `${raw.kind}:${raw.slot}:${raw.generation}`, timestamp_nanos: 0,
-    message: reason ?? null, truncated: false }) as Failure;
+    message: reason ?? null, truncated: false });
+  if (outcome.outcome === "cancelled") Object.freeze(outcome.cancellation);
+  return Object.freeze(outcome) as Failure;
 }
 
 export function browserFetchHandleKey(raw: HandleRef): string {
@@ -199,7 +206,7 @@ function prepare(options: BrowserFetchOptions, grant: FetchAuthority): Prepared 
 }
 
 function asFailure(error: unknown): Failure {
-  if (error && typeof error === "object" && "outcome" in error && error.outcome === "err") return error as Failure;
+  if (error && typeof error === "object" && LOCAL_FAILURES.has(error)) return error as Failure;
   return failure(`browser fetch failed: ${message(error)}`, "internal_failure", true);
 }
 
@@ -228,6 +235,7 @@ export interface BrowserFetchGrant { rootKey: string; authority: FetchAuthority;
 /** Internal authority resolver and ownership registry, shared by all SDK scopes. */
 export function createBrowserFetchManager(dependencies: {
   lookup(scopeKey: string): BrowserFetchGrant | null;
+  isClosing(scopeKey: string): boolean;
   globalObject(): Record<string, unknown> | undefined;
 }) {
   const active = new Map<string, Operation>();
@@ -251,6 +259,7 @@ export function createBrowserFetchManager(dependencies: {
     received = 0;
     terminalFailure: Failure | null = null;
     creditHeld = true;
+    cancelling: Promise<Outcome<void>> | null = null;
     readonly taskKey: string;
 
     constructor(readonly scopeKey: string, readonly grant: BrowserFetchGrant,
@@ -286,6 +295,9 @@ export function createBrowserFetchManager(dependencies: {
           outcome = asFailure(error);
         }
       }
+      if (outcome.outcome === "cancelled") Object.freeze(outcome.cancellation);
+      if (outcome.outcome === "err") Object.freeze(outcome.failure);
+      Object.freeze(outcome);
       if (outcome.outcome !== "ok") this.terminalFailure = outcome;
       if (!publicationFailed) this.retire();
       this.closed.resolve(outcome);
@@ -387,7 +399,7 @@ export function createBrowserFetchManager(dependencies: {
           void Promise.resolve(readerClosed).catch((error) => this.stop(asFailure(error)));
           if (this.stopped) return;
         }
-        this.head.resolve(Outcomes.ok(Object.freeze({ status, statusText, url, headers: Object.freeze(headers) })));
+        this.head.resolve(Object.freeze(Outcomes.ok(Object.freeze({ status, statusText, url, headers: Object.freeze(headers) }))));
         if (body === null) this.finish(Outcomes.ok(undefined));
       } catch (error) {
         this.stop(asFailure(error));
@@ -447,11 +459,25 @@ export function createBrowserFetchManager(dependencies: {
 
     cancel(reason = "fetch cancelled by caller"): Promise<Outcome<void>> {
       if (typeof reason !== "string") return Promise.resolve(failure("fetch cancel reason must be a string"));
+      return this.requestCancel("fetch_cancel", reason);
+    }
+
+    requestCancel(kind: string, reason: string): Promise<Outcome<void>> {
       if (this.completed || this.stopped) return this.closed.promise;
-      const admitted = taskCancel({ task: this.task, kind: "fetch_cancel", message: reason }, this.version);
-      if (admitted.outcome !== "ok") return Promise.resolve(admitted);
-      this.stop(cancelled("fetch_cancel", reason, this.task));
-      return this.closed.promise;
+      if (this.cancelling) return this.cancelling;
+      const attempt = deferred<Outcome<void>>();
+      this.cancelling = attempt.promise;
+      let admitted: Outcome<void>;
+      try { admitted = taskCancel({ task: this.task, kind, message: reason }, this.version); }
+      catch (error) { admitted = asFailure(error); }
+      if (admitted.outcome !== "ok") {
+        this.cancelling = null;
+        attempt.resolve(admitted);
+      } else {
+        this.stop(cancelled(kind, reason, this.task));
+        void this.closed.promise.then(attempt.resolve);
+      }
+      return attempt.promise;
     }
   }
 
@@ -470,8 +496,10 @@ export function createBrowserFetchManager(dependencies: {
         const scopeKey = browserFetchHandleKey(snapshot);
         const grant = dependencies.lookup(scopeKey);
         if (!grant) return failure("fetch requires a scope with retained explicit runtime authority", "capability_denied");
+        if (dependencies.isClosing(scopeKey)) return failure("fetch owner is closing", "capability_denied");
         const request = prepare(options, grant.authority);
         if (dependencies.lookup(scopeKey) !== grant) return failure("fetch owner closed during request preparation", "capability_denied");
+        if (dependencies.isClosing(scopeKey)) return failure("fetch owner is closing", "capability_denied");
         const count = roots.get(grant.rootKey) ?? 0;
         if (count >= BROWSER_FETCH_LIMITS.maxRequestsPerRuntime) return failure("fetch runtime admission capacity exhausted", "compatibility_rejected", true);
         roots.set(grant.rootKey, count + 1);
@@ -501,6 +529,20 @@ export function createBrowserFetchManager(dependencies: {
           else operation.stop(cancelled(reason, reason, operation.task));
         }
       }
+    },
+    async drainScopes(scopeKeys: Set<string>, reason: string): Promise<Outcome<void>> {
+      const operations = Array.from(active.values()).filter((operation) => scopeKeys.has(operation.scopeKey));
+      const receipts = await Promise.all(operations.map(async (operation) => {
+        const receipt = await operation.requestCancel(reason, reason);
+        // Domain errors and admitted cancellation can both finish cleanup.
+        // A refused cancellation or terminal publication still owns its slot.
+        return operation.creditHeld
+          ? receipt.outcome === "ok"
+            ? failure("fetch cleanup retained its owned task", "internal_failure")
+            : receipt
+          : Outcomes.ok(undefined);
+      }));
+      return receipts.find((receipt) => receipt.outcome !== "ok") ?? Outcomes.ok(undefined);
     },
     cancelTask(taskKey: string, kind: string, reason?: string): void {
       const operation = active.get(taskKey);

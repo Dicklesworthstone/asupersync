@@ -2153,13 +2153,13 @@ promises and event loop; no Rust future is polled inside the wasm module.
   `asupersync-j1xbon.4` support decision keeps this lane
   artifact-contract-backed preview, not a stable external Rust Browser Edition
   API.
-- **Invariants enforced by the ledger**: the wasm ABI refuses to close a
-  scope with live task handles and rejects unknown, foreign, or already-closed
-  handles, so the no-orphan and scope-close-ordering rules hold for work that
-  is registered with it. The cancel-correctness, obligation-accounting, and
-  quiescence proofs for the browser path run natively against that ledger
-  (`tests/obligation_wasm_parity.rs`, `tests/scheduler_browser_determinism.rs`),
-  not inside a browser engine.
+- **Ownership tracked by the ledger**: the wasm ABI validates handle identity
+  and recursively drains and releases descendant handles during owner close.
+  Releasing a handle does not itself await JavaScript host cleanup. The SDK's
+  `closeAsync()` waits for its managed streamed fetches before requesting ABI
+  closure and preserves any refusal returned by that boundary. Native ledger
+  tests and browser host integration tests cover these different parts of the
+  ownership lifecycle.
 - **Single-threaded, event-loop-driven**: the package never blocks the browser
   event loop, and there is no wasm-side scheduler loop yet; `docs/WASM.md`
   tracks the lane pump as designed but not exposed.
@@ -2180,9 +2180,18 @@ requests outside the origin, method, credential, or header-count grant are
 refused before network I/O. Redirects are refused, and credentials are omitted
 unless explicitly requested and granted. Reads pull on demand and count actual
 response bytes, with a 16 MiB default response limit, a 1 MiB chunk limit, and
-at most 64 active requests per runtime. Read to EOF or await cancellation before
-closing the owner. Pending cleanup retains admission capacity, including when
-the host delivers a response after cancellation.
+at most 64 active requests per runtime. Read to EOF, await request cancellation,
+or use `await scope.closeAsync()` / `await runtime.closeAsync()` to drain managed
+streamed fetches before owner closure. Pending cleanup retains admission
+capacity, including when the host delivers a response after cancellation.
+
+`closeAsync()` prevents new descendant fetch admissions while it drains and
+shares an in-progress close attempt with concurrent callers. It returns the
+actual cancellation, publication, or ABI-close refusal when cleanup cannot
+complete, and a failed attempt restores fetch admission. This awaited path
+covers the SDK's streamed fetches; it does not claim to drain unrelated host
+operations. Synchronous `close()`, raw ABI exports, and `withScope()` retain
+their existing behavior.
 
 ### Reliable WebTransport streams
 
