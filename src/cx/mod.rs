@@ -69,6 +69,8 @@ pub mod resource_bracket;
 pub mod scope;
 pub mod scoped_cpu;
 pub mod supervisor_service;
+// Source-only readiness increment: opt in for validation before production use.
+#[cfg(feature = "test-internals")]
 pub mod worker_readiness;
 pub mod wrappers;
 

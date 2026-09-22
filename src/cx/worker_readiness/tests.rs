@@ -310,3 +310,139 @@ fn active_generation_outlives_factory_until_its_body_is_retired() {
     assert!(!readiness.is_current(&ready));
     assert_eq!(readiness.state().phase, WorkerReadinessPhase::Closed);
 }
+
+#[test]
+fn pre_cancelled_generation_skips_initializer_and_run() {
+    let cx = Cx::for_testing();
+    let (factory, readiness) = initialized_worker(
+        |_, _| -> std::future::Ready<Outcome<u8, ()>> { panic!("cancelled initializer invoked") },
+        |_, _, _| -> std::future::Ready<Outcome<(), ()>> { panic!("cancelled run invoked") },
+    );
+    cx.cancel_fast(CancelKind::User);
+    let mut body = factory.start(cx.clone(), generation(&cx, 1));
+    assert!(matches!(body.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Outcome::Cancelled(_))));
+    assert!(readiness.try_ready().unwrap().is_none());
+    assert_eq!(readiness.state().phase, WorkerReadinessPhase::Retired);
+}
+
+struct RunRetirementPanic;
+impl Future for RunRetirementPanic {
+    type Output = Outcome<(), ()>;
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(Outcome::Ok(()))
+    }
+}
+impl Drop for RunRetirementPanic {
+    fn drop(&mut self) { panic!("run retirement panic"); }
+}
+
+#[test]
+fn run_retirement_panic_cannot_leave_stale_readiness() {
+    let cx = Cx::for_testing();
+    let (factory, readiness) = initialized_worker(
+        |_, _| async { Outcome::<_, ()>::Ok(()) },
+        |_, _, ()| RunRetirementPanic,
+    );
+    let mut body = factory.start(cx.clone(), generation(&cx, 1));
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = body.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+    })).is_err());
+    drop(body);
+    assert_eq!(readiness.state().phase, WorkerReadinessPhase::Retired);
+    assert!(readiness.try_ready().unwrap().is_none());
+}
+
+struct ReentrantWake { readiness: WorkerReadiness, wakes: AtomicUsize }
+impl Wake for ReentrantWake {
+    fn wake(self: Arc<Self>) {
+        assert!(self.readiness.shared.state.try_lock().is_some(), "observer invoked under readiness lock");
+        let _ = self.readiness.try_ready();
+        self.wakes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn ready_publication_permits_reentrant_observation_without_state_lock() {
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<WorkerReadiness>();
+    send_sync::<ReadyWorker>();
+    let cx = Cx::for_testing();
+    let (factory, readiness) = held();
+    let wake = Arc::new(ReentrantWake { readiness: readiness.clone(), wakes: AtomicUsize::new(0) });
+    let waker = Waker::from(Arc::clone(&wake));
+    let mut waiting = Box::pin(readiness.wait_ready(&cx));
+    assert!(waiting.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+    let mut body = factory.start(cx.clone(), generation(&cx, 1));
+    assert!(body.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+    assert!(wake.wakes.load(Ordering::SeqCst) > 0);
+    assert!(readiness.try_ready().unwrap().is_some());
+    assert!(matches!(waiting.as_mut().poll(&mut Context::from_waker(&waker)), Poll::Ready(Ok(_))));
+}
+
+fn lab_case<F, Fut>(factory: F)
+where
+    F: FnOnce(Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::types::Budget;
+    let mut lab = LabRuntime::new(LabConfig::new(0x5ead_1e55).max_steps(16_384));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (task, mut join) = lab.state.create_task(root, Budget::INFINITE, async move {
+        factory(Cx::current().expect("real initialized-worker owner")).await;
+    }).unwrap();
+    lab.scheduler.lock().schedule(task, 0);
+    lab.run_until_idle();
+    join.try_join().unwrap().expect("bounded initialized-worker lab journey completes");
+    assert_eq!(lab.state.live_task_count(), 0);
+    assert_eq!(lab.state.pending_obligation_count(), 0);
+    assert!(lab.run_until_quiescent_with_report().lab_test_passed());
+    if lab.state.region(root).is_some() {
+        let (tasks, wakes) = lab.state.cancel_request(root, &CancelReason::shutdown(), None).into_parts();
+        assert!(tasks.is_empty());
+        wakes.dispatch();
+        lab.state.advance_region_state(root);
+    }
+    assert!(lab.state.region(root).is_none());
+}
+
+#[test]
+fn real_dynamic_initialization_failure_keeps_original_typed_error() {
+    lab_case(|cx| async move {
+        use crate::cx::DynamicSupervisorConfig;
+        use crate::supervision::{ManagedRestartMode, SupervisionConfig};
+        use std::time::Duration;
+        let mut supervisor = cx.open_dynamic_supervisor::<Cell<u8>>(DynamicSupervisorConfig::new(1)).await.unwrap();
+        let policy = DynamicWorkerConfig::new(ManagedRestartMode::Temporary, SupervisionConfig::new(1, Duration::from_secs(30)));
+        let (id, readiness) = supervisor.start_initialized_worker("failed-startup", policy,
+            |_, _| async { Outcome::<Cell<u8>, _>::Err(Cell::new(79)) },
+            |_, _, _| -> std::future::Ready<Outcome<(), Cell<u8>>> { panic!("run after failed initialization") },
+        ).await.unwrap();
+        assert!(matches!(readiness.wait_ready(&cx).await, Err(WorkerReadinessError::Closed)));
+        let completion = supervisor.wait_child(&id).await.unwrap();
+        assert!(completion.close.is_ok());
+        let report = completion.supervisor.unwrap();
+        assert_eq!((report.started, report.joined, report.restart_batches), (1, 1, 0));
+        assert!(matches!(&report.children[0].outcome, Outcome::Err(error) if error.get() == 79));
+        assert!(supervisor.shutdown().await.close.is_ok());
+    });
+}
+
+#[test]
+fn zero_capacity_admission_never_runs_initializer() {
+    lab_case(|cx| async move {
+        use crate::cx::DynamicSupervisorConfig;
+        use crate::supervision::{ManagedRestartMode, SupervisionConfig};
+        use std::time::Duration;
+        let mut supervisor = cx.open_dynamic_supervisor::<()>(DynamicSupervisorConfig::new(0)).await.unwrap();
+        let policy = DynamicWorkerConfig::new(ManagedRestartMode::Temporary, SupervisionConfig::new(1, Duration::from_secs(30)));
+        let refused = supervisor.start_initialized_worker("refused", policy,
+            |_, _| -> std::future::Ready<Outcome<(), ()>> { panic!("initializer admission bypass") },
+            |_, _, ()| -> std::future::Ready<Outcome<(), ()>> { panic!("run admission bypass") },
+        ).await;
+        assert!(matches!(refused, Err(DynamicSupervisorError::Capacity)));
+        assert_eq!(supervisor.len(), 0);
+        assert!(supervisor.shutdown().await.close.is_ok());
+    });
+}

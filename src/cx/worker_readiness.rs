@@ -12,8 +12,11 @@
 //! an observer nor cancelling an observation stops the worker. Join/reap through
 //! its existing owner for the authoritative terminal result and region closure.
 
-use super::{CancelWakerToken, Cx};
-use crate::supervision::{ManagedChildFactory, ManagedGeneration};
+use super::{
+    CancelWakerToken, Cx, DynamicChildId, DynamicSupervisor, DynamicSupervisorError,
+    DynamicWorkerConfig,
+};
+use crate::supervision::{ChildName, ManagedChildFactory, ManagedGeneration};
 use crate::sync::Notify;
 use crate::types::{CancelReason, Outcome, PanicPayload};
 use parking_lot::Mutex;
@@ -138,6 +141,24 @@ impl WorkerReadiness {
         self.shared.state.lock().snapshot
     }
 
+    /// Observe Ready without allocating a waiter or touching a task context.
+    /// `None` means no generation is currently ready, not that startup failed.
+    ///
+    /// # Errors
+    /// Returns `Closed` or `InvalidGeneration` for terminal observation failures.
+    pub fn try_ready(&self) -> Result<Option<ReadyWorker>, WorkerReadinessError> {
+        let state = self.state();
+        match state.phase {
+            WorkerReadinessPhase::Closed => Err(WorkerReadinessError::Closed),
+            WorkerReadinessPhase::InvalidGeneration => Err(WorkerReadinessError::InvalidGeneration),
+            WorkerReadinessPhase::Ready => Ok(Some(ReadyWorker {
+                shared: Arc::clone(&self.shared),
+                generation: state.generation.expect("ready generation has an identity"),
+            })),
+            _ => Ok(None),
+        }
+    }
+
     /// Whether this exact observation is still the latest Ready generation.
     /// The answer may become false immediately afterward; it grants no lease.
     #[must_use]
@@ -193,21 +214,12 @@ impl WorkerReadiness {
                     task.waker().wake_by_ref();
                 }
             }
-            let state = self.state();
-            match state.phase {
-                WorkerReadinessPhase::Closed => Poll::Ready(Err(WorkerReadinessError::Closed)),
-                WorkerReadinessPhase::InvalidGeneration => {
-                    Poll::Ready(Err(WorkerReadinessError::InvalidGeneration))
+            match self.try_ready() {
+                Err(error) => Poll::Ready(Err(error)),
+                Ok(Some(ready)) if after.is_none_or(|previous| ready.generation.number > previous) => {
+                    Poll::Ready(Ok(ready))
                 }
-                WorkerReadinessPhase::Ready => {
-                    let generation = state.generation.expect("ready generation has an identity");
-                    if after.is_none_or(|previous| generation.number > previous) {
-                        Poll::Ready(Ok(ReadyWorker { shared: Arc::clone(&self.shared), generation }))
-                    } else {
-                        Poll::Pending
-                    }
-                }
-                _ => Poll::Pending,
+                Ok(_) => Poll::Pending,
             }
         }).await
     }
@@ -391,6 +403,42 @@ where
         }
     };
     (factory, readiness)
+}
+
+impl<E: Send + 'static> DynamicSupervisor<E> {
+    /// Admit an initialization-aware worker using the existing restart policy.
+    ///
+    /// The returned child ID is usable for stopping/reaping immediately; the
+    /// returned readiness view must be awaited separately before starting work
+    /// that depends on initialization. Admission alone is NOT readiness. Dropping
+    /// an observation never withdraws this child or its reserved capacity.
+    ///
+    /// Initialization is repeated for every actual restart. A replacement cannot
+    /// start before the previous generation's descendants/finalizers drain under
+    /// the managed controller. Different dynamic entries retain independent
+    /// restart policies; waiting on readiness adds no automatic dependency graph.
+    ///
+    /// # Errors
+    /// Returns the existing `start_worker` admission/configuration errors. Later
+    /// application errors remain in the ordinary child completion report.
+    pub async fn start_initialized_worker<R, I, IF, U, UF>(
+        &mut self,
+        name: impl Into<ChildName>,
+        config: DynamicWorkerConfig,
+        initialize: I,
+        run: U,
+    ) -> Result<(DynamicChildId, WorkerReadiness), DynamicSupervisorError>
+    where
+        R: Send + 'static,
+        I: Fn(Cx, ManagedGeneration) -> IF + Send + Sync + 'static,
+        IF: Future<Output = Outcome<R, E>> + Send + 'static,
+        U: Fn(Cx, ManagedGeneration, R) -> UF + Send + Sync + 'static,
+        UF: Future<Output = Outcome<(), E>> + Send + 'static,
+    {
+        let (factory, readiness) = initialized_worker(initialize, run);
+        let id = self.start_worker(name, config, factory).await?;
+        Ok((id, readiness))
+    }
 }
 
 #[cfg(test)]
