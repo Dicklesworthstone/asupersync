@@ -196,7 +196,7 @@ fn interrupted_message_wait_preserves_fragment_and_unregisters_on_drop() {
     assert_eq!(complete(client.message()).unwrap().unwrap().as_ref(), b"fragmented");
     assert!(complete(client.message()).unwrap().is_none());
     assert!(wire.output.lock().unwrap().starts_with(&written));
-    assert_eq!(wire.output.lock().unwrap().windows(CLIENT_PREFACE.len()).filter(|bytes| *bytes == &CLIENT_PREFACE[..]).count(), 1);
+    assert_eq!(wire.output.lock().unwrap().windows(CLIENT_PREFACE.len()).filter(|bytes| *bytes == CLIENT_PREFACE).count(), 1);
     assert_eq!(wire.drops.load(Ordering::SeqCst), 1);
 }
 
@@ -218,7 +218,7 @@ fn partial_transport_write_resumes_without_replaying_committed_prefix() {
     assert!(complete(client.message()).unwrap().is_none());
     let output = wire.output.lock().unwrap();
     assert!(output.starts_with(CLIENT_PREFACE));
-    assert_eq!(output.windows(CLIENT_PREFACE.len()).filter(|bytes| *bytes == &CLIENT_PREFACE[..]).count(), 1);
+    assert_eq!(output.windows(CLIENT_PREFACE.len()).filter(|bytes| *bytes == CLIENT_PREFACE).count(), 1);
 }
 
 #[test]

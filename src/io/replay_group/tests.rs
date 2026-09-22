@@ -18,7 +18,7 @@ impl AsyncRead for Fixture {
     fn poll_read(self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.polls.fetch_add(1, Ordering::SeqCst);
-        if std::mem::take(&mut this.panic) { panic!("provider panic sentinel"); }
+        assert!(!std::mem::take(&mut this.panic), "provider panic sentinel");
         if std::mem::take(&mut this.pending) { return Poll::Pending; }
         if this.error { return Poll::Ready(Err(io::ErrorKind::ConnectionReset.into())); }
         let n = buf.remaining().min(this.input.len());

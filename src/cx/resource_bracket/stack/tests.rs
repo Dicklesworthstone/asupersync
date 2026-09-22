@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 
-fn success(_: Cx, _: u8) -> impl Future<Output = Outcome<(), &'static str>> + Send {
-    async { Outcome::Ok(()) }
+async fn success(_: Cx, _: u8) -> Outcome<(), &'static str> {
+    Outcome::Ok(())
 }
 
 #[test]
@@ -377,7 +377,7 @@ where
 {
     use crate::lab::{LabConfig, LabRuntime};
     use crate::types::{Budget, CancelReason};
-    let mut lab = LabRuntime::new(LabConfig::new(0x5c_0f_2026).max_steps(16_384));
+    let mut lab = LabRuntime::new(LabConfig::new(0x5c0f_2026).max_steps(16_384));
     let root = lab.state.create_root_region(Budget::INFINITE);
     let (task, mut join) = lab.state.create_task(root, Budget::INFINITE, async move {
         factory(Cx::current().expect("admitted scope owner")).await;

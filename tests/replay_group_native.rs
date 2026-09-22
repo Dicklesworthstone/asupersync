@@ -120,7 +120,7 @@ fn parent(multithread: bool, test_name: &'static str) {
     let peer = std::thread::spawn(move || {
         let mut request_a = [0]; let mut request_b = [0];
         peer_a.read_exact(&mut request_a).unwrap(); peer_b.read_exact(&mut request_b).unwrap();
-        assert_eq!((request_a, request_b), ([b'A'], [b'B']));
+        assert_eq!((request_a, request_b), (*b"A", *b"B"));
         witness.recv_timeout(Duration::from_secs(10)).expect("actual pending read before peer response");
         peer_a.write_all(b"Y").unwrap(); peer_b.write_all(b"N").unwrap();
     });

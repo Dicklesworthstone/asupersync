@@ -299,7 +299,7 @@ where
     let handle = runtime.handle().clone();
     let completed = Arc::new(AtomicBool::new(false));
     let observed_completion = Arc::clone(&completed);
-    let _result = runtime.block_on(runtime.handle().spawn(async move {
+    runtime.block_on(runtime.handle().spawn(async move {
         let listener = server.bind_registered_streaming_http2(
             "127.0.0.1:0",
             HostPolicy::allow_all(),

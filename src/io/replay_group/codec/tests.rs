@@ -36,7 +36,7 @@ fn resign(bytes: &mut [u8]) {
 fn positions(bytes: &[u8]) -> (usize, usize) {
     let second = HEADER + 16 + count(bytes, HEADER + 8).unwrap();
     let order = second + 16 + count(bytes, second + 8).unwrap();
-    return (second, order);
+    (second, order)
 }
 
 #[test]
@@ -101,6 +101,8 @@ fn duplicate_id_unknown_ordinal_bad_counts_and_unknown_tag_are_rejected() {
 }
 
 #[test]
+// Iterating two byte offsets via an array literal; not a tuple->array conversion.
+#[allow(clippy::tuple_array_conversions)]
 fn nested_corruption_is_not_hidden_by_a_recomputed_group_checksum() {
     let bytes = captured().to_canonical_bytes(16_384).unwrap(); let (second, order) = positions(bytes.as_ref());
     for end in [second, order] {
