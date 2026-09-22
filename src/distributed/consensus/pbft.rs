@@ -355,7 +355,7 @@ impl<T: PbftTransport> PbftNode<T> {
     /// Send pre-prepare message as primary.
     async fn send_preprepare(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         view: ViewNumber,
         sequence: SequenceNumber,
         batch: ConsensusBatch,
@@ -394,12 +394,16 @@ impl<T: PbftTransport> PbftNode<T> {
 
         // Broadcast pre-prepare to all replicas
         timeout(
-            Time::from_millis(0),
+            cx.now(),
             self.config.preprepare_timeout,
             self.transport.broadcast(message),
         )
         .await
-        .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?
+        .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))??;
+
+        // A one-replica configuration already has both local quorums. There
+        // will be no remote prepare/commit packet to trigger execution.
+        self.drain_committed().await
     }
 
     /// Process an incoming PBFT message.
@@ -456,7 +460,7 @@ impl<T: PbftTransport> PbftNode<T> {
     /// Handle pre-prepare message from primary.
     async fn handle_preprepare(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         view: ViewNumber,
         sequence: SequenceNumber,
         digest: MessageDigest,
@@ -526,18 +530,20 @@ impl<T: PbftTransport> PbftNode<T> {
         };
 
         timeout(
-            Time::from_millis(0),
+            cx.now(),
             self.config.prepare_timeout,
             self.transport.broadcast(prepare_msg),
         )
         .await
-        .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?
+        .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))??;
+
+        self.drain_committed().await
     }
 
     /// Handle prepare message from replica.
     async fn handle_prepare(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         view: ViewNumber,
         sequence: SequenceNumber,
         digest: MessageDigest,
@@ -576,12 +582,17 @@ impl<T: PbftTransport> PbftNode<T> {
             };
 
             timeout(
-                Time::from_millis(0),
+                cx.now(),
                 self.config.commit_timeout,
                 self.transport.broadcast(commit_msg),
             )
             .await
             .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))??;
+
+            // Commit votes may arrive before the last prepare vote. Recheck
+            // execution here as well: a completed certificate must not need
+            // an extra duplicate commit packet to make progress.
+            self.drain_committed().await?;
         }
 
         Ok(())
@@ -630,20 +641,22 @@ impl<T: PbftTransport> PbftNode<T> {
         // already holds a full commit certificate would stall permanently behind
         // a lower one — ordinary under network reordering, not just adversarial.
         if should_execute {
-            self.execute_batch(sequence).await?;
-            while let Some(next) = self.next_executable_sequence() {
-                self.execute_batch(next).await?;
-            }
+            self.drain_committed().await?;
         }
 
         Ok(())
     }
 
-    /// The next sequence that is prepared, committed, and not yet executed, if
-    /// any. Used to drain successors whose commit-quorum was reached before the
-    /// lower sequence executed (`handle_commit` only fires execution on the
-    /// exact `last_executed.next()`, so out-of-order quorum completion would
-    /// otherwise wedge the pipeline).
+    /// Execute the entire contiguous prefix whose prepare and commit
+    /// certificates are complete, regardless of which phase completed last.
+    async fn drain_committed(&self) -> Result<()> {
+        while let Some(next) = self.next_executable_sequence() {
+            self.execute_batch(next).await?;
+        }
+        Ok(())
+    }
+
+    /// The next sequence that is prepared, committed, and not yet executed.
     fn next_executable_sequence(&self) -> Option<SequenceNumber> {
         let state = self.state.lock().unwrap();
         let next = state.last_executed.next();
@@ -825,5 +838,182 @@ impl<T: PbftTransport> PbftConsensus<T> {
             let message = self.node.transport.receive().await?;
             self.node.process_message(cx, message).await?;
         }
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    use std::future::{Future, ready};
+
+    #[derive(Default)]
+    struct RecordingTransport {
+        sent: Mutex<Vec<PbftMessage>>,
+    }
+
+    impl PbftTransport for RecordingTransport {
+        fn send_to_replica(
+            &self,
+            _replica_id: &ReplicaId,
+            message: PbftMessage,
+        ) -> impl Future<Output = Result<()>> + Send {
+            self.sent.lock().unwrap().push(message);
+            ready(Ok(()))
+        }
+
+        fn broadcast(&self, message: PbftMessage) -> impl Future<Output = Result<()>> + Send {
+            self.sent.lock().unwrap().push(message);
+            ready(Ok(()))
+        }
+
+        fn receive(&self) -> impl Future<Output = Result<PbftMessage>> + Send {
+            ready(Err(Error::new(ErrorKind::ChannelEmpty)))
+        }
+    }
+
+    fn backup() -> PbftNode<RecordingTransport> {
+        PbftNode::new(
+            ReplicaId::new("1".to_owned()),
+            PbftConfig::new(4, 1).unwrap(),
+            RecordingTransport::default(),
+        )
+        .unwrap()
+    }
+
+    fn preprepare(
+        node: &PbftNode<RecordingTransport>,
+        cx: &Cx,
+        sequence: u64,
+    ) -> MessageDigest {
+        let batch = ConsensusBatch::new(vec![ConsensusRequest::new(
+            "client".to_owned(),
+            Time::from_millis(sequence),
+            sequence.to_le_bytes().to_vec(),
+        )]);
+        let digest = MessageDigest::of(&batch).unwrap();
+        futures_lite::future::block_on(node.process_message(
+            cx,
+            PbftMessage::PrePrepare {
+                view: ViewNumber::new(0),
+                sequence: SequenceNumber::new(sequence),
+                digest: digest.clone(),
+                batch,
+                replica_id: ReplicaId::new("0".to_owned()),
+            },
+        ))
+        .unwrap();
+        digest
+    }
+
+    fn vote(sequence: u64, digest: &MessageDigest, event: usize) -> PbftMessage {
+        let replica_id = ReplicaId::new(if event % 2 == 0 { "0" } else { "2" }.to_owned());
+        if event < 2 {
+            PbftMessage::Prepare {
+                view: ViewNumber::new(0),
+                sequence: SequenceNumber::new(sequence),
+                digest: digest.clone(),
+                replica_id,
+            }
+        } else {
+            PbftMessage::Commit {
+                view: ViewNumber::new(0),
+                sequence: SequenceNumber::new(sequence),
+                digest: digest.clone(),
+                replica_id,
+            }
+        }
+    }
+
+    #[test]
+    fn every_prepare_commit_permutation_executes_only_after_both_quorums() {
+        let cx = Cx::for_testing();
+        let mut permutations = 0;
+        for a in 0..4 {
+            for b in 0..4 {
+                for c in 0..4 {
+                    for d in 0..4 {
+                        if a == b || a == c || a == d || b == c || b == d || c == d {
+                            continue;
+                        }
+                        let node = backup();
+                        let digest = preprepare(&node, &cx, 1);
+                        let mut prepares = 0;
+                        let mut commits = 0;
+                        for event in [a, b, c, d] {
+                            futures_lite::future::block_on(
+                                node.process_message(&cx, vote(1, &digest, event)),
+                            )
+                            .unwrap();
+                            if event < 2 {
+                                prepares += 1;
+                            } else {
+                                commits += 1;
+                            }
+                            let expected = if prepares == 2 && commits == 2 { 1 } else { 0 };
+                            assert_eq!(node.last_executed(), SequenceNumber::new(expected));
+                        }
+                        permutations += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(permutations, 24);
+    }
+
+    #[test]
+    fn late_prepare_drains_already_committed_successors_without_extra_packets() {
+        let cx = Cx::for_testing();
+        let node = backup();
+        let first = preprepare(&node, &cx, 1);
+        let second = preprepare(&node, &cx, 2);
+        for event in [0, 1, 2, 3] {
+            futures_lite::future::block_on(node.process_message(&cx, vote(2, &second, event)))
+                .unwrap();
+        }
+        assert_eq!(node.last_executed(), SequenceNumber::new(0));
+        for event in [2, 3, 0, 1] {
+            futures_lite::future::block_on(node.process_message(&cx, vote(1, &first, event)))
+                .unwrap();
+        }
+        assert_eq!(node.last_executed(), SequenceNumber::new(2));
+    }
+
+    #[test]
+    fn single_replica_executes_without_transport_loopback() {
+        let node = PbftNode::new(
+            ReplicaId::new("0".to_owned()),
+            PbftConfig::new(1, 0).unwrap(),
+            RecordingTransport::default(),
+        )
+        .unwrap();
+        let cx = Cx::for_testing();
+        for sequence in 1..=2 {
+            let request = ConsensusRequest::new(
+                "client".to_owned(),
+                Time::from_millis(sequence),
+                vec![42],
+            );
+            futures_lite::future::block_on(node.submit_request(&cx, request)).unwrap();
+            assert_eq!(node.last_executed(), SequenceNumber::new(sequence));
+        }
+    }
+
+    #[test]
+    fn duplicate_votes_cannot_replace_distinct_quorum_members() {
+        let cx = Cx::for_testing();
+        let node = backup();
+        let digest = preprepare(&node, &cx, 1);
+        for _ in 0..4 {
+            for event in [0, 2] {
+                futures_lite::future::block_on(node.process_message(&cx, vote(1, &digest, event)))
+                    .unwrap();
+            }
+        }
+        assert_eq!(node.last_executed(), SequenceNumber::new(0));
+        for event in [3, 1] {
+            futures_lite::future::block_on(node.process_message(&cx, vote(1, &digest, event)))
+                .unwrap();
+        }
+        assert_eq!(node.last_executed(), SequenceNumber::new(1));
     }
 }
