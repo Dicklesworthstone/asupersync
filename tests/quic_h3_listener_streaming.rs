@@ -1532,6 +1532,426 @@ mod native_h3_listener_live {
                 assert!(!report.drain_timed_out);
             });
         }
+        async fn write_trailers(
+            cx: &Cx,
+            owner: &mut NativeQuicUdpConnection,
+            stream: StreamId,
+            fields: &[(String, String)],
+            fin: bool,
+        ) {
+            let field_section =
+                asupersync::http::h3_native::qpack_encode_trailer_field_section(fields).unwrap();
+            let mut wire = Vec::new();
+            H3Frame::Headers(field_section).encode(&mut wire).unwrap();
+            owner
+                .connection_mut()
+                .write_stream(cx, stream, Bytes::from(wire), fin)
+                .unwrap();
+            owner.flush(cx).await.unwrap();
+        }
+
+        fn assert_trailer_fields(
+            trailers: &asupersync::http::body::HeaderMap,
+            expected: &[(String, String)],
+        ) {
+            let actual: Vec<_> = trailers
+                .iter()
+                .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
+                .collect();
+            let expected: Vec<_> = expected
+                .iter()
+                .map(|(name, value)| (name.clone(), value.as_bytes().to_vec()))
+                .collect();
+            assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn authenticated_listener_request_trailers_wait_for_fin_with_known_and_unknown_length() {
+            for workers in [1, 2] {
+                for declared in [None, Some(8)] {
+                    trailers_before_fin(workers, b"payload\0", declared);
+                }
+            }
+        }
+
+        #[test]
+        fn authenticated_listener_trailers_only_zero_length_waits_for_fin() {
+            for workers in [1, 2] {
+                trailers_before_fin(workers, b"", Some(0));
+            }
+        }
+
+        fn trailers_before_fin(workers: usize, payload: &'static [u8], declared: Option<usize>) {
+            run(workers, async move {
+                const QUEUE_BYTES: usize = 64;
+                let cx = Cx::current().unwrap();
+                let fields = vec![
+                    ("x-checksum".to_owned(), "checked".to_owned()),
+                    ("x-part".to_owned(), "one".to_owned()),
+                    ("x-part".to_owned(), "two".to_owned()),
+                ];
+                let handler_fields = fields.clone();
+                let (parked_tx, mut parked_rx) = asupersync::channel::oneshot::channel();
+                let parked_slot = Arc::new(Mutex::new(Some(parked_tx)));
+                let router = Router::new().route(
+                    "/trailers",
+                    post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                        move |request_cx: Cx, mut body: StreamingRawBody| {
+                            let fields = handler_fields.clone();
+                            let mut parked = parked_slot.lock().unwrap().take();
+                            async move {
+                                let mut received = Vec::new();
+                                let mut trailers_seen = false;
+                                loop {
+                                    let frame = std::future::poll_fn(|task_cx| {
+                                        let poll = Pin::new(&mut body).poll_frame(task_cx);
+                                        if poll.is_pending() && trailers_seen {
+                                            assert!(!body.is_end_stream());
+                                            if let Some(signal) = parked.take() {
+                                                signal.send(&request_cx, request_cx.clone()).unwrap();
+                                            }
+                                        }
+                                        poll
+                                    })
+                                    .await;
+                                    match frame {
+                                        Some(Ok(Frame::Data(bytes))) => {
+                                            assert!(!trailers_seen, "DATA cannot follow trailers");
+                                            received.extend_from_slice(bytes.chunk());
+                                        }
+                                        Some(Ok(Frame::Trailers(trailers))) => {
+                                            assert!(!trailers_seen, "exactly one trailer block");
+                                            assert_eq!(received, payload);
+                                            assert_trailer_fields(&trailers, &fields);
+                                            trailers_seen = true;
+                                        }
+                                        Some(Err(error)) => panic!("valid request trailers: {error}"),
+                                        None => break,
+                                    }
+                                }
+                                assert_eq!(received, payload);
+                                assert!(trailers_seen);
+                                assert!(parked.is_none(), "trailers must not manufacture body EOF");
+                                assert!(body.queued_bytes_peak() <= QUEUE_BYTES);
+                                Response::new(StatusCode::OK, received)
+                            }
+                        },
+                    )),
+                );
+                let listener = bind(&cx, router, config(QUEUE_BYTES)).await;
+                let address = listener.local_addr();
+                let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                let serving = listener.serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                });
+                let client = async {
+                    let (mut owner, mut session) = connect(&cx, address, 71).await;
+                    let stream = open_upload(&cx, &mut owner, "/trailers", declared).await;
+                    if !payload.is_empty() {
+                        write_data(&cx, &mut owner, stream, payload, false).await;
+                    }
+                    write_trailers(&cx, &mut owner, stream, &fields, false).await;
+                    let request_cx: Cx = parked_rx.recv(&cx).await.unwrap();
+                    assert!(!request_cx.is_cancel_requested());
+                    owner
+                        .connection_mut()
+                        .write_stream(&cx, stream, Bytes::new(), true)
+                        .unwrap();
+                    owner.flush(&cx).await.unwrap();
+                    receive_response(
+                        &cx,
+                        &mut owner,
+                        &mut session,
+                        stream,
+                        &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                        payload,
+                    )
+                    .await;
+                    shutdown_tx.send(&cx, ()).unwrap();
+                    acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, stream.0 + 4, None)
+                        .await;
+                };
+                let (report, ()) = zip(serving, client).await;
+                let report = report.unwrap();
+                assert_eq!(report.accepted_connections, 1);
+                assert_eq!(report.completed_requests, 1);
+                assert_eq!(report.cancelled_requests, 0);
+                assert_eq!(report.refused_requests, 0);
+                assert_eq!(report.failed_connections, 0);
+                assert!(!report.drain_timed_out);
+            });
+        }
+
+        #[test]
+        fn authenticated_listener_trailer_backpressure_resumes_without_another_client_packet() {
+            run(2, async {
+                const QUEUE_BYTES: usize = 32;
+                const WINDOW: u64 = 128;
+                const PAYLOAD: &[u8] = b"abcdefghijklmnopqrstuvwx";
+                let cx = Cx::current().unwrap();
+                let fields = vec![("x-proof".to_owned(), "value".to_owned())];
+                let handler_fields = fields.clone();
+                let (admitted_tx, mut admitted_rx) = asupersync::channel::oneshot::channel();
+                let admitted_slot = Arc::new(Mutex::new(Some(admitted_tx)));
+                let (resume_tx, resume_rx) = asupersync::channel::oneshot::channel();
+                let resume_slot = Arc::new(Mutex::new(Some(resume_rx)));
+                let (trailers_tx, mut trailers_rx) = asupersync::channel::oneshot::channel();
+                let trailers_slot = Arc::new(Mutex::new(Some(trailers_tx)));
+                let router = Router::new().route(
+                    "/queued-trailers",
+                    post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                        move |request_cx: Cx, mut body: StreamingRawBody| {
+                            let admitted = admitted_slot.lock().unwrap().take().unwrap();
+                            let mut resume = resume_slot.lock().unwrap().take().unwrap();
+                            let mut trailers_signal = trailers_slot.lock().unwrap().take();
+                            let fields = handler_fields.clone();
+                            async move {
+                                admitted.send(&request_cx, ()).unwrap();
+                                resume.recv(&request_cx).await.unwrap();
+                                // DATA charges 24 bytes. The trailer charges 16;
+                                // both cannot occupy this 32-byte queue together.
+                                assert_eq!(body.queued_bytes(), PAYLOAD.len());
+                                let mut received = Vec::new();
+                                let mut trailers_seen = false;
+                                loop {
+                                    let frame = std::future::poll_fn(|task_cx| {
+                                        let poll = Pin::new(&mut body).poll_frame(task_cx);
+                                        if poll.is_pending() && trailers_seen {
+                                            if let Some(signal) = trailers_signal.take() {
+                                                signal.send(&request_cx, ()).unwrap();
+                                            }
+                                        }
+                                        poll
+                                    })
+                                    .await;
+                                    match frame {
+                                        Some(Ok(Frame::Data(bytes))) => {
+                                            assert!(!trailers_seen);
+                                            received.extend_from_slice(bytes.chunk());
+                                        }
+                                        Some(Ok(Frame::Trailers(trailers))) => {
+                                            assert!(!trailers_seen);
+                                            assert_eq!(received, PAYLOAD);
+                                            assert_trailer_fields(&trailers, &fields);
+                                            trailers_seen = true;
+                                        }
+                                        Some(Err(error)) => panic!("queued trailer failed: {error}"),
+                                        None => break,
+                                    }
+                                }
+                                assert!(trailers_seen && trailers_signal.is_none());
+                                assert_eq!(received, PAYLOAD);
+                                assert!(body.queued_bytes_peak() <= QUEUE_BYTES);
+                                Response::new(StatusCode::OK, received)
+                            }
+                        },
+                    )),
+                );
+                let mut listener_config = config(QUEUE_BYTES);
+                listener_config.endpoint.connection_config.recv_window = WINDOW;
+                listener_config.receive_window_bytes = WINDOW;
+                let listener = bind(&cx, router, listener_config).await;
+                let address = listener.local_addr();
+                let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                let serving = listener.serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                });
+                let client = async {
+                    let (mut owner, mut session) = connect(&cx, address, 72).await;
+                    let stream = open_upload(
+                        &cx,
+                        &mut owner,
+                        "/queued-trailers",
+                        Some(PAYLOAD.len()),
+                    )
+                    .await;
+                    admitted_rx.recv(&cx).await.unwrap();
+                    write_data(&cx, &mut owner, stream, PAYLOAD, false).await;
+                    write_trailers(&cx, &mut owner, stream, &fields, false).await;
+                    let sent = owner
+                        .connection()
+                        .inner()
+                        .streams()
+                        .stream(stream)
+                        .unwrap()
+                        .send_offset;
+                    loop {
+                        owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                        let credit = owner
+                            .connection()
+                            .inner()
+                            .streams()
+                            .stream(stream)
+                            .unwrap()
+                            .send_credit
+                            .limit();
+                        if credit >= sent + WINDOW {
+                            break;
+                        }
+                    }
+                    // Credit witnesses that the trailer wire bytes reached
+                    // the server parser while the sole consumer was gated.
+                    resume_tx.send(&cx, ()).unwrap();
+                    // Do not send or receive a client packet here: consuming
+                    // queued DATA alone must wake and deliver the parked trailer.
+                    trailers_rx.recv(&cx).await.unwrap();
+                    owner
+                        .connection_mut()
+                        .write_stream(&cx, stream, Bytes::new(), true)
+                        .unwrap();
+                    owner.flush(&cx).await.unwrap();
+                    receive_response(
+                        &cx,
+                        &mut owner,
+                        &mut session,
+                        stream,
+                        &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                        PAYLOAD,
+                    )
+                    .await;
+                    shutdown_tx.send(&cx, ()).unwrap();
+                    acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, stream.0 + 4, None)
+                        .await;
+                };
+                let (report, ()) = zip(serving, client).await;
+                let report = report.unwrap();
+                assert_eq!(report.completed_requests, 1);
+                assert_eq!(report.cancelled_requests, 0);
+                assert_eq!(report.refused_requests, 0);
+                assert_eq!(report.failed_connections, 0);
+                assert!(!report.drain_timed_out);
+            });
+        }
+
+        #[test]
+        fn authenticated_listener_oversized_request_trailers_cancel_only_the_upload() {
+            failed_trailers(
+                32,
+                vec![(
+                    "x-proof".to_owned(),
+                    "012345678901234567890123456789".to_owned(),
+                )],
+                IncomingBodyError::TrailersTooLarge,
+                asupersync::http::h3_quic::H3_REQUEST_CANCELLED,
+            );
+        }
+
+        #[test]
+        fn authenticated_listener_forbidden_request_trailers_are_message_errors() {
+            for (name, value) in [("content-length", "0"), ("host", "localhost")] {
+                // Both fields fit the 64-byte metadata budget, so these cases
+                // reach field-policy validation rather than the size rejection.
+                failed_trailers(
+                    64,
+                    vec![(name.to_owned(), value.to_owned())],
+                    IncomingBodyError::BadHeader,
+                    0x10e,
+                );
+            }
+        }
+
+        fn failed_trailers(
+            queue_bytes: usize,
+            fields: Vec<(String, String)>,
+            expected_error: IncomingBodyError,
+            expected_reset_code: u64,
+        ) {
+            run(2, async move {
+                let cx = Cx::current().unwrap();
+                let terminal = Arc::new(Mutex::new(None));
+                let handler_terminal = Arc::clone(&terminal);
+                let retired = Arc::new(AtomicUsize::new(0));
+                let handler_retired = Arc::clone(&retired);
+                let (parked_tx, mut parked_rx) = asupersync::channel::oneshot::channel();
+                let parked_slot = Arc::new(Mutex::new(Some(parked_tx)));
+                let router = Router::new()
+                    .route(
+                        "/invalid-trailers",
+                        post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                            move |request_cx: Cx, mut body: StreamingRawBody| {
+                                let mut parked = parked_slot.lock().unwrap().take();
+                                let terminal = Arc::clone(&handler_terminal);
+                                let retired = Arc::clone(&handler_retired);
+                                async move {
+                                    let _retired = ProducerRetired(retired);
+                                    let frame = std::future::poll_fn(|task_cx| {
+                                        let poll = Pin::new(&mut body).poll_frame(task_cx);
+                                        if poll.is_pending() {
+                                            if let Some(signal) = parked.take() {
+                                                signal.send(&request_cx, request_cx.clone()).unwrap();
+                                            }
+                                        }
+                                        poll
+                                    })
+                                    .await;
+                                    match frame {
+                                        Some(Err(error)) => *terminal.lock().unwrap() = Some(error),
+                                        other => panic!("invalid trailer must fail the body: {other:?}"),
+                                    }
+                                    Response::new(StatusCode::OK, "must not be emitted")
+                                }
+                            },
+                        )),
+                    )
+                    .route(
+                        "/survivor",
+                        post(FnHandler::new(|| Response::new(StatusCode::OK, "survived"))),
+                    );
+                let mut listener_config = config(queue_bytes);
+                listener_config.max_concurrent_requests = 1;
+                let listener = bind(&cx, router, listener_config).await;
+                let address = listener.local_addr();
+                let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                let serving = listener.serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                });
+                let client = async {
+                    let (mut owner, mut session) = connect(&cx, address, 73).await;
+                    let stream = open_upload(
+                        &cx,
+                        &mut owner,
+                        "/invalid-trailers",
+                        None,
+                    )
+                    .await;
+                    let request_cx: Cx = parked_rx.recv(&cx).await.unwrap();
+                    assert!(!request_cx.is_cancel_requested());
+                    write_trailers(&cx, &mut owner, stream, &fields, false).await;
+                    receive_cancelled(
+                        &cx,
+                        &mut owner,
+                        &mut session,
+                        stream,
+                        expected_reset_code,
+                    )
+                    .await;
+                    wait_region_closed(&request_cx).await;
+                    assert_eq!(*terminal.lock().unwrap(), Some(expected_error));
+                    assert_eq!(retired.load(Ordering::SeqCst), 1);
+                    response(
+                        &cx,
+                        &mut owner,
+                        &mut session,
+                        "/survivor",
+                        &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                        b"survived",
+                    )
+                    .await;
+                    shutdown_tx.send(&cx, ()).unwrap();
+                    acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, stream.0 + 8, None)
+                        .await;
+                };
+                let (report, ()) = zip(serving, client).await;
+                let report = report.unwrap();
+                assert_eq!(report.accepted_connections, 1);
+                assert_eq!(report.completed_requests, 1);
+                assert_eq!(report.cancelled_requests, 1);
+                assert_eq!(report.refused_requests, 0);
+                assert_eq!(report.failed_connections, 0);
+                assert!(!report.drain_timed_out);
+            });
+        }
+
     }
 
 }

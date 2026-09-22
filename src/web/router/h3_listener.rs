@@ -7,7 +7,7 @@ use super::*;
 use crate::bytes::BytesCursor;
 use crate::channel::oneshot;
 use crate::cx::{ChildRegion, ChildRegionError, ChildRegionOpening, ChildRegionSpec};
-use crate::http::body::Frame;
+use crate::http::body::{Frame, HeaderMap, HeaderName, HeaderValue};
 use crate::http::h1::stream::{
     FramedIncomingRequestBodyWriter, IncomingBodyError, IncomingRequestBody,
 };
@@ -60,8 +60,10 @@ pub struct NativeH3ListenerConfig {
     /// Opt in to live request bodies dispatched after validated HEADERS.
     ///
     /// This bounds queued body bytes per request. The listener also retains
-    /// at most one pending DATA chunk of `min(bytes, 16 KiB)`; their sum is
-    /// reserved against `router`'s aggregate body budget before admission.
+    /// at most one pending DATA chunk or trailer map of `min(bytes, 16 KiB)`;
+    /// their sum is reserved against `router`'s aggregate body budget before
+    /// admission. Trailer accounting includes each name, value, and four
+    /// bytes of internal per-field accounting. One trailer map is supported.
     /// The per-request body-size limit and matched Router policy still apply
     /// to the entire upload, independently of this queue size.
     ///
@@ -165,10 +167,12 @@ impl From<ManagedEndpointError> for NativeH3ListenerError {
 /// Request bodies are assembled within explicit limits by default. Enabling
 /// [`NativeH3ListenerConfig::streaming_request_body_buffer_bytes`] dispatches
 /// validated HEADERS before FIN and passes live bounded input to
-/// [`crate::web::StreamingRawBody`]. CONNECT and request trailers retain the
-/// bridge's explicit refusal behavior; response producers may send DATA and
-/// response trailers. Buffered response limits are applied before listener
-/// retention/encoding, after application code creates them.
+/// [`crate::web::StreamingRawBody`]. Streaming request trailers are delivered
+/// as one bounded ordinary header map; successful input EOF still requires
+/// FIN. CONNECT and buffered-mode request trailers retain the bridge's
+/// explicit refusal behavior. Response producers may send DATA and response
+/// trailers. Buffered response limits are applied before listener retention
+/// and encoding, after application code creates them.
 pub struct NativeH3Listener {
     endpoint: ManagedQuicEndpoint,
     router: Arc<Router>,
@@ -335,8 +339,8 @@ fn streaming_chunk_bytes(queue_bytes: NonZeroUsize) -> usize {
 
 /// The request task creates this source with its actual admitted Cx. Until
 /// publication, the session keeps this stream paused at HEADERS. Afterwards
-/// the framed writer owns at most one pending DATA frame while its queue is
-/// full, and its capacity waiter wakes the UDP application callback directly.
+/// the framed writer owns at most one pending DATA or trailer frame while its
+/// queue is full, and its capacity waiter wakes the UDP callback directly.
 struct RequestBodyWork {
     publication: Option<oneshot::Receiver<RequestBodySource>>,
     source: Option<RequestBodySource>,
@@ -444,6 +448,41 @@ impl RequestBodyWork {
         self.finished = true;
         self.paused = false;
         Ok(())
+    }
+
+    fn send_trailers(
+        &mut self,
+        fields: Vec<(String, String)>,
+        max_bytes: usize,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Poll<Result<(), IncomingBodyError>> {
+        let Some((request_cx, writer)) = &mut self.source else {
+            return Poll::Ready(Err(IncomingBodyError::SourceDisconnected));
+        };
+        // The native session has already validated and decoded these fields.
+        // Bound their retained size before allocating the handler-side map.
+        // This is the same accounting used by the body queue's byte permits.
+        let mut retained_bytes = 0_usize;
+        for (name, value) in &fields {
+            let next = name
+                .len()
+                .checked_add(value.len())
+                .and_then(|bytes| bytes.checked_add(4))
+                .and_then(|bytes| retained_bytes.checked_add(bytes));
+            let Some(next) = next.filter(|bytes| *bytes <= max_bytes) else {
+                return Poll::Ready(Err(IncomingBodyError::TrailersTooLarge));
+            };
+            retained_bytes = next;
+        }
+        let mut trailers = HeaderMap::with_capacity(fields.len());
+        for (name, value) in fields {
+            trailers.append(
+                HeaderName::from_string(&name),
+                HeaderValue::from_bytes(value.as_bytes()),
+            );
+        }
+        let mut frame = Some(Frame::Trailers(trailers));
+        writer.poll_send_frame(request_cx, task_cx, &mut frame)
     }
 }
 
@@ -664,8 +703,11 @@ impl RequestWork {
                                                 STREAMING_REQUEST_FRAME_CAPACITY,
                                                 queue_bytes,
                                             );
-                                        let writer =
-                                            writer.max_body_size(dispatch.max_request_body_size());
+                                        let writer = writer
+                                            .max_body_size(dispatch.max_request_body_size())
+                                            .max_trailers_size(
+                                                queue_bytes.min(MAX_STREAMING_REQUEST_CHUNK_BYTES),
+                                            );
                                         if body_publisher
                                             .send_blocking((request_cx.clone(), writer))
                                             .is_err()
@@ -1626,7 +1668,7 @@ impl ListenerConnection {
                     }
                     continue;
                 }
-                NativeH3Event::Trailers { stream_id, .. }
+                NativeH3Event::Trailers { stream_id, fields }
                     if self
                         .requests
                         .get(&stream_id)
@@ -1637,15 +1679,32 @@ impl ListenerConnection {
                         .get_mut(&stream_id)
                         .expect("streaming request was checked");
                     if request.terminal.is_none() {
-                        retire_request_input(
-                            cx,
-                            &mut self.bridge,
-                            connection,
-                            stream_id,
-                            request,
-                            config,
-                            IncomingBodyError::SourceDisconnected,
-                        )?;
+                        let body = request.body.as_mut().expect("streaming body exists");
+                        if !body.stopped {
+                            let max_bytes = streaming_chunk_bytes(
+                                config
+                                    .streaming_request_body_buffer_bytes
+                                    .expect("streaming request has a queue budget"),
+                            );
+                            match body.send_trailers(fields, max_bytes, task_cx) {
+                                Poll::Pending => {
+                                    self.session.pause_request_stream(stream_id)?;
+                                    body.paused = true;
+                                }
+                                Poll::Ready(Ok(())) => {}
+                                Poll::Ready(Err(error)) => {
+                                    retire_request_input(
+                                        cx,
+                                        &mut self.bridge,
+                                        connection,
+                                        stream_id,
+                                        request,
+                                        config,
+                                        error,
+                                    )?;
+                                }
+                            }
+                        }
                     }
                     continue;
                 }

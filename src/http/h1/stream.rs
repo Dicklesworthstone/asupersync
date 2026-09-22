@@ -1140,7 +1140,6 @@ impl FramedIncomingRequestBodyWriter {
     }
 
     #[must_use]
-    #[cfg(test)]
     pub(crate) fn max_trailers_size(mut self, bytes: usize) -> Self {
         self.max_trailers_size = bytes;
         self

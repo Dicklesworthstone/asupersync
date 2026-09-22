@@ -571,10 +571,8 @@ checks their cleanup outcomes.
 The native H3 listener also has an opt-in live request-body path:
 
 ```rust,ignore
-let config = NativeH3ListenerConfig {
-    streaming_request_body_buffer_bytes: std::num::NonZeroUsize::new(64 * 1024),
-    ..NativeH3ListenerConfig::default()
-};
+let mut config = NativeH3ListenerConfig::default();
+config.streaming_request_body_buffer_bytes = std::num::NonZeroUsize::new(64 * 1024);
 ```
 
 With `http3,tls` enabled, this path resolves the static route/body policy and
@@ -593,10 +591,16 @@ Content-Length zero or already-consumed declared lengths. Length mismatches
 reset the request with `H3_MESSAGE_ERROR`; FIN inside a frame closes the
 connection with `H3_FRAME_ERROR`. Early body abandonment stops input with
 `H3_NO_ERROR` while allowing the response to finish, including when the peer
-acknowledges that input stop with RESET_STREAM. Request trailers remain refused
-in this initial listener streaming profile. Handlers on this opt-in path use
-`StreamingRawBody` or the async body collectors; synchronous buffered
-extractors fail closed. The default `None` keeps buffered request dispatch.
+acknowledges that input stop with RESET_STREAM. A final request trailer section
+is delivered through the same body queue and remains distinct from EOF. Its
+internal queue accounting (name bytes + value bytes + four bytes per field)
+must fit in `min(queue bytes, 16 KiB)`, checked before constructing the
+handler-side trailer map. This bound is separate from the existing native
+QPACK decoding and QUIC reassembly limits. Oversized trailer metadata cancels
+the request; forbidden trailer fields fail with `H3_MESSAGE_ERROR`. Handlers
+on this opt-in path use `StreamingRawBody` or the async body collectors;
+synchronous buffered extractors fail closed. The default `None` keeps
+buffered request dispatch.
 
 The live multi-peer, stalled-response, and receive-credit regressions are in
 `tests/quic_h3_live_udp.rs`; the streaming request journeys are in
@@ -2359,7 +2363,7 @@ JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust b
 | I/O reactor (Linux epoll + optional io_uring primary path; BSD/Windows reactors have narrower interest support) | ✅ Implemented |
 | TCP, HTTP/1.1, HTTP/2, TLS | ✅ Implemented |
 | WebSocket | ⚠️ Runtime surface shipped; live RFC6455 conformance coverage now wires extension negotiation plus broader framing/control/close/masking/fragmentation harnesses, with runtime e2e coverage still lane-specific |
-| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. Opt-in streaming request ingress admits handlers at HEADERS, applies static body policy before admission, and uses bounded request-task-owned DATA queues with per-stream backpressure and FIN validation. The earlier buffered listener compiled; the new request-streaming implementation and native regressions have source review, with full native compilation/execution still unverified. Request trailers remain refused on this initial listener streaming path. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
+| HTTP/3 (default static-only QPACK; opt-in dynamic QPACK field-section and instruction-stream state machine) | ⚠️ Partial implementation: an established-connection adapter drives control and request/response lifecycle over native QUIC stream bytes, including static-QPACK headers/trailers, informational responses, GOAWAY, cancellation, resets, and reliable STREAM/control-frame recovery. A caller-driven `NativeH3Router` bridge assembles bounded requests through FIN, detaches bounded caller-scoped Router dispatches, and emits validated final responses on the originating stream while isolating per-stream refusal/reset. The feature-gated `NativeH3Listener` adds autonomous multi-peer TLS admission, runtime-owned request tasks, buffered and produced responses, deadlines, and graceful shutdown over native UDP. Opt-in streaming request ingress admits handlers at HEADERS, applies static body policy before admission, and uses bounded request-task-owned DATA queues with per-stream backpressure and FIN validation. The earlier buffered listener compiled; the new request-streaming implementation and native regressions have source review, with full native compilation/execution still unverified. The live request path also carries a bounded final trailer section through the body queue and requires actual FIN before EOF. The native opt-in state machine separately supports dynamic QPACK field sections/tables, Huffman strings, encoder/decoder instruction-stream processing, and bounded blocked-stream scheduling. Deployment readiness, CONNECT, migration, 0-RTT, and external interop evidence remain open, so this is not a claim of h3/quinn drop-in parity or full QUIC deployment parity. |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR-style race-guided seed exploration | ⚠️ Implemented as trace analysis, seed derivation, and equivalence-class telemetry; no exact-prefix backtracking or completeness claim |
