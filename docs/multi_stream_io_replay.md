@@ -75,12 +75,46 @@ streams never opened. A capture with no operations on a stream does not require
 opening that empty stream. Verification is a point-in-time check, not a runtime
 join or an irreversible shutdown of the replay providers.
 
-Within ONE stream, the consumer must reproduce its operation order: independently
-reordered read/write halves are not supported by this strict group interface.
+Within ONE unsplit stream, the consumer must reproduce its operation order.
 Across streams, polling preference may change while completed-operation order
 is enforced. A borrowed pending operation can leave at most that stream's latest
 waker until subsequent progress, polling or stream destruction. No timer or busy
 loop manufactures a missing prerequisite; the caller owns deadlines/cancellation.
+
+## Owned full-duplex replay
+
+Use `ReplayGroupIo::into_split()` when separate read and write tasks share a
+connection. It returns `ReplayGroupReadHalf` and `ReplayGroupWriteHalf`, each
+with an exclusive owner and an independent waiter. An early read parks until a
+preceding write completes, and an early write similarly waits for a read. The
+captured completion order is still authoritative across directions AND streams.
+Within the write direction, scalar writes, vectored writes, flush and shutdown
+remain distinct checked operations. The original unsplit behavior is unchanged.
+
+Keep a half alive when cancelling an individual borrowed I/O future. That leaves
+its observations unconsumed; a later poll replaces its waiter. Dropping the half
+itself with remaining observations fails the group with `AbandonedHalf` and wakes
+peers. An exhausted half may drop while the other finishes. Polling an exhausted
+direction returns `ExhaustedHalf`, not fabricated EOF or indefinite `Pending`.
+Original captured I/O errors consume an observation but are not divergence.
+
+After recovering both owners from their tasks, `reader.reunite(writer)` returns
+the original strict stream at the current tape position, even before the tape
+ends. No observation is invented or discarded. `reader.is_pair_of(&writer)`
+checks split identity, not merely the caller-selected stream ID. A mismatched
+reunite returns `Err((reader, writer))` without poisoning either group; recover
+both halves and supply their actual partners. A sticky divergence cannot be
+reset by reuniting or splitting again.
+
+Reunification retires cancelled-operation waiters outside both locks and releases
+the old split state. It cannot revoke a callback already dispatched on another
+thread. Neither split nor reunite creates a task, opens a provider, copies tape
+payloads, or changes artifact bytes. Coordination has two waiter slots and one
+exclusive component lease; splitting scans the remaining order once. A wake can
+arrive before the previous poll returns its lease: callers must handle another
+`Pending`, whose contending waiter is notified when custody is restored. Always
+verify the complete group after users have drained; ownership transfer is not
+proof of replay completion.
 
 ## Bounded persistence and authenticated archives
 
@@ -118,7 +152,14 @@ cancellation, exact RSS, performance or wall-clock bound.
 
 ## Validation and limits
 
-The two-commit batch adds 28 unit tests and two native process tests. Primitive
+Owned-duplex replay adds 23 focused unit tests, including synchronous reentrant
+wakes, callback-panic fanout, waker retirement, cross-thread parked-read handoff,
+reunification, and directional abandonment. These tests were authored but NOT
+compiled or executed in this session: the remote-required RCH test attempt exits
+127 because RCH is unavailable. The OS-thread handoff test is not the native
+runtime cancellation gate, and source/lexical checks are not execution evidence.
+
+The original capture/persistence batch adds 28 unit tests and two native process tests. Primitive
 coverage includes actual multi-threaded capture, lost-wake-sensitive registration,
 latest wakers, hostile callbacks, failed capture, strict ordering, and abandonment.
 Codec/archive tests include truncation/bit changes, forged identities/ordinals,

@@ -45,6 +45,7 @@ struct State {
     io: Option<ReplayGroupIo>,
     waiters: [Option<Arc<Waker>>; 2],
     contended: [bool; 2],
+    reunited: bool,
 }
 
 struct Shared {
@@ -177,6 +178,9 @@ impl Shared {
         let slot = direction.index();
         let waiter = {
             let mut state = self.state.lock();
+            if state.reunited {
+                return;
+            }
             state.contended[slot] = false;
             state.waiters[slot].take()
         };
@@ -284,10 +288,63 @@ impl ReplayGroupIo {
                 io: Some(self),
                 waiters: [None, None],
                 contended: [false, false],
+                reunited: false,
             }),
             forward: Waker::from(Arc::new(Forward(Weak::clone(weak)))),
         });
         (ReplayGroupReadHalf { shared: Arc::clone(&shared) }, ReplayGroupWriteHalf { shared })
+    }
+}
+
+impl ReplayGroupReadHalf {
+    /// Whether these halves came from the same call to `into_split`.
+    ///
+    /// Stream IDs alone are insufficient: separate groups may reuse an ID.
+    #[must_use]
+    pub fn is_pair_of(&self, write: &ReplayGroupWriteHalf) -> bool {
+        Arc::ptr_eq(&self.shared, &write.shared)
+    }
+
+    /// Recover the original strict replay stream at its current tape position.
+    ///
+    /// This transfers ownership, not observations: no read, write, EOF, flush,
+    /// or shutdown is synthesized, and an existing divergence remains sticky.
+    /// The stream can be split again or driven through its strict unsplit API.
+    /// Callers must first recover both owned halves from their tasks; owning
+    /// both excludes any in-flight borrowed I/O operation or component lease.
+    ///
+    /// Pending-operation waiters left after cancellation are detached and
+    /// retired outside both locks. Callbacks already dispatched concurrently
+    /// may still run; reunification cannot revoke an in-flight callback.
+    ///
+    /// # Errors
+    /// Halves from different splits are returned unchanged as `(read, write)`.
+    /// Neither group is poisoned and no waiter or observation is consumed.
+    pub fn reunite(
+        self,
+        write: ReplayGroupWriteHalf,
+    ) -> Result<ReplayGroupIo, (Self, ReplayGroupWriteHalf)> {
+        if !self.is_pair_of(&write) {
+            return Err((self, write));
+        }
+        let (io, waiters) = {
+            let mut state = self.shared.state.lock();
+            let io = state.io.take().expect("both half owners exclude an active lease");
+            state.reunited = true;
+            state.contended = [false, false];
+            let waiters = [state.waiters[0].take(), state.waiters[1].take()];
+            (io, waiters)
+        };
+        let forward = self.shared.group.state.lock().slots[self.shared.index].waiter.take();
+        retire(forward);
+        for waiter in waiters {
+            retire(waiter);
+        }
+        // The reunited flag prevents either consumed half's Drop from
+        // misclassifying the returned provider's remaining work as abandoned.
+        drop(self);
+        drop(write);
+        Ok(io)
     }
 }
 
@@ -320,3 +377,6 @@ impl Drop for ReplayGroupWriteHalf {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod ownership_tests;
