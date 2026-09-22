@@ -1,6 +1,11 @@
 //! Separate OS processes run the actual mTLS symbol service and immutable store.
 //! A deliberately stalled TCP/TLS peer verifies local loser-close, not storage.
 #![cfg(all(feature = "tls", feature = "test-internals", not(target_arch = "wasm32")))]
+// Raise the type-checker recursion limit for the deeply-nested async `Send`
+// bound evaluation in this multi-process hedge test (the compiler suggests 256).
+// Silences the future-incompatible `recursion_depth_exceeding_limit` warning
+// (rust-lang #159228), which will otherwise become a hard error in a future rustc.
+#![recursion_limit = "256"]
 
 use asupersync::distributed::distribution::{
     DistributionConfig, DistributionResult, DistributorTransport, ReplicaAck, ReplicaFailure,
