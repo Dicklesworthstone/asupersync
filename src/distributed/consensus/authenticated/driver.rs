@@ -1,5 +1,7 @@
 //! Authenticated, single-owner ingress and application execution.
 
+mod reorder;
+
 use super::{
     AuthenticatedPbftTransport, LimitedPayload, PbftAuthError, PbftAuthenticator,
     PbftPacketTransport, protocol_error,
@@ -14,6 +16,8 @@ use crate::distributed::consensus::types::{
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::types::Time;
+use parking_lot::Mutex as InboxMutex;
+use reorder::ReorderBuffer;
 use std::future::{Future, poll_fn};
 use std::pin::pin;
 use std::sync::Arc;
@@ -24,7 +28,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PbftIngressOutcome {
-    /// An authenticated message reached the normal-case protocol engine.
+    /// An authenticated message was processed or retained in the opt-in inbox.
     /// This does not by itself mean a quorum or application result exists.
     Processed,
     /// The authenticated protocol packet refers to an already applied prefix.
@@ -32,6 +36,13 @@ pub enum PbftIngressOutcome {
     AlreadyApplied(SequenceNumber),
     /// A packet was refused before changing consensus/application state.
     Rejected(PbftAuthError),
+    /// An opt-in inbox refused a sequence outside its 64-sequence live window.
+    OutsideWindow(SequenceNumber),
+    /// An authenticated author proposed/voted for two digests in the same slot.
+    /// The first retained digest is preserved; the conflicting one is refused.
+    Equivocation(SequenceNumber),
+    /// The opt-in inbox has reached its 8192-vote bound. Retry after progress.
+    BufferFull,
 }
 
 struct SharedPackets<T>(Arc<T>);
@@ -61,7 +72,10 @@ impl<T: PbftPacketTransport> PbftPacketTransport for SharedPackets<T> {
 // nodes in a four-node group cannot prepare when the fourth backup is silent:
 // each backup sees only its own vote and the other live backup's vote.
 // This is a normal-case driver step, not a change to legacy transport behavior.
-struct PrimaryVotingTransport<T>(AuthenticatedPbftTransport<SharedPackets<T>>);
+struct PrimaryVotingTransport<T>(
+    AuthenticatedPbftTransport<SharedPackets<T>>,
+    Option<Arc<InboxMutex<ReorderBuffer>>>,
+);
 
 impl<T: PbftPacketTransport> PbftTransport for PrimaryVotingTransport<T> {
     async fn send_to_replica(&self, recipient: &ReplicaId, message: PbftMessage) -> Result<()> {
@@ -69,6 +83,11 @@ impl<T: PbftPacketTransport> PbftTransport for PrimaryVotingTransport<T> {
     }
 
     async fn broadcast(&self, message: PbftMessage) -> Result<()> {
+        if let Some(inbox) = &self.1 {
+            // The engine has installed the entry before emitting a proposal or
+            // prepare. Publish that fact before a send can yield or be dropped.
+            inbox.lock().observe_outbound(&message).map_err(inbox_error)?;
+        }
         let prepare = match &message {
             PbftMessage::PrePrepare { view, sequence, digest, replica_id, .. } => {
                 Some(PbftMessage::Prepare {
@@ -92,6 +111,11 @@ impl<T: PbftPacketTransport> PbftTransport for PrimaryVotingTransport<T> {
     }
 }
 
+fn inbox_error(outcome: PbftIngressOutcome) -> Error {
+    Error::new(ErrorKind::InvalidStateTransition)
+        .with_message(format!("PBFT bounded inbox refused admission: {outcome:?}"))
+}
+
 /// A single-owner PBFT application node with no unsigned remote-ingress API.
 ///
 /// Construction binds the protocol's replica count/id to the pinned keys.
@@ -108,16 +132,18 @@ impl<T: PbftPacketTransport> PbftTransport for PrimaryVotingTransport<T> {
 /// effects, and synchronous application callbacks are NOT rolled back. The
 /// packet transport must preserve/retire its own partial framing on drop.
 ///
-/// The normal-case driver publishes the primary's prepare vote. It does not
-/// add retransmission, view changes, stable checkpoints, durable recovery,
-/// bounded log retention, or a proof of Byzantine safety/liveness. In
-/// particular, votes arriving before their pre-prepare can still be ignored
-/// by the legacy protocol engine. Packet bounds are not total log bounds.
+/// The normal-case driver publishes the primary's prepare vote. The additive
+/// [`Self::new_with_reordering`] constructor also retains early votes in a
+/// bounded inbox; [`Self::new`] preserves the original direct-admission path.
+/// Neither constructor adds retransmission, view changes, stable checkpoints,
+/// durable recovery, bounded committed-log retention, or a proof of Byzantine
+/// safety/liveness. Packet and inbox bounds are not total log bounds.
 pub struct AuthenticatedPbftNode<T: PbftPacketTransport, S: PbftStateMachine> {
     driver: PbftExecution<PrimaryVotingTransport<T>, S>,
     packets: SharedPackets<T>,
     auth: Arc<PbftAuthenticator>,
     max_batch_size: usize,
+    reorder: Option<Arc<InboxMutex<ReorderBuffer>>>,
 }
 
 impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
@@ -132,19 +158,51 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
         auth: Arc<PbftAuthenticator>,
         machine: S,
     ) -> Result<Self> {
+        Self::build(config, packets, auth, machine, None)
+    }
+
+    /// Enable bounded, cancellation-resilient normal-case vote reordering.
+    ///
+    /// Retains at most 8192 distinct votes over the next 64 sequences. Each
+    /// authenticated replica gets at most one vote per phase and sequence;
+    /// duplicates do not consume additional capacity. Only votes matching an
+    /// installed proposal reach the engine. Completion retires inbox state.
+    /// The new admission bounds are opt-in and do not change `new` callers.
+    ///
+    /// The current protocol supports view zero only. Out-of-window traffic and
+    /// inbox pressure are explicit refusals, not unbounded buffering. A primary
+    /// refuses new requests before reserving a 65th outstanding sequence, while
+    /// exact retries remain permitted. Committed logs/results remain retained
+    /// by the legacy execution driver; this is not durable recovery or pruning.
+    pub fn new_with_reordering(
+        config: PbftConfig,
+        packets: T,
+        auth: Arc<PbftAuthenticator>,
+        machine: S,
+    ) -> Result<Self> {
+        Self::build(config, packets, auth, machine, Some(Arc::new(InboxMutex::new(ReorderBuffer::default()))))
+    }
+
+    fn build(
+        config: PbftConfig,
+        packets: T,
+        auth: Arc<PbftAuthenticator>,
+        machine: S,
+        reorder: Option<Arc<InboxMutex<ReorderBuffer>>>,
+    ) -> Result<Self> {
         if config.replica_count != auth.membership().replica_count() {
             return Err(protocol_error(PbftAuthError::Configuration));
         }
         let max_batch_size = config.max_batch_size;
         let packets = SharedPackets(Arc::new(packets));
-        let transport = PrimaryVotingTransport(AuthenticatedPbftTransport::new(
-            packets.clone(),
-            Arc::clone(&auth),
-        ));
+        let transport = PrimaryVotingTransport(
+            AuthenticatedPbftTransport::new(packets.clone(), Arc::clone(&auth)),
+            reorder.clone(),
+        );
         let driver = PbftExecution::new(
             auth.local_replica().clone(), config, transport, machine,
         )?;
-        Ok(Self { driver, packets, auth, max_batch_size })
+        Ok(Self { driver, packets, auth, max_batch_size, reorder })
     }
 
     /// Highest contiguous sequence applied to the application, not just admitted.
@@ -165,8 +223,10 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
     /// very close to the limit may be refused even if today's encoding fits.
     pub async fn submit_request(&mut self, cx: &Cx, request: ConsensusRequest) -> Result<()> {
         until_stopped(cx, async {
-            self.preflight_request(&request).map_err(protocol_error)?;
-            self.driver.submit_request(cx, request).await
+            self.prepare_submission(&request)?;
+            self.driver.submit_request(cx, request).await?;
+            self.drain_reordered(cx).await?;
+            Ok(())
         }).await
     }
 
@@ -185,8 +245,13 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
     /// A parked receive is woken by `Cx` cancellation even when no peer sends
     /// another packet. Dropping this future also drops its receive operation
     /// and its owned cancellation registration; it leaves no detached pump.
+    /// In reordering mode, a previously interrupted ready delivery is resumed
+    /// first and can return `Processed` without requiring a new network packet.
     pub async fn receive_one(&mut self, cx: &Cx) -> Result<PbftIngressOutcome> {
         until_stopped(cx, async {
+            if self.drain_reordered(cx).await? {
+                return Ok(PbftIngressOutcome::Processed);
+            }
             let packet = self.packets.receive_packet(self.auth.max_packet_bytes()).await?;
             self.admit_packet(cx, &packet).await
         }).await
@@ -216,8 +281,10 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
         // copy for receipt lookup. Neither an oversized request nor a stopped
         // caller should cause an unbounded clone before admission.
         until_stopped(cx, async {
-            self.preflight_request(&request).map_err(protocol_error)?;
-            self.driver.submit_request(cx, request.clone()).await
+            self.prepare_submission(&request)?;
+            self.driver.submit_request(cx, request.clone()).await?;
+            self.drain_reordered(cx).await?;
+            Ok(())
         }).await?;
         loop {
             if let Some(response) = self.committed_response(&request)? {
@@ -270,13 +337,70 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
             | PbftMessage::Commit { sequence, .. } => Some(*sequence),
             _ => None,
         };
+        let applied = self.driver.last_applied()?;
         if let Some(sequence) = sequence
-            && sequence <= self.driver.last_applied()?
+            && sequence <= applied
         {
             return Ok(PbftIngressOutcome::AlreadyApplied(sequence));
         }
+        if let Some(inbox) = &self.reorder {
+            inbox.lock().prune(applied);
+            match &message {
+                PbftMessage::PrePrepare { view, sequence, digest, batch, .. } => {
+                    if MessageDigest::of(batch)? != *digest {
+                        return Ok(PbftIngressOutcome::Rejected(PbftAuthError::Encoding));
+                    }
+                    let result = inbox.lock().proposal(*view, *sequence, digest, false, None);
+                    if let Err(outcome) = result { return Ok(outcome); }
+                }
+                PbftMessage::Prepare { .. } | PbftMessage::Commit { .. } => {
+                    let result = inbox.lock().vote(&message);
+                    if let Err(outcome) = result { return Ok(outcome); }
+                    self.drain_reordered(cx).await?;
+                    return Ok(PbftIngressOutcome::Processed);
+                }
+                PbftMessage::Request(request) => self.prepare_submission(request)?,
+                _ => {}
+            }
+        }
         self.driver.process_message(cx, message).await?;
+        self.drain_reordered(cx).await?;
         Ok(PbftIngressOutcome::Processed)
+    }
+
+    async fn drain_reordered(&self, cx: &Cx) -> Result<bool> {
+        let Some(inbox) = &self.reorder else { return Ok(false) };
+        let mut delivered = 0_usize;
+        loop {
+            let applied = self.driver.last_applied()?;
+            let next = {
+                let mut inbox = inbox.lock();
+                inbox.prune(applied);
+                inbox.next()
+            };
+            let Some(next) = next else { return Ok(delivered != 0) };
+            self.driver.process_message(cx, next.message()).await?;
+            inbox.lock().acknowledge(&next);
+            delivered += 1;
+            if delivered % 64 == 0 { crate::future::yield_now().await; }
+        }
+    }
+
+    fn prepare_submission(&self, request: &ConsensusRequest) -> Result<()> {
+        self.preflight_request(request).map_err(protocol_error)?;
+        if let Some(inbox) = &self.reorder
+            && self.auth.local_replica().as_str() == "0"
+            && self.driver.committed_response(request)?.is_none()
+        {
+            let applied = self.driver.last_applied()?;
+            let digest = MessageDigest::of(request)?;
+            let mut inbox = inbox.lock();
+            inbox.prune(applied);
+            if !inbox.can_propose(&digest) {
+                return Err(inbox_error(PbftIngressOutcome::BufferFull));
+            }
+        }
+        Ok(())
     }
 
     fn preflight_request(&self, request: &ConsensusRequest) -> std::result::Result<(), PbftAuthError> {
