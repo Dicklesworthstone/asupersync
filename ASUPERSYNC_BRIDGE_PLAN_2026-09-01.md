@@ -173,7 +173,7 @@ PARTIAL, STUB, UNPROVEN (code exists; no execution), REGRESSED, DOC_STALE (code 
 | 11 | HTTP/body/WS/gRPC/H3 against independent peers | PARTIAL: h2spec 147/147 on 09-06 (receipts not retained; six H2 commits since). H2 has DoS/drain gaps (no preface timeout, unbounded `pump_writes`, detached handlers not cancelled on RST, unbounded shutdown wait); H1 streaming responses have no write timeout; native gRPC streaming connect refuses on every native call; gRPC client-/bidi-streaming unimplemented on real transports; QUIC has no Retry, so 16 spoofed Initials exhaust H3 handshake slots. | `bi2462.36`; NEW R21-R23 |
 | 12 | Files, databases, telemetry for consumers | PARTIAL / REGRESSED: PostgreSQL cancellation of a query parked on the socket never sends CancelRequest (server keeps running it); MySQL has no TLS and no caching_sha2 full auth, and its KILL-on-drop can never run; Kafka teardown hangs in ~half of CI runs; OTLP `export` always errors so `MultiExporter` cannot compose it; production poll counts are always 0; one `ctrl_c()` call disables default termination for all signals process-wide. Real-server evidence ends 09-07. | NEW R24-R26; `bi2462.19` |
 | 13 | Remote handles follow region ownership | PARTIAL: default `spawn_remote` is not region-owned; opt-in `run_remote` is, but a silent peer hangs region close (no deadline/keepalive; uninterruptible close) and the origin never renews leases (30 s default). v0.5.0 shipped two remote defects (V3 reply decode; `RemoteCap` lost across `open_child_region`), fixed on main, unreleased. | `bi2462.16`; NEW R27; NEW R35 patch release |
-| 14 | Snapshot distribution survives failed peers | UNPROVEN: real mTLS transport and two-process tests exist; never executed; acceptance scale (4 MiB, symbol loss) not met. | `bi2462.10`; G2.2 first execution |
+| 14 | Snapshot distribution survives failed peers | PARTIAL: first runs at `8525d7055`. `distribution_hedge_process` 2/2 and `symbol_service_native` 5/5; `symbol_durable_process` 6/7, where continuation restore fails with `HolderNotLive`. The acceptance scale (4 MiB, symbol loss) is still not met. | `bi2462.10`; G2.2 first execution |
 | 15 | Membership drives discovery and revocation | PARTIAL: SWIM still an island; authenticated authority path opt-in and unexecuted. | `bi2462.11/.12` |
 | 16 | Supervisor trees restart and escalate | WORKING_SCOPED: `supervision_regression` 6/6 at `8525d7055` (ManagedSupervisor public lab, native and SIGTERM journeys); DOC_STALE in README/rustdoc; new fail-open: a required Permanent child whose dependency is gone is silently never restarted and the report ends `Ok`; named children refused; AppSpec still uses the legacy non-restarting supervisor. | `bi2462.34/.35/.46`; NEW R29 |
 | 17 | Secure ATP moves real files with bounded resources | PARTIAL: `atp send` defaults to plaintext unauthenticated TCP; RQ control transcript and NeedMore frames unauthenticated; `e880xo` (P0) has had no implementation since 06-15. | `e880xo`; NEW R30 |
@@ -513,6 +513,20 @@ has a planted defect it must catch.
     reference vectors 3/3.
   - Red: `e2e_stream_pipeline` 20/21 (native stage-panic attribution); `browser_ga_final_signoff_contract`
     6/8 and `wasm_supply_chain_controls` 5/10, both exactly as predicted by the browser audit.
+- Remaining lanes (pristine `8525d7055`).
+  - F1b: the remote lifecycle contract 38/38 with the hanging test skipped; `symbol_service_native` 5/5;
+    `worker_readiness_native` 6/6; `symbol_durable_process` 6/7, where continuation restore fails with
+    `Lease(Admission(HolderNotLive))`.
+  - Contracts with as-of 2026-09-23: the proof-freshness time bomb, the red `api_surface_map_contract` and
+    the red supply-chain fingerprint contract are all confirmed by execution.
+  - `atpd_live_cli` 33/39: the headline multi-file commit fails on the first allowed send, and child stderr
+    is not captured.
+  - `asupersync-browser-core` lib 59/60, with one refusal-classification mismatch.
+  - `cargo fmt --all --check` fails: 3,425 hunks in 187 files, concentrated in the source-only families.
+  - Totals across F1, F1b, F2, the contract lane, F3 and F4: 368 tests ran, 342 passed, 26 failed, plus
+    1 hang. Each failure has a receipt on its owning bead.
+  - A peer had already landed the fix for R22a (`409a695d8`, citing `bi2462.104`) within 90 minutes of that
+    bead's creation.
 - Phase 2: this section, written in place.
 - Phase 3a: 69 beads created under `bi2462` using the frozen generation instructions and only `br`. 24 existing
   beads received evidence comments (landed-but-unrecorded work, unmet acceptance, new prerequisites), and 27
