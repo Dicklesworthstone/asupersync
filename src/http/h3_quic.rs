@@ -833,9 +833,15 @@ impl NativeH3Session {
     ) -> Result<(), NativeH3SessionError> {
         let stream_id = readiness.stream_id;
         self.terminal_streams.ensure_healthy()?;
-        if self.terminal_streams.contains(stream_id) {
+        if self.terminal_streams.contains(stream_id)
+            && !(readiness.reset.is_some() && is_client_bidi(stream_id))
+        {
             return Ok(());
         }
+        // Request FIN completes only the peer's sending direction. A later
+        // reset still cancels an in-flight handler or response on this stream.
+        // QUIC exposes that reset exactly once, including when duplicate
+        // transport frames arrive after its terminal receive notification.
         if let Some((error_code, final_size)) = readiness.reset {
             let kind = self.classify_reset_stream(connection, stream_id)?;
             match kind {
@@ -877,6 +883,9 @@ impl NativeH3Session {
             return Ok(());
         }
         if readiness.receive_stopped.is_some() {
+            if is_client_bidi(stream_id) {
+                self.state.abort_request_stream(stream_id.0)?;
+            }
             self.incoming.remove(&stream_id);
             self.terminal_streams.insert(stream_id)?;
             return Ok(());
@@ -1337,6 +1346,172 @@ fn is_client_bidi(stream_id: StreamId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::h3_native::H3PseudoHeaders;
+    use crate::net::quic_native::NativeQuicConnectionConfig;
+
+    fn server_with_request_limit(cx: &Cx, limit: u64) -> (NativeH3Session, QuicConnection) {
+        let mut connection = QuicConnection::server(NativeQuicConnectionConfig::default());
+        connection.begin_handshake(cx).expect("begin handshake");
+        connection
+            .mark_handshake_keys_available(cx)
+            .expect("handshake keys");
+        connection
+            .mark_app_keys_available(cx)
+            .expect("application keys");
+        connection.confirm_handshake(cx).expect("confirm handshake");
+        let mut session = NativeH3Session::with_config(H3ConnectionConfig {
+            endpoint_role: H3EndpointRole::Server,
+            max_concurrent_request_streams: Some(limit),
+            ..H3ConnectionConfig::default()
+        });
+        session
+            .initialize(cx, &mut connection, H3Settings::default())
+            .expect("initialize server session");
+        (session, connection)
+    }
+
+    fn receive_request_head(
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        stream_id: StreamId,
+        fin: bool,
+    ) -> u64 {
+        let head = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.test".to_string()),
+                path: Some("/".to_string()),
+                ..H3PseudoHeaders::default()
+            },
+            Vec::new(),
+        )
+        .expect("valid request head");
+        let wire = encode_frame(H3Frame::Headers(
+            qpack_encode_request_field_section(&head).expect("encode request head"),
+        ))
+        .expect("encode HEADERS frame");
+        let final_size = u64::try_from(wire.len()).expect("bounded request wire size");
+        connection
+            .inner_mut()
+            .accept_remote_stream(cx, stream_id)
+            .expect("accept request stream");
+        connection
+            .inner_mut()
+            .receive_stream_bytes(cx, stream_id, 0, wire, fin)
+            .expect("receive request HEADERS");
+        final_size
+    }
+
+    #[test]
+    fn native_h3_session_local_receive_stop_releases_request_concurrency() {
+        let cx = Cx::for_testing();
+        let (mut session, mut connection) = server_with_request_limit(&cx, 1);
+        let refused = StreamId(0);
+        receive_request_head(&cx, &mut connection, refused, false);
+        assert!(matches!(
+            session.next_event(&cx, &mut connection).expect("request HEADERS"),
+            Some(NativeH3Event::RequestHeaders { stream_id, .. }) if stream_id == refused
+        ));
+        assert_eq!(session.state.active_request_stream_count(), 1);
+        session
+            .cancel_request(&cx, &mut connection, refused)
+            .expect("cancel incomplete request");
+        assert_eq!(
+            session
+                .next_event(&cx, &mut connection)
+                .expect("receive stop"),
+            None
+        );
+        assert_eq!(session.state.active_request_stream_count(), 0);
+        assert!(!session.incoming.contains_key(&refused));
+        assert!(session.terminal_streams.contains(refused));
+
+        let survivor = StreamId(4);
+        receive_request_head(&cx, &mut connection, survivor, true);
+        assert!(matches!(
+            session.next_event(&cx, &mut connection).expect("survivor HEADERS"),
+            Some(NativeH3Event::RequestHeaders { stream_id, .. }) if stream_id == survivor
+        ));
+        assert_eq!(
+            session
+                .next_event(&cx, &mut connection)
+                .expect("survivor FIN"),
+            Some(NativeH3Event::Finished {
+                stream_id: survivor
+            })
+        );
+        assert_eq!(session.state.active_request_stream_count(), 0);
+        assert!(session.incoming.is_empty());
+    }
+
+    #[test]
+    fn native_h3_session_peer_reset_after_request_fin_is_delivered_once() {
+        let cx = Cx::for_testing();
+        let (mut session, mut connection) = server_with_request_limit(&cx, 1);
+        let cancelled = StreamId(0);
+        let final_size = receive_request_head(&cx, &mut connection, cancelled, true);
+        assert!(matches!(
+            session.next_event(&cx, &mut connection).expect("request HEADERS"),
+            Some(NativeH3Event::RequestHeaders { stream_id, .. }) if stream_id == cancelled
+        ));
+        assert_eq!(
+            session
+                .next_event(&cx, &mut connection)
+                .expect("request FIN"),
+            Some(NativeH3Event::Finished {
+                stream_id: cancelled
+            })
+        );
+        assert!(session.terminal_streams.contains(cancelled));
+        assert_eq!(session.state.active_request_stream_count(), 0);
+
+        connection
+            .inner_mut()
+            .reset_stream_receive(&cx, cancelled, H3_REQUEST_CANCELLED, final_size)
+            .expect("peer cancels after request FIN");
+        assert_eq!(
+            session
+                .next_event(&cx, &mut connection)
+                .expect("late peer reset"),
+            Some(NativeH3Event::StreamReset {
+                stream_id: cancelled,
+                error_code: H3_REQUEST_CANCELLED,
+                final_size,
+            })
+        );
+        session
+            .cancel_request(&cx, &mut connection, cancelled)
+            .expect("acknowledge cancelled dispatch");
+        connection
+            .inner_mut()
+            .reset_stream_receive(&cx, cancelled, H3_REQUEST_CANCELLED, final_size)
+            .expect("duplicate peer reset");
+        assert_eq!(
+            session
+                .next_event(&cx, &mut connection)
+                .expect("no repeated reset"),
+            None
+        );
+        assert_eq!(session.state.active_request_stream_count(), 0);
+
+        let survivor = StreamId(4);
+        receive_request_head(&cx, &mut connection, survivor, true);
+        assert!(matches!(
+            session.next_event(&cx, &mut connection).expect("survivor HEADERS"),
+            Some(NativeH3Event::RequestHeaders { stream_id, .. }) if stream_id == survivor
+        ));
+        assert_eq!(
+            session
+                .next_event(&cx, &mut connection)
+                .expect("survivor FIN"),
+            Some(NativeH3Event::Finished {
+                stream_id: survivor
+            })
+        );
+        assert_eq!(session.state.active_request_stream_count(), 0);
+        assert!(session.incoming.is_empty());
+    }
 
     #[test]
     fn produced_h3_data_wire_length_tracks_varint_boundaries_exactly() {

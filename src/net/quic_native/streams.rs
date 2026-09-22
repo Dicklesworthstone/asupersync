@@ -456,6 +456,10 @@ pub struct QuicStream {
     pub receive_stopped_error_code: Option<u64>,
     /// Optional peer reset state `(error_code, final_size)`.
     pub recv_reset: Option<(u64, u64)>,
+    /// Whether the receive-readiness consumer observed the peer reset.
+    /// The sticky reset state must not produce another edge when duplicate
+    /// RESET_STREAM, late STREAM, or local receive-stop traffic arrives.
+    reset_readiness_delivered: bool,
     /// Up to one QUIC-varint prefix retained across RESET_STREAM so an
     /// application protocol can classify an already-buffered unidirectional
     /// stream before treating a critical-stream reset as fatal.
@@ -506,6 +510,7 @@ impl QuicStream {
             stop_sending_error_code: None,
             receive_stopped_error_code: None,
             recv_reset: None,
+            reset_readiness_delivered: false,
             reset_buffered_prefix: Bytes::new(),
             recv_ranges: BTreeMap::new(),
             recv_chunks: BTreeMap::new(),
@@ -667,7 +672,9 @@ impl QuicStream {
     ) -> Result<u64, QuicStreamError> {
         let len = data.len() as u64;
         let flow_delta = self.receive_segment(offset, len, is_fin)?;
-        if len > 0 {
+        // Terminal receives still pass final-size/flow validation above, but
+        // their discarded payload must never repopulate the reassembly queue.
+        if len > 0 && self.recv_reset.is_none() && self.receive_stopped_error_code.is_none() {
             self.insert_recv_bytes(offset, data)?;
         }
         Ok(flow_delta)
@@ -913,6 +920,10 @@ impl QuicStream {
     /// Locally stop receiving this stream.
     pub fn stop_receiving(&mut self, error_code: u64) {
         self.receive_stopped_error_code = Some(error_code);
+        // Retain offsets, credit and the final size for transport accounting;
+        // the application can no longer consume any retained payload.
+        self.recv_ranges.clear();
+        self.recv_chunks.clear();
     }
 
     /// Apply a peer RESET_STREAM to this stream's receive side.
@@ -1821,7 +1832,8 @@ impl StreamTable {
         // stores no payload bytes. Advertising byte-readiness here makes a
         // consumer observe `readable_bytes > 0` followed by an empty read and
         // can create a permanent poll loop. FIN remains a real terminal edge.
-        if is_fin {
+        let stream = self.stream(id)?;
+        if is_fin && stream.recv_reset.is_none() && stream.receive_stopped_error_code.is_none() {
             self.mark_stream_readable(id);
         }
         Ok(())
@@ -1974,7 +1986,11 @@ impl StreamTable {
         self.recv_connection_credit
             .consume(flow_delta)
             .map_err(|err| StreamTableError::Stream(QuicStreamError::Flow(err)))?;
-        if len > 0 || is_fin {
+        let stream = self.stream(id)?;
+        if (len > 0 || is_fin)
+            && stream.recv_reset.is_none()
+            && stream.receive_stopped_error_code.is_none()
+        {
             self.mark_stream_readable(id);
         }
         Ok(())
@@ -2021,7 +2037,14 @@ impl StreamTable {
     /// remain observable; terminal state is a one-shot edge.
     pub fn take_next_readable_stream(&mut self) -> Option<StreamReadiness> {
         let stream_id = self.readable_streams.pop_first()?;
-        self.stream_readiness(stream_id).ok()
+        let readiness = self.stream_readiness(stream_id).ok()?;
+        if readiness.reset.is_some() {
+            self.streams
+                .get_mut(&stream_id)
+                .expect("readiness requires an existing stream")
+                .reset_readiness_delivered = true;
+        }
+        Some(readiness)
     }
 
     /// Poll for the next deterministic receive-side stream notification.
@@ -2230,8 +2253,12 @@ impl StreamTable {
         id: StreamId,
         error_code: u64,
     ) -> Result<(), StreamTableError> {
-        self.stream_mut(id)?.stop_receiving(error_code);
-        self.mark_stream_readable(id);
+        let stream = self.stream_mut(id)?;
+        let previous = stream.receive_stopped_error_code;
+        stream.stop_receiving(error_code);
+        if previous != Some(error_code) {
+            self.mark_stream_readable(id);
+        }
         Ok(())
     }
 
@@ -2440,6 +2467,13 @@ impl StreamTable {
     }
 
     fn mark_stream_readable(&mut self, id: StreamId) {
+        if self
+            .streams
+            .get(&id)
+            .is_some_and(|stream| stream.reset_readiness_delivered)
+        {
+            return;
+        }
         self.readable_streams.insert(id);
         self.wake_reader(id);
         if let Some(waker) = self.readable_stream_waker.take() {
@@ -3177,6 +3211,137 @@ mod tests {
     }
 
     #[test]
+    fn native_h3_adapter_reset_discards_late_payload_without_losing_final_size_validation() {
+        let mut table = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let stream = StreamId(0);
+        table.accept_remote_stream(stream).expect("accept request");
+        table
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"prefix"), false)
+            .expect("buffer readable prefix");
+        table
+            .receive_stream_bytes(stream, 10, Bytes::from_static(b"tail"), false)
+            .expect("buffer out-of-order tail");
+        assert_eq!(table.stream(stream).expect("request").recv_chunks.len(), 2);
+        table
+            .reset_stream_receive(stream, 7, 16)
+            .expect("peer reset");
+        assert_eq!(
+            table.take_next_readable_stream().expect("reset edge").reset,
+            Some((7, 16))
+        );
+        table
+            .receive_stream_bytes(stream, 6, Bytes::from_static(b"late"), false)
+            .expect("late bytes inside final size are discarded");
+        table
+            .receive_stream_bytes(stream, 10, Bytes::from_static(b"tail!!"), true)
+            .expect("late FIN at the reset final size is discarded");
+        table.stop_receiving(stream, 7).expect("acknowledge reset");
+
+        let state = table.stream(stream).expect("request remains tracked");
+        assert!(state.recv_chunks.is_empty());
+        assert!(state.recv_ranges.is_empty());
+        assert_eq!(state.recv_credit.used(), 16);
+        assert_eq!(state.recv_offset, 6);
+        assert_eq!(state.read_offset, 0);
+        assert_eq!(state.final_size, Some(16));
+        assert_eq!(state.reset_buffered_prefix(), Bytes::from_static(b"prefix"));
+        assert!(table.take_next_readable_stream().is_none());
+        assert_eq!(
+            table.receive_stream_bytes(stream, 16, Bytes::from_static(b"x"), false),
+            Err(StreamTableError::Stream(
+                QuicStreamError::InvalidFinalSize {
+                    final_size: 16,
+                    received: 17,
+                }
+            ))
+        );
+        assert!(
+            table
+                .stream(stream)
+                .expect("request")
+                .recv_chunks
+                .is_empty()
+        );
+        assert_eq!(
+            table.stream(stream).expect("request").recv_credit.used(),
+            16
+        );
+    }
+
+    #[test]
+    fn native_h3_adapter_local_stop_releases_buffered_and_late_payload() {
+        let mut table = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let stream = StreamId(0);
+        table.accept_remote_stream(stream).expect("accept request");
+        table
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"abc"), false)
+            .expect("buffer readable prefix");
+        table
+            .receive_stream_bytes(stream, 8, Bytes::from_static(b"end"), true)
+            .expect("buffer out-of-order FIN");
+        assert_eq!(table.stream(stream).expect("request").recv_chunks.len(), 2);
+        table.stop_receiving(stream, 7).expect("stop receiving");
+        let stopped = table
+            .take_next_readable_stream()
+            .expect("receive-stop edge");
+        assert_eq!(stopped.receive_stopped, Some(7));
+        assert_eq!(stopped.readable_bytes, 0);
+        table
+            .receive_stream_bytes(stream, 3, Bytes::from_static(b"late!"), false)
+            .expect("late bytes are discarded");
+        table
+            .receive_stream_bytes(stream, 8, Bytes::from_static(b"end"), true)
+            .expect("repeated FIN is discarded");
+        table.stop_receiving(stream, 7).expect("repeat local stop");
+
+        let state = table.stream(stream).expect("request remains tracked");
+        assert!(state.recv_chunks.is_empty());
+        assert!(state.recv_ranges.is_empty());
+        assert_eq!(state.recv_credit.used(), 11);
+        assert_eq!(state.recv_offset, 3);
+        assert_eq!(state.read_offset, 0);
+        assert_eq!(state.final_size, Some(11));
+        assert_eq!(state.send_offset, 0);
+        assert_eq!(state.send_reset, None);
+        assert!(table.take_next_readable_stream().is_none());
+        assert_eq!(
+            table.read_stream_bytes(stream, 11),
+            Err(StreamTableError::Stream(QuicStreamError::ReceiveStopped {
+                code: 7
+            }))
+        );
+
+        table
+            .reset_stream_receive(stream, 7, 11)
+            .expect("peer acknowledges stop");
+        assert_eq!(
+            table
+                .take_next_readable_stream()
+                .expect("peer reset edge")
+                .reset,
+            Some((7, 11))
+        );
+        let survivor = StreamId(4);
+        table
+            .accept_remote_stream(survivor)
+            .expect("accept survivor");
+        table
+            .receive_stream_bytes(survivor, 0, Bytes::from_static(b"ok"), true)
+            .expect("receive survivor");
+        assert_eq!(
+            table
+                .take_next_readable_stream()
+                .expect("survivor edge")
+                .stream_id,
+            survivor
+        );
+        assert_eq!(
+            table.read_stream_bytes(survivor, 2).expect("survivor body"),
+            b"ok"[..]
+        );
+    }
+
+    #[test]
     fn native_h3_adapter_stream_readiness_is_edge_triggered_for_bytes_fin_and_reset() {
         let mut tbl = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
         let id = StreamId::local(StreamRole::Client, StreamDirection::Bidirectional, 0);
@@ -3224,6 +3389,106 @@ mod tests {
         assert!(
             tbl.take_next_readable_stream().is_none(),
             "consumed reset edge must be one-shot"
+        );
+    }
+
+    #[test]
+    fn native_h3_adapter_reset_after_fin_is_one_shot_across_late_terminal_traffic() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let mut table = StreamTable::new(StreamRole::Server, 0, 0, 100, 100);
+        let stream = StreamId(0);
+        table.accept_remote_stream(stream).expect("accept request");
+        table
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"body"), true)
+            .expect("receive complete request");
+        assert!(
+            table
+                .take_next_readable_stream()
+                .expect("FIN edge")
+                .fin_received
+        );
+        assert_eq!(
+            table.read_stream_bytes(stream, 4).expect("read body"),
+            b"body"[..]
+        );
+        assert!(table.take_next_readable_stream().is_none());
+
+        let wake_count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wake_count));
+        let mut task = Context::from_waker(&waker);
+        assert!(table.poll_next_readable_stream(&mut task).is_pending());
+        table
+            .reset_stream_receive(stream, 7, 4)
+            .expect("reset after FIN");
+        assert_eq!(wake_count.0.load(Ordering::SeqCst), 1);
+        let reset = table.take_next_readable_stream().expect("late reset edge");
+        assert_eq!(reset.stream_id, stream);
+        assert_eq!(reset.reset, Some((7, 4)));
+        assert_eq!(reset.readable_bytes, 0);
+        assert!(!reset.fin_received);
+
+        assert!(table.poll_next_readable_stream(&mut task).is_pending());
+        table
+            .reset_stream_receive(stream, 7, 4)
+            .expect("duplicate reset");
+        table
+            .receive_stream_bytes(stream, 0, Bytes::from_static(b"body"), true)
+            .expect("late duplicate STREAM");
+        table
+            .stop_receiving(stream, 7)
+            .expect("local reset acknowledgement");
+        table
+            .set_stream_final_size(stream, 4)
+            .expect("unchanged final size");
+        assert_eq!(wake_count.0.load(Ordering::SeqCst), 1);
+        assert!(table.take_next_readable_stream().is_none());
+        assert_eq!(
+            table.read_stream_bytes(stream, 4),
+            Err(StreamTableError::Stream(QuicStreamError::ReceiveReset {
+                code: 7,
+                final_size: 4,
+            }))
+        );
+        assert_eq!(
+            table.reset_stream_receive(stream, 7, 5),
+            Err(StreamTableError::Stream(
+                QuicStreamError::InconsistentReset {
+                    previous_final_size: 4,
+                    new_final_size: 5,
+                }
+            ))
+        );
+
+        let survivor = StreamId(4);
+        table
+            .accept_remote_stream(survivor)
+            .expect("accept survivor");
+        table
+            .receive_stream_bytes(survivor, 0, Bytes::from_static(b"ok"), true)
+            .expect("receive survivor");
+        assert_eq!(wake_count.0.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            table
+                .take_next_readable_stream()
+                .expect("survivor edge")
+                .stream_id,
+            survivor
+        );
+        assert_eq!(
+            table.read_stream_bytes(survivor, 2).expect("survivor body"),
+            b"ok"[..]
         );
     }
 
