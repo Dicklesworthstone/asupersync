@@ -50,7 +50,9 @@ where
     lab.scheduler.lock().schedule(task, 0);
     // These journeys include pending timers, not only runnable tasks/channel
     // wakes. Drive virtual-time progress as well as the scheduler ready queue.
-    lab.run_until_quiescent();
+    let progress = lab.run_with_auto_advance();
+    assert_eq!(progress.termination, crate::lab::AutoAdvanceTermination::Quiescent,
+        "startup scenario must finish without exhausting its step budget or stalling");
     join.try_join().unwrap().expect("startup test finished in lab budget");
     assert_eq!(lab.state.live_task_count(), 0);
     assert_eq!(lab.state.pending_obligation_count(), 0);
