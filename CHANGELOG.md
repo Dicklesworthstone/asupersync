@@ -16,12 +16,14 @@ crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 
 ## Version Timeline
 
-- **v0.6.0 Release**: durable ATP sender/receiver journaling and resume across
-  process loss, targeted resume-client revocation without peer restart, QUIC
-  protected close and post-close accounting shutdown, bounded clock capture and
-  replay, and an HTTP/1 fix that answers a rejected request head with
-  `400`/`413`/`431` instead of a silent close. Also documents the `Outcome<T, E>`
-  conditional-`Debug` migration that landed in 0.5.0.
+- **v0.6.0 (unreleased)**: the workspace version was bumped on `main` in
+  `85f7a8e59` (2026-09-18), but v0.6.0 has not been tagged, released on GitHub or
+  published to crates.io; the latest published version is v0.5.0. Planned
+  content: durable ATP sender/receiver journaling and resume across process
+  loss, targeted resume-client revocation without peer restart, QUIC protected
+  close and post-close accounting shutdown, bounded clock capture and replay,
+  and an HTTP/1 fix that answers a rejected request head with
+  `400`/`413`/`431` instead of a silent close.
 - **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
   retirement, QUIC connection reclamation, and buffered I/O recovery.
@@ -81,13 +83,22 @@ crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 
 ## [Unreleased]
 
-## [v0.6.0] - 2026-09-18
+## [v0.6.0] - Unreleased (version bumped on `main` 2026-09-18; not yet published)
 
 250 commits since v0.5.0. The theme is **durability**: ATP transfers now survive
 a process dying mid-send or mid-receive, QUIC closes cleanly and stops accounting
 afterwards, and the clock can be captured and replayed within bounded windows.
 
 ### Migration note — `Outcome<T, E>` and conditionally derived `Debug`
+
+**Correction (2026-09-22):** the attribution below is wrong. The
+`#[derive(Debug, ...)]` on `Outcome<T, E>` is byte-identical at v0.4.3 and at
+v0.5.0 (`src/types/outcome.rs` line 217 in both tags), so it cannot be what
+changed in 0.5.0. The real cause of the downstream break observed with 0.5.0 is
+still unidentified and is tracked in `asupersync-bi2462.139`. The
+conditional-`Debug` behaviour described below is accurate. It has held since
+before v0.4.3, so it may explain an `E0277` in new code, but it is not a
+0.5.0 change.
 
 This is not new in 0.6.0; it landed in **0.5.0** and is documented here because
 it is a silent, source-breaking change for downstream crates that only surfaces
