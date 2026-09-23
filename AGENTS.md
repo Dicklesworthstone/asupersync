@@ -30,6 +30,17 @@ weaken a gate to land a change**, and if a gate is genuinely defective, meet the
 standard and publish the win/lose split of what the fix admits; and **reporting a loss is a
 success** — one line, revert, next lever, no retraction narrative.
 
+**Status note (2026-09-22, `asupersync-bi2462.146`).** `/data/projects/AGENTS.md` does not
+currently exist. The sibling projects that reference it are in the same situation. Until the
+owner restores it:
+- Treat the three sentences above as the binding summary.
+- The nearest existing text of the named patterns is the project-specific
+  "Named Reward-Hacking Patterns (all forbidden)" section of
+  `/data/projects/hedge_fund_data_tool/AGENTS.md`.
+- No copy of "Work-Graph Discipline" exists on disk; the one-line summary in the list above is the
+  operative text.
+- Do not invent the missing file.
+
 ---
 
 ## RULE NUMBER 1: NO FILE DELETION
@@ -546,7 +557,31 @@ work-in-progress module behind a cargo feature so a break cannot reach the defau
 build — do **not** push never-compiled default (`pub mod ...`) code to `main`.
 `git push --no-verify` bypasses the hook for a change you have verified another
 way (e.g. docs-only). The hook runs only the default set, not the full
-`--all-features` clippy gate (too slow to block every push); CI still covers that.
+`--all-features` clippy gate (too slow to block every push). GitHub Actions is currently
+disabled for this repository (see "Validation Path" below), so no CI job covers it. Run the
+`--all-features` commands yourself through RCH before landing feature-gated changes.
+
+## Validation Path (owner decision, 2026-09-22)
+
+Recorded in `asupersync-bi2462.85`. These decisions settle the split that left part of the swarm
+landing code nobody compiled or ran:
+
+1. **RCH is the sanctioned and required path for Cargo proof.** RCH pruning its own worker-side
+   scratch and cache directories is tool-internal housekeeping of artifacts that RCH itself
+   created. It is not an agent deleting files under RULE 1. RULE 1 still governs every file
+   an agent deletes or overwrites, locally or on a worker. `asupersync-bi2462.81` is resolved on
+   this basis.
+2. **GitHub Actions stays disabled.** The workflow files are retained, but they are not
+   enforcement. Any README or docs statement that a CI job "runs", "gates" or "covers" something
+   describes a job that does not currently execute. Until the owner re-enables Actions, the main
+   watchdog (`asupersync-bi2462.147`) and the RCH lanes named in this file are the checks.
+3. **Commits created through the GitHub web UI or API, or by any agent without a working
+   compile path, must not add or modify Rust sources, `Cargo.toml`/`Cargo.lock`, build scripts or
+   test code.** Such agents may land docs and tracker changes only, or hand the code to an agent
+   that can validate it. A Rust change lands only after at least `cargo check --all-targets
+   --keep-going` (default features) plus a check of every touched feature-gated target has run
+   through RCH. The commit body must cite that receipt. A commit message saying the code was
+   "not compiled" or "not executed" is not an acceptable way to land Rust code.
 
 ---
 
