@@ -225,6 +225,9 @@ struct DropAudit {
     drops: Arc<AtomicUsize>,
     locked: Arc<AtomicBool>,
 }
+// Not replaceable by `Waker::noop()`: this waker exists to observe when it is
+// dropped (see the `Drop` impl below).
+#[allow(clippy::manual_noop_waker)]
 impl Wake for DropAudit {
     fn wake(self: Arc<Self>) {}
 }

@@ -85,6 +85,9 @@ struct SelectInput {
 }
 
 impl Parse for SelectInput {
+    // One linear pass over the select! grammar; the workspace crate allows
+    // too_many_lines outright and lab_test.rs allows it per function.
+    #[allow(clippy::too_many_lines)]
     fn parse(input: ParseStream) -> syn::Result<Self> {
         if input.is_empty() || input.peek(syn::token::Brace) {
             return Err(Error::new(input.span(), "select! requires cx argument"));

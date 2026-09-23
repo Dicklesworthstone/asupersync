@@ -194,7 +194,7 @@ where
         else { RuntimeBuilder::current_thread().build().unwrap() };
     let finished = Arc::new(AtomicBool::new(false));
     let observed = Arc::clone(&finished);
-    let _ = runtime.block_on(runtime.handle().spawn(async move {
+    runtime.block_on(runtime.handle().spawn(async move {
         test(Cx::current().expect("native context")).await;
         finished.store(true, Ordering::Release);
     }));
@@ -216,7 +216,7 @@ fn native_endpoint_dials_health_watch_and_closes_its_owned_connection() {
         let handle = runtime.handle().clone();
         let done = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&done);
-        let _ = runtime.block_on(runtime.handle().spawn(async move {
+        runtime.block_on(runtime.handle().spawn(async move {
             let health = HealthService::with_auth_mode(HealthAuthMode::bearer_token("endpoint-secret"));
             health.set_status("svc", ServingStatus::Serving);
             let rpc = health.rpc_service(1);

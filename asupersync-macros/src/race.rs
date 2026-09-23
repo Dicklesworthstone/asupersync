@@ -133,13 +133,13 @@ impl Parse for RaceInput {
             ));
         }
         for branch in &branches {
-            if let Some(closure) = factory(&branch.future) {
-                if closure.inputs.len() != 1 {
-                    return Err(Error::new_spanned(
-                        closure,
-                        "race! factories must take exactly one child Cx argument",
-                    ));
-                }
+            if let Some(closure) = factory(&branch.future)
+                && closure.inputs.len() != 1
+            {
+                return Err(Error::new_spanned(
+                    closure,
+                    "race! factories must take exactly one child Cx argument",
+                ));
             }
         }
 
@@ -208,11 +208,10 @@ fn generate_race(cx: &Expr, timeout: Option<&Expr>, branches: &[RaceBranch]) -> 
         (false, false) => "",
     };
     let method = format_ident!("{prefix}{suffix}");
-    let call = if let Some(duration) = timeout {
-        quote! { (#cx).#method(#duration, vec![#(#boxed_futures),*]).await }
-    } else {
-        quote! { (#cx).#method(vec![#(#boxed_futures),*]).await }
-    };
+    let call = timeout.map_or_else(
+        || quote! { (#cx).#method(vec![#(#boxed_futures),*]).await },
+        |duration| quote! { (#cx).#method(#duration, vec![#(#boxed_futures),*]).await },
+    );
     quote! { { #call } }
 }
 

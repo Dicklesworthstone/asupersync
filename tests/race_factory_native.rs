@@ -55,12 +55,13 @@ where
     } else {
         RuntimeBuilder::new().worker_threads(workers).build().unwrap()
     };
-    let result = runtime.block_on(runtime.handle().spawn(async move {
+    // `JoinHandle<()>` resolves to `()`: a panicked owner is resumed here and a
+    // dropped or cancelled one panics, so any owner failure fails the test.
+    runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("real admitted native task");
         asupersync::time::timeout(cx.now(), Duration::from_secs(10), body(cx.clone()))
             .await.expect("native race/drain watchdog");
     }));
-    assert!(result.is_ok(), "native owner failed: {result:?}");
     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
 }
 
@@ -197,13 +198,17 @@ fn cancelled_and_masked_owners_never_invoke_a_factory() {
         assert!(matches!(result, Err(JoinError::Cancelled(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     });
-    let cx = Cx::detached_cancel_context();
-    cx.cancel_fast(CancelKind::User);
-    let mut future = Box::pin(cx.race_drained_with(vec![boxed::<(), _, _>(|_child| async {
-        panic!("cancelled owner must not invoke its factory");
-    })]));
-    assert!(matches!(future.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())),
-        Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.kind == CancelKind::User));
+    // `race_drained_with` needs spawn authority (`Cx<cap::All>`), which a
+    // detached `Cx<cap::None>` cannot carry, so the cancelled owner is a real
+    // admitted native task that cancels its own context before racing.
+    native(1, |cx| async move {
+        cx.cancel_fast(CancelKind::User);
+        let mut future = Box::pin(cx.race_drained_with(vec![boxed::<(), _, _>(|_child| async {
+            panic!("cancelled owner must not invoke its factory");
+        })]));
+        assert!(matches!(future.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())),
+            Poll::Ready(Err(JoinError::Cancelled(reason))) if reason.kind == CancelKind::User));
+    });
 }
 
 #[cfg(feature = "proc-macros")]

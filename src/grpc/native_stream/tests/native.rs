@@ -30,7 +30,7 @@ where
     let handle = runtime.handle().clone();
     let complete = Arc::new(AtomicBool::new(false));
     let observed = Arc::clone(&complete);
-    let _ = runtime.block_on(runtime.handle().spawn(async move {
+    runtime.block_on(runtime.handle().spawn(async move {
         let server = Arc::new(Server::builder().add_service(service).build());
         let listener = server.bind_registered_streaming_http2("127.0.0.1:0", HostPolicy::allow_all(),
             ServerStreamingConfig {
@@ -219,7 +219,7 @@ fn native_client_cross_thread_cancel_wakes_witnessed_partial_message_read() {
         } else { RuntimeBuilder::current_thread().build().unwrap() };
         let complete = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&complete);
-        let _ = runtime.block_on(runtime.handle().spawn(async move {
+        runtime.block_on(runtime.handle().spawn(async move {
             let cx = Cx::current().unwrap();
             let io = TcpStream::connect_timeout(address, Duration::from_secs(3)).await.unwrap();
             let mut stream = NativeServerStream::new(&cx, io, "localhost", "/test.Values/Watch",
@@ -429,7 +429,7 @@ fn native_duplex_pending_write_and_flush_resume_after_interrupted_header_wait() 
             } else { RuntimeBuilder::current_thread().build().unwrap() };
             let complete = Arc::new(AtomicBool::new(false));
             let observed = Arc::clone(&complete);
-            let _ = runtime.block_on(runtime.handle().spawn(async move {
+            runtime.block_on(runtime.handle().spawn(async move {
                 let cx = Cx::current().unwrap();
                 let inner = TcpStream::connect_timeout(address, Duration::from_secs(3)).await.unwrap();
                 let io = NativeDuplexIo {

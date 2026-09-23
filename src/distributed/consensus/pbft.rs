@@ -69,9 +69,9 @@ pub struct PbftConfig {
 impl PbftConfig {
     /// Create configuration for n replicas with f Byzantine faults.
     pub fn new(replica_count: usize, fault_tolerance: usize) -> Result<Self> {
-        if !fault_tolerance
+        if fault_tolerance
             .checked_mul(3)
-            .is_some_and(|minimum| replica_count > minimum)
+            .is_none_or(|minimum| replica_count <= minimum)
         {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
@@ -1255,7 +1255,7 @@ mod progress_tests {
                             } else {
                                 commits += 1;
                             }
-                            let expected = if prepares == 2 && commits == 2 { 1 } else { 0 };
+                            let expected = u64::from(prepares == 2 && commits == 2);
                             assert_eq!(node.last_executed(), SequenceNumber::new(expected));
                         }
                         permutations += 1;

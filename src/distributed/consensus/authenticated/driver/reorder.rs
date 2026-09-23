@@ -207,6 +207,7 @@ mod tests {
         let first = inbox.next().unwrap();
         assert_eq!(first.phase, 0);
         // Dropping a selected delivery must not consume the obligation to apply it.
+        #[allow(clippy::drop_non_drop)] // the explicit discard is the scenario under test
         drop(first);
         let first = inbox.next().unwrap();
         assert_eq!(first.author, 0);

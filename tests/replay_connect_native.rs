@@ -135,8 +135,8 @@ impl Observation {
         hash.update(self.start.to_le_bytes());
         hash.update(self.end.to_le_bytes());
         hash.update(self.nonce.to_le_bytes());
-        hash.update([self.replies.0, self.replies.1]);
-        format!("{:x}", hash.finalize())
+        hash.update(<[u8; 2]>::from(self.replies));
+        hex::encode(hash.finalize())
     }
     fn decision(&self) -> Result<(), &'static str> {
         if self.replies.1 == b'N' { Err("peer-b-denied") } else { Ok(()) }

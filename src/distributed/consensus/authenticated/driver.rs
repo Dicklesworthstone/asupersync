@@ -350,10 +350,10 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                     return Ok(PbftIngressOutcome::Rejected(error));
                 }
             }
-            PbftMessage::PrePrepare { batch, .. } => {
-                if batch.is_empty() || batch.len() > self.max_batch_size {
-                    return Ok(PbftIngressOutcome::Rejected(PbftAuthError::Configuration));
-                }
+            PbftMessage::PrePrepare { batch, .. }
+                if batch.is_empty() || batch.len() > self.max_batch_size =>
+            {
+                return Ok(PbftIngressOutcome::Rejected(PbftAuthError::Configuration));
             }
             _ => {}
         }
@@ -386,10 +386,8 @@ impl<T: PbftPacketTransport, S: PbftStateMachine> AuthenticatedPbftNode<T, S> {
                     self.drain_reordered(cx).await?;
                     return Ok(PbftIngressOutcome::Processed);
                 }
-                PbftMessage::Request(request) => {
-                    if !self.has_submission_credit(request)? {
-                        return Ok(PbftIngressOutcome::BufferFull);
-                    }
+                PbftMessage::Request(request) if !self.has_submission_credit(request)? => {
+                    return Ok(PbftIngressOutcome::BufferFull);
                 }
                 _ => {}
             }
