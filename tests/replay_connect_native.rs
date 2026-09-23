@@ -129,6 +129,8 @@ struct Observation {
 }
 impl Observation {
     fn digest(&self) -> String {
+        use std::fmt::Write as _;
+
         let mut hash = Sha256::new();
         hash.update(b"asupersync.connect-observation.v1\0");
         hash.update(format!("{:?}:{:?}", self.connect_error, self.raw_error).as_bytes());
@@ -136,7 +138,11 @@ impl Observation {
         hash.update(self.end.to_le_bytes());
         hash.update(self.nonce.to_le_bytes());
         hash.update([self.replies.0, self.replies.1]);
-        format!("{:x}", hash.finalize())
+        let mut digest = String::with_capacity(64);
+        for byte in hash.finalize() {
+            write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        digest
     }
     fn decision(&self) -> Result<(), &'static str> {
         if self.replies.1 == b'N' { Err("peer-b-denied") } else { Ok(()) }

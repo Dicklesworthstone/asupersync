@@ -2264,6 +2264,63 @@ impl SporkHarnessReport {
     }
 }
 
+/// Retires producer admission and queued work before the lab's state drops.
+/// Kept in a private field so `LabRuntime` itself need not implement `Drop`:
+/// callers may continue moving its public state and scheduler fields out.
+#[derive(Debug)]
+struct LabSpawnShutdown {
+    liveness: Option<Arc<()>>,
+    mailbox: Arc<crate::runtime::spawn_mailbox::SpawnMailbox>,
+}
+
+impl Drop for LabSpawnShutdown {
+    fn drop(&mut self) {
+        fn isolate(cleanup: impl FnOnce()) {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup)) {
+                // A user panic payload can itself panic when destroyed.
+                std::mem::forget(payload);
+            }
+        }
+
+        if let Some(token) = self.liveness.take() {
+            let publishers = Arc::downgrade(&token);
+            drop(token);
+            // Match native teardown: a producer already holding the token may
+            // finish publishing before we perform the final mailbox drain.
+            while publishers.strong_count() > 0 {
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+        }
+        let mut cancelled = Vec::new();
+        while self.mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
+            for request in cancelled.drain(..) {
+                isolate(|| {
+                    if let Some(slot) = request.admitted_slot {
+                        slot.abandon_unpublished_spawn_effects();
+                    }
+                });
+            }
+        }
+        while let Some(request) = self.mailbox.dequeue() {
+            let mut parts = request.into_parts();
+            // Keep the region's pending credit until even the panic fallback
+            // has made retirement visible to the caller.
+            let pending_reservation = parts.pending_reservation.take();
+            let barrier = parts
+                .admitted_slot
+                .as_ref()
+                .and_then(|slot| slot.retirement_barrier());
+            isolate(|| parts.resolve_cancelled(crate::types::CancelReason::shutdown()));
+            // If a captured destructor panicked before the denial callback,
+            // the sender is now dropped but its join still needs retirement.
+            if let Some(barrier) = barrier {
+                isolate(|| barrier.open_after_shutdown());
+            }
+            drop(pending_reservation);
+        }
+    }
+}
+
 /// The deterministic lab runtime.
 ///
 /// This runtime is designed for testing and provides:
@@ -2273,6 +2330,9 @@ impl SporkHarnessReport {
 /// - Chaos injection for stress testing
 #[derive(Debug)]
 pub struct LabRuntime {
+    // Field drop order is significant: reject further spawns before dropping
+    // state-owned futures, whose destructors may retain and use a parent Cx.
+    _spawn_shutdown: LabSpawnShutdown,
     /// Runtime state (public for tests and oracle access).
     pub state: RuntimeState,
     /// Lab reactor for deterministic I/O simulation.
@@ -2280,8 +2340,6 @@ pub struct LabRuntime {
     /// Deterministic spawn intake (br-asupersync-4h8lye / A2.1): requests
     /// enqueued here are admitted in FIFO order at the top of each step.
     spawn_mailbox: Arc<crate::runtime::spawn_mailbox::SpawnMailbox>,
-    /// Keeps the lab spawn gateway live while the lab runtime is alive.
-    _spawn_liveness: Arc<()>,
     /// Tokens seen for I/O submissions (for trace emission).
     seen_io_tokens: DetHashSet<usize>,
     /// Scheduler.
@@ -2383,10 +2441,13 @@ impl LabRuntime {
         crate::tracing_compat::info!("virtual clock initialized: start_time_ms=0");
 
         Self {
+            _spawn_shutdown: LabSpawnShutdown {
+                liveness: Some(spawn_liveness),
+                mailbox: Arc::clone(&spawn_mailbox),
+            },
             state,
             lab_reactor,
             spawn_mailbox,
-            _spawn_liveness: spawn_liveness,
             // GH#55: derive lab hashing from the lab seed rather than
             // `Default::default()`, which is randomly seeded in builds
             // without `test-internals` and breaks lab determinism.
