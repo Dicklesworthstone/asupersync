@@ -8,10 +8,16 @@
 //! drain guarantee that differentiates `race!` from a plain drop-the-losers
 //! select — resources held by a losing branch are resolved, not abandoned. The
 //! older drop-only expansion (`Cx::race*`) is no longer emitted.
+//!
+//! Prefer `move |child| async move { operation(&child).await }` branches: the
+//! factory receives the context that loser cancellation actually targets.
+//! Prebuilt futures retain their compatibility behavior and may still capture
+//! a parent context which never observes loser cancellation. The factory
+//! timeout path drains after expiry; the legacy timeout path is drop-only.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     Error, Expr, Ident, LitStr, Token, braced,
     parse::{Parse, ParseStream},
@@ -27,6 +33,7 @@ struct RaceBranch {
 /// Input to the race! macro.
 ///
 /// Supported forms:
+/// - `race!(cx, { move |child| work(child), move |child| backup(child) })`
 /// - `race!(cx, { fut1(), fut2() })`
 /// - `race!(cx, { "name" => fut1(), "other" => fut2() })`
 /// - `race!(cx, timeout: Duration::from_secs(5), { fut1(), fut2() })`
@@ -118,6 +125,24 @@ impl Parse for RaceInput {
             ));
         }
 
+        let factories = branches.iter().filter(|branch| factory(&branch.future).is_some()).count();
+        if factories != 0 && factories != branches.len() {
+            return Err(Error::new(
+                input.span(),
+                "race! cannot mix prebuilt futures and child-context factories; wrap every branch in |child| ...",
+            ));
+        }
+        for branch in &branches {
+            if let Some(closure) = factory(&branch.future) {
+                if closure.inputs.len() != 1 {
+                    return Err(Error::new_spanned(
+                        closure,
+                        "race! factories must take exactly one child Cx argument",
+                    ));
+                }
+            }
+        }
+
         Ok(Self {
             cx,
             timeout,
@@ -142,15 +167,31 @@ pub fn race_impl(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+fn factory(expr: &Expr) -> Option<&syn::ExprClosure> {
+    match expr {
+        Expr::Closure(closure) => Some(closure),
+        Expr::Paren(paren) => factory(&paren.expr),
+        Expr::Group(group) => factory(&group.expr),
+        _ => None,
+    }
+}
+
 fn generate_race(cx: &Expr, timeout: Option<&Expr>, branches: &[RaceBranch]) -> TokenStream2 {
     let named = branches.first().and_then(|b| b.name.as_ref()).is_some();
-
+    let factories = branches.first().is_some_and(|b| factory(&b.future).is_some());
+    let child = format_ident!("__asupersync_race_child", span = proc_macro2::Span::mixed_site());
     let boxed_futures: Vec<TokenStream2> = branches
         .iter()
         .map(|branch| {
             let fut = &branch.future;
-            let fut_expr = quote! {
-                ::std::boxed::Box::pin(#fut)
+            let fut_expr = if factories {
+                quote! {
+                    ::std::boxed::Box::new(move |#child| {
+                        ::std::boxed::Box::pin((#fut)(#child))
+                    })
+                }
+            } else {
+                quote! { ::std::boxed::Box::pin(#fut) }
             };
             if let Some(name) = &branch.name {
                 quote! { (#name, #fut_expr) }
@@ -159,27 +200,20 @@ fn generate_race(cx: &Expr, timeout: Option<&Expr>, branches: &[RaceBranch]) -> 
             }
         })
         .collect();
-
-    let call = match (timeout, named) {
-        (Some(timeout_expr), true) => quote! {
-            (#cx).race_drained_timeout_named(#timeout_expr, vec![#(#boxed_futures),*]).await
-        },
-        (Some(timeout_expr), false) => quote! {
-            (#cx).race_drained_timeout(#timeout_expr, vec![#(#boxed_futures),*]).await
-        },
-        (None, true) => quote! {
-            (#cx).race_drained_named(vec![#(#boxed_futures),*]).await
-        },
-        (None, false) => quote! {
-            (#cx).race_drained(vec![#(#boxed_futures),*]).await
-        },
+    let prefix = if factories { "race_drained_with" } else { "race_drained" };
+    let suffix = match (timeout.is_some(), named) {
+        (true, true) => "_timeout_named",
+        (true, false) => "_timeout",
+        (false, true) => "_named",
+        (false, false) => "",
     };
-
-    quote! {
-        {
-            #call
-        }
-    }
+    let method = format_ident!("{prefix}{suffix}");
+    let call = if let Some(duration) = timeout {
+        quote! { (#cx).#method(#duration, vec![#(#boxed_futures),*]).await }
+    } else {
+        quote! { (#cx).#method(vec![#(#boxed_futures),*]).await }
+    };
+    quote! { { #call } }
 }
 
 #[cfg(test)]
@@ -323,4 +357,33 @@ mod tests {
             "named timeout race! must use race_drained_timeout_named"
         );
     }
+
+    #[test]
+    fn closure_races_receive_child_context_in_all_four_forms() {
+        for (input, method) in [
+            (quote! { cx, { |child| a(child), move |child| b(child) } }, "race_drained_with"),
+            (quote! { cx, { "a" => |child| a(child), "b" => (move |child| b(child)) } }, "race_drained_with_named"),
+            (quote! { cx, timeout: dur, { |child| a(child), |child| b(child) } }, "race_drained_with_timeout"),
+            (quote! { cx, timeout: dur, { "a" => |child| a(child), "b" => |child| b(child) } }, "race_drained_with_timeout_named"),
+        ] {
+            let parsed: RaceInput = syn::parse2(input).unwrap();
+            let expanded = generate_race(&parsed.cx, parsed.timeout.as_ref(), &parsed.branches);
+            let _: syn::Expr = syn::parse2(expanded.clone()).unwrap();
+            assert!(expanded.to_string().contains(method));
+            assert!(expanded.to_string().contains("__asupersync_race_child"));
+        }
+    }
+
+    #[test]
+    fn mixed_or_wrong_arity_factories_have_actionable_diagnostics() {
+        for (input, expected) in [
+            (quote! { cx, { |child| a(child), b() } }, "cannot mix"),
+            (quote! { cx, { || a(), |child| b(child) } }, "exactly one"),
+            (quote! { cx, { |a, b| call(a, b), |child| b(child) } }, "exactly one"),
+        ] {
+            let error = syn::parse2::<RaceInput>(input).err().expect("invalid factory form");
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
 }

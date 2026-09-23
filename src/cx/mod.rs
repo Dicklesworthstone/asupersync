@@ -112,3 +112,6 @@ pub use wrappers::{
     BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps, WebCaps,
     WebContext, narrow,
 };
+
+mod race_factory;
+pub use race_factory::RaceFactory;
