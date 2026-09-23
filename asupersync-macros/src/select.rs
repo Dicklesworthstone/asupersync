@@ -44,9 +44,20 @@
 //! the seeded drain tie-break into strict source order. For guaranteed
 //! source-order selection, use the `else` (non-blocking) form.
 
+//! # Child-context factories
+//!
+//! Blocking branches can use `value = move |child| operation(child) => handler`.
+//! Every factory receives its actual admitted child context and routes through
+//! `Cx::race_drained_with`. Use that child for cancel-aware operations instead
+//! of capturing the parent's context. Handlers remain part of each branch's
+//! future, as in the prebuilt form: they can run when that branch completes
+//! during drain, not only for the winning branch. Their result types must agree.
+//! Factories cannot be mixed with prebuilt futures or used with nonblocking
+//! `else`. Legacy prebuilt and source-ordered default behavior is unchanged.
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     Error, Expr, Pat, Token, braced,
     parse::{Parse, ParseStream},
@@ -174,6 +185,25 @@ impl Parse for SelectInput {
             ));
         }
 
+        let factories = branches.iter().filter(|branch| factory(&branch.future).is_some()).count();
+        if factories != 0 {
+            if factories != branches.len() {
+                return Err(Error::new(input.span(),
+                    "select! cannot mix prebuilt futures and child-context factories; wrap every branch in |child| ..."));
+            }
+            if els.is_some() {
+                return Err(Error::new(input.span(),
+                    "select! child-context factories require the blocking form; else cannot own and drain child tasks"));
+            }
+            for branch in &branches {
+                let closure = factory(&branch.future).expect("all branches are factories");
+                if closure.inputs.len() != 1 {
+                    return Err(Error::new_spanned(closure,
+                        "select! factories must take exactly one child Cx argument"));
+                }
+            }
+        }
+
         Ok(Self {
             cx,
             biased,
@@ -203,6 +233,30 @@ fn branch_future(branch: &SelectBranch) -> TokenStream2 {
     }
 }
 
+fn factory(expr: &Expr) -> Option<&syn::ExprClosure> {
+    match expr {
+        Expr::Closure(closure) => Some(closure),
+        Expr::Paren(paren) => factory(&paren.expr),
+        Expr::Group(group) => factory(&group.expr),
+        _ => None,
+    }
+}
+
+fn branch_factory(branch: &SelectBranch) -> TokenStream2 {
+    let pat = &branch.pat;
+    let fut = &branch.future;
+    let handler = &branch.handler;
+    let child = format_ident!("__asupersync_select_child", span = proc_macro2::Span::mixed_site());
+    quote! {
+        ::std::boxed::Box::new(move |#child| {
+            ::std::boxed::Box::pin(async move {
+                let #pat = (#fut)(#child).await;
+                #handler
+            })
+        })
+    }
+}
+
 fn generate_select(input: &SelectInput) -> TokenStream2 {
     let SelectInput {
         cx, branches, els, ..
@@ -213,6 +267,15 @@ fn generate_select(input: &SelectInput) -> TokenStream2 {
     // source order; the `else` form polls strictly in source order. The flag is
     // therefore documentation-level today — read here so the field stays live.
     let _ = input.biased;
+
+    if els.is_none() && branches.first().is_some_and(|branch| factory(&branch.future).is_some()) {
+        let factories: Vec<_> = branches.iter().map(branch_factory).collect();
+        return quote! {
+            {
+                (#cx).race_drained_with(::std::vec![#(#factories),*]).await
+            }
+        };
+    }
 
     let branch_futs: Vec<TokenStream2> = branches.iter().map(branch_future).collect();
 
@@ -442,4 +505,34 @@ mod tests {
             "biased select! must still use the drained engine, got: {tokens}"
         );
     }
+
+    #[test]
+    fn factory_select_preserves_bindings_handlers_and_biased_mode() {
+        for input in [
+            quote! { cx, { (x, y) = move |child| first(child) => x + y, value = |child| second(child) => value.len() } },
+            quote! { cx, biased, { value = (move |child| first(child)) => value } },
+        ] {
+            let parsed: SelectInput = syn::parse2(input).unwrap();
+            let expanded = generate_select(&parsed);
+            let _: syn::Expr = syn::parse2(expanded.clone()).unwrap();
+            let text = expanded.to_string();
+            assert!(text.contains("race_drained_with"));
+            assert!(text.contains("__asupersync_select_child"));
+            assert!(!text.contains("poll_fn"));
+            assert!(text.contains("first"));
+        }
+    }
+
+    #[test]
+    fn factory_select_refuses_ambiguous_ownership_and_default() {
+        for (input, expected) in [
+            (quote! { cx, { x = |child| first(child) => x, y = second() => y } }, "cannot mix"),
+            (quote! { cx, { x = |child| first(child) => x, else => 0 } }, "blocking form"),
+            (quote! { cx, { x = || first() => x } }, "exactly one"),
+            (quote! { cx, { x = |a, b| first(a, b) => x } }, "exactly one"),
+        ] {
+            assert!(parse_err(input).contains(expected));
+        }
+    }
+
 }

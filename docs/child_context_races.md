@@ -76,3 +76,30 @@ RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/asupersync-race-facto
 This addresses the child-context factory portion of bridge-plan R37. It does
 not establish full R37 closure, native/lab panic-path equivalence, or a repaired
 `hedge`/legacy timeout surface.
+
+## Heterogeneous blocking selection
+
+The blocking `select!` form also accepts factories, including with `biased`:
+
+```rust,ignore
+let result = asupersync::select!(cx, {
+    value = move |child| read_number(child) => value.to_string(),
+    value = move |child| read_text(child) => value,
+});
+```
+
+Per-branch input values may have different types; handler outputs still share
+one type. As with the existing prebuilt implementation, each handler belongs to
+its branch future. It may therefore run when a losing operation completes during
+drain. This is not a promise of winner-only handler side effects. Put child-aware
+cleanup inside the factory's future and avoid using the parent context there.
+
+Factory lists cannot contain an `else` arm: that form polls inline without child
+task ownership, so fabricating a child context would be misleading. Existing
+prebuilt `else` selection remains nonblocking, source ordered, and usable with
+borrowed/non-Send futures and a context that has no spawn authority.
+
+The native target additionally includes heterogeneous blocking/biased selection,
+a non-Send `else` compatibility control, and a real one-hour sleep loser that
+must observe cancellation and finish cleanup within the test watchdog. These
+remain uncompiled/unexecuted sources until the named Rust validation runs.

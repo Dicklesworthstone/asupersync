@@ -247,3 +247,102 @@ fn race_macro_factory_forms_share_native_cancel_and_drain_semantics() {
         }
     }
 }
+
+#[cfg(feature = "proc-macros")]
+#[test]
+fn select_factory_heterogeneous_outputs_drain_before_returning() {
+    for workers in [1, 2] {
+        for biased in [false, true] {
+            native(workers, move |cx| async move {
+                let seen = Arc::new(Witness::default());
+                let (_sender, receiver) = mpsc::channel(1);
+                let a = Arc::clone(&seen);
+                let b = Arc::clone(&seen);
+                let run = async {
+                    if biased {
+                        asupersync::select!(cx, biased, {
+                            value = move |child| loser(child, receiver, a) => value,
+                            (value, label) = move |_child| async move {
+                                (winner(b).await, String::from("selected"))
+                            } => { assert_eq!(label, "selected"); value },
+                        })
+                    } else {
+                        asupersync::select!(cx, {
+                            value = move |child| loser(child, receiver, a) => value,
+                            (value, label) = move |_child| async move {
+                                (winner(b).await, String::from("selected"))
+                            } => { assert_eq!(label, "selected"); value },
+                        })
+                    }
+                };
+                let mut race = Box::pin(run);
+                wait_cancel(&mut race, &seen).await;
+                assert_ne!(seen.task.lock().unwrap().unwrap(), cx.task_id());
+                seen.release();
+                assert_eq!(race.await.unwrap(), 7);
+                assert!(seen.retired.load(Ordering::Acquire));
+                assert!(!cx.is_cancel_requested());
+                eprintln!("scenario=select-factory workers={workers} biased={biased} parked=true cancelled=true retired=true");
+            });
+        }
+    }
+}
+
+#[cfg(feature = "proc-macros")]
+#[test]
+fn select_default_still_needs_no_spawn_and_accepts_non_send_borrows() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let cx = Cx::detached_cancel_context();
+    let calls = Rc::new(Cell::new(0));
+    let retained = Rc::clone(&calls);
+    let mut future = std::pin::pin!(async {
+        asupersync::select!(cx, {
+            () = async {
+                retained.set(retained.get() + 1);
+                std::future::pending::<()>().await;
+            } => 0,
+            else => 41,
+        })
+    });
+    assert!(matches!(future.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())), Poll::Ready(41)));
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn factory_sleep_loser_is_cancelled_without_waiting_for_its_deadline() {
+    for workers in [1, 2] {
+        native(workers, move |cx| async move {
+            let seen = Arc::new(Witness::default());
+            let a = Arc::clone(&seen);
+            let b = Arc::clone(&seen);
+            let mut race = Box::pin(cx.race_drained_with(vec![
+                boxed(move |child| async move {
+                    let _retire = Retire(Arc::clone(&a));
+                    *a.task.lock().unwrap() = Some(child.task_id());
+                    let mut sleep = std::pin::pin!(asupersync::time::sleep(child.now(), Duration::from_secs(3600)));
+                    poll_fn(|task| {
+                        let result = sleep.as_mut().poll(task);
+                        if result.is_pending() && !a.parked.swap(true, Ordering::AcqRel) {
+                            a.changed.notify_waiters();
+                        }
+                        result
+                    }).await;
+                    assert_eq!(child.cancel_reason().unwrap().kind, CancelKind::RaceLost);
+                    assert!(child.checkpoint().is_err());
+                    a.cancelled.store(true, Ordering::Release);
+                    a.changed.notify_waiters();
+                    a.changed.wait_until(|| a.released.load(Ordering::Acquire)).await;
+                    0
+                }),
+                boxed(move |_child| winner(b)),
+            ]));
+            wait_cancel(&mut race, &seen).await;
+            seen.release();
+            assert_eq!(race.await.unwrap(), 7);
+            assert!(seen.retired.load(Ordering::Acquire));
+            assert!(!cx.is_cancel_requested());
+            eprintln!("scenario=factory-sleep workers={workers} deadline=3600s parked=true cancelled=true retired=true");
+        });
+    }
+}
