@@ -337,6 +337,114 @@ fn lab_spawn_join_releases_after_task_record_retirement() {
 }
 
 #[test]
+fn lab_teardown_releases_unadmitted_spawn_handles() {
+    use asupersync::runtime::task_handle::JoinError;
+    use asupersync::{Budget, CancelKind, LabConfig, LabRuntime};
+    use std::task::{Context, Wake, Waker};
+
+    struct Captured(Arc<AtomicBool>, bool);
+    impl Drop for Captured {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+            assert!(!self.1, "queued factory destructor panic");
+        }
+    }
+    struct Woken {
+        woken: Arc<AtomicBool>,
+        pending: Arc<asupersync::record::region::PendingSpawnCounter>,
+        credit_held_at_wake: Arc<AtomicBool>,
+    }
+    impl Wake for Woken {
+        fn wake(self: Arc<Self>) {
+            self.credit_held_at_wake
+                .store(self.pending.count() == 1, Ordering::Release);
+            self.woken.store(true, Ordering::Release);
+        }
+    }
+
+    for panic_drop in [false, true] {
+        let mut lab = LabRuntime::new(LabConfig::new(0x91).max_steps(16));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let pending = lab.state.region(root).unwrap().pending_spawn_handle();
+        let retired = Arc::new(AtomicBool::new(false));
+        let captured = Captured(Arc::clone(&retired), panic_drop);
+        let invoked = Arc::new(AtomicBool::new(false));
+        let invoked_child = Arc::clone(&invoked);
+        let published = Arc::new(Mutex::new(None));
+        let publish = Arc::clone(&published);
+        let (owner, _owner_join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                let child = cx
+                    .spawn(move |_| {
+                        invoked_child.store(true, Ordering::Release);
+                        async move {
+                            drop(captured);
+                        }
+                    })
+                    .unwrap();
+                *publish.lock() = Some((child, cx));
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(owner, 0);
+        // One dispatch publishes the child; no second step may admit it.
+        lab.step_for_test();
+        let (mut child, retained_cx) = published.lock().take().expect("queued child");
+        assert!(!invoked.load(Ordering::Acquire));
+        assert!(!retired.load(Ordering::Acquire));
+        assert_eq!(pending.count(), 1);
+        let woken = Arc::new(AtomicBool::new(false));
+        let credit_held_at_wake = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(Woken {
+            woken: Arc::clone(&woken),
+            pending: Arc::clone(&pending),
+            credit_held_at_wake: Arc::clone(&credit_held_at_wake),
+        }));
+        assert!(
+            child
+                .poll_join(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        let started = std::time::Instant::now();
+        eprintln!(
+            "teardown_join scenario=lab_unadmitted panic_drop={panic_drop} queued=true trigger=drop"
+        );
+        drop(lab);
+        assert!(
+            retired.load(Ordering::Acquire),
+            "queued factory retained after Lab drop"
+        );
+        assert!(
+            !invoked.load(Ordering::Acquire),
+            "teardown ran user factory"
+        );
+        assert!(woken.load(Ordering::Acquire), "queued join was not woken");
+        assert!(credit_held_at_wake.load(Ordering::Acquire));
+        assert_eq!(pending.count(), 0);
+        assert!(child.is_finished());
+        assert!(matches!(child.try_join(), Err(JoinError::Cancelled(reason))
+            if reason.kind == CancelKind::Shutdown));
+        assert!(matches!(
+            retained_cx.spawn(|_| async {}),
+            Err(asupersync::runtime::state::SpawnError::RuntimeUnavailable)
+        ));
+        eprintln!(
+            "teardown_join scenario=lab_unadmitted panic_drop={panic_drop} retired=true woken=true elapsed={:?}",
+            started.elapsed()
+        );
+    }
+}
+
+#[test]
+fn lab_public_state_remains_movable() {
+    let mut lab = asupersync::LabRuntime::with_seed(0x91);
+    let root = lab.state.create_root_region(asupersync::Budget::INFINITE);
+    let state = lab.state;
+    assert!(state.region(root).is_some());
+}
+
+#[test]
 fn join_handles_preserve_auto_traits_for_non_sync_and_pinned_results() {
     use asupersync::runtime::task_handle::{JoinFuture, TaskHandle};
     use std::cell::Cell;
