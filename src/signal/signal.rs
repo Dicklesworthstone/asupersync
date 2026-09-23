@@ -108,7 +108,7 @@ impl SignalSlot {
 struct SignalDispatcher {
     slots: HashMap<SignalKind, Arc<SignalSlot>>,
     #[cfg(unix)]
-    _handle: signal_hook::iterator::Handle,
+    handle: signal_hook::iterator::Handle,
     /// Windows-only: kernel event handles + JoinHandle for the
     /// background poller thread. The poller waits on these events with
     /// `WaitForMultipleObjects(INFINITE)`; the CTRL signal handler
@@ -211,11 +211,10 @@ impl SignalDispatcher {
             slots.insert(kind, Arc::new(SignalSlot::new()));
         }
 
-        let raw_signals: Vec<i32> = all_signal_kinds()
-            .iter()
-            .copied()
-            .map(raw_signal_for_kind)
-            .collect();
+        // Slots are bookkeeping, not permission to intercept every signal.
+        // Start with no OS registrations; Signal::new adds only the requested
+        // kind through the iterator's thread-safe, idempotent handle API.
+        let raw_signals: [i32; 0] = [];
         let mut signals = signal_hook::iterator::Signals::new(raw_signals)?;
         let handle = signals.handle();
 
@@ -233,10 +232,7 @@ impl SignalDispatcher {
             })
             .map_err(|e| io::Error::other(format!("failed to spawn signal dispatcher: {e}")))?;
 
-        Ok(Self {
-            slots,
-            _handle: handle,
-        })
+        Ok(Self { slots, handle })
     }
 
     fn slot(&self, kind: SignalKind) -> Option<Arc<SignalSlot>> {
@@ -546,6 +542,13 @@ impl Signal {
             let slot = dispatcher.slot(kind).ok_or_else(|| {
                 SignalError::unsupported(kind, "signal kind is not supported by dispatcher")
             })?;
+            #[cfg(unix)]
+            dispatcher
+                .handle
+                .add_signal(raw_signal_for_kind(kind))
+                .map_err(|err| {
+                    SignalError::unsupported(kind, format!("failed to register signal: {err}"))
+                })?;
             let seen_deliveries = slot.deliveries.load(Ordering::Acquire);
             Ok(Self {
                 kind,
@@ -610,6 +613,13 @@ impl Signal {
 }
 
 /// Creates a new stream that receives signals of the given kind.
+///
+/// On Unix, registration intercepts only this signal kind; creating an
+/// interrupt stream does not also intercept termination, hangup, or alarm.
+/// Registrations remain process-global and persist after all streams of that
+/// kind are dropped. Dropping a stream does not restore its default disposition.
+/// Other libraries' signal handlers are subject to `signal-hook`'s usual
+/// composition rules; this function does not replace their policies.
 ///
 /// # Errors
 ///
