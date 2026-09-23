@@ -544,6 +544,15 @@ has a planted defect it must catch.
   bead changes (convergence).
 - Validation: `br dep cycles` reports 0 active cycles; `bv --robot-insights --label reality-check-20260922`
   computed its cycle metric and found 0.
+- Follow-through on 2026-09-23, under the owner's delegation of the open decisions:
+  - R40 (`bi2462.140`): the two expiring rows were demoted to `rerun-required` because their lanes are
+    red at HEAD (bi2462.136 drift). The two contracts that hard-coded `fresh-rch-pass` now accept any
+    known status. The snapshot contract passes 22/22 after the expiry. A deliberate-failure control
+    (demoted row, pristine tests) turns exactly the two edited tests red.
+  - R36a (`bi2462.141`): option (d). Nothing moves or is deleted. A census in
+    `tests/dormant_e2e_inventory_contract.rs` fails if the top-level orphan count rises above 230, and
+    the `e2e_hardening_*` reports carry a banner saying that their checkmarks for orphan files are not
+    test results. Wiring valuable orphans into real targets stays open on that bead.
 
 ### Created task index (September 22)
 

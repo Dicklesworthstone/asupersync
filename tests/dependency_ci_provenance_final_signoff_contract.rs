@@ -486,7 +486,20 @@ fn proof_mapping_commands_docs_and_no_claims_are_exact() {
         .find(|claim| text(claim, "claim_id") == LANE_ID)
         .expect("aggregate signoff status row");
     assert_eq!(claim["status"], "green");
-    assert_eq!(claim["proof_evidence_status"], "fresh-rch-pass");
+    // This row records attribution, not perpetual freshness
+    // (asupersync-bi2462.80/.140). The snapshot contract validates the date of
+    // any row that claims `fresh-rch-pass`. Here the status must just be a
+    // known truthful value, so an expired or red lane can be demoted.
+    assert!(
+        [
+            "fresh-rch-pass",
+            "rerun-required",
+            "stale-evidence",
+            "blocked"
+        ]
+        .contains(&text(claim, "proof_evidence_status")),
+        "unknown proof_evidence_status for {LANE_ID}"
+    );
     assert_eq!(
         string_set(claim, "proof_commands"),
         BTreeSet::from([PROOF_COMMAND.to_owned()])
