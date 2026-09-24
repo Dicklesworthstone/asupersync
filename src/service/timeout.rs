@@ -334,8 +334,14 @@ impl<F> TimeoutFuture<F> {
                             let has_ambient_timer = crate::cx::Cx::current()
                                 .and_then(|current| current.timer_driver())
                                 .is_some();
-                            if time_getter.is_some() || has_ambient_timer {
-                                let _ = Pin::new(&mut sleep).poll(cx);
+                            if (time_getter.is_some() || has_ambient_timer)
+                                && Pin::new(&mut sleep).poll(cx).is_ready()
+                            {
+                                // Registering the wake source can also complete
+                                // the sleep. Never retain it for another poll.
+                                return Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
+                                    sleep.deadline(),
+                                ))));
                             }
                             self.state = TimeoutFutureState::Running {
                                 inner,
@@ -383,8 +389,13 @@ where
                     }
 
                     // Preserve wake registration even when timeout decisions use a
-                    // manual or virtual clock.
-                    let _ = Pin::new(&mut sleep).poll(cx);
+                    // manual or virtual clock. Time can advance between the two
+                    // polls, and explicit cancellation can complete Sleep early.
+                    if Pin::new(&mut sleep).poll(cx).is_ready() {
+                        return Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
+                            sleep.deadline(),
+                        ))));
+                    }
                     this.state = TimeoutFutureState::Running {
                         inner,
                         sleep,
@@ -641,6 +652,109 @@ mod tests {
 
         let second = future.poll_with_time(Time::from_millis(5), &mut cx);
         assert!(matches!(second, Poll::Ready(Err(TimeoutError::Elapsed(_)))));
+    }
+
+    #[test]
+    fn timeout_finishes_when_custom_clock_expires_during_registration() {
+        fn advancing_time() -> Time {
+            TEST_NOW.with(|now| {
+                let sampled = now.get();
+                now.set(sampled.saturating_add(5_000_000));
+                Time::from_nanos(sampled)
+            })
+        }
+
+        let _guard = Cx::set_current(None);
+        set_test_time(0);
+        let deadline = Time::from_millis(5);
+        let mut future =
+            TimeoutFuture::with_time_getter(pending::<Result<(), ()>>(), deadline, advancing_time);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // The first clock sample is before the deadline; the Sleep registration
+        // poll observes the deadline itself. That completion must not be lost.
+        let result = Future::poll(Pin::new(&mut future), &mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(TimeoutError::Elapsed(elapsed))) if elapsed.deadline() == deadline
+        ));
+        assert!(matches!(
+            Future::poll(Pin::new(&mut future), &mut cx),
+            Poll::Ready(Err(TimeoutError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn timeout_finishes_when_driver_advances_past_explicit_time_sample() {
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let runtime_cx = Cx::new_with_drivers(
+            RegionId::new_for_test(1, 0),
+            TaskId::new_for_test(1, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(runtime_cx));
+        let deadline = Time::from_millis(5);
+        let mut future = TimeoutFuture::new(pending::<Result<(), ()>>(), deadline);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let sampled = timer.now();
+        clock.advance(deadline.as_nanos());
+        let result = future.poll_with_time(sampled, &mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(TimeoutError::Elapsed(elapsed))) if elapsed.deadline() == deadline
+        ));
+        assert_eq!(timer.pending_count(), 0);
+        assert!(matches!(
+            future.poll_with_time(sampled, &mut cx),
+            Poll::Ready(Err(TimeoutError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn timeout_cancelled_registration_returns_error_and_releases_timer() {
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let runtime_cx = Cx::new_with_drivers(
+            RegionId::new_for_test(1, 0),
+            TaskId::new_for_test(1, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(runtime_cx.clone()));
+        set_test_time(0);
+        let deadline = Time::from_millis(5);
+        let mut future =
+            TimeoutFuture::with_time_getter(pending::<Result<(), ()>>(), deadline, test_time);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(Future::poll(Pin::new(&mut future), &mut cx).is_pending());
+        assert_eq!(timer.pending_count(), 1);
+        runtime_cx.cancel_with(crate::types::CancelKind::User, Some("cancel timeout wait"));
+        let result = Future::poll(Pin::new(&mut future), &mut cx);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(TimeoutError::Elapsed(elapsed))) if elapsed.deadline() == deadline
+        ));
+        assert_eq!(test_time(), Time::ZERO);
+        assert_eq!(timer.pending_count(), 0);
+        assert!(matches!(
+            Future::poll(Pin::new(&mut future), &mut cx),
+            Poll::Ready(Err(TimeoutError::PolledAfterCompletion))
+        ));
     }
 
     #[test]

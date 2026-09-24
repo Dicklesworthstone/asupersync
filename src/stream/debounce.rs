@@ -188,8 +188,14 @@ impl<S: Stream> Stream for Debounce<S> {
                     let remaining_nanos = remaining.as_nanos().min(u128::from(u64::MAX)) as u64;
                     let wake_deadline = wall_clock_now().saturating_add_nanos(remaining_nanos);
                     let mut new_timer = Box::pin(Sleep::new(wake_deadline));
-                    // Register the waker with the new timer.
-                    let _ = Pin::new(&mut new_timer).poll(cx);
+                    // Registration can complete immediately if the deadline
+                    // elapsed or the ambient task was cancelled. Reset before
+                    // retaining the timer: Sleep cannot be polled after Ready.
+                    // A wake still cannot override the configured quiet clock.
+                    if new_timer.as_mut().poll(cx).is_ready() {
+                        new_timer.as_mut().get_mut().reset(wake_deadline);
+                        cx.waker().wake_by_ref();
+                    }
                     *this.timer = Some(new_timer);
                     return Poll::Pending;
                 }
@@ -472,6 +478,58 @@ mod tests {
         );
         assert!(stream.pending.is_none(), "pending item should be drained");
         crate::test_complete!("debounce_does_not_emit_early_when_timer_future_is_ready");
+    }
+
+    #[test]
+    fn debounce_cancelled_rearm_keeps_item_without_repolling_completed_sleep() {
+        use crate::Cx;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, CancelKind, RegionId, TaskId};
+
+        let clock = Arc::new(VirtualClock::new());
+        let timer = TimerDriverHandle::with_virtual_clock(clock);
+        let runtime_cx = Cx::new_with_drivers(
+            RegionId::new_for_test(1, 0),
+            TaskId::new_for_test(1, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(runtime_cx.clone()));
+        set_test_time(0);
+        let mut stream =
+            Debounce::with_time_getter(PendingStream, Duration::from_millis(5), test_time);
+        stream.pending = Some((7, Time::ZERO));
+        let woke = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(woke.clone())));
+        let mut cx = Context::from_waker(&waker);
+
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending);
+        assert_eq!(timer.pending_count(), 1);
+        runtime_cx.cancel_with(CancelKind::User, Some("cancel debounce wait"));
+
+        // Cancellation completes both the parked Sleep and its freshly armed
+        // replacement without advancing the configured quiet clock. The old
+        // path stored a completed replacement and panicked on the second poll.
+        for _ in 0..2 {
+            woke.store(false, Ordering::SeqCst);
+            assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Pending);
+            assert_eq!(stream.pending, Some((7, Time::ZERO)));
+            assert!(woke.load(Ordering::SeqCst));
+            assert_eq!(timer.pending_count(), 0);
+        }
+
+        set_test_time(Time::from_millis(5).as_nanos());
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(7))
+        );
+        assert!(stream.pending.is_none());
+        assert!(stream.timer.is_none());
+        assert_eq!(timer.pending_count(), 0);
     }
 
     #[test]
