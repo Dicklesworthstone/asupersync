@@ -198,14 +198,17 @@ fn concurrent_first_subscriptions_share_delivery_without_losing_a_kind() {
     if let Ok(case) = std::env::var(CASE) {
         assert_eq!(case, "concurrent");
         let start = Arc::new(Barrier::new(8));
-        let handles: Vec<_> = (0..8).map(|index| {
+        // All eight threads must exist before any join: they rendezvous on the
+        // barrier, so spawning and joining lazily would deadlock this child.
+        let mut handles = Vec::with_capacity(8);
+        for index in 0..8 {
             let start = Arc::clone(&start);
-            thread::spawn(move || {
+            handles.push(thread::spawn(move || {
                 start.wait();
                 let kind = if index % 2 == 0 { SignalKind::User1 } else { SignalKind::User2 };
                 signal(kind).expect("concurrent subscription")
-            })
-        }).collect();
+            }));
+        }
         let mut streams: Vec<_> = handles.into_iter().map(|handle| handle.join().expect("subscription thread")).collect();
         receive_all(&mut streams, &[signal_hook::consts::SIGUSR1, signal_hook::consts::SIGUSR2]);
         std::process::exit(CHILD_COMPLETE);

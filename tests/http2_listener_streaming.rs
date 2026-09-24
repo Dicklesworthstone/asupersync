@@ -38,7 +38,7 @@ use futures_lite::future::zip;
 
 const INITIAL_WINDOW: usize = 65_535;
 
-fn run(workers: usize, future: impl Future<Output = ()> + Send + 'static) {
+fn run(workers: usize, future: impl Future<Output = ()> + 'static) {
     let builder = if workers == 1 {
         RuntimeBuilder::current_thread()
     } else {
