@@ -42,7 +42,11 @@ const DEFAULT_RST_STREAM_RATE_WINDOW_MS: u128 = 30_000;
 /// that shutdown is imminent without refusing any in-flight stream.
 const GRACEFUL_SHUTDOWN_LAST_STREAM_ID: u32 = 0x7fff_ffff;
 
-/// Configurable RST_STREAM rate limit for CVE-2023-44487 protection.
+/// Configurable peer reset rate limit for Rapid Reset and MadeYouReset protection.
+///
+/// Peer RST_STREAM frames and peer-induced stream errors share this budget.
+/// Normal application cancellations through [`Connection::reset_stream`] do
+/// not consume it.
 ///
 /// **Security warning**: Increasing these limits or disabling rate limiting
 /// exposes the server to Rapid Reset attacks. Only relax these values if your
@@ -53,11 +57,12 @@ const GRACEFUL_SHUTDOWN_LAST_STREAM_ID: u32 = 0x7fff_ffff;
 ///
 /// | Parameter | Default | Meaning |
 /// |-----------|---------|---------|
-/// | `max_rst_streams` | 100 | Max RST_STREAM frames per window |
+/// | `max_rst_streams` | 100 | Max peer resets and stream errors per window |
 /// | `rst_window_ms` | 30,000 | Window duration in milliseconds |
 #[derive(Debug, Clone, Copy)]
 pub struct RstStreamRateLimit {
-    /// Maximum RST_STREAM frames allowed within the window.
+    /// Maximum peer RST_STREAM frames and reset-inducing stream errors allowed
+    /// within the window, combined.
     pub max_rst_streams: u32,
     /// Window duration in milliseconds.
     pub rst_window_ms: u128,
@@ -409,7 +414,7 @@ pub struct Connection {
     pending_push_promise: Option<PushPromiseAccumulator>,
     /// RST_STREAM rate limit configuration.
     rst_rate_limit: RstStreamRateLimit,
-    /// RST_STREAM frames received in the current rate-limit window.
+    /// Peer RST_STREAM frames and peer-induced stream errors in this window.
     rst_stream_count: u32,
     /// Start of the current RST_STREAM rate-limit window.
     rst_stream_window_start: Time,
@@ -1156,6 +1161,9 @@ impl Connection {
             DecodedFrame::Frame(frame) => self.process_frame(frame),
             DecodedFrame::PriorityError(error) => {
                 self.check_incoming_frame(false, None)?;
+                if error.stream_id.is_some() {
+                    self.record_peer_reset()?;
+                }
                 Err(error)
             }
         }
@@ -1201,6 +1209,15 @@ impl Connection {
             self.prune_closed_streams_without_pending_frames();
         }
 
+        // Malformed WINDOW_UPDATE, request headers, flow-control violations,
+        // and other peer-induced stream errors release protocol stream slots
+        // just as a peer RST does. Charging only explicit RST_STREAM lets the
+        // peer trigger the same reset amplification through these errors.
+        if let Err(error) = &result
+            && error.stream_id.is_some()
+        {
+            self.record_peer_reset()?;
+        }
         result
     }
 
@@ -1669,27 +1686,7 @@ impl Connection {
         // Track stream ID so GOAWAY last_stream_id is correct (RFC 9113 §6.8).
         self.track_stream_id(frame.stream_id);
 
-        // Rate-limit RST_STREAM frames (CVE-2023-44487 mitigation).
-        let elapsed = std::time::Duration::from_nanos(
-            (self.time_getter)().duration_since(self.rst_stream_window_start),
-        )
-        .as_millis();
-        if elapsed >= self.rst_rate_limit.rst_window_ms {
-            // Reset the window.
-            self.rst_stream_count = 0;
-            self.rst_stream_window_start = (self.time_getter)();
-        }
-
-        // Fail closed at the configured limit instead of incrementing first.
-        // This preserves the "N allowed, N+1 rejected" contract even when the
-        // configured ceiling is `u32::MAX`, where a direct increment would wrap.
-        if self.rst_stream_count >= self.rst_rate_limit.max_rst_streams {
-            return Err(H2Error::connection(
-                ErrorCode::EnhanceYourCalm,
-                "RST_STREAM flood detected",
-            ));
-        }
-        self.rst_stream_count += 1;
+        self.record_peer_reset()?;
 
         if let Some(stream) = self.streams.get_mut(frame.stream_id) {
             stream.reset(frame.error_code);
@@ -1699,6 +1696,32 @@ impl Connection {
             stream_id: frame.stream_id,
             error_code: frame.error_code,
         })
+    }
+
+    /// One budget covers both peer resets and errors requiring a local reset.
+    fn record_peer_reset(&mut self) -> Result<(), H2Error> {
+        let now = (self.time_getter)();
+        let elapsed =
+            std::time::Duration::from_nanos(now.duration_since(self.rst_stream_window_start))
+                .as_millis();
+        if elapsed >= self.rst_rate_limit.rst_window_ms {
+            // Reset the window.
+            self.rst_stream_count = 0;
+            self.rst_stream_window_start = now;
+        }
+
+        // Fail closed at the configured limit instead of incrementing first.
+        // This preserves the "N allowed, N+1 rejected" contract even when the
+        // configured ceiling is `u32::MAX`, where a direct increment would wrap.
+        if self.rst_stream_count >= self.rst_rate_limit.max_rst_streams {
+            return Err(H2Error::connection(
+                ErrorCode::EnhanceYourCalm,
+                "peer reset or stream-error flood detected",
+            ));
+        }
+        self.rst_stream_count += 1;
+
+        Ok(())
     }
 
     /// Process SETTINGS frame.
@@ -6711,6 +6734,172 @@ mod tests {
         let overflow_attempt = Frame::RstStream(RstStreamFrame::new(3, ErrorCode::Cancel));
         let err = conn.process_frame(overflow_attempt).unwrap_err();
         assert_eq!(err.code, ErrorCode::EnhanceYourCalm);
+        assert_eq!(conn.rst_stream_count, u32::MAX);
+    }
+
+    #[test]
+    fn peer_stream_errors_and_rst_share_one_reset_budget() {
+        let _clock = lock_test_clock();
+        set_test_time_offset(Duration::ZERO);
+        for errors_only in [false, true] {
+            let mut conn = Connection::server_with_time_getter(Settings::default(), test_now)
+                .rst_stream_rate_limit(RstStreamRateLimit {
+                    max_rst_streams: 2,
+                    rst_window_ms: 1000,
+                });
+            conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+                .unwrap();
+            for stream_id in [1, 3, 5] {
+                conn.process_frame(Frame::Headers(HeadersFrame::new(
+                    stream_id,
+                    test_request_headers("/reset-budget"),
+                    true,
+                    true,
+                )))
+                .unwrap();
+            }
+            for stream_id in [1, 3] {
+                if stream_id == 1 && !errors_only {
+                    conn.process_frame(Frame::RstStream(RstStreamFrame::new(
+                        stream_id,
+                        ErrorCode::Cancel,
+                    )))
+                    .unwrap();
+                } else {
+                    let error = conn
+                        .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(stream_id, 0)))
+                        .unwrap_err();
+                    assert_eq!(error.stream_id, Some(stream_id));
+                    assert_eq!(error.code, ErrorCode::ProtocolError);
+                    conn.reset_stream(stream_id, error.code);
+                }
+            }
+            assert_eq!(
+                conn.rst_stream_count, 2,
+                "local reset must not double charge"
+            );
+            let exhausted = conn
+                .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(5, 0)))
+                .unwrap_err();
+            assert_eq!(exhausted.code, ErrorCode::EnhanceYourCalm);
+            assert_eq!(
+                exhausted.stream_id, None,
+                "exhaustion closes the connection"
+            );
+            assert_eq!(conn.rst_stream_count, 2);
+            // Match the listener's connection-error handling and verify the
+            // actual queued GOAWAY, including its accepted-stream boundary.
+            conn.goaway(exhausted.code, Bytes::new());
+            let mut goaway = None;
+            while let Some(frame) = conn.next_frame() {
+                if let Frame::GoAway(frame) = frame {
+                    goaway = Some(frame);
+                }
+            }
+            let goaway = goaway.expect("budget exhaustion GOAWAY");
+            assert_eq!(goaway.error_code, ErrorCode::EnhanceYourCalm);
+            assert_eq!(goaway.last_stream_id, 5);
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "bead": "asupersync-bi2462.102", "scenario": "shared_reset_budget",
+                    "errors_only": errors_only, "charged": conn.rst_stream_count,
+                    "limit": 2, "goaway_last_stream": goaway.last_stream_id,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn peer_reset_budget_rolls_over_and_excludes_application_cancellation() {
+        let _clock = lock_test_clock();
+        set_test_time_offset(Duration::ZERO);
+        let mut conn = Connection::server_with_time_getter(Settings::default(), test_now)
+            .rst_stream_rate_limit(RstStreamRateLimit {
+                max_rst_streams: 1,
+                rst_window_ms: 10,
+            });
+        conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .unwrap();
+        for stream_id in [1, 3, 5, 7, 9, 11] {
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                test_request_headers("/reset-window"),
+                true,
+                true,
+            )))
+            .unwrap();
+        }
+        for stream_id in [1, 3, 5] {
+            conn.reset_stream(stream_id, ErrorCode::Cancel);
+        }
+        assert_eq!(
+            conn.rst_stream_count, 0,
+            "application cancellations are not peer abuse"
+        );
+        let error = conn
+            .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(7, 0)))
+            .unwrap_err();
+        assert_eq!(error.stream_id, Some(7));
+        conn.reset_stream(7, error.code);
+        assert_eq!(conn.rst_stream_count, 1);
+
+        advance_test_time(Duration::from_millis(10));
+        let error = conn
+            .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(9, 0)))
+            .unwrap_err();
+        assert_eq!(
+            error.stream_id,
+            Some(9),
+            "new window admits one new stream error"
+        );
+        conn.reset_stream(9, error.code);
+        assert_eq!(conn.rst_stream_count, 1);
+        // Self-dependent priority frames are decoded into a stream error
+        // before the ordinary Frame dispatcher. That path shares the budget.
+        let exhausted = conn
+            .process_decoded_frame(DecodedFrame::PriorityError(H2Error::stream(
+                11,
+                ErrorCode::ProtocolError,
+                "stream depends on itself",
+            )))
+            .unwrap_err();
+        assert_eq!(exhausted.code, ErrorCode::EnhanceYourCalm);
+        assert_eq!(exhausted.stream_id, None);
+        assert_eq!(conn.rst_stream_count, 1);
+    }
+
+    #[test]
+    fn peer_stream_error_reset_budget_never_wraps() {
+        let _clock = lock_test_clock();
+        set_test_time_offset(Duration::ZERO);
+        let mut conn = Connection::server_with_time_getter(Settings::default(), test_now)
+            .rst_stream_rate_limit(RstStreamRateLimit {
+                max_rst_streams: u32::MAX,
+                rst_window_ms: 1000,
+            });
+        conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+            .unwrap();
+        for stream_id in [1, 3] {
+            conn.process_frame(Frame::Headers(HeadersFrame::new(
+                stream_id,
+                test_request_headers("/reset-counter-overflow"),
+                true,
+                true,
+            )))
+            .unwrap();
+        }
+        conn.rst_stream_count = u32::MAX - 1;
+        let last_admitted = conn
+            .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(1, 0)))
+            .unwrap_err();
+        assert_eq!(last_admitted.stream_id, Some(1));
+        assert_eq!(conn.rst_stream_count, u32::MAX);
+        let exhausted = conn
+            .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(3, 0)))
+            .unwrap_err();
+        assert_eq!(exhausted.code, ErrorCode::EnhanceYourCalm);
+        assert_eq!(exhausted.stream_id, None);
         assert_eq!(conn.rst_stream_count, u32::MAX);
     }
 
