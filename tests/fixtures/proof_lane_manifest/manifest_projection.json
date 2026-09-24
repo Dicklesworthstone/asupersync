@@ -25,7 +25,9 @@
     "classes": [
       {
         "class_id": "dependency-graph-light",
-        "lane_kinds": ["dependency_graph"],
+        "lane_kinds": [
+          "dependency_graph"
+        ],
         "timeout_seconds": 900,
         "memory_mb": 4096,
         "remote_required": true,
@@ -35,7 +37,9 @@
       },
       {
         "class_id": "compile-frontier-heavy",
-        "lane_kinds": ["compile_frontier"],
+        "lane_kinds": [
+          "compile_frontier"
+        ],
         "timeout_seconds": 7200,
         "memory_mb": 49152,
         "remote_required": true,
@@ -45,7 +49,9 @@
       },
       {
         "class_id": "test-frontier-heavy",
-        "lane_kinds": ["test_frontier"],
+        "lane_kinds": [
+          "test_frontier"
+        ],
         "timeout_seconds": 7200,
         "memory_mb": 65536,
         "remote_required": true,
@@ -55,7 +61,9 @@
       },
       {
         "class_id": "lint-frontier-heavy",
-        "lane_kinds": ["lint_frontier"],
+        "lane_kinds": [
+          "lint_frontier"
+        ],
         "timeout_seconds": 7200,
         "memory_mb": 49152,
         "remote_required": true,
@@ -65,7 +73,9 @@
       },
       {
         "class_id": "format-frontier-light",
-        "lane_kinds": ["format_frontier"],
+        "lane_kinds": [
+          "format_frontier"
+        ],
         "timeout_seconds": 600,
         "memory_mb": 2048,
         "remote_required": true,
@@ -75,7 +85,9 @@
       },
       {
         "class_id": "documentation-frontier-medium",
-        "lane_kinds": ["documentation_frontier"],
+        "lane_kinds": [
+          "documentation_frontier"
+        ],
         "timeout_seconds": 3600,
         "memory_mb": 16384,
         "remote_required": true,
@@ -85,7 +97,9 @@
       },
       {
         "class_id": "formal-frontier-medium",
-        "lane_kinds": ["formal_frontier"],
+        "lane_kinds": [
+          "formal_frontier"
+        ],
         "timeout_seconds": 3600,
         "memory_mb": 16384,
         "remote_required": true,
@@ -95,7 +109,9 @@
       },
       {
         "class_id": "artifact-contract-medium",
-        "lane_kinds": ["artifact_contract"],
+        "lane_kinds": [
+          "artifact_contract"
+        ],
         "timeout_seconds": 3600,
         "memory_mb": 16384,
         "remote_required": true,
@@ -105,7 +121,9 @@
       },
       {
         "class_id": "dependency-audit-light",
-        "lane_kinds": ["dependency_audit"],
+        "lane_kinds": [
+          "dependency_audit"
+        ],
         "timeout_seconds": 900,
         "memory_mb": 2048,
         "remote_required": true,
@@ -134,10 +152,15 @@
     "description": "Machine-readable lane semantics for interpreting proof evidence without overclaiming compile-only, broad-frontier, conformance, or stale-progress outcomes.",
     "lane_classes": [
       {
-        "expected_graph_roots": ["Cargo.toml"],
+        "expected_graph_roots": [
+          "Cargo.toml"
+        ],
         "expected_heavy_edges": [],
         "lane_class": "dependency_graph",
-        "lane_kinds": ["dependency_graph", "dependency_audit"],
+        "lane_kinds": [
+          "dependency_graph",
+          "dependency_audit"
+        ],
         "max_expected_crates": 256,
         "no_claim_boundaries": [
           "test-execution",
@@ -147,10 +170,19 @@
         ]
       },
       {
-        "expected_graph_roots": ["Cargo.toml", "src/lib.rs"],
-        "expected_heavy_edges": ["workspace feature graph"],
+        "expected_graph_roots": [
+          "Cargo.toml",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "workspace feature graph"
+        ],
         "lane_class": "compile_only",
-        "lane_kinds": ["compile_frontier", "lint_frontier", "format_frontier"],
+        "lane_kinds": [
+          "compile_frontier",
+          "lint_frontier",
+          "format_frontier"
+        ],
         "max_expected_crates": 700,
         "no_claim_boundaries": [
           "test-execution",
@@ -161,10 +193,18 @@
         ]
       },
       {
-        "expected_graph_roots": ["Cargo.toml", "src/lib.rs"],
-        "expected_heavy_edges": ["test-internals", "integration test harnesses"],
+        "expected_graph_roots": [
+          "Cargo.toml",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "test-internals",
+          "integration test harnesses"
+        ],
         "lane_class": "broad_frontier",
-        "lane_kinds": ["test_frontier"],
+        "lane_kinds": [
+          "test_frontier"
+        ],
         "max_expected_crates": 900,
         "no_claim_boundaries": [
           "focused-change-proof",
@@ -173,10 +213,17 @@
         ]
       },
       {
-        "expected_graph_roots": ["README.md", "src/lib.rs"],
-        "expected_heavy_edges": ["rustdoc doctest graph"],
+        "expected_graph_roots": [
+          "README.md",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "rustdoc doctest graph"
+        ],
         "lane_class": "rustdoc",
-        "lane_kinds": ["documentation_frontier"],
+        "lane_kinds": [
+          "documentation_frontier"
+        ],
         "max_expected_crates": 700,
         "no_claim_boundaries": [
           "test-execution",
@@ -186,10 +233,16 @@
         ]
       },
       {
-        "expected_graph_roots": ["formal/lean"],
-        "expected_heavy_edges": ["Lean proof graph"],
+        "expected_graph_roots": [
+          "formal/lean"
+        ],
+        "expected_heavy_edges": [
+          "Lean proof graph"
+        ],
         "lane_class": "formal",
-        "lane_kinds": ["formal_frontier"],
+        "lane_kinds": [
+          "formal_frontier"
+        ],
         "max_expected_crates": 1,
         "no_claim_boundaries": [
           "cargo-compile",
@@ -199,12 +252,23 @@
         ]
       },
       {
-        "expected_graph_roots": ["artifacts", "tests"],
-        "expected_heavy_edges": ["focused verifier test graph"],
+        "expected_graph_roots": [
+          "artifacts",
+          "tests"
+        ],
+        "expected_heavy_edges": [
+          "focused verifier test graph"
+        ],
         "lane_class": "artifact_contract",
-        "lane_kinds": ["artifact_contract"],
+        "lane_kinds": [
+          "artifact_contract"
+        ],
         "max_expected_crates": 700,
-        "no_claim_boundaries": ["broad-workspace-health", "runtime-behavior", "release-readiness"]
+        "no_claim_boundaries": [
+          "broad-workspace-health",
+          "runtime-behavior",
+          "release-readiness"
+        ]
       }
     ],
     "lane_overrides": [
@@ -228,8 +292,13 @@
         ]
       },
       {
-        "expected_graph_roots": ["fuzz/Cargo.toml", "fuzz/fuzz_targets"],
-        "expected_heavy_edges": ["fuzz-only OTLP generated-message graph"],
+        "expected_graph_roots": [
+          "fuzz/Cargo.toml",
+          "fuzz/fuzz_targets"
+        ],
+        "expected_heavy_edges": [
+          "fuzz-only OTLP generated-message graph"
+        ],
         "lane_class": "fuzz_smoke",
         "lane_id": "fuzz-manifest-smoke",
         "max_expected_crates": 900,
@@ -300,7 +369,9 @@
           "tests/fixtures/downstream-consumer-proof/Cargo.toml",
           "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
         ],
-        "expected_heavy_edges": ["metrics feature graph"],
+        "expected_heavy_edges": [
+          "metrics feature graph"
+        ],
         "lane_class": "run_exact",
         "lane_id": "downstream-consumer-metrics-run",
         "max_expected_crates": 320,
@@ -318,7 +389,9 @@
           "tests/fixtures/downstream-consumer-proof/Cargo.toml",
           "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs"
         ],
-        "expected_heavy_edges": ["channel-mpsc-select-e2e feature graph"],
+        "expected_heavy_edges": [
+          "channel-mpsc-select-e2e feature graph"
+        ],
         "lane_class": "run_exact",
         "lane_id": "downstream-consumer-channel-profile-run",
         "max_expected_crates": 220,
@@ -343,7 +416,11 @@
     "readme": "README.md"
   },
   "documentation_contract": {
-    "docs_must_reference_manifest": ["README.md", "AGENTS.md", "docs/proof_runner_usage.md"],
+    "docs_must_reference_manifest": [
+      "README.md",
+      "AGENTS.md",
+      "docs/proof_runner_usage.md"
+    ],
     "required_marker": "artifacts/proof_lane_manifest_v1.json",
     "verifier_marker": "tests/proof_lane_manifest_contract.rs"
   },
@@ -420,7 +497,9 @@
       "resource_envelope_class": "dependency-graph-light",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
-      "guarantee_ids": ["default-production-tokio-free"],
+      "guarantee_ids": [
+        "default-production-tokio-free"
+      ],
       "feature_flags": [],
       "expected_signal": "warning: nothing to print.",
       "source_paths": [
@@ -436,8 +515,12 @@
       "resource_envelope_class": "dependency-graph-light",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
-      "guarantee_ids": ["metrics-production-tokio-free"],
-      "feature_flags": ["metrics"],
+      "guarantee_ids": [
+        "metrics-production-tokio-free"
+      ],
+      "feature_flags": [
+        "metrics"
+      ],
       "expected_signal": "warning: nothing to print.",
       "source_paths": [
         "Cargo.toml",
@@ -452,8 +535,12 @@
       "resource_envelope_class": "dependency-graph-light",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
-      "guarantee_ids": ["fuzz-tokio-quarantine"],
-      "feature_flags": ["fuzz"],
+      "guarantee_ids": [
+        "fuzz-tokio-quarantine"
+      ],
+      "feature_flags": [
+        "fuzz"
+      ],
       "expected_signal": "dependency path containing opentelemetry-proto, tonic or tonic-prost, and tokio",
       "source_paths": [
         "Cargo.toml",
@@ -467,10 +554,16 @@
       "resource_envelope_class": "dependency-graph-light",
       "package": "workspace",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
-      "guarantee_ids": ["workspace-tokio-audit"],
+      "guarantee_ids": [
+        "workspace-tokio-audit"
+      ],
       "feature_flags": [],
       "expected_signal": "tokio paths are limited to documented workspace carve-outs",
-      "source_paths": ["AGENTS.md", "README.md", "Cargo.toml"]
+      "source_paths": [
+        "AGENTS.md",
+        "README.md",
+        "Cargo.toml"
+      ]
     },
     {
       "lane_id": "full-feature-tokio-audit",
@@ -478,7 +571,9 @@
       "resource_envelope_class": "dependency-graph-light",
       "package": "workspace",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_full_tokio_tree cargo tree -e features --workspace --invert tokio",
-      "guarantee_ids": ["full-graph-tokio-audit"],
+      "guarantee_ids": [
+        "full-graph-tokio-audit"
+      ],
       "feature_flags": [],
       "expected_signal": "tokio paths are explained as scoped dev/test/fuzz/satellite audit edges",
       "source_paths": [
@@ -495,7 +590,9 @@
       "resource_envelope_class": "compile-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
-      "guarantee_ids": ["feature-gated-native-surfaces"],
+      "guarantee_ids": [
+        "feature-gated-native-surfaces"
+      ],
       "feature_flags": [
         "tls",
         "sqlite",
@@ -507,7 +604,10 @@
         "tracing-integration"
       ],
       "expected_signal": "cargo check exits 0 or records the first unrelated compile frontier blocker",
-      "source_paths": ["Cargo.toml", "src/lib.rs"]
+      "source_paths": [
+        "Cargo.toml",
+        "src/lib.rs"
+      ]
     },
     {
       "lane_id": "fuzz-manifest-smoke",
@@ -515,10 +615,15 @@
       "resource_envelope_class": "compile-frontier-heavy",
       "package": "fuzz",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -j 2 --locked --manifest-path fuzz/Cargo.toml",
-      "guarantee_ids": ["fuzz-manifest-smoke"],
+      "guarantee_ids": [
+        "fuzz-manifest-smoke"
+      ],
       "feature_flags": [],
       "expected_signal": "cargo check exits 0 or records the first fuzz target compile blocker",
-      "source_paths": ["fuzz/Cargo.toml", "fuzz/fuzz_targets"]
+      "source_paths": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets"
+      ]
     },
     {
       "lane_id": "lib-tests",
@@ -526,10 +631,17 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
-      "guarantee_ids": ["lib-test-frontier"],
-      "feature_flags": ["test-internals"],
+      "guarantee_ids": [
+        "lib-test-frontier"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
       "expected_signal": "lib tests pass or the first failing compile/test frontier is recorded",
-      "source_paths": ["src/lib.rs", "Cargo.toml"]
+      "source_paths": [
+        "src/lib.rs",
+        "Cargo.toml"
+      ]
     },
     {
       "lane_id": "native-parked-task-cancellation",
@@ -537,7 +649,9 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture",
-      "guarantee_ids": ["native-parked-task-cancellation"],
+      "guarantee_ids": [
+        "native-parked-task-cancellation"
+      ],
       "feature_flags": [],
       "expected_signal": "all unfiltered runtime_abort_vs_cancel_semantics_audit tests and every proof-runner named escaped-defect sentinel run and pass with nonzero behavioral test evidence",
       "source_paths": [
@@ -569,10 +683,21 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_db_feature_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features postgres,mysql,sqlite,test-internals database:: -- --test-threads=2",
-      "guarantee_ids": ["db-feature-lib-test-frontier"],
-      "feature_flags": ["postgres", "mysql", "sqlite", "test-internals"],
+      "guarantee_ids": [
+        "db-feature-lib-test-frontier"
+      ],
+      "feature_flags": [
+        "postgres",
+        "mysql",
+        "sqlite",
+        "test-internals"
+      ],
       "expected_signal": "database:: filtered lib tests pass under postgres,mysql,sqlite,test-internals or the first failing compile/test frontier is recorded",
-      "source_paths": ["src/database", "src/conformance/mod.rs", "Cargo.toml"]
+      "source_paths": [
+        "src/database",
+        "src/conformance/mod.rs",
+        "Cargo.toml"
+      ]
     },
     {
       "lane_id": "channel-mpsc-select-e2e-public-run",
@@ -580,8 +705,12 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_mpsc_select_public_run CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -p asupersync --bin channel_mpsc_select_e2e --features channel-mpsc-select-e2e",
-      "guarantee_ids": ["channel-mpsc-select-e2e-public-run"],
-      "feature_flags": ["channel-mpsc-select-e2e"],
+      "guarantee_ids": [
+        "channel-mpsc-select-e2e-public-run"
+      ],
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
       "expected_signal": "binary exits 0 after assertion-only public API scenarios or reports the first compile/runtime diagnostic",
       "source_paths": [
         "Cargo.toml",
@@ -598,10 +727,16 @@
       "resource_envelope_class": "compile-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
-      "guarantee_ids": ["all-target-compile-frontier"],
+      "guarantee_ids": [
+        "all-target-compile-frontier"
+      ],
       "feature_flags": [],
       "expected_signal": "cargo check exits 0 or records the first unrelated all-target blocker",
-      "source_paths": ["Cargo.toml", "src/lib.rs", "tests"]
+      "source_paths": [
+        "Cargo.toml",
+        "src/lib.rs",
+        "tests"
+      ]
     },
     {
       "lane_id": "clippy-all-targets",
@@ -609,10 +744,16 @@
       "resource_envelope_class": "lint-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
-      "guarantee_ids": ["clippy-frontier"],
+      "guarantee_ids": [
+        "clippy-frontier"
+      ],
       "feature_flags": [],
       "expected_signal": "clippy exits 0 or records the first lint frontier blocker",
-      "source_paths": ["Cargo.toml", "src", "tests"]
+      "source_paths": [
+        "Cargo.toml",
+        "src",
+        "tests"
+      ]
     },
     {
       "lane_id": "cli-feature-clippy",
@@ -620,10 +761,19 @@
       "resource_envelope_class": "lint-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cli_feature_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features cli -- -D warnings",
-      "guarantee_ids": ["cli-feature-clippy-frontier"],
-      "feature_flags": ["cli"],
+      "guarantee_ids": [
+        "cli-feature-clippy-frontier"
+      ],
+      "feature_flags": [
+        "cli"
+      ],
       "expected_signal": "clippy exits 0 under --features cli or records the first cli-feature lint frontier blocker",
-      "source_paths": ["Cargo.toml", "src/bin", "src/lib.rs", "src/tracing_compat.rs"]
+      "source_paths": [
+        "Cargo.toml",
+        "src/bin",
+        "src/lib.rs",
+        "src/tracing_compat.rs"
+      ]
     },
     {
       "lane_id": "rustfmt-check",
@@ -631,10 +781,14 @@
       "resource_envelope_class": "format-frontier-light",
       "package": "workspace",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
-      "guarantee_ids": ["rustfmt-frontier"],
+      "guarantee_ids": [
+        "rustfmt-frontier"
+      ],
       "feature_flags": [],
       "expected_signal": "rustfmt exits 0 or prints exact formatting diffs",
-      "source_paths": ["Cargo.toml"]
+      "source_paths": [
+        "Cargo.toml"
+      ]
     },
     {
       "lane_id": "rustdoc-api",
@@ -642,10 +796,17 @@
       "resource_envelope_class": "documentation-frontier-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
-      "guarantee_ids": ["rustdoc-api-frontier"],
-      "feature_flags": ["test-internals"],
+      "guarantee_ids": [
+        "rustdoc-api-frontier"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
       "expected_signal": "cargo doc exits 0 or records the first rustdoc warning/error",
-      "source_paths": ["src/lib.rs", "README.md"]
+      "source_paths": [
+        "src/lib.rs",
+        "README.md"
+      ]
     },
     {
       "lane_id": "formal-lean-build",
@@ -653,7 +814,9 @@
       "resource_envelope_class": "formal-frontier-medium",
       "package": "formal/lean",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build",
-      "guarantee_ids": ["formal-lean-core-invariants"],
+      "guarantee_ids": [
+        "formal-lean-core-invariants"
+      ],
       "feature_flags": [],
       "expected_signal": "Build completed successfully",
       "source_paths": [
@@ -669,7 +832,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture",
-      "guarantee_ids": ["runtime-pressure-control-evidence-contract"],
+      "guarantee_ids": [
+        "runtime-pressure-control-evidence-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "runtime_pressure_control_evidence_contract tests pass",
       "source_paths": [
@@ -690,7 +855,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture",
-      "guarantee_ids": ["fourth-wave-governor-schema-contract"],
+      "guarantee_ids": [
+        "fourth-wave-governor-schema-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "fourth_wave_swarm_governor_contract tests pass",
       "source_paths": [
@@ -709,8 +876,12 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_policy_engine CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib fourth_wave_governor --features test-internals -- --nocapture",
-      "guarantee_ids": ["fourth-wave-governor-policy-engine"],
-      "feature_flags": ["test-internals"],
+      "guarantee_ids": [
+        "fourth-wave-governor-policy-engine"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
       "expected_signal": "filtered fourth_wave_governor lib tests pass with nonzero test evidence",
       "source_paths": [
         "src/observability/swarm_pressure_governor.rs",
@@ -725,7 +896,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture",
-      "guarantee_ids": ["fourth-wave-swarm-replay-corpus"],
+      "guarantee_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ],
       "feature_flags": [],
       "expected_signal": "swarm_workload_scenario_corpus_contract tests pass",
       "source_paths": [
@@ -741,8 +914,12 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture",
-      "guarantee_ids": ["fourth-wave-runtime-bridge-contract"],
-      "feature_flags": ["test-internals"],
+      "guarantee_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
       "expected_signal": "runtime_slo_policy_bridge_fourth_wave filtered tests pass with nonzero test evidence",
       "source_paths": [
         "src/runtime/slo_policy.rs",
@@ -757,7 +934,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
-      "guarantee_ids": ["fourth-wave-benchmark-contract"],
+      "guarantee_ids": [
+        "fourth-wave-benchmark-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "fourth_wave_swarm_governor_benchmark_contract tests pass",
       "source_paths": [
@@ -774,7 +953,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture",
-      "guarantee_ids": ["fourth-wave-governor-signoff-runbook"],
+      "guarantee_ids": [
+        "fourth-wave-governor-signoff-runbook"
+      ],
       "feature_flags": [],
       "expected_signal": "fourth_wave_swarm_governor_runbook_contract tests pass",
       "source_paths": [
@@ -793,7 +974,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture",
-      "guarantee_ids": ["fourth-wave-governor-final-signoff"],
+      "guarantee_ids": [
+        "fourth-wave-governor-final-signoff"
+      ],
       "feature_flags": [],
       "expected_signal": "fourth_wave_governor_final_signoff_contract tests pass",
       "source_paths": [
@@ -812,7 +995,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dirty_tree_ownership_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test dirty_tree_ownership_receipt_contract -- --nocapture",
-      "guarantee_ids": ["shared-main-commit-guard"],
+      "guarantee_ids": [
+        "shared-main-commit-guard"
+      ],
       "feature_flags": [],
       "expected_signal": "dirty_tree_ownership_receipt_contract tests pass",
       "source_paths": [
@@ -827,7 +1012,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture",
-      "guarantee_ids": ["durable-rch-final-signoff"],
+      "guarantee_ids": [
+        "durable-rch-final-signoff"
+      ],
       "feature_flags": [],
       "expected_signal": "durable_rch_proof_final_signoff_contract tests pass",
       "source_paths": [
@@ -849,7 +1036,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture",
-      "guarantee_ids": ["admission-aware-proof-lane-atlas"],
+      "guarantee_ids": [
+        "admission-aware-proof-lane-atlas"
+      ],
       "feature_flags": [],
       "expected_signal": "swarm_proof_lane_planner_contract tests pass",
       "source_paths": [
@@ -870,7 +1059,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_readiness_planner_signoff_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test migration_readiness_planner_contract migration_readiness_planner_signoff_artifact_is_complete -- --nocapture",
-      "guarantee_ids": ["migration-readiness-planner-signoff"],
+      "guarantee_ids": [
+        "migration-readiness-planner-signoff"
+      ],
       "feature_flags": [],
       "expected_signal": "migration_readiness_planner_signoff_artifact_is_complete test passes",
       "source_paths": [
@@ -891,7 +1082,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_unsafe_boundary_ledger_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test unsafe_boundary_ledger_contract -- --nocapture",
-      "guarantee_ids": ["unsafe-boundary-ledger-contract"],
+      "guarantee_ids": [
+        "unsafe-boundary-ledger-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "unsafe_boundary_ledger_contract tests pass",
       "source_paths": [
@@ -908,7 +1101,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
-      "guarantee_ids": ["proof-lane-manifest-verifier"],
+      "guarantee_ids": [
+        "proof-lane-manifest-verifier"
+      ],
       "feature_flags": [],
       "expected_signal": "proof_lane_manifest_contract tests pass",
       "source_paths": [
@@ -925,7 +1120,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_topology_preflight_canary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_ledger_contract rch_topology_preflight_fixtures_capture_cargo_started_boundary -- --nocapture",
-      "guarantee_ids": ["rch-topology-preflight-canary"],
+      "guarantee_ids": [
+        "rch-topology-preflight-canary"
+      ],
       "feature_flags": [],
       "expected_signal": "rch_topology_preflight_fixtures_capture_cargo_started_boundary test passes or emits an exact topology-preflight blocker receipt",
       "source_paths": [
@@ -945,7 +1142,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture",
-      "guarantee_ids": ["rch-stale-progress-receipt"],
+      "guarantee_ids": [
+        "rch-stale-progress-receipt"
+      ],
       "feature_flags": [],
       "expected_signal": "rch_stale_progress_receipt_contract tests pass",
       "source_paths": [
@@ -963,7 +1162,9 @@
       "resource_envelope_class": "dependency-audit-light",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
-      "guarantee_ids": ["atp-native-self-contained"],
+      "guarantee_ids": [
+        "atp-native-self-contained"
+      ],
       "feature_flags": [],
       "expected_signal": "exit code 0 with 'ATP Dependency Audit PASSED' message",
       "source_paths": [
@@ -979,8 +1180,13 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_loopback_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test arq_quic_e2e_scripts_contract --features atp-cli,tls loopback_script_runs_real_atp_binary -- --ignored --nocapture",
-      "guarantee_ids": ["arq-quic-loopback-e2e"],
-      "feature_flags": ["atp-cli", "tls"],
+      "guarantee_ids": [
+        "arq-quic-loopback-e2e"
+      ],
+      "feature_flags": [
+        "atp-cli",
+        "tls"
+      ],
       "expected_signal": "loopback_script_runs_real_atp_binary passes and retained summary/events artifacts validate",
       "source_paths": [
         "scripts/run_arq_quic_loopback_e2e.sh",
@@ -995,8 +1201,12 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_lab_determinism CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_transport_quic_lab_contract --features test-internals -- --nocapture",
-      "guarantee_ids": ["arq-quic-lab-determinism"],
-      "feature_flags": ["test-internals"],
+      "guarantee_ids": [
+        "arq-quic-lab-determinism"
+      ],
+      "feature_flags": [
+        "test-internals"
+      ],
       "expected_signal": "atp_transport_quic_lab_contract tests pass with clean LabRunReport oracle evidence",
       "source_paths": [
         "tests/atp_transport_quic_lab_contract.rs",
@@ -1011,7 +1221,9 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_symbol_envelope_fuzz CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_symbol_envelope_fuzz -- --nocapture",
-      "guarantee_ids": ["arq-quic-symbol-envelope-fuzz-smoke"],
+      "guarantee_ids": [
+        "arq-quic-symbol-envelope-fuzz-smoke"
+      ],
       "feature_flags": [],
       "expected_signal": "atp_symbol_envelope_fuzz proptest suite passes",
       "source_paths": [
@@ -1026,8 +1238,13 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_bounded_memory CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' ARQ_QUIC_PAYLOAD_BYTES=10485760 scripts/run_arq_quic_loopback_e2e.sh",
-      "guarantee_ids": ["arq-quic-bounded-memory-loopback"],
-      "feature_flags": ["atp-cli", "tls"],
+      "guarantee_ids": [
+        "arq-quic-bounded-memory-loopback"
+      ],
+      "feature_flags": [
+        "atp-cli",
+        "tls"
+      ],
       "expected_signal": "run_arq_quic_loopback_e2e.sh exits 0 and summary metrics contain sender_max_rss_kb, receiver_max_rss_kb, and peak_max_rss_kb",
       "source_paths": [
         "scripts/run_arq_quic_loopback_e2e.sh",
@@ -1041,7 +1258,9 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_wire_conformance CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_quic_symbol_envelope_conformance -- --nocapture",
-      "guarantee_ids": ["arq-quic-wire-conformance"],
+      "guarantee_ids": [
+        "arq-quic-wire-conformance"
+      ],
       "feature_flags": [],
       "expected_signal": "atp_quic_symbol_envelope_conformance tests pass",
       "source_paths": [
@@ -1056,7 +1275,9 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env SENDER=${SENDER:?set SENDER} RECEIVER=${RECEIVER:?set RECEIVER} RECEIVER_IP=${RECEIVER_IP:?set RECEIVER_IP} ATP_BIN_LOCAL=${ATP_BIN_LOCAL:?set ATP_BIN_LOCAL} scripts/atp_quic_vs_rsync_benchmark.sh all",
-      "guarantee_ids": ["arq-quic-fleet-benchmark-no-fresh-result"],
+      "guarantee_ids": [
+        "arq-quic-fleet-benchmark-no-fresh-result"
+      ],
       "feature_flags": [],
       "expected_signal": "benchmark report records all payload rows, SHA verification success, RSS/load metrics, and honest rsync comparison",
       "source_paths": [
@@ -1071,7 +1292,9 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync-downstream-consumer-proof",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_v044_cancel_compat CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer",
-      "guarantee_ids": ["downstream-consumer-v044-cancel-compatibility"],
+      "guarantee_ids": [
+        "downstream-consumer-v044-cancel-compatibility"
+      ],
       "feature_flags": [],
       "expected_signal": "V044_CANCEL_COMPAT_NEGATIVE_RED and V044_CANCEL_COMPAT_POSITIVE_GREEN both appear before remote exit 0",
       "source_paths": [
@@ -1086,7 +1309,9 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
-      "guarantee_ids": ["downstream-consumer-default-public-api"],
+      "guarantee_ids": [
+        "downstream-consumer-default-public-api"
+      ],
       "feature_flags": [],
       "expected_signal": "default_consumer exits 0 after exercising only root public re-exports",
       "source_paths": [
@@ -1101,7 +1326,9 @@
       "resource_envelope_class": "compile-frontier-heavy",
       "package": "asupersync-downstream-consumer-proof",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-08-31 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
-      "guarantee_ids": ["downstream-consumer-direct-minimal-resolution"],
+      "guarantee_ids": [
+        "downstream-consumer-direct-minimal-resolution"
+      ],
       "feature_flags": [],
       "expected_signal": "the independent direct-minimal lock compiles the default consumer on pinned nightly-2026-08-31 and exits 0",
       "source_paths": [
@@ -1119,7 +1346,9 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync-downstream-consumer-proof",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
-      "guarantee_ids": ["downstream-consumer-default-kafka-fail-closed"],
+      "guarantee_ids": [
+        "downstream-consumer-default-kafka-fail-closed"
+      ],
       "feature_flags": [],
       "expected_signal": "kafka_default_feature_surface runs 2 tests successfully against the external fixture with only default asupersync features",
       "source_paths": [
@@ -1133,8 +1362,12 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
-      "guarantee_ids": ["downstream-consumer-metrics-public-api"],
-      "feature_flags": ["metrics"],
+      "guarantee_ids": [
+        "downstream-consumer-metrics-public-api"
+      ],
+      "feature_flags": [
+        "metrics"
+      ],
       "expected_signal": "metrics_consumer exits 0 with the fixture's metrics-profile forwarding asupersync/metrics",
       "source_paths": [
         "tests/fixtures/downstream-consumer-proof/Cargo.toml",
@@ -1148,8 +1381,12 @@
       "resource_envelope_class": "test-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
-      "guarantee_ids": ["downstream-consumer-channel-public-api"],
-      "feature_flags": ["channel-mpsc-select-e2e"],
+      "guarantee_ids": [
+        "downstream-consumer-channel-public-api"
+      ],
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
       "expected_signal": "channel_profile_consumer exits 0 after resolving the feature-gated public channel runner without cfg(test)",
       "source_paths": [
         "tests/fixtures/downstream-consumer-proof/Cargo.toml",
@@ -1163,7 +1400,9 @@
       "resource_envelope_class": "dependency-graph-light",
       "package": "asupersync-downstream-consumer-proof",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio",
-      "guarantee_ids": ["downstream-consumer-default-tokio-free"],
+      "guarantee_ids": [
+        "downstream-consumer-default-tokio-free"
+      ],
       "feature_flags": [],
       "expected_signal": "warning: nothing to print.",
       "source_paths": [
@@ -1177,7 +1416,9 @@
       "resource_envelope_class": "compile-frontier-heavy",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_internal_negative CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' sh -c 'cargo check --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin internal_only_negative 2> /tmp/asupersync_downstream_consumer_negative.err && exit 1; grep -q \"could not find .*test_utils.* in .*asupersync\" /tmp/asupersync_downstream_consumer_negative.err'",
-      "guarantee_ids": ["downstream-consumer-internal-only-negative"],
+      "guarantee_ids": [
+        "downstream-consumer-internal-only-negative"
+      ],
       "feature_flags": [],
       "expected_signal": "cargo check fails with E0433 because asupersync::test_utils is unavailable outside test-internals",
       "source_paths": [
@@ -1192,7 +1433,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture",
-      "guarantee_ids": ["downstream-consumer-proof-contract"],
+      "guarantee_ids": [
+        "downstream-consumer-proof-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "downstream_consumer_proof_contract tests pass",
       "source_paths": [
@@ -1208,7 +1451,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_support_claim_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_support_claim_report_contract -- --nocapture",
-      "guarantee_ids": ["lab-live-support-claim-report-contract"],
+      "guarantee_ids": [
+        "lab-live-support-claim-report-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "lab_live_support_claim_report_contract tests pass",
       "source_paths": [
@@ -1233,7 +1478,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_ga_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test browser_ga_final_signoff_contract -- --nocapture",
-      "guarantee_ids": ["browser-ga-final-signoff"],
+      "guarantee_ids": [
+        "browser-ga-final-signoff"
+      ],
       "feature_flags": [],
       "expected_signal": "browser_ga_final_signoff_contract tests pass",
       "source_paths": [
@@ -1255,7 +1502,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_signoff_contract -- --nocapture",
-      "guarantee_ids": ["validation-frontier-final-signoff"],
+      "guarantee_ids": [
+        "validation-frontier-final-signoff"
+      ],
       "feature_flags": [],
       "expected_signal": "validation_frontier_signoff_contract tests pass",
       "source_paths": [
@@ -1279,7 +1528,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_e2e_proof_lane_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test doctor_e2e_proof_lane_contract -- --nocapture",
-      "guarantee_ids": ["doctor-e2e-proof-lane-contract"],
+      "guarantee_ids": [
+        "doctor-e2e-proof-lane-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "doctor_e2e_proof_lane_contract tests pass",
       "source_paths": [
@@ -1298,7 +1549,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_proof_lane CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 1 -p asupersync --test semantic_lint_proof_lane_contract --test semantic_lint_rule_inventory_contract --test semantic_lint_diagnostic_codes_contract --test error_code_registry_contract --test semantic_lint_ambient_contract --test semantic_lint_cleanup_budget_contract --test semantic_lint_core_tokio_contract --test semantic_lint_loop_checkpoint_contract --test semantic_lint_ignored_outcome_contract --test semantic_lint_await_holding_contract --test semantic_lint_drop_race_loser_contract -- --nocapture",
-      "guarantee_ids": ["semantic-lint-proof-lane-contract"],
+      "guarantee_ids": [
+        "semantic-lint-proof-lane-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "semantic_lint_proof_lane_contract and all semantic_lint_* contract tests pass",
       "source_paths": [
@@ -1335,7 +1588,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract -- --nocapture",
-      "guarantee_ids": ["rust-crate-release-provenance-contract"],
+      "guarantee_ids": [
+        "rust-crate-release-provenance-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "rust_crate_release_provenance_contract tests pass",
       "source_paths": [
@@ -1358,7 +1613,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_replay_e2e_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_replay_e2e_contract -- --nocapture",
-      "guarantee_ids": ["memory-residency-replay-e2e-contract"],
+      "guarantee_ids": [
+        "memory-residency-replay-e2e-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "memory_residency_replay_e2e_contract tests pass",
       "source_paths": [
@@ -1381,7 +1638,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_operator_safety_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_operator_safety_contract -- --nocapture",
-      "guarantee_ids": ["memory-residency-operator-safety-contract"],
+      "guarantee_ids": [
+        "memory-residency-operator-safety-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "memory_residency_operator_safety_contract tests pass",
       "source_paths": [
@@ -1405,7 +1664,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_validation_harness CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract -- --nocapture",
-      "guarantee_ids": ["artifact-governance-validation-harness"],
+      "guarantee_ids": [
+        "artifact-governance-validation-harness"
+      ],
       "feature_flags": [],
       "expected_signal": "artifact_governance_validation_harness_contract and artifact_governance_ledger_contract pass",
       "source_paths": [
@@ -1426,7 +1687,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test artifact_governance_final_signoff_contract --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture",
-      "guarantee_ids": ["artifact-governance-final-signoff"],
+      "guarantee_ids": [
+        "artifact-governance-final-signoff"
+      ],
       "feature_flags": [],
       "expected_signal": "artifact_governance_final_signoff_contract and supporting artifact-governance/proof manifest/status contracts pass",
       "source_paths": [
@@ -1449,7 +1712,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clean_overlay_proof_orchestration_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test clean_overlay_proof_orchestration_contract -- --nocapture",
-      "guarantee_ids": ["clean-overlay-proof-orchestration-contract"],
+      "guarantee_ids": [
+        "clean-overlay-proof-orchestration-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "clean_overlay_proof_orchestration_contract tests pass",
       "source_paths": [
@@ -1475,7 +1740,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_traffic_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_traffic_final_signoff_contract -- --nocapture",
-      "guarantee_ids": ["proof-traffic-final-signoff"],
+      "guarantee_ids": [
+        "proof-traffic-final-signoff"
+      ],
       "feature_flags": [],
       "expected_signal": "proof_traffic_final_signoff_contract tests pass",
       "source_paths": [
@@ -1505,7 +1772,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
-      "guarantee_ids": ["dependency-supply-chain-policy-contract"],
+      "guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
       "feature_flags": [],
       "expected_signal": "dependency_supply_chain_policy_contract tests pass",
       "source_paths": [
@@ -1534,8 +1803,12 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
-      "guarantee_ids": ["dependency-budget-contract"],
-      "feature_flags": ["dependency-ledger"],
+      "guarantee_ids": [
+        "dependency-budget-contract"
+      ],
+      "feature_flags": [
+        "dependency-ledger"
+      ],
       "expected_signal": "all dependency_budget_contract tests pass, including Cargo-built AGENTS render/check and fail-closed mutation coverage",
       "source_paths": [
         "artifacts/dependency_budget_contract_v1.json",
@@ -1556,7 +1829,9 @@
       "resource_envelope_class": "artifact-contract-medium",
       "package": "asupersync",
       "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture",
-      "guarantee_ids": ["dependency-ci-provenance-final-signoff"],
+      "guarantee_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ],
       "feature_flags": [],
       "expected_signal": "all dependency_ci_provenance_final_signoff_contract tests pass with the STATIC_ONLY and KEEP/DEFER boundaries intact",
       "source_paths": [
@@ -1579,259 +1854,387 @@
   "guarantees": [
     {
       "guarantee_id": "default-production-tokio-free",
-      "lane_ids": ["default-production-tokio-tree"]
+      "lane_ids": [
+        "default-production-tokio-tree"
+      ]
     },
     {
       "guarantee_id": "metrics-production-tokio-free",
-      "lane_ids": ["metrics-production-tokio-tree"]
+      "lane_ids": [
+        "metrics-production-tokio-tree"
+      ]
     },
     {
       "guarantee_id": "fuzz-tokio-quarantine",
-      "lane_ids": ["fuzz-tokio-quarantine-tree"]
+      "lane_ids": [
+        "fuzz-tokio-quarantine-tree"
+      ]
     },
     {
       "guarantee_id": "workspace-tokio-audit",
-      "lane_ids": ["workspace-normal-tokio-audit"]
+      "lane_ids": [
+        "workspace-normal-tokio-audit"
+      ]
     },
     {
       "guarantee_id": "full-graph-tokio-audit",
-      "lane_ids": ["full-feature-tokio-audit"]
+      "lane_ids": [
+        "full-feature-tokio-audit"
+      ]
     },
     {
       "guarantee_id": "atp-native-self-contained",
-      "lane_ids": ["atp-native-quic-dependency-audit"]
+      "lane_ids": [
+        "atp-native-quic-dependency-audit"
+      ]
     },
     {
       "guarantee_id": "arq-quic-loopback-e2e",
-      "lane_ids": ["arq-quic-loopback-e2e"]
+      "lane_ids": [
+        "arq-quic-loopback-e2e"
+      ]
     },
     {
       "guarantee_id": "arq-quic-lab-determinism",
-      "lane_ids": ["arq-quic-lab-determinism"]
+      "lane_ids": [
+        "arq-quic-lab-determinism"
+      ]
     },
     {
       "guarantee_id": "arq-quic-symbol-envelope-fuzz-smoke",
-      "lane_ids": ["arq-quic-symbol-envelope-fuzz-smoke"]
+      "lane_ids": [
+        "arq-quic-symbol-envelope-fuzz-smoke"
+      ]
     },
     {
       "guarantee_id": "arq-quic-bounded-memory-loopback",
-      "lane_ids": ["arq-quic-bounded-memory-loopback"]
+      "lane_ids": [
+        "arq-quic-bounded-memory-loopback"
+      ]
     },
     {
       "guarantee_id": "arq-quic-wire-conformance",
-      "lane_ids": ["arq-quic-wire-conformance"]
+      "lane_ids": [
+        "arq-quic-wire-conformance"
+      ]
     },
     {
       "guarantee_id": "arq-quic-fleet-benchmark-no-fresh-result",
-      "lane_ids": ["arq-quic-fleet-benchmark"]
+      "lane_ids": [
+        "arq-quic-fleet-benchmark"
+      ]
     },
     {
       "guarantee_id": "feature-gated-native-surfaces",
-      "lane_ids": ["native-feature-smoke"]
+      "lane_ids": [
+        "native-feature-smoke"
+      ]
     },
     {
       "guarantee_id": "fuzz-manifest-smoke",
-      "lane_ids": ["fuzz-manifest-smoke"]
+      "lane_ids": [
+        "fuzz-manifest-smoke"
+      ]
     },
     {
       "guarantee_id": "lib-test-frontier",
-      "lane_ids": ["lib-tests"]
+      "lane_ids": [
+        "lib-tests"
+      ]
     },
     {
       "guarantee_id": "native-parked-task-cancellation",
-      "lane_ids": ["native-parked-task-cancellation"]
+      "lane_ids": [
+        "native-parked-task-cancellation"
+      ]
     },
     {
       "guarantee_id": "db-feature-lib-test-frontier",
-      "lane_ids": ["db-feature-lib-tests"]
+      "lane_ids": [
+        "db-feature-lib-tests"
+      ]
     },
     {
       "guarantee_id": "channel-mpsc-select-e2e-public-run",
-      "lane_ids": ["channel-mpsc-select-e2e-public-run"]
+      "lane_ids": [
+        "channel-mpsc-select-e2e-public-run"
+      ]
     },
     {
       "guarantee_id": "all-target-compile-frontier",
-      "lane_ids": ["all-targets-check"]
+      "lane_ids": [
+        "all-targets-check"
+      ]
     },
     {
       "guarantee_id": "clippy-frontier",
-      "lane_ids": ["clippy-all-targets"]
+      "lane_ids": [
+        "clippy-all-targets"
+      ]
     },
     {
       "guarantee_id": "cli-feature-clippy-frontier",
-      "lane_ids": ["cli-feature-clippy"]
+      "lane_ids": [
+        "cli-feature-clippy"
+      ]
     },
     {
       "guarantee_id": "rustfmt-frontier",
-      "lane_ids": ["rustfmt-check"]
+      "lane_ids": [
+        "rustfmt-check"
+      ]
     },
     {
       "guarantee_id": "rustdoc-api-frontier",
-      "lane_ids": ["rustdoc-api"]
+      "lane_ids": [
+        "rustdoc-api"
+      ]
     },
     {
       "guarantee_id": "formal-lean-core-invariants",
-      "lane_ids": ["formal-lean-build"]
+      "lane_ids": [
+        "formal-lean-build"
+      ]
     },
     {
       "guarantee_id": "runtime-pressure-control-evidence-contract",
-      "lane_ids": ["runtime-pressure-control-evidence-contract"]
+      "lane_ids": [
+        "runtime-pressure-control-evidence-contract"
+      ]
     },
     {
       "guarantee_id": "fourth-wave-governor-schema-contract",
-      "lane_ids": ["fourth-wave-governor-schema-contract"]
+      "lane_ids": [
+        "fourth-wave-governor-schema-contract"
+      ]
     },
     {
       "guarantee_id": "fourth-wave-governor-policy-engine",
-      "lane_ids": ["fourth-wave-governor-policy-engine"]
+      "lane_ids": [
+        "fourth-wave-governor-policy-engine"
+      ]
     },
     {
       "guarantee_id": "fourth-wave-swarm-replay-corpus",
-      "lane_ids": ["fourth-wave-swarm-replay-corpus"]
+      "lane_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ]
     },
     {
       "guarantee_id": "fourth-wave-runtime-bridge-contract",
-      "lane_ids": ["fourth-wave-runtime-bridge-contract"]
+      "lane_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ]
     },
     {
       "guarantee_id": "fourth-wave-benchmark-contract",
-      "lane_ids": ["fourth-wave-benchmark-contract"]
+      "lane_ids": [
+        "fourth-wave-benchmark-contract"
+      ]
     },
     {
       "guarantee_id": "fourth-wave-governor-signoff-runbook",
-      "lane_ids": ["fourth-wave-governor-signoff-runbook"]
+      "lane_ids": [
+        "fourth-wave-governor-signoff-runbook"
+      ]
     },
     {
       "guarantee_id": "fourth-wave-governor-final-signoff",
-      "lane_ids": ["fourth-wave-governor-final-signoff"]
+      "lane_ids": [
+        "fourth-wave-governor-final-signoff"
+      ]
     },
     {
       "guarantee_id": "admission-aware-proof-lane-atlas",
-      "lane_ids": ["swarm-proof-lane-planner-contract"]
+      "lane_ids": [
+        "swarm-proof-lane-planner-contract"
+      ]
     },
     {
       "guarantee_id": "migration-readiness-planner-signoff",
-      "lane_ids": ["migration-readiness-planner-signoff-contract"]
+      "lane_ids": [
+        "migration-readiness-planner-signoff-contract"
+      ]
     },
     {
       "guarantee_id": "shared-main-commit-guard",
-      "lane_ids": ["dirty-tree-ownership-receipt-contract"]
+      "lane_ids": [
+        "dirty-tree-ownership-receipt-contract"
+      ]
     },
     {
       "guarantee_id": "durable-rch-final-signoff",
-      "lane_ids": ["durable-rch-proof-final-signoff"]
+      "lane_ids": [
+        "durable-rch-proof-final-signoff"
+      ]
     },
     {
       "guarantee_id": "rch-stale-progress-receipt",
-      "lane_ids": ["rch-stale-progress-receipt-contract"]
+      "lane_ids": [
+        "rch-stale-progress-receipt-contract"
+      ]
     },
     {
       "guarantee_id": "rch-topology-preflight-canary",
-      "lane_ids": ["rch-topology-preflight-canary"]
+      "lane_ids": [
+        "rch-topology-preflight-canary"
+      ]
     },
     {
       "guarantee_id": "unsafe-boundary-ledger-contract",
-      "lane_ids": ["unsafe-boundary-ledger-contract"]
+      "lane_ids": [
+        "unsafe-boundary-ledger-contract"
+      ]
     },
     {
       "guarantee_id": "proof-lane-manifest-verifier",
-      "lane_ids": ["proof-lane-manifest-contract"]
+      "lane_ids": [
+        "proof-lane-manifest-contract"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-v044-cancel-compatibility",
-      "lane_ids": ["downstream-consumer-v044-cancel-compat-run"]
+      "lane_ids": [
+        "downstream-consumer-v044-cancel-compat-run"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-default-public-api",
-      "lane_ids": ["downstream-consumer-default-run"]
+      "lane_ids": [
+        "downstream-consumer-default-run"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-direct-minimal-resolution",
-      "lane_ids": ["downstream-consumer-direct-minimal-check"]
+      "lane_ids": [
+        "downstream-consumer-direct-minimal-check"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-default-kafka-fail-closed",
-      "lane_ids": ["downstream-consumer-default-kafka-test"]
+      "lane_ids": [
+        "downstream-consumer-default-kafka-test"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-metrics-public-api",
-      "lane_ids": ["downstream-consumer-metrics-run"]
+      "lane_ids": [
+        "downstream-consumer-metrics-run"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-channel-public-api",
-      "lane_ids": ["downstream-consumer-channel-profile-run"]
+      "lane_ids": [
+        "downstream-consumer-channel-profile-run"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-default-tokio-free",
-      "lane_ids": ["downstream-consumer-default-tokio-tree"]
+      "lane_ids": [
+        "downstream-consumer-default-tokio-tree"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-internal-only-negative",
-      "lane_ids": ["downstream-consumer-internal-negative-check"]
+      "lane_ids": [
+        "downstream-consumer-internal-negative-check"
+      ]
     },
     {
       "guarantee_id": "downstream-consumer-proof-contract",
-      "lane_ids": ["downstream-consumer-proof-contract"]
+      "lane_ids": [
+        "downstream-consumer-proof-contract"
+      ]
     },
     {
       "guarantee_id": "lab-live-support-claim-report-contract",
-      "lane_ids": ["lab-live-support-claim-report-contract"]
+      "lane_ids": [
+        "lab-live-support-claim-report-contract"
+      ]
     },
     {
       "guarantee_id": "browser-ga-final-signoff",
-      "lane_ids": ["browser-ga-final-signoff"]
+      "lane_ids": [
+        "browser-ga-final-signoff"
+      ]
     },
     {
       "guarantee_id": "validation-frontier-final-signoff",
-      "lane_ids": ["validation-frontier-final-signoff"]
+      "lane_ids": [
+        "validation-frontier-final-signoff"
+      ]
     },
     {
       "guarantee_id": "memory-residency-replay-e2e-contract",
-      "lane_ids": ["memory-residency-replay-e2e-contract"]
+      "lane_ids": [
+        "memory-residency-replay-e2e-contract"
+      ]
     },
     {
       "guarantee_id": "memory-residency-operator-safety-contract",
-      "lane_ids": ["memory-residency-operator-safety-contract"]
+      "lane_ids": [
+        "memory-residency-operator-safety-contract"
+      ]
     },
     {
       "guarantee_id": "doctor-e2e-proof-lane-contract",
-      "lane_ids": ["doctor-e2e-proof-lane-contract"]
+      "lane_ids": [
+        "doctor-e2e-proof-lane-contract"
+      ]
     },
     {
       "guarantee_id": "semantic-lint-proof-lane-contract",
-      "lane_ids": ["semantic-lint-proof-lane-contract"]
+      "lane_ids": [
+        "semantic-lint-proof-lane-contract"
+      ]
     },
     {
       "guarantee_id": "rust-crate-release-provenance-contract",
-      "lane_ids": ["rust-crate-release-provenance-contract"]
+      "lane_ids": [
+        "rust-crate-release-provenance-contract"
+      ]
     },
     {
       "guarantee_id": "artifact-governance-validation-harness",
-      "lane_ids": ["artifact-governance-validation-harness"]
+      "lane_ids": [
+        "artifact-governance-validation-harness"
+      ]
     },
     {
       "guarantee_id": "artifact-governance-final-signoff",
-      "lane_ids": ["artifact-governance-final-signoff"]
+      "lane_ids": [
+        "artifact-governance-final-signoff"
+      ]
     },
     {
       "guarantee_id": "clean-overlay-proof-orchestration-contract",
-      "lane_ids": ["clean-overlay-proof-orchestration-contract"]
+      "lane_ids": [
+        "clean-overlay-proof-orchestration-contract"
+      ]
     },
     {
       "guarantee_id": "proof-traffic-final-signoff",
-      "lane_ids": ["proof-traffic-final-signoff"]
+      "lane_ids": [
+        "proof-traffic-final-signoff"
+      ]
     },
     {
       "guarantee_id": "dependency-supply-chain-policy-contract",
-      "lane_ids": ["dependency-supply-chain-policy-contract"]
+      "lane_ids": [
+        "dependency-supply-chain-policy-contract"
+      ]
     },
     {
       "guarantee_id": "dependency-budget-contract",
-      "lane_ids": ["dependency-budget-contract"]
+      "lane_ids": [
+        "dependency-budget-contract"
+      ]
     },
     {
       "guarantee_id": "dependency-ci-provenance-final-signoff",
-      "lane_ids": ["dependency-ci-provenance-final-signoff"]
+      "lane_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ]
     }
   ]
 }

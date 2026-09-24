@@ -1236,7 +1236,7 @@ fn ci_executes_native_cancellation_regression_before_broader_proofs() {
     );
 }
 
-fn native_cancellation_sentinels() -> [&'static str; 41] {
+fn native_cancellation_sentinels() -> [&'static str; 42] {
     [
         "run_test_preserves_typed_cancellation_from_a_parked_spawn",
         "abort_repolls_a_mutex_parked_operation_to_graceful_cancellation",
@@ -1248,6 +1248,7 @@ fn native_cancellation_sentinels() -> [&'static str; 41] {
         "cross_thread_cx_cancel_wakes_a_timer_parked_native_task",
         "abort_and_join_complete_promptly_for_a_timer_parked_native_child",
         "abort_before_first_poll_keeps_task_level_cancellation_attribution",
+        "local_abort_before_first_poll_keeps_task_level_cancellation_attribution",
         "cancellation_published_at_the_end_of_pending_repolls_user_code",
         "acknowledged_cancellation_can_finish_async_cleanup_before_join_completes",
         "ordinary_spawn_keeps_cancellation_dominant_for_cancellation_blind_late_values",

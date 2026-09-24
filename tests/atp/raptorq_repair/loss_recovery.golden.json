@@ -6,7 +6,13 @@
   "k": 8,
   "symbol_size": 32,
   "source_symbols_total": 8,
-  "source_symbols_lost": [1, 2, 3, 4, 6],
+  "source_symbols_lost": [
+    1,
+    2,
+    3,
+    4,
+    6
+  ],
   "source_symbols_received": 3,
   "repair_symbols_sent": 32,
   "repair_esi_start": 8,
