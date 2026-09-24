@@ -6234,6 +6234,7 @@ impl Drop for RuntimeInner {
                 (unified, sharded)
             };
             if let Some(mailbox) = gateway_mailbox {
+                mailbox.retire_region_commands();
                 let mut cancelled = Vec::new();
                 while mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
                     for request in cancelled.drain(..) {
@@ -8524,6 +8525,83 @@ mod tests {
         drop_thread
             .join()
             .expect("runtime drop thread should exit cleanly");
+    }
+
+    #[test]
+    fn runtime_drop_releases_unapplied_region_finalizers_outside_state_lock() {
+        struct Retained {
+            state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
+            dropped: Arc<AtomicUsize>,
+            panic_on_drop: bool,
+        }
+        impl Drop for Retained {
+            fn drop(&mut self) {
+                drop(
+                    self.state
+                        .try_lock()
+                        .expect("retained value drops outside runtime lock"),
+                );
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    !self.panic_on_drop,
+                    "injected retained-value destructor panic"
+                );
+            }
+        }
+        struct WakeCounter(AtomicUsize);
+        impl std::task::Wake for WakeCounter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let region = runtime.block_on(async {
+            Cx::current()
+                .unwrap()
+                .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                .await
+                .unwrap()
+        });
+        let state = Arc::clone(&runtime.inner.state);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let wake_count = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_count));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut first = Box::pin(region.retain_until_finalized(Retained {
+            state: Arc::clone(&state),
+            dropped: Arc::clone(&dropped),
+            panic_on_drop: true,
+        }));
+        let mut second = Box::pin(region.retain_until_finalized(Retained {
+            state,
+            dropped: Arc::clone(&dropped),
+            panic_on_drop: false,
+        }));
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        assert_eq!(wake_count.0.load(Ordering::SeqCst), 0);
+
+        // No current-thread pump is running. Both requests remain queued, and
+        // the child region plus retained state keep the mailbox reachable.
+        drop(runtime);
+        assert_eq!(dropped.load(Ordering::SeqCst), 2);
+        assert!(wake_count.0.load(Ordering::SeqCst) >= 2);
+        assert!(matches!(
+            first.as_mut().poll(&mut context),
+            Poll::Ready(Err(crate::cx::ChildRegionError::RuntimeUnavailable))
+        ));
+        assert!(matches!(
+            second.as_mut().poll(&mut context),
+            Poll::Ready(Err(crate::cx::ChildRegionError::RuntimeUnavailable))
+        ));
+        eprintln!(
+            "REGION_FINALIZER_TEARDOWN backend=native queued=2 retired=2 acknowledgments=closed locks=reentrant"
+        );
     }
 
     #[test]

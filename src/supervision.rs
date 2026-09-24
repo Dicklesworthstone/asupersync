@@ -540,10 +540,9 @@ impl Eq for SupervisionConfig {}
 
 /// Name registration policy for a child.
 ///
-/// This is a **spec-level** field used by the SPORK supervisor builder to
-/// define how children become discoverable. The actual registry capability
-/// is planned (bd-3rpp8); until then this is carried through compilation
-/// for determinism and UX contracts.
+/// This spec-level field defines how children become discoverable. Managed
+/// supervisors execute it when bound through
+/// [`CompiledSupervisor::bind_managed_with_registry`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NameRegistrationPolicy {
     /// Child is not registered.
@@ -1787,13 +1786,18 @@ pub use managed::{
     ManagedSupervisorError, ManagedSupervisorHandle, ManagedSupervisorReport,
 };
 
+#[path = "supervision/managed_names.rs"]
+mod managed_names;
+
 mod managed {
+    use super::managed_names::{GenerationName, RegistrationFailure};
     use super::{
         Arc, BTreeMap, Budget, BudgetRefusal, CancelReason, ChildName, ChildSpec,
         CompiledSupervisor, Duration, EscalationPolicy, NameRegistrationPolicy, Outcome, RegionId,
         RestartPolicy, RestartTracker, RestartVerdict, SpawnError, SupervisionConfig,
         SupervisorBuilder, SupervisorCompileError, TaskId, Time,
     };
+    use crate::cx::registry::{NameLeaseError, NameRegistry};
     use crate::cx::{ChildRegion, ChildRegionError, ChildRegionSpec, Cx};
     use crate::runtime::{JoinError, TaskHandle};
     use crate::types::PanicPayload;
@@ -1932,6 +1936,16 @@ mod managed {
         Region(ChildRegionError),
         /// The actual spawn gateway refused a task.
         Spawn(SpawnError),
+        /// A named generation could not acquire its registry lease. Its
+        /// managed factory was not invoked.
+        Registration {
+            /// Child whose registration failed.
+            child: ChildName,
+            /// Actual task and region used for the failed registration.
+            generation: ManagedGeneration,
+            /// Registry collision, stale grant, or wait deadline failure.
+            error: NameLeaseError,
+        },
         /// A returned task handle terminated before the managed factory ran.
         ChildNotStarted {
             /// Child whose admission/start failed.
@@ -2034,6 +2048,7 @@ mod managed {
         children: Vec<ChildSpec>,
         bindings: Vec<ManagedChildBinding<E>>,
         config: SupervisionConfig,
+        registry: Option<Arc<Mutex<NameRegistry>>>,
     }
 
     impl<E> std::fmt::Debug for ManagedSupervisor<E> {
@@ -2053,12 +2068,46 @@ mod managed {
         /// deferred flags, and shutdown budgets. The bindings supply restart
         /// modes; `config` supplies one shared intensity/backoff policy. Legacy
         /// per-child SupervisionStrategy remains exclusive to the old APIs.
-        /// Registry-bearing specs are refused until an actual registry binding
-        /// is supplied by a separate integration; they never silently register.
+        /// Registry-bearing specs require [`Self::bind_managed_with_registry`]
+        /// and are refused by this method.
         pub fn bind_managed<E>(
             self,
             bindings: Vec<ManagedChildBinding<E>>,
             config: SupervisionConfig,
+        ) -> Result<ManagedSupervisor<E>, ManagedSupervisorBindError> {
+            self.bind_managed_registry(bindings, config, None)
+        }
+
+        /// Bind managed children to a concrete, shared name registry.
+        ///
+        /// The child acquires its name with its actual task/region identity
+        /// before factory construction. The lease remains owned through that
+        /// generation's drain and is resolved before a replacement starts.
+        /// `Wait` uses the child's budget deadline and the registry's FIFO
+        /// waiter queue; cancellation removes its unclaimed grant. `Replace`
+        /// requests cancellation of the displaced task before invoking the new
+        /// factory, without claiming that the displaced task has drained.
+        ///
+        /// Share this registry only among tasks in the same runtime: registry
+        /// task and region IDs belong to that runtime's arenas. The bound
+        /// capability is propagated to factories and their descendants.
+        /// Standalone `NameLease` values outside this integration still have
+        /// only their drop-bomb obligation: forgetting one is not detected by
+        /// the runtime obligation oracle.
+        pub fn bind_managed_with_registry<E>(
+            self,
+            bindings: Vec<ManagedChildBinding<E>>,
+            config: SupervisionConfig,
+            registry: Arc<Mutex<NameRegistry>>,
+        ) -> Result<ManagedSupervisor<E>, ManagedSupervisorBindError> {
+            self.bind_managed_registry(bindings, config, Some(registry))
+        }
+
+        fn bind_managed_registry<E>(
+            self,
+            bindings: Vec<ManagedChildBinding<E>>,
+            config: SupervisionConfig,
+            registry: Option<Arc<Mutex<NameRegistry>>>,
         ) -> Result<ManagedSupervisor<E>, ManagedSupervisorBindError> {
             if config.restart_policy != self.restart_policy {
                 return Err(ManagedSupervisorBindError::RestartPolicyMismatch);
@@ -2099,7 +2148,9 @@ mod managed {
                 let child = children[index]
                     .take()
                     .expect("validated unique start order");
-                if !matches!(child.registration, NameRegistrationPolicy::None) {
+                if registry.is_none()
+                    && !matches!(child.registration, NameRegistrationPolicy::None)
+                {
                     return Err(ManagedSupervisorBindError::UnsupportedRegistration(
                         child.name,
                     ));
@@ -2117,6 +2168,7 @@ mod managed {
                 children: ordered,
                 bindings: factories,
                 config,
+                registry,
             })
         }
     }
@@ -2127,6 +2179,7 @@ mod managed {
         terminal: Option<(Time, Outcome<(), E>, bool)>,
         shutdown_requested: bool,
         waiter: Option<Waker>,
+        registration_error: Option<RegistrationFailure>,
     }
 
     struct RunningChild<E> {
@@ -2138,6 +2191,7 @@ mod managed {
         cancellation_sent: bool,
         start_observed: bool,
         terminal_observed: bool,
+        registration: Option<Arc<GenerationName>>,
     }
 
     impl<E> RunningChild<E> {
@@ -2437,21 +2491,72 @@ mod managed {
                 terminal: None,
                 shutdown_requested: false,
                 waiter: None,
+                registration_error: None,
             }));
             let child_publication = Arc::clone(&publication);
             let factory = Arc::clone(&self.supervisor.bindings[index].factory);
             let region_id = region.region_id();
+            let registry = self.supervisor.registry.clone();
+            let registration = registry.as_ref().and_then(|registry| {
+                GenerationName::for_policy(registry, &self.supervisor.children[index].registration)
+            });
+            let child_registration = registration.clone();
+            if let Some(registration) = &registration {
+                region
+                    .retain_until_finalized(Arc::clone(registration))
+                    .await
+                    .map_err(ManagedSupervisorError::Region)?;
+                if self.cancelled() {
+                    self.record_cancel();
+                    region
+                        .close()
+                        .await
+                        .map_err(ManagedSupervisorError::Region)?;
+                    return Ok(());
+                }
+            }
             // Moved into the future at spawn so it fires on every terminal
             // path, including cancellation before the first poll.
             let spawn = |tally| {
                 region.cx().spawn(move |cx| async move {
                     let _tally = tally;
+                    let cx = match registry {
+                        Some(registry) => cx.with_registry_handle(Some(
+                            crate::cx::registry::RegistryHandle::new(registry),
+                        )),
+                        None => cx,
+                    };
                     let identity = ManagedGeneration {
                         number,
                         region: region_id,
                         task: cx.task_id(),
                     };
                     child_publication.lock().identity = Some(identity);
+                    if let Some(registration) = &child_registration {
+                        if let Err(error) = registration.acquire(&cx, identity).await {
+                            let (reason, error) = match error {
+                                RegistrationFailure::Cancelled(reason) => (reason, None),
+                                error => (
+                                    CancelReason::user("managed child registration failed"),
+                                    Some(error),
+                                ),
+                            };
+                            let waiter = {
+                                let mut publication = child_publication.lock();
+                                publication.registration_error = error;
+                                publication.terminal = Some((
+                                    cx.now(),
+                                    Outcome::Cancelled(reason),
+                                    publication.shutdown_requested,
+                                ));
+                                publication.waiter.take()
+                            };
+                            if let Some(waiter) = waiter {
+                                waiter.wake();
+                            }
+                            return;
+                        }
+                    }
                     let constructed =
                         catch_unwind(AssertUnwindSafe(|| factory.start(cx.clone(), identity)));
                     let waiter = {
@@ -2506,6 +2611,7 @@ mod managed {
                 cancellation_sent: false,
                 start_observed: false,
                 terminal_observed: false,
+                registration,
             });
             // Start means actual factory construction, not a provisional
             // mailbox TaskId. A panic/admission denial also wakes via join.
@@ -2543,6 +2649,39 @@ mod managed {
                 }
             })
             .await;
+            let registration_error = self.running[index]
+                .as_ref()
+                .expect("owned child")
+                .publication
+                .lock()
+                .registration_error
+                .take();
+            if let Some(error) = registration_error {
+                return match error {
+                    RegistrationFailure::Name(error) => {
+                        let generation = self.running[index]
+                            .as_ref()
+                            .expect("owned child")
+                            .publication
+                            .lock()
+                            .identity
+                            .expect("registration has an admitted identity");
+                        Err(ManagedSupervisorError::Registration {
+                            child: self.supervisor.children[index].name.clone(),
+                            generation,
+                            error,
+                        })
+                    }
+                    RegistrationFailure::RuntimeUnavailable => Err(ManagedSupervisorError::Spawn(
+                        SpawnError::RuntimeUnavailable,
+                    )),
+                    RegistrationFailure::Cancelled(_) => unreachable!("cancellation is a terminal"),
+                };
+            }
+            if self.cancelled() {
+                self.record_cancel();
+                return Ok(());
+            }
             if self.running[index]
                 .as_ref()
                 .is_some_and(|child| child.terminal_observed && !child.start_observed)
@@ -2598,6 +2737,9 @@ mod managed {
                 .close_with_outcome()
                 .await
                 .map_err(ManagedSupervisorError::Region)?;
+            if let Some(registration) = child.registration.take() {
+                registration.release();
+            }
             let completed = self.latest[index]
                 .as_mut()
                 .expect("joined generation before close");

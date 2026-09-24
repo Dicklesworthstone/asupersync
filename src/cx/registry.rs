@@ -1373,6 +1373,52 @@ impl NameRegistry {
         std::mem::take(&mut self.granted)
     }
 
+    /// Take only the grant belonging to one named task generation.
+    ///
+    /// Unlike [`Self::take_granted`], this leaves other consumers' armed leases
+    /// in the registry. The caller must still resolve the returned lease. A
+    /// later replacement can invalidate a queued grant; use
+    /// [`Self::owns_lease`] before publishing the acquired name.
+    pub fn take_granted_for(
+        &mut self,
+        name: &str,
+        holder: TaskId,
+        region: RegionId,
+    ) -> Option<GrantedLease> {
+        let index = self.granted.iter().position(|grant| {
+            grant.name == name && grant.lease.holder() == holder && grant.lease.region() == region
+        })?;
+        Some(self.granted.remove(index))
+    }
+
+    /// Whether the active entry still belongs to this exact lease identity.
+    #[must_use]
+    pub fn owns_lease(&self, lease: &NameLease) -> bool {
+        lease.is_active()
+            && self.leases.get(lease.name()).is_some_and(|entry| {
+                entry.holder == lease.holder()
+                    && entry.region == lease.region()
+                    && entry.acquired_at == lease.acquired_at()
+            })
+    }
+
+    /// Cancel one named task generation's waiting registration and any grant
+    /// it has not collected. Other tasks, names, and successor generations are
+    /// untouched. An uncollected grant is aborted and its slot is passed to
+    /// the next eligible waiter.
+    pub fn cancel_wait_for(&mut self, name: &str, holder: TaskId, region: RegionId, now: Time) {
+        if let Some(queue) = self.waiters.get_mut(name) {
+            queue.retain(|waiter| waiter.holder != holder || waiter.region != region);
+            if queue.is_empty() {
+                self.waiters.remove(name);
+            }
+        }
+        while let Some(mut grant) = self.take_granted_for(name, holder, region) {
+            let _ = self.unregister_owned_and_grant(&grant.lease, now);
+            let _ = grant.lease.abort();
+        }
+    }
+
     /// Remove all expired waiters for a given virtual time.
     ///
     /// Returns the number of waiters removed.

@@ -1428,6 +1428,9 @@ impl fmt::Debug for CreateRegionRequest {
 pub(crate) enum RegionCommand {
     /// Mint a child region and publish the owned handle parts.
     Create(CreateRegionRequest),
+    /// Retain generation-owned state through real region finalization. The
+    /// acknowledgment is published after the runtime state lock is released.
+    RegisterFinalizer(RegisterRegionFinalizer),
     /// Request cancellation for an existing region (idempotent in effect:
     /// unknown regions are tolerated so late cancels after close never
     /// fail).
@@ -1446,6 +1449,80 @@ pub(crate) enum RegionCommand {
     /// `Drop` backstop for abandoned handles (whose body may still be
     /// running; the close protocol cancels whatever remains).
     Close { region_id: RegionId },
+}
+
+/// Crate-private finalizer admission with an owned acknowledgment. A rejected
+/// callback remains in this request and is dropped only after publication,
+/// outside the native runtime state lock.
+pub(crate) struct RegisterRegionFinalizer {
+    region_id: RegionId,
+    finalizer: Option<Box<dyn FnOnce() + Send + 'static>>,
+    completion: Option<
+        crate::channel::oneshot::Sender<
+            Result<(), crate::runtime::region_table::RegionCreateError>,
+        >,
+    >,
+    outcome: Option<Result<(), crate::runtime::region_table::RegionCreateError>>,
+}
+
+impl fmt::Debug for RegisterRegionFinalizer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegisterRegionFinalizer")
+            .field("region_id", &self.region_id)
+            .field("outcome", &self.outcome)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RegisterRegionFinalizer {
+    pub(crate) fn new(
+        region_id: RegionId,
+        finalizer: impl FnOnce() + Send + 'static,
+        completion: crate::channel::oneshot::Sender<
+            Result<(), crate::runtime::region_table::RegionCreateError>,
+        >,
+    ) -> Self {
+        Self {
+            region_id,
+            finalizer: Some(Box::new(finalizer)),
+            completion: Some(completion),
+            outcome: None,
+        }
+    }
+
+    pub(crate) fn apply(mut self, state: &mut crate::runtime::state::RuntimeState) -> Self {
+        use crate::runtime::region_table::RegionCreateError;
+        let refusal = match state.region(self.region_id) {
+            None => Some(RegionCreateError::ParentNotFound(self.region_id)),
+            Some(region) if region.state().is_closing() || region.state().is_terminal() => {
+                Some(RegionCreateError::ParentClosed {
+                    region: self.region_id,
+                    state: region.state(),
+                })
+            }
+            Some(_) => None,
+        };
+        self.outcome = Some(if let Some(error) = refusal {
+            Err(error)
+        } else {
+            let finalizer = self.finalizer.take().expect("unapplied region finalizer");
+            assert!(
+                state.register_sync_finalizer(self.region_id, finalizer),
+                "finalizer admission changed under the runtime state lock"
+            );
+            Ok(())
+        });
+        self
+    }
+
+    pub(crate) fn publish(mut self) {
+        let completion = self
+            .completion
+            .take()
+            .expect("unpublished finalizer admission");
+        let outcome = self.outcome.take().expect("applied finalizer admission");
+        let _ = completion.send_blocking(outcome);
+    }
 }
 
 /// Worker-published outcome parts of one successfully minted child region.
@@ -1680,6 +1757,25 @@ impl SpawnMailbox {
         out: &mut Vec<RegionCommand>,
     ) -> usize {
         self.region_commands.pop_batch_into(max, out)
+    }
+
+    /// Retire unapplied lifecycle commands after publishers and consumers
+    /// have stopped. Retained contexts can keep this mailbox alive beyond
+    /// runtime teardown, so waiting for its destructor would strand finalizer
+    /// acknowledgments. Run only outside runtime and shard locks.
+    pub(crate) fn retire_region_commands(&self) {
+        let mut commands = Vec::new();
+        while self.dequeue_region_commands_into(64, &mut commands) > 0 {
+            for command in commands.drain(..) {
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(command)))
+                {
+                    // Retention values and panic payloads can have arbitrary
+                    // destructors. One failure cannot strand later senders.
+                    std::mem::forget(payload);
+                }
+            }
+        }
     }
 
     #[must_use]

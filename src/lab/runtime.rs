@@ -2328,6 +2328,7 @@ impl Drop for LabSpawnShutdown {
                 std::thread::park_timeout(Duration::from_millis(1));
             }
         }
+        self.mailbox.retire_region_commands();
         let mut cancelled = Vec::new();
         while self.mailbox.dequeue_handle_cancels_into(64, &mut cancelled) > 0 {
             for request in cancelled.drain(..) {
@@ -4085,11 +4086,15 @@ impl LabRuntime {
                 crate::runtime::region_table::RegionCreateError,
             >,
         )> = Vec::with_capacity(commands.len());
+        let mut finalizer_publications = Vec::new();
         for command in commands {
             match command {
                 crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
                     let (slot, outcome) = self.state.open_child_region_command(request);
                     publications.push((slot, outcome));
+                }
+                crate::runtime::spawn_mailbox::RegionCommand::RegisterFinalizer(request) => {
+                    finalizer_publications.push(request.apply(&mut self.state));
                 }
                 crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
                     self.state.close_region_command(region_id, &reason);
@@ -4114,6 +4119,9 @@ impl LabRuntime {
         }
         for (slot, outcome) in publications {
             slot.publish(outcome);
+        }
+        for publication in finalizer_publications {
+            publication.publish();
         }
     }
 
@@ -6670,6 +6678,51 @@ mod tests {
             matches!(result, Err(crate::runtime::task_handle::JoinError::Cancelled(reason))
             if reason.kind == CancelKind::Shutdown)
         );
+    }
+
+    #[test]
+    fn lab_teardown_releases_unapplied_region_finalizer_acknowledgment() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct Retained(Arc<AtomicBool>);
+        impl Drop for Retained {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let mut lab = LabRuntime::new(LabConfig::new(0x100_17).max_steps(256));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, mut joined) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                crate::Cx::current()
+                    .unwrap()
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .unwrap()
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        let region = joined
+            .try_join()
+            .unwrap()
+            .expect("actual child region admitted");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(FlagWaker(Arc::clone(&woken))));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut admission = Box::pin(region.retain_until_finalized(Retained(Arc::clone(&dropped))));
+        assert!(admission.as_mut().poll(&mut context).is_pending());
+        assert!(!dropped.load(Ordering::Acquire));
+        assert!(!woken.load(Ordering::Acquire));
+        drop(lab);
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(woken.load(Ordering::Acquire));
+        assert!(matches!(
+            admission.as_mut().poll(&mut context),
+            std::task::Poll::Ready(Err(crate::cx::ChildRegionError::RuntimeUnavailable))
+        ));
+        eprintln!("REGION_FINALIZER_TEARDOWN backend=lab queued=1 retired=1 acknowledgment=closed");
     }
     #[cfg(unix)]
     impl std::os::fd::AsRawFd for TestFdSource {

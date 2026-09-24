@@ -6314,6 +6314,7 @@ impl ThreeLaneWorker {
                 crate::runtime::region_table::RegionCreateError,
             >,
         )> = Vec::with_capacity(commands.len());
+        let mut finalizer_publications = Vec::new();
         {
             let mut state = self
                 .state
@@ -6324,6 +6325,9 @@ impl ThreeLaneWorker {
                     crate::runtime::spawn_mailbox::RegionCommand::Create(request) => {
                         let (slot, outcome) = state.open_child_region_command(request);
                         publications.push((slot, outcome));
+                    }
+                    crate::runtime::spawn_mailbox::RegionCommand::RegisterFinalizer(request) => {
+                        finalizer_publications.push(request.apply(&mut state));
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Cancel { region_id, reason } => {
                         state.close_region_command_in_task_table(
@@ -6362,6 +6366,9 @@ impl ThreeLaneWorker {
         // lock is released so a woken opener never contends mid-transition.
         for (slot, outcome) in publications {
             slot.publish(outcome);
+        }
+        for publication in finalizer_publications {
+            publication.publish();
         }
         count
     }

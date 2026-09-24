@@ -264,6 +264,28 @@ impl ChildRegion {
         &self.cx
     }
 
+    /// Attach an owned value to real finalizer work before admitting a body.
+    /// The acknowledgment prevents a caller from exposing the value before
+    /// the runtime accepted its lifetime. Register this before user finalizers
+    /// so LIFO cleanup retains it through their completion.
+    pub(crate) async fn retain_until_finalized<T: Send + 'static>(
+        &self,
+        retained: T,
+    ) -> Result<(), ChildRegionError> {
+        let (complete, mut completed) = crate::channel::oneshot::channel();
+        let request = crate::runtime::spawn_mailbox::RegisterRegionFinalizer::new(
+            self.region_id,
+            move || drop(retained),
+            complete,
+        );
+        self.enqueue(RegionCommand::RegisterFinalizer(request))?;
+        completed
+            .recv_uninterruptible()
+            .await
+            .map_err(|_| ChildRegionError::RuntimeUnavailable)?
+            .map_err(ChildRegionError::Create)
+    }
+
     fn enqueue(&self, command: RegionCommand) -> Result<(), ChildRegionError> {
         let gateway = self
             .gateway
