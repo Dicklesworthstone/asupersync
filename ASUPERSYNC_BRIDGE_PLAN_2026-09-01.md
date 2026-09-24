@@ -12,15 +12,15 @@ finally ran them at `f4423fcf0`:
 - the R37 factory races are 8/8 and the R26a signal fix passes all 3 of its process-isolated tests on first run.
 
 The same run found two new defects:
-- the new hedge API cannot be cancelled while its branches are parked (the owner's abort never reaches them);
+- the drain-correct race engine behind hedge, `race_drained_with`, `race!` and blocking `select!` ignores its owner's cancellation while every branch is parked (the owner's abort never reaches them);
 - the new SWIM driver panics a runtime worker on two threads.
 
 It also found two gates red again:
 - the all-features build (an API-landed HTTP/2 test target that never compiled);
 - the default clippy gate (an API-landed lint).
 
-Meanwhile the agents that do validate spent most of the window waiting for build capacity. Their proven fixes for
-R16 and R29a are stranded on a local `main` that has not reached origin for 32 hours. Of the 80 beads created on
+Meanwhile the agents that do validate spent most of the window waiting for build capacity. Their proven fixes are stranded in the shared tree: R16 committed on a local `main` that has not reached origin for
+32 hours, and R29a uncommitted. Of the 80 beads created on
 September 22, four closed (all governance). None of the six decisions recorded on September 23 has an
 implementation. The limiting factors are no longer mainly knowledge of what is broken; they are (1) the cost of
 validation on the fleet that exists, (2) a code-producing lane that cannot validate and is not being healed on a
@@ -41,8 +41,8 @@ schedule, and (3) validated work that cannot reach origin.
   `src/database` or `src/remote.rs`. Every September 22 defect in those files is therefore still present by
   construction (byte-identical source), and each keeps its existing bead.
 - All execution used `RCH_REQUIRE_REMOTE=1 rch exec --base <sha> --clean-overlay --no-overlay` on the exact
-  committed tree. Two probes ran on dangling commit objects built with a temporary index and `commit-tree` (no
-  ref, no working-tree change, never pushed). Logs: `/data/tmp/rc_20260923/lanes/`.
+  committed tree. Probes and heal candidates ran on dangling commit objects built with a temporary index and
+  `commit-tree` (no ref, no working-tree change, never pushed unless landed as a heal). Logs: `/data/tmp/rc_20260923/lanes/`.
 - The shared working tree was not used as evidence: its `main` is 16 commits behind origin and carries 4 unpushed
   commits plus uncommitted peer work.
 
@@ -61,11 +61,11 @@ schedule, and (3) validated work that cannot reach origin.
 | `cargo check --all-targets --all-features --keep-going` | **exit 101**: only `tests/http2_listener_streaming.rs`, 9 × E0277 (non-`Send` futures) |
 | `cargo clippy --all-targets --keep-going -- -D warnings` (default) | **exit 101, exactly one lint**: `tests/signal_subscription_isolation.rs:208` `needless_collect` (from e1df06645); every other target clean |
 | Owner-abort probe (`68c38a1f4`, `race_drained_with`, two branches parked on never-sent receives) | **Defect confirmed.** Positive control (release one branch) passes on 1 and 2 workers. After an owner abort, the owner is **not joined within 3 s and 0 of 2 branches observe cancellation**. It ends `Cancelled(owner reason)` only after the test releases the branches |
-| HTTP/2 streaming probe with the peer's one-line fix (`171aa186f`) | Running at publication; results posted on the owning beads and in the follow-up update below |
-| Gated suites (`quic_h3_listener_streaming`, `initialized_supervisor_native`, `remote_owned_native`) | Running at publication; results posted on the owning beads and in the follow-up update below |
-| I/O replay suites (G2.5 first execution) | Running at publication; results posted on the owning beads and in the follow-up update below |
-| Full lib suite (`--features test-internals`) | Running at publication; results posted on the owning beads and in the follow-up update below |
-| Contract lanes (proof status, API surface map, supply chain, orphan census, manifest, kafka inventory, phase 6, error codes) | Running at publication; results posted on the owning beads and in the follow-up update below |
+| HTTP/2 streaming probe with the peer's one-line fix (`171aa186f`) | **10/10 on first execution.** The listener's streaming path works; only its test harness failed to compile |
+| Gated suites (`http3,tls,test-internals`) | `initialized_supervisor_native` 8/8; `remote_owned_native` 11/11. **`quic_h3_listener_streaming` 9/16 on first execution**: six listener-originated error/reset paths leave the graceful-shutdown drain timing out, and one reset case hangs (R67, `bi2462.167`). A first attempt lost its output stream (inconclusive) and was rerun |
+| I/O replay suites (G2.5 first execution, `--features test-internals`) | **All green, 21/21 parent tests**: `io_capture_replay` 7, `ordered_replay_native_http` 3, `poll_aware_replay_native` 3, `polled_replay_native_tcp` 2, `replay_archive_native` 2, `replay_group_native` 2, `replay_group_session_native` 2, plus child processes. This is I/O replay, not schedule capture |
+| Full lib suite (`--features test-internals`) | Running on the landed tip `73638f012`; results go to `bi2462.86.1`, `.145` and the owning beads |
+| Contract lanes | Green: proof-status snapshot 22/22 (time-bomb fix holds), orphan census 6/6, error-code registry 6/6, phase-6 gates 11/11. Still red: API surface map 5/6 (R39), supply chain 8/10 (`.136`), Kafka journey inventory 3/11 (pin drift; owner `sarszu.2.14.1`). **Newly red:** proof-lane manifest 14/16. The release-blocking native-cancellation sentinel list misses `local_abort_before_first_poll_keeps_task_level_cancellation_attribution`, added by 30d07d1cc (R66, `bi2462.166`), and the manifest projection golden was rewritten by the 09-21 JSON restyle (R62) |
 
 ### Systemic findings added on September 23 (S1-S6 from September 22 still hold)
 
@@ -85,7 +85,13 @@ schedule, and (3) validated work that cannot reach origin.
 - **S8. The code-producing lane with the most throughput cannot compile, and no one heals it on a schedule.**
   - All 7 Rust-changing commits since September 22 came from the API identity: +3,137 lines, every one self-declared uncompiled.
   - Five came after rule 3 of the validation decision, 18 minutes to 25 hours after it, citing the user's explicit request.
-  - The code is good more often than not: everything compiled under default features, and 5 of 7 new test targets passed first time. The defects it did carry (hedge owner-abort, SWIM re-poll panic, the HTTP/2 test target, a clippy lint) sat on main until this assessment ran them.
+  - The code is good more often than not. Everything compiled under default features.
+  - API-landed test targets executed so far:
+    - `race_factory_native` 8/8 after a compile repair;
+    - `signal_subscription_isolation` 3/3;
+    - `http2_listener_streaming` 10/10 once its harness compiled;
+    - `hedge_factory_native` 13/14 and `swim_driver_native` 2/3, which exposed real defects.
+  - The defects it carried (owner-abort propagation, the SWIM re-poll panic, a never-compiled test harness, a clippy lint) sat on main until this assessment ran them.
   - The watchdog that rule 2 names as the check (`bi2462.147`) is not on origin yet. It exists as untracked files in the shared tree, prepared by another session.
   - The owner's instruction and the owner's rule now conflict. Only the owner can settle which governs, and on what terms.
 - **S9. Validated work is stranded, and fixes are being written twice.**
@@ -120,7 +126,8 @@ schedule, and (3) validated work that cannot reach origin.
    Everything recorded as working on September 22 in unchanged files still stands.
 2. **What does not work:**
    - every September 22 defect in untouched code (listed by bead in the September 22 section; none fixed on origin);
-   - hedged requests cannot be cancelled while parked (new R56);
+   - the drain-correct race engine ignores its owner's cancellation while every branch is parked (new R56);
+   - the release-blocking native-cancellation sentinel census is red (new R66);
    - the native SWIM driver crashes a worker (new R57);
    - main's all-features and default-clippy gates are red again (new R58);
    - the RaptorQ golden reds are a formatting regression (R38b root cause);
@@ -153,7 +160,7 @@ Only rows whose status or evidence changed are listed; every other row keeps its
 | # | Goal | September 23 reality | Owner (existing / new) |
 |---|---|---|---|
 | 1 | Cooperative cancellation preserves typed results and cleanup | WORKING_SCOPED: 42/42 at `f4423fcf0`. The R16 teardown fix exists with old-red/new-green receipts but is **not on origin** (stranded, S9). | `bi2462.91`; NEW R61 |
-| 11 | HTTP/body/WS/gRPC/H3 against independent peers | PARTIAL. R22a gRPC native admission fixed on origin (409a695d8); an identical local fix conflicts textually. The `http2-streaming` test target has never compiled under its feature (E0277 at the tip), so README's "unverified" line is if anything generous. | `bi2462.104`, `.86.4`; NEW R58 |
+| 11 | HTTP/body/WS/gRPC/H3 against independent peers | PARTIAL. R22a gRPC native admission fixed on origin (409a695d8); an identical local fix conflicts textually. The `http2-streaming` test harness did not compile under its feature at the tip (E0277). With the one-line fix the suite passes 10/10 on its first execution (probe `171aa186f`), so README's "unverified" line can become a measured result. The opt-in H3 live request-body path ran for the first time: 9/16, with error/reset-path drain failures (R67). | `bi2462.104`, `.86.4`; NEW R58 |
 | 12 | Files, databases, telemetry for consumers | PARTIAL, improved: R26a fixed on origin (e1df06645) and green on first execution (3/3). Minor window: the delivery cursor is read after registration. PostgreSQL/MySQL/Kafka/OTLP unchanged. | `bi2462.113` (ready to close on receipts) |
 | 15 | Membership drives discovery and revocation | PARTIAL: SWIM now has a caller-driven native UDP driver (`new_trusted_network`, honestly labelled unauthenticated). It **crashes a runtime worker** in its two-worker test and still has no consumer. | NEW R57; `bi2462.11`, `e6drlx` |
 | 16 | Supervisor trees restart and escalate | WORKING_SCOPED on origin (6/6). The R29a fail-open fix is proven old-red/new-green but uncommitted, and its last edit is uncompiled. | `bi2462.99`; NEW R61 |
@@ -192,7 +199,7 @@ Public API changes stay additive unless the owner approves a break.
 
 - **R56 — Owner cancellation must reach parked branches of drain-correct races (P1 bug).**
   - The failure: `Cx::hedge_drained_with` inside a task that is aborted while its primary is parked on a never-sent receive and its backup waits out an hour-long delay. The owner never finishes; the test's 10 s watchdog fires (`hedge_factory_native`, 13/14).
-  - Mechanism, read at `f4423fcf0`: `Scope::race_all` (`src/cx/scope.rs:1213`) waits only on the branches' `join_with_drop_reason` futures. `JoinFuture` (`src/runtime/task_handle.rs:1026`) wraps an uninterruptible receive and never observes the joiner's cancellation. The branches are spawned into the owner's *region* (`spawn_in(&self.scope())`), not beneath the owner *task*, so aborting the task cancels nothing below it. The same engine sits behind `race_drained_with`, `race!` and blocking `select!`, The probe (`68c38a1f4`) confirmed the defect is general: `race_drained_with` with two parked branches ignored an owner abort (not joined in 3 s, 0 branches cancelled), while the positive control passed on 1 and 2 workers. Consequences: `TaskHandle::abort`, `Scope::timeout` and `JoinSet::cancel_all` on a racing task hang until a branch finishes naturally, and nested races do not drain promptly. Region-level cancellation still reaches the branches, which is why region-close tests did not catch it.
+  - Mechanism, read at `f4423fcf0`: `Scope::race_all` (`src/cx/scope.rs:1213`) waits only on the branches' `join_with_drop_reason` futures. `JoinFuture` (`src/runtime/task_handle.rs:1026`) wraps an uninterruptible receive and never observes the joiner's cancellation. The branches are spawned into the owner's *region* (`spawn_in(&self.scope())`), not beneath the owner *task*, so aborting the task cancels nothing below it. The same engine sits behind `race_drained_with`, `race!` and blocking `select!`. The probe (`68c38a1f4`) confirmed the defect is general: `race_drained_with` with two parked branches ignored an owner abort (not joined in 3 s, 0 branches cancelled), while the positive control passed on 1 and 2 workers. Consequences: `TaskHandle::abort`, `Scope::timeout` and `JoinSet::cancel_all` on a racing task hang until a branch finishes naturally, and nested races do not drain promptly. Region-level cancellation still reaches the branches, which is why region-close tests did not catch it.
   - Fix direction, to be chosen with a compatibility note: while waiting, race the join set against the owner's `cancelled()`; on owner cancellation, abort every unfinished branch with the owner's reason, drain them all, preserve panic precedence, and return the owner's cancellation. The alternative, spawning branches into a child region of the racing task, needs a design review. Documented behavior ("request propagates down the tree") supports the fix; state the change in the CHANGELOG.
   - Proof:
     - native current-thread and multi-worker tests with never-waking parked branches, for hedge, `race_drained_with`, `race!` and blocking `select!`;
@@ -217,7 +224,10 @@ Public API changes stay additive unless the owner approves a break.
     - (a) enforce rule 3: the API lane lands a patch file under a docs-only path, and an RCH agent validates and lands it;
     - (b) sanctioned land-then-heal: allowed only with a cited bead; new modules and new test targets gated behind a non-default `unverified` feature until their first green receipt; a watchdog receipt within 2 h; a named heal owner; the gate removed only by the healing commit;
     - (c) status quo, with AGENTS.md amended to say so.
-  - Recommendation: (b) for new files, (a) for edits to existing kernel files. The measured record (everything compiled; 5 of 7 targets green on first run; two real defects caught only by execution) supports keeping the lane's speed while bounding its blast radius.
+  - Recommendation: (b) for new files, (a) for edits to existing kernel files. The measured record supports keeping the lane's speed while bounding its blast radius:
+    - everything compiled under default features;
+    - three executed targets were green (one after a compile repair, one after a one-line harness fix);
+    - two real defects were caught only by execution.
 - **R60 — Watchdog detects stranded work, duplicate fixes and heal latency (P1; child of `bi2462.147`).**
   - Report, on each run:
     - how far the shared tree's `main` is ahead of and behind origin, and the age of its oldest unpushed commit;
@@ -333,7 +343,7 @@ each with a measured acceptance:
   - One auditor re-verified ATP/browser/release/docs. Two auditors hit the API session limit; the root covered their scope by the zero-change argument plus a code review of every changed Rust file.
 - **Phase 2:** this section, written in place.
 - **Phase 3a:**
-  - 14 beads created under `bi2462` using the frozen generation instructions and only `br`: `.159`-`.165`, `.147.1`, `.82.1`-`.82.6`.
+  - 16 beads created under `bi2462` using the frozen generation instructions and only `br`: `.159`-`.167`, `.147.1`, `.82.1`-`.82.6`.
   - `bi2462.82` raised to P0.
   - 17 evidence comments on 15 existing beads (`.82`, `.86`, `.88`, `.89` ×2, `.90` ×2, `.91`, `.99`, `.104`, `.113`, `.126`, `.131`, `.132`, `.138`, `.145`, `.147`).
   - 23 dependency edges: 5 blocking (`.82.2/.3/.4` after `.82.1`, `.82.6` after `.82.3`, `.90` after `.165`), the rest `related`.
@@ -344,6 +354,42 @@ each with a measured acceptance:
   - Pass 3: overlap search against open beads found no duplicates.
   - Pass 4: `br dep cycles` reports none; `bv --robot-insights --label reality-check-20260923` reports no cycles.
   - No further changes (convergence).
+
+### Follow-through (September 24, 01:00-02:30 EDT)
+
+Three heals were built as dangling candidates, validated on RCH against the exact tree that landed, and pushed to
+`main` and `master`:
+- **`a1bf751b1` (R58, `bi2462.160`)** heals the all-features and default-clippy gates.
+  - The `http2_listener_streaming` harness no longer requires `Send` of a root future that `block_on` polls in place. This is CopperOak's one-liner, verbatim.
+  - The thread-handle `collect` in `signal_subscription_isolation` became a spawn loop into a pre-sized `Vec`. Clippy's suggested rewrite would deadlock on the `Barrier(8)`.
+  - Receipts: default check 0 warnings; all-features check 0 warnings; targeted clippy clean; `http2_listener_streaming` 10/10 on first execution; signal 3/3.
+- **`e13811792` (R66 closed; R62 instances)** adds the missing native-cancellation sentinel to all three lists and restores six goldens to their exact pre-restyle blobs.
+  - Proof-lane manifest contract: 16/16 (was 14/16).
+  - `atp_raptorq_repair_e2e`: old-red at the parent, new-green with only the golden bytes changed.
+  - The restored projection golden re-matches a drifted Kafka inventory pin.
+- **`73638f012` (R33a/R33b closed; R63 check)** restores the browser-core bindgen outputs that match the committed wasm.
+  - These are the bytes the GA signoff, SBOM and provenance already pin; the old glue called 3 missing exports.
+  - `pages.yml` now copies `webtransport-streams.js`.
+  - A permanent glue-to-wasm export test was added. It is old-red on the old glue and new-green on the landed pair.
+  - The remaining browser-contract reds are package release drift (0.4.11 vs 0.6.0), recorded on R33d.
+
+New from execution: **R67 (`bi2462.167`)**. The opt-in H3 live request-body path ran for the first time: 9/16. Six
+listener-originated error/reset paths leave the shutdown drain timing out, and one reset case hangs.
+
+Other G2 receipts:
+- G2.5 I/O replay: 21/21 on first execution.
+- `initialized_supervisor_native` 8/8.
+- `remote_owned_native` 11/11.
+
+The R56 design (insertion points in `Scope::race_all` and `Scope::race`, plus a no-winner loser-drain history record)
+is posted on `bi2462.165`.
+
+Tracker hygiene:
+- The 30 edge-less blocked beads are classified on `bi2462.88`.
+- `qoir1r` now depends on the watchdog and on R59.
+
+Still running at this update: the full lib suite and a default `clippy --all-targets` on the landed tip `73638f012`.
+Both results go to their beads.
 
 ### Created task index (September 23)
 
@@ -356,6 +402,8 @@ each with a measured acceptance:
 | R60 | `asupersync-bi2462.147.1` | task | P1 | Watchdog: stranded-work alarm, duplicate-fix detector, API-lane heal latency, first-run ledger, decision ledger |
 | R61 | `asupersync-bi2462.159` | task | P0 | Land the stranded RCH-receipted local work and reconcile duplicate fixes |
 | R62 | `asupersync-bi2462.163` | bug | P2 | JSON restyle 7056d5a93 broke byte-exact goldens (root cause of .145); inventory and repair every byte/hash consumer |
+| R66 | `asupersync-bi2462.166` | bug | P1 | Release-blocking native-cancellation sentinel census red (a native test added without updating run_proof_checks.sh) |
+| R67 | `asupersync-bi2462.167` | bug | P2 | NativeH3Listener streaming request path: listener-originated error/reset paths leave the shutdown drain timing out (9/16 on first run) |
 | R63 | `asupersync-bi2462.164` | task | P2 | Pages demo frozen at the coherent 09-03 build; gate the next redeploy on a glue-wasm consistency check |
 | R65a | `asupersync-bi2462.82.1` | task | P0 | Measure where validation time goes (--timings, cold/warm, per target class, capacity model) |
 | R65b | `asupersync-bi2462.82.2` | task | P1 | Move the 553 crate-independent test targets off the per-binary link path with an exact identity inventory |
