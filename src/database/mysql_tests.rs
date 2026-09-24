@@ -408,7 +408,7 @@ mod tests {
         });
         let conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id,
                 capabilities: 0,
                 charset: 0,
@@ -787,7 +787,7 @@ mod tests {
         let stream = crate::net::TcpStream::from_std(std_stream).expect("from_std");
         MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -818,7 +818,7 @@ mod tests {
         (
             MySqlConnection {
                 inner: MySqlConnectionInner {
-                    stream,
+                    stream: stream.into(),
                     connection_id: 0,
                     capabilities: 0,
                     charset: 0,
@@ -885,7 +885,7 @@ mod tests {
 
         let conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -934,7 +934,7 @@ mod tests {
                 .expect("connect client");
             let mut conn = MySqlConnection {
                 inner: MySqlConnectionInner {
-                    stream,
+                    stream: stream.into(),
                     connection_id: 0,
                     capabilities: 0,
                     charset: 0,
@@ -2052,7 +2052,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -2141,7 +2141,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -2193,10 +2193,13 @@ mod tests {
             SslMode::Required,
             0
         ));
-        assert!(MySqlConnection::should_fail_closed_without_tls(
-            SslMode::Required,
-            capability::CLIENT_SSL
-        ));
+        assert_eq!(
+            MySqlConnection::should_fail_closed_without_tls(
+                SslMode::Required,
+                capability::CLIENT_SSL
+            ),
+            !cfg!(feature = "tls")
+        );
     }
 
     #[test]
@@ -2205,10 +2208,13 @@ mod tests {
             SslMode::Preferred,
             0
         ));
-        assert!(MySqlConnection::should_fail_closed_without_tls(
-            SslMode::Preferred,
-            capability::CLIENT_SSL
-        ));
+        assert_eq!(
+            MySqlConnection::should_fail_closed_without_tls(
+                SslMode::Preferred,
+                capability::CLIENT_SSL
+            ),
+            !cfg!(feature = "tls")
+        );
     }
 
     #[test]
@@ -2779,7 +2785,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 41,
                 capabilities: 0,
                 charset: 0,
@@ -2862,7 +2868,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: capability::CLIENT_DEPRECATE_EOF,
                 charset: 0,
@@ -3073,7 +3079,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -3186,7 +3192,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 // The statement must inherit this id as its owner
                 // (br-asupersync-uvqpga: was 0, contradicting the
                 // owner_connection_id assertion below).
@@ -3267,7 +3273,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -3400,7 +3406,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 55,
                 capabilities: 0,
                 charset: 0,
@@ -3513,7 +3519,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 55,
                 capabilities: 0,
                 charset: 0,
@@ -3617,7 +3623,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 7,
                 capabilities: capability::CLIENT_PROTOCOL_41 | capability::CLIENT_DEPRECATE_EOF,
                 charset: 0,
@@ -3716,7 +3722,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -3836,7 +3842,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4029,7 +4035,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4117,7 +4123,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4648,7 +4654,7 @@ mod tests {
         });
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4907,7 +4913,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -4991,7 +4997,7 @@ mod tests {
 
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,

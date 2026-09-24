@@ -35,6 +35,8 @@ use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::security::SecretString;
+#[cfg(feature = "tls")]
+use crate::tls::{Certificate, TlsConnector, TlsConnectorBuilder, TlsStream};
 use crate::types::{CancelReason, Outcome};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -1326,7 +1328,7 @@ pub struct MySqlConnectOptions {
     /// view; the wrapping prevents the underlying allocation from
     /// outliving auth as plaintext.
     pub password: Option<SecretString>,
-    /// Connect timeout.
+    /// Timeout for TCP connection, TLS negotiation, and authentication together.
     pub connect_timeout: Option<std::time::Duration>,
     /// Require SSL.
     pub ssl_mode: SslMode,
@@ -1394,11 +1396,13 @@ impl std::fmt::Debug for MySqlConnectOptions {
 
 /// SSL connection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SslMode {
-    /// Never use SSL.
+pub enum SslMode {    /// Never use SSL.
     #[default]
     Disabled,
-    /// Prefer SSL if available.
+    /// Use verified TLS and reject servers that do not advertise it.
+    ///
+    /// This mode preserves the driver's fail-closed downgrade policy: an
+    /// unauthenticated greeting cannot authorize a plaintext fallback.
     Preferred,
     /// Require SSL.
     Required,
@@ -1663,10 +1667,124 @@ struct OkPacket {
     status_flags: u16,
 }
 
+/// The TLS connector travels with its stream so reconnecting for KILL QUERY
+/// preserves the caller's trust roots, certificate pins, and client identity.
+enum MySqlStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls {
+        stream: Box<TlsStream<TcpStream>>,
+        connector: TlsConnector,
+    },
+    #[cfg(feature = "tls")]
+    Upgrading,
+}
+
+impl From<TcpStream> for MySqlStream {
+    fn from(stream: TcpStream) -> Self {
+        Self::Plain(stream)
+    }
+}
+
+impl MySqlStream {
+    fn shutdown(&self, how: std::net::Shutdown) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.shutdown(how),
+            #[cfg(feature = "tls")]
+            Self::Tls { stream, .. } => stream.get_ref().shutdown(how),
+            #[cfg(feature = "tls")]
+            Self::Upgrading => Ok(()),
+        }
+    }
+
+    fn is_tls(&self) -> bool {
+        #[cfg(feature = "tls")]
+        {
+            matches!(self, Self::Tls { .. })
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    fn connector(&self) -> Option<TlsConnector> {
+        match self {
+            Self::Tls { connector, .. } => Some(connector.clone()),
+            Self::Plain(_) | Self::Upgrading => None,
+        }
+    }
+}
+
+impl AsyncRead for MySqlStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls { stream, .. } => Pin::new(stream.as_mut()).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Upgrading => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "MySQL TLS upgrade incomplete",
+            ))),
+        }
+    }
+}
+
+impl AsyncWrite for MySqlStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls { stream, .. } => Pin::new(stream.as_mut()).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Upgrading => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "MySQL TLS upgrade incomplete",
+            ))),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls { stream, .. } => Pin::new(stream.as_mut()).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Upgrading => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "MySQL TLS upgrade incomplete",
+            ))),
+        }
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls { stream, .. } => Pin::new(stream.as_mut()).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Upgrading => Poll::Ready(Ok(())),
+        }
+    }
+}
+
 /// Inner connection state.
 struct MySqlConnectionInner {
-    /// TCP stream to the server.
-    stream: TcpStream,
+    /// Plain TCP or verified TLS stream to the server.
+    stream: MySqlStream,
     /// Connection ID.
     connection_id: u32,
     /// Server capabilities.
@@ -1835,6 +1953,8 @@ impl Drop for MySqlConnection {
             .load(std::sync::atomic::Ordering::Acquire);
         let already_closed = self.inner.closed;
         let kill_options = self.options.clone();
+        #[cfg(feature = "tls")]
+        let kill_connector = self.inner.stream.connector();
         let thread_id = self.inner.connection_id;
 
         if in_flight && !already_closed && thread_id != 0 {
@@ -1857,7 +1977,7 @@ impl Drop for MySqlConnection {
                                 None => return,
                             };
                             let killer =
-                                match MySqlConnection::connect_with_options(&cx, options.clone())
+                                match MySqlConnection::connect_bounded(&cx, options.clone(), #[cfg(feature = "tls")] kill_connector)
                                     .await
                                 {
                                     Outcome::Ok(c) => c,
@@ -2074,10 +2194,10 @@ where
     while pos < buf.len() {
         let mut read_buf = ReadBuf::new(&mut buf[pos..]);
         std::future::poll_fn(|task_cx| {
+            cancel_wake.refresh(task_cx.waker());
             if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            cancel_wake.refresh(task_cx.waker());
             Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf)
         })
         .await
@@ -2115,10 +2235,100 @@ impl MySqlConnection {
     }
 
     /// Connect with explicit options.
+    ///
+    /// TLS uses verified webpki roots when `tls-webpki-roots` is enabled and
+    /// optionally adds private CA certificates from `SSL_CERT_FILE`. With the
+    /// `tls` feature, `connect_with_tls_connector` accepts explicit roots,
+    /// pins, or client certificates. Both TLS modes reject untrusted
+    /// certificates, hostname mismatches, and stripped CLIENT_SSL.
     pub async fn connect_with_options(
         cx: &Cx,
         options: MySqlConnectOptions,
     ) -> Outcome<Self, MySqlError> {
+        Self::connect_bounded(
+            cx,
+            options,
+            #[cfg(feature = "tls")]
+            None,
+        )
+        .await
+    }
+
+    /// Connect with an explicit TLS trust and client-identity configuration.
+    ///
+    /// `options.ssl_mode` must be `Preferred` or `Required`. The connector
+    /// verifies the server against `options.host`; private roots and client
+    /// certificates can be supplied through [`TlsConnectorBuilder`]. Failure
+    /// never retries over plaintext. The same connector is retained for
+    /// subsequent [`Self::cancel_in_flight_query`] connections.
+    #[cfg(feature = "tls")]
+    pub async fn connect_with_tls_connector(
+        cx: &Cx,
+        options: MySqlConnectOptions,
+        connector: TlsConnector,
+    ) -> Outcome<Self, MySqlError> {
+        if options.ssl_mode == SslMode::Disabled {
+            return Outcome::Err(MySqlError::InvalidParameter(
+                "an explicit TLS connector requires ssl-mode=preferred or required".to_string(),
+            ));
+        }
+        Self::connect_bounded(cx, options, Some(connector)).await
+    }
+
+    /// Whether this connection authenticated over TLS.
+    #[must_use]
+    pub fn is_tls(&self) -> bool {
+        self.inner.stream.is_tls()
+    }
+
+    async fn connect_bounded(
+        cx: &Cx,
+        options: MySqlConnectOptions,
+        #[cfg(feature = "tls")] connector: Option<TlsConnector>,
+    ) -> Outcome<Self, MySqlError> {
+        use std::future::Future;
+
+        let mut deadline = options
+            .connect_timeout
+            .map(|duration| crate::time::Sleep::after(cx.now(), duration));
+        let mut connecting = std::pin::pin!(Self::connect_inner(
+            options,
+            #[cfg(feature = "tls")]
+            connector
+        ));
+        let mut cancel_wake = CancelWakerGuard {
+            cx: Some(cx.clone()),
+            token: None,
+        };
+        std::future::poll_fn(|task_cx| {
+            cancel_wake.refresh(task_cx.waker());
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Outcome::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("cancelled")),
+                ));
+            }
+            // Scope ambient authority to this poll, never across an await.
+            // TCP, TLS, and the existing packet helpers all see the caller's Cx.
+            let _current = Cx::set_current(Some(cx.clone()));
+            if let Some(deadline) = deadline.as_mut() {
+                if Pin::new(deadline).poll_deadline(task_cx).is_ready() {
+                    return Poll::Ready(Outcome::Err(MySqlError::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "MySQL connection, TLS negotiation, or authentication timed out",
+                    ))));
+                }
+            }
+            connecting.as_mut().poll(task_cx)
+        })
+        .await
+    }
+
+    async fn connect_inner(
+        options: MySqlConnectOptions,
+        #[cfg(feature = "tls")] connector: Option<TlsConnector>,
+    ) -> Outcome<Self, MySqlError> {
+        let cx = Cx::current().expect("connect_bounded installs its Cx during polling");
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -2126,23 +2336,16 @@ impl MySqlConnection {
             );
         }
 
-        // Connect to the server (applying connect_timeout if configured).
+        // The outer deadline covers TCP, TLS, and authentication together.
         let addr = format!("{}:{}", options.host, options.port);
-        let stream = if let Some(timeout) = options.connect_timeout {
-            match TcpStream::connect_timeout(addr, timeout).await {
-                Ok(s) => s,
-                Err(e) => return Outcome::Err(MySqlError::Io(e)),
-            }
-        } else {
-            match TcpStream::connect(addr).await {
-                Ok(s) => s,
-                Err(e) => return Outcome::Err(MySqlError::Io(e)),
-            }
+        let stream = match TcpStream::connect(addr).await {
+            Ok(s) => s,
+            Err(e) => return Outcome::Err(MySqlError::Io(e)),
         };
 
         let mut conn = Self {
             inner: MySqlConnectionInner {
-                stream,
+                stream: stream.into(),
                 connection_id: 0,
                 capabilities: 0,
                 charset: 0,
@@ -2183,6 +2386,17 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::TlsRequired);
         }
 
+        #[cfg(feature = "tls")]
+        if options.ssl_mode != SslMode::Disabled {
+            let connector = match connector.map_or_else(Self::default_tls_connector, Ok) {
+                Ok(connector) => connector,
+                Err(error) => return outcome_from_error(error),
+            };
+            if let Err(error) = conn.upgrade_tls(&options, &handshake, connector).await {
+                return outcome_from_error(error);
+            }
+        }
+
         // Send handshake response
         if let Err(e) = conn.send_handshake_response(&options, &handshake).await {
             return outcome_from_error(e);
@@ -2194,6 +2408,62 @@ impl MySqlConnection {
         }
 
         Outcome::Ok(conn)
+    }
+
+    #[cfg(feature = "tls")]
+    fn default_tls_connector() -> Result<TlsConnector, MySqlError> {
+        let mut builder = TlsConnectorBuilder::new()
+            .with_webpki_roots()
+            .with_strict_ca_validation();
+        if let Ok(path) = std::env::var("SSL_CERT_FILE") {
+            let certificates = Certificate::from_pem_file(path).map_err(|error| {
+                MySqlError::Io(io::Error::new(io::ErrorKind::InvalidInput, error))
+            })?;
+            builder = builder.add_root_certificates(certificates);
+        }
+        builder
+            .build()
+            .map_err(|error| MySqlError::Io(io::Error::new(io::ErrorKind::InvalidInput, error)))
+    }
+
+    #[cfg(feature = "tls")]
+    async fn upgrade_tls(
+        &mut self,
+        options: &MySqlConnectOptions,
+        handshake: &Handshake,
+        connector: TlsConnector,
+    ) -> Result<(), MySqlError> {
+        let mut request = PacketBuffer::new();
+        request.set_sequence(self.inner.sequence);
+        request.write_u32_le(
+            Self::client_handshake_response_capabilities(options.database.is_some())
+                | capability::CLIENT_SSL,
+        );
+        request.write_u32_le(16_777_215);
+        request.write_byte(handshake.charset);
+        request.write_bytes(&[0; 23]);
+        let packet = request.build_packet();
+        self.write_all(&packet.bytes).await?;
+        self.inner.sequence = packet.next_sequence;
+
+        let MySqlStream::Plain(tcp) =
+            std::mem::replace(&mut self.inner.stream, MySqlStream::Upgrading)
+        else {
+            return Err(MySqlError::Protocol(
+                "MySQL TLS upgrade requires a plaintext transport".to_string(),
+            ));
+        };
+        let stream = connector
+            .connect(&options.host, tcp)
+            .await
+            .map_err(|error| {
+                MySqlError::Io(io::Error::new(io::ErrorKind::ConnectionAborted, error))
+            })?;
+        self.inner.stream = MySqlStream::Tls {
+            stream: Box::new(stream),
+            connector,
+        };
+        Ok(())
     }
 
     /// Send `KILL QUERY <connection_id>` to the server via a *separate*
@@ -2245,7 +2515,7 @@ impl MySqlConnection {
         })?;
         let thread_id = self.connection_id();
 
-        let mut killer = match Self::connect_with_options(cx, options).await {
+        let mut killer = match Self::connect_bounded(cx, options, #[cfg(feature = "tls")] self.inner.stream.connector()).await {
             Outcome::Ok(c) => c,
             Outcome::Err(e) => return Err(e),
             Outcome::Cancelled(reason) => return Err(MySqlError::Cancelled(reason)),
@@ -2441,7 +2711,7 @@ impl MySqlConnection {
         );
 
         let kill = async {
-            let mut killer = match Self::connect_with_options(cx, kill_options).await {
+            let mut killer = match Self::connect_bounded(cx, kill_options, #[cfg(feature = "tls")] self.inner.stream.connector()).await {
                 Outcome::Ok(conn) => conn,
                 Outcome::Err(err) => return Err(("connect", err.to_string())),
                 Outcome::Cancelled(_) => {
@@ -2599,11 +2869,14 @@ impl MySqlConnection {
         buf.set_sequence(self.inner.sequence);
 
         // Client capabilities
-        let client_caps = Self::client_handshake_response_capabilities(options.database.is_some());
+        let mut client_caps =
+            Self::client_handshake_response_capabilities(options.database.is_some());
+        if self.inner.stream.is_tls() {
+            client_caps |= capability::CLIENT_SSL;
+        }
 
-        // CLIENT_SSL is only valid in the separate MySQL SSL Request packet,
-        // before TLS wraps the stream. Do not set it on the plaintext full
-        // handshake response, which already carries authentication data.
+        // The encrypted response repeats CLIENT_SSL from SSLRequest. A plain
+        // response never advertises it or implies that TLS was negotiated.
         // Runtime packet parsing decisions must use negotiated capabilities,
         // not the server-advertised superset.
         self.inner.capabilities =
@@ -2763,15 +3036,14 @@ impl MySqlConnection {
     }
 
     #[inline]
-    const fn should_fail_closed_without_tls(ssl_mode: SslMode, _server_caps: u32) -> bool {
+    const fn should_fail_closed_without_tls(ssl_mode: SslMode, server_caps: u32) -> bool {
         match ssl_mode {
             SslMode::Disabled => false,
-            SslMode::Required => true,
-            // Until the TLS upgrade path exists, `Preferred` must also fail
-            // closed: the initial handshake is plaintext and unauthenticated,
-            // so an active network attacker could strip CLIENT_SSL and force a
-            // cleartext fallback if we only rejected TLS-capable handshakes.
-            SslMode::Preferred => true,
+            // The initial greeting is unauthenticated: neither mode permits
+            // a stripped CLIENT_SSL capability to authorize cleartext auth.
+            SslMode::Required | SslMode::Preferred => {
+                !cfg!(feature = "tls") || server_caps & capability::CLIENT_SSL == 0
+            }
         }
     }
 
@@ -2900,43 +3172,17 @@ impl MySqlConnection {
     async fn handle_caching_sha2_more_data(
         &mut self,
         data: &[u8],
-        _options: &MySqlConnectOptions,
+        options: &MySqlConnectOptions,
         _handshake: &Handshake,
     ) -> Result<(), MySqlError> {
-        if data.first() == Some(&0x03) {
-            // Fast auth success - wait for OK packet
-            let (data, seq) = self.read_packet().await?;
-            self.inner.sequence = seq.wrapping_add(1);
-            match data.first() {
-                Some(0x00) => {
-                    let ok = Self::parse_ok_packet(&data)?;
-                    self.inner.status_flags = ok.status_flags;
-                    Ok(())
-                }
-                Some(0xFF) => Err(Self::parse_error(&data)),
-                _ => Err(MySqlError::Protocol(
-                    "unexpected response after fast auth".to_string(),
-                )),
-            }
-        } else if data.first() == Some(&0x04) {
-            // Full authentication required - would need RSA key exchange
-            // For now, this requires a secure connection
-            Err(MySqlError::AuthenticationFailed(
-                "caching_sha2_password full auth requires secure connection".to_string(),
-            ))
-        } else {
-            Err(MySqlError::Protocol(format!(
-                "unexpected caching_sha2 status: {:?}",
-                data.first()
-            )))
-        }
+        self.handle_caching_sha2_final(data, options).await
     }
 
     /// Handle final step of caching_sha2_password auth.
     async fn handle_caching_sha2_final(
         &mut self,
         data: &[u8],
-        _options: &MySqlConnectOptions,
+        options: &MySqlConnectOptions,
     ) -> Result<(), MySqlError> {
         match data.first() {
             Some(0x03) => {
@@ -2955,12 +3201,67 @@ impl MySqlConnection {
                     )),
                 }
             }
-            Some(0x04) => Err(MySqlError::AuthenticationFailed(
-                "caching_sha2_password full auth requires secure connection".to_string(),
-            )),
+            Some(0x04) => self.caching_sha2_full_auth(options).await,
             status => Err(MySqlError::Protocol(format!(
                 "unexpected caching_sha2 final status: {status:?}"
             ))),
+        }
+    }
+
+    /// A cache miss requires the clear password inside an established TLS
+    /// tunnel. RSA exchange on plaintext TCP remains explicitly unsupported.
+    async fn caching_sha2_full_auth(
+        &mut self,
+        options: &MySqlConnectOptions,
+    ) -> Result<(), MySqlError> {
+        if !self.inner.stream.is_tls() {
+            return Err(MySqlError::AuthenticationFailed(
+                "caching_sha2_password full auth requires secure connection".to_string(),
+            ));
+        }
+        let password = options
+            .password
+            .as_ref()
+            .map(SecretString::as_str)
+            .unwrap_or_default();
+        if password.as_bytes().contains(&0) {
+            return Err(MySqlError::InvalidParameter(
+                "MySQL full-auth password contains a NUL byte".to_string(),
+            ));
+        }
+        // PacketBuffer would make an additional non-zeroizing password copy.
+        // Construct the sole wire buffer directly and scrub it on every exit.
+        let length = password
+            .len()
+            .checked_add(1)
+            .filter(|length| *length < 0xFF_FFFF)
+            .ok_or_else(|| {
+                MySqlError::InvalidParameter(
+                    "MySQL password exceeds the authentication packet limit".to_string(),
+                )
+            })?;
+        let mut packet = ZeroizingBytes::new(Vec::with_capacity(length + 4));
+        let length_bytes = u32::try_from(length)
+            .expect("authentication payload is bounded to 24 bits")
+            .to_le_bytes();
+        packet.0.extend_from_slice(&length_bytes[..3]);
+        packet.0.push(self.inner.sequence);
+        packet.0.extend_from_slice(password.as_bytes());
+        packet.0.push(0);
+        self.write_all(packet.as_slice()).await?;
+        self.inner.sequence = self.inner.sequence.wrapping_add(1);
+        drop(packet);
+        let (response, sequence) = self.read_packet().await?;
+        self.inner.sequence = sequence.wrapping_add(1);
+        match response.first() {
+            Some(0x00) => {
+                self.inner.status_flags = Self::parse_ok_packet(&response)?.status_flags;
+                Ok(())
+            }
+            Some(0xFF) => Err(Self::parse_error(&response)),
+            _ => Err(MySqlError::Protocol(
+                "unexpected response after caching_sha2 full authentication".to_string(),
+            )),
         }
     }
 
@@ -5023,13 +5324,13 @@ impl MySqlConnection {
         let mut cancel_wake = CancelWakerGuard::new();
         while pos < data.len() {
             let written = std::future::poll_fn(|cx| {
+                cancel_wake.refresh(cx.waker());
                 if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "cancelled",
                     )));
                 }
-                cancel_wake.refresh(cx.waker());
                 Pin::new(&mut self.inner.stream).poll_write(cx, &data[pos..])
             })
             .await
@@ -5043,6 +5344,17 @@ impl MySqlConnection {
             }
             pos += written;
         }
+        // TLS may accept plaintext while encrypted records are still queued.
+        // Flush before the caller reads the server's next protocol packet.
+        std::future::poll_fn(|cx| {
+            cancel_wake.refresh(cx.waker());
+            if Cx::with_current(|current| current.checkpoint().is_err()).unwrap_or(false) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            Pin::new(&mut self.inner.stream).poll_flush(cx)
+        })
+        .await
+        .map_err(stream_io_error)?;
         Ok(())
     }
 

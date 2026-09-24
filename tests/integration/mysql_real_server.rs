@@ -778,3 +778,77 @@ fn mysql_real_dropped_transaction_drains_rollback_on_next_op() {
 fn log_elapsed_ms(log: &MySqlTestLogger) -> u128 {
     log.start.elapsed().as_millis()
 }
+
+/// Each invocation creates a new caching_sha2 account and makes its very first
+/// login over verified TLS. There can be no warm server authentication cache
+/// entry for that account. This lane requires an isolated MySQL 8 server,
+/// CREATE USER privilege, and trusted roots via SSL_CERT_FILE or webpki roots.
+/// Run explicitly with mysql,tls,test-internals and --ignored; missing setup is
+/// a failure, never a silently successful skipped cold-auth receipt.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[test]
+#[ignore = "requires isolated MySQL 8 with verified TLS and CREATE USER privilege"]
+fn mysql_real_first_login_caching_sha2_over_verified_tls() {
+    use asupersync::database::mysql::SslMode;
+    use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use asupersync::security::SecretString;
+    use std::time::Duration;
+
+    let cfg = RealMySqlConfig::from_env();
+    assert!(cfg.enabled, "real MySQL lane unavailable: {:?}", cfg.reason);
+    assert_eq!(
+        std::env::var("MYSQL_TLS_CREATE_USER_TESTS").as_deref(),
+        Ok("true"),
+        "MYSQL_TLS_CREATE_USER_TESTS=true authorizes a temporary test account"
+    );
+    let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+    let join = runtime.handle().spawn(async move {
+        let cx = asupersync::Cx::current().unwrap();
+        let log = MySqlTestLogger::new("mysql_real", "first_login_caching_sha2_tls");
+        let mut options = MySqlConnectOptions::parse(&cfg.url).unwrap();
+        options.ssl_mode = SslMode::Required;
+        options.connect_timeout = Some(Duration::from_secs(5));
+        let mut admin = unwrap_mysql(MySqlConnection::connect_with_options(&cx, options.clone()).await, "admin_tls_connect", &log);
+        assert!(admin.is_tls());
+        assert!(admin.server_version().starts_with("8."), "requires MySQL 8, got {}", admin.server_version());
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let account = format!("asup_tls_{nonce:x}");
+        let password = format!("Cold_{nonce:x}_112!");
+        let create = format!("CREATE USER '{account}'@'%' IDENTIFIED WITH caching_sha2_password BY '{password}' REQUIRE SSL");
+        // MySQL 8 permits CREATE/DROP USER in its prepared protocol. Use it
+        // because the legacy static-SQL heuristic rejects quoted literals.
+        let create_statement = unwrap_mysql(admin.prepare(&cx, &create).await, "prepare_create_account", &log);
+        let drop_account = format!("DROP USER '{account}'@'%'");
+        let drop_statement = unwrap_mysql(admin.prepare(&cx, &drop_account).await, "prepare_drop_account", &log);
+        unwrap_mysql(admin.execute_prepared(&cx, &create_statement, &[]).await, "create_uncached_account", &log);
+        options.user = account.clone();
+        options.password = Some(SecretString::from_string(password));
+        options.database = None;
+        log.phase("first_login_no_cache_warming");
+        let login = MySqlConnection::connect_with_options(&cx, options).await;
+        let mut connection = match login {
+            Outcome::Ok(connection) => connection,
+            failed => {
+                unwrap_mysql(admin.execute_prepared(&cx, &drop_statement, &[]).await, "drop_account_after_failed_login", &log);
+                panic!("first login failed: {failed:?}");
+            }
+        };
+        let tls_status = connection.query_static_sql(&cx, "SHOW SESSION STATUS LIKE 'Ssl_cipher'").await;
+        let ping = connection.ping(&cx).await;
+        let close = connection.close().await;
+        // Revoke the temporary account before asserting command outcomes, so a
+        // failed query does not strand credentials in the isolated server.
+        unwrap_mysql(admin.execute_prepared(&cx, &drop_statement, &[]).await, "drop_uncached_account", &log);
+        let rows = unwrap_mysql(tls_status, "server_tls_cipher", &log);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].get_str("Value").unwrap().is_empty(), "server must observe TLS");
+        unwrap_mysql(ping, "cold_connection_ping", &log);
+        close.unwrap();
+        admin.close().await.unwrap();
+        log.line("cold_login", &[("account", account), ("cache_warming_connections", "0".to_string()), ("server_tls_cipher", rows[0].get_str("Value").unwrap().to_string())]);
+        log.end("pass");
+    });
+    runtime.block_on(join);
+    let report = runtime.shutdown_drained(Duration::from_secs(2));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+}

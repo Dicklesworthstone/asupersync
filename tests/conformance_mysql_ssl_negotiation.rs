@@ -4,12 +4,11 @@
 //! SSL/TLS negotiation according to the MySQL protocol specification,
 //! especially for `caching_sha2_password` authentication.
 //!
-//! # Conformance Issues Identified
+//! # Covered Protocol Boundaries
 //!
-//! 1. **No TLS upgrade**: No implementation of TLS handshake after MySQL handshake
-//! 2. **caching_sha2_password failures**: Full auth fails due to missing secure connection
-//! 3. **Required SSL fail-closed behavior**: `ssl-mode=required` must not send auth data
-//!    in cleartext
+//! Native TLS tests below exercise SSLRequest, verified TLS, cold caching_sha2
+//! authentication, and command traffic. Feature-disabled and stripped-capability
+//! tests require failure before any authentication payload is sent.
 
 #![cfg(feature = "mysql")]
 
@@ -222,7 +221,8 @@ fn test_ssl_mode_enum_conformance() {
     assert!(format!("{:?}", SslMode::Required).contains("Required"));
 }
 
-/// Required SSL must fail closed until the MySQL TLS upgrade path exists.
+/// Builds without TLS must fail before any credential-bearing packet.
+#[cfg(not(feature = "tls"))]
 #[test]
 fn test_required_ssl_fails_closed_before_auth_payload() {
     init_test_logging();
@@ -289,6 +289,7 @@ fn test_required_ssl_fails_closed_before_auth_payload() {
     );
 }
 
+#[cfg(not(feature = "tls"))]
 #[test]
 fn test_preferred_ssl_fails_closed_before_auth_payload_when_server_supports_ssl() {
     init_test_logging();
@@ -572,8 +573,7 @@ fn test_prepared_statement_rejects_cross_connection_reuse() {
 fn test_conformance_gap_missing_server_ssl_validation() {
     init_test_logging();
 
-    // Until the TLS upgrade is implemented, Required mode must fail closed before
-    // capability-specific fallback behavior can matter.
+    // A stripped CLIENT_SSL bit must never authorize plaintext credentials.
     let base_capabilities = mysql_capabilities::CLIENT_PROTOCOL_41
         | mysql_capabilities::CLIENT_SECURE_CONNECTION
         | mysql_capabilities::CLIENT_PLUGIN_AUTH;
@@ -583,6 +583,7 @@ fn test_conformance_gap_missing_server_ssl_validation() {
         base_capabilities,
         "required mode with server missing CLIENT_SSL",
     );
+    #[cfg(not(feature = "tls"))]
     assert_ssl_mode_fails_closed_before_auth_payload(
         SslMode::Required,
         base_capabilities | mysql_capabilities::CLIENT_SSL,
@@ -591,6 +592,7 @@ fn test_conformance_gap_missing_server_ssl_validation() {
 }
 
 /// Test conformance gap: Missing TLS handshake implementation
+#[cfg(not(feature = "tls"))]
 #[test]
 fn test_conformance_gap_missing_tls_handshake() {
     init_test_logging();
@@ -675,4 +677,390 @@ fn test_required_fixes_documentation() {
     assert_eq!(ssl_mode_query_value(SslMode::Disabled), "disabled");
     assert_eq!(ssl_mode_query_value(SslMode::Preferred), "preferred");
     assert_eq!(ssl_mode_query_value(SslMode::Required), "required");
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+mod native_tls {
+    use super::*;
+    use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use asupersync::tls::TlsConnector;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    use std::future::{Future, poll_fn};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    const CERT: &[u8] = include_bytes!("fixtures/tls/admission_peer.crt");
+    const KEY: &[u8] = include_bytes!("fixtures/tls/admission_peer.key");
+    const OK: &[u8] = &[0, 0, 0, 2, 0, 0, 0];
+
+    fn capabilities() -> u32 {
+        mysql_capabilities::CLIENT_PROTOCOL_41
+            | mysql_capabilities::CLIENT_SECURE_CONNECTION
+            | mysql_capabilities::CLIENT_PLUGIN_AUTH
+            | mysql_capabilities::CLIENT_SSL
+            | 0x0020_0000 // CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+    }
+
+    fn connector(trusted: bool) -> TlsConnector {
+        let mut roots = rustls::RootCertStore::empty();
+        if trusted {
+            roots
+                .add(CertificateDer::from_pem_slice(CERT).unwrap())
+                .unwrap();
+        }
+        TlsConnector::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
+    }
+
+    fn accept_tls(
+        socket: std::net::TcpStream,
+    ) -> rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream> {
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(CERT).unwrap()],
+                PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+            )
+            .unwrap();
+        rustls::StreamOwned::new(
+            rustls::ServerConnection::new(Arc::new(config)).unwrap(),
+            socket,
+        )
+    }
+
+    fn read_packet(reader: &mut impl Read) -> std::io::Result<(u8, Vec<u8>)> {
+        let mut header = [0; 4];
+        reader.read_exact(&mut header)?;
+        let length =
+            usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+        assert!(
+            length < 65_536,
+            "unexpected fixture packet length: {length}"
+        );
+        let mut payload = vec![0; length];
+        reader.read_exact(&mut payload)?;
+        Ok((header[3], payload))
+    }
+
+    fn accept_socket(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        let (socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        socket
+    }
+
+    fn ssl_request(socket: &mut std::net::TcpStream) -> Vec<u8> {
+        socket
+            .write_all(&mysql_handshake_packet(capabilities()))
+            .unwrap();
+        let (sequence, request) = read_packet(socket).unwrap();
+        assert_eq!(sequence, 1);
+        assert_eq!(request.len(), 32, "only SSLRequest may precede TLS");
+        let flags = u32::from_le_bytes(request[..4].try_into().unwrap());
+        assert_ne!(flags & mysql_capabilities::CLIENT_SSL, 0);
+        assert_eq!(&request[9..], &[0; 23]);
+        request
+    }
+
+    fn options(address: std::net::SocketAddr, mode: SslMode) -> MySqlConnectOptions {
+        let mut options =
+            MySqlConnectOptions::parse(&format!("mysql://cold_user:cold_secret@{address}/db"))
+                .unwrap();
+        options.ssl_mode = mode;
+        options.connect_timeout = Some(Duration::from_secs(2));
+        options
+    }
+
+    fn assert_retired(runtime: &asupersync::runtime::Runtime) {
+        let report = runtime.shutdown_drained(Duration::from_secs(2));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.pending_obligations, 0);
+    }
+
+    #[test]
+    fn native_mysql_tls_cold_auth_and_auth_switch_roundtrip() {
+        for workers in [1, 2] {
+            for mode in [SslMode::Preferred, SslMode::Required] {
+                for auth_switch in [false, true] {
+                    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let server = std::thread::spawn(move || {
+                        let mut socket = accept_socket(&listener);
+                        let request = ssl_request(&mut socket);
+                        let mut tls = accept_tls(socket);
+                        let (sequence, response) = read_packet(&mut tls).unwrap();
+                        assert_eq!(sequence, 2);
+                        assert_eq!(&response[..32], request.as_slice());
+                        assert!(response[32..].starts_with(b"cold_user\0"));
+                        assert!(
+                            !response
+                                .windows(b"cold_secret".len())
+                                .any(|window| window == b"cold_secret")
+                        );
+                        let mut next = 3;
+                        if auth_switch {
+                            let mut switch = b"\xfecaching_sha2_password\0".to_vec();
+                            switch.extend_from_slice(b"zyxwvutsrqponmlkjihg\0");
+                            tls.write_all(&mysql_packet(next, &switch)).unwrap();
+                            tls.flush().unwrap();
+                            let (sequence, scramble) = read_packet(&mut tls).unwrap();
+                            assert_eq!(sequence, next + 1);
+                            assert_eq!(scramble.len(), 32);
+                            next += 2;
+                        }
+                        tls.write_all(&mysql_packet(next, &[1, 4])).unwrap();
+                        tls.flush().unwrap();
+                        let (sequence, password) = read_packet(&mut tls).unwrap();
+                        assert_eq!(sequence, next + 1);
+                        assert_eq!(password, b"cold_secret\0");
+                        tls.write_all(&mysql_packet(next + 2, OK)).unwrap();
+                        tls.flush().unwrap();
+                        let (sequence, ping) = read_packet(&mut tls).unwrap();
+                        assert_eq!(sequence, 0);
+                        assert_eq!(ping, [0x0e]);
+                        tls.write_all(&mysql_packet(1, OK)).unwrap();
+                        tls.flush().unwrap();
+                        let (sequence, quit) = read_packet(&mut tls).unwrap();
+                        assert_eq!(sequence, 0);
+                        assert_eq!(quit, [1]);
+                    });
+                    let runtime = RuntimeBuilder::new()
+                        .worker_threads(workers)
+                        .build()
+                        .unwrap();
+                    let join = runtime.handle().spawn(async move {
+                        let cx = Cx::current().unwrap();
+                        let mut connection = match MySqlConnection::connect_with_tls_connector(
+                            &cx,
+                            options(address, mode),
+                            connector(true),
+                        )
+                        .await
+                        {
+                            Outcome::Ok(connection) => connection,
+                            other => panic!("TLS cold login failed: {other:?}"),
+                        };
+                        assert!(connection.is_tls());
+                        assert_eq!(connection.connection_id(), 42);
+                        assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
+                        connection.close().await.unwrap();
+                    });
+                    runtime.block_on(join);
+                    server.join().unwrap();
+                    assert_retired(&runtime);
+                    eprintln!(
+                        "event=mysql_tls_cold_auth workers={workers} mode={mode:?} auth_switch={auth_switch} verified=true ping=true closed=true"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_mysql_rejects_untrusted_tls_without_authentication_bytes() {
+        for workers in [1, 2] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let mut socket = accept_socket(&listener);
+                ssl_request(&mut socket);
+                let mut tls = accept_tls(socket);
+                let mut application_byte = [0];
+                assert!(
+                    matches!(tls.read(&mut application_byte), Ok(0) | Err(_)),
+                    "untrusted TLS received authentication data"
+                );
+            });
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(workers)
+                .build()
+                .unwrap();
+            let join = runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let result = MySqlConnection::connect_with_tls_connector(&cx, options(address, SslMode::Required), connector(false)).await;
+                assert!(matches!(result, Outcome::Err(MySqlError::Io(ref error)) if error.kind() == std::io::ErrorKind::ConnectionAborted), "{result:?}");
+            });
+            runtime.block_on(join);
+            server.join().unwrap();
+            assert_retired(&runtime);
+            eprintln!("event=mysql_tls_rejected workers={workers} auth_bytes=0");
+        }
+    }
+
+    #[test]
+    fn native_mysql_plaintext_full_auth_never_sends_password() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut socket = accept_socket(&listener);
+            socket
+                .write_all(&mysql_handshake_packet(capabilities()))
+                .unwrap();
+            let (sequence, response) = read_packet(&mut socket).unwrap();
+            assert_eq!(sequence, 1);
+            assert_eq!(
+                u32::from_le_bytes(response[..4].try_into().unwrap())
+                    & mysql_capabilities::CLIENT_SSL,
+                0
+            );
+            socket.write_all(&mysql_packet(2, &[1, 4])).unwrap();
+            let mut extra = [0];
+            match socket.read(&mut extra) {
+                Ok(0) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                other => {
+                    panic!("plaintext full-auth rejection must close without a password: {other:?}")
+                }
+            }
+        });
+        let runtime = RuntimeBuilder::new().worker_threads(1).build().unwrap();
+        let join = runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let result =
+                MySqlConnection::connect_with_options(&cx, options(address, SslMode::Disabled))
+                    .await;
+            assert!(
+                matches!(result, Outcome::Err(MySqlError::AuthenticationFailed(_))),
+                "{result:?}"
+            );
+        });
+        runtime.block_on(join);
+        server.join().unwrap();
+        assert_retired(&runtime);
+        eprintln!("event=mysql_plaintext_cold_auth rejected=true password_bytes=0");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Stall {
+        Greeting,
+        TlsHandshake,
+        Authentication,
+    }
+
+    #[test]
+    fn native_mysql_connect_deadline_and_cancel_release_parked_handshakes() {
+        for workers in [1, 2] {
+            for phase in [Stall::Greeting, Stall::TlsHandshake, Stall::Authentication] {
+                for cancel in [false, true] {
+                    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let (stage_tx, stage_rx) = mpsc::channel();
+                    let server = std::thread::spawn(move || {
+                        let mut socket = accept_socket(&listener);
+                        match phase {
+                            Stall::Greeting => {
+                                stage_tx.send(()).unwrap();
+                                let mut byte = [0];
+                                assert_eq!(socket.read(&mut byte).unwrap(), 0);
+                            }
+                            Stall::TlsHandshake => {
+                                ssl_request(&mut socket);
+                                let mut record_prefix = [0; 3];
+                                socket.read_exact(&mut record_prefix).unwrap();
+                                assert_eq!(
+                                    record_prefix[0], 0x16,
+                                    "client TLS handshake actually started"
+                                );
+                                stage_tx.send(()).unwrap();
+                                let mut bytes = [0; 4096];
+                                loop {
+                                    if socket.read(&mut bytes).unwrap() == 0 {
+                                        break;
+                                    }
+                                }
+                            }
+                            Stall::Authentication => {
+                                ssl_request(&mut socket);
+                                let mut tls = accept_tls(socket);
+                                assert_eq!(read_packet(&mut tls).unwrap().0, 2);
+                                tls.write_all(&mysql_packet(3, &[1, 4])).unwrap();
+                                tls.flush().unwrap();
+                                assert_eq!(
+                                    read_packet(&mut tls).unwrap(),
+                                    (4, b"cold_secret\0".to_vec())
+                                );
+                                stage_tx.send(()).unwrap();
+                                let mut byte = [0];
+                                match tls.read(&mut byte) {
+                                    Ok(0) => {}
+                                    Err(error) => assert!(
+                                        matches!(
+                                            error.kind(),
+                                            std::io::ErrorKind::UnexpectedEof
+                                                | std::io::ErrorKind::ConnectionReset
+                                        ),
+                                        "{error}"
+                                    ),
+                                    other => {
+                                        panic!("stalled auth connection not closed: {other:?}")
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    let runtime = RuntimeBuilder::new()
+                        .worker_threads(workers)
+                        .build()
+                        .unwrap();
+                    let (cx_tx, cx_rx) = mpsc::channel();
+                    let (done_tx, done_rx) = mpsc::channel();
+                    let (parked_tx, parked_rx) = mpsc::channel();
+                    let probe = Arc::new(AtomicBool::new(false));
+                    let task_probe = Arc::clone(&probe);
+                    let started = Instant::now();
+                    let join = runtime.handle().spawn(async move {
+                        let cx = Cx::current().unwrap();
+                        let mut cx_tx = Some(cx_tx);
+                        let mut options = options(address, SslMode::Required);
+                        options.connect_timeout = Some(if cancel { Duration::from_secs(30) } else { Duration::from_millis(750) });
+                        let mut connect = std::pin::pin!(MySqlConnection::connect_with_tls_connector(&cx, options, connector(true)));
+                        let result = poll_fn(|task_cx| {
+                            if let Some(sender) = cx_tx.take() {
+                                sender.send((cx.clone(), task_cx.waker().clone())).unwrap();
+                            }
+                            let result = connect.as_mut().poll(task_cx);
+                            if result.is_pending() && task_probe.swap(false, Ordering::AcqRel) {
+                                parked_tx.send(()).unwrap();
+                            }
+                            result
+                        }).await;
+                        if cancel {
+                            assert!(matches!(result, Outcome::Cancelled(_)), "{result:?}");
+                        } else {
+                            assert!(matches!(result, Outcome::Err(MySqlError::Io(ref error)) if error.kind() == std::io::ErrorKind::TimedOut), "{result:?}");
+                        }
+                        done_tx.send(()).unwrap();
+                    });
+                    let (cx, probe_waker) = cx_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    stage_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    // One probe after the peer's wire witness must return
+                    // Pending. The probe ends before cancellation; subsequent
+                    // progress can only come from cancellation or the deadline.
+                    probe.store(true, Ordering::Release);
+                    probe_waker.wake_by_ref();
+                    parked_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    if cancel {
+                        cx.cancel_fast(asupersync::types::CancelKind::User);
+                    }
+                    done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    runtime.block_on(join);
+                    server.join().unwrap();
+                    assert_retired(&runtime);
+                    eprintln!(
+                        "event=mysql_connect_stall workers={workers} phase={phase:?} cancel={cancel} elapsed_ms={} socket_closed=true",
+                        started.elapsed().as_millis()
+                    );
+                }
+            }
+        }
+    }
 }

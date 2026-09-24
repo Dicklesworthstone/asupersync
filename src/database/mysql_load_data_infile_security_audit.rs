@@ -70,7 +70,7 @@ struct MySqlPacket {
 fn make_test_connection(stream: crate::net::TcpStream, sequence: u8) -> MySqlConnection {
     MySqlConnection {
         inner: MySqlConnectionInner {
-            stream,
+            stream: stream.into(),
             connection_id: 0,
             capabilities: 0,
             charset: 0,
