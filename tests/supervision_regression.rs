@@ -185,6 +185,7 @@ mod managed_public {
     use std::collections::BTreeSet;
     use std::future::{Future, poll_fn};
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Poll, Waker};
     use std::time::Duration;
@@ -795,6 +796,173 @@ mod managed_public {
             "actual_task_outcome":format!("{:?}", child.task_outcome),"events":format!("{log:?}")})
     }
 
+    async fn unavailable_restart_dependency(
+        cx: Cx,
+        snapshot: &Snapshot,
+        required: bool,
+    ) -> serde_json::Value {
+        let (events, mut receiver) = events();
+        let b_parked = Arc::new(AtomicBool::new(false));
+        let b_parked_in_factory = Arc::clone(&b_parked);
+        let b_events = events.clone();
+        let b = ManagedChildBinding::new(
+            "b",
+            ManagedRestartMode::Permanent,
+            move |child_cx: Cx, generation: ManagedGeneration| {
+                let events = b_events.clone();
+                let parked = Arc::clone(&b_parked_in_factory);
+                async move {
+                    let (sender, mut receiver) = mpsc::channel(2);
+                    events.log.lock().unwrap().push(Observation {
+                        child: 1,
+                        generation,
+                        action: Action::Started,
+                    });
+                    events
+                        .sender
+                        .try_send(Event::Ready(Ready {
+                            child: 1,
+                            generation,
+                            mailbox: sender,
+                            cleanup: Arc::new(Gate::default()),
+                        }))
+                        .unwrap();
+                    let mut recv = Box::pin(receiver.recv(&child_cx));
+                    let command = poll_fn(|poll_cx| {
+                        let next = recv.as_mut().poll(poll_cx);
+                        if next.is_pending() {
+                            parked.store(true, Ordering::Release);
+                        }
+                        next
+                    })
+                    .await
+                    .unwrap();
+                    assert!(matches!(command, Command::Error));
+                    events.observe(1, generation, Action::Failed);
+                    Outcome::Err("controlled mailbox failure")
+                }
+            },
+        );
+        let supervisor = SupervisorBuilder::new("dependency-restart")
+            .with_restart_policy(RestartPolicy::OneForOne)
+            .child(ChildSpec::new("a", legacy_start))
+            .child(
+                ChildSpec::new("b", legacy_start)
+                    .depends_on("a")
+                    .with_required(required),
+            )
+            .compile()
+            .unwrap()
+            .bind_managed(
+                vec![
+                    worker(0, ManagedRestartMode::Transient, events.clone(), None, None),
+                    b,
+                ],
+                config(RestartPolicy::OneForOne, 2),
+            )
+            .unwrap();
+        let mut handle = supervisor.spawn(&cx).unwrap();
+        let ready = ready_set(&cx, &mut handle, &mut receiver, &[0, 1]).await;
+        let parked_at = std::time::Instant::now();
+        while !b_parked.load(Ordering::Acquire) {
+            assert!(
+                parked_at.elapsed() < Duration::from_secs(10),
+                "required child never parked on its real mailbox"
+            );
+            asupersync::runtime::yield_now().await;
+        }
+        eprintln!(
+            "scenario=unavailable_restart_dependency required={required} stage=b_recv_pending elapsed={:?}",
+            parked_at.elapsed()
+        );
+        ready[0].mailbox.try_send(Command::Finish).unwrap();
+        eprintln!(
+            "scenario=unavailable_restart_dependency required={required} stage=a_finish_sent elapsed={:?}",
+            parked_at.elapsed()
+        );
+
+        // The dependency must be actually drained before b fails; ordering
+        // two sends alone would leave the restart eligibility race unproved.
+        let a_task = format!("task={:?}", ready[0].generation.task);
+        let started = std::time::Instant::now();
+        loop {
+            if snapshot().iter().any(|event| {
+                matches!(&event.data, TraceData::Message(message)
+                    if message.contains("action=drained") && message.contains(&a_task))
+            }) {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "dependency a was not drained"
+            );
+            asupersync::runtime::yield_now().await;
+        }
+        eprintln!(
+            "scenario=unavailable_restart_dependency required={required} stage=a_drained elapsed={:?}",
+            parked_at.elapsed()
+        );
+        ready[1].mailbox.try_send(Command::Error).unwrap();
+        eprintln!(
+            "scenario=unavailable_restart_dependency required={required} stage=b_error_sent elapsed={:?}",
+            parked_at.elapsed()
+        );
+        let report = handle.join().await.unwrap();
+        assert_eq!(
+            (report.started, report.joined, report.restart_batches),
+            (2, 2, 0)
+        );
+        assert!(report.children[0].outcome.is_ok());
+        assert!(matches!(
+            &report.children[1].outcome,
+            Outcome::Err("controlled mailbox failure")
+        ));
+        if required {
+            assert!(
+                matches!(&report.outcome,
+                    Outcome::Err(asupersync::supervision::ManagedSupervisorError::DependencyUnavailable { child, dependency })
+                        if child.as_str() == "b" && dependency.as_str() == "a"),
+                "{report:?}"
+            );
+        } else {
+            assert!(report.outcome.is_ok(), "{report:?}");
+        }
+        let log = events.log.lock().unwrap().clone();
+        assert_eq!(
+            log.iter()
+                .filter(|entry| entry.child == 1 && entry.action == Action::Started)
+                .count(),
+            1
+        );
+        assert!(
+            log.iter()
+                .any(|entry| entry.child == 1 && entry.action == Action::Failed)
+        );
+        let trace = snapshot();
+        terminal_witnesses(&log, &trace);
+        let b_task = format!("task={:?}", ready[1].generation.task);
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|event| {
+                    matches!(&event.data, TraceData::Message(message)
+                        if message.contains("action=restart_dependency_unavailable") && message.contains(&b_task))
+                })
+                .count(),
+            1
+        );
+        eprintln!(
+            "scenario=unavailable_restart_dependency required={required} stage=terminal_joined outcome={:?} elapsed={:?}",
+            report.outcome,
+            parked_at.elapsed()
+        );
+        serde_json::json!({"scenario":"unavailable_restart_dependency", "required":required,
+            "b_recv_parked_before_trigger":true, "dependency_drained_before_failure":true,
+            "b_factory_calls":1,
+            "started":report.started,"joined":report.joined,
+            "restart_batches":report.restart_batches,"outcome":format!("{:?}", report.outcome)})
+    }
+
     async fn cancellation_during_start(cx: Cx, snapshot: &Snapshot) -> serde_json::Value {
         let (events, mut receiver) = events();
         let observed = events.clone();
@@ -1064,10 +1232,13 @@ mod managed_public {
                 results.push(restart_mode(cx.clone(), &snapshot, mode, terminal).await);
             }
         }
+        for required in [true, false] {
+            results.push(unavailable_restart_dependency(cx.clone(), &snapshot, required).await);
+        }
         results.push(cancellation_during_start(cx.clone(), &snapshot).await);
         results.push(cancellation_during_backoff(cx.clone(), &snapshot).await);
         results.push(shared_intensity(cx, &snapshot).await);
-        assert_eq!(results.len(), 18);
+        assert_eq!(results.len(), 20);
         results
     }
 

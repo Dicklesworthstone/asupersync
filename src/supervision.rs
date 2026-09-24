@@ -704,7 +704,9 @@ impl ChildSpec {
         self
     }
 
-    /// Set whether the child is required.
+    /// Set whether the child is required. A managed required child fails the
+    /// supervisor if a dependency is unavailable at boot or restart; an
+    /// optional child may remain stopped, with the skipped restart traced.
     #[must_use]
     pub fn with_required(mut self, required: bool) -> Self {
         self.required = required;
@@ -2922,12 +2924,27 @@ mod managed {
                 }
                 let mut counted = false;
                 for index in restart {
-                    if self.dependency_unavailable(index).is_some() {
-                        continue;
-                    }
                     if self.cancelled() {
                         self.record_cancel();
                         return;
+                    }
+                    if let Some(dependency) = self.dependency_unavailable(index) {
+                        let identity = self.latest[index]
+                            .as_ref()
+                            .expect("drained generation")
+                            .generation;
+                        self.trace("restart_dependency_unavailable", index, identity);
+                        if self.supervisor.children[index].required {
+                            self.report.outcome =
+                                Outcome::Err(ManagedSupervisorError::DependencyUnavailable {
+                                    child: self.supervisor.children[index].name.clone(),
+                                    dependency,
+                                });
+                            return;
+                        }
+                        // An optional child may stay stopped when a dependency
+                        // is unavailable; its skipped restart is still traced.
+                        continue;
                     }
                     if !counted {
                         self.tracker.record(self.cx.now().as_nanos());
