@@ -10,6 +10,8 @@ use crate::time::Sleep;
 use crate::types::CancelReason;
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -63,7 +65,128 @@ enum Timed<T> {
     Expired,
 }
 
+// Published by the primary itself, not by its waiting owner. Otherwise an
+// owner that is not scheduled promptly could start a backup after the primary
+// has already completed. Retirement also publishes this on a factory/poll panic.
+struct HedgePrimaryCompletion(Arc<AtomicBool>);
+
+impl Drop for HedgePrimaryCompletion {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+fn hedge_cancelled(cx: &Cx) -> JoinError {
+    JoinError::Cancelled(
+        cx.cancel_reason()
+            .unwrap_or_else(|| CancelReason::user("hedge cancelled")),
+    )
+}
+
 impl Cx<cap::All> {
+    /// Start a primary and, after a delay, a backup with its own child context.
+    ///
+    /// The first terminal branch wins; an application error returned as `T` is
+    /// still a value, not a request to retry. Selection, panic precedence and
+    /// loser retirement use the same engine as [`Self::race_drained_with`].
+    /// Both factories run inside admitted child tasks, including their synchronous
+    /// construction code. Pass each factory's `Cx` to its cancel-aware operations.
+    ///
+    /// Two region-owned task slots are admitted up front. The backup task waits
+    /// without invoking its factory until `delay` has elapsed since admission
+    /// began. It checks whether the primary has finished before invoking the
+    /// backup, even if the owner has not yet polled the race's result. Cancellation
+    /// interrupts this wait: a fast primary does not wait out the hedge delay.
+    ///
+    /// A nonzero delay requires this context's timer capability. A zero delay
+    /// makes the backup eligible immediately without requiring time authority. No
+    /// ambient timer or detached work is created. Return waits for loser cleanup;
+    /// dropping the outer future requests cancellation and leaves asynchronous
+    /// draining to the owning region. Uncooperative work can prevent that drain.
+    ///
+    /// # Errors
+    /// Missing timer authority refuses before either factory is invoked. Parent
+    /// cancellation and admission failures retain the existing race semantics;
+    /// a panic in either child takes precedence over a successful winner.
+    pub async fn hedge_drained_with<T, P, PF, B, BF>(
+        &self,
+        delay: Duration,
+        primary: P,
+        backup: B,
+    ) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+        P: FnOnce(Cx) -> PF + Send + 'static,
+        PF: Future<Output = T> + Send + 'static,
+        B: FnOnce(Cx) -> BF + Send + 'static,
+        BF: Future<Output = T> + Send + 'static,
+    {
+        if self.checkpoint().is_err() {
+            return Err(hedge_cancelled(self));
+        }
+        let delayed = if delay.is_zero() {
+            None
+        } else {
+            let timer = self.timer_driver().ok_or_else(|| {
+                JoinError::Cancelled(
+                    CancelReason::resource_unavailable()
+                        .with_message("delayed hedge requires a timer"),
+                )
+            })?;
+            let deadline = timer.now() + delay;
+            Some((timer, deadline))
+        };
+
+        let primary_finished = Arc::new(AtomicBool::new(false));
+        let completion = HedgePrimaryCompletion(Arc::clone(&primary_finished));
+        let primary: RaceFactory<Result<T, JoinError>> = Box::new(move |child| {
+            Box::pin(async move {
+                let _completion = completion;
+                if child.checkpoint().is_err() {
+                    return Err(hedge_cancelled(&child));
+                }
+                Ok(primary(child).await)
+            })
+        });
+        let backup: RaceFactory<Result<T, JoinError>> = Box::new(move |child| {
+            Box::pin(async move {
+                if let Some((timer, deadline)) = delayed {
+                    let elapsed = {
+                        let mut sleep = std::pin::pin!(Sleep::with_timer_driver(deadline, timer));
+                        let mut cancelled = std::pin::pin!(child.cancelled());
+                        poll_fn(|task| {
+                            // Cancellation wins a tie with the timer so a stopped
+                            // hedge never starts fresh work just to drain it.
+                            if cancelled.as_mut().poll(task).is_ready() {
+                                Poll::Ready(false)
+                            } else if sleep.as_mut().poll(task).is_ready() {
+                                Poll::Ready(true)
+                            } else {
+                                Poll::Pending
+                            }
+                        })
+                        .await
+                    };
+                    if !elapsed {
+                        return Err(hedge_cancelled(&child));
+                    }
+                }
+                if child.checkpoint().is_err() {
+                    return Err(hedge_cancelled(&child));
+                }
+                if primary_finished.load(Ordering::Acquire) {
+                    // Do not publish a synthetic result: it could beat the
+                    // primary's retirement barrier and hide its real outcome.
+                    child.cancelled().await;
+                    return Err(hedge_cancelled(&child));
+                }
+                Ok(backup(child).await)
+            })
+        });
+
+        self.race_drained_with(vec![primary, backup]).await?
+    }
+
     /// Race child-context factories, cancelling and draining losing tasks.
     ///
     /// This is the context-aware counterpart of [`Self::race_drained`]. Pass
