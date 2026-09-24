@@ -1182,16 +1182,17 @@ impl PgRowStream<'_> {
         }
 
         if cx.checkpoint().is_err() {
-            return Outcome::Cancelled(
-                cx.cancel_reason()
-                    .unwrap_or_else(|| CancelReason::user("cancelled")),
-            );
+            self.finished = true;
+            return self.connection.cancel_in_flight(cx).await;
         }
 
         loop {
             let (msg_type, data) = match self.connection.read_message(cx).await {
                 Ok(m) => m,
-                Err(e) => return Outcome::Err(e),
+                Err(e) => {
+                    self.finished = true;
+                    return self.connection.fail_in_flight(e);
+                }
             };
 
             match msg_type {
@@ -3002,15 +3003,15 @@ struct PgConnectionInner {
 struct CancelTarget {
     host: String,
     port: u16,
-    /// Hard upper bound on the cancel-request connect — see
-    /// `PgConnection::fire_cancel_request` for why this is clamped to a
-    /// short value rather than inheriting the original `connect_timeout`.
+    /// Hard upper bound on the whole cancel exchange, including name
+    /// resolution, connect, and frame write. Kept short so cleanup does not
+    /// inherit an arbitrarily long original connection timeout.
     connect_timeout: std::time::Duration,
 }
 
 impl CancelTarget {
     fn from_options(options: &PgConnectOptions) -> Self {
-        // CancelRequest is best-effort signaling — bound the connect attempt
+        // CancelRequest is best-effort signaling — bound the entire exchange
         // to 500ms (or the user's configured connect_timeout, whichever is
         // smaller) so a cancelling caller can't be stalled by an
         // unreachable host on the cancel path.
@@ -3223,6 +3224,17 @@ fn eof_or_cancelled(cx: &Cx) -> PgError {
     ))
 }
 
+fn io_or_cancelled(cx: &Cx, err: io::Error) -> PgError {
+    // The ambient socket checkpoint can observe cancellation after our
+    // explicit checkpoint passed. Preserve that signal as cancellation so
+    // the connection still performs its server-side cancellation drain.
+    if err.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() {
+        cancelled_error(cx)
+    } else {
+        PgError::Io(err)
+    }
+}
+
 /// Owns exactly one cancellation-Waker registration on a `Cx` for the
 /// lifetime of a socket poll loop.
 ///
@@ -3233,8 +3245,8 @@ fn eof_or_cancelled(cx: &Cx) -> PgError {
 /// the server finally answered: the real-server suite measured `pg_sleep(30)`
 /// running its full 30 s before `Outcome::Cancelled` surfaced. Registering the
 /// task's Waker with the `Cx` makes the cancel wake the parked poll, after
-/// which the checkpoint guard returns `PgError::Cancelled` and the caller's
-/// `cancel_in_flight` fires the `CancelRequest`. Same owned-token pattern as
+/// which the checkpoint guard returns `PgError::Cancelled` and the connection's
+/// I/O completion path sends `CancelRequest`. Same owned-token pattern as
 /// the oneshot `RecvFuture`; a stale token from an earlier poll is refreshed
 /// without allocation when the Waker is unchanged.
 struct CancelWakerGuard<'a> {
@@ -3280,7 +3292,7 @@ where
             cancel_wake.refresh(task_cx.waker());
             match Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-                Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
                 Poll::Pending => Poll::Pending,
             }
         })
@@ -3568,17 +3580,36 @@ impl PgConnection {
     /// notices the closed socket on its next write attempt.
     ///
     /// Returns the failure stage plus error so the drain path can log the
-    /// connection-close fallback distinctly. The connect attempt is bounded
-    /// by [`CancelTarget::connect_timeout`] (clamped to 500ms at capture
-    /// time); the frame itself is a single 16-byte write into a fresh socket
-    /// buffer. TLS is intentionally not negotiated: the CancelRequest
+    /// connection-close fallback distinctly. The entire exchange, including
+    /// name resolution and writing the frame, is bounded by
+    /// [`CancelTarget::connect_timeout`] (clamped to 500ms at capture time).
+    /// TLS is intentionally not negotiated: the CancelRequest
     /// exchange is defined pre-TLS in the protocol and carries only the
     /// `(process_id, secret_key)` pair issued by BackendKeyData.
     ///
-    /// This future performs no `Cx` checkpoints, so it runs to completion
-    /// even when the calling task's `Cx` is already cancelled — exactly the
-    /// drain-phase situation it exists for.
+    /// This future has no explicit `Cx` checkpoints. Its caller masks the
+    /// ambient socket checkpoints during the bounded drain, allowing the
+    /// side connection to make progress after the query was cancelled.
     async fn send_cancel_request(
+        target: CancelTarget,
+        process_id: i32,
+        secret_key: i32,
+    ) -> Result<(), (&'static str, std::io::Error)> {
+        crate::time::timeout(
+            crate::time::wall_now(),
+            target.connect_timeout,
+            Self::send_cancel_request_payload(target, process_id, secret_key),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err((
+                "timeout",
+                io::Error::new(io::ErrorKind::TimedOut, "cancel-request exchange timed out"),
+            ))
+        })
+    }
+
+    async fn send_cancel_request_payload(
         target: CancelTarget,
         process_id: i32,
         secret_key: i32,
@@ -3627,6 +3658,8 @@ impl PgConnection {
     /// logged distinctly so operators can tell "server told to abort" from
     /// "only the client socket was torn down".
     async fn wire_cancel_in_drain(&mut self, cx: &Cx) {
+        const MASKED_WIRE_CANCEL_POLLS: u32 = 4096;
+
         // No backend identity yet (e.g. cancel during pre-startup
         // exchange) → nothing the server can match this cancel against.
         if self.inner.process_id == 0 && self.inner.secret_key == 0 {
@@ -3639,7 +3672,18 @@ impl PgConnection {
         let target = self.inner.cancel_target.clone();
         let process_id = self.inner.process_id;
         let secret_key = self.inner.secret_key;
-        match Self::send_cancel_request(target, process_id, secret_key).await {
+        // TcpStream checks the ambient context even when no Cx is passed to
+        // its methods. Mask that context only while polling the bounded
+        // cleanup, otherwise it rejects the CancelRequest's own connect/write.
+        let ambient = Cx::current();
+        let drain_cx = ambient.as_ref().unwrap_or(cx);
+        let result = crate::combinator::commit_section(
+            drain_cx,
+            MASKED_WIRE_CANCEL_POLLS,
+            Self::send_cancel_request(target, process_id, secret_key),
+        )
+        .await;
+        match result {
             Ok(()) => cx.trace(&format!(
                 "client.wire_cancel proto=postgres outcome=sent process_id={process_id}"
             )),
@@ -3654,6 +3698,22 @@ impl PgConnection {
     fn fail_in_flight<T>(&mut self, err: PgError) -> Outcome<T, PgError> {
         self.abort_in_flight_exchange();
         outcome_from_error(err)
+    }
+
+    /// Cancellation can be observed inside a parked read/write/flush rather
+    /// than by the enclosing response loop. Deliver the server-side cancel
+    /// before returning that error, so every protocol path shares the same
+    /// cleanup ordering (br-asupersync-bi2462.110).
+    async fn finish_io_result<T>(
+        &mut self,
+        cx: &Cx,
+        result: Result<T, PgError>,
+    ) -> Result<T, PgError> {
+        if matches!(&result, Err(PgError::Cancelled(_))) {
+            self.wire_cancel_in_drain(cx).await;
+            self.abort_in_flight_exchange();
+        }
+        result
     }
 
     async fn ensure_open_for_request(&mut self, cx: &Cx) -> Outcome<PgOpenState, PgError> {
@@ -6543,6 +6603,11 @@ impl PgConnection {
     /// Write data to the stream using async I/O and flush with explicit
     /// cancellation checks from the caller-provided capability context.
     async fn write_all(&mut self, cx: &Cx, data: &[u8]) -> Result<(), PgError> {
+        let result = self.write_all_cancellable(cx, data).await;
+        self.finish_io_result(cx, result).await
+    }
+
+    async fn write_all_cancellable(&mut self, cx: &Cx, data: &[u8]) -> Result<(), PgError> {
         let mut pos = 0;
         let mut cancel_wake = CancelWakerGuard::new(cx);
         while pos < data.len() {
@@ -6553,7 +6618,7 @@ impl PgConnection {
                 cancel_wake.refresh(task_cx.waker());
                 match Pin::new(&mut self.inner.stream).poll_write(task_cx, &data[pos..]) {
                     Poll::Ready(Ok(written)) => Poll::Ready(Ok(written)),
-                    Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
                     Poll::Pending => Poll::Pending,
                 }
             })
@@ -6574,7 +6639,7 @@ impl PgConnection {
             cancel_wake.refresh(task_cx.waker());
             match Pin::new(&mut self.inner.stream).poll_flush(task_cx) {
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-                Poll::Ready(Err(err)) => Poll::Ready(Err(PgError::Io(err))),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(io_or_cancelled(cx, err))),
                 Poll::Pending => Poll::Pending,
             }
         })
@@ -6584,7 +6649,8 @@ impl PgConnection {
 
     /// Read exactly `len` bytes from the stream.
     async fn read_exact(&mut self, cx: &Cx, buf: &mut [u8]) -> Result<(), PgError> {
-        read_exact_from(cx, &mut self.inner.stream, buf).await
+        let result = read_exact_from(cx, &mut self.inner.stream, buf).await;
+        self.finish_io_result(cx, result).await
     }
 
     /// Read a complete message from the stream.
@@ -7203,7 +7269,7 @@ impl PgConnection {
     async fn drain_to_ready(&mut self, cx: &Cx) -> Result<(), PgError> {
         loop {
             if cx.checkpoint().is_err() {
-                return Err(PgError::Cancelled(cancelled_reason(cx)));
+                return self.finish_io_result(cx, Err(cancelled_error(cx))).await;
             }
             let (msg_type, data) = self.read_message(cx).await?;
             if msg_type == b'Z' {

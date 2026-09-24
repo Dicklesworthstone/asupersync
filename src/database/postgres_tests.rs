@@ -10678,4 +10678,212 @@ mod tests {
             "a committed transaction must not poison the connection"
         );
     }
+
+    #[test]
+    fn cancellation_between_explicit_and_socket_checkpoints_keeps_its_reason() {
+        struct CancelOnRead(Cx);
+
+        impl AsyncRead for CancelOnRead {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _task_cx: &mut Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                self.0
+                    .cancel_with(CancelKind::User, Some("cancel inside socket poll"));
+                Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")))
+            }
+        }
+
+        let cx = Cx::for_testing();
+        let mut stream = CancelOnRead(cx.clone());
+        let err = run(read_exact_from(&cx, &mut stream, &mut [0u8; 1])).unwrap_err();
+        assert!(
+            matches!(err, PgError::Cancelled(ref reason)
+            if reason.kind == CancelKind::User
+                && reason.message.as_deref() == Some("cancel inside socket poll")),
+            "socket cancellation must not become an ordinary I/O failure: {err:?}"
+        );
+
+        let active_cx = Cx::for_testing();
+        assert!(
+            matches!(
+                io_or_cancelled(&active_cx, io::Error::from(io::ErrorKind::Interrupted)),
+                PgError::Io(err) if err.kind() == io::ErrorKind::Interrupted
+            ),
+            "an unrelated interruption must retain its I/O error"
+        );
+    }
+
+    async fn parked_operation(
+        conn: &mut PgConnection,
+        cx: &Cx,
+        operation: &str,
+    ) -> Outcome<(), PgError> {
+        const SQL: &str = "SELECT pg_sleep(30)";
+        match operation {
+            "query" => conn.query_unchecked(cx, SQL).await.map(drop),
+            "execute" => conn.execute_unchecked(cx, SQL).await.map(drop),
+            "query_params" => conn.query_params(cx, SQL, &[]).await.map(drop),
+            "execute_params" => conn.execute_params(cx, SQL, &[]).await.map(drop),
+            "prepare" => conn.prepare(cx, SQL).await.map(drop),
+            "copy_in" => conn.copy_in(cx, "COPY t FROM STDIN").await.map(drop),
+            "query_stream" => match conn.query_stream(cx, SQL).await {
+                Outcome::Ok(mut stream) => stream.next(cx).await.map(drop),
+                other => other.map(drop),
+            },
+            "query_stream_params" => match conn.query_stream_params(cx, SQL, &[]).await {
+                Outcome::Ok(mut stream) => stream.next(cx).await.map(drop),
+                other => other.map(drop),
+            },
+            other => panic!("unknown parked operation: {other}"),
+        }
+    }
+
+    /// Cancels the actual native task only after its request reached the peer
+    /// and its future returned Pending on an incomplete backend response. The
+    /// independent listener must receive BackendKeyData's exact cancel frame;
+    /// returning Cancelled after merely closing the query socket cannot pass.
+    #[test]
+    fn parked_protocol_operations_deliver_wire_cancel() {
+        use std::future::Future;
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+
+        let scenarios: &[(&str, &[u8])] = &[
+            ("query", &[]),
+            // Park after the message type and in the middle of a body too.
+            ("query", &[b'T', 0, 0]),
+            ("query", &[b'T', 0, 0, 0, 8, 0]),
+            ("execute", &[]),
+            ("query_params", &[]),
+            ("execute_params", &[]),
+            ("prepare", &[]),
+            ("copy_in", &[]),
+            ("query_stream", &[]),
+            ("query_stream_params", &[]),
+        ];
+
+        for &(operation, response_prefix) in scenarios {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            conn.inner.process_id = 42;
+            conn.inner.secret_key = 1337;
+            peer.write_all(response_prefix)
+                .expect("partial backend response");
+            peer.set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("query socket timeout");
+
+            let cancel_listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("bind cancel listener");
+            let cancel_addr = cancel_listener.local_addr().expect("cancel address");
+            cancel_listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            conn.inner.cancel_target = CancelTarget {
+                host: cancel_addr.ip().to_string(),
+                port: cancel_addr.port(),
+                connect_timeout: Duration::from_millis(500),
+            };
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+                .build()
+                .expect("native runtime");
+            runtime.block_on(async {
+                let cx = Cx::current().expect("registered native task");
+                let canceller = cx.clone();
+                let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+                let backend = std::thread::spawn(move || {
+                    // Consume full frontend frames, through Query or Sync.
+                    // No complete backend response is ever sent in this test.
+                    let mut request = Vec::new();
+                    loop {
+                        let mut header = [0u8; 5];
+                        peer.read_exact(&mut header).expect("frontend header");
+                        let length = i32::from_be_bytes(header[1..].try_into().unwrap());
+                        assert!((4..=1024).contains(&length), "unexpected request length");
+                        let mut body = vec![0u8; usize::try_from(length - 4).unwrap()];
+                        peer.read_exact(&mut body).expect("frontend body");
+                        request.extend_from_slice(&body);
+                        if matches!(header[0], b'Q' | b'S') {
+                            break;
+                        }
+                    }
+                    let sql = if operation == "copy_in" {
+                        b"COPY t FROM STDIN".as_slice()
+                    } else {
+                        b"SELECT pg_sleep(30)".as_slice()
+                    };
+                    assert!(contains_subslice(&request, sql), "missing {operation} SQL");
+                    parked_rx
+                        .recv_timeout(Duration::from_secs(3))
+                        .expect("operation must yield Pending before cancellation");
+                    canceller.cancel_with(CancelKind::User, Some("cancel parked wire exchange"));
+
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let mut cancel_socket = loop {
+                        match cancel_listener.accept() {
+                            Ok((stream, _)) => break stream,
+                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                                assert!(
+                                    Instant::now() < deadline,
+                                    "{operation}: closed client socket without a CancelRequest"
+                                );
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(err) => panic!("cancel accept: {err}"),
+                        }
+                    };
+                    cancel_socket
+                        .set_nonblocking(false)
+                        .expect("blocking cancel socket");
+                    cancel_socket
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .expect("cancel socket timeout");
+                    let mut frame = [0u8; 16];
+                    cancel_socket
+                        .read_exact(&mut frame)
+                        .expect("complete CancelRequest");
+                    assert_eq!(&frame[..4], &16i32.to_be_bytes(), "frame length");
+                    assert_eq!(&frame[4..8], &80_877_102i32.to_be_bytes(), "request code");
+                    assert_eq!(&frame[8..12], &42i32.to_be_bytes(), "backend process");
+                    assert_eq!(&frame[12..], &1337i32.to_be_bytes(), "backend key");
+                    assert_eq!(
+                        peer.read(&mut [0u8; 1]).expect("query socket EOF"),
+                        0,
+                        "cancelled exchange must close its query socket"
+                    );
+                });
+
+                let outcome = {
+                    let mut future = std::pin::pin!(parked_operation(&mut conn, &cx, operation));
+                    let mut witness = Some(parked_tx);
+                    let observed = std::future::poll_fn(|task_cx| {
+                        let result = future.as_mut().poll(task_cx);
+                        if result.is_pending()
+                            && let Some(tx) = witness.take()
+                        {
+                            tx.send(()).expect("publish real Pending witness");
+                        }
+                        result
+                    });
+                    crate::time::timeout(crate::time::wall_now(), Duration::from_secs(3), observed)
+                        .await
+                        .expect("cancelled operation must finish its bounded drain")
+                };
+                backend.join().expect("backend observed wire cancellation");
+                assert!(
+                    matches!(outcome,
+                    Outcome::Cancelled(ref reason)
+                    if reason.kind == CancelKind::User
+                        && reason.message.as_deref() == Some("cancel parked wire exchange")),
+                    "{operation}: preserve the cancellation outcome and reason, got {outcome:?}"
+                );
+                assert!(
+                    conn.inner.closed,
+                    "{operation}: cancelled connection must be closed"
+                );
+            });
+        }
+    }
 }
