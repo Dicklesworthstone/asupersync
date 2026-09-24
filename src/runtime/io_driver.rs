@@ -105,6 +105,41 @@ pub struct IoDriver {
     waker_buf: Vec<Waker>,
     /// Statistics for diagnostics.
     stats: IoStats,
+    /// Reactor poll failures, kept outside the public [`IoStats`] so that
+    /// struct's literal shape is unchanged.
+    poll_errors: PollErrors,
+}
+
+/// Reactor poll failures seen by one driver.
+#[derive(Debug, Default, Clone, Copy)]
+struct PollErrors {
+    total: u64,
+    consecutive: u64,
+}
+
+fn trace_reactor_poll_error(error: &io::Error, errors: PollErrors) {
+    #[cfg(feature = "tracing-integration")]
+    {
+        const ESCALATE_AFTER: u64 = 64;
+        if errors.consecutive == 1 {
+            crate::tracing_compat::warn!(
+                error = %error,
+                total = errors.total,
+                "reactor poll failed"
+            );
+        } else if errors.consecutive >= ESCALATE_AFTER && errors.consecutive.is_power_of_two() {
+            crate::tracing_compat::error!(
+                error = %error,
+                consecutive = errors.consecutive,
+                total = errors.total,
+                "reactor poll keeps failing; I/O readiness is not being delivered"
+            );
+        }
+    }
+    #[cfg(not(feature = "tracing-integration"))]
+    {
+        let _ = (error, errors);
+    }
 }
 
 impl IoDriver {
@@ -122,6 +157,7 @@ impl IoDriver {
             events: Events::with_capacity(DEFAULT_EVENTS_CAPACITY),
             waker_buf: Vec::with_capacity(64),
             stats: IoStats::default(),
+            poll_errors: PollErrors::default(),
         }
     }
 
@@ -137,6 +173,7 @@ impl IoDriver {
             events: Events::with_capacity(events_capacity),
             waker_buf: Vec::with_capacity(events_capacity.min(256)),
             stats: IoStats::default(),
+            poll_errors: PollErrors::default(),
         }
     }
 
@@ -302,7 +339,9 @@ impl IoDriver {
         self.events.clear();
 
         // Poll the reactor
-        let n = self.reactor.poll(&mut self.events, timeout)?;
+        let poll_result = self.reactor.poll(&mut self.events, timeout);
+        self.note_poll_result(&poll_result);
+        let n = poll_result?;
         self.stats.polls += 1;
         self.stats.events_received += n as u64;
 
@@ -442,6 +481,30 @@ impl IoDriver {
     #[must_use]
     pub fn stats(&self) -> &IoStats {
         &self.stats
+    }
+
+    /// Returns how many reactor polls have failed.
+    ///
+    /// Schedulers treat a failed poll like a turn led by another worker, so a
+    /// persistently failing reactor would otherwise look like an idle runtime
+    /// (asupersync-bi2462.121). Failures are also traced: the first of a run
+    /// at warn level, then at error level at each power-of-two run length
+    /// from 64 on.
+    #[inline]
+    #[must_use]
+    pub fn poll_error_count(&self) -> u64 {
+        self.poll_errors.total
+    }
+
+    fn note_poll_result(&mut self, result: &io::Result<usize>) {
+        match result {
+            Ok(_) => self.poll_errors.consecutive = 0,
+            Err(error) => {
+                self.poll_errors.total = self.poll_errors.total.saturating_add(1);
+                self.poll_errors.consecutive = self.poll_errors.consecutive.saturating_add(1);
+                trace_reactor_poll_error(error, self.poll_errors);
+            }
+        }
     }
 
     /// Returns the number of registered wakers.
@@ -610,6 +673,13 @@ impl IoDriverHandle {
         driver.stats().clone()
     }
 
+    /// Returns how many reactor polls have failed; see
+    /// [`IoDriver::poll_error_count`].
+    #[must_use]
+    pub fn poll_error_count(&self) -> u64 {
+        self.inner.lock().poll_error_count()
+    }
+
     /// Timer publication must interrupt an already-selected reactor timeout
     /// without retaining the reactor's task registrations through the timer.
     pub(crate) fn downgrade_reactor(&self) -> Weak<dyn Reactor> {
@@ -668,6 +738,7 @@ impl IoDriverHandle {
             let (wakers, event_data) = {
                 let mut driver = self.inner.lock();
                 let events = guard.take_events();
+                driver.note_poll_result(&poll_result);
                 if let Ok(n) = &poll_result {
                     driver.stats.polls += 1;
                     driver.stats.events_received += *n as u64;
@@ -2370,6 +2441,51 @@ mod tests {
             driver.waker_count()
         );
         crate::test_complete!("io_driver_handle_turn_with_poll_error_does_not_dispatch");
+    }
+
+    /// asupersync-bi2462.121: schedulers treat a failed poll as a turn led by
+    /// another worker, so the failure is counted where it happens.
+    #[test]
+    fn failed_reactor_polls_are_counted_on_both_turn_paths() {
+        init_test("failed_reactor_polls_are_counted_on_both_turn_paths");
+        let handle = IoDriverHandle::new(Arc::new(PollErrorWithEventReactor::new()));
+        for attempt in 1..=3_u64 {
+            let result = handle.try_turn_with(Some(Duration::ZERO), |_, _| {});
+            crate::assert_with_log!(
+                result.is_err(),
+                "leader poll error propagates",
+                true,
+                result.is_err()
+            );
+            crate::assert_with_log!(
+                handle.poll_error_count() == attempt,
+                "handle poll errors",
+                attempt,
+                handle.poll_error_count()
+            );
+        }
+
+        let mut driver = IoDriver::new(Arc::new(PollErrorWithEventReactor::new()));
+        let result = driver.turn(Some(Duration::ZERO));
+        crate::assert_with_log!(
+            result.is_err(),
+            "turn propagates poll error",
+            true,
+            result.is_err()
+        );
+        crate::assert_with_log!(
+            driver.poll_error_count() == 1,
+            "driver poll errors",
+            1_u64,
+            driver.poll_error_count()
+        );
+        crate::assert_with_log!(
+            driver.stats().polls == 0,
+            "a failed poll is not a completed poll",
+            0_u64,
+            driver.stats().polls
+        );
+        crate::test_complete!("failed_reactor_polls_are_counted_on_both_turn_paths");
     }
 
     #[test]
