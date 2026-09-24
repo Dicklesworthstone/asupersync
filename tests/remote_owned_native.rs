@@ -74,7 +74,7 @@ impl Drop for Stop {
     }
 }
 #[derive(Clone, Copy)]
-enum Case { Success, Cancel, Deadline, Drop }
+enum Case { Success, Cancel, Deadline, Drop, RenewalSuccess, RenewalCancel }
 fn config() -> RemoteRunConfig {
     RemoteRunConfig { timeout: Duration::from_secs(5), child: ChildRegionSpec::inherit() }
 }
@@ -100,10 +100,21 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
     // Keep feature-sensitive Diagnostics on this owner thread, never in a Send task.
     let diagnostics = runtime.diagnostics();
     let witness = Arc::new(Witness::default());
+    let lease = if matches!(case, Case::RenewalSuccess | Case::RenewalCancel) {
+        Duration::from_millis(600)
+    } else {
+        Duration::from_secs(20)
+    };
+    let slow_echo = matches!(case, Case::RenewalSuccess);
     runtime.block_on(async {
         let base = Cx::current().unwrap();
         let mut registry = RemoteComputationRegistry::new();
-        registry.register::<Request, Response, _, _>("echo", |_, request| async move {
+        registry.register::<Request, Response, _, _>("echo", move |cx, request| async move {
+            if slow_echo {
+                // This is actual production service work spanning three lease
+                // windows. No test-side renewal call keeps its child alive.
+                asupersync::time::sleep(cx.now(), lease * 3).await;
+            }
             Ok(RemoteOutcome::Success(request.request().input.data().to_vec()))
         }).unwrap();
         let seen = Arc::clone(&witness);
@@ -157,8 +168,9 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
             ],
             NativeRemoteRuntimeConfig::new().with_max_in_flight(4).with_drain_timeout(Duration::from_secs(3))).unwrap());
         let _stop = Stop { service: operator.clone(), remote: Arc::clone(&remote), witness: Arc::clone(&witness) };
+        assert!(NativeRemoteRuntimeConfig::new().automatic_lease_renewal());
         let cx = base.with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin"))
-            .with_default_lease(Duration::from_secs(20)).with_runtime(Arc::clone(&remote) as Arc<dyn RemoteRuntime>));
+            .with_default_lease(lease).with_runtime(Arc::clone(&remote) as Arc<dyn RemoteRuntime>));
         let executor = bounded.then(|| RemoteExecutor::new(
             RemoteAdmissionLimits { max_peers: 2, max_in_flight: 2, max_input_bytes: 64 },
             ["worker", "other"].map(|name| (NodeId::new(name), RemotePeerLimits {
@@ -167,7 +179,8 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
         ).unwrap());
         let work_input = if bounded { vec![1; 8] } else { Vec::new() };
 
-        if matches!(case, Case::Success) {
+        if matches!(case, Case::Success | Case::RenewalSuccess) {
+            let started = Instant::now();
             let report = invoke(executor.as_ref(), &cx, "worker", "echo",
                 RemoteInput::new(b"native-secret".to_vec()), config()).await.unwrap();
             assert!(
@@ -177,6 +190,27 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
             );
             assert!(!format!("{report:?}").contains("native-secret"));
             assert!(matches!(report.task.unwrap().outcome, Outcome::Ok(RemoteOutcome::Success(bytes)) if bytes == b"native-secret"));
+            if matches!(case, Case::RenewalSuccess) {
+                let renewals = native_trace_count(&runtime, asupersync::remote::trace_events::LEASE_RENEWAL_RECEIVED);
+                assert!(renewals >= 2, "production listener acknowledged successive renewals: {renewals}");
+                assert!(started.elapsed() >= lease * 3, "work actually outlived its original lease");
+                eprintln!("{}", serde_json::json!({
+                    "bead": "asupersync-bi2462.123",
+                    "scenario": "owned_production_service_outlives_three_leases",
+                    "workers": workers,
+                    "lease_ms": lease.as_millis(),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                    "acknowledged_renewals": renewals,
+                    "outcome": "Success_committed_closed",
+                }));
+            }
+            // Result publication can wake the owned proxy on another worker
+            // before the native driver removes its active entry.
+            asupersync::time::timeout(cx.now(), Duration::from_secs(2), async {
+                while remote.active_operations() != 0 {
+                    asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                }
+            }).await.expect("native driver retires after successful terminal publication");
             assert_eq!(remote.active_operations(), 0);
         } else if matches!(case, Case::Drop) {
             let mut running = Box::pin(invoke(executor.as_ref(), &cx, "worker", "wait", RemoteInput::new(work_input), config()));
@@ -219,13 +253,28 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
             let (region, holder) = witness.origin.lock().expect("actual origin IDs");
             wait_for_lease(&cx, &diagnostics, region, holder).await;
             assert!(!witness.cancelled.load(Ordering::Acquire), "the parked lease witness must precede cancellation");
-            if matches!(case, Case::Cancel) { invocation.abort(); }
+            if matches!(case, Case::RenewalCancel) {
+                asupersync::time::timeout(cx.now(), Duration::from_secs(3), async {
+                    while native_trace_count(&runtime, asupersync::remote::trace_events::LEASE_RENEWAL_RECEIVED) < 3 {
+                        asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+                    }
+                }).await.expect("parked production handler survived with three confirmed automatic renewals");
+                assert!(holds_lease(&diagnostics, region, holder));
+                assert!(!witness.cancelled.load(Ordering::Acquire));
+            }
+            if matches!(case, Case::Cancel | Case::RenewalCancel) { invocation.abort(); }
             asupersync::time::timeout(cx.now(), Duration::from_secs(3),
                 witness.changed.wait_until(|| witness.cancelled.load(Ordering::Acquire))).await.expect("remote observed cancellation");
             let early = invocation.try_join().unwrap();
             assert!(early.is_none(), "sending Cancel is not terminal collection: {early:?}");
             assert!(holds_lease(&diagnostics, region, holder));
             assert_eq!(remote.active_operations(), 1);
+            if matches!(case, Case::RenewalCancel) {
+                let sent = native_trace_count(&runtime, asupersync::remote::trace_events::LEASE_RENEWAL_SENT);
+                asupersync::time::sleep(cx.now(), lease).await;
+                assert_eq!(native_trace_count(&runtime, asupersync::remote::trace_events::LEASE_RENEWAL_SENT), sent,
+                    "owning-region cancellation stopped renewal while remote cleanup was still pending");
+            }
             // A different invocation on the same remote runtime still works;
             // cancelling one scope never calls global begin_drain/close.
             if let Some(executor) = &executor { assert_peer_still_charged(executor, &cx).await; }
@@ -244,9 +293,19 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
             assert!(!report.is_success()); assert!(report.close.is_ok()); assert!(report.cancel_error.is_none());
             let reply = report.task.unwrap(); assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
             match case {
-                Case::Cancel => {
+                Case::Cancel | Case::RenewalCancel => {
                     assert!(matches!(report.trigger, RemoteRunTrigger::Cancelled(_)));
                     assert!(matches!(reply.outcome, Outcome::Ok(RemoteOutcome::Cancelled(_))));
+                    if matches!(case, Case::RenewalCancel) {
+                        eprintln!("{}", serde_json::json!({
+                            "bead": "asupersync-bi2462.123",
+                            "scenario": "owned_cancellation_stops_automatic_renewals",
+                            "workers": workers,
+                            "lease_ms": lease.as_millis(),
+                            "witness": "parked_handler_three_renewal_acknowledgements_then_Cancel",
+                            "outcome": "Cancelled_aborted_closed",
+                        }));
+                    }
                 }
                 Case::Deadline => {
                     assert!(matches!(report.trigger, RemoteRunTrigger::Deadline));
@@ -267,6 +326,19 @@ fn exercise_with_admission(workers: usize, case: Case, bounded: bool) {
     });
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+}
+
+fn native_trace_count(runtime: &asupersync::runtime::Runtime, message: &str) -> usize {
+    runtime
+        .trace_snapshot()
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.data,
+                asupersync::trace::event::TraceData::Message(actual) if actual == message
+            )
+        })
+        .count()
 }
 
 async fn assert_peer_still_charged(executor: &RemoteExecutor, cx: &Cx) {
@@ -340,6 +412,7 @@ async fn silent_native_peer(
     lease: Duration,
     drain_timeout: Duration,
     control: SilentPeerControl,
+    automatic_lease_renewal: bool,
 ) -> SilentNativePeer {
     let cert = Certificate::from_pem(include_bytes!("fixtures/tls/server.crt"))
         .unwrap()
@@ -516,7 +589,8 @@ async fn silent_native_peer(
             )],
             NativeRemoteRuntimeConfig::new()
                 .with_max_in_flight(1)
-                .with_drain_timeout(drain_timeout),
+                .with_drain_timeout(drain_timeout)
+                .with_automatic_lease_renewal(automatic_lease_renewal),
         )
         .unwrap(),
     );
@@ -605,6 +679,7 @@ fn native_silent_accepted_peer_expires_without_runtime_close() {
                 lease,
                 Duration::from_millis(400),
                 SilentPeerControl::None,
+                false,
             )
             .await;
             let mut handle = spawn_remote(
@@ -672,6 +747,7 @@ fn native_silent_peer_renewal_extends_deadline_only_after_acknowledgement() {
                     lease,
                     Duration::from_millis(400),
                     SilentPeerControl::Renewal { acknowledge },
+                    false,
                 )
                 .await;
                 let mut handle = spawn_remote(
@@ -761,6 +837,96 @@ fn native_silent_peer_renewal_extends_deadline_only_after_acknowledgement() {
 }
 
 #[test]
+fn native_automatic_renewal_missing_ack_expires_confirmed_lease() {
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
+        };
+        runtime.block_on(async {
+            let base = Cx::current().unwrap();
+            let lease = Duration::from_secs(1);
+            let mut peer = silent_native_peer(
+                &base,
+                runtime.handle(),
+                lease,
+                Duration::from_millis(400),
+                SilentPeerControl::Renewal { acknowledge: false },
+                true,
+            )
+            .await;
+            let mut handle = spawn_remote(
+                &peer.cx,
+                NodeId::new("silent-worker"),
+                ComputationName::new("silent"),
+                RemoteInput::empty(),
+            )
+            .unwrap();
+            let (task_id, _, _) = wait_for_silent_native_running(&peer).await;
+            let started = Instant::now();
+            asupersync::time::timeout(
+                peer.cx.now(),
+                Duration::from_secs(2),
+                peer.witness
+                    .changed
+                    .wait_until(|| peer.witness.renewed.load(Ordering::Acquire)),
+            )
+            .await
+            .expect("native driver automatically sent RenewLease before its lease expired");
+            // No manual LeaseRenewal was published. The peer has received the
+            // driver's own keepalive and deliberately never acknowledges it.
+            let result = asupersync::time::timeout(
+                peer.cx.now(),
+                Duration::from_secs(2),
+                handle.join(&peer.cx),
+            )
+            .await
+            .expect("automatic renewal without acknowledgement retains the prior deadline");
+            assert!(
+                matches!(result, Outcome::Err(RemoteError::LeaseExpired)),
+                "{result:?}"
+            );
+            assert_eq!(
+                native_trace_count(
+                    &runtime,
+                    asupersync::remote::trace_events::LEASE_RENEWAL_SENT
+                ),
+                1
+            );
+            assert_eq!(
+                native_trace_count(
+                    &runtime,
+                    asupersync::remote::trace_events::LEASE_RENEWAL_RECEIVED
+                ),
+                0
+            );
+            assert_eq!(handle.state(), RemoteTaskState::LeaseExpired);
+            assert!(peer.remote.observe_task_state(task_id).is_none());
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "bead": "asupersync-bi2462.123",
+                    "scenario": "automatic_renewal_ack_withheld",
+                    "workers": workers,
+                    "remote_task_id": task_id.raw(),
+                    "lease_ms": lease.as_millis(),
+                    "elapsed_since_running_ms": started.elapsed().as_millis(),
+                    "witness": "Running_then_automatic_RenewLease_received",
+                    "renewal_acknowledgements": 0,
+                    "outcome": "LeaseExpired_no_replay",
+                })
+            );
+            finish_silent_native_peer(&mut peer).await;
+        });
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
 fn owned_native_silent_cancel_reply_bounds_parent_close() {
     for workers in [1, 2] {
         let runtime = if workers == 1 {
@@ -781,6 +947,7 @@ fn owned_native_silent_cancel_reply_bounds_parent_close() {
                 Duration::from_secs(30),
                 drain_timeout,
                 SilentPeerControl::Cancel,
+                false,
             )
             .await;
             let parent = peer
@@ -1105,6 +1272,18 @@ fn native_child_remote_authority_respects_parent_presence_and_runtime_mask() {
 #[test]
 fn native_v3_success_has_a_checked_commit_and_closed_local_child() {
     for workers in [1, 2] { exercise(workers, Case::Success); }
+}
+#[test]
+fn owned_native_automatic_renewal_keeps_production_computation_alive() {
+    for workers in [1, 2] {
+        exercise(workers, Case::RenewalSuccess);
+    }
+}
+#[test]
+fn owned_native_cancellation_stops_automatic_renewal_during_remote_cleanup() {
+    for workers in [1, 2] {
+        exercise(workers, Case::RenewalCancel);
+    }
 }
 #[test]
 fn cancelled_native_invocation_retains_its_lease_until_remote_handler_cleanup() {
