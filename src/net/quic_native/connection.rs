@@ -2523,12 +2523,19 @@ impl NativeQuicConnection {
                 Ok(())
             }
             QuicFrame::PathChallenge { data } => {
+                // Answer the newest challenge only: a peer that streams
+                // challenges faster than we send must not grow the control
+                // queue without bound (asupersync-bi2462.107).
+                self.pending_control_frames
+                    .retain(|pending| !matches!(pending, QuicFrame::PathResponse { .. }));
                 self.pending_control_frames
                     .push_back(QuicFrame::PathResponse { data: *data });
                 Ok(())
             }
             QuicFrame::PathResponse { .. } => {
-                self.peer_address_validated = true;
+                // This endpoint never sends PATH_CHALLENGE, so no response can
+                // match one; it must not validate the peer's address
+                // (RFC 9000 §8.2.3). The handshake validates it instead.
                 Ok(())
             }
             QuicFrame::ConnectionClose { error_code, .. } => {
@@ -5428,6 +5435,54 @@ mod tests {
         assert!(conn.validate_local_close_packet(&cx, 64, &frames).is_err());
         conn.close_immediately(&cx, 42).unwrap();
         assert!(conn.validate_local_close_packet(&cx, 64, &frames).is_err());
+    }
+
+    /// asupersync-bi2462.107 (N10): a PATH_CHALLENGE flood keeps one pending
+    /// PATH_RESPONSE (for the newest challenge), and a PATH_RESPONSE this
+    /// endpoint never solicited does not validate the peer's address.
+    #[test]
+    fn path_challenge_flood_is_bounded_and_unsolicited_response_does_not_validate() {
+        let cx = test_cx();
+        let space = PacketNumberSpace::ApplicationData;
+        let mut conn = established_server_conn();
+        for pn in 0..1_000_u64 {
+            let frames = [QuicFrame::PathChallenge {
+                data: pn.to_be_bytes(),
+            }];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).expect("encode");
+            conn.process_packet_payload(&cx, space, 10 + pn, &payload, 100 + pn)
+                .expect("challenge");
+        }
+        let responses: Vec<_> = conn
+            .pending_control_frames
+            .iter()
+            .filter(|frame| matches!(frame, QuicFrame::PathResponse { .. }))
+            .collect();
+        assert_eq!(
+            responses.len(),
+            1,
+            "one pending PATH_RESPONSE after 1000 challenges"
+        );
+        assert!(
+            matches!(responses[0], QuicFrame::PathResponse { data } if *data == 999_u64.to_be_bytes()),
+            "the pending response answers the newest challenge"
+        );
+        assert!(
+            conn.pending_control_frames.len() < 16,
+            "control queue stays bounded"
+        );
+
+        conn.peer_address_validated = false;
+        let frames = [QuicFrame::PathResponse { data: [9; 8] }];
+        let mut payload = BytesMut::new();
+        NativeQuicConnection::encode_frames(&frames, &mut payload).expect("encode");
+        conn.process_packet_payload(&cx, space, 2_000, &payload, 5_000)
+            .expect("unsolicited response is ignored");
+        assert!(
+            !conn.peer_address_validated,
+            "an unsolicited PATH_RESPONSE must not validate the peer"
+        );
     }
 
     #[test]
