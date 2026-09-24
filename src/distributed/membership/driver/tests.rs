@@ -1,7 +1,86 @@
 use super::*;
-use crate::distributed::membership::{MemberState, MembershipEvent, MembershipKind, Packet, Payload, Rumor, decode_packet, encode_packet};
+use crate::distributed::membership::{
+    MemberState, MembershipEvent, MembershipKind, Packet, Payload, Rumor, decode_packet,
+    encode_packet,
+};
 use std::collections::VecDeque;
 use std::task::Waker;
+
+#[test]
+fn elapsed_rearm_keeps_tick_ready_without_repolling_completed_sleep() {
+    use crate::time::VirtualClock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
+
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let clock = Arc::new(VirtualClock::new());
+    let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+    let wakes = Arc::new(Wakes::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut task = Context::from_waker(&waker);
+    let tick = 5_000_000;
+    let mut ticker = TickTimer::new(Time::from_nanos(tick), timer.clone());
+    assert!(!ticker.poll_due(&mut task));
+    assert_eq!(timer.pending_count(), 1);
+    clock.advance(tick);
+    assert_eq!(timer.process_timers(), 1);
+    assert!(ticker.poll_due(&mut task));
+
+    // The driver samples now before engine.turn. Move the real virtual clock
+    // past the next deadline during that turn, before the timer is rearmed.
+    // The old loop completed this Sleep at arm time, then panicked next poll.
+    let sampled_now = timer.now();
+    clock.advance(2 * tick);
+    let elapsed_deadline = Time::from_nanos(sampled_now.as_nanos() + tick);
+    let before = wakes.0.load(Ordering::Relaxed);
+    ticker.rearm(elapsed_deadline, timer.clone(), &mut task);
+    assert_eq!(wakes.0.load(Ordering::Relaxed), before + 1);
+    assert_eq!(timer.pending_count(), 0);
+    assert!(ticker.poll_due(&mut task));
+    assert!(ticker.poll_due(&mut task));
+    assert_eq!(wakes.0.load(Ordering::Relaxed), before + 1);
+
+    // A later, future deadline clears the carried completion and really parks
+    // again. Its timer fires once, and dropping a rearmed timer releases it.
+    let future_deadline = Time::from_nanos(timer.now().as_nanos() + tick);
+    ticker.rearm(future_deadline, timer.clone(), &mut task);
+    assert!(!ticker.poll_due(&mut task));
+    assert_eq!(timer.pending_count(), 1);
+    clock.advance(tick);
+    assert_eq!(timer.process_timers(), 1);
+    assert!(ticker.poll_due(&mut task));
+    ticker.rearm(
+        Time::from_nanos(timer.now().as_nanos() + tick),
+        timer.clone(),
+        &mut task,
+    );
+    assert_eq!(timer.pending_count(), 1);
+    drop(ticker);
+    assert_eq!(timer.pending_count(), 0);
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "bead": "asupersync-bi2462.161",
+            "scenario": "elapsed_swim_tick_rearm",
+            "sampled_now_ns": sampled_now.as_nanos(),
+            "rearm_deadline_ns": elapsed_deadline.as_nanos(),
+            "now_ns": timer.now().as_nanos(),
+            "ready_at_arm": true,
+            "future_tick_fired": true,
+            "pending_after_drop": timer.pending_count(),
+        })
+    );
+}
 
 fn node(name: &str) -> NodeId { NodeId::new(name) }
 fn address(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }

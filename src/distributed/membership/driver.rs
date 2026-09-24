@@ -15,21 +15,55 @@
 use super::{MembershipView, Swim, SwimConfig, SwimConfigError, UdpMembershipTransport, WireError};
 use crate::cx::Cx;
 use crate::remote::NodeId;
-use crate::time::Sleep;
+use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelReason, Outcome, Time};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::{Future, poll_fn};
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 mod engine;
 use engine::Engine;
 mod observation;
-pub use observation::{SwimDriverStatus, SwimObservation, SwimObserver};
 use observation::ObservationState;
+pub use observation::{SwimDriverStatus, SwimObservation, SwimObserver};
+
+// A maintenance deadline can elapse while an engine turn is running. Remember
+// that completion until the next rearm: Sleep itself must never be repolled
+// after returning Ready, including when it was already due at registration.
+struct TickTimer {
+    sleeper: Pin<Box<Sleep>>,
+    ready: bool,
+}
+
+impl TickTimer {
+    fn new(deadline: Time, timer: TimerDriverHandle) -> Self {
+        Self {
+            sleeper: Box::pin(Sleep::with_timer_driver(deadline, timer)),
+            ready: false,
+        }
+    }
+
+    fn poll_due(&mut self, task: &mut Context<'_>) -> bool {
+        if !self.ready {
+            self.ready = self.sleeper.as_mut().poll(task).is_ready();
+        }
+        self.ready
+    }
+
+    fn rearm(&mut self, deadline: Time, timer: TimerDriverHandle, task: &mut Context<'_>) {
+        *self = Self::new(deadline, timer);
+        // Register before parking. An elapsed deadline schedules one bounded
+        // turn; it does not run an unbounded catch-up loop in this poll.
+        if self.poll_due(task) {
+            task.waker().wake_by_ref();
+        }
+    }
+}
 
 /// Independent finite bounds for one driver. All counts and durations are nonzero.
 ///
@@ -296,7 +330,7 @@ impl UdpSwimDriver {
         let Some(deadline) = first.as_nanos().checked_add(tick_nanos) else {
             return Outcome::Err(SwimDriverError::Clock);
         };
-        let mut sleeper = Box::pin(Sleep::with_timer_driver(Time::from_nanos(deadline), timer.clone()));
+        let mut tick_timer = TickTimer::new(Time::from_nanos(deadline), timer.clone());
         let mut stop = std::pin::pin!(stop);
         let mut cancelled = std::pin::pin!(cx.cancelled());
         let mut last = first;
@@ -326,7 +360,7 @@ impl UdpSwimDriver {
                     return Poll::Ready(Outcome::Err(error));
                 }
             }
-            let timer_due = sleeper.as_mut().poll(task).is_ready();
+            let timer_due = tick_timer.poll_due(task);
             let tick = std::mem::take(&mut first_tick) || timer_due;
             let turn = engine.turn(transport, task, now_ms, tick);
             let status = if engine.is_leaving() { SwimDriverStatus::Leaving } else { SwimDriverStatus::Running };
@@ -343,10 +377,7 @@ impl UdpSwimDriver {
                 let Some(deadline) = now.as_nanos().checked_add(tick_nanos) else {
                     return Poll::Ready(Outcome::Err(SwimDriverError::Clock));
                 };
-                sleeper = Box::pin(Sleep::with_timer_driver(Time::from_nanos(deadline), timer.clone()));
-                // Arm before returning Pending; an already-due timer requests
-                // one more bounded turn, never an inner unbounded catch-up loop.
-                if sleeper.as_mut().poll(task).is_ready() { task.waker().wake_by_ref(); }
+                tick_timer.rearm(Time::from_nanos(deadline), timer.clone(), task);
             }
             Poll::Pending
         }).await
