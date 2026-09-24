@@ -1094,7 +1094,7 @@ struct InFlightRequestGuard {
 impl InFlightRequestGuard {
     fn try_acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
         counter
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 (active < limit).then(|| active + 1)
             })
             .ok()

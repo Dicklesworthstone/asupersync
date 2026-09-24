@@ -47,10 +47,12 @@ async fn panic_after_child_parks(cx: &Cx) {
                 result
             })
             .await;
-            let reason = child
+            child
                 .checkpoint()
-                .expect_err("entry panic must run the shutdown drain")
-                .reason;
+                .expect_err("entry panic must run the shutdown drain");
+            let reason = child
+                .cancel_reason()
+                .expect("the shutdown drain records its cancel reason");
             assert_eq!(reason.kind, asupersync::types::CancelKind::Shutdown);
             eprintln!("ENTRY_PANIC_CHILD_CLEANED kind=Shutdown");
         })

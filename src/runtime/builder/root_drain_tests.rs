@@ -1,6 +1,7 @@
 //! Native root-close regressions for br-asupersync-bi2462.92.
 
 use super::*;
+use crate::cx::Cx;
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::types::{CancelKind, Outcome, TaskId};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -301,10 +302,10 @@ fn shutdown_drained_cancels_parked_child_settles_obligation_and_runs_finalizer()
                     result
                 })
                 .await;
+                child.checkpoint().expect_err("child acknowledges shutdown");
                 let reason = child
-                    .checkpoint()
-                    .expect_err("child acknowledges shutdown")
-                    .reason;
+                    .cancel_reason()
+                    .expect("the shutdown drain records its cancel reason");
                 assert_eq!(reason.kind, CancelKind::Shutdown);
                 assert!(obligation.abort(ObligationAbortReason::Cancel));
                 child_settled.store(true, Ordering::Release);
