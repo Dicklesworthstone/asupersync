@@ -544,10 +544,14 @@ for you: grepping a workflow proves a step *exists*, never that it *ran*
 caused multiple fleet-blocking red-`main` incidents in a single day, all from
 commits whose authors lacked compile access ("rch was not found (exit 127)").
 
-A committed pre-push hook at [`.githooks/pre-push`](./.githooks/pre-push) verifies
-`cargo check --all-targets --keep-going` (default features — the fleet-critical
-build) BEFORE the push completes, and refuses the push on failure. Enable it once
-per clone (git cannot auto-share hooks):
+A committed pre-push hook at [`.githooks/pre-push`](./.githooks/pre-push) verifies the
+commit being pushed, not the clone's working tree, BEFORE the push completes, and refuses
+the push on failure. For each distinct tip pushed to `main`/`master` it runs, through RCH on
+that commit (`--base <sha> --clean-overlay --no-overlay`), `cargo check --all-targets
+--keep-going` (default features — the fleet-critical build). When the push touches
+feature-gated modules, it also runs the main watchdog's `check-features` lane for those
+features. RCH is required; there is no local cargo fallback. `PREPUSH_DRY_RUN=1` prints the
+commands instead of running them. Enable it once per clone (git cannot auto-share hooks):
 
 ```bash
 git config core.hooksPath .githooks
@@ -558,8 +562,8 @@ conditions in "Validation Path" rule 3 below (cited bead, plain not-compiled sta
 receipt within 2 hours, P0 bead on red or after 6 hours). Gating new work-in-progress modules
 behind a non-default cargo feature still keeps a break away from the default build.
 `git push --no-verify` bypasses the hook for a change you have verified another
-way (e.g. docs-only). The hook runs only the default set, not the full
-`--all-features` clippy gate (too slow to block every push). GitHub Actions is currently
+way (e.g. docs-only). The hook does not run clippy, tests or the full `--all-features`
+gate (too slow to block every push); the main watchdog covers them after landing. GitHub Actions is currently
 disabled for this repository (see "Validation Path" below), so no CI job covers it. Run the
 `--all-features` commands yourself through RCH before landing feature-gated changes.
 
@@ -598,8 +602,8 @@ landing code nobody compiled or ran:
    Every other agent lands Rust only after at least `cargo check --all-targets --keep-going`
    (default features), plus a check of every touched feature-gated target, has run through RCH on
    the exact tree being pushed. The commit body must cite that receipt. The committed pre-push hook
-   checks the working tree, not the pushed commit, so it does not satisfy this on its own
-   (`asupersync-bi2462.87`).
+   runs the default check, plus the feature check for touched gated modules, on the pushed commit
+   through RCH (`asupersync-bi2462.87`); its output is such a receipt.
 
 ---
 
