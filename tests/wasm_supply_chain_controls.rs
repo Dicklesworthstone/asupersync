@@ -556,3 +556,93 @@ fn browser_package_manifests_encode_allowed_internal_layer_edges() {
         "next adapter must depend on browser package inside the Browser Edition package graph"
     );
 }
+
+fn read_leb128_u32(bytes: &[u8], cursor: &mut usize) -> u32 {
+    let mut value = 0_u32;
+    let mut shift = 0_u32;
+    loop {
+        let byte = *bytes.get(*cursor).expect("truncated LEB128 in wasm binary");
+        *cursor += 1;
+        value |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return value;
+        }
+        shift += 7;
+        assert!(shift < 35, "LEB128 value in wasm binary exceeds u32");
+    }
+}
+
+/// Names in the export section (id 7) of a wasm module.
+fn wasm_export_names(bytes: &[u8]) -> BTreeSet<String> {
+    assert!(
+        bytes.len() >= 8 && &bytes[..4] == b"\0asm",
+        "not a wasm module (missing \\0asm magic)"
+    );
+    let mut names = BTreeSet::new();
+    let mut cursor = 8;
+    while cursor < bytes.len() {
+        let id = bytes[cursor];
+        cursor += 1;
+        let size = read_leb128_u32(bytes, &mut cursor) as usize;
+        let end = cursor + size;
+        if id == 7 {
+            let mut at = cursor;
+            let count = read_leb128_u32(bytes, &mut at);
+            for _ in 0..count {
+                let len = read_leb128_u32(bytes, &mut at) as usize;
+                let name = std::str::from_utf8(&bytes[at..at + len]).expect("export name is UTF-8");
+                names.insert(name.to_owned());
+                at += len + 1; // name bytes, then the export kind byte
+                read_leb128_u32(bytes, &mut at); // export index
+            }
+        }
+        cursor = end;
+    }
+    names
+}
+
+/// Identifiers the wasm-bindgen glue reaches through `wasm.<export>`.
+fn glue_wasm_references(glue: &str) -> BTreeSet<String> {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    let mut refs = BTreeSet::new();
+    for (offset, _) in glue.match_indices("wasm.") {
+        // Only the glue's own module binding counts, not `x.wasm.<member>`.
+        if glue[..offset].chars().next_back().is_some_and(|c| is_ident(c) || c == '.') {
+            continue;
+        }
+        let name: String = glue[offset + "wasm.".len()..].chars().take_while(|&c| is_ident(c)).collect();
+        if !name.is_empty() {
+            refs.insert(name);
+        }
+    }
+    refs
+}
+
+/// asupersync-bi2462.131 / .164: glue and binary must come from the same wasm-bindgen run.
+/// a675a26cb once restored an older glue over a newer binary; the glue then called
+/// `__wasm_bindgen_func_elem_385`, `_385_3` and `_860`, which the binary did not export, so every
+/// WebSocket event and promise callback in the browser threw a TypeError while instantiation
+/// still succeeded.
+#[test]
+fn browser_core_glue_calls_only_exports_present_in_the_committed_wasm() {
+    // Negative control: the checker must be able to fail.
+    let control = glue_wasm_references("const a = wasm.present(1); const b = wasm.absent_export(2); x.wasm.ignored;");
+    assert_eq!(
+        control,
+        BTreeSet::from([String::from("absent_export"), String::from("present")]),
+        "reference scanner must see exactly the two wasm.<export> calls"
+    );
+
+    let wasm = fs::read("packages/browser-core/asupersync_bg.wasm").expect("read committed wasm binary");
+    let exports = wasm_export_names(&wasm);
+    assert!(exports.contains("memory"), "export section parse found no memory export");
+    let glue = fs::read_to_string("packages/browser-core/asupersync.js").expect("read committed glue");
+    let references = glue_wasm_references(&glue);
+    assert!(!references.is_empty(), "glue must reference wasm exports");
+    let missing: Vec<_> = references.difference(&exports).cloned().collect();
+    assert!(
+        missing.is_empty(),
+        "packages/browser-core/asupersync.js calls wasm exports missing from asupersync_bg.wasm: {missing:?}; \
+         rebuild and commit the glue and the binary together"
+    );
+}
