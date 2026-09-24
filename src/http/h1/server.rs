@@ -95,7 +95,9 @@ pub struct Http1Config {
     /// the body's accumulated socket waits (asupersync-1to1qw). It also
     /// bounds the TLS handshake on [`crate::http::h1::listener::Http1Listener::run_tls`]
     /// when the acceptor sets no handshake timeout of its own.
-    /// `None` means no timeout (wait forever).
+    /// Response writes, flushes, and waits for the next produced body frame
+    /// also use this bound. Successful frame transmission starts a new window.
+    /// `None` means no timeout; force-close still interrupts a pending response.
     pub idle_timeout: Option<Duration>,
     /// br-asupersync-t9yqht, br-asupersync-scxixg: Host header validation policy.
     /// SECURITY: Defends against Host header injection attacks where attackers
@@ -929,6 +931,8 @@ where
             .saturating_add(64 * 1024)
             .max(crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN);
         let mut framed = Framed::new(io, codec).with_max_buffer_len(max_buffer_len);
+        let response_write =
+            ResponseWritePolicy::new(self.config.idle_timeout, self.shutdown_signal.as_ref());
         let mut state = ConnectionState::new(
             Cx::current()
                 .and_then(|cx| cx.timer_driver())
@@ -1013,16 +1017,7 @@ where
                     };
                     state.phase = ConnectionPhase::Writing;
                     framed.send(reject)?;
-                    poll_fn(|cx| {
-                        if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                            return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
-                                std::io::ErrorKind::Interrupted,
-                                "connection cancelled",
-                            ))));
-                        }
-                        framed.poll_flush(cx).map_err(HttpError::Io)
-                    })
-                    .await?;
+                    response_write.flush_framed(&mut framed).await?;
                     state.requests_served += 1;
                     state.phase = ConnectionPhase::Closing;
                     break;
@@ -1078,16 +1073,7 @@ where
                     trailers: Vec::new(),
                 };
                 framed.send(reject_resp)?;
-                poll_fn(|cx| {
-                    if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "connection cancelled",
-                        ))));
-                    }
-                    framed.poll_flush(cx).map_err(HttpError::Io)
-                })
-                .await?;
+                response_write.flush_framed(&mut framed).await?;
                 state.requests_served += 1;
                 state.phase = ConnectionPhase::Closing;
                 break;
@@ -1099,16 +1085,7 @@ where
                 let reject = expectation_response(req.version, ExpectationAction::Reject)
                     .expect("reject expectation should build a response");
                 framed.send(reject)?;
-                poll_fn(|cx| {
-                    if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "connection cancelled",
-                        ))));
-                    }
-                    framed.poll_flush(cx).map_err(HttpError::Io)
-                })
-                .await?;
+                response_write.flush_framed(&mut framed).await?;
                 state.requests_served += 1;
                 state.last_request_at = Cx::current()
                     .and_then(|cx| cx.timer_driver())
@@ -1124,16 +1101,7 @@ where
                 let interim = expectation_response(req.version, ExpectationAction::Continue)
                     .expect("continue expectation should build a response");
                 framed.send(interim)?;
-                poll_fn(|cx| {
-                    if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "connection cancelled",
-                        ))));
-                    }
-                    framed.poll_flush(cx).map_err(HttpError::Io)
-                })
-                .await?;
+                response_write.flush_framed(&mut framed).await?;
             }
 
             // Determine if we should close after this request
@@ -1286,26 +1254,7 @@ where
             // Write response
             framed.send(resp)?;
             // `Framed::send` only encodes into the internal write buffer; flush to the socket.
-            let raw_flush = poll_fn(|cx| {
-                if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                    return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "connection cancelled",
-                    ))));
-                }
-                framed.poll_flush(cx).map_err(HttpError::Io)
-            });
-            // br-asupersync-hw83se: bound the flush by idle_timeout so a client
-            // that stops reading cannot pin this connection forever.
-            let flush = write_within_idle_timeout(self.config.idle_timeout, raw_flush);
-            let Some(flush_result) = race_force_close(self.shutdown_signal.as_ref(), flush).await
-            else {
-                return Err(HttpError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "connection force-closed before response flush",
-                )));
-            };
-            flush_result?;
+            response_write.flush_framed(&mut framed).await?;
 
             state.requests_served += 1;
             state.last_request_at = Cx::current()
@@ -1334,7 +1283,7 @@ where
 
         // Gracefully shutdown the connection
         let mut io = framed.into_inner();
-        let _ = io.shutdown().await;
+        let _ = response_write.close_transport(&mut io).await;
 
         Ok(Http1ServeOutcome::Closed(state))
     }
@@ -1448,6 +1397,8 @@ where
     {
         let mut read_buffer = BytesMut::with_capacity(8192);
         let mut state = ConnectionState::new(connection_now(cx));
+        let response_write =
+            ResponseWritePolicy::new(self.config.idle_timeout, self.shutdown_signal.as_ref());
 
         loop {
             state.phase = ConnectionPhase::Idle;
@@ -1476,7 +1427,7 @@ where
                             return Err(error);
                         };
                         state.phase = ConnectionPhase::Writing;
-                        write_streaming_response(cx, &mut io, response).await?;
+                        response_write.write_streaming_response(cx, &mut io, response).await?;
                         state.requests_served += 1;
                         state.phase = ConnectionPhase::Closing;
                         break;
@@ -1511,7 +1462,7 @@ where
                     trailers: Vec::new(),
                 };
                 state.phase = ConnectionPhase::Writing;
-                write_streaming_response(cx, &mut io, response).await?;
+                response_write.write_streaming_response(cx, &mut io, response).await?;
                 state.requests_served += 1;
                 state.phase = ConnectionPhase::Closing;
                 break;
@@ -1522,7 +1473,7 @@ where
                 let response = expectation_response(head.version, expectation)
                     .expect("rejected expectation must have a response");
                 state.phase = ConnectionPhase::Writing;
-                write_streaming_response(cx, &mut io, response).await?;
+                response_write.write_streaming_response(cx, &mut io, response).await?;
                 state.requests_served += 1;
                 state.phase = ConnectionPhase::Closing;
                 break;
@@ -1531,7 +1482,7 @@ where
                 let response = expectation_response(head.version, expectation)
                     .expect("100-continue expectation must have a response");
                 state.phase = ConnectionPhase::Writing;
-                write_streaming_response(cx, &mut io, response).await?;
+                response_write.write_streaming_response(cx, &mut io, response).await?;
             }
 
             let close_after =
@@ -1612,7 +1563,7 @@ where
                                 suppress_response_body_for_head(&mut response);
                             }
                             state.phase = ConnectionPhase::Writing;
-                            write_streaming_response(cx, &mut io, response).await?;
+                            response_write.write_streaming_response(cx, &mut io, response).await?;
                             state.requests_served += 1;
                         }
                         state.phase = ConnectionPhase::Closing;
@@ -1658,7 +1609,9 @@ where
             );
 
             state.phase = ConnectionPhase::Writing;
-            write_streaming_response(cx, &mut io, response).await?;
+            response_write
+                .write_streaming_response(cx, &mut io, response)
+                .await?;
             state.requests_served += 1;
             state.last_request_at = connection_now(cx);
             if close_after {
@@ -1667,7 +1620,7 @@ where
             }
         }
 
-        let _ = io.shutdown().await;
+        let _ = response_write.close_transport(&mut io).await;
         Ok(state)
     }
 }
@@ -1812,6 +1765,7 @@ where
 {
     let mut read_buffer = BytesMut::with_capacity(8192);
     let mut state = ConnectionState::new(connection_now(cx));
+    let response_write = ResponseWritePolicy::new(config.idle_timeout, shutdown_signal.as_ref());
 
     if cx.checkpoint().is_err()
         || shutdown_signal
@@ -1821,7 +1775,7 @@ where
         || state.exceeded_idle_timeout(config.idle_timeout, connection_now(cx))
     {
         state.phase = ConnectionPhase::Closing;
-        let _ = io.shutdown().await;
+        let _ = response_write.close_transport(&mut io).await;
         return Ok(state);
     }
 
@@ -1837,16 +1791,16 @@ where
                     return Err(error);
                 };
                 state.phase = ConnectionPhase::Writing;
-                write_streaming_response(cx, &mut io, response).await?;
+                response_write.write_streaming_response(cx, &mut io, response).await?;
                 state.requests_served += 1;
                 state.phase = ConnectionPhase::Closing;
-                let _ = io.shutdown().await;
+                let _ = response_write.close_transport(&mut io).await;
                 return Ok(state);
             }
         };
     let Some((head, body_kind)) = head_and_body else {
         state.phase = ConnectionPhase::Closing;
-        let _ = io.shutdown().await;
+        let _ = response_write.close_transport(&mut io).await;
         return Ok(state);
     };
     let early_request_method = head.method.clone();
@@ -1876,10 +1830,10 @@ where
             suppress_response_body_for_head(&mut response);
         }
         state.phase = ConnectionPhase::Writing;
-        write_streaming_response(cx, &mut io, response).await?;
+        response_write.write_streaming_response(cx, &mut io, response).await?;
         state.requests_served = 1;
         state.phase = ConnectionPhase::Closing;
-        let _ = io.shutdown().await;
+        let _ = response_write.close_transport(&mut io).await;
         return Ok(state);
     }
 
@@ -1892,17 +1846,17 @@ where
             suppress_response_body_for_head(&mut response);
         }
         state.phase = ConnectionPhase::Writing;
-        write_streaming_response(cx, &mut io, response).await?;
+        response_write.write_streaming_response(cx, &mut io, response).await?;
         state.requests_served = 1;
         state.phase = ConnectionPhase::Closing;
-        let _ = io.shutdown().await;
+        let _ = response_write.close_transport(&mut io).await;
         return Ok(state);
     }
     if expectation == ExpectationAction::Continue && !body_kind.is_empty() {
         let response = expectation_response(head.version, expectation)
             .expect("100-continue expectation must have a response");
         state.phase = ConnectionPhase::Writing;
-        write_streaming_response(cx, &mut io, response).await?;
+        response_write.write_streaming_response(cx, &mut io, response).await?;
     }
 
     let request_version = head.version;
@@ -1980,7 +1934,7 @@ where
                             suppress_response_body_for_head(&mut response);
                         }
                         head_committed.store(true, Ordering::Release);
-                        return write_streaming_response(&request_cx, &mut io, response).await;
+                        return response_write.write_streaming_response(&request_cx, &mut io, response).await;
                     }
                     return Err(HttpError::Io(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
@@ -2009,7 +1963,7 @@ where
                 suppress_response_body_for_head(&mut response);
             }
             head_committed.store(true, Ordering::Release);
-            return write_streaming_response(&request_cx, &mut io, response).await;
+            return response_write.write_streaming_response(&request_cx, &mut io, response).await;
         }
 
         let rejected_method = match policy {
@@ -2033,7 +1987,7 @@ where
             }
             add_connection_close(&mut response);
             head_committed.store(true, Ordering::Release);
-            return write_streaming_response(&request_cx, &mut io, response).await;
+            return response_write.write_streaming_response(&request_cx, &mut io, response).await;
         }
 
         if request_version != Version::Http11 {
@@ -2049,7 +2003,7 @@ where
                 suppress_response_body_for_head(&mut response);
             }
             head_committed.store(true, Ordering::Release);
-            return write_streaming_response(&request_cx, &mut io, response).await;
+            return response_write.write_streaming_response(&request_cx, &mut io, response).await;
         }
 
         if request_method == Method::Head {
@@ -2058,7 +2012,7 @@ where
                 ProducedResponsePolicy::Generic => produced_head_only_response(produced)?,
             };
             head_committed.store(true, Ordering::Release);
-            return write_streaming_response(&request_cx, &mut io, response).await;
+            return response_write.write_streaming_response(&request_cx, &mut io, response).await;
         }
 
         let mut produced = produced;
@@ -2072,7 +2026,7 @@ where
             producer,
             policy == ProducedResponsePolicy::Generic,
             config.request_drain_grace,
-            config.idle_timeout,
+            response_write,
             &head_committed,
         )
         .await
@@ -2109,7 +2063,7 @@ where
                 if request_method == Method::Head {
                     suppress_response_body_for_head(&mut response);
                 }
-                write_streaming_response(cx, &mut io, response).await
+                response_write.write_streaming_response(cx, &mut io, response).await
             } else {
                 error!(
                     diagnostic = WebBodyDiagnostic::ResponseProducerFailure.code(),
@@ -2126,7 +2080,7 @@ where
                 if request_method == Method::Head {
                     suppress_response_body_for_head(&mut response);
                 }
-                write_streaming_response(cx, &mut io, response).await
+                response_write.write_streaming_response(cx, &mut io, response).await
             } else {
                 error!(
                     diagnostic = "ASUP-E501",
@@ -2136,7 +2090,7 @@ where
             }
         }
     };
-    let _ = io.shutdown().await;
+    let _ = response_write.close_transport(&mut io).await;
     result.map(|()| state)
 }
 
@@ -2345,7 +2299,7 @@ async fn drain_producer_after_write_error<P>(
 {
     cx.cancel_with(
         CancelKind::ParentCancelled,
-        Some("HTTP/1 produced-body client transport disconnected"),
+        Some("HTTP/1 produced response could not make progress"),
     );
     if producer_result.is_none() {
         let _ = timeout(connection_now(cx), drain_grace, producer).await;
@@ -2396,9 +2350,7 @@ async fn drive_produced_response<T>(
     mut producer: Http1ProducedResponseFuture,
     allow_trailers: bool,
     drain_grace: Duration,
-    // br-asupersync-hw83se: bounds every socket write/flush below so a client
-    // that stops reading cannot pin the produced/streaming body indefinitely.
-    idle_timeout: Option<Duration>,
+    response_write: ResponseWritePolicy<'_>,
     head_committed: &AtomicBool,
 ) -> Result<(), HttpError>
 where
@@ -2412,7 +2364,7 @@ where
     // subsequent failure therefore closes the connection without a fallback
     // status or a clean chunk terminator.
     head_committed.store(true, Ordering::Release);
-    if let Err(error) = write_all_within_idle(io, encoded_head.as_ref(), idle_timeout).await {
+    if let Err(error) = write_all_within_idle(io, encoded_head.as_ref(), response_write).await {
         record_h1_body_diagnostic(
             WebBodyDiagnostic::ClientAbort,
             "client transport failed while writing the response head",
@@ -2421,7 +2373,7 @@ where
             .await;
         return Err(HttpError::Io(error));
     }
-    if let Err(error) = flush_within_idle(io, idle_timeout).await {
+    if let Err(error) = flush_within_idle(io, response_write).await {
         record_h1_body_diagnostic(
             WebBodyDiagnostic::ClientAbort,
             "client transport failed while flushing the response head",
@@ -2434,19 +2386,44 @@ where
     let body_kind = response.body.kind();
     let mut encoder = ChunkedEncoder::new();
     loop {
-        let frame = poll_fn(|task_cx| {
-            if producer_result.is_none()
-                && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
-            {
-                producer_result = Some(normalize_producer_result(result, &response.body));
+        // A body producer can park without ever yielding a frame. Socket
+        // write deadlines alone cannot release that request's in-flight slot.
+        let frame = response_write
+            .run(async {
+                Ok(poll_fn(|task_cx| {
+                    if producer_result.is_none()
+                        && let Poll::Ready(result) = producer.as_mut().poll(task_cx)
+                    {
+                        producer_result = Some(normalize_producer_result(result, &response.body));
+                    }
+                    Pin::new(&mut response.body).poll_frame(task_cx)
+                })
+                .await)
+            })
+            .await;
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                record_h1_body_diagnostic(
+                    WebBodyDiagnostic::ResponseProducerFailure,
+                    "response producer made no progress before the response deadline",
+                );
+                drain_producer_after_write_error(
+                    cx,
+                    producer.as_mut(),
+                    &mut producer_result,
+                    drain_grace,
+                )
+                .await;
+                return Err(HttpError::Io(error));
             }
-            Pin::new(&mut response.body).poll_frame(task_cx)
-        })
-        .await;
+        };
         let Some(frame) = frame else {
             let producer_result = match producer_result.take() {
                 Some(result) => result,
-                None => normalize_producer_result(producer.as_mut().await, &response.body),
+                None => finish_producer_within_idle(
+                    cx, producer.as_mut(), &response.body, response_write, drain_grace,
+                ).await,
             };
             let sender = match producer_result {
                 Ok(sender) => sender,
@@ -2467,14 +2444,14 @@ where
             }
             let mut final_chunk = BytesMut::new();
             encoder.finalize(None, &mut final_chunk);
-            if let Err(error) = write_all_within_idle(io, final_chunk.as_ref(), idle_timeout).await {
+            if let Err(error) = write_all_within_idle(io, final_chunk.as_ref(), response_write).await {
                 record_h1_body_diagnostic(
                     WebBodyDiagnostic::ClientAbort,
                     "client transport failed while writing the terminal chunk",
                 );
                 return Err(HttpError::Io(error));
             }
-            if let Err(error) = flush_within_idle(io, idle_timeout).await {
+            if let Err(error) = flush_within_idle(io, response_write).await {
                 record_h1_body_diagnostic(
                     WebBodyDiagnostic::ClientAbort,
                     "client transport failed while flushing the terminal chunk",
@@ -2517,7 +2494,9 @@ where
                 }
                 let producer_result = match producer_result.take() {
                     Some(result) => result,
-                    None => normalize_producer_result(producer.as_mut().await, &response.body),
+                    None => finish_producer_within_idle(
+                        cx, producer.as_mut(), &response.body, response_write, drain_grace,
+                    ).await,
                 };
                 let sender = match producer_result {
                     Ok(sender) => sender,
@@ -2540,7 +2519,7 @@ where
                 encoder.finalize(Some(&trailers), &mut encoded_frame);
 
                 if let Err(error) =
-                    write_all_within_idle(io, encoded_frame.as_ref(), idle_timeout).await
+                    write_all_within_idle(io, encoded_frame.as_ref(), response_write).await
                 {
                     record_h1_body_diagnostic(
                         WebBodyDiagnostic::ClientAbort,
@@ -2552,7 +2531,7 @@ where
                     );
                     return Err(HttpError::Io(error));
                 }
-                if let Err(error) = flush_within_idle(io, idle_timeout).await {
+                if let Err(error) = flush_within_idle(io, response_write).await {
                     record_h1_body_diagnostic(
                         WebBodyDiagnostic::ClientAbort,
                         "client transport failed while flushing response trailers",
@@ -2572,10 +2551,12 @@ where
         // current write and flush complete. Transport-error cleanup below is
         // the sole exception: it polls under cancellation for a bounded drain.
         let write_result = async {
-            write_all_within_idle(io, encoded_frame.as_ref(), idle_timeout)
+            write_all_within_idle(io, encoded_frame.as_ref(), response_write)
                 .await
                 .map_err(HttpError::Io)?;
-            flush_within_idle(io, idle_timeout).await.map_err(HttpError::Io)
+            flush_within_idle(io, response_write)
+                .await
+                .map_err(HttpError::Io)
         }
         .await;
 
@@ -2651,28 +2632,6 @@ where
         }
         buffer.extend_from_slice(&chunk[..count]);
     }
-}
-
-async fn write_streaming_response<T>(
-    cx: &Cx,
-    io: &mut T,
-    response: Response,
-) -> Result<(), HttpError>
-where
-    T: AsyncWrite + Unpin,
-{
-    if cx.checkpoint().is_err() {
-        return Err(HttpError::Io(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "connection cancelled",
-        )));
-    }
-    let mut encoded = BytesMut::new();
-    Http1Codec::new().encode(response, &mut encoded)?;
-    io.write_all(encoded.as_ref())
-        .await
-        .map_err(HttpError::Io)?;
-    io.flush().await.map_err(HttpError::Io)
 }
 
 async fn drive_incoming_body<T>(
@@ -3002,92 +2961,143 @@ impl Drop for InFlightRequestGuard {
     }
 }
 
-/// Races `fut` against the shutdown signal's ForceClosing phase.
-///
-/// Returns `None` when force-close interrupts the future (the future is
-/// dropped — drop is the cancellation backstop for shutdown). With no
-/// signal attached the future simply runs to completion.
-/// Bound a response-write future by `idle_timeout` — the same budget the read
-/// side already applies (br-asupersync-hw83se). A client that stops reading its
-/// socket (its TCP receive window full) would otherwise park the write forever
-/// and pin the connection, its in-flight slot, and its buffers (slowloris-read
-/// DoS). A `None` timeout leaves the write unbounded, matching the read side; a
-/// fired timeout yields a `TimedOut` I/O error so the caller closes the socket.
-/// Bound a single `write_all` on a raw socket by `idle_timeout`
-/// (br-asupersync-hw83se), for the streaming/produced response paths that write
-/// directly rather than through a `Framed`. A fired timeout becomes a `TimedOut`
-/// I/O error so a slow-reading client cannot pin the connection mid-body.
+/// One response-progress policy for buffered, streaming and error responses.
+/// A progress step is a complete buffered response, a body frame write/flush,
+/// or the wait for the next producer frame/terminal receipt. Force-close is
+/// effective even when the configured idle timeout is disabled.
+#[derive(Clone, Copy)]
+struct ResponseWritePolicy<'a> {
+    idle_timeout: Option<Duration>,
+    shutdown_signal: Option<&'a ShutdownSignal>,
+}
+
+impl<'a> ResponseWritePolicy<'a> {
+    const fn new(
+        idle_timeout: Option<Duration>,
+        shutdown_signal: Option<&'a ShutdownSignal>,
+    ) -> Self {
+        Self {
+            idle_timeout,
+            shutdown_signal,
+        }
+    }
+
+    async fn run<F, T>(self, progress: F) -> std::io::Result<T>
+    where
+        F: Future<Output = std::io::Result<T>>,
+    {
+        let bounded = async {
+            match self.idle_timeout {
+                Some(idle) => {
+                    let now = Cx::current()
+                        .and_then(|cx| cx.timer_driver())
+                        .map_or_else(wall_now, |timer| timer.now());
+                    timeout(now, idle, progress).await.unwrap_or_else(|_| {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "HTTP/1 response progress timed out",
+                        ))
+                    })
+                }
+                None => progress.await,
+            }
+        };
+        race_force_close(self.shutdown_signal, bounded)
+            .await
+            .unwrap_or_else(|| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "HTTP/1 response force-closed",
+                ))
+            })
+    }
+
+    async fn flush_framed<T>(self, framed: &mut Framed<T, Http1Codec>) -> Result<(), HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        self.run(poll_fn(|task_cx| {
+            if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "connection cancelled",
+                )));
+            }
+            framed.poll_flush(task_cx)
+        }))
+        .await
+        .map_err(HttpError::Io)
+    }
+
+    async fn close_transport<T: AsyncWrite + Unpin>(self, io: &mut T) -> std::io::Result<()> {
+        self.run(io.shutdown()).await
+    }
+
+    async fn write_streaming_response<T>(
+        self,
+        cx: &Cx,
+        io: &mut T,
+        response: Response,
+    ) -> Result<(), HttpError>
+    where
+        T: AsyncWrite + Unpin,
+    {
+        if cx.checkpoint().is_err() {
+            return Err(HttpError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "connection cancelled",
+            )));
+        }
+        let mut encoded = BytesMut::new();
+        Http1Codec::new().encode(response, &mut encoded)?;
+        self.run(async {
+            io.write_all(encoded.as_ref()).await?;
+            io.flush().await
+        })
+        .await
+        .map_err(HttpError::Io)
+    }
+}
+
+/// Raw produced-body writes share the response policy used by buffered flushes.
 async fn write_all_within_idle<T: AsyncWrite + Unpin>(
     io: &mut T,
     bytes: &[u8],
-    idle_timeout: Option<Duration>,
+    response_write: ResponseWritePolicy<'_>,
 ) -> std::io::Result<()> {
-    match idle_timeout {
-        Some(idle) => {
-            let now = Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |timer| timer.now());
-            timeout(now, idle, io.write_all(bytes))
-                .await
-                .unwrap_or_else(|_elapsed| {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "response write timed out",
-                    ))
-                })
-        }
-        None => io.write_all(bytes).await,
-    }
+    response_write.run(io.write_all(bytes)).await
 }
 
 /// Bound a single `flush` on a raw socket by `idle_timeout`. See
 /// [`write_all_within_idle`].
 async fn flush_within_idle<T: AsyncWrite + Unpin>(
     io: &mut T,
-    idle_timeout: Option<Duration>,
+    response_write: ResponseWritePolicy<'_>,
 ) -> std::io::Result<()> {
-    match idle_timeout {
-        Some(idle) => {
-            let now = Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |timer| timer.now());
-            timeout(now, idle, io.flush())
-                .await
-                .unwrap_or_else(|_elapsed| {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "response flush timed out",
-                    ))
-                })
+    response_write.run(io.flush()).await
+}
+
+async fn finish_producer_within_idle(
+    cx: &Cx,
+    mut producer: Pin<&mut (dyn Future<Output = Result<OutgoingBodySender, HttpError>> + Send)>,
+    body: &crate::http::h1::stream::OutgoingBody,
+    response_write: ResponseWritePolicy<'_>,
+    drain_grace: Duration,
+) -> Result<OutgoingBodySender, HttpError> {
+    match response_write
+        .run(async { Ok(producer.as_mut().await) })
+        .await
+    {
+        Ok(result) => normalize_producer_result(result, body),
+        Err(error) => {
+            drain_producer_after_write_error(cx, producer, &mut None, drain_grace).await;
+            Err(HttpError::Io(error))
         }
-        None => io.flush().await,
     }
 }
 
-async fn write_within_idle_timeout<F>(
-    idle_timeout: Option<Duration>,
-    write: F,
-) -> Result<(), HttpError>
-where
-    F: Future<Output = Result<(), HttpError>>,
-{
-    match idle_timeout {
-        Some(idle) => {
-            let now = Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |timer| timer.now());
-            match timeout(now, idle, write).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(HttpError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "response write timed out",
-                ))),
-            }
-        }
-        None => write.await,
-    }
-}
-
+/// Races `fut` against the shutdown signal's ForceClosing phase. Dropping the
+/// interrupted future is the shutdown backstop; no signal means no race.
 async fn race_force_close<F: Future>(signal: Option<&ShutdownSignal>, fut: F) -> Option<F::Output> {
     let Some(signal) = signal else {
         return Some(fut.await);
@@ -3649,6 +3659,68 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
+
+    /// Supplemental bypass guard; behavioral proof is the native nonreading
+    /// peer and parked-producer matrix in e2e_h1_graceful_drain.
+    #[test]
+    fn response_write_sites_use_bounded_policy_or_request_read_budget() {
+        let source = include_str!("server.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let permitted = [
+            ("flush_framed", ".poll_flush("),
+            ("write_streaming_response", ".write_all("),
+            ("write_streaming_response", ".flush("),
+            ("write_all_within_idle", ".write_all("),
+            ("flush_within_idle", ".flush("),
+            ("close_transport", ".shutdown("),
+            // Both expectation writes are inside read_next's one request
+            // deadline and its registered shutdown waiter, including retries.
+            ("poll_pending_expectation_flush", ".poll_flush("),
+            ("poll_request_expectation", ".poll_flush("),
+        ];
+        let mut observed = Vec::new();
+        let mut function = "";
+        for (line_number, line) in production.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            if let Some((_, declaration)) = code.split_once("fn ") {
+                function = declaration.split(['<', '(']).next().unwrap();
+            }
+            for operation in [
+                ".poll_write(",
+                ".poll_write_vectored(",
+                ".write(",
+                ".write_all(",
+                ".poll_flush(",
+                ".flush(",
+                ".poll_shutdown(",
+                ".shutdown(",
+                ".poll_close(",
+            ] {
+                if code.contains(operation) {
+                    assert!(
+                        permitted.contains(&(function, operation)),
+                        "unbounded response operation at line {} in {function}: {code}",
+                        line_number + 1
+                    );
+                    observed.push((function, operation));
+                }
+            }
+        }
+        assert_eq!(
+            observed.len(),
+            permitted.len(),
+            "review changed response write sites"
+        );
+        for site in permitted {
+            assert!(
+                observed.contains(&site),
+                "missing expected write site: {site:?}"
+            );
+        }
+    }
 
     struct TestIo {
         read_data: Vec<u8>,
