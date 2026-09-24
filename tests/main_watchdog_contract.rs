@@ -418,6 +418,127 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
     );
 }
 
+fn hedge_log(with_newer: bool) -> String {
+    let mut log = String::from(
+        "     Running tests/hedge_native.rs (x)\nrunning 2 tests\ntest cancel_test ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s\n",
+    );
+    if with_newer {
+        log.push_str("     Running tests/newer_contract.rs (x)\nrunning 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n");
+    }
+    log.push_str("  Remote command finished: exit=101 in 1000ms\n");
+    log
+}
+
+/// The first real run's failure shape (bi2462.147.2): a targeted lane at the batch
+/// head names a target (`newer_contract`) that only the head commit added, and the
+/// red target (`hedge_native`) appeared at commit 3.
+fn new_target_mid_batch_scenario(disable_filter: bool) -> Value {
+    let lane = json!({
+        "id": "targeted-tests[default]", "kind": "test",
+        "argv": ["cargo", "test", "--test", "hedge_native", "--test", "newer_contract"],
+        "expected_targets": ["hedge_native", "newer_contract"],
+    });
+    json!({
+        "plan": {
+            "commits": (1..=5u8).map(|n| commit(n, "dev@example.com", "c")).collect::<Vec<_>>(),
+            "lanes": [lane],
+        },
+        "state": {"known_reds": {}},
+        "disable_target_filter": disable_filter,
+        "absent_targets": {
+            sha(1): ["hedge_native", "newer_contract"],
+            sha(2): ["hedge_native", "newer_contract"],
+            sha(3): ["newer_contract"],
+            sha(4): ["newer_contract"],
+        },
+        "lane_logs": {"targeted-tests[default]": {
+            sha(3): {"log": hedge_log(false)},
+            sha(4): {"log": hedge_log(false)},
+            sha(5): {"log": hedge_log(true)},
+        }},
+    })
+}
+
+#[test]
+fn bisect_probes_only_request_targets_that_exist_at_the_probed_commit() {
+    let result = evaluate(&new_target_mid_batch_scenario(false));
+    let lane = receipt(&result, "targeted-tests[default]");
+    assert_eq!(lane["verdict"], "red");
+    assert_eq!(lane["new_red"], json!(["hedge_native::cancel_test"]));
+    assert_eq!(lane["culprit"], sha(3), "{result:#}");
+    assert_eq!(lane["culprit_exact"], true);
+    let probes = lane["bisect_probes"].as_array().expect("probes");
+    assert_eq!(probes[0]["sha"], sha(3));
+    assert_eq!(probes[0]["verdict"], "red");
+    assert_eq!(probes[1]["sha"], sha(2));
+    assert_eq!(
+        probes[1]["verdict"], "target-absent",
+        "a commit without the failing target cannot hold its red and is not run"
+    );
+
+    // Without the filter, cargo refuses the probe's target list. That must read as
+    // undecided (a range), never as a confident culprit.
+    let unfiltered = evaluate(&new_target_mid_batch_scenario(true));
+    let lane = receipt(&unfiltered, "targeted-tests[default]");
+    assert_eq!(lane["culprit_exact"], false, "{unfiltered:#}");
+    assert_eq!(lane["bisect_probes"][0]["verdict"], "no-evidence");
+}
+
+#[test]
+fn a_targeted_green_heals_only_the_targets_it_ran() {
+    let lane = json!({
+        "id": "targeted-tests[default]", "kind": "test",
+        "argv": ["cargo", "test", "--test", "alpha_native"],
+        "expected_targets": ["alpha_native"],
+    });
+    let known = json!({"known_reds": {"targeted-tests[default]": {
+        "hedge_native::cancel_test": {"bead": "asupersync-bi2462.165"},
+        "alpha_native::old_red": {"bead": "asupersync-known2"},
+    }}});
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "c")], "lanes": [lane]},
+        "state": known,
+        "lane_logs": {"targeted-tests[default]": {sha(1): {"log": test_green("alpha_native", 4)}}},
+    });
+    let result = evaluate(&scenario);
+    assert_eq!(
+        receipt(&result, "targeted-tests[default]")["healed"],
+        json!(["alpha_native::old_red"])
+    );
+    assert_eq!(
+        result["state"]["known_reds"]["targeted-tests[default]"],
+        json!({"hedge_native::cancel_test": {"bead": "asupersync-bi2462.165"}}),
+        "a run that never executed hedge_native cannot heal it"
+    );
+}
+
+#[test]
+fn an_already_tracked_red_is_not_filed_again() {
+    let hedge = "hedge_factory_native::cancellation_during_backup_delay_stops_primary_and_never_launches_backup";
+    let tracked = json!({
+        "id": "asupersync-bi2462.165",
+        "title": "Owner cancellation never reaches parked branches",
+        "description": "tests/hedge_factory_native.rs::cancellation_during_backup_delay_stops_primary_and_never_launches_backup",
+    });
+    let unrelated =
+        json!({"id": "asupersync-x1", "title": "cancellation_during_backup", "description": ""});
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"existing_bead_for": [
+            {"new_targets": [hedge], "open_issues": [unrelated.clone(), tracked.clone()]},
+            {"new_targets": [hedge, "hedge_factory_native::other_test"], "open_issues": [tracked.clone()]},
+            {"new_targets": ["remote exit 101"], "open_issues": [tracked]},
+            {"new_targets": [hedge], "open_issues": [unrelated]},
+        ]},
+    });
+    assert_eq!(
+        evaluate(&scenario)["probe_results"]["existing_bead_for"],
+        json!(["asupersync-bi2462.165", null, null, null]),
+        "whole-word match on every new test; a partial name or an error-keyed red never matches"
+    );
+}
+
 #[test]
 fn script_documents_its_non_claims() {
     let source = std::fs::read_to_string(

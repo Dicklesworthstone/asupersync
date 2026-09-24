@@ -95,6 +95,8 @@ RUNNING_UNITTESTS_RE = re.compile(r"^\s*Running unittests (\S+)")
 COULD_NOT_COMPILE_RE = re.compile(r"error: could not compile `([^`]+)`(?: \(([^)]*)\))?")
 FIRST_ERROR_RE = re.compile(r"^(?:\S+\.rs:\d+:\d+: error(?:\[E\d+\])?:.*|error(?:\[E\d+\])?: (?!could not compile|aborting).*)$")
 FAILED_TEST_RE = re.compile(r"^test (\S+) \.\.\. FAILED$")
+NO_TARGET_RE = re.compile(r"error: no (?:test|bin|example|bench) target named `([^`]+)`")
+COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -239,6 +241,12 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     if remote_exit is None:
         result["reason"] = f"no remote exit in log (client exit {client_exit})"
         return result
+    missing_target = NO_TARGET_RE.search(clean)
+    if missing_target:
+        # Cargo refused the target list itself (for example a bisect probe asked for a
+        # target that does not exist yet at that commit): nothing was tested.
+        result["reason"] = f"cargo has no target `{missing_target.group(1)}` at this commit"
+        return result
 
     failing: list[str] = []
     for match in COULD_NOT_COMPILE_RE.finditer(clean):
@@ -260,14 +268,21 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
             result["reason"] = "remote exit 0 without `Finished`"
         return result
 
-    # Test lane.
+    # Test lane. Failing tests are named `<target>::<test>` so a known red can later be
+    # healed only by a run that actually executed its target.
     seen: list[str] = []
+    failed_tests: list[str] = []
+    current = "?"
     for line in lines:
         running = RUNNING_TARGET_RE.match(line)
         if running:
-            seen.append(running.group(1).split("/")[-1])
+            current = running.group(1).split("/")[-1]
+            seen.append(current)
         elif RUNNING_UNITTESTS_RE.match(line):
+            current = "lib"
             seen.append("lib")
+        elif failed := FAILED_TEST_RE.match(line.strip()):
+            failed_tests.append(f"{current}::{failed.group(1)}")
     counts = result["counts"]
     for line in lines:
         tr = TEST_RESULT_RE.match(line.strip())
@@ -277,7 +292,6 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
             counts["failed"] += int(tr.group(3))
             counts["ignored"] += int(tr.group(4))
             counts["filtered"] += int(tr.group(6))
-    failed_tests = [m.group(1) for line in lines if (m := FAILED_TEST_RE.match(line.strip()))]
     result["targets_seen"] = sorted(set(seen))
     if failing or counts["failed"] or failed_tests or remote_exit != 0:
         result.update(
@@ -361,9 +375,72 @@ def bead_payload(
 # ---------------------------------------------------------------------------
 
 Runner = Callable[[dict[str, Any], str], tuple[str, int]]
+TargetExists = Callable[[str, str], bool]  # (sha, test target name) -> exists at sha
 
 
-def bisect_first_red(lane: dict[str, Any], batch: list[str], runner: Runner, new_targets: set[str]) -> tuple[int, bool, list[dict[str, Any]]]:
+def target_of(key: str) -> str | None:
+    """The test target a red key belongs to: `target::test` or `pkg (test "target")`."""
+    compile_target = COMPILE_TARGET_RE.search(key)
+    if compile_target:
+        return compile_target.group(1)
+    return key.split("::", 1)[0] if "::" in key else None
+
+
+def lane_at_commit(lane: dict[str, Any], sha: str, target_exists: TargetExists | None) -> dict[str, Any]:
+    """The lane as it can run at `sha`: `--test X` targets absent there are dropped.
+
+    A bisect probe must not ask cargo for a target that a later commit added; cargo
+    would refuse the whole invocation and the refusal would look like a red.
+    """
+    if lane["kind"] != "test" or target_exists is None:
+        return lane
+    argv: list[str] = []
+    kept: list[str] = []
+    source = lane["argv"]
+    index = 0
+    while index < len(source):
+        if source[index] == "--test" and index + 1 < len(source):
+            name = source[index + 1]
+            if target_exists(sha, name):
+                argv += ["--test", name]
+                kept.append(name)
+            index += 2
+            continue
+        argv.append(source[index])
+        index += 1
+    expected = [t for t in lane.get("expected_targets", []) if t in kept]
+    return {**lane, "argv": argv, "expected_targets": expected, "display_command": " ".join(argv)}
+
+
+def red_can_exist_at(lane: dict[str, Any], sha: str, new_targets: set[str], target_exists: TargetExists | None) -> bool:
+    """False when every newly red target's test target is absent at `sha`, so it cannot be red there."""
+    if lane["kind"] != "test" or target_exists is None:
+        return True
+    owners = {target_of(t) for t in new_targets}
+    if None in owners:
+        return True
+    return any(target_exists(sha, owner) for owner in owners if owner is not None)
+
+
+def probe(
+    lane: dict[str, Any], sha: str, runner: Runner, new_targets: set[str], target_exists: TargetExists | None
+) -> tuple[str, dict[str, Any] | None]:
+    """Run one bisect probe. Returns (kind, outcome): kind is `red`, `clear` or `undecided`."""
+    if not red_can_exist_at(lane, sha, new_targets, target_exists):
+        return "clear", None  # the failing target does not exist yet at this commit
+    probe_lane = lane_at_commit(lane, sha, target_exists)
+    text, exit_code = runner(probe_lane, sha)
+    outcome = classify_lane_output(text, exit_code, probe_lane)
+    if outcome["verdict"] == VERDICT_RED and red_targets(outcome) & new_targets:
+        return "red", outcome
+    if outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED):
+        return "clear", outcome  # green, or red only for other targets
+    return "undecided", outcome
+
+
+def bisect_first_red(
+    lane: dict[str, Any], batch: list[str], runner: Runner, new_targets: set[str], target_exists: TargetExists | None = None
+) -> tuple[int, bool, list[dict[str, Any]]]:
     """Index in `batch` of the first commit at which any of `new_targets` is red.
 
     Assumes they are red at the batch head. Returns (index, exact, probes). A probe
@@ -376,20 +453,34 @@ def bisect_first_red(lane: dict[str, Any], batch: list[str], runner: Runner, new
     exact = True
     while lo < hi:
         mid = (lo + hi) // 2
-        text, exit_code = runner(lane, batch[mid])
-        outcome = classify_lane_output(text, exit_code, lane)
-        probes.append({"sha": batch[mid], "verdict": outcome["verdict"]})
-        if outcome["verdict"] == VERDICT_RED and red_targets(outcome) & new_targets:
+        kind, outcome = probe(lane, batch[mid], runner, new_targets, target_exists)
+        probes.append({"sha": batch[mid], "verdict": outcome["verdict"] if outcome else "target-absent"})
+        if kind == "red":
             hi = mid
-        elif outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED):
-            lo = mid + 1  # green, or red only for other targets: the new red came later
+        elif kind == "clear":
+            lo = mid + 1
         else:
             exact = False
             break
     return hi, exact and lo == hi, probes
 
 
-def run_engine(plan: dict[str, Any], runner: Runner, state: dict[str, Any], now: str) -> dict[str, Any]:
+def heal_candidates(lane: dict[str, Any], lane_known: dict[str, Any], failing: set[str], outcome: dict[str, Any]) -> list[str]:
+    """Known reds this outcome proves healed.
+
+    A build lane covers every target, so absence from its failures heals. A targeted
+    test lane only covers the targets it ran, so a known red heals only when its own
+    target ran and passed.
+    """
+    if lane["kind"] == "build":
+        return sorted(set(lane_known) - failing)
+    seen = set(outcome.get("targets_seen") or [])
+    return sorted(t for t in lane_known if t not in failing and target_of(t) in seen)
+
+
+def run_engine(
+    plan: dict[str, Any], runner: Runner, state: dict[str, Any], now: str, target_exists: TargetExists | None = None
+) -> dict[str, Any]:
     commits = {c["sha"]: c for c in plan["commits"]}
     batch = [c["sha"] for c in plan["commits"]]
     head = batch[-1]
@@ -419,7 +510,7 @@ def run_engine(plan: dict[str, Any], runner: Runner, state: dict[str, Any], now:
         lane_known: dict[str, Any] = known.setdefault(lane["id"], {})
         if outcome["verdict"] == VERDICT_RED:
             failing = red_targets(outcome)
-            healed = sorted(set(lane_known) - failing)
+            healed = heal_candidates(lane, lane_known, failing, outcome)
             for target in healed:
                 lane_known.pop(target)
             if healed:
@@ -431,17 +522,18 @@ def run_engine(plan: dict[str, Any], runner: Runner, state: dict[str, Any], now:
                 notes.append(f"{lane['id']}: still red: " + ", ".join(f"{t} (bead {lane_known[t].get('bead')})" for t in still))
             new_targets = failing - set(lane_known)
             if new_targets:
-                index, exact, probes = bisect_first_red(lane, batch, runner, new_targets)
+                index, exact, probes = bisect_first_red(lane, batch, runner, new_targets, target_exists)
                 pre_existing = False
                 base = plan.get("since")
                 if index == 0 and base:
                     # Red at the first commit of the batch: it may predate the batch.
-                    text, exit_code = runner(lane, base)
-                    base_outcome = classify_lane_output(text, exit_code, lane)
-                    probes.append({"sha": base, "verdict": base_outcome["verdict"], "batch_base": True})
-                    if base_outcome["verdict"] == VERDICT_RED and red_targets(base_outcome) & new_targets:
+                    kind, base_outcome = probe(lane, base, runner, new_targets, target_exists)
+                    probes.append(
+                        {"sha": base, "verdict": base_outcome["verdict"] if base_outcome else "target-absent", "batch_base": True}
+                    )
+                    if kind == "red":
                         pre_existing = True
-                    elif base_outcome["verdict"] != VERDICT_GREEN:
+                    elif kind == "undecided":
                         exact = False
                 culprit = commits[batch[index]]
                 payload = bead_payload(lane, culprit, outcome, batch, new_targets)
@@ -472,9 +564,12 @@ def run_engine(plan: dict[str, Any], runner: Runner, state: dict[str, Any], now:
                         "signature": payload["signature"],
                     }
         elif outcome["verdict"] == VERDICT_GREEN and lane_known:
-            receipt["healed"] = sorted(lane_known)
-            notes.append(f"{lane['id']}: healed at {head[:9]}: {', '.join(sorted(lane_known))}")
-            lane_known.clear()
+            healed = heal_candidates(lane, lane_known, set(), outcome)
+            for target in healed:
+                lane_known.pop(target)
+            if healed:
+                receipt["healed"] = healed
+                notes.append(f"{lane['id']}: healed at {head[:9]}: {', '.join(healed)}")
         if not lane_known:
             known.pop(lane["id"], None)
         receipts.append(receipt)
@@ -549,6 +644,21 @@ def phase6_report(commit: dict[str, Any]) -> list[dict[str, Any]]:
         present = [c for c in candidates if c in tree]
         findings.append({"gate": gate, "present": present, "missing": not present, "expected_one_of": candidates})
     return findings
+
+
+_TARGET_EXISTS_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def git_target_exists(sha: str, name: str) -> bool:
+    """Whether integration test target `name` exists at `sha` (registered path or tests/<name>.rs)."""
+    key = (sha, name)
+    if key not in _TARGET_EXISTS_CACHE:
+        paths = [path for path, entry in cargo_test_registry(sha).items() if entry["name"] == name] or [f"tests/{name}.rs"]
+        _TARGET_EXISTS_CACHE[key] = any(
+            subprocess.run(["git", "cat-file", "-e", f"{sha}:{path}"], capture_output=True, check=False).returncode == 0
+            for path in paths
+        )
+    return _TARGET_EXISTS_CACHE[key]
 
 
 def cargo_test_registry(sha: str) -> dict[str, dict[str, Any]]:
@@ -747,6 +857,38 @@ def post_receipts(plan: dict[str, Any], receipts: list[dict[str, Any]]) -> None:
         subprocess.run(["br", "comments", "add", target, "-f", path, "--author", "main-watchdog"], capture_output=True, check=False)
 
 
+def existing_bead_for(new_targets: list[str], open_issues: list[dict[str, Any]]) -> str | None:
+    """An open bead whose title or description already names every newly red test.
+
+    Test names are matched without their `target::` prefix, as bead text names them.
+    A red keyed only by an error message never matches, so it is always filed.
+    """
+    names = [t.split("::", 1)[1] for t in new_targets if "::" in t]
+    if not names or len(names) != len(new_targets):
+        return None
+    for issue in open_issues:
+        text = f"{issue.get('title', '')}\n{issue.get('description', '')}"
+        if all(re.search(rf"\b{re.escape(name)}\b", text) for name in names):
+            return issue.get("id")
+    return None
+
+
+def open_tracker_issues(issues_path: Path = Path(".beads/issues.jsonl")) -> list[dict[str, Any]]:
+    try:
+        lines = issues_path.read_text().splitlines()
+    except FileNotFoundError:
+        return []
+    issues = []
+    for line in lines:
+        try:
+            issue = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(issue, dict) and issue.get("status") not in ("closed", "tombstone"):
+            issues.append(issue)
+    return issues
+
+
 def file_bead(payload: dict[str, Any]) -> str | None:
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
         handle.write(payload["description"])
@@ -906,21 +1048,41 @@ def main(argv: list[str]) -> int:
         scenario = json.loads(args.scenario.read_text())
         logs = scenario["lane_logs"]
 
+        absent = {sha: set(names) for sha, names in scenario.get("absent_targets", {}).items()}
+
         def fake_runner(lane: dict[str, Any], sha: str) -> tuple[str, int]:
+            # Like cargo: asking for a target that does not exist at `sha` fails the invocation.
+            argv = lane.get("argv", [])
+            for index, arg in enumerate(argv[:-1]):
+                if arg == "--test" and argv[index + 1] in absent.get(sha, set()):
+                    name = argv[index + 1]
+                    return f"error: no test target named `{name}` in `asupersync` package\n  Remote command finished: exit=101 in 1ms\n", 101
             entry = logs.get(lane["id"], {}).get(sha)
             if entry is None:
                 return "", 103
             return entry["log"], entry.get("client_exit", 0)
 
+        def fake_target_exists(sha: str, name: str) -> bool:
+            return name not in absent.get(sha, set())
+
         for lane in scenario["plan"]["lanes"]:
             lane.setdefault("display_command", " ".join(lane.get("argv", [lane["id"]])))
-        result = run_engine(scenario["plan"], fake_runner, scenario.get("state", {"known_reds": {}}), scenario.get("now", "2026-01-01T00:00:00+00:00"))
+        result = run_engine(
+            scenario["plan"],
+            fake_runner,
+            scenario.get("state", {"known_reds": {}}),
+            scenario.get("now", "2026-01-01T00:00:00+00:00"),
+            None if scenario.get("disable_target_filter") else fake_target_exists,
+        )
         probes = scenario.get("probes", {})
         result["probe_results"] = {
             "declares_not_compiled": [declares_not_compiled(m) for m in probes.get("declares_not_compiled", [])],
             "bead_ids": [bead_ids(m, set(probes["known_ids"]) if "known_ids" in probes else None) for m in probes.get("bead_ids", [])],
             "file_cfg_features": [list(file_cfg_features(s)) for s in probes.get("file_cfg_features", [])],
             "lib_filter_for": [lib_filter_for(p) for p in probes.get("lib_filter_for", [])],
+            "existing_bead_for": [
+                existing_bead_for(case["new_targets"], case["open_issues"]) for case in probes.get("existing_bead_for", [])
+            ],
         }
         json.dump(result, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
@@ -946,11 +1108,17 @@ def main(argv: list[str]) -> int:
         return 0
     args.state_dir.mkdir(parents=True, exist_ok=True)
     runner = rch_runner(str(args.state_dir / "target"), args.admission_attempts, args.admission_sleep, args.state_dir / "logs")
-    result = run_engine(plan, runner, state, now.isoformat())
+    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists)
+    open_issues = open_tracker_issues()
     for payload in result["bead_payloads"]:
         if args.file_beads:
-            bead = file_bead(payload)
-            payload["filed_bead"] = bead
+            existing = existing_bead_for(payload["new_targets"], open_issues)
+            if existing:
+                payload["existing_bead"] = existing  # already tracked: record it, file nothing
+                bead = existing
+            else:
+                bead = file_bead(payload)
+                payload["filed_bead"] = bead
             for target in payload["new_targets"]:
                 entry = state["known_reds"].get(payload["lane"], {}).get(target)
                 if entry is not None:
