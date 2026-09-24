@@ -64,7 +64,7 @@ schedule, and (3) validated work that cannot reach origin.
 | HTTP/2 streaming probe with the peer's one-line fix (`171aa186f`) | **10/10 on first execution.** The listener's streaming path works; only its test harness failed to compile |
 | Gated suites (`http3,tls,test-internals`) | `initialized_supervisor_native` 8/8; `remote_owned_native` 11/11. **`quic_h3_listener_streaming` 9/16 on first execution**: six listener-originated error/reset paths leave the graceful-shutdown drain timing out, and one reset case hangs (R67, `bi2462.167`). A first attempt lost its output stream (inconclusive) and was rerun |
 | I/O replay suites (G2.5 first execution, `--features test-internals`) | **All green, 21/21 parent tests**: `io_capture_replay` 7, `ordered_replay_native_http` 3, `poll_aware_replay_native` 3, `polled_replay_native_tcp` 2, `replay_archive_native` 2, `replay_group_native` 2, `replay_group_session_native` 2, plus child processes. This is I/O replay, not schedule capture |
-| Full lib suite (`--features test-internals`) | Running on the landed tip `73638f012`; results go to `bi2462.86.1`, `.145` and the owning beads |
+| Full lib suite (`--features test-internals`, on the landed tip `73638f012`) | **23,635 passed, 6 failed, 23 ignored** (09-22: 23,562 / 17). The 4 RaptorQ goldens now pass (`.145` closed). The 6 remaining are all carry-overs; 3 sit in files that CopperOak's stranded `83c2c52af` repairs |
 | Contract lanes | Green: proof-status snapshot 22/22 (time-bomb fix holds), orphan census 6/6, error-code registry 6/6, phase-6 gates 11/11. Still red: API surface map 5/6 (R39), supply chain 8/10 (`.136`), Kafka journey inventory 3/11 (pin drift; owner `sarszu.2.14.1`). **Newly red:** proof-lane manifest 14/16. The release-blocking native-cancellation sentinel list misses `local_abort_before_first_poll_keeps_task_level_cancellation_attribution`, added by 30d07d1cc (R66, `bi2462.166`), and the manifest projection golden was rewritten by the 09-21 JSON restyle (R62) |
 
 ### Systemic findings added on September 23 (S1-S6 from September 22 still hold)
@@ -218,7 +218,7 @@ Public API changes stay additive unless the owner approves a break.
   - Default clippy fails on exactly one lint: `tests/signal_subscription_isolation.rs:208` (`needless_collect`). The suggested fix is wrong: the collect gathers 8 thread handles that rendezvous on `Barrier::new(8)`, so spawning and joining lazily would deadlock the child. Use a targeted `allow` with the reason, or restructure the spawn loop.
   - Heal both by hand, then run the `http2-streaming` suite. That run is its first execution; the README currently calls it "unverified".
   - Proof: default check, default clippy and all-features check at the heal SHA, plus the suite counts.
-- **R59 — OWNER: how may the API/web lane land Rust? (P0 decision).**
+- **R59 — OWNER: how may the API/web lane land Rust? (P0 decision; DECIDED 2026-09-24: land-then-heal for all).**
   - Rule 3 forbids uncompiled Rust from that lane; the owner has overridden it five times since it was written.
   - Options:
     - (a) enforce rule 3: the API lane lands a patch file under a docs-only path, and an RCH agent validates and lands it;
@@ -388,8 +388,17 @@ Tracker hygiene:
 - The 30 edge-less blocked beads are classified on `bi2462.88`.
 - `qoir1r` now depends on the watchdog and on R59.
 
-Still running at this update: the full lib suite and a default `clippy --all-targets` on the landed tip `73638f012`.
-Both results go to their beads.
+Final receipts on the landed tip `73638f012`:
+- default `clippy --all-targets -D warnings` is clean (27 min), closing `.160`;
+- the lib suite is 23,635/6/23, with the RaptorQ goldens green, closing `.145`.
+
+Owner decision R59 (`bi2462.162`, closed): **land-then-heal for all**, now AGENTS.md "Validation Path" rule 3 (`a4703693f`):
+- API-lane Rust may land directly, with a cited bead and a plain not-compiled statement;
+- the watchdog posts a receipt within 2 hours;
+- a red receipt, or no green receipt after 6 hours, files a P0 bead;
+- the cited bead's assignee, or else the watchdog operator, heals forward.
+
+Enforcement is `bi2462.147.1`.
 
 ### Created task index (September 23)
 
