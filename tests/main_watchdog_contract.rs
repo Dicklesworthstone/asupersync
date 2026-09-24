@@ -364,6 +364,7 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
                 "ledger_recovery.rs (landed uncompiled in 8f08a9631) uses the nightly API",
                 "Keep handler execution inside the branch",
                 "recompiled cleanly on hz3",
+                "the first version missed \"compilation, runtime tests and rustfmt are NOT RUN\"",
             ],
             "known_ids": ["asupersync-bi2462.158", "asupersync-qoir1r"],
             "bead_ids": [
@@ -389,7 +390,7 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
     assert_eq!(
         probes["declares_not_compiled"],
         json!([
-            true, true, true, true, true, true, false, false, false, false, false
+            true, true, true, true, true, true, false, false, false, false, false, false
         ])
     );
     assert_eq!(

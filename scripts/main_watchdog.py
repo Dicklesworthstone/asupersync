@@ -103,9 +103,17 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # ---------------------------------------------------------------------------
 
 
+QUOTED_RE = re.compile(r'"[^"\n]*"|`[^`\n]*`')
+
+
 def declares_not_compiled(message: str) -> bool:
-    """True when a commit message declares its own change was not compiled or executed."""
-    return any(p.search(message) for p in NOT_COMPILED_PATTERNS)
+    """True when a commit message declares its own change was not compiled or executed.
+
+    Quoted text is ignored: a message that quotes another commit's declaration
+    (for example to describe the predicate itself) is not declaring anything.
+    """
+    unquoted = QUOTED_RE.sub(" ", message)
+    return any(p.search(unquoted) for p in NOT_COMPILED_PATTERNS)
 
 
 def bead_ids(message: str, known: set[str] | None = None) -> list[str]:
