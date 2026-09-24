@@ -625,8 +625,21 @@ where
                         if !*delay_elapsed {
                             if sleep.poll_with_time(time_getter()).is_ready() {
                                 *delay_elapsed = true;
-                            } else {
-                                let _ = Pin::new(sleep).poll(cx);
+                            } else if Pin::new(sleep).poll(cx).is_ready() {
+                                // The registering poll completed the Sleep, so
+                                // decide now instead of polling it again
+                                // (asupersync-bi2462.168). Sleep completes early
+                                // when the current task is cancelled, and a
+                                // cancelled task starts no backup; otherwise
+                                // the delay passed between the two clock reads.
+                                if crate::cx::Cx::current()
+                                    .is_some_and(|current| current.is_cancel_requested())
+                                {
+                                    *hedge_service = None;
+                                    *hedge_request = None;
+                                } else {
+                                    *delay_elapsed = true;
+                                }
                             }
                         }
 
@@ -1123,6 +1136,57 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(hedge.hedged_requests(), 0);
         assert_eq!(hedge.hedge_wins(), 0);
+    }
+
+    /// asupersync-bi2462.168: `Sleep` completes on its registering poll when
+    /// the current task is cancelled. The future used to keep that completed
+    /// Sleep and poll it again ("Sleep polled after completion"). A cancelled
+    /// task must also not start the backup.
+    #[test]
+    fn cancelled_task_never_repolls_the_delay_sleep_or_starts_a_backup() {
+        set_test_time(0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut hedge = Hedge::new(
+            TimedService::new(
+                vec![TimedPlan::ok_at(50, 11), TimedPlan::ok_at(60, 22)],
+                Arc::clone(&calls),
+            ),
+            HedgeConfig::new(Duration::from_nanos(10)).with_time_getter(test_time),
+        );
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(hedge.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let owner = crate::cx::Cx::for_testing();
+        owner.cancel_with(
+            crate::types::CancelKind::User,
+            Some("hedge owner cancelled"),
+        );
+        let _current = crate::cx::Cx::set_current(Some(owner));
+
+        let mut future = hedge.call(7);
+        for poll in 0..3 {
+            let res = Pin::new(&mut future).poll(&mut cx);
+            assert!(
+                res.is_pending(),
+                "poll {poll}: expected pending, got {res:?}"
+            );
+        }
+        // Past the delay by the injected clock: still no backup.
+        set_test_time(20);
+        assert!(Pin::new(&mut future).poll(&mut cx).is_pending());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a cancelled task starts no backup"
+        );
+        assert_eq!(hedge.hedged_requests(), 0);
+
+        set_test_time(50);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(
+            matches!(result, Poll::Ready(Ok(11))),
+            "primary still completes: {result:?}"
+        );
     }
 
     #[test]

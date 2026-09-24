@@ -646,6 +646,9 @@ struct ResolverTimeout<F> {
     sleep: Sleep,
     time_getter: fn() -> Time,
     completed: bool,
+    /// The re-armed wake sleep completed while registering and must be reset
+    /// before it is polled again (asupersync-bi2462.168).
+    sleep_done: bool,
 }
 
 impl<F> ResolverTimeout<F> {
@@ -660,6 +663,7 @@ impl<F> ResolverTimeout<F> {
             sleep: Sleep::new(wake_deadline),
             time_getter,
             completed: false,
+            sleep_done: false,
         }
     }
 
@@ -698,7 +702,15 @@ where
             return Poll::Ready(Err(Elapsed::new(this.deadline)));
         }
 
-        match Pin::new(&mut this.sleep).poll(cx) {
+        if this.sleep_done {
+            this.rearm_wake_sleep();
+            this.sleep_done = false;
+        }
+
+        // A deadline wrapper polls its wake sleep with `poll_deadline`: owner
+        // cancellation is not elapsed time, and the lookup keeps its real
+        // deadline (the convention of bi2462.110's timeout fix).
+        match Pin::new(&mut this.sleep).poll_deadline(cx) {
             Poll::Ready(()) => {
                 if (this.time_getter)() >= this.deadline {
                     this.completed = true;
@@ -707,8 +719,13 @@ where
 
                 // The wake source fired before the injected clock reached the
                 // authoritative deadline, so re-arm for the remaining duration.
+                // A completed Sleep is never polled again: if the re-armed one
+                // is already due, reset it on the next poll.
                 this.rearm_wake_sleep();
-                let _ = Pin::new(&mut this.sleep).poll(cx);
+                if Pin::new(&mut this.sleep).poll_deadline(cx).is_ready() {
+                    this.sleep_done = true;
+                    cx.waker().wake_by_ref();
+                }
             }
             Poll::Pending => {}
         }
@@ -3505,6 +3522,50 @@ mod tests {
         );
 
         crate::test_complete!("resolver_timeout_future_poll_honors_custom_time_getter");
+    }
+
+    /// asupersync-bi2462.168: a cancel-aware wake sleep completed on every poll
+    /// while the current task was cancelled; the timeout re-armed it, kept the
+    /// completed Sleep, and polled it again ("Sleep polled after completion").
+    /// Owner cancellation is not elapsed time: the wait keeps its deadline.
+    #[test]
+    fn resolver_timeout_future_under_cancellation_keeps_its_deadline_without_repolling_its_sleep() {
+        init_test(
+            "resolver_timeout_future_under_cancellation_keeps_its_deadline_without_repolling_its_sleep",
+        );
+        set_test_time(1_000);
+
+        let owner = Cx::for_testing();
+        owner.cancel_with(crate::types::CancelKind::User, Some("dns owner cancelled"));
+        let _guard = Cx::set_current(Some(owner));
+
+        let resolver = Resolver::with_time_getter(ResolverConfig::default(), test_time);
+        let mut future = resolver.timeout_future(Duration::from_secs(5), pending::<()>());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for poll in 0..3 {
+            let waiting: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
+            crate::assert_with_log!(
+                waiting.is_pending(),
+                "owner cancellation is not elapsed time",
+                (poll, true),
+                (poll, waiting.is_pending())
+            );
+        }
+
+        set_test_time(6_000_000_000);
+        let elapsed: Poll<Result<(), Elapsed>> = Future::poll(Pin::new(&mut future), &mut cx);
+        crate::assert_with_log!(
+            matches!(elapsed, Poll::Ready(Err(_))),
+            "the real deadline still elapses",
+            true,
+            matches!(elapsed, Poll::Ready(Err(_)))
+        );
+
+        crate::test_complete!(
+            "resolver_timeout_future_under_cancellation_keeps_its_deadline_without_repolling_its_sleep"
+        );
     }
 
     #[test]
