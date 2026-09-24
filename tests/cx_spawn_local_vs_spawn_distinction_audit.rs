@@ -257,13 +257,14 @@ fn spawn_local_routes_through_owner_thread_lane() {
 
     let fn_marker = "fn spawn_local_via_lane<F, Fut>(";
     let start = source.find(fn_marker).expect("spawn_local_via_lane fn");
-    let window_end = (start + 7000).min(source.len());
-    let safe_end = source
-        .char_indices()
-        .map(|(i, _)| i)
-        .rfind(|&i| i <= window_end)
-        .unwrap_or(window_end);
-    let body = &source[start..safe_end];
+    // Bound the window by the function's own closing brace rather than a
+    // fixed byte count: the body grew past 7000 bytes with the retirement
+    // barrier (929295c1f), which pushed the enqueue out of a fixed window
+    // (asupersync-bi2462.169).
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .map_or(source.len(), |offset| start + offset);
+    let body = &source[start..body_end];
 
     assert!(
         body.contains("LocalSpawnFactoryFn")
@@ -362,10 +363,21 @@ fn spawn_local_schedules_via_worker_local_queue_non_stealable() {
     );
 
     let mailbox = read("src/runtime/spawn_mailbox.rs");
+    // The owner check compares mailbox identity by pointer; since 9cb6cf082
+    // it lives in `local_spawn_lane_is_owned_by_mailbox` (bi2462.169).
+    let owner_check = mailbox
+        .find("fn local_spawn_lane_is_owned_by_mailbox(")
+        .map(|start| {
+            let end = mailbox[start..]
+                .find("\n}\n")
+                .map_or(mailbox.len(), |offset| start + offset);
+            &mailbox[start..end]
+        })
+        .unwrap_or_default();
     assert!(
         source.contains("ScopedLocalSpawnLaneOwner::new")
-            && mailbox.contains("local_spawn_lane_is_owned_by")
-            && mailbox.contains("Arc::ptr_eq(mailbox, gateway.mailbox())"),
+            && mailbox.contains("fn local_spawn_lane_is_owned_by(gateway: &SpawnGateway)")
+            && owner_check.contains("Arc::ptr_eq(owned, mailbox)"),
         "REGRESSION: the worker-local spawn lane no longer carries a \
          runtime-unique mailbox identity. Numeric worker ids or ambient \
          runtime handles are insufficient under multiple or nested runtimes.",
