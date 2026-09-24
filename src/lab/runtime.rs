@@ -4674,6 +4674,8 @@ impl LabRuntime {
                 replay.next = replay.next.saturating_add(1);
                 replay.report.steps_matched = replay.report.steps_matched.saturating_add(1);
             }
+            let _scheduler_driven =
+                crate::runtime::scheduler::three_lane::ScopedSchedulerDriven::enter();
             stored.poll(&mut cx)
         } else {
             if let Some(replay) = self.production_replay.as_mut()

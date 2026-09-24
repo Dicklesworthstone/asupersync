@@ -112,6 +112,7 @@ use crate::cx::{Cx, cap};
 use crate::record::AdmissionError;
 use crate::record::task::TaskState;
 use crate::runtime::resource_monitor::RegionPriority;
+use crate::runtime::scheduler::three_lane::scheduler_drives_current_task;
 use crate::runtime::task_handle::{JoinError, TaskHandle};
 use crate::runtime::{RegionCreateError, RuntimeState, SpawnError, StoredTask};
 use crate::types::{
@@ -1068,17 +1069,16 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         match winner {
             Either::Left(res) => {
                 Self::record_loser_drain_task_complete(cx, first_task);
-                if matches!(&res, Err(JoinError::Panicked(_)))
-                    && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
-                {
+                if matches!(&res, Err(JoinError::Panicked(_))) && !scheduler_drives_current_task() {
                     // In direct block_on tests there is no scheduler driving the
                     // loser task after the winner panic surfaces. Best-effort poll
                     // once so a cooperative loser can observe cancellation, then
                     // preserve the winner panic without deadlocking the test.
+                    // Only a drain that happened is recorded (bi2462.101).
                     if Self::best_effort_poll_loser_join(cx, &mut h2) {
                         Self::record_loser_drain_task_complete(cx, second_task);
+                        Self::record_loser_drain_complete(cx, race_id, first_task);
                     }
-                    Self::record_loser_drain_complete(cx, race_id, first_task);
                     return res;
                 }
                 let loser_res = h2.join(cx).await;
@@ -1094,14 +1094,12 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             }
             Either::Right(res) => {
                 Self::record_loser_drain_task_complete(cx, second_task);
-                if matches!(&res, Err(JoinError::Panicked(_)))
-                    && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
-                {
+                if matches!(&res, Err(JoinError::Panicked(_))) && !scheduler_drives_current_task() {
                     // See the left-branch comment above.
                     if Self::best_effort_poll_loser_join(cx, &mut h1) {
                         Self::record_loser_drain_task_complete(cx, first_task);
+                        Self::record_loser_drain_complete(cx, race_id, second_task);
                     }
-                    Self::record_loser_drain_complete(cx, race_id, second_task);
                     return res;
                 }
                 let loser_res = h1.join(cx).await;
@@ -1233,9 +1231,9 @@ impl<'scope, P: Policy> Scope<'scope, P> {
                     if cx.is_cancel_requested() && cx.checkpoint().is_err() {
                         let participants = [h1.task_id()];
                         let race_id = self.record_loser_drain_start(cx, participants.to_vec());
-                        let reason = cx.cancel_reason().unwrap_or_else(|| {
-                            CancelReason::user("hedge owner cancelled")
-                        });
+                        let reason = cx
+                            .cancel_reason()
+                            .unwrap_or_else(|| CancelReason::user("hedge owner cancelled"));
                         return Err(Self::drain_owner_cancelled_race(
                             cx,
                             &mut [h1],
@@ -1249,7 +1247,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
                     // Request cancellation on primary to avoid orphaned work.
                     h1.abort_with_reason(CancelReason::resource_unavailable());
 
-                    if crate::runtime::scheduler::three_lane::current_worker_id().is_some() {
+                    if scheduler_drives_current_task() {
                         // In scheduler-backed runtime execution, fully drain the
                         // cancelled primary before returning.
                         match h1.join(cx).await {
@@ -1425,19 +1423,24 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         for &idx in &pending_loser_indices {
             handles[idx].abort_with_reason(CancelReason::race_loser());
         }
-        if matches!(&winner_result, Err(JoinError::Panicked(_)))
-            && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
+        if matches!(&winner_result, Err(JoinError::Panicked(_))) && !scheduler_drives_current_task()
         {
             // In direct block_on tests there is no scheduler driving pending
             // losers after the winner panic surfaces. Best-effort poll each
             // loser once so cooperative tasks can observe cancellation, then
-            // preserve the winner panic without deadlocking the test.
+            // preserve the winner panic without deadlocking the test. Only a
+            // drain that happened is recorded (asupersync-bi2462.101).
+            let mut all_drained = true;
             for idx in pending_loser_indices {
                 if Self::best_effort_poll_loser_join(cx, &mut handles[idx]) {
                     Self::record_loser_drain_task_complete(cx, participant_tasks[idx]);
+                } else {
+                    all_drained = false;
                 }
             }
-            Self::record_loser_drain_complete(cx, race_id, winner_task);
+            if all_drained {
+                Self::record_loser_drain_complete(cx, race_id, winner_task);
+            }
             return winner_result.map(|val| (val, winner_idx));
         }
         for idx in pending_loser_indices {

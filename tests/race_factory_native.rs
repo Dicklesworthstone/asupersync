@@ -870,3 +870,107 @@ fn factory_sleep_loser_is_cancelled_without_waiting_for_its_deadline() {
         });
     }
 }
+
+/// A loser parked on a receive whose sender stays alive. It records the cause
+/// it observes once cancellation releases it.
+async fn parked_until_cancelled(
+    child: Cx,
+    mut receiver: mpsc::Receiver<()>,
+    parked: Arc<AtomicUsize>,
+    kinds: Arc<Mutex<Vec<CancelKind>>>,
+) -> u8 {
+    let mut marked = false;
+    let result = {
+        let mut receive = std::pin::pin!(receiver.recv(&child));
+        poll_fn(|task| {
+            let progress = receive.as_mut().poll(task);
+            if progress.is_pending() && !marked {
+                marked = true;
+                parked.fetch_add(1, Ordering::SeqCst);
+            }
+            progress
+        })
+        .await
+    };
+    if let Some(reason) = child.cancel_reason() {
+        kinds.lock().unwrap().push(reason.kind);
+    }
+    assert!(result.is_err(), "the retained sender never sends");
+    0
+}
+
+/// Races a parked loser against a winner that panics once the loser is
+/// parked. Returns whether the race ended Panicked and the causes the loser
+/// observed before the race returned.
+async fn panicking_winner_race(cx: Cx) -> (bool, Vec<CancelKind>) {
+    let parked = Arc::new(AtomicUsize::new(0));
+    let kinds = Arc::new(Mutex::new(Vec::new()));
+    let (_sender, receiver) = mpsc::channel::<()>(1);
+    let (loser_parked, loser_kinds) = (Arc::clone(&parked), Arc::clone(&kinds));
+    let winner_waits = Arc::clone(&parked);
+    let result = cx
+        .race_drained_with(vec![
+            boxed(move |child| parked_until_cancelled(child, receiver, loser_parked, loser_kinds)),
+            boxed(move |_child| async move {
+                while winner_waits.load(Ordering::SeqCst) == 0 {
+                    asupersync::runtime::yield_now().await;
+                }
+                panic!("winner panics after the loser parked");
+            }),
+        ])
+        .await;
+    let observed = kinds.lock().unwrap().clone();
+    (matches!(result, Err(JoinError::Panicked(_))), observed)
+}
+
+/// asupersync-bi2462.101: under the deterministic lab a panicking winner used
+/// to return after one noop-waker poll of the loser's join, while the lab
+/// recorded a drain that never happened. The lab now drains the parked loser
+/// before returning, exactly as both native runtimes do.
+#[test]
+fn lab_and_native_drain_a_parked_loser_before_a_panicking_winner_returns() {
+    use asupersync::{Budget, LabConfig, LabRuntime};
+
+    for seed in [17, 41, 93] {
+        let observed = Arc::new(Mutex::new(None));
+        let publish = Arc::clone(&observed);
+        let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(4096));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, mut joined) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let outcome = panicking_winner_race(Cx::current().unwrap()).await;
+                *publish.lock().unwrap() = Some(outcome);
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            matches!(joined.try_join(), Ok(Some(()))),
+            "seed {seed}: owner did not finish: {report:?}"
+        );
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some((true, vec![CancelKind::RaceLost])),
+            "seed {seed}: the lab drains the loser before the race returns"
+        );
+        assert_eq!(
+            lab.oracles.loser_drain.completed_race_count(),
+            1,
+            "seed {seed}: the recorded drain happened"
+        );
+    }
+    for workers in [1, 2] {
+        native(workers, move |cx| async move {
+            let outcome = panicking_winner_race(cx).await;
+            assert_eq!(
+                outcome,
+                (true, vec![CancelKind::RaceLost]),
+                "native workers={workers} drains the loser first"
+            );
+        });
+    }
+    eprintln!(
+        "scenario=panicking-winner-drain seeds=17,41,93 lab=drained native=drained loser_kind=RaceLost"
+    );
+}

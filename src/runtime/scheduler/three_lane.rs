@@ -153,7 +153,7 @@ use crate::util::{CachePadded, DetHashMap, DetHasher, DetRng};
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -1071,6 +1071,40 @@ thread_local! {
         const { RefCell::new(None) };
     /// Thread-local worker id for routing local tasks.
     static CURRENT_WORKER_ID: RefCell<Option<WorkerId>> = const { RefCell::new(None) };
+    /// Set while a scheduler that is not a runtime worker (the deterministic
+    /// lab) polls a task on this thread.
+    static SCHEDULER_DRIVEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks the current thread as driven by a scheduler for the guard's lifetime.
+///
+/// The lab sets this around each task poll so that drain-correct combinators
+/// await their losers exactly as they do on a runtime worker
+/// (asupersync-bi2462.101).
+pub(crate) struct ScopedSchedulerDriven {
+    prev: bool,
+}
+
+impl ScopedSchedulerDriven {
+    pub(crate) fn enter() -> Self {
+        let prev = SCHEDULER_DRIVEN.with(|cell| cell.replace(true));
+        Self { prev }
+    }
+}
+
+impl Drop for ScopedSchedulerDriven {
+    fn drop(&mut self) {
+        let prev = self.prev;
+        let _ = SCHEDULER_DRIVEN.try_with(|cell| cell.set(prev));
+    }
+}
+
+/// Whether the current task is polled by a scheduler that keeps driving other
+/// tasks while it waits: a runtime worker or the lab. Without one (a stored
+/// task polled directly under `block_on`), awaiting another task can deadlock.
+#[inline]
+pub(crate) fn scheduler_drives_current_task() -> bool {
+    current_worker_id().is_some() || SCHEDULER_DRIVEN.with(Cell::get)
 }
 
 /// Scoped setter for the thread-local scheduler pointer.
