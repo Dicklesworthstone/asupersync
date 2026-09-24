@@ -553,9 +553,10 @@ per clone (git cannot auto-share hooks):
 git config core.hooksPath .githooks
 ```
 
-If you genuinely cannot compile locally, either get `rch` access or gate your
-work-in-progress module behind a cargo feature so a break cannot reach the default
-build — do **not** push never-compiled default (`pub mod ...`) code to `main`.
+If you genuinely cannot compile, get `rch` access, or land under the land-then-heal
+conditions in "Validation Path" rule 3 below (cited bead, plain not-compiled statement, watchdog
+receipt within 2 hours, P0 bead on red or after 6 hours). Gating new work-in-progress modules
+behind a non-default cargo feature still keeps a break away from the default build.
 `git push --no-verify` bypasses the hook for a change you have verified another
 way (e.g. docs-only). The hook runs only the default set, not the full
 `--all-features` clippy gate (too slow to block every push). GitHub Actions is currently
@@ -580,13 +581,25 @@ landing code nobody compiled or ran:
    commit through RCH, bisects a new red to its commit and files a P0 bead. It detects breakage
    after it lands and never reverts anything. `plan` shows what a run would do, and `summary`
    reports the daily metrics.
-3. **Commits created through the GitHub web UI or API, or by any agent without a working
-   compile path, must not add or modify Rust sources, `Cargo.toml`/`Cargo.lock`, build scripts or
-   test code.** Such agents may land docs and tracker changes only, or hand the code to an agent
-   that can validate it. A Rust change lands only after at least `cargo check --all-targets
-   --keep-going` (default features) plus a check of every touched feature-gated target has run
-   through RCH. The commit body must cite that receipt. A commit message saying the code was
-   "not compiled" or "not executed" is not an acceptable way to land Rust code.
+3. **Land-then-heal for commits without a compile path (owner decision, 2026-09-24,
+   `asupersync-bi2462.162`).** Commits created through the GitHub web UI or API, or by any agent
+   without a working compile path, may add or modify Rust sources, `Cargo.toml`/`Cargo.lock`,
+   build scripts and test code directly on `main`, under these conditions:
+   - The commit cites the bead it serves, and its body says plainly that the code was not
+     compiled or executed. It never implies a receipt it does not have.
+   - The main watchdog posts an RCH receipt within 2 hours of landing. The receipt covers
+     `cargo check --all-targets --keep-going` (default features), a check of every touched
+     feature-gated target, and the tests the commit adds or names.
+   - A red receipt, or no green receipt after 6 hours, files a P0 bead naming the commit.
+   - The bead's assignee, or failing that the watchdog operator, is the heal owner. The heal
+     owner repairs forward and cites the new receipt. Reverting someone else's commit still
+     needs the owner's approval.
+
+   Every other agent lands Rust only after at least `cargo check --all-targets --keep-going`
+   (default features), plus a check of every touched feature-gated target, has run through RCH on
+   the exact tree being pushed. The commit body must cite that receipt. The committed pre-push hook
+   checks the working tree, not the pushed commit, so it does not satisfy this on its own
+   (`asupersync-bi2462.87`).
 
 ---
 
