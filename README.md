@@ -335,7 +335,7 @@ Asupersync deliberately uses mathematically rigorous machinery where it buys rea
 
 The runtime design is backed by a small-step operational semantics (`asupersync_v4_formal_semantics.md`) and a Lean project (`formal/lean/Asupersync.lean`) that checks six invariants of that abstract model, recorded in `formal/lean/coverage/invariant_status_inventory.json`: structured concurrency single-owner, region-close quiescence, cancellation protocol, race loser drain, obligation no leaks, and no ambient authority.
 
-The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The CI job `lean-build` runs `lake build` on the pinned toolchain and uploads a hash-bound receipt; the last recorded local build is in `formal/lean/coverage/lake_build_receipt.txt`. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
+The proof posture is exact: these are Lean-checked **model** invariants with theorem and executable-test linkage. The production Rust runtime has not been proved to refine that model. This is therefore not a blanket mechanized proof of the executor, adapters, protocol implementations, platform backends, or distributed transports. Broader runtime-facing claims stay tiered through TLA+/TLC exports, lab/refinement oracles, and lane-specific coverage artifacts. The CI job `lean-build` is defined to run `lake build` on the pinned toolchain and upload a hash-bound receipt, but GitHub Actions is disabled for this repository, so it does not currently run; the last recorded local build is in `formal/lean/coverage/lake_build_receipt.txt`. The canonical proof command is `RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build`; see [`artifacts/formal_proof_posture_contract_v1.json`](./artifacts/formal_proof_posture_contract_v1.json), [`tests/formal_proof_posture_contract.rs`](./tests/formal_proof_posture_contract.rs), and [`formal/README.md`](./formal/README.md).
 
 Some checked artifacts retain the legacy markers `Lean-checked core invariants cover the six non-negotiable runtime invariants` and `checks the six non-negotiable runtime invariants`. In this README those phrases mean coverage of the six abstract-model rows only; they do not assert a Rust refinement proof.
 
@@ -1674,9 +1674,11 @@ async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
 
 These macros are available in the default feature set. The default production
 feature set is intentionally limited to `proc-macros` plus
-`nightly-outcome-try`; test-only internals are opt-in. If you opt out of
-default features for a minimal core-only build, re-enable `proc-macros`
-explicitly.
+`nightly-outcome-try` plus the empty compatibility markers `runtime-core` and
+`native-runtime`; test-only internals are opt-in. The markers gate nothing yet.
+They are on by default so that default builds keep those modules when the planned
+runtime split puts them behind the markers. If you opt out of default features
+for a minimal core-only build, re-enable `proc-macros` explicitly.
 
 Current contract:
 
@@ -1890,7 +1892,7 @@ Payoff: principled plan optimization without silently breaking cancel/drain/quie
 
 ### TLA+ Export for Model Checking
 
-Traces can be exported as TLA+ behaviors with spec skeletons for bounded TLC model checking of core invariants (no orphans, obligation linearity, quiescence). See `src/trace/tla_export.rs`. `tests/lab_tla_export_tlc_e2e.rs` exports a real `LabRuntime` trace and runs TLC on it (invariants `NoObligationLeaks`, `QuiescenceOnClose`, `ObligationLinearity`, plus a planted violation that TLC must reject); the CI job `tla-tlc` installs Java and a sha-pinned `tla2tools.jar` and fails closed if TLC is missing. TLC checks the recorded concrete behavior, not a parametric model of the runtime.
+Traces can be exported as TLA+ behaviors with spec skeletons for bounded TLC model checking of core invariants (no orphans, obligation linearity, quiescence). See `src/trace/tla_export.rs`. `tests/lab_tla_export_tlc_e2e.rs` exports a real `LabRuntime` trace and runs TLC on it (invariants `NoObligationLeaks`, `QuiescenceOnClose`, `ObligationLinearity`, plus a planted violation that TLC must reject); the CI job `tla-tlc` is defined to install Java and a sha-pinned `tla2tools.jar` and to fail closed if TLC is missing, but it does not run while GitHub Actions is disabled. TLC checks the recorded concrete behavior, not a parametric model of the runtime.
 
 Payoff: bridge from deterministic runtime traces to model-checking workflows when you need "prove it", not "it passed tests".
 
@@ -1945,8 +1947,9 @@ dependency-cutover, file-deletion, or local-Cargo-fallback authority.
 # crates.io
 asupersync = "0.5.0"
 
-# or git
-# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", version = "0.5.0" }
+# or git (main carries the unreleased 0.6.0 line; a `version = "0.5.0"`
+# requirement would not match it)
+# asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", branch = "main" }
 ```
 
 When migrating from `0.4.x`, `Cx::set_current` now preserves restrictions
@@ -1966,6 +1969,8 @@ Asupersync is feature-light by default; the lab runtime is available without fla
 | `tracing-integration` | Tracing spans/logging integration | No |
 | `proc-macros` | `scope!`, `spawn!`, `join!`, `join_all!`, `race!`, `select!`, plus `#[main]`, `#[test]`, and `#[lab_test]` | Yes |
 | `nightly-outcome-try` | Nightly-only `Outcome` `Try`/residual impls that enable `?` ergonomics | Yes |
+| `runtime-core` | Compatibility marker for the planned runtime module split; gates nothing yet | Yes |
+| `native-runtime` | Compatibility marker for the planned runtime module split; a compile error on wasm32 browser builds, gates nothing else yet | Yes |
 | `tower` | Tower `Service` adapter support | No |
 | `trace-compression` | LZ4 compression for trace files | No |
 | `debug-server` | Debug HTTP server for runtime inspection | No |
@@ -2575,7 +2580,7 @@ rch exec -- bash -lc 'test -f artifacts/proof_notes/main-<bead-or-short-sha>.md 
 
 ### Rollout
 
-All four gates are live today, but their enforcement lane matters. The PR workflow is **PR-only and CI-blocking** for pull-request/release-review events. Normal agent work on `main` is **locally enforced** by the `rch` preflight commands above plus the required committed artifacts. Push-on-main GitHub enforcement is not currently enabled, and the signoff contract records that explicitly.
+All four gates are defined, but GitHub Actions is disabled for this repository (AGENTS.md "Validation Path"). The PR workflow therefore does not run today, and no gate is CI-enforced. Normal agent work on `main` is **locally enforced** by the `rch` preflight commands above plus the required committed artifacts. Push-on-main GitHub enforcement is not currently enabled, and the signoff contract records that explicitly. The main watchdog (`scripts/main_watchdog.py`, `asupersync-bi2462.147`) reports, after the fact, direct-main commits that are missing a triggered flamegraph or proof note. It does not block them.
 
 Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by committing the reviewed behavior change, running the fail-closed golden candidate flow above from that clean commit, reviewing the retrieved exact-set candidate, and committing the promoted registry separately (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
 

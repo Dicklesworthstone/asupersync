@@ -290,15 +290,16 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 
 ```toml
 [features]
-default = ["proc-macros", "nightly-outcome-try"]
+default = ["proc-macros", "nightly-outcome-try", "runtime-core", "native-runtime"]
 nightly-outcome-try = []       # Nightly Outcome Try/? ergonomics for default contributor lanes
+runtime-core = []              # Compatibility marker for the planned runtime module split (gates nothing yet)
 messaging-fabric = []          # Native FABRIC messaging lane
 wasm-browser-preview = []      # Guarded browser-targeted compilation surface
 wasm-runtime = ["wasm-browser-preview"]
 browser-io = []
 browser-trace = []
 deterministic-mode = []
-native-runtime = []
+native-runtime = []            # Compatibility marker; a compile error on wasm32 browser builds
 wasm-browser-dev = ["wasm-runtime", "browser-io", "runtime-core"]
 wasm-browser-prod = ["wasm-runtime", "browser-io", "runtime-core"]
 wasm-browser-deterministic = ["wasm-runtime", "deterministic-mode", "browser-trace", "runtime-core"]

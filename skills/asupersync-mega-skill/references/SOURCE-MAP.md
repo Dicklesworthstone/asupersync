@@ -41,15 +41,15 @@ guarantees:
 
 ## Release and Live-HEAD Status
 
-Last reconciled: 2026-09-09. Publication status was checked separately on
+Last reconciled: 2026-09-23. Publication status was checked separately on
 GitHub and crates.io; a workspace version is not proof of publication.
 
 | Boundary | Current status | Authority |
 |---|---|---|
-| GitHub release assets | v0.4.9 is the functional baseline for the latest published GitHub release | annotated tag and GitHub release registry |
-| Published Rust crate | crates.io lists `asupersync` 0.4.10 | crates.io package registry |
-| Working release candidate | workspace version 0.4.11 is unpublished; browser JavaScript packages remain at 0.4.9 pending reconciliation | live `Cargo.toml`, package manifests, and release tracker `asupersync-ghxhvm` |
-| 0.4.x compatibility floor | v0.4.3 public API and documented behavior remain mandatory | live `AGENTS.md` compatibility policy |
+| GitHub release assets | v0.5.0 (2026-09-12) is the latest published GitHub release | annotated tag and GitHub release registry |
+| Published Rust crate | crates.io lists `asupersync` 0.5.0 | crates.io package registry |
+| Working release candidate | workspace version 0.6.0 on `main` is unpublished (no tag, no GitHub release, not on crates.io); browser JavaScript packages are at 0.4.11 pending reconciliation | live `Cargo.toml`, package manifests, `CHANGELOG.md` `[v0.6.0] - Unreleased`, and `asupersync-bi2462.138` |
+| 0.4.x compatibility floor | v0.4.3 public API and documented behavior remain mandatory; the policy for 0.5.x/0.6.x awaits the owner | live `AGENTS.md` compatibility policy and `asupersync-bi2462.138` |
 | Source after the GitHub baseline | Registered unary `ServiceHandler` implementations can route over native H2 through additive `ServiceHandlerFuture`, `call_unary`, `dispatch_registered_unary`, `dispatch_registered_unary_with_trailers`, `bind_registered_http2`, and `serve_http2`; legacy-shaped impl blocks need no new required trait item, while metadata-only dispatch and `Server::serve` retain their established fail-closed/probe roles. This row does not classify the delta against the later crates.io package. | commit `3c73a334c`; `src/grpc/{service,server}.rs`; focused real-H2 and audit tests |
 | Current-thread root correction on `main` | `block_on` runs its root as a caller-thread task with an owned local lane. The root counts toward task admission and keeps `is_quiescent()` false until it retires. | commits `daaa8b609` and `8bacdbac3`; `tests/runtime_current_thread_root_task.rs`; release bead `asupersync-94jh37` |
 | Open correctness boundaries | Callback/waker execution under runtime-state locks (`asupersync-909482`) and ATP receive-watchdog acceptance (`asupersync-2qas9c`) remain unshipped until live tracker/source evidence says otherwise | live Beads plus focused source/proof |
