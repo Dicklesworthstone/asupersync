@@ -252,6 +252,39 @@ All cargo-heavy validation for Track-Z work must follow this policy:
 - Summary artifacts for cargo-backed runs must record both `rch_routed` and
   `cargo_target_dir`.
 
+### RCH Behavior and Workarounds (observed 2026-09-22..24, asupersync-bi2462.82.5)
+
+These are RCH behaviors, not asupersync bugs; they are reported to the RCH
+maintainer. Until they change:
+
+- **One pooled target per worker.** Distinct `CARGO_TARGET_DIR` values map to a
+  single pooled target on each worker, so concurrent asupersync lanes on one
+  worker serialize on Cargo's lock ("Blocking waiting for file lock on build
+  directory") while holding their slots. Send concurrent lanes to different
+  workers with `RCH_WORKER`. Cancel your own blocked job; never a peer's.
+- **Each clean-overlay job restages the source**, so every lane rebuilds from
+  scratch (17-50 min for asupersync test targets on a loaded worker). Put
+  several `--test` targets in one cargo invocation instead of one lane each.
+- **RCH-I006 "lacks the required runtime" for clippy or rustfmt** means the
+  worker's rustup inventory probe hit a cache lock, so installed components look
+  missing. `rch workers capabilities --json` shows it under `probe_warnings`.
+  `--refresh` clears it only briefly. Steer with `RCH_WORKER` to workers whose
+  inventory lists the component. `RCH_WORKER` is merged with
+  `.rch/config.toml`'s `preferred_workers`.
+- **Admission:** size `-j` to the free slots (the RCH-I003 message says what
+  fits) and set `RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=3000`, because the
+  default wait ends in RCH-I001 `queue_timeout`. `cargo fmt --check` is sized at
+  4 cores and takes no `-j`, so it is not admitted while no worker has 4 free
+  slots.
+- **Timeouts:** the default `RCH_BUILD_TIMEOUT_SEC=5400` is too short for a
+  loaded `cargo check --all-targets` at `-j 2` (RCH-E104). Use 10800 for
+  all-targets lanes. After an E104 whose remote process group could not be
+  verified dead, RCH quarantines the worker.
+- **False results:** a local client exit (for example 143) after `Remote
+  command finished: exit=0` and artifact retrieval is a client-side false red,
+  and the remote exit is authoritative. RCH-E412/E504 exit 0 with nothing run.
+  Always grep for `Finished`, `test result:` and the named tests.
+
 ### Evidence Matrix For Terminal Tracks
 
 The rows below are the minimum evidence ownership contract for the current
