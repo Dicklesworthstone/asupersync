@@ -6,8 +6,8 @@ use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
-    Error, FnArg, GenericArgument, Ident, ItemFn, LitInt, LitStr, Pat, PathArguments, Result,
-    ReturnType, Token, Type, parse_macro_input,
+    Error, FnArg, GenericArgument, Ident, ItemFn, LitBool, LitInt, LitStr, Pat, PathArguments,
+    Result, ReturnType, Token, Type, parse_macro_input,
 };
 
 /// Upper bound of the lazily populated blocking pool that the entry macros
@@ -49,6 +49,7 @@ struct EntryArgs {
     poll_budget: Option<u32>,
     blocking: Option<usize>,
     drain_ms: Option<u64>,
+    drain_report: bool,
 }
 
 impl Parse for EntryArgs {
@@ -71,6 +72,10 @@ impl Parse for EntryArgs {
                     input.parse::<Token![=]>()?;
                     let value: LitInt = input.parse()?;
                     args.drain_ms = Some(value.base10_parse::<u64>()?);
+                }
+                "drain_report" => {
+                    input.parse::<Token![=]>()?;
+                    args.drain_report = input.parse::<LitBool>()?.value;
                 }
                 "workers" => {
                     input.parse::<Token![=]>()?;
@@ -175,11 +180,18 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
         0 => None,
         millis => {
             let literal = Literal::u64_unsuffixed(millis);
+            let report = args.drain_report.then(|| quote! {
+                let _ = ::std::io::Write::write_fmt(
+                    &mut ::std::io::stderr(),
+                    ::core::format_args!("asupersync root drain: {:?}\n", __asupersync_entry_drain),
+                );
+            });
             Some(quote! {
                 {
                     #legacy_drain_fallback
-                    let _ = __asupersync_entry_runtime
+                    let __asupersync_entry_drain = __asupersync_entry_runtime
                         .drain_root_region(::core::time::Duration::from_millis(#literal));
+                    #report
                 }
             })
         }
@@ -192,12 +204,33 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
             let __asupersync_entry_runtime = #builder
                 .build()
                 .expect("asupersync entry macro failed to build the runtime");
-            let __asupersync_entry_output = __asupersync_entry_runtime.block_on(async move {
-                #cx_binding
-                #block
-            });
-            #drain_step
-            __asupersync_entry_output
+            // Keep the runtime alive while unwinding the entry future so
+            // root-owned children and finalizers still receive their drain.
+            let __asupersync_entry_output = ::std::panic::catch_unwind(
+                ::std::panic::AssertUnwindSafe(|| {
+                    __asupersync_entry_runtime.block_on(async move {
+                        #cx_binding
+                        #block
+                    })
+                }),
+            );
+            let __asupersync_drain_output = ::std::panic::catch_unwind(
+                ::std::panic::AssertUnwindSafe(|| { #drain_step }),
+            );
+            match __asupersync_entry_output {
+                ::core::result::Result::Ok(output) => match __asupersync_drain_output {
+                    ::core::result::Result::Ok(()) => output,
+                    ::core::result::Result::Err(panic) => ::std::panic::resume_unwind(panic),
+                },
+                ::core::result::Result::Err(panic) => {
+                    if let ::core::result::Result::Err(secondary) = __asupersync_drain_output {
+                        // A secondary panic payload may panic on Drop.
+                        // Preserve the original entry failure even then.
+                        ::core::mem::forget(secondary);
+                    }
+                    ::std::panic::resume_unwind(panic)
+                },
+            }
         }
     })
 }
@@ -378,7 +411,7 @@ fn unsupported_entry_arg(key: &Ident) -> Error {
         _ => None,
     };
     let mut message = format!(
-        "unsupported asupersync entry argument `{key_name}`; valid arguments are `flavor`, `workers`, `budget`, `blocking`, and `drain_ms`"
+        "unsupported asupersync entry argument `{key_name}`; valid arguments are `flavor`, `workers`, `budget`, `blocking`, `drain_ms`, and `drain_report`"
     );
     if let Some(suggestion) = suggestion {
         message.push_str("; did you mean `");
@@ -482,7 +515,7 @@ mod tests {
         let err = syn::parse2::<EntryArgs>(quote!(blocking_threads = 4)).unwrap_err();
         let message = err.to_string();
         assert!(message.contains(
-            "valid arguments are `flavor`, `workers`, `budget`, `blocking`, and `drain_ms`"
+            "valid arguments are `flavor`, `workers`, `budget`, `blocking`, `drain_ms`, and `drain_report`"
         ));
         assert!(message.contains("did you mean `blocking`"));
     }
@@ -526,6 +559,36 @@ mod tests {
         assert!(tokens.contains("drain_root_region"));
         assert!(tokens.contains("from_millis (7)"));
         assert!(!tokens.contains("__AsupersyncEntryDrainFallback"));
+    }
+
+    #[test]
+    fn entry_drain_report_is_opt_in_and_panic_is_resumed_after_drain() {
+        let input: ItemFn = syn::parse2(quote! { async fn main() {} }).unwrap();
+        let default = expand_entry(&EntryArgs::default(), input.clone(), EntryKind::Main)
+            .unwrap()
+            .to_string();
+        assert!(!default.contains("asupersync root drain:"));
+        assert!(!default.contains("write_fmt"));
+        let args: EntryArgs = syn::parse2(quote!(drain_report = true)).unwrap();
+        let reported = expand_entry(&args, input.clone(), EntryKind::Main)
+            .unwrap()
+            .to_string();
+        assert!(reported.contains("asupersync root drain:"));
+        let catch = reported.find("catch_unwind").unwrap();
+        let drain = reported.rfind(". drain_root_region").unwrap();
+        let resume = reported.find("resume_unwind").unwrap();
+        assert!(catch < drain && drain < resume);
+        assert!(
+            !syn::parse2::<EntryArgs>(quote!(drain_report = false))
+                .unwrap()
+                .drain_report
+        );
+        assert!(syn::parse2::<EntryArgs>(quote!(drain_report = "true")).is_err());
+        let skipped: EntryArgs = syn::parse2(quote!(drain_report = true, drain_ms = 0)).unwrap();
+        let skipped = expand_entry(&skipped, input, EntryKind::Main)
+            .unwrap()
+            .to_string();
+        assert!(!skipped.contains("asupersync root drain:"));
     }
 
     #[test]

@@ -13,12 +13,15 @@
 //!   cleanup counter is read after the macro-expanded function returns);
 //! - `drain_ms = 0` restores the old behaviour: the same task's cleanup has
 //!   not run when the function returns (planted negative);
-//! - `Runtime::drain_root_region` reports `Quiescent` for cooperative work
-//!   and `TimedOut` within the bound for non-cooperative work.
+//! - `Runtime::drain_root_region` reports `Quiescent` for completed root
+//!   close and `TimedOut` within the bound for non-cooperative work;
+//! - an unwinding entry panic still drains its genuinely parked child, emits
+//!   the opt-in terminal report, and resumes the original panic in a subprocess.
 //!
 //! No-claim: non-cooperative code is not bounded beyond the wait; LabRuntime
 //! semantics are unchanged.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -26,6 +29,139 @@ use std::time::{Duration, Instant};
 use asupersync::Cx;
 use asupersync::observability::TaskInspectorConfig;
 use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder, yield_now};
+
+async fn panic_after_child_parks(cx: &Cx) {
+    let parked = Arc::new(asupersync::sync::Notify::new());
+    let pending = Arc::new(AtomicBool::new(false));
+    let child_parked = Arc::clone(&parked);
+    let child_pending = Arc::clone(&pending);
+    let _child = cx
+        .spawn(move |child| async move {
+            let mut cancelled = std::pin::pin!(child.cancelled());
+            std::future::poll_fn(|task| {
+                let result = cancelled.as_mut().poll(task);
+                if result.is_pending() {
+                    child_pending.store(true, Ordering::Release);
+                    child_parked.notify_one();
+                }
+                result
+            })
+            .await;
+            let reason = child
+                .checkpoint()
+                .expect_err("entry panic must run the shutdown drain")
+                .reason;
+            assert_eq!(reason.kind, asupersync::types::CancelKind::Shutdown);
+            eprintln!("ENTRY_PANIC_CHILD_CLEANED kind=Shutdown");
+        })
+        .expect("spawn child that outlives the panicking entry");
+    parked.wait_until(|| pending.load(Ordering::Acquire)).await;
+    eprintln!("ENTRY_PANIC_CHILD_PARKED");
+    panic!("ORIGINAL_ENTRY_PANIC_MUST_SURVIVE");
+}
+
+mod panicking_current_thread {
+    use super::*;
+
+    #[asupersync::main(flavor = "current_thread", drain_ms = 1000, drain_report = true)]
+    pub(super) async fn main(cx: &Cx) {
+        panic_after_child_parks(cx).await;
+    }
+}
+
+mod panicking_multi_thread {
+    use super::*;
+
+    #[asupersync::main(workers = 2, drain_ms = 1000, drain_report = true)]
+    pub(super) async fn main(cx: &Cx) {
+        panic_after_child_parks(cx).await;
+    }
+}
+
+#[test]
+fn panicking_entry_drains_children_and_reports_before_resuming_panic() {
+    const CHILD_CASE: &str = "ASUPERSYNC_ENTRY_PANIC_DRAIN_CASE";
+    if let Ok(case) = std::env::var(CHILD_CASE) {
+        let result = std::panic::catch_unwind(|| match case.as_str() {
+            "current" => panicking_current_thread::main(),
+            "multi" => panicking_multi_thread::main(),
+            _ => panic!("unknown entry panic case"),
+        });
+        let panic = result.expect_err("panicking entry unexpectedly returned");
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(message, Some("ORIGINAL_ENTRY_PANIC_MUST_SURVIVE"));
+        eprintln!("ENTRY_PANIC_ORIGINAL_PAYLOAD_OBSERVED_AFTER_DRAIN");
+        std::panic::resume_unwind(panic);
+    }
+    for case in ["current", "multi"] {
+        let started = Instant::now();
+        let mut child =
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "panicking_entry_drains_children_and_reports_before_resuming_panic",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_CASE, case)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn entry panic subprocess");
+        loop {
+            if child.try_wait().expect("entry subprocess status").is_some() {
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(10) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("entry panic drain exceeded process watchdog: {case}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let output = child
+            .wait_with_output()
+            .expect("collect entry panic output");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !output.status.success(),
+            "the original panic must remain a failure"
+        );
+        assert!(
+            stderr.contains("ENTRY_PANIC_CHILD_PARKED"),
+            "child never parked: {stdout}\n{stderr}"
+        );
+        assert!(
+            stderr.contains("ENTRY_PANIC_CHILD_CLEANED kind=Shutdown"),
+            "panic skipped cooperative cleanup: {stdout}\n{stderr}"
+        );
+        assert!(
+            stderr.contains("ORIGINAL_ENTRY_PANIC_MUST_SURVIVE"),
+            "original panic payload lost: {stdout}\n{stderr}"
+        );
+        let cleanup = stderr.find("ENTRY_PANIC_CHILD_CLEANED").unwrap();
+        let report = stderr
+            .find("asupersync root drain: Quiescent")
+            .expect("observable successful drain report");
+        assert!(cleanup < report, "drain reported before cleanup");
+        let payload = stderr
+            .find("ENTRY_PANIC_ORIGINAL_PAYLOAD_OBSERVED_AFTER_DRAIN")
+            .expect("subprocess must inspect the resumed payload, not only its panic hook");
+        assert!(
+            report < payload,
+            "the report precedes resuming the entry panic"
+        );
+        eprintln!(
+            "{{\"bead\":\"asupersync-bi2462.92\",\"scenario\":\"panic-entry\",\"runtime\":\"{case}\",\"elapsed_ms\":{},\"cleanup_observed\":true,\"original_panic_preserved\":true}}",
+            started.elapsed().as_millis()
+        );
+    }
+}
 
 /// Spawns a task that keeps checkpointing until cancelled, then bumps
 /// `cleanup` once. The handle is deliberately dropped: the task outlives the
@@ -165,10 +301,8 @@ fn drain_reports_quiescent_for_cooperative_work(runtime: asupersync::runtime::Ru
     }
     assert_eq!(outcome, RootDrainOutcome::Quiescent);
     assert_eq!(cleanup.load(Ordering::SeqCst), 1);
-    // Informational: full runtime quiescence additionally requires the root
-    // region to have left its close lifecycle and the I/O driver to hold no
-    // wakers; report it rather than assert it (the drain contract is
-    // task-and-obligation quiescence).
+    // Full runtime quiescence additionally requires no I/O registrations;
+    // root lifecycle completion is now part of the drain's own contract.
     eprintln!(
         "runtime.is_quiescent() after drain = {}",
         runtime.is_quiescent()

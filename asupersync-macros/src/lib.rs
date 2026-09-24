@@ -90,6 +90,12 @@ pub fn derive_proto_oneof(input: TokenStream) -> TokenStream {
 
 /// Runs an async `main` function on an asupersync production runtime.
 ///
+/// After either a return or an unwinding panic, the root region receives a
+/// shutdown cancellation and is drained for `drain_ms` milliseconds (default
+/// 2000). The original panic is then resumed. Set `drain_ms = 0` to skip this
+/// drain. `drain_report = true` prints the drain outcome to stderr; reporting
+/// is disabled by default and does not change the function's return type.
+///
 /// Supported signatures:
 ///
 /// ```ignore
@@ -111,6 +117,8 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// This is distinct from [`#[lab_test]`](macro@lab_test): `#[asupersync::test]`
 /// uses the production runtime, while `#[lab_test]` uses deterministic lab
 /// runtime seed matrices.
+/// The `drain_ms` and `drain_report` options, including panic-path cleanup,
+/// are the same as for [`#[main]`](macro@main).
 #[proc_macro_attribute]
 pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
     entry::test_impl(attr, item)
