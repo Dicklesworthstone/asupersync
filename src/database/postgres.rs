@@ -46,7 +46,7 @@ use crate::net::TcpStream;
 use crate::obligation::graded::{ObligationToken, TransactionKind};
 use crate::security::SecretString;
 #[cfg(feature = "tls")]
-use crate::tls::{Certificate, TlsConnector, TlsConnectorBuilder, TlsStream};
+use crate::tls::{TlsConnector, TlsStream};
 use crate::types::{CancelReason, Outcome};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
@@ -54,6 +54,10 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
+
+#[path = "postgres_tls.rs"]
+mod tls_options;
+pub use tls_options::{PgTlsOptions, PgTlsVerification};
 
 // ============================================================================
 // Error Types
@@ -2426,7 +2430,22 @@ impl PgConnectOptions {
     /// Parse a connection URL.
     ///
     /// Format: `postgres://user:password@host:port/database?options`
+    /// Use [`Self::parse_with_tls`] for `verify-ca`, `verify-full`, or
+    /// `sslrootcert`, which cannot be represented by this legacy struct alone.
     pub fn parse(url: &str) -> Result<Self, PgError> {
+        Self::parse_url(url, false).map(|(options, _)| options)
+    }
+
+    /// Parse a URL without discarding explicit TLS trust policy.
+    ///
+    /// The returned pair is accepted by [`PgConnection::connect_with_tls_options`].
+    /// `verify-ca` and `verify-full` both require TLS; `sslrootcert` is a
+    /// percent-decoded PEM file path. Other existing URL options are preserved.
+    pub fn parse_with_tls(url: &str) -> Result<(Self, PgTlsOptions), PgError> {
+        Self::parse_url(url, true)
+    }
+
+    fn parse_url(url: &str, extended_tls: bool) -> Result<(Self, PgTlsOptions), PgError> {
         let url = url
             .strip_prefix("postgres://")
             .or_else(|| url.strip_prefix("postgresql://"))
@@ -2496,20 +2515,43 @@ impl PgConnectOptions {
         let mut ssl_mode = SslMode::Prefer;
         let mut application_name = None;
         let mut connect_timeout = None;
+        let mut tls = PgTlsOptions::default();
+        let mut verification = None;
         for kv in params.split('&').filter(|s| !s.is_empty()) {
             if let Some((key, value)) = kv.split_once('=') {
                 match key {
                     "sslmode" => {
+                        verification = None;
                         ssl_mode = match value {
                             "disable" => SslMode::Disable,
                             "prefer" => SslMode::Prefer,
                             "require" => SslMode::Require,
+                            "verify-ca" | "verify-full" if extended_tls => {
+                                verification = Some(if value == "verify-ca" {
+                                    PgTlsVerification::VerifyCa
+                                } else {
+                                    PgTlsVerification::VerifyFull
+                                });
+                                SslMode::Require
+                            }
                             _ => {
                                 return Err(PgError::InvalidUrl(format!(
                                     "unknown sslmode: {value}"
                                 )));
                             }
                         };
+                    }
+                    "sslrootcert" => {
+                        if !extended_tls {
+                            return Err(PgError::InvalidUrl(
+                                "sslrootcert requires PgConnectOptions::parse_with_tls".into(),
+                            ));
+                        }
+                        let path = percent_decode(value);
+                        if path.is_empty() {
+                            return Err(PgError::InvalidUrl("sslrootcert path is empty".into()));
+                        }
+                        tls = tls.root_certificate_file(path);
                     }
                     "application_name" => {
                         application_name = Some(percent_decode(value));
@@ -2525,22 +2567,28 @@ impl PgConnectOptions {
             }
         }
 
-        Ok(Self {
-            host: percent_decode(host),
-            port,
-            database: percent_decode(database),
-            user,
-            // br-asupersync-r2l1ze: wrap the parsed password (whose
-            // owned `String` allocation came from `percent_decode`)
-            // into a `SecretString` so its bytes are zeroized on drop.
-            // `from_string` reuses the existing allocation — the bytes
-            // wiped at drop are the same bytes that were in memory
-            // during connection setup.
-            password: password.map(SecretString::from_string),
-            application_name,
-            connect_timeout,
-            ssl_mode,
-        })
+        if let Some(verification) = verification {
+            tls = tls.verification(verification);
+        }
+        Ok((
+            Self {
+                host: percent_decode(host),
+                port,
+                database: percent_decode(database),
+                user,
+                // br-asupersync-r2l1ze: wrap the parsed password (whose
+                // owned `String` allocation came from `percent_decode`)
+                // into a `SecretString` so its bytes are zeroized on drop.
+                // `from_string` reuses the existing allocation — the bytes
+                // wiped at drop are the same bytes that were in memory
+                // during connection setup.
+                password: password.map(SecretString::from_string),
+                application_name,
+                connect_timeout,
+                ssl_mode,
+            },
+            tls,
+        ))
     }
 }
 
@@ -2563,7 +2611,7 @@ impl PgStream {
         match self {
             Self::Plain(s) => s.shutdown(how),
             #[cfg(feature = "tls")]
-            Self::Tls(_) => Ok(()), // TLS stream dropped on connection close
+            Self::Tls(s) => s.get_ref().shutdown(how),
         }
     }
 
@@ -2585,10 +2633,9 @@ impl PgStream {
     ///
     /// TLS is intentionally skipped — encrypting the frame would
     /// require driving an async TLS handshake from sync Drop. The
-    /// existing TLS shutdown (drop-on-close) is preserved; the server
-    /// still reclaims state via idle_session_timeout (slower but
-    /// unavoidable from sync Drop). Future work could route TLS
-    /// connection close through an async helper.
+    /// subsequent underlying TCP shutdown still releases the transport even
+    /// when the closed connection object remains alive. An orderly TLS close
+    /// with a Terminate frame uses the explicit async close path.
     fn try_send_terminate_frame(&self) {
         const TERMINATE_FRAME: [u8; 5] = [b'X', 0, 0, 0, 4];
         match self {
@@ -2914,6 +2961,8 @@ struct PgConnectionInner {
     stream: PgStream,
     /// Original connection options retained for safe idle reconnect.
     options: PgConnectOptions,
+    /// The full trust policy must survive reconnect without widening its roots.
+    tls_options: PgTlsOptions,
     /// Server process ID.
     process_id: i32,
     /// Secret key for cancel requests.
@@ -3737,10 +3786,11 @@ impl PgConnection {
         }
 
         let options = self.inner.options.clone();
+        let tls_options = self.inner.tls_options.clone();
         let max_result_rows = self.inner.max_result_rows;
         let subscribed_channels = self.inner.subscribed_channels.clone();
 
-        let mut fresh = match Self::connect_with_options(cx, options).await {
+        let mut fresh = match Self::connect_with_tls_options(cx, options, tls_options).await {
             Outcome::Ok(conn) => conn,
             Outcome::Err(err) => return Outcome::Err(err),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -3870,18 +3920,21 @@ impl PgConnection {
     ///
     /// # Cancellation
     ///
-    /// This operation checks for cancellation before starting.
+    /// Cancellation wakes DNS, TCP, TLS, and authentication waits and drops
+    /// incomplete transports. `connect_timeout` bounds the entire connection
+    /// setup once; its default is thirty seconds. TLS additionally has a
+    /// ten-second bound, configurable through [`Self::connect_with_tls_options`].
     pub async fn connect(cx: &Cx, url: &str) -> Outcome<Self, PgError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(cancelled_reason(cx));
         }
 
-        let options = match PgConnectOptions::parse(url) {
+        let (options, tls) = match PgConnectOptions::parse_with_tls(url) {
             Ok(opts) => opts,
             Err(e) => return Outcome::Err(e),
         };
 
-        Self::connect_with_options(cx, options).await
+        Self::connect_with_tls_options(cx, options, tls).await
     }
 
     /// Connect with explicit options.
@@ -3889,13 +3942,84 @@ impl PgConnection {
         cx: &Cx,
         options: PgConnectOptions,
     ) -> Outcome<Self, PgError> {
+        Self::connect_with_tls_options(cx, options, PgTlsOptions::default()).await
+    }
+
+    /// Connect with explicit CA trust, certificate verification, and TLS bounds.
+    ///
+    /// Selecting a verification mode with [`PgTlsOptions::verification`] requires
+    /// TLS even if the legacy options specify `Prefer` or `Disable`. Cancellation
+    /// and expiry drop the incomplete transport before returning. The TLS bound
+    /// covers SSLRequest through the completed handshake. A separate whole-connect
+    /// deadline covers DNS through ReadyForQuery and does not restart between
+    /// stages. Synchronous CA-file loading cannot be preempted within a poll.
+    pub async fn connect_with_tls_options(
+        cx: &Cx,
+        options: PgConnectOptions,
+        tls: PgTlsOptions,
+    ) -> Outcome<Self, PgError> {
+        use std::future::Future;
+
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(cancelled_reason(cx));
+        }
+        let duration = options
+            .connect_timeout
+            .unwrap_or(tls.connect_timeout_duration());
+        let now = crate::time::wall_now();
+        let mut deadline = std::pin::pin!(crate::time::Sleep::after(now, duration));
+        let mut connect = std::pin::pin!(Self::connect_with_tls_options_inner(cx, options, tls));
+        let mut cancel_wake = CancelWakerGuard::new(cx);
+        std::future::poll_fn(|task_cx| {
+            cancel_wake.refresh(task_cx.waker());
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Outcome::Cancelled(cancelled_reason(cx)));
+            }
+            if deadline.as_mut().poll_deadline(task_cx).is_ready() {
+                return Poll::Ready(Outcome::Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "PostgreSQL connection setup timed out",
+                ))));
+            }
+            let result = connect.as_mut().poll(task_cx);
+            if cx.checkpoint().is_err() {
+                Poll::Ready(Outcome::Cancelled(cancelled_reason(cx)))
+            } else {
+                result
+            }
+        })
+        .await
+    }
+
+    async fn connect_with_tls_options_inner(
+        cx: &Cx,
+        mut options: PgConnectOptions,
+        tls: PgTlsOptions,
+    ) -> Outcome<Self, PgError> {
+        if tls.requires_tls() {
+            options.ssl_mode = SslMode::Require;
+        }
+
+        #[cfg(feature = "tls")]
+        let connector = if options.ssl_mode == SslMode::Disable {
+            None
+        } else {
+            // Prepare trust before the TLS deadline. Defer any trust error
+            // until the server accepts TLS so legacy Prefer still permits a
+            // plaintext server to decline TLS when no roots are installed.
+            Some(Self::build_postgres_tls_connector(&tls))
+        };
+        #[cfg(not(feature = "tls"))]
+        if options.ssl_mode == SslMode::Require {
+            return Outcome::Err(PgError::Tls(
+                "TLS required but the `tls` feature is not enabled".into(),
+            ));
         }
 
         let tcp_stream = match Self::connect_tcp(&options).await {
             Ok(stream) => stream,
-            Err(e) => return Outcome::Err(e),
+            Err(PgError::Io(error)) => return outcome_from_error(io_or_cancelled(cx, error)),
+            Err(error) => return Outcome::Err(error),
         };
 
         // TLS negotiation based on ssl_mode
@@ -3903,7 +4027,15 @@ impl PgConnection {
             SslMode::Disable => PgStream::Plain(tcp_stream),
             #[cfg(feature = "tls")]
             SslMode::Prefer | SslMode::Require => {
-                match Self::negotiate_tls(cx, tcp_stream, &options).await {
+                match Self::negotiate_tls(
+                    cx,
+                    tcp_stream,
+                    &options,
+                    &tls,
+                    connector.expect("TLS connector was configured"),
+                )
+                .await
+                {
                     Ok(s) => s,
                     Err(PgError::Cancelled(reason)) => return Outcome::Cancelled(reason),
                     Err(e) => return outcome_from_error(e),
@@ -3924,6 +4056,7 @@ impl PgConnection {
             inner: PgConnectionInner {
                 stream,
                 options: options.clone(),
+                tls_options: tls,
                 process_id: 0,
                 secret_key: 0,
                 cancel_target,
@@ -4003,8 +4136,57 @@ impl PgConnection {
     #[cfg(feature = "tls")]
     async fn negotiate_tls(
         cx: &Cx,
+        tcp: TcpStream,
+        options: &PgConnectOptions,
+        tls: &PgTlsOptions,
+        connector: Result<TlsConnector, PgError>,
+    ) -> Result<PgStream, PgError> {
+        use std::future::Future;
+
+        let duration = options
+            .connect_timeout
+            .map_or(tls.handshake_timeout_duration(), |timeout| {
+                timeout.min(tls.handshake_timeout_duration())
+            });
+        // Sleep uses the polling runtime's clock. The explicit owner Cx may be
+        // a separately cancelled context and supplies cancellation independently.
+        let now = Cx::current()
+            .and_then(|current| current.timer_driver())
+            .map_or_else(crate::time::wall_now, |driver| driver.now());
+        let mut deadline = std::pin::pin!(crate::time::Sleep::after(now, duration));
+        let mut exchange =
+            std::pin::pin!(Self::negotiate_tls_exchange(cx, tcp, options, connector));
+        let mut cancel_wake = CancelWakerGuard::new(cx);
+        std::future::poll_fn(|task_cx| {
+            cancel_wake.refresh(task_cx.waker());
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(cancelled_error(cx)));
+            }
+            if deadline.as_mut().poll_deadline(task_cx).is_ready() {
+                return Poll::Ready(Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "PostgreSQL TLS negotiation timed out",
+                ))));
+            }
+            let result = exchange.as_mut().poll(task_cx);
+            // An ambient socket can observe cancellation inside this poll.
+            // Keep owner cancellation attributed as Cancelled, including when
+            // rustls wraps an Interrupted error in its TLS error type.
+            if cx.checkpoint().is_err() {
+                Poll::Ready(Err(cancelled_error(cx)))
+            } else {
+                result
+            }
+        })
+        .await
+    }
+
+    #[cfg(feature = "tls")]
+    async fn negotiate_tls_exchange(
+        cx: &Cx,
         mut tcp: TcpStream,
         options: &PgConnectOptions,
+        connector: Result<TlsConnector, PgError>,
     ) -> Result<PgStream, PgError> {
         // SSLRequest message: 8 bytes total
         //   4 bytes: message length (8, including self)
@@ -4072,7 +4254,7 @@ impl PgConnection {
         match response[0] {
             b'S' => {
                 // Server accepts TLS — perform handshake.
-                let connector = Self::build_postgres_tls_connector()?;
+                let connector = connector?;
                 let tls_stream = connector
                     .connect(&options.host, tcp)
                     .await
@@ -4257,23 +4439,8 @@ impl PgConnection {
     }
 
     #[cfg(feature = "tls")]
-    fn build_postgres_tls_connector() -> Result<TlsConnector, PgError> {
-        let mut tls_builder = TlsConnectorBuilder::new()
-            .with_webpki_roots()
-            .with_strict_ca_validation();
-
-        // Match libpq-style deployments that provide an extra private
-        // CA bundle through SSL_CERT_FILE, while keeping certificate
-        // verification enabled.
-        if let Ok(ca_path) = std::env::var("SSL_CERT_FILE") {
-            let certs = Certificate::from_pem_file(&ca_path)
-                .map_err(|err| PgError::Tls(format!("loading SSL_CERT_FILE {ca_path}: {err}")))?;
-            tls_builder = tls_builder.add_root_certificates(certs);
-        }
-
-        tls_builder
-            .build()
-            .map_err(|err| PgError::Tls(err.to_string()))
+    fn build_postgres_tls_connector(options: &PgTlsOptions) -> Result<TlsConnector, PgError> {
+        options.build_connector()
     }
 
     /// Choose a `ScramChannelBinding` based on advertised mechanisms, whether
@@ -8544,12 +8711,14 @@ mod hex {
 pub struct PgConnectionManager {
     /// Options used to mint each new connection.
     options: PgConnectOptions,
+    tls_options: PgTlsOptions,
 }
 
 impl fmt::Debug for PgConnectionManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PgConnectionManager")
             .field("options", &self.options)
+            .field("tls_options", &self.tls_options)
             .finish()
     }
 }
@@ -8558,7 +8727,26 @@ impl PgConnectionManager {
     /// Create a new manager that mints connections using `options`.
     #[must_use]
     pub fn new(options: PgConnectOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            tls_options: PgTlsOptions::default(),
+        }
+    }
+
+    /// Configure the trust policy retained by every pooled connection and reconnect.
+    #[must_use]
+    pub fn with_tls_options(mut self, tls_options: PgTlsOptions) -> Self {
+        if tls_options.requires_tls() {
+            self.options.ssl_mode = SslMode::Require;
+        }
+        self.tls_options = tls_options;
+        self
+    }
+
+    /// Create a manager from a URL including `sslrootcert` and verified SSL modes.
+    pub fn from_url(url: &str) -> Result<Self, PgError> {
+        let (options, tls_options) = PgConnectOptions::parse_with_tls(url)?;
+        Ok(Self::new(options).with_tls_options(tls_options))
     }
 
     /// Returns the options the manager uses to mint connections.
@@ -8576,7 +8764,8 @@ impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
         // Pass through verbatim — the underlying constructor already
         // returns Outcome<PgConnection, PgError>; the explicit match
         // would only round-trip the data through itself.
-        PgConnection::connect_with_options(cx, self.options.clone()).await
+        PgConnection::connect_with_tls_options(cx, self.options.clone(), self.tls_options.clone())
+            .await
     }
 
     async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
@@ -8664,6 +8853,7 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
+                tls_options: PgTlsOptions::default(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: test_cancel_target(),

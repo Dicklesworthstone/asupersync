@@ -43,6 +43,7 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
+                tls_options: super::PgTlsOptions::default(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: test_cancel_target(),

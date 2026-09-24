@@ -81,8 +81,8 @@ impl RealPgConfig {
 }
 
 fn postgres_url_host_is_local(url: &str) -> bool {
-    match PgConnectOptions::parse(url) {
-        Ok(opts) => {
+    match PgConnectOptions::parse_with_tls(url) {
+        Ok((opts, _)) => {
             opts.host.eq_ignore_ascii_case("localhost")
                 || matches!(opts.host.as_str(), "127.0.0.1" | "::1")
         }
@@ -203,6 +203,61 @@ fn postgres_real_config_localhost_gate_rejects_prefix_spoofing() {
         "postgres://postgres:postgres@10.0.0.5:5432/postgres"
     ));
     assert!(!postgres_url_host_is_local("not-a-postgres-url"));
+    assert!(postgres_url_host_is_local(
+        "postgres://localhost/postgres?sslmode=verify-full&sslrootcert=%2Fprivate%20ca.pem"
+    ));
+}
+
+/// Run against an actual private-CA PostgreSQL server with REAL_POSTGRES_TESTS=true
+/// and PGSSLROOTCERT set to its CA bundle. Each mode must authenticate and the
+/// backend's own pg_stat_ssl row must confirm that this session uses TLS.
+#[cfg(feature = "tls")]
+#[test]
+fn pg_real_private_ca_tls_verification() {
+    use asupersync::database::postgres::{PgTlsOptions, PgTlsVerification};
+
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_private_ca_tls_verification") {
+        return;
+    }
+    let Ok(root_path) = std::env::var("PGSSLROOTCERT") else {
+        eprintln!(
+            r#"{{"event":"test_skipped","test":"pg_real_private_ca_tls_verification","reason":"PGSSLROOTCERT private CA bundle not configured"}}"#
+        );
+        return;
+    };
+    let log = PgTestLogger::new("postgres_real", "pg_real_private_ca_tls_verification");
+    run_test_with_cx(|cx| async move {
+        for mode in [PgTlsVerification::VerifyCa, PgTlsVerification::VerifyFull] {
+            let (options, _) = PgConnectOptions::parse_with_tls(&cfg.url).unwrap();
+            let tls = PgTlsOptions::new()
+                .root_certificate_file(&root_path)
+                .verification(mode);
+            let mut connection = unwrap_pg(
+                PgConnection::connect_with_tls_options(&cx, options, tls).await,
+                &log,
+                "private_ca_connect",
+            );
+            let rows = unwrap_pg(
+                connection
+                    .query_unchecked(
+                        &cx,
+                        "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+                    )
+                    .await,
+                &log,
+                "backend_tls_state",
+            );
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].get_bool("ssl").expect("backend SSL flag"));
+            log.line(
+                "private_ca_authenticated",
+                &[("mode", &format!("{mode:?}")), ("backend_ssl", "true")],
+            );
+            connection.close().await.unwrap();
+        }
+        log.end("pass");
+    });
 }
 
 fn unwrap_pg<T>(out: Outcome<T, PgError>, log: &PgTestLogger, op: &str) -> T {

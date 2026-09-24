@@ -946,7 +946,7 @@ mod tests {
         // SAFETY: this test holds a process-wide mutex for SSL_CERT_FILE.
         unsafe { std::env::set_var("SSL_CERT_FILE", "/definitely/not/a/postgres-ca.pem") };
 
-        let result = PgConnection::build_postgres_tls_connector();
+        let result = PgConnection::build_postgres_tls_connector(&PgTlsOptions::default());
 
         match previous {
             Some(value) => {
@@ -1160,6 +1160,7 @@ mod tests {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
                 options: test_pg_connect_options(),
+                tls_options: PgTlsOptions::default(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: test_cancel_target(),
@@ -1195,6 +1196,7 @@ mod tests {
                 inner: PgConnectionInner {
                     stream: PgStream::Plain(stream),
                     options: test_pg_connect_options(),
+                    tls_options: PgTlsOptions::default(),
                     process_id: 0,
                     secret_key: 0,
                     cancel_target: test_cancel_target(),
@@ -4830,6 +4832,46 @@ mod tests {
         let opts =
             PgConnectOptions::parse("postgres://user:pass@localhost/db?sslmode=require").unwrap();
         assert_eq!(opts.ssl_mode, SslMode::Require);
+    }
+
+    #[test]
+    fn parse_verified_ssl_modes_preserves_separate_trust_policy() {
+        for (value, expected) in [
+            ("verify-ca", PgTlsVerification::VerifyCa),
+            ("verify-full", PgTlsVerification::VerifyFull),
+        ] {
+            let url = format!(
+                "postgres://user:pass@localhost/db?sslmode={value}&sslrootcert=%2Fprivate%20ca.pem&connect_timeout=7"
+            );
+            let (options, tls) = PgConnectOptions::parse_with_tls(&url).unwrap();
+            assert_eq!(options.ssl_mode, SslMode::Require);
+            assert_eq!(
+                options.connect_timeout,
+                Some(std::time::Duration::from_secs(7))
+            );
+            assert_eq!(tls.verification_mode(), expected);
+            assert!(tls.has_explicit_roots());
+            assert!(tls.requires_tls());
+            assert!(
+                PgConnectOptions::parse(&url).is_err(),
+                "legacy options must not silently erase trust policy"
+            );
+        }
+        assert!(PgConnectOptions::parse_with_tls("postgres://localhost/db?sslrootcert=").is_err());
+    }
+
+    #[test]
+    fn repeated_sslmode_uses_final_policy_without_stale_verification() {
+        let (options, tls) = PgConnectOptions::parse_with_tls(
+            "postgres://localhost/db?sslmode=verify-ca&sslmode=prefer",
+        )
+        .unwrap();
+        assert_eq!(options.ssl_mode, SslMode::Prefer);
+        assert_eq!(tls.verification_mode(), PgTlsVerification::VerifyFull);
+        assert!(!tls.requires_tls());
+        assert!(
+            PgConnectionManager::from_url("postgres://localhost/db?sslmode=verify-full").is_ok()
+        );
     }
 
     #[test]
