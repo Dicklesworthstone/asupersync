@@ -16,12 +16,29 @@ Modes:
   evaluate  Run the same engine against a JSON scenario of commits and raw lane
             logs. Nothing is executed and no bead is filed; bead payloads are
             printed. This is the dry-run the planted-red acceptance check uses.
-  summary   Daily summary and exit metrics from receipts, git, and the tracker.
+  summary   Daily summary and exit metrics from receipts, git, and the tracker, with
+            the ledgers of asupersync-bi2462.147.1: rule-3 receipt latency per
+            no-compile-path commit (overdue after 2 h, escalated after 6 h), test
+            targets added in the window that no lane has executed, stranded or
+            stale work in the shared checkout, and duplicate-fix leads (same bead,
+            or overlapping lines from different bases: a lead, not proof). `run`
+            files the 6 h escalations (one P0 per commit, once) for commits after
+            `--ledger-since`. The owner-decision ledger (item 5) is not built.
 
 A lane is green only when the remote exit is 0, cargo reached `Finished`, nothing
 failed to compile, and (for test lanes) every expected target ran at least one
 test and none failed. Admission refusals, RCH false greens (E412/E504), missing
 remote exits, and zero-test runs are never green.
+
+Changed `src/` files are mapped through the module tree (`mod` declarations,
+`#[path]`, `include!`) to their lib module path and the `cfg` features on their
+chain. Touched feature-gated modules add a `check-features` all-targets check and
+run the lib lane with those features, as one union: a break that shows only under
+a subset of them is not detected (`--with-all-features` checks the full set). A
+changed file no crate root reaches is reported as unmapped: nothing compiles it.
+A touched workspace member crate (for example asupersync-macros) gets its own
+`cargo test -p <crate>` lane; its clippy is not run. Head lanes run `--parallel`
+at a time; bisection is serial.
 """
 
 from __future__ import annotations
@@ -31,11 +48,13 @@ import datetime as dt
 import hashlib
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
 import tempfile
 import tomllib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -64,7 +83,6 @@ NOT_COMPILED_PATTERNS = [
         r"\b(?:compilation|tests?)\b[^.\n]{0,80}\b(?:have|has)\s+not\s+(?:been\s+)?run\b",
         r"\b(?:compilation|tests?|rustfmt)\b[^.\n]{0,80}\b(?:are|is|were|was)\s+not\s+run\b",
         r"\bremains?\s+not\s+run\b",
-        r"\b(?:was|were|is|are|been)\s+not\s+(?:yet\s+)?(?:compiled|executed)\b",
         r"\b(?:rust|cargo|rustc|rch)\b[^.\n]{0,40}\b(?:are|is)\s+(?:absent|unavailable)\b",
         r"\brch\s+not\s+found\b",
         r"\bnot\s+(?:rust\s+)?execution(?:\s+evidence)?\b",
@@ -82,11 +100,21 @@ WORKSPACE_CRATES = {
     "asupersync-wasm",
 }
 UNSAFE_BLOCK_RE = re.compile(r"\bunsafe\s*\{")
-FILE_CFG_RE = re.compile(r"^\s*#!\[cfg\((.*)\)\]\s*$")
-FEATURE_RE = re.compile(r'feature\s*=\s*"([^"]+)"')
+INNER_CFG_RE = re.compile(r"#!\[cfg\(")
+CFG_TOKEN_RE = re.compile(r'\s*(?:([A-Za-z_][A-Za-z0-9_]*)|("[^"]*")|([(),=]))')
+# A `mod x;` at column 0 (the tree has no indented or macro-wrapped file modules).
+MOD_DECL_RE = re.compile(r"^(?:pub(?:\([^)\n]*\))?[ \t]+)?mod[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;", re.MULTILINE)
+INCLUDE_RE = re.compile(r'\binclude!\(\s*"([^"]+)"\s*\)')
+ENV_GATE_RE = re.compile(r'"REAL_[A-Z0-9_]+"')
+PATH_ATTR_RE = re.compile(r'^path\s*=\s*"([^"]+)"$')
+# A cfg requirement lists the alternative feature sets that make a predicate hold in a
+# watchdog build (Linux RCH worker, default features on). TRUE holds as is; NEVER has no
+# alternative (nothing the watchdog runs compiles it); None is not understood.
+TRUE: frozenset[frozenset[str]] = frozenset({frozenset()})
+NEVER: frozenset[frozenset[str]] = frozenset()
 REMOTE_EXIT_RE = re.compile(r"Remote command finished: exit=(\d+)")
 WORKER_RE = re.compile(r"Selected worker: (\S+)")
-NATIVE_ONLY_GUARD_RE = re.compile(r'not\(\s*target_arch\s*=\s*"wasm32"\s*\)|\bunix\b')
+EXECUTED_TEST_RE = re.compile(r"^test (\S+) \.\.\. (?:ok|FAILED)$")
 TEST_RESULT_RE = re.compile(
     r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out"
 )
@@ -161,29 +189,242 @@ def is_web_api_identity(email: str) -> bool:
     return email.lower().endswith(WEB_API_IDENTITY_SUFFIX)
 
 
-def file_cfg_features(source: str) -> tuple[list[str], bool]:
-    """Features a test file's crate-level `#![cfg(...)]` requires.
+Requirement = Any  # frozenset[frozenset[str]] (TRUE, NEVER, alternatives) or None
 
-    Returns (features, understood). Only `feature = "x"` and `all(...)` of those
-    are understood; anything else (not/any/target) is reported as not understood
-    so the caller can mark the mapping instead of guessing.
-    """
-    features: list[str] = []
-    understood = True
-    for line in source.splitlines()[:40]:
-        match = FILE_CFG_RE.match(line)
+
+def _cfg_tokens(expr: str) -> list[str] | None:
+    tokens: list[str] = []
+    pos = 0
+    while expr[pos:].strip():
+        match = CFG_TOKEN_RE.match(expr, pos)
         if not match:
+            return None
+        tokens.append(next(group for group in match.groups() if group is not None))
+        pos = match.end()
+    return tokens
+
+
+def _cfg_parse(tokens: list[str], i: int) -> tuple[tuple[Any, ...], int]:
+    head = tokens[i]
+    if head in ("all", "any", "not") and tokens[i + 1] == "(":
+        args = []
+        i += 2
+        while tokens[i] != ")":
+            node, i = _cfg_parse(tokens, i)
+            args.append(node)
+            if tokens[i] == ",":
+                i += 1
+        return (head, args), i + 1
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", head):
+        raise ValueError(head)
+    if i + 1 < len(tokens) and tokens[i + 1] == "=":
+        if not tokens[i + 2].startswith('"'):
+            raise ValueError(tokens[i + 2])
+        return ("kv", head, tokens[i + 2].strip('"')), i + 3
+    return ("flag", head), i + 1
+
+
+def _alternatives(sets: Any) -> frozenset[frozenset[str]]:
+    """Minimal alternatives only (a superset of another alternative adds nothing)."""
+    pool = set(sets)
+    minimal = sorted((s for s in pool if not any(o < s for o in pool)), key=lambda s: (len(s), sorted(s)))
+    return frozenset(minimal[:64])
+
+
+def _cfg_eval(node: tuple[Any, ...], defaults: frozenset[str]) -> Requirement:
+    kind = node[0]
+    if kind == "kv":
+        key, value = node[1], node[2]
+        if key == "feature":
+            return TRUE if value in defaults else frozenset({frozenset({value})})
+        if key == "target_os":
+            return TRUE if value == "linux" else NEVER
+        if key == "target_family":
+            return TRUE if value == "unix" else NEVER
+        if key == "target_arch" and value.startswith("wasm"):
+            return NEVER
+        return None
+    if kind == "flag":
+        if node[1] in ("unix", "test", "debug_assertions"):
+            return TRUE
+        if node[1] in ("windows", "miri"):
+            return NEVER
+        return None
+    args = [_cfg_eval(arg, defaults) for arg in node[1]]
+    if kind == "all":
+        return combine_requirements(args)
+    if kind == "any":
+        alternatives = [s for arg in args if arg is not None for s in arg]
+        if alternatives:
+            return _alternatives(alternatives)
+        return None if None in args else NEVER
+    # not(...) holds without extra features exactly when its operand needs some (or never
+    # holds), and never holds when its operand already holds in every watchdog build.
+    if len(args) != 1 or args[0] is None:
+        return None
+    return NEVER if frozenset() in args[0] else TRUE
+
+
+def cfg_requirement(expr: str, defaults: frozenset[str] = frozenset()) -> Requirement:
+    """What the predicate of `cfg(<expr>)` needs to hold on a Linux RCH worker."""
+    tokens = _cfg_tokens(expr)
+    if not tokens:
+        return None
+    try:
+        node, end = _cfg_parse(tokens, 0)
+    except (IndexError, ValueError):
+        return None
+    return _cfg_eval(node, defaults) if end == len(tokens) else None
+
+
+def combine_requirements(reqs: list[Requirement]) -> Requirement:
+    """Conjunction: NEVER dominates, then not-understood, else pairwise unions of alternatives."""
+    if any(req is not None and not req for req in reqs):
+        return NEVER
+    if None in reqs:
+        return None
+    result = TRUE
+    for req in reqs:
+        result = _alternatives(a | b for a in result for b in req)
+    return result
+
+
+def chosen_features(req: Requirement) -> frozenset[str] | None:
+    """The smallest feature set that satisfies `req`; None when none is known to."""
+    if not req:
+        return None
+    return min(req, key=lambda s: (len(s), sorted(s)))
+
+
+def requirement_json(req: Requirement) -> Any:
+    if req is None:
+        return None
+    return sorted(chosen_features(req)) if req else "never"
+
+
+def _balanced_end(text: str, start: int) -> int:
+    """Index just past the bracket closing the one at `start` (strings skipped), or -1."""
+    depth, i, in_string = 0, start, False
+    while i < len(text):
+        c = text[i]
+        if in_string:
+            if c == "\\":
+                i += 1
+            elif c == '"':
+                in_string = False
+        elif c == '"':
+            in_string = True
+        elif c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return -1
+
+
+def inner_cfg_requirement(source: str, defaults: frozenset[str] = frozenset()) -> Requirement:
+    """Conjunction of a file's leading inner `#![cfg(...)]` attributes (single- or multi-line)."""
+    reqs: list[Requirement] = []
+    for match in INNER_CFG_RE.finditer(source):
+        if source.count("\n", 0, match.start()) > 80:
+            break
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        if source[line_start : match.start()].strip():
             continue
-        # Native-only guards hold on the Linux fleet; what remains must be a
-        # conjunction of `feature = "..."` terms to be understood.
-        expr = NATIVE_ONLY_GUARD_RE.sub("", match.group(1))
-        residue = FEATURE_RE.sub("", expr)
-        residue = re.sub(r"\ball\(|[(),\s]", "", residue)
-        if residue:
-            understood = False
+        end = _balanced_end(source, match.end() - 1)
+        if end < 0:
+            return None
+        reqs.append(cfg_requirement(source[match.end() : end - 1], defaults))
+    return combine_requirements(reqs)
+
+
+def file_cfg_features(source: str, defaults: frozenset[str] = frozenset()) -> tuple[list[str], bool]:
+    """Features a test file's crate-level `#![cfg(...)]` requires, as (features, understood).
+
+    A cfg that never holds on the Linux fleet (wasm-only, windows-only) or that is not
+    understood is reported as not understood, so the caller marks the mapping instead of
+    running a target that compiles to nothing.
+    """
+    chosen = chosen_features(inner_cfg_requirement(source, defaults))
+    return (sorted(chosen), True) if chosen is not None else ([], False)
+
+
+def _attrs_before(text: str, pos: int) -> list[str]:
+    """Bodies of the outer attributes stacked directly above `pos` (comments skipped)."""
+    attrs: list[str] = []
+    end = pos
+    while True:
+        j = end
+        while j > 0 and text[j - 1].isspace():
+            j -= 1
+        line_start = text.rfind("\n", 0, j) + 1
+        if j > line_start and text[line_start:j].lstrip().startswith("//"):
+            end = line_start
             continue
-        features.extend(FEATURE_RE.findall(expr))
-    return sorted(set(features)), understood
+        if j == 0 or text[j - 1] != "]":
+            return attrs
+        depth, k = 0, j - 1
+        while k >= 0:
+            if text[k] == "]":
+                depth += 1
+            elif text[k] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k < 1 or text[k - 1] != "#":
+            return attrs
+        attrs.append(text[k + 1 : j - 1].strip())
+        end = k - 1
+
+
+def module_tree(
+    sources: dict[str, str], roots: dict[str, Requirement], defaults: frozenset[str] = frozenset()
+) -> dict[str, tuple[str | None, Requirement]]:
+    """Map every source file a crate root reaches to (lib module path, cfg requirement).
+
+    Follows column-0 `mod x;` declarations (with `#[path]`) and `include!`, conjoining
+    every `cfg` on the way. `src/lib.rs` yields lib module paths; other roots (binaries)
+    yield None. A file missing from the result is compiled by nothing.
+    """
+    tree: dict[str, tuple[str | None, Requirement]] = {}
+
+    def rank(modpath: str | None, req: Requirement) -> tuple[bool, bool, int]:
+        chosen = chosen_features(req)
+        return (modpath is None, chosen is None, len(chosen) if chosen is not None else 0)
+
+    def walk(path: str, modpath: str | None, req: Requirement, mod_rs: bool) -> None:
+        text = sources.get(path)
+        if text is None:
+            return
+        req = combine_requirements([req, inner_cfg_requirement(text, defaults)])
+        if path in tree and rank(*tree[path]) <= rank(modpath, req):
+            return
+        tree[path] = (modpath, req)
+        directory = posixpath.dirname(path)
+        child_dir = directory if mod_rs else posixpath.join(directory, posixpath.basename(path)[: -len(".rs")])
+        for match in MOD_DECL_RE.finditer(text):
+            name = match.group(1)
+            attrs = _attrs_before(text, match.start())
+            cfgs = [cfg_requirement(a[len("cfg(") : -1], defaults) for a in attrs if a.startswith("cfg(") and a.endswith(")")]
+            child_req = combine_requirements([req, *cfgs])
+            child_mod = None if modpath is None else (f"{modpath}::{name}" if modpath else name)
+            explicit = next((m.group(1) for a in attrs if (m := PATH_ATTR_RE.match(a))), None)
+            if explicit:
+                walk(posixpath.normpath(posixpath.join(directory, explicit)), child_mod, child_req, True)
+                continue
+            for candidate, child_mod_rs in ((f"{child_dir}/{name}.rs", False), (f"{child_dir}/{name}/mod.rs", True)):
+                if candidate in sources:
+                    walk(candidate, child_mod, child_req, child_mod_rs)
+                    break
+        for match in INCLUDE_RE.finditer(text):
+            walk(posixpath.normpath(posixpath.join(directory, match.group(1))), modpath, req, mod_rs)
+
+    for root, req in sorted(roots.items()):
+        walk(root, "" if root == "src/lib.rs" else None, req, True)
+    return tree
 
 
 def lib_filter_for(path: str) -> str | None:
@@ -231,6 +472,9 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         "first_error": "",
         "counts": {"passed": 0, "failed": 0, "ignored": 0, "filtered": 0, "results": 0},
         "targets_seen": [],
+        "unexercised_filters": [],
+        "targets_executed": [],
+        "env_gated_targets": list(lane.get("env_gated_targets", [])),
     }
     if remote_exit is None and client_exit == 103:
         result.update(verdict=VERDICT_DEFERRED, reason="admission refused (exit 103)")
@@ -272,6 +516,8 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     # healed only by a run that actually executed its target.
     seen: list[str] = []
     failed_tests: list[str] = []
+    lib_tests: list[str] = []
+    executed_targets: set[str] = set()
     current = "?"
     for line in lines:
         running = RUNNING_TARGET_RE.match(line)
@@ -283,6 +529,11 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
             seen.append("lib")
         elif failed := FAILED_TEST_RE.match(line.strip()):
             failed_tests.append(f"{current}::{failed.group(1)}")
+        if current == "lib" and (executed := EXECUTED_TEST_RE.match(line.strip())):
+            lib_tests.append(executed.group(1))
+        if (tr := TEST_RESULT_RE.match(line.strip())) and int(tr.group(2)) + int(tr.group(3)) > 0:
+            executed_targets.add(current)
+    result["targets_executed"] = sorted(executed_targets - {"?"})
     counts = result["counts"]
     for line in lines:
         tr = TEST_RESULT_RE.match(line.strip())
@@ -293,6 +544,9 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
             counts["ignored"] += int(tr.group(4))
             counts["filtered"] += int(tr.group(6))
     result["targets_seen"] = sorted(set(seen))
+    # Informational: a changed module whose filter selected no executed test has no unit
+    # test here; the lane still vouches only for what it ran.
+    result["unexercised_filters"] = [f for f in lane.get("lib_filters", []) if not any(f in name for name in lib_tests)]
     if failing or counts["failed"] or failed_tests or remote_exit != 0:
         result.update(
             verdict=VERDICT_RED,
@@ -479,7 +733,12 @@ def heal_candidates(lane: dict[str, Any], lane_known: dict[str, Any], failing: s
 
 
 def run_engine(
-    plan: dict[str, Any], runner: Runner, state: dict[str, Any], now: str, target_exists: TargetExists | None = None
+    plan: dict[str, Any],
+    runner: Runner,
+    state: dict[str, Any],
+    now: str,
+    target_exists: TargetExists | None = None,
+    parallel: int = 1,
 ) -> dict[str, Any]:
     commits = {c["sha"]: c for c in plan["commits"]}
     batch = [c["sha"] for c in plan["commits"]]
@@ -489,8 +748,13 @@ def run_engine(
     payloads: list[dict[str, Any]] = []
     notes: list[str] = []
     all_green = True
-    for lane in plan["lanes"]:
-        text, exit_code = runner(lane, head)
+    head_runs: list[tuple[str, int]] | None = None
+    if parallel > 1 and len(plan["lanes"]) > 1:
+        # Head lanes are independent; only wall clock changes. Bisection stays serial below.
+        with ThreadPoolExecutor(max_workers=parallel) as pool:
+            head_runs = list(pool.map(lambda lane: runner(lane, head), plan["lanes"]))
+    for index, lane in enumerate(plan["lanes"]):
+        text, exit_code = head_runs[index] if head_runs is not None else runner(lane, head)
         outcome = classify_lane_output(text, exit_code, lane)
         receipt = {
             "schema": SCHEMA_VERSION,
@@ -502,7 +766,10 @@ def run_engine(
             "batch_size": len(batch),
             **{
                 k: outcome[k]
-                for k in ("verdict", "reason", "remote_exit", "client_exit", "worker", "failing_targets", "first_error", "counts", "targets_seen")
+                for k in (
+                    "verdict", "reason", "remote_exit", "client_exit", "worker", "failing_targets", "first_error", "counts",
+                    "targets_seen", "unexercised_filters", "targets_executed", "env_gated_targets",
+                )
             },
         }
         if outcome["verdict"] != VERDICT_GREEN:
@@ -661,36 +928,112 @@ def git_target_exists(sha: str, name: str) -> bool:
     return _TARGET_EXISTS_CACHE[key]
 
 
+def manifest_at(sha: str) -> dict[str, Any]:
+    return tomllib.loads(git("show", f"{sha}:Cargo.toml"))
+
+
 def cargo_test_registry(sha: str) -> dict[str, dict[str, Any]]:
-    manifest = tomllib.loads(git("show", f"{sha}:Cargo.toml"))
     registry = {}
-    for entry in manifest.get("test", []):
+    for entry in manifest_at(sha).get("test", []):
         path = entry.get("path", f"tests/{entry['name']}.rs")
         registry[path] = {"name": entry["name"], "features": sorted(entry.get("required-features", []))}
     return registry
 
 
-def targeted_tests(head: str, paths: list[str]) -> tuple[dict[str, list[str]], list[str], list[str]]:
-    """Map changed paths to integration targets grouped by feature set, lib filters, and unmapped paths."""
+def tree_sources(sha: str, prefix: str = "src/") -> dict[str, str]:
+    """Every `.rs` blob under `prefix` at `sha`, read through one `git cat-file --batch`."""
+    entries = []
+    for line in git("ls-tree", "-r", sha, "--", prefix).splitlines():
+        meta, path = line.split("\t", 1)
+        _mode, kind, blob = meta.split()
+        if kind == "blob" and path.endswith(".rs"):
+            entries.append((path, blob))
+    stdin = "".join(f"{blob}\n" for _, blob in entries).encode()
+    out = subprocess.run(["git", "cat-file", "--batch"], input=stdin, capture_output=True, check=True).stdout
+    sources, pos = {}, 0
+    for path, _blob in entries:
+        header_end = out.index(b"\n", pos)
+        size = int(out[pos:header_end].split()[2])
+        sources[path] = out[header_end + 1 : header_end + 1 + size].decode("utf-8", "replace")
+        pos = header_end + 1 + size + 1
+    return sources
+
+
+def crate_roots(sources: dict[str, str], manifest: dict[str, Any], defaults: frozenset[str]) -> dict[str, Requirement]:
+    """The library root plus every binary root, each with the features its target requires."""
+    roots: dict[str, Requirement] = {"src/lib.rs": TRUE}
+    for entry in manifest.get("bin", []):
+        required = frozenset(entry.get("required-features", [])) - defaults
+        roots[entry.get("path", f"src/bin/{entry['name']}.rs")] = frozenset({required})
+    for path in sources:
+        if path == "src/main.rs" or re.fullmatch(r"src/bin/[^/]+\.rs|src/bin/[^/]+/main\.rs", path):
+            roots.setdefault(path, TRUE)
+    return roots
+
+
+def workspace_members(head: str, manifest: dict[str, Any]) -> dict[str, str]:
+    """Member directory -> package name, for every workspace member except the root package."""
+    members = {}
+    for directory in manifest.get("workspace", {}).get("members", []):
+        if directory in (".", ""):
+            continue
+        member = tomllib.loads(git("show", f"{head}:{directory}/Cargo.toml", check=False) or "")
+        if name := member.get("package", {}).get("name"):
+            members[directory.rstrip("/")] = name
+    return members
+
+
+def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
+    """Map changed paths to integration targets grouped by feature set, lib filters, unmapped
+    paths, the features gating the touched `src/` modules, and touched workspace member crates."""
+    manifest = manifest_at(head)
+    defaults = frozenset(manifest.get("features", {}).get("default", []))
     registry = cargo_test_registry(head)
+    members = workspace_members(head, manifest)
     groups: dict[str, set[str]] = {}
     lib_filters: list[str] = []
     unmapped: list[str] = []
+    src_features: set[str] = set()
+    crates: set[str] = set()
+    env_gated: set[str] = set()
     existing = set(git("ls-tree", "-r", "--name-only", head, "--", "tests").split())
+    sources: dict[str, str] = {}
+    tree: dict[str, tuple[str | None, Requirement]] = {}
+    if any(p.startswith("src/") and p.endswith(".rs") for p in paths):
+        sources = tree_sources(head)
+        tree = module_tree(sources, crate_roots(sources, manifest, defaults), defaults)
     for path in sorted(set(paths)):
+        member = next((d for d in members if path.startswith(d + "/")), None)
+        if member:
+            # A root `cargo check --all-targets` builds a member only as a dependency,
+            # never its own tests (for the macros crate: its trybuild compile-fail suite).
+            crates.add(members[member])
+            continue
         if path.startswith("src/"):
-            f = lib_filter_for(path)
-            if f:
-                lib_filters.append(f)
+            if path not in sources:
+                continue  # not Rust, or removed at head: check-default covers the crate
+            entry = tree.get(path)
+            if entry is None:
+                unmapped.append(f"{path} (no crate root reaches it: nothing compiles it)")
+            elif entry[1] is None:
+                unmapped.append(f"{path} (cfg not understood)")
+            elif not entry[1]:
+                unmapped.append(f"{path} (its cfg never holds on a Linux worker)")
+            else:
+                src_features |= chosen_features(entry[1]) or frozenset()
+                if entry[0]:
+                    lib_filters.append(entry[0])
             continue
         if not path.startswith("tests/") or not path.endswith(".rs") or path not in existing:
             continue
         targets: list[tuple[str, list[str]]] = []
         if path in registry:
-            targets.append((registry[path]["name"], registry[path]["features"]))
+            features, understood = file_cfg_features(git("show", f"{head}:{path}", check=False), defaults)
+            required = set(registry[path]["features"]) | (set(features) if understood else set())
+            targets.append((registry[path]["name"], sorted(required)))
         elif path.count("/") == 1:
             source = git("show", f"{head}:{path}", check=False)
-            features, understood = file_cfg_features(source)
+            features, understood = file_cfg_features(source, defaults)
             if not understood:
                 unmapped.append(f"{path} (crate cfg not understood)")
                 continue
@@ -699,20 +1042,32 @@ def targeted_tests(head: str, paths: list[str]) -> tuple[dict[str, list[str]], l
             top = path.split("/")[1]
             owners = [p for p in registry if p.startswith(f"tests/{top}/")]
             for owner in owners:
-                targets.append((registry[owner]["name"], registry[owner]["features"]))
+                features, understood = file_cfg_features(git("show", f"{head}:{owner}", check=False), defaults)
+                required = set(registry[owner]["features"]) | (set(features) if understood else set())
+                targets.append((registry[owner]["name"], sorted(required)))
             if not owners:
                 hits = git("grep", "-lE", rf"^\s*(pub\s+)?mod\s+{re.escape(top)}\s*;", head, "--", "tests/*.rs", check=False)
                 for hit in hits.split():
                     file = hit.split(":", 1)[1]
                     if file.count("/") == 1:
-                        features, understood = file_cfg_features(git("show", f"{head}:{file}", check=False))
+                        features, understood = file_cfg_features(git("show", f"{head}:{file}", check=False), defaults)
                         if understood:
                             targets.append((Path(file).stem, features))
             if not targets:
                 unmapped.append(f"{path} (no owning test target found)")
         for name, features in targets:
             groups.setdefault(",".join(features), set()).add(name)
-    return {k: sorted(v) for k, v in groups.items()}, compress_lib_filters(lib_filters), unmapped
+            root = next((p for p, e in registry.items() if e["name"] == name), f"tests/{name}.rs")
+            if ENV_GATE_RE.search(git("show", f"{head}:{root}", check=False)):
+                env_gated.add(name)
+    return {
+        "groups": {k: sorted(v) for k, v in groups.items()},
+        "lib_filters": compress_lib_filters(lib_filters),
+        "unmapped": unmapped,
+        "src_features": sorted(src_features),
+        "crates": sorted(crates),
+        "env_gated": sorted(env_gated),
+    }
 
 
 def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool) -> tuple[list[dict[str, Any]], list[str]]:
@@ -736,7 +1091,20 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
     ]
     if with_all_features:
         lanes.insert(1, {"id": "check-all-features", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--all-features", "--keep-going", "--message-format=short"]})
-    groups, lib_filters, unmapped = targeted_tests(head, paths)
+    mapped = targeted_tests(head, paths)
+    groups, lib_filters, unmapped, src_features = mapped["groups"], mapped["lib_filters"], mapped["unmapped"], mapped["src_features"]
+    feature_args = ["--features", ",".join(src_features)] if src_features else []
+    if src_features:
+        # Touched feature-gated modules are invisible to check-default: check every target
+        # with the union of their features (a subset-only break needs --with-all-features).
+        lanes.insert(
+            1,
+            {
+                "id": "check-features",
+                "kind": "build",
+                "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", *feature_args, "--keep-going", "--message-format=short"],
+            },
+        )
     for features, names in sorted(groups.items()):
         argv = ["cargo", "test", "-j", str(jobs), "-p", "asupersync", "--no-fail-fast"]
         if features:
@@ -744,15 +1112,29 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
         for name in names:
             argv += ["--test", name]
         suffix = features.replace(",", "+") or "default"
-        lanes.append({"id": f"targeted-tests[{suffix}]", "kind": "test", "argv": argv, "expected_targets": names})
+        lane = {"id": f"targeted-tests[{suffix}]", "kind": "test", "argv": argv, "expected_targets": names}
+        if gated := sorted(set(names) & set(mapped["env_gated"])):
+            # These skip their live bodies unless a REAL_* switch is set: green here is not
+            # a live-service receipt.
+            lane["env_gated_targets"] = gated
+        lanes.append(lane)
     if lib_filters:
         lanes.append(
             {
                 "id": "targeted-lib",
                 "kind": "test",
-                "argv": ["cargo", "test", "-j", str(jobs), "-p", "asupersync", "--lib", "--", *lib_filters],
+                "argv": ["cargo", "test", "-j", str(jobs), "-p", "asupersync", *feature_args, "--lib", "--", *lib_filters],
                 "expected_targets": [],
                 "lib_filters": lib_filters,
+            }
+        )
+    for crate in mapped["crates"]:
+        lanes.append(
+            {
+                "id": f"targeted-crate[{crate}]",
+                "kind": "test",
+                "argv": ["cargo", "test", "-j", str(jobs), "-p", crate, "--no-fail-fast"],
+                "expected_targets": [],
             }
         )
     for lane in lanes:
@@ -805,9 +1187,11 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
         env = dict(os.environ)
         env.update(
             RCH_REQUIRE_REMOTE="1",
-            RCH_BUILD_TIMEOUT_SEC=env.get("RCH_BUILD_TIMEOUT_SEC", "5400"),
+            # A loaded all-targets check at -j 2..4 exceeded 5400 s (RCH-E104) on 2026-09-24.
+            RCH_BUILD_TIMEOUT_SEC=env.get("RCH_BUILD_TIMEOUT_SEC", "10800"),
             RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=env.get("RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS", "3000"),
-            CARGO_TARGET_DIR=f"{target_dir}_{lane['id'].split('[')[0]}",
+            # One target directory per lane: parallel lanes must not share a cargo build lock.
+            CARGO_TARGET_DIR=f"{target_dir}_{re.sub(r'[^A-Za-z0-9_.+-]', '_', lane['id'])}",
         )
         if lane.get("needs_clippy_component") and os.environ.get("WATCHDOG_CLIPPY_WORKERS"):
             env["RCH_WORKER"] = os.environ["WATCHDOG_CLIPPY_WORKERS"]
@@ -965,6 +1349,287 @@ def tracker_counts(issues_path: Path, now: dt.datetime) -> dict[str, int]:
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Ledgers (asupersync-bi2462.147.1): receipt latency, first runs, stranded work,
+# duplicate fixes. Pure functions; `evaluate` drives them from scenarios.
+# ---------------------------------------------------------------------------
+
+RECEIPT_DUE = dt.timedelta(hours=2)
+RECEIPT_ESCALATE = dt.timedelta(hours=6)
+STRANDED_AFTER = dt.timedelta(hours=2)
+MAX_BEHIND = 5
+# Beads that commits cite for process rather than for the change itself.
+PROCESS_BEADS = {WATCHDOG_BEAD, "asupersync-bi2462.162"}
+HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
+
+
+def _hours(delta: dt.timedelta) -> float:
+    return round(delta.total_seconds() / 3600, 1)
+
+
+def owes_receipt(commit: dict[str, Any]) -> bool:
+    """Validation Path rule 3: a commit landed without a compile path that touches code."""
+    no_compile_path = is_web_api_identity(commit["author_email"]) or declares_not_compiled(commit["message"])
+    return no_compile_path and not commit.get("is_merge") and any(is_code_path(p) for p in commit["paths"])
+
+
+def watchdog_runs(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lane receipts grouped into runs (one head checked at one time), oldest first."""
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for receipt in receipts:
+        grouped.setdefault((receipt["recorded_at"], receipt["sha"]), []).append(receipt)
+    return [
+        {
+            "head": head,
+            "recorded_at": recorded,
+            "green": all(r["verdict"] == VERDICT_GREEN for r in rs),
+            "red": any(r["verdict"] == VERDICT_RED for r in rs),
+            "culprits": sorted({r["culprit"] for r in rs if r.get("culprit")}),
+        }
+        for (recorded, head), rs in sorted(grouped.items())
+    ]
+
+
+def receipt_ledger(commits: list[dict[str, Any]], receipts: list[dict[str, Any]], now: dt.datetime) -> dict[str, Any]:
+    """Heal latency for every commit that owes a rule-3 receipt; `commits` oldest first.
+
+    A run covers a commit when its head is that commit or a later one. A commit is green
+    at the first all-green covering run, and red when a run names it as the culprit. It
+    is blocked while its latest covering run is red for another commit, because that red
+    has its own P0. Otherwise it is pending until 2 h, overdue until 6 h, and escalated
+    after that.
+    """
+    order = {c["sha"]: i for i, c in enumerate(commits)}
+    runs = [run for run in watchdog_runs(receipts) if run["head"] in order]
+    rows = []
+    for index, commit in enumerate(commits):
+        if not owes_receipt(commit):
+            continue
+        landed = dt.datetime.fromisoformat(commit["committed_at"])
+        covering = [run for run in runs if order[run["head"]] >= index]
+        green = next((run for run in covering if run["green"]), None)
+        row: dict[str, Any] = {
+            "sha": commit["sha"],
+            "subject": commit["subject"],
+            "author_email": commit["author_email"],
+            "beads": commit["beads"],
+            "landed_at": commit["committed_at"],
+            "age_h": _hours(now - landed),
+        }
+        if green:
+            row.update(status="green", receipt_at=green["recorded_at"], latency_h=_hours(dt.datetime.fromisoformat(green["recorded_at"]) - landed))
+        elif any(commit["sha"] in run["culprits"] for run in covering):
+            row["status"] = "red"
+        elif covering and covering[-1]["red"]:
+            row.update(status="blocked", blocked_by=covering[-1]["culprits"])
+        else:
+            age = now - landed
+            row["status"] = "pending" if age < RECEIPT_DUE else "overdue" if age < RECEIPT_ESCALATE else "escalate"
+        rows.append(row)
+    return {
+        "owed": len(rows),
+        "green_within_2h": sum(1 for r in rows if r["status"] == "green" and r["latency_h"] <= _hours(RECEIPT_DUE)),
+        "overdue": [r["sha"] for r in rows if r["status"] == "overdue"],
+        "escalate": [r["sha"] for r in rows if r["status"] == "escalate"],
+        "rows": rows,
+    }
+
+
+def receipt_escalation_payload(row: dict[str, Any]) -> dict[str, Any]:
+    sha9 = row["sha"][:9]
+    cited = ", ".join(row["beads"]) or "none"
+    description = (
+        f"**Validation Path rule 3 (AGENTS.md):** `{row['sha']}` landed at {row['landed_at']} without a compile path "
+        f"and has no green main-watchdog receipt after {row['age_h']} h.\n\n"
+        f"- Subject: {row['subject']}\n"
+        f"- Author identity: {row['author_email']}\n"
+        f"- Cited beads: {cited}\n\n"
+        "Heal owner: the cited bead's assignee, else the watchdog operator. Repair forward and cite the new receipt. "
+        "The watchdog does not revert or edit anyone's code; reverting someone else's commit needs the owner.\n"
+    )
+    return {
+        "title": f"[main-watchdog] NO GREEN RECEIPT after 6 h: {sha9} ({row['author_email']}) {row['subject'][:80]}"[:240],
+        "type": "bug",
+        "priority": 0,
+        "labels": ["main-watchdog", "rule-3"],
+        "parent": WATCHDOG_BEAD,
+        "description": description,
+        "sha": row["sha"],
+    }
+
+
+def first_run_ledger(added_targets: list[str], receipts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Test targets added since a baseline that no watchdog lane has executed (>0 tests)."""
+    executed = {t for r in receipts for t in r.get("targets_executed", [])}
+    never = sorted(t for t in set(added_targets) if t not in executed)
+    return {"added": len(set(added_targets)), "never_run": never}
+
+
+def stranded_alerts(tree: dict[str, Any], now: dt.datetime) -> list[str]:
+    """Alerts for work stuck in the shared tree: unpushed past 2 h, or far behind origin."""
+    alerts = []
+    oldest = tree.get("oldest_unpushed_at")
+    if tree.get("ahead") and oldest and now - dt.datetime.fromisoformat(oldest) > STRANDED_AFTER:
+        beads = ", ".join(tree.get("oldest_unpushed_beads") or []) or "none cited"
+        alerts.append(
+            f"stranded: main is {tree['ahead']} commit(s) ahead of origin/main; the oldest unpushed commit is "
+            f"{_hours(now - dt.datetime.fromisoformat(oldest))} h old (beads: {beads})"
+        )
+    if tree.get("landed_elsewhere"):
+        alerts.append(
+            f"stale: {tree['landed_elsewhere']} commit(s) on the shared main are already on origin under other SHAs; "
+            "the shared checkout is not tracking origin"
+        )
+    if tree.get("behind", 0) > MAX_BEHIND:
+        alerts.append(f"behind: main is {tree['behind']} commits behind origin/main")
+    return alerts
+
+
+def diff_hunks(diff_text: str) -> dict[str, list[tuple[int, int]]]:
+    """Old-side line ranges per file from a `git diff -U0` / `git show -U0` text."""
+    hunks: dict[str, list[tuple[int, int]]] = {}
+    path = None
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            path = line.rsplit(" b/", 1)[-1]
+        elif path and (match := HUNK_RE.match(line)):
+            start, count = int(match.group(1)), int(match.group(2) or 1)
+            hunks.setdefault(path, []).append((start, start + max(count, 1) - 1))
+    return hunks
+
+
+def duplicate_fixes(origin_items: list[dict[str, Any]], local_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pairs of (origin commit, local commit or uncommitted diff) citing the same change bead or
+    changing overlapping old-side lines of one file. Line numbers come from different bases,
+    so an overlap is a lead to check, not proof."""
+    flags = []
+    for origin in origin_items:
+        for local in local_items:
+            beads = sorted((set(origin["beads"]) & set(local["beads"])) - PROCESS_BEADS)
+            overlapping = sorted(
+                path
+                for path, ranges in local["hunks"].items()
+                if any(a0 <= b1 and b0 <= a1 for a0, a1 in ranges for b0, b1 in origin["hunks"].get(path, []))
+            )
+            if beads or overlapping:
+                flags.append({"origin": origin["id"], "local": local["id"], "beads": beads, "overlapping_files": overlapping})
+    return flags
+
+
+def shared_tree_state() -> dict[str, Any]:
+    """The shared checkout's `main` against origin, and its dirty paths by last-modified time.
+
+    A local commit whose patch (`git cherry`) or subject is already on origin under another
+    SHA is counted as landed elsewhere, not as stranded work.
+    """
+    ahead = git("log", "--reverse", "--format=%H%x09%cI%x09%s", "origin/main..main", check=False).splitlines()
+    upstream_subjects = set(git("log", "--format=%s", "main..origin/main", check=False).splitlines())
+    equivalent = {line[2:] for line in git("cherry", "origin/main", "main", check=False).splitlines() if line.startswith("- ")}
+    unpushed = []
+    landed_elsewhere = 0
+    for line in ahead:
+        sha, committed, subject = (line.split("\t", 2) + ["", ""])[:3]
+        if sha in equivalent or subject in upstream_subjects:
+            landed_elsewhere += 1
+        else:
+            unpushed.append((sha, committed))
+    oldest = unpushed[0] if unpushed else None
+    dirty = []
+    for line in git("status", "--porcelain", check=False).splitlines():
+        path = line[3:].split(" -> ")[-1]
+        try:
+            modified = dt.datetime.fromtimestamp(os.path.getmtime(path), dt.timezone.utc).isoformat(timespec="seconds")
+        except OSError:
+            modified = None
+        dirty.append({"path": path, "modified_at": modified})
+    return {
+        "ahead": len(unpushed),
+        "landed_elsewhere": landed_elsewhere,
+        "behind": int(git("rev-list", "--count", "main..origin/main", check=False).strip() or 0),
+        "oldest_unpushed_at": oldest[1] if oldest else None,
+        "oldest_unpushed_beads": bead_ids(git("log", "-1", "--format=%B", oldest[0], check=False)) if oldest else [],
+        "dirty": sorted(dirty, key=lambda d: d["modified_at"] or ""),
+    }
+
+
+def _rust_hunks(diff_text: str) -> dict[str, list[tuple[int, int]]]:
+    return {path: ranges for path, ranges in diff_hunks(diff_text).items() if path.endswith(".rs")}
+
+
+def duplicate_fix_items(window: str = "72.hours") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Origin commits of the last `window` that the shared tree lacks, and the shared tree's
+    unpushed commits plus its diff. An origin commit the tree already contains cannot be
+    duplicated by work built on top of it."""
+    def item(label: str, sha: str) -> dict[str, Any]:
+        return {
+            "id": label,
+            "beads": bead_ids(git("log", "-1", "--format=%B", sha, check=False)),
+            "hunks": _rust_hunks(git("show", "-U0", "--format=", sha, check=False)),
+        }
+
+    origin = [item(sha[:9], sha) for sha in git("rev-list", "--first-parent", f"--since={window}", "main..origin/main", check=False).split()]
+    local = [item(f"local {sha[:9]}", sha) for sha in git("rev-list", "origin/main..main", check=False).split()]
+    working = _rust_hunks(git("diff", "-U0", "HEAD", check=False))
+    for path in list(working):
+        # A dirty file already byte-identical to origin is landed work in a stale checkout,
+        # not a second fix.
+        blob = git("rev-parse", "-q", "--verify", f"origin/main:{path}", check=False).strip()
+        if blob and git("hash-object", "--", path, check=False).strip() == blob:
+            del working[path]
+    if working:
+        local.append({"id": "working tree", "beads": [], "hunks": working})
+    return origin, local
+
+
+def added_test_targets(since: str, until: str) -> list[str]:
+    """Integration test targets whose root file was added in since..until."""
+    registry = cargo_test_registry(until)
+    added = git("diff", "--diff-filter=A", "--name-only", f"{since}..{until}", "--", "tests", check=False).split()
+    names = []
+    for path in added:
+        if path in registry:
+            names.append(registry[path]["name"])
+        elif path.count("/") == 1 and path.endswith(".rs"):
+            names.append(Path(path).stem)
+    return sorted(set(names))
+
+
+def ledger_commits(since: str, until: str) -> list[dict[str, Any]]:
+    return [commit_record(s, scan_unsafe=False) for s in git("rev-list", "--reverse", "--first-parent", f"{since}..{until}").split()]
+
+
+def escalate_overdue_receipts(state: dict[str, Any], receipts_path: Path, now: dt.datetime, file_beads: bool) -> list[dict[str, Any]]:
+    """File one P0 per commit with no green receipt 6 h after landing (rule 3).
+
+    Only commits after `state["ledger_since"]` count, so work that landed before the
+    watchdog covered main is not flooded with beads; with no `ledger_since`, nothing
+    escalates. A commit is escalated once (`state["receipt_escalations"]`) and never when
+    an open bead already names it.
+    """
+    since = state.get("ledger_since")
+    if not since:
+        return []
+    receipts = [json.loads(line) for line in receipts_path.read_text().splitlines() if line.strip()] if receipts_path.exists() else []
+    ledger = receipt_ledger(ledger_commits(since, "origin/main"), receipts, now)
+    filed = state.setdefault("receipt_escalations", {})
+    open_issues = open_tracker_issues()
+    payloads = []
+    for row in ledger["rows"]:
+        if row["status"] != "escalate" or row["sha"] in filed:
+            continue
+        payload = receipt_escalation_payload(row)
+        existing = next(
+            (i.get("id") for i in open_issues if "NO GREEN RECEIPT" in i.get("title", "") and row["sha"][:9] in i.get("title", "")),
+            None,
+        )
+        if existing:
+            payload["existing_bead"] = filed[row["sha"]] = existing
+        elif file_beads and (bead := file_bead(payload)):
+            payload["filed_bead"] = filed[row["sha"]] = bead
+        payloads.append(payload)
+    return payloads
+
+
 def summary(receipts_path: Path, since: str, until: str, issues_path: Path, now: dt.datetime) -> dict[str, Any]:
     shas = git("rev-list", "--reverse", "--first-parent", f"{since}..{until}").split()
     receipts = []
@@ -1009,6 +1674,10 @@ def summary(receipts_path: Path, since: str, until: str, issues_path: Path, now:
         "orphan_top_level_sources": orphan_count(until),
         **tracker_counts(issues_path, now),
         "reds_in_window": sorted({f"{r['lane']}@{r.get('culprit', r['sha'])[:9]}" for r in receipts if r["verdict"] == VERDICT_RED and r["sha"] in order}),
+        "receipt_ledger": receipt_ledger(ledger_commits(since, until), receipts, now),
+        "first_run_ledger": first_run_ledger(added_test_targets(since, until), receipts),
+        "stranded_alerts": stranded_alerts(shared_tree_state(), now),
+        "duplicate_fixes": duplicate_fixes(*duplicate_fix_items()),
     }
 
 
@@ -1034,6 +1703,11 @@ def main(argv: list[str]) -> int:
             p.add_argument("--post-receipts", action="store_true", help="comment the batch receipt on cited beads")
             p.add_argument("--admission-attempts", type=int, default=40)
             p.add_argument("--admission-sleep", type=int, default=90)
+            p.add_argument("--parallel", type=int, default=2, help="head lanes run concurrently (RCH admits ~2-3 per project)")
+            p.add_argument(
+                "--ledger-since",
+                help="record in state: rule-3 receipt escalation counts commits after this SHA (unset: no escalation)",
+            )
     e = sub.add_parser("evaluate")
     e.add_argument("--scenario", type=Path, required=True)
     s = sub.add_parser("summary")
@@ -1073,13 +1747,34 @@ def main(argv: list[str]) -> int:
             scenario.get("state", {"known_reds": {}}),
             scenario.get("now", "2026-01-01T00:00:00+00:00"),
             None if scenario.get("disable_target_filter") else fake_target_exists,
+            scenario.get("parallel", 1),
         )
         probes = scenario.get("probes", {})
         result["probe_results"] = {
             "declares_not_compiled": [declares_not_compiled(m) for m in probes.get("declares_not_compiled", [])],
             "bead_ids": [bead_ids(m, set(probes["known_ids"]) if "known_ids" in probes else None) for m in probes.get("bead_ids", [])],
             "file_cfg_features": [list(file_cfg_features(s)) for s in probes.get("file_cfg_features", [])],
+            "cfg_requirement": [requirement_json(cfg_requirement(e, frozenset(probes.get("defaults", [])))) for e in probes.get("cfg_requirement", [])],
+            "module_tree": {
+                path: [modpath, requirement_json(req)]
+                for path, (modpath, req) in module_tree(
+                    probes.get("module_tree", {}).get("sources", {}),
+                    {root: TRUE for root in probes.get("module_tree", {}).get("roots", [])},
+                    frozenset(probes.get("defaults", [])),
+                ).items()
+            },
             "lib_filter_for": [lib_filter_for(p) for p in probes.get("lib_filter_for", [])],
+            "receipt_ledger": [
+                {
+                    "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
+                    "payloads": [receipt_escalation_payload(row) for row in ledger["rows"] if row["status"] == "escalate"],
+                }
+                for case in probes.get("receipt_ledger", [])
+            ],
+            "first_run_ledger": [first_run_ledger(case["added"], case["receipts"]) for case in probes.get("first_run_ledger", [])],
+            "stranded_alerts": [stranded_alerts(case["tree"], dt.datetime.fromisoformat(case["now"])) for case in probes.get("stranded", [])],
+            "duplicate_fixes": [duplicate_fixes(case["origin"], case["local"]) for case in probes.get("duplicate_fixes", [])],
+            "diff_hunks": [diff_hunks(text) for text in probes.get("diff_hunks", [])],
             "existing_bead_for": [
                 existing_bead_for(case["new_targets"], case["open_issues"]) for case in probes.get("existing_bead_for", [])
             ],
@@ -1103,12 +1798,16 @@ def main(argv: list[str]) -> int:
         json.dump(plan, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
-    if not plan["commits"]:
-        print(json.dumps({"schema": SCHEMA_VERSION, "status": "no new commits", "since": plan["since"]}))
-        return 0
     args.state_dir.mkdir(parents=True, exist_ok=True)
+    if args.ledger_since:
+        state["ledger_since"] = args.ledger_since
+    if not plan["commits"]:
+        escalations = escalate_overdue_receipts(state, args.state_dir / "receipts.jsonl", now, args.file_beads)
+        state_path.write_text(json.dumps(state, indent=2, sort_keys=True))
+        print(json.dumps({"schema": SCHEMA_VERSION, "status": "no new commits", "since": plan["since"], "receipt_escalations": escalations}))
+        return 0
     runner = rch_runner(str(args.state_dir / "target"), args.admission_attempts, args.admission_sleep, args.state_dir / "logs")
-    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists)
+    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists, args.parallel)
     open_issues = open_tracker_issues()
     for payload in result["bead_payloads"]:
         if args.file_beads:
@@ -1128,6 +1827,7 @@ def main(argv: list[str]) -> int:
     with open(args.state_dir / "receipts.jsonl", "a", encoding="utf-8") as handle:
         for receipt in result["receipts"]:
             handle.write(json.dumps(receipt, sort_keys=True) + "\n")
+    result["receipt_escalations"] = escalate_overdue_receipts(state, args.state_dir / "receipts.jsonl", now, args.file_beads)
     state_path.write_text(json.dumps(state, indent=2, sort_keys=True))
     json.dump({"plan_flags": plan["flags"], "unmapped_paths": plan["unmapped_paths"], **result}, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

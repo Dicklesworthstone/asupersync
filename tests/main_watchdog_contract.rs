@@ -365,6 +365,7 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
                 "Keep handler execution inside the branch",
                 "recompiled cleanly on hz3",
                 "the first version missed \"compilation, runtime tests and rustfmt are NOT RUN\"",
+                "The first plan flagged the watchdog's own commit as declaring it was not compiled.",
             ],
             "known_ids": ["asupersync-bi2462.158", "asupersync-qoir1r"],
             "bead_ids": [
@@ -376,6 +377,9 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
                 "#![cfg(all(feature = \"tls\", feature = \"http3\", not(target_arch = \"wasm32\")))]",
                 "#![cfg(not(target_arch = \"wasm32\"))]\n",
                 "#![cfg(any(feature = \"a\", feature = \"b\"))]",
+                // The multi-line form 23 test files use; a line regex saw no features here.
+                "//! doc\n#![cfg(all(\n    feature = \"tls\",\n    feature = \"test-internals\",\n    not(target_arch = \"wasm32\")\n))]\nuse x;",
+                "#![cfg(target_arch = \"wasm32\")]",
             ],
             "lib_filter_for": [
                 "src/distributed/consensus/pbft.rs",
@@ -390,7 +394,7 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
     assert_eq!(
         probes["declares_not_compiled"],
         json!([
-            true, true, true, true, true, true, false, false, false, false, false, false
+            true, true, true, true, true, true, false, false, false, false, false, false, false
         ])
     );
     assert_eq!(
@@ -403,6 +407,8 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
             [["tls"], true],
             [["http3", "tls"], true],
             [[], true],
+            [["a"], true],
+            [["test-internals", "tls"], true],
             [[], false]
         ])
     );
@@ -416,6 +422,106 @@ fn predicates_match_real_phrasings_and_reject_look_alikes() {
             null
         ])
     );
+}
+
+/// A changed `src/` file is checked with the features its module chain needs, under
+/// the module path it really has. Line-based mapping ran feature-gated modules
+/// without their feature, so their tests compiled to nothing and still read green.
+#[test]
+fn feature_gated_modules_map_to_their_features_and_real_module_paths() {
+    let sources = json!({
+        "src/lib.rs": "//! crate\n#![allow(dead_code)]\npub mod plain;\n#[cfg(any(feature = \"mysql\", feature = \"postgres\"))]\npub mod database;\n#[cfg(all(\n    feature = \"tls\",\n    not(target_arch = \"wasm32\")\n))]\n// a comment between the attribute and the item\npub mod tls;\n#[cfg(target_arch = \"wasm32\")]\npub mod wasm_only;\n",
+        "src/plain.rs": "#[cfg(test)]\n#[path = \"plain_tests.rs\"]\nmod tests;\n",
+        "src/plain_tests.rs": "",
+        "src/database/mod.rs": "#[cfg(feature = \"postgres\")]\npub mod postgres;\n",
+        "src/database/postgres.rs": "#[cfg(test)]\ninclude!(\"postgres_tests.rs\");\n",
+        "src/database/postgres_tests.rs": "",
+        "src/tls.rs": "pub mod types;\n",
+        "src/tls/types.rs": "",
+        "src/wasm_only.rs": "",
+        "src/orphan.rs": "",
+    });
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {
+            "defaults": ["proc-macros"],
+            "cfg_requirement": [
+                "feature = \"tls\"",
+                "all(feature = \"tls\", not(target_arch = \"wasm32\"))",
+                "feature = \"proc-macros\"",
+                "not(feature = \"proc-macros\")",
+                "any(feature = \"mysql\", feature = \"postgres\")",
+                "target_os = \"windows\"",
+                "all(unix, test)",
+                "panic = \"abort\"",
+                "all(feature = \"a\"",
+            ],
+            "module_tree": {"sources": sources, "roots": ["src/lib.rs"]},
+        },
+    });
+    let probes = &evaluate(&scenario)["probe_results"];
+    assert_eq!(
+        probes["cfg_requirement"],
+        json!([
+            ["tls"],
+            ["tls"],
+            [],
+            "never",
+            ["mysql"],
+            "never",
+            [],
+            null,
+            null
+        ])
+    );
+    assert_eq!(
+        probes["module_tree"],
+        json!({
+            "src/lib.rs": ["", []],
+            "src/plain.rs": ["plain", []],
+            "src/plain_tests.rs": ["plain::tests", []],
+            "src/database/mod.rs": ["database", ["mysql"]],
+            // Not mysql+postgres: the `any` on `database` is resolved against the whole chain.
+            "src/database/postgres.rs": ["database::postgres", ["postgres"]],
+            "src/database/postgres_tests.rs": ["database::postgres", ["postgres"]],
+            "src/tls.rs": ["tls", ["tls"]],
+            "src/tls/types.rs": ["tls::types", ["tls"]],
+            "src/wasm_only.rs": ["wasm_only", "never"],
+        }),
+        "src/orphan.rs is absent: nothing compiles it"
+    );
+}
+
+#[test]
+fn parallel_head_lanes_change_nothing_but_wall_clock() {
+    let serial = evaluate(&planted_red_scenario(
+        json!({"known_reds": {}}),
+        &["alpha_native"],
+    ));
+    let mut scenario = planted_red_scenario(json!({"known_reds": {}}), &["alpha_native"]);
+    scenario["parallel"] = json!(4);
+    let parallel = evaluate(&scenario);
+    for key in ["receipts", "bead_payloads", "state", "notes"] {
+        assert_eq!(serial[key], parallel[key], "{key} differs under --parallel");
+    }
+    assert_eq!(receipt(&parallel, "check-default")["culprit"], sha(3));
+}
+
+#[test]
+fn a_lib_filter_that_ran_no_test_is_reported_not_hidden() {
+    let lane = json!({
+        "id": "targeted-lib", "kind": "test", "argv": ["cargo", "test", "--lib"],
+        "expected_targets": [], "lib_filters": ["database::postgres", "trace::capture"],
+    });
+    let log = "     Running unittests src/lib.rs (target/debug/deps/asupersync-abc)\nrunning 2 tests\ntest trace::capture::tests::records_poll ... ok\ntest trace::capture::tests::records_wake ... ok\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 900 filtered out; finished in 0.01s\n  Remote command finished: exit=0 in 1000ms\n";
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": [lane]},
+        "lane_logs": {"targeted-lib": {sha(1): {"log": log}}},
+    });
+    let lib = receipt(&evaluate(&scenario), "targeted-lib").clone();
+    assert_eq!(lib["verdict"], "green", "{lib:#}");
+    assert_eq!(lib["unexercised_filters"], json!(["database::postgres"]));
 }
 
 fn hedge_log(with_newer: bool) -> String {
@@ -536,6 +642,232 @@ fn an_already_tracked_red_is_not_filed_again() {
         evaluate(&scenario)["probe_results"]["existing_bead_for"],
         json!(["asupersync-bi2462.165", null, null, null]),
         "whole-word match on every new test; a partial name or an error-keyed red never matches"
+    );
+}
+
+/// A commit for the rule-3 ledger (bi2462.147.1): `hh:mm` on 2026-09-24 UTC.
+fn ledger_commit(n: u8, email: &str, at: &str, message: &str, path: &str) -> Value {
+    let mut c = commit(n, email, message);
+    c["committed_at"] = json!(format!("2026-09-24T{at}:00+00:00"));
+    c["paths"] = json!([path]);
+    c["is_merge"] = json!(false);
+    c
+}
+
+fn run_receipt(head: u8, at: &str, verdict: &str, culprit: Option<u8>) -> Value {
+    json!({
+        "sha": sha(head),
+        "recorded_at": format!("2026-09-24T{at}:00+00:00"),
+        "lane": "check-default",
+        "verdict": verdict,
+        "culprit": culprit.map(sha),
+    })
+}
+
+fn ledger_probe(receipts: Vec<Value>) -> Value {
+    let commits = vec![
+        ledger_commit(1, WEB_API, "00:00", "one", "src/a.rs"),
+        ledger_commit(2, "dev@example.com", "00:30", "two", "src/a.rs"),
+        ledger_commit(3, WEB_API, "04:00", "three", "src/a.rs"),
+        ledger_commit(4, WEB_API, "04:30", "four", "src/a.rs"),
+        ledger_commit(5, WEB_API, "05:00", "five", "src/a.rs"),
+        ledger_commit(
+            6,
+            "dev@example.com",
+            "07:00",
+            "six: Tests have NOT been compiled or executed",
+            "src/b.rs",
+        ),
+        ledger_commit(7, WEB_API, "11:00", "seven", "src/a.rs"),
+        ledger_commit(8, WEB_API, "11:30", "eight", "docs/x.md"),
+    ];
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"receipt_ledger": [{
+            "commits": commits, "receipts": receipts, "now": "2026-09-24T12:00:00+00:00",
+        }]},
+    });
+    evaluate(&scenario)["probe_results"]["receipt_ledger"][0].clone()
+}
+
+/// Validation Path rule 3: a no-compile-path commit gets a receipt within 2 h, and no
+/// green receipt after 6 h means one P0 naming it. A red elsewhere blocks instead of
+/// multiplying P0s; the red's own bead covers it.
+#[test]
+fn rule3_ledger_lists_overdue_commits_and_escalates_after_six_hours() {
+    let probe = ledger_probe(vec![
+        run_receipt(2, "01:00", "green", None),
+        run_receipt(4, "09:00", "red", Some(4)),
+    ]);
+    let ledger = &probe["ledger"];
+    let statuses: Vec<(String, String)> = ledger["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| {
+            (
+                r["sha"].as_str().expect("sha")[..2].to_owned(),
+                r["status"].as_str().expect("status").to_owned(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        ("01", "green"),
+        ("03", "blocked"),
+        ("04", "red"),
+        ("05", "escalate"),
+        ("06", "overdue"),
+        ("07", "pending"),
+    ]
+    .into_iter()
+    .map(|(s, st)| (s.to_owned(), st.to_owned()))
+    .collect();
+    assert_eq!(statuses, expected, "{ledger:#}");
+    assert_eq!(
+        ledger["owed"], 6,
+        "a plain dev commit and a docs-only commit owe nothing"
+    );
+    assert_eq!(ledger["green_within_2h"], 1);
+    assert_eq!(ledger["rows"][0]["latency_h"], 1.0);
+    assert_eq!(ledger["rows"][1]["blocked_by"], json!([sha(4)]));
+    assert_eq!(ledger["overdue"], json!([sha(6)]));
+    assert_eq!(ledger["escalate"], json!([sha(5)]));
+    let payloads = probe["payloads"].as_array().expect("payloads");
+    assert_eq!(payloads.len(), 1);
+    let title = payloads[0]["title"].as_str().expect("title");
+    assert!(
+        title.starts_with(&format!(
+            "[main-watchdog] NO GREEN RECEIPT after 6 h: {}",
+            &sha(5)[..9]
+        )),
+        "{title}"
+    );
+    assert!(title.contains(WEB_API), "{title}");
+    assert_eq!(payloads[0]["priority"], 0);
+    assert_eq!(payloads[0]["parent"], "asupersync-bi2462.147");
+
+    // Negative twin: a later all-green run covers everything, so nothing is owed.
+    let healed = ledger_probe(vec![
+        run_receipt(2, "01:00", "green", None),
+        run_receipt(4, "09:00", "red", Some(4)),
+        run_receipt(8, "11:45", "green", None),
+    ]);
+    assert_eq!(healed["ledger"]["escalate"], json!([]));
+    assert_eq!(healed["ledger"]["overdue"], json!([]));
+    assert_eq!(healed["payloads"], json!([]));
+    assert!(
+        healed["ledger"]["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .all(|r| r["status"] == "green"),
+        "{healed:#}"
+    );
+}
+
+#[test]
+fn first_run_ledger_names_targets_no_lane_has_executed() {
+    // A target that ran zero tests is not executed; one that ran tests is.
+    let lane = json!({
+        "id": "targeted-tests[default]", "kind": "test", "argv": ["cargo", "test"],
+        "expected_targets": ["alpha_native", "beta_native"],
+    });
+    let log = format!(
+        "{}     Running tests/beta_native.rs (x)\nrunning 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        test_green("alpha_native", 2).replace("  Remote command finished: exit=0 in 1000ms\n", "")
+    ) + "  Remote command finished: exit=0 in 1000ms\n";
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": [lane]},
+        "lane_logs": {"targeted-tests[default]": {sha(1): {"log": log}}},
+        "probes": {"first_run_ledger": [
+            {"added": ["alpha_native", "beta_native"], "receipts": [{"targets_executed": ["alpha_native"]}]},
+            {"added": ["alpha_native"], "receipts": [{"targets_executed": ["alpha_native"]}]},
+        ]},
+    });
+    let result = evaluate(&scenario);
+    assert_eq!(
+        receipt(&result, "targeted-tests[default]")["targets_executed"],
+        json!(["alpha_native"])
+    );
+    assert_eq!(
+        result["probe_results"]["first_run_ledger"],
+        json!([
+            {"added": 2, "never_run": ["beta_native"]},
+            {"added": 1, "never_run": []}
+        ])
+    );
+}
+
+#[test]
+fn stranded_work_and_duplicate_fixes_alert_only_past_their_thresholds() {
+    let now = "2026-09-24T12:00:00+00:00";
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {
+            "stranded": [
+                {"now": now, "tree": {"ahead": 2, "oldest_unpushed_at": "2026-09-24T09:00:00+00:00",
+                                      "oldest_unpushed_beads": ["asupersync-x1"], "behind": 0}},
+                {"now": now, "tree": {"ahead": 2, "oldest_unpushed_at": "2026-09-24T11:00:00+00:00",
+                                      "oldest_unpushed_beads": [], "behind": 5}},
+                {"now": now, "tree": {"ahead": 0, "landed_elsewhere": 4, "behind": 6}},
+            ],
+            "duplicate_fixes": [
+                {"origin": [{"id": "o1", "beads": ["asupersync-fix1", "asupersync-bi2462.162"],
+                             "hunks": {"src/a.rs": [[10, 20]]}}],
+                 "local": [
+                     {"id": "same-bead", "beads": ["asupersync-fix1"], "hunks": {}},
+                     {"id": "process-bead-disjoint", "beads": ["asupersync-bi2462.162"],
+                      "hunks": {"src/a.rs": [[30, 40]]}},
+                     {"id": "overlap", "beads": [], "hunks": {"src/a.rs": [[18, 25]]}},
+                 ]},
+            ],
+            "diff_hunks": [
+                "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -10,3 +10,4 @@ fn x\n-a\n@@ -40 +41,2 @@\n+b\n@@ -50,0 +52 @@\n+c\n",
+            ],
+        },
+    });
+    let probes = &evaluate(&scenario)["probe_results"];
+    let stranded = probes["stranded_alerts"].as_array().expect("stranded");
+    let first = stranded[0].as_array().expect("case 0");
+    assert_eq!(first.len(), 1, "{stranded:?}");
+    assert!(
+        first[0]
+            .as_str()
+            .expect("alert")
+            .starts_with("stranded: main is 2 commit(s) ahead")
+            && first[0].as_str().expect("alert").contains("asupersync-x1"),
+        "{first:?}"
+    );
+    assert_eq!(
+        stranded[1],
+        json!([]),
+        "1 h unpushed and 5 behind stay silent"
+    );
+    let third: Vec<&str> = stranded[2]
+        .as_array()
+        .expect("case 2")
+        .iter()
+        .map(|a| a.as_str().expect("alert"))
+        .collect();
+    assert!(
+        third.len() == 2
+            && third[0].starts_with("stale: 4 commit(s)")
+            && third[1].starts_with("behind: main is 6"),
+        "{third:?}"
+    );
+    assert_eq!(
+        probes["duplicate_fixes"],
+        json!([[
+            {"origin": "o1", "local": "same-bead", "beads": ["asupersync-fix1"], "overlapping_files": []},
+            {"origin": "o1", "local": "overlap", "beads": [], "overlapping_files": ["src/a.rs"]}
+        ]]),
+        "a shared process bead and disjoint lines are not a duplicate"
+    );
+    assert_eq!(
+        probes["diff_hunks"],
+        json!([{"src/a.rs": [[10, 12], [40, 40], [50, 50]]}])
     );
 }
 
