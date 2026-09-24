@@ -1,9 +1,10 @@
 //! Bounded, fail-closed driving of a production task-order projection.
 //!
-//! The legacy production replay API intentionally resumes seeded scheduling at
-//! the end of its projection. [`LabRuntime::run_production_schedule_strict`]
-//! instead requires both complete consumption and quiescence. It never polls a
-//! task after consuming the last recorded choice. A rejection, budget boundary,
+//! Production replay stops at the end of its projection. Only the explicit
+//! [`LabRuntime::replay_production_schedule_prefix`] API resumes seeded
+//! scheduling afterward. [`LabRuntime::run_production_schedule_strict`]
+//! additionally bounds admission and requires consumption and quiescence. It
+//! never polls a task after consuming the last recorded choice. A rejection, budget boundary,
 //! or unwind leaves normal dispatch paused and retains the caller's runtime.
 //! [`LabRuntime::discard_production_replay`] explicitly leaves replay mode so
 //! the caller can cancel/drain that retained work under ordinary scheduling.
@@ -16,10 +17,38 @@
 //! step quotas cannot bound a user poll or callback that does not return.
 
 use super::{
-    LabRunReport, LabRuntime, OnReplayDivergence, ProductionReplayOptions,
-    ProductionReplayState, ReplayReport,
+    LabRunReport, LabRuntime, OnReplayDivergence, ProductionReplayOptions, ProductionReplayState,
+    ReplayReport,
 };
 use crate::trace::replay::{CompactTaskId, ProductionSchedule, ReplayEvent};
+
+/// Authority granted to a production task-order projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ProductionReplayMode {
+    /// Stop before polling any task beyond the recorded choices.
+    #[default]
+    Strict,
+    /// Explicitly permit exploratory execution after the recorded prefix.
+    Prefix,
+}
+
+/// Typed replay boundary without extending the legacy report's public fields.
+#[derive(Debug, Clone)]
+pub struct ProductionReplayBoundary {
+    /// Whether unrecorded continuation was explicitly authorized.
+    pub mode: ProductionReplayMode,
+    /// Known terminal classification; `None` means execution is still pending.
+    /// A prefix never receives a strict `Matched` classification.
+    pub termination: Option<StrictProductionReplayTermination>,
+    /// Source rejection observed by the legacy-signature configurator.
+    /// The bounded strict driver returns these errors before installation.
+    pub source_error: Option<StrictProductionReplayError>,
+    /// Actual number of tasks that entered the Lab scheduler.
+    pub observed_spawns: usize,
+    /// Recorded choices and any task-order divergence.
+    pub replay: ReplayReport,
+}
 
 /// Source admission and driver work limits; no implicit unbounded defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +185,14 @@ pub enum StrictProductionReplayError {
     /// Enqueue notifications are not evidence of actual task polls.
     #[error("strict production replay requires Poll events, not Schedule-event fallback")]
     NonPollSource,
+    /// Source observations were duplicated or reordered before projection.
+    #[error("production source sequence is not increasing: {previous} then {next}")]
+    SourceOrder {
+        /// Sequence of the earlier observation.
+        previous: u64,
+        /// Sequence of the following observation.
+        next: u64,
+    },
     /// The retained source does not satisfy its projection contract.
     #[error("invalid production schedule projection: {reason}")]
     InvalidProjection {
@@ -178,8 +215,9 @@ impl LabRuntime {
     /// Source counts are checked before copying. Orphan identities, enqueue-
     /// only projections, and active pre-poll chaos injection are refused.
     /// Recorded tasks retain the legacy binding
-    /// to the order in which Lab tasks first enter their scheduler. No public
-    /// legacy option, report enum, or default behavior is changed.
+    /// to the order in which Lab tasks first enter their scheduler. Legacy
+    /// option and report shapes remain unchanged; prefix continuation requires
+    /// an explicit call to [`Self::replay_production_schedule_prefix`].
     ///
     /// Each recorded choice is attempted through the existing production replay
     /// selector with `OnReplayDivergence::Stop`. After the last choice, only
@@ -230,6 +268,12 @@ impl LabRuntime {
         let start_steps = pause.runtime.steps;
         let mut work_units = 0;
         let termination = drive(&mut *pause.runtime, limits, &mut work_units);
+        pause
+            .runtime
+            .production_replay
+            .as_mut()
+            .expect("strict source installed")
+            .termination = Some(termination);
         // Pause before reporting too: reporting can itself invoke panic-prone
         // oracle/trace paths, and must not reopen ordinary dispatch on unwind.
         pause.freeze();
@@ -260,6 +304,61 @@ impl LabRuntime {
         let report = self.replay_report()?;
         self.production_replay = None;
         Some(report)
+    }
+
+    /// Reports whether replay is strict, an explicit prefix, or incomplete.
+    ///
+    /// This does not dispatch work. Numerical gaps between source sequence
+    /// numbers alone are not evidence of loss: the runtime can allocate a
+    /// sequence without publishing an event. A match proves the reconstructed
+    /// workload consumed the retained choices, not the capture's completeness.
+    #[must_use]
+    pub fn production_replay_boundary(&self) -> Option<ProductionReplayBoundary> {
+        let state = self.production_replay.as_ref()?;
+        let scheduler = self.scheduler.lock();
+        let observed_spawns = scheduler.first_entry_count();
+        let scheduler_empty = scheduler.is_empty();
+        drop(scheduler);
+        let termination = state.termination.or_else(|| {
+            if state.source_error.is_some() || state.report.divergence.is_some() {
+                return Some(StrictProductionReplayTermination::Diverged);
+            }
+            if state.mode == ProductionReplayMode::Prefix {
+                return None;
+            }
+            let exhausted = state.next >= state.steps.len();
+            let pending =
+                self.has_pending_dispatch_commands() || self.state.has_pending_obligation_posts();
+            if observed_spawns > state.spawn_order.len()
+                || (exhausted
+                    && !pending
+                    && self.is_quiescent()
+                    && observed_spawns != state.spawn_order.len())
+            {
+                return Some(StrictProductionReplayTermination::SpawnCountMismatch {
+                    expected: state.spawn_order.len(),
+                    observed: observed_spawns,
+                });
+            }
+            if exhausted && !pending {
+                return Some(if self.is_quiescent() && scheduler_empty {
+                    StrictProductionReplayTermination::Matched
+                } else {
+                    StrictProductionReplayTermination::SourceExhausted
+                });
+            }
+            if !exhausted && self.is_quiescent() && scheduler_empty {
+                return Some(StrictProductionReplayTermination::SourceRemaining);
+            }
+            None
+        });
+        Some(ProductionReplayBoundary {
+            mode: state.mode,
+            termination,
+            source_error: state.source_error.clone(),
+            observed_spawns,
+            replay: self.replay_report().expect("production replay installed"),
+        })
     }
 }
 
@@ -297,10 +396,7 @@ fn admit(
     Ok(())
 }
 
-fn reserve<T>(
-    resource: &'static str,
-    count: usize,
-) -> Result<Vec<T>, StrictProductionReplayError> {
+fn reserve<T>(resource: &'static str, count: usize) -> Result<Vec<T>, StrictProductionReplayError> {
     let mut values = Vec::new();
     values
         .try_reserve_exact(count)
@@ -308,7 +404,7 @@ fn reserve<T>(
     Ok(values)
 }
 
-fn prepare_source(
+pub(super) fn prepare_source(
     schedule: &ProductionSchedule,
     limits: StrictProductionReplayLimits,
 ) -> Result<ProductionReplayState, StrictProductionReplayError> {
@@ -316,6 +412,9 @@ fn prepare_source(
     let spawns = schedule.spawn_order();
     admit("events", events.len(), limits.max_events)?;
     admit("spawns", spawns.len(), limits.max_spawns)?;
+    if let Some((previous, next)) = schedule.source_sequence_disorder() {
+        return Err(StrictProductionReplayError::SourceOrder { previous, next });
+    }
     if !schedule.summary().orphans.is_empty() {
         return Err(StrictProductionReplayError::OrphanSpawns {
             count: schedule.summary().orphans.len(),
@@ -384,6 +483,10 @@ fn prepare_source(
         next: 0,
         waited: 0,
         following: true,
+        mode: ProductionReplayMode::Strict,
+        termination: None,
+        source_error: None,
+        selected: None,
         report: ReplayReport {
             steps_total: count,
             ..ReplayReport::default()
@@ -402,6 +505,9 @@ fn drive(
             .production_replay
             .as_ref()
             .expect("strict source installed");
+        if let Some(termination) = replay.termination {
+            return termination;
+        }
         if replay.report.divergence.is_some() || replay.report.stopped || !replay.following {
             return End::Diverged;
         }
@@ -414,8 +520,8 @@ fn drive(
                 observed: observed_spawns,
             };
         }
-        let pending_commands = runtime.has_pending_dispatch_commands()
-            || runtime.state.has_pending_obligation_posts();
+        let pending_commands =
+            runtime.has_pending_dispatch_commands() || runtime.state.has_pending_obligation_posts();
         if exhausted && !pending_commands {
             if !runtime.is_quiescent() || !runtime.scheduler.lock().is_empty() {
                 return End::SourceExhausted;
@@ -444,9 +550,8 @@ fn drive(
         }
         *work_units += 1;
         if exhausted {
-            // Do not call Normal after source exhaustion: its legacy selector
-            // deliberately returns ReplayPick::Normal. Candidate(None) pumps
-            // the same system boundary but has no permission to poll a task.
+            // A terminal command pump must have no authority to select a task,
+            // independent of the production selector's current replay mode.
             let dispatched = runtime
                 .step_with_candidate_dispatch(None)
                 .expect("system-only pump has no candidate dispatch to reject");

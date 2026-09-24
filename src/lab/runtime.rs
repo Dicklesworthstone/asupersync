@@ -46,6 +46,13 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 use std::{fmt, future::Future};
 
+/// Fail-closed, bounded execution of a production dispatch projection.
+pub mod production_strict;
+
+use production_strict::{
+    ProductionReplayMode, StrictProductionReplayError, StrictProductionReplayTermination,
+};
+
 const AUTO_ARTIFACTS_ENV: &str = "ASUPERSYNC_AUTO_ARTIFACTS";
 const TEST_ARTIFACTS_DIR_ENV: &str = "ASUPERSYNC_TEST_ARTIFACTS_DIR";
 const LAB_TEST_SEED_ENV: &str = "ASUPERSYNC_LAB_TEST_SEED";
@@ -1242,6 +1249,10 @@ struct ProductionReplayState {
     waited: usize,
     following: bool,
     report: ReplayReport,
+    mode: ProductionReplayMode,
+    termination: Option<StrictProductionReplayTermination>,
+    source_error: Option<StrictProductionReplayError>,
+    selected: Option<usize>,
 }
 
 /// What the oracle decided for one lab step.
@@ -1272,6 +1283,10 @@ impl ProductionReplayState {
             waited: 0,
             following: true,
             report,
+            mode: ProductionReplayMode::Prefix,
+            termination: None,
+            source_error: None,
+            selected: None,
         }
     }
 
@@ -1283,10 +1298,24 @@ impl ProductionReplayState {
             return ReplayPick::Normal;
         }
         let Some(&(ordinal, _seq)) = self.steps.get(self.next) else {
-            // Schedule exhausted: the rest of the run is the lab's own policy.
+            if self.mode == ProductionReplayMode::Strict {
+                self.report.stopped = true;
+                return ReplayPick::Stopped;
+            }
+            // Only explicit prefix replay permits an unrecorded continuation.
             self.following = false;
             return ReplayPick::Normal;
         };
+        if self.mode == ProductionReplayMode::Strict
+            && sched.first_entry_count() > self.spawn_order.len()
+        {
+            self.termination = Some(StrictProductionReplayTermination::SpawnCountMismatch {
+                expected: self.spawn_order.len(),
+                observed: sched.first_entry_count(),
+            });
+            self.report.stopped = true;
+            return ReplayPick::Stopped;
+        }
         let Some(task) = sched.first_entry(ordinal) else {
             return self.diverge(
                 step,
@@ -1297,9 +1326,15 @@ impl ProductionReplayState {
         };
         match sched.take_preferred(task, now) {
             Ok((lane, worker)) => {
-                self.next = self.next.saturating_add(1);
                 self.waited = 0;
-                self.report.steps_matched = self.report.steps_matched.saturating_add(1);
+                if self.mode == ProductionReplayMode::Strict {
+                    // Selection alone is not a poll: stale wakes can enqueue a
+                    // completed task whose stored future has already gone.
+                    self.selected = Some(ordinal);
+                } else {
+                    self.next = self.next.saturating_add(1);
+                    self.report.steps_matched = self.report.steps_matched.saturating_add(1);
+                }
                 ReplayPick::Take(task, lane, worker)
             }
             Err(PreferredDispatchError::NotRunnable | PreferredDispatchError::TimedNotDue) => {
@@ -1569,7 +1604,9 @@ pub enum AutoAdvanceTermination {
     /// The configured `max_steps` limit was reached before quiescence.
     StepLimitReached,
     /// The runtime was stuck (scheduler empty, no pending deadlines, not
-    /// quiescent) for 1 000 consecutive iterations and bailed out.
+    /// quiescent) for 1 000 consecutive iterations, or replay forbade further
+    /// dispatch. See [`LabRuntime::production_replay_boundary`] for the typed
+    /// replay reason; a replay pause returns immediately without advancing time.
     StuckBailout,
 }
 
@@ -3170,6 +3207,13 @@ impl LabRuntime {
         let start_time = self.virtual_time;
 
         let termination = loop {
+            if self.replay_stopped() {
+                break if self.is_quiescent() {
+                    AutoAdvanceTermination::Quiescent
+                } else {
+                    AutoAdvanceTermination::StuckBailout
+                };
+            }
             // Check step limit
             if let Some(max) = self.config.max_steps {
                 if self.steps >= max {
@@ -3745,6 +3789,22 @@ impl LabRuntime {
         for invariant in &temporal_invariant_failures {
             invariant_violations.push(format!("temporal:{invariant}"));
         }
+        if let Some(boundary) = self.production_replay_boundary()
+            && boundary.mode == ProductionReplayMode::Strict
+            && boundary.termination != Some(StrictProductionReplayTermination::Matched)
+        {
+            // State quiescence can precede replay completion: a stale wake may
+            // remain queued after every real task has finished. A still-pending
+            // boundary must not let that partial source pass the Lab report.
+            let termination = boundary.termination.map_or_else(
+                || "Pending".to_owned(),
+                |termination| format!("{termination:?}"),
+            );
+            invariant_violations.push(format!(
+                "production_replay:incomplete:{termination}:matched={},total={},source_error={:?}",
+                boundary.replay.steps_matched, boundary.replay.steps_total, boundary.source_error,
+            ));
+        }
         if let Some(prefix_len) = temporal_counterexample_prefix_len {
             invariant_violations.push(format!(
                 "temporal:minimal_divergent_prefix_len={prefix_len}"
@@ -4087,7 +4147,12 @@ impl LabRuntime {
     /// ([`ProductionReplayOptions::max_wait_steps`]); a task that no lab task
     /// ever bound to, or one still not runnable after the bound, is a
     /// [`ReplayDivergence`] handled per [`ProductionReplayOptions::on_divergence`].
-    /// Once the schedule is exhausted the lab's normal policy resumes.
+    /// The default is fail closed: no task is polled after the source ends.
+    /// [`Self::production_replay_boundary`] distinguishes a complete match
+    /// from source exhaustion with outstanding work or unconsumed choices.
+    /// Use [`Self::replay_production_schedule_prefix`] to explicitly authorize
+    /// an exploratory continuation. `OnReplayDivergence::Continue` still
+    /// explicitly permits continuation after a recorded task-order divergence.
     /// Recorded spawn ordinals bind to lab tasks by the order in which tasks
     /// first enter the lab scheduler, so the replay must be configured before
     /// the first step. [`ForcedSchedule`] replay is a separate, hash-bound
@@ -4097,7 +4162,60 @@ impl LabRuntime {
     ///
     /// [`ProductionReplayError::AlreadyStarted`] after any step,
     /// [`ProductionReplayError::EmptySchedule`] for a schedule without steps.
+    /// Additional source-admission failures install a stopped replay and are
+    /// exposed by [`Self::production_replay_boundary`], preserving this method's
+    /// existing error type. Prefer [`Self::run_production_schedule_strict`] for
+    /// bounded admission with directly returned typed errors.
     pub fn replay_production_schedule(
+        &mut self,
+        schedule: &ProductionSchedule,
+        options: ProductionReplayOptions,
+    ) -> Result<(), ProductionReplayError> {
+        if self.steps != 0 {
+            return Err(ProductionReplayError::AlreadyStarted { steps: self.steps });
+        }
+        if schedule.summary().steps == 0 {
+            return Err(ProductionReplayError::EmptySchedule);
+        }
+        let limits = production_strict::StrictProductionReplayLimits::new(
+            usize::MAX,
+            usize::MAX,
+            usize::MAX,
+            u64::MAX,
+            options.max_wait_steps,
+        );
+        let admission = if self.has_chaos() {
+            Err(StrictProductionReplayError::ChaosActive)
+        } else {
+            production_strict::prepare_source(schedule, limits)
+        };
+        let state = match admission {
+            Ok(mut state) => {
+                state.options = options;
+                state
+            }
+            Err(error) => {
+                let mut state = ProductionReplayState::new(schedule, options);
+                state.mode = ProductionReplayMode::Strict;
+                state.source_error = Some(error);
+                state.report.stopped = true;
+                state
+            }
+        };
+        self.production_replay = Some(state);
+        Ok(())
+    }
+
+    /// Replays a recorded prefix and explicitly resumes ordinary scheduling.
+    ///
+    /// This retains the historical continuation policy. Its boundary report
+    /// always says [`ProductionReplayMode::Prefix`], so a matched prefix cannot
+    /// be mistaken for a complete strict replay. Source completeness and
+    /// quiescence are not admission conditions for this exploratory mode.
+    ///
+    /// # Errors
+    /// Returns the same configuration errors as [`Self::replay_production_schedule`].
+    pub fn replay_production_schedule_prefix(
         &mut self,
         schedule: &ProductionSchedule,
         options: ProductionReplayOptions,
@@ -4124,15 +4242,29 @@ impl LabRuntime {
             .lock()
             .first_entry_count()
             .min(replay.spawn_order.len());
+        if replay.mode == ProductionReplayMode::Strict
+            && replay.following
+            && replay.next >= replay.steps.len()
+            && (!self.is_quiescent() || !self.scheduler.lock().is_empty())
+            && !self.has_pending_dispatch_commands()
+            && !self.state.has_pending_obligation_posts()
+        {
+            report.stopped = true;
+        }
         Some(report)
     }
 
     /// Whether a production-schedule replay diverged under
     /// [`OnReplayDivergence::Stop`]; the run loops stop stepping then.
     fn replay_stopped(&self) -> bool {
-        self.production_replay
-            .as_ref()
-            .is_some_and(|replay| replay.report.stopped)
+        self.production_replay.as_ref().is_some_and(|replay| {
+            replay.report.stopped
+                || (replay.mode == ProductionReplayMode::Strict
+                    && replay.following
+                    && replay.next >= replay.steps.len()
+                    && !self.has_pending_dispatch_commands()
+                    && !self.state.has_pending_obligation_posts())
+        })
     }
 
     /// One bounded wait for a recorded task that is not runnable yet.
@@ -4536,9 +4668,25 @@ impl LabRuntime {
         }
 
         let result = if let Some(stored) = self.state.get_stored_future(task_id) {
+            if let Some(replay) = self.production_replay.as_mut()
+                && replay.selected.take().is_some()
+            {
+                replay.next = replay.next.saturating_add(1);
+                replay.report.steps_matched = replay.report.steps_matched.saturating_add(1);
+            }
             stored.poll(&mut cx)
         } else {
-            // Task lost (should not happen if consistent)
+            if let Some(replay) = self.production_replay.as_mut()
+                && let Some(ordinal) = replay.selected.take()
+            {
+                let _ = replay.diverge(
+                    self.steps,
+                    ordinal,
+                    Some(task_id),
+                    ReplayDivergenceReason::SchedulerInvariant,
+                );
+            }
+            // A stale wake may name a retired future. It is not a matched poll.
             return Ok(true);
         };
 

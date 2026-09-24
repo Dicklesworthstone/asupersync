@@ -116,6 +116,17 @@ impl Fixture {
     }
 
     fn drain(&mut self) {
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "bead": "asupersync-bi2462.96",
+                "phase": "before_explicit_cleanup",
+                "steps": self.runtime.steps(),
+                "polls": self.counts(),
+                "drops": self.drop_counts(),
+                "boundary": format!("{:?}", self.runtime.production_replay_boundary()),
+            })
+        );
         let _ = self.runtime.discard_production_replay();
         // Explicit cleanup, not replay. step_for_test also lets the fixture
         // clean up after deliberately testing a configured one-step limit.
@@ -145,7 +156,10 @@ fn complete_source_requires_exact_consumption_and_quiescence() {
         .runtime
         .run_production_schedule_strict(&source(2, &[0, 1, 0]), limits())
         .unwrap();
-    assert_eq!(report.termination, StrictProductionReplayTermination::Matched);
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Matched
+    );
     assert_eq!(report.replay.steps_matched, 3);
     assert_eq!(report.replay.steps_total, 3);
     assert_eq!(report.observed_spawns, 2);
@@ -183,14 +197,68 @@ fn exhausted_source_never_polls_unrecorded_tail_and_retains_captures() {
 }
 
 #[test]
-fn legacy_production_replay_still_has_its_documented_tail_continuation() {
+fn explicit_prefix_replay_continues_and_reports_its_limited_authority() {
     let mut fx = fixture(&[1, 1]);
     fx.runtime
-        .replay_production_schedule(&source(2, &[0]), ProductionReplayOptions::default())
+        .replay_production_schedule_prefix(&source(2, &[0]), ProductionReplayOptions::default())
         .unwrap();
     fx.runtime.run_until_quiescent();
     assert_eq!(fx.counts(), [1, 1]);
     assert!(!fx.runtime.replay_report().unwrap().stopped);
+    let boundary = fx.runtime.production_replay_boundary().unwrap();
+    assert_eq!(boundary.mode, ProductionReplayMode::Prefix);
+    assert_eq!(boundary.termination, None);
+    assert_eq!(boundary.replay.steps_matched, 1);
+    fx.drain();
+}
+
+#[test]
+fn default_replay_rejects_truncated_tail_without_polling_it() {
+    let mut fx = fixture(&[1, 1]);
+    fx.runtime
+        .replay_production_schedule(&source(2, &[0]), ProductionReplayOptions::default())
+        .unwrap();
+    let report = fx.runtime.run_until_quiescent_with_report();
+    assert_eq!(fx.counts(), [1, 0], "an unrecorded task must remain owned");
+    assert!(!report.lab_test_passed());
+    let boundary = fx.runtime.production_replay_boundary().unwrap();
+    assert_eq!(boundary.mode, ProductionReplayMode::Strict);
+    assert_eq!(
+        boundary.termination,
+        Some(StrictProductionReplayTermination::SourceExhausted)
+    );
+    assert!(boundary.replay.stopped);
+    assert_eq!(boundary.replay.steps_matched, 1);
+    let steps = fx.runtime.steps();
+    let now = fx.runtime.now();
+    let auto = fx.runtime.run_with_auto_advance();
+    assert_eq!(auto.steps, 0);
+    assert_eq!(auto.auto_advances, 0);
+    assert_eq!(fx.runtime.steps(), steps);
+    assert_eq!(fx.runtime.now(), now);
+    assert_eq!(fx.counts(), [1, 0]);
+    fx.drain();
+}
+
+#[test]
+fn default_replay_rejects_unconsumed_source_even_after_workload_quiesces() {
+    let mut fx = fixture(&[1]);
+    fx.runtime
+        .replay_production_schedule(&source(1, &[0, 0]), ProductionReplayOptions::default())
+        .unwrap();
+    let report = fx.runtime.run_until_quiescent_with_report();
+    assert!(report.quiescent);
+    assert!(!report.lab_test_passed());
+    assert_eq!(
+        fx.runtime.production_replay_boundary().unwrap().termination,
+        Some(StrictProductionReplayTermination::SourceRemaining)
+    );
+    assert!(
+        report
+            .invariant_violations
+            .iter()
+            .any(|value| value.starts_with("production_replay:incomplete:SourceRemaining"))
+    );
     fx.drain();
 }
 
@@ -220,7 +288,10 @@ fn missing_recorded_task_reports_divergence_without_polling_another_task() {
         .runtime
         .run_production_schedule_strict(&source(2, &[1]), limits())
         .unwrap();
-    assert_eq!(report.termination, StrictProductionReplayTermination::Diverged);
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Diverged
+    );
     assert_eq!(report.replay.steps_matched, 0);
     assert_eq!(report.replay.divergence.unwrap().expected_ordinal, 1);
     assert_eq!(fx.counts(), [0]);
@@ -241,7 +312,10 @@ fn driver_budget_stops_between_recorded_polls_and_preserves_work() {
             },
         )
         .unwrap();
-    assert_eq!(report.termination, StrictProductionReplayTermination::WorkLimit);
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::WorkLimit
+    );
     assert_eq!(report.work_units, 1);
     assert_eq!(report.replay.steps_matched, 1);
     assert_eq!(fx.counts(), [1]);
@@ -264,7 +338,10 @@ fn zero_work_budget_admits_but_does_not_poll() {
             },
         )
         .unwrap();
-    assert_eq!(report.termination, StrictProductionReplayTermination::WorkLimit);
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::WorkLimit
+    );
     assert_eq!(report.work_units, 0);
     assert_eq!(fx.runtime.steps(), 0);
     assert_eq!(fx.counts(), [0]);
@@ -373,9 +450,248 @@ fn repeated_or_reversed_poll_sequence_is_rejected_before_execution() {
         let schedule = ProductionSchedule::from_runtime_trace(&events).unwrap();
         assert!(matches!(
             prepare_source(&schedule, limits()),
-            Err(StrictProductionReplayError::InvalidProjection { .. })
+            Err(StrictProductionReplayError::SourceOrder { .. })
         ));
     }
+}
+
+#[test]
+fn source_order_rejection_includes_unprojected_observations() {
+    let region = RegionId::from_arena(ArenaIndex::new(31, 2));
+    for next in [1, 0] {
+        let mut events = source_events(1, &[0]);
+        // Schedule is ignored when Poll observations exist, but its ordering
+        // still belongs to the source and must not disappear during projection.
+        events.push(TraceEvent::schedule(
+            next,
+            Time::ZERO,
+            source_task(0),
+            region,
+        ));
+        let schedule = ProductionSchedule::from_runtime_trace(&events).unwrap();
+        assert_eq!(schedule.summary().skipped, 1);
+        assert!(matches!(
+            prepare_source(&schedule, limits()),
+            Err(StrictProductionReplayError::SourceOrder { previous: 1, next: observed }) if observed == next
+        ));
+        let mut fx = fixture(&[1]);
+        fx.runtime
+            .replay_production_schedule(&schedule, ProductionReplayOptions::default())
+            .unwrap();
+        fx.runtime.run_until_quiescent();
+        assert_eq!(fx.counts(), [0]);
+        assert!(matches!(
+            fx.runtime
+                .production_replay_boundary()
+                .unwrap()
+                .source_error,
+            Some(StrictProductionReplayError::SourceOrder { .. })
+        ));
+        fx.drain();
+    }
+}
+
+#[test]
+fn legitimate_unused_sequence_numbers_do_not_reject_complete_work() {
+    let mut events = source_events(1, &[0]);
+    events[0].seq = 7;
+    events[1].seq = 19;
+    let schedule = ProductionSchedule::from_runtime_trace(&events).unwrap();
+    let mut fx = fixture(&[1]);
+    let report = fx
+        .runtime
+        .run_production_schedule_strict(&schedule, limits())
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Matched
+    );
+    assert!(report.passed());
+    assert_eq!(fx.counts(), [1]);
+    fx.drain();
+}
+
+#[test]
+fn default_replay_cannot_pass_quiescence_with_a_stale_wake_and_unconsumed_source() {
+    let mut runtime = LabRuntime::new(LabConfig::new(71).max_steps(128));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let saved = Arc::new(parking_lot::Mutex::new(None::<std::task::Waker>));
+    let first_saved = Arc::clone(&saved);
+    let (first, first_handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            poll_fn(|cx| {
+                *first_saved.lock() = Some(cx.waker().clone());
+                Poll::Ready(())
+            })
+            .await;
+        })
+        .unwrap();
+    let (second, second_handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            saved
+                .lock()
+                .take()
+                .expect("first task captured its waker")
+                .wake();
+        })
+        .unwrap();
+    runtime.scheduler.lock().schedule(first, 0);
+    runtime.scheduler.lock().schedule(second, 0);
+    runtime
+        .replay_production_schedule(&source(2, &[0, 1, 0]), ProductionReplayOptions::default())
+        .unwrap();
+
+    // The legacy run loop stops on task-state quiescence before it considers
+    // the stale scheduler entry. That is not complete replay consumption.
+    let report = runtime.run_until_quiescent_with_report();
+    let boundary = runtime.production_replay_boundary().unwrap();
+    assert!(report.quiescent);
+    assert!(first_handle.is_finished());
+    assert!(second_handle.is_finished());
+    assert!(!runtime.scheduler.lock().is_empty());
+    assert_eq!(boundary.replay.steps_matched, 2);
+    assert_eq!(boundary.replay.steps_total, 3);
+    assert_eq!(boundary.termination, None);
+    assert!(report.oracle_report.all_passed());
+    assert!(
+        report
+            .invariant_violations
+            .iter()
+            .all(|violation| { violation.starts_with("production_replay:incomplete:Pending:") })
+    );
+    assert!(!report.lab_test_passed());
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "bead": "asupersync-bi2462.96",
+            "case": "default_quiescent_stale_wake",
+            "matched": boundary.replay.steps_matched,
+            "total": boundary.replay.steps_total,
+            "quiescent": report.quiescent,
+            "invariant_violations": report.invariant_violations,
+        })
+    );
+
+    let _ = runtime.discard_production_replay();
+    runtime.step_for_test();
+    assert!(runtime.scheduler.lock().is_empty());
+    assert!(runtime.is_quiescent());
+}
+
+#[test]
+fn stale_wake_cannot_count_a_retired_future_as_a_matched_poll() {
+    let mut runtime = LabRuntime::new(LabConfig::new(71).max_steps(128));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let saved = Arc::new(parking_lot::Mutex::new(None::<std::task::Waker>));
+    let first_saved = Arc::clone(&saved);
+    let (first, first_handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            poll_fn(|cx| {
+                *first_saved.lock() = Some(cx.waker().clone());
+                Poll::Ready(())
+            })
+            .await;
+        })
+        .unwrap();
+    let (second, second_handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            saved
+                .lock()
+                .take()
+                .expect("first task captured its waker")
+                .wake();
+        })
+        .unwrap();
+    runtime.scheduler.lock().schedule(first, 0);
+    runtime.scheduler.lock().schedule(second, 0);
+    let report = runtime
+        .run_production_schedule_strict(&source(2, &[0, 1, 0]), limits())
+        .unwrap();
+    eprintln!(
+        "{}",
+        serde_json::json!({"bead": "asupersync-bi2462.96", "case": "stale_wake", "receipt": format!("{report:?}")})
+    );
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Diverged
+    );
+    assert_eq!(report.replay.steps_matched, 2);
+    assert_eq!(report.replay.steps_total, 3);
+    assert_eq!(
+        report.replay.divergence.unwrap().reason,
+        crate::lab::runtime::ReplayDivergenceReason::SchedulerInvariant
+    );
+    assert!(first_handle.is_finished());
+    assert!(second_handle.is_finished());
+    let _ = runtime.discard_production_replay();
+    runtime.run_until_quiescent();
+    assert!(runtime.is_quiescent());
+}
+
+#[test]
+fn missing_interior_poll_cannot_skip_a_dependency() {
+    use std::sync::atomic::AtomicBool;
+    let mut runtime = LabRuntime::new(LabConfig::new(71).max_steps(128));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let ready = Arc::new(AtomicBool::new(false));
+    let waiter = Arc::new(parking_lot::Mutex::new(None::<std::task::Waker>));
+    let producer_ready = Arc::clone(&ready);
+    let producer_waiter = Arc::clone(&waiter);
+    let (producer, producer_handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            futures_lite::future::yield_now().await;
+            producer_ready.store(true, Ordering::SeqCst);
+            if let Some(waker) = producer_waiter.lock().take() {
+                waker.wake();
+            }
+        })
+        .unwrap();
+    let (consumer, consumer_handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            poll_fn(|cx| {
+                if ready.load(Ordering::SeqCst) {
+                    Poll::Ready(())
+                } else {
+                    *waiter.lock() = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            })
+            .await;
+        })
+        .unwrap();
+    runtime.scheduler.lock().schedule(producer, 0);
+    runtime.scheduler.lock().schedule(consumer, 0);
+    // The complete source is producer, consumer, producer, consumer. Remove
+    // the interior producer poll while retaining the final consumer choice.
+    let report = runtime
+        .run_production_schedule_strict(&source(2, &[0, 1, 1]), limits())
+        .unwrap();
+    eprintln!(
+        "{}",
+        serde_json::json!({"bead": "asupersync-bi2462.96", "case": "missing_dependency_poll", "receipt": format!("{report:?}")})
+    );
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Diverged
+    );
+    assert_eq!(report.replay.steps_matched, 2);
+    assert!(matches!(
+        report.replay.divergence.unwrap().reason,
+        crate::lab::runtime::ReplayDivergenceReason::TaskNotRunnable { .. }
+    ));
+    assert!(!producer_handle.is_finished());
+    assert!(!consumer_handle.is_finished());
+    let _ = runtime.discard_production_replay();
+    runtime.run_until_quiescent();
+    assert!(producer_handle.is_finished());
+    assert!(consumer_handle.is_finished());
+    assert!(runtime.is_quiescent());
 }
 
 #[test]
@@ -426,14 +742,16 @@ fn existing_replay_and_exact_recorder_are_not_overwritten() {
         .unwrap();
     let before = fx.runtime.replay_report();
     assert!(matches!(
-        fx.runtime.run_production_schedule_strict(&schedule, limits()),
+        fx.runtime
+            .run_production_schedule_strict(&schedule, limits()),
         Err(StrictProductionReplayError::ReplayAlreadyConfigured)
     ));
     assert_eq!(fx.runtime.replay_report(), before);
     let _ = fx.runtime.discard_production_replay();
     fx.runtime.start_forced_schedule_recording(64).unwrap();
     assert!(matches!(
-        fx.runtime.run_production_schedule_strict(&schedule, limits()),
+        fx.runtime
+            .run_production_schedule_strict(&schedule, limits()),
         Err(StrictProductionReplayError::RecordingActive)
     ));
     assert!(fx.runtime.forced_schedule_recorder.is_some());
@@ -448,7 +766,8 @@ fn started_runtime_is_refused_without_rewinding_or_pausing_existing_work() {
     fx.runtime.step_for_test();
     let steps = fx.runtime.steps();
     assert!(matches!(
-        fx.runtime.run_production_schedule_strict(&source(1, &[0]), limits()),
+        fx.runtime
+            .run_production_schedule_strict(&source(1, &[0]), limits()),
         Err(StrictProductionReplayError::AlreadyStarted { .. })
     ));
     assert_eq!(fx.runtime.steps(), steps);
@@ -508,7 +827,10 @@ fn final_spawn_admission_pumps_do_not_poll_an_unrecorded_child() {
         StrictProductionReplayTermination::SourceExhausted
     );
     assert_eq!(report.replay.steps_matched, 1);
-    assert_eq!(report.observed_spawns, 2, "terminal pump admits queued child");
+    assert_eq!(
+        report.observed_spawns, 2,
+        "terminal pump admits queued child"
+    );
     assert!(
         report.work_units > 1,
         "system-only admission consumes driver budget"
@@ -519,6 +841,62 @@ fn final_spawn_admission_pumps_do_not_poll_an_unrecorded_child() {
     runtime.run_until_quiescent();
     assert!(runtime.is_quiescent());
     assert!(handle.is_finished());
+    assert_eq!(child_polls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn extra_spawn_admitted_during_a_step_retains_its_typed_rejection() {
+    let mut runtime = LabRuntime::new(LabConfig::new(71).max_steps(128));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let child_polls = Arc::new(AtomicUsize::new(0));
+    let child_counter = Arc::clone(&child_polls);
+    let (parent, handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = crate::Cx::current().expect("runtime installs a context");
+            let mut child = cx
+                .spawn(move |_| async move {
+                    child_counter.fetch_add(1, Ordering::SeqCst);
+                })
+                .expect("child admitted to mailbox");
+            child
+                .join(&cx)
+                .await
+                .expect("explicit cleanup completes child");
+        })
+        .unwrap();
+    runtime.scheduler.lock().schedule(parent, 0);
+    // Only the parent exists before execution. Its first poll admits the
+    // unexpected child, which becomes visible inside the second step.
+    let report = runtime
+        .run_production_schedule_strict(&source(1, &[0, 0]), limits())
+        .unwrap();
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "bead": "asupersync-bi2462.96",
+            "case": "spawn_during_dispatch_admission",
+            "receipt": format!("{report:?}"),
+            "child_polls": child_polls.load(Ordering::SeqCst),
+        })
+    );
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::SpawnCountMismatch {
+            expected: 1,
+            observed: 2,
+        }
+    );
+    assert_eq!(report.replay.steps_matched, 1);
+    assert_eq!(child_polls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        runtime.production_replay_boundary().unwrap().termination,
+        Some(report.termination)
+    );
+    let _ = runtime.discard_production_replay();
+    runtime.run_until_quiescent();
+    assert!(handle.is_finished());
+    assert!(runtime.is_quiescent());
     assert_eq!(child_polls.load(Ordering::SeqCst), 1);
 }
 
@@ -546,11 +924,25 @@ fn timer_waits_charge_work_without_claiming_an_extra_matched_poll() {
             },
         )
         .unwrap();
-    assert_eq!(report.termination, StrictProductionReplayTermination::WorkLimit);
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::WorkLimit
+    );
     assert_eq!(report.replay.steps_matched, 1);
     assert_eq!(report.work_units, 2);
     assert!(runtime.now() >= deadline);
-    assert_eq!(finished.load(Ordering::SeqCst), 0, "wait must not secretly poll");
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        0,
+        "wait must not secretly poll"
+    );
+    let frozen_time = runtime.now();
+    let frozen_steps = runtime.steps();
+    let paused = runtime.run_with_auto_advance();
+    assert_eq!(paused.steps, 0);
+    assert_eq!(paused.auto_advances, 0);
+    assert_eq!(runtime.now(), frozen_time);
+    assert_eq!(runtime.steps(), frozen_steps);
     let _ = runtime.discard_production_replay();
     let _ = runtime.run_with_auto_advance();
     assert!(runtime.is_quiescent());
@@ -578,7 +970,10 @@ fn zero_wait_policy_refuses_timer_wait_without_advancing_virtual_time() {
             },
         )
         .unwrap();
-    assert_eq!(report.termination, StrictProductionReplayTermination::Diverged);
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Diverged
+    );
     assert_eq!(report.replay.steps_matched, 1);
     assert_eq!(runtime.now(), Time::ZERO);
     let _ = runtime.discard_production_replay();
