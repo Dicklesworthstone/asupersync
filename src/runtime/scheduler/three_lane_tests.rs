@@ -7729,6 +7729,249 @@ fn lyapunov_snapshot_reads_dispatch_table_tasks() {
     );
 }
 
+#[test]
+fn lyapunov_worker_snapshots_follow_driver_time_in_both_task_tables() {
+    use crate::record::ObligationKind;
+
+    for external_table in [false, true] {
+        let clock = Arc::new(VirtualClock::new());
+        let mut runtime_state = RuntimeState::new();
+        runtime_state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+        // Deliberately disagree with the installed timer. The production
+        // logical field is not the source of effect timestamps.
+        runtime_state.now = Time::from_secs(100);
+        let root = runtime_state.create_root_region(Budget::unlimited());
+        let (task_id, _handle) = runtime_state
+            .create_task(root, Budget::with_deadline_at_ns(3_000_000_000), async {})
+            .expect("create deadline task");
+        let obligation_id = runtime_state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation at timer time zero");
+        let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
+        let table = external_table.then(|| {
+            let table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
+            move_runtime_task_to_shard(&state, &table, task_id);
+            table
+        });
+        let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
+            1,
+            &state,
+            table,
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            true,
+            1,
+        );
+        let mut worker = scheduler.take_workers().remove(0);
+        worker.decision_contract = None;
+        worker.decision_posterior = None;
+
+        let initial = worker.capture_adaptive_snapshot();
+        assert_eq!(initial.deadline_pressure, 0.0);
+        assert_eq!(
+            worker.governor_suggest(),
+            SchedulingSuggestion::NoPreference
+        );
+
+        clock.advance_to(Time::from_nanos(2_500_000_000));
+        let advanced = worker.capture_adaptive_snapshot();
+        let snapshot = {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            worker.lyapunov_snapshot_locked(&guard)
+        };
+        assert_eq!(snapshot.time, Time::from_nanos(2_500_000_000));
+        assert_eq!(snapshot.live_tasks, 1);
+        assert_eq!(snapshot.pending_obligations, 1);
+        assert_eq!(snapshot.obligation_age_sum_ns, 2_500_000_000);
+        assert!((advanced.deadline_pressure - 0.5).abs() < 1e-9);
+        assert!(advanced.potential > initial.potential);
+        assert_eq!(
+            worker.governor_suggest(),
+            SchedulingSuggestion::DrainObligations
+        );
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(guard.now, Time::from_secs(100), "logical time is unchanged");
+        guard
+            .commit_obligation(obligation_id)
+            .expect("resolve obligation");
+        eprintln!(
+            "{{\"bead\":\"asupersync-bi2462.93\",\"scenario\":\"worker_driver_clock\",\"external_table\":{external_table},\"logical_ns\":{},\"driver_ns\":{},\"deadline_pressure\":{},\"obligation_age_ns\":{}}}",
+            guard.now.as_nanos(),
+            snapshot.time.as_nanos(),
+            snapshot.deadline_pressure,
+            snapshot.obligation_age_sum_ns,
+        );
+    }
+}
+
+#[test]
+fn native_workers_age_parked_obligations_with_the_live_timer() {
+    use crate::record::ObligationKind;
+    use std::sync::mpsc as probe;
+
+    for worker_count in [1, 2] {
+        let timer = TimerDriverHandle::with_wall_clock();
+        let mut runtime_state = RuntimeState::new();
+        runtime_state.set_timer_driver(timer.clone());
+        runtime_state.now = Time::ZERO;
+        let root = runtime_state.create_root_region(Budget::unlimited());
+        let parked = Arc::new(AtomicBool::new(false));
+        let task_parked = Arc::clone(&parked);
+        let (release, mut receive) = crate::channel::oneshot::channel::<()>();
+        let deadline = timer.now() + Duration::from_millis(800);
+        let (task_id, _handle) = runtime_state
+            .create_task(
+                root,
+                Budget::unlimited().with_deadline(deadline),
+                async move {
+                    let mut waiting = std::pin::pin!(receive.recv_uninterruptible());
+                    std::future::poll_fn(|cx| {
+                        let result = waiting.as_mut().poll(cx);
+                        if result.is_pending() {
+                            task_parked.store(true, Ordering::Release);
+                        }
+                        result
+                    })
+                    .await
+                    .expect("release parked task");
+                },
+            )
+            .expect("create native parked task");
+        let obligation_id = runtime_state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("reserve obligation on the live timer");
+        let state = Arc::new(ContendedMutex::new("runtime_state", runtime_state));
+        let mut scheduler = ThreeLaneScheduler::new_with_options(
+            worker_count,
+            &state,
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            true,
+            1,
+        );
+        scheduler.set_adaptive_cancel_streak(true, 1);
+        scheduler.inject_ready(task_id, 50);
+
+        thread::scope(|scope| {
+            let (samples_tx, samples_rx) = probe::channel();
+            let mut controls = Vec::new();
+            for mut worker in scheduler.take_workers() {
+                let (control_tx, control_rx) = probe::channel::<bool>();
+                controls.push(control_tx);
+                let samples_tx = samples_tx.clone();
+                scope.spawn(move || {
+                    loop {
+                        worker.run_pump_step();
+                        match control_rx.recv_timeout(Duration::from_millis(1)) {
+                            Ok(true) => {
+                                let snapshot = {
+                                    let guard = worker
+                                        .state
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    worker.lyapunov_snapshot_locked(&guard)
+                                };
+                                let adaptive = worker.capture_adaptive_snapshot();
+                                if samples_tx.send((worker.id, snapshot, adaptive)).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(false) | Err(probe::RecvTimeoutError::Disconnected) => break,
+                            Err(probe::RecvTimeoutError::Timeout) => {}
+                        }
+                    }
+                });
+            }
+            let started = Instant::now();
+            while !parked.load(Ordering::Acquire) {
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "task never parked"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            let sample_all = || {
+                for control in &controls {
+                    control.send(true).expect("request worker snapshot");
+                }
+                let mut samples = (0..worker_count)
+                    .map(|_| {
+                        samples_rx
+                            .recv_timeout(Duration::from_secs(2))
+                            .expect("native worker snapshot")
+                    })
+                    .collect::<Vec<_>>();
+                samples.sort_by_key(|sample| sample.0);
+                samples
+            };
+            let before = sample_all();
+            thread::sleep(Duration::from_millis(20));
+            let after = sample_all();
+
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .commit_obligation(obligation_id)
+                .expect("resolve held obligation");
+            release.send_blocking(()).expect("unpark native task");
+            let drain_started = Instant::now();
+            while state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .live_task_count()
+                != 0
+            {
+                assert!(
+                    drain_started.elapsed() < Duration::from_secs(2),
+                    "task did not retire"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            for control in &controls {
+                control
+                    .send(false)
+                    .expect("stop probe worker after retirement");
+            }
+
+            for ((before_id, first, first_adaptive), (after_id, last, last_adaptive)) in
+                before.into_iter().zip(after)
+            {
+                assert_eq!(before_id, after_id);
+                assert_eq!(first.live_tasks, 1);
+                assert_eq!(last.live_tasks, 1);
+                assert_eq!(first.pending_obligations, 1);
+                assert_eq!(last.pending_obligations, 1);
+                assert!(last.time > first.time);
+                assert!(last.obligation_age_sum_ns > first.obligation_age_sum_ns);
+                assert!(last.deadline_pressure > first.deadline_pressure);
+                assert!(last_adaptive.deadline_pressure > first_adaptive.deadline_pressure);
+                assert!(last_adaptive.potential > first_adaptive.potential);
+                eprintln!(
+                    "{{\"bead\":\"asupersync-bi2462.93\",\"scenario\":\"native_parked_timer_age\",\"workers\":{worker_count},\"worker\":{before_id},\"logical_ns\":0,\"before_ns\":{},\"after_ns\":{},\"before_pressure\":{},\"after_pressure\":{},\"before_age_ns\":{},\"after_age_ns\":{}}}",
+                    first.time.as_nanos(),
+                    last.time.as_nanos(),
+                    first.deadline_pressure,
+                    last.deadline_pressure,
+                    first.obligation_age_sum_ns,
+                    last.obligation_age_sum_ns,
+                );
+            }
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(
+                guard.now,
+                Time::ZERO,
+                "the old logical clock remained frozen"
+            );
+            assert_eq!(guard.pending_obligation_count(), 0);
+        });
+    }
+}
+
 /// E1.2 subsystem 3d (E1.1 row T14): wait-graph extraction from an explicit
 /// task table sees externally-owned live tasks and their waiter edges.
 #[test]

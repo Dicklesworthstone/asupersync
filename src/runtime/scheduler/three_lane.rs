@@ -4801,12 +4801,19 @@ impl ThreeLaneWorker {
     /// when this worker runs against an external shard, otherwise from the
     /// embedded table.
     fn lyapunov_snapshot_locked(&self, state: &RuntimeState) -> StateSnapshot {
+        // Production effects are timestamped by the runtime timer driver;
+        // state.now is advanced only by logical/lab callers. Use one sample
+        // for all pressure and age terms, preserving logical time when no
+        // driver is installed.
+        let now = state
+            .timer_driver()
+            .map_or(state.now, TimerDriverHandle::now);
         match &self.task_table {
             Some(tt) => {
                 let table = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                StateSnapshot::from_runtime_state_with_tasks(state, &table)
+                StateSnapshot::from_runtime_state_with_tasks_at(state, &table, now)
             }
-            None => StateSnapshot::from_runtime_state(state),
+            None => StateSnapshot::from_runtime_state_at(state, now),
         }
     }
 
@@ -6761,9 +6768,12 @@ impl ThreeLaneWorker {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = state
+            .timer_driver()
+            .map_or(state.now, TimerDriverHandle::now);
         let (snapshot, wait_graph_snapshot) = if let Some(tt) = &self.task_table {
             let table = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let snapshot = StateSnapshot::from_runtime_state_with_tasks(&state, &table);
+            let snapshot = StateSnapshot::from_runtime_state_with_tasks_at(&state, &table, now);
             let wait_graph_snapshot = if self.spectral_monitor.is_some() {
                 Some(wait_graph_snapshot_from_tasks(&table))
             } else {
@@ -6771,7 +6781,7 @@ impl ThreeLaneWorker {
             };
             (snapshot, wait_graph_snapshot)
         } else {
-            let snapshot = StateSnapshot::from_runtime_state(&state);
+            let snapshot = StateSnapshot::from_runtime_state_at(&state, now);
             let wait_graph_snapshot = if self.spectral_monitor.is_some() {
                 Some(wait_graph_snapshot_from_state(&state))
             } else {
