@@ -22,6 +22,7 @@ struct Witness {
     retired: AtomicBool,
     task: Mutex<Option<TaskId>>,
     reason: Mutex<Option<CancelKind>>,
+    full_reason: Mutex<Option<CancelReason>>,
     changed: Notify,
 }
 
@@ -60,11 +61,7 @@ where
     assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
 }
 
-async fn parked_loser(
-    child: Cx,
-    mut receiver: mpsc::Receiver<()>,
-    seen: Arc<Witness>,
-) -> u8 {
+async fn parked_loser(child: Cx, mut receiver: mpsc::Receiver<()>, seen: Arc<Witness>) -> u8 {
     let _retire = Retire(Arc::clone(&seen));
     *seen.task.lock().unwrap() = Some(child.task_id());
     let received = {
@@ -84,6 +81,7 @@ async fn parked_loser(
     assert!(child.is_cancel_requested());
     assert!(child.checkpoint().is_err());
     *seen.reason.lock().unwrap() = Some(child.cancel_reason().unwrap().kind);
+    *seen.full_reason.lock().unwrap() = child.cancel_reason();
     seen.cancelled.store(true, Ordering::Release);
     seen.changed.notify_waiters();
     seen.changed
@@ -293,37 +291,101 @@ fn timer_authority_is_required_only_when_delay_is_nonzero() {
 #[test]
 fn cancellation_during_backup_delay_stops_primary_and_never_launches_backup() {
     for workers in [1, 2] {
-        native(workers, |cx| async move {
+        for timed in [false, true] {
+        native(workers, move |cx| async move {
             let seen = Arc::new(Witness::default());
-            seen.release();
             let (_sender, receiver) = mpsc::channel(1);
             let primary = Arc::clone(&seen);
             let calls = Arc::new(AtomicUsize::new(0));
             let backup_calls = Arc::clone(&calls);
             let reported = Arc::new(AtomicBool::new(false));
             let publication = Arc::clone(&reported);
+            let reason = CancelReason::user("stop hedged request");
+            let expected = reason.clone();
             let mut owner = cx.spawn(move |owner| async move {
-                let result = owner.hedge_drained_with(
-                    Duration::from_secs(3600),
-                    move |child| parked_loser(child, receiver, primary),
-                    move |_child| {
-                        backup_calls.fetch_add(1, Ordering::SeqCst);
-                        async { 9_u8 }
-                    },
-                ).await;
-                assert!(matches!(result, Err(JoinError::Cancelled(_))));
+                let primary = move |child| parked_loser(child, receiver, primary);
+                let backup = move |_child| {
+                    backup_calls.fetch_add(1, Ordering::SeqCst);
+                    async { 9_u8 }
+                };
+                let result = if timed {
+                    owner.hedge_drained_with_timeout(
+                        Duration::from_secs(3600),
+                        Duration::from_secs(7200),
+                        primary,
+                        backup,
+                    ).await
+                } else {
+                    owner.hedge_drained_with(Duration::from_secs(3600), primary, backup).await
+                };
+                assert!(matches!(result, Err(JoinError::Cancelled(actual)) if actual == expected));
                 publication.store(true, Ordering::Release);
             }).unwrap();
             seen.changed
                 .wait_until(|| seen.parked.load(Ordering::Acquire))
                 .await;
-            owner.abort_with_reason(CancelReason::user("stop hedged request"));
-            let terminal = poll_fn(|task| owner.poll_join(task)).await;
-            assert!(matches!(terminal, Ok(()) | Err(JoinError::Cancelled(_))));
+            owner.abort_with_reason(reason.clone());
+            let mut joined = Box::pin(owner.join(&cx));
+            wait_cancel(&mut joined, &seen).await;
+            assert_eq!(*seen.full_reason.lock().unwrap(), Some(reason));
+            assert!(!reported.load(Ordering::Acquire));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            seen.release();
+            assert!(matches!(joined.await, Ok(())));
             assert!(reported.load(Ordering::Acquire));
             assert!(seen.cancelled.load(Ordering::Acquire));
             assert!(seen.retired.load(Ordering::Acquire));
             assert_eq!(calls.load(Ordering::SeqCst), 0);
+        });
+        }
+    }
+}
+
+#[test]
+fn owner_cancellation_drains_both_already_started_hedge_attempts() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let seen = [Arc::new(Witness::default()), Arc::new(Witness::default())];
+            let [primary, backup] = seen.clone();
+            let (_sa, ra) = mpsc::channel(1);
+            let (_sb, rb) = mpsc::channel(1);
+            let reason = CancelReason::user("stop both hedge attempts");
+            let expected = reason.clone();
+            let mut owner = cx
+                .spawn(move |owner| async move {
+                    let result = owner
+                        .hedge_drained_with(
+                            Duration::ZERO,
+                            move |child| parked_loser(child, ra, primary),
+                            move |child| parked_loser(child, rb, backup),
+                        )
+                        .await;
+                    assert!(
+                        matches!(result, Err(JoinError::Cancelled(actual)) if actual == expected)
+                    );
+                })
+                .unwrap();
+            for branch in &seen {
+                branch
+                    .changed
+                    .wait_until(|| branch.parked.load(Ordering::Acquire))
+                    .await;
+            }
+            owner.abort_with_reason(reason.clone());
+            let mut joined = Box::pin(owner.join(&cx));
+            for branch in &seen {
+                wait_cancel(&mut joined, branch).await;
+                assert_eq!(*branch.full_reason.lock().unwrap(), Some(reason.clone()));
+            }
+            for branch in &seen {
+                branch.release();
+            }
+            assert!(matches!(joined.await, Ok(())));
+            assert!(
+                seen.iter()
+                    .all(|branch| branch.retired.load(Ordering::Acquire))
+            );
+            assert!(!cx.is_cancel_requested());
         });
     }
 }

@@ -2,6 +2,9 @@
 //!
 //! This oracle verifies that in race combinators, all losing tasks are
 //! cancelled AND drained to completion before the race returns.
+//! If the owner cancels a race before any branch wins, every participant must
+//! drain. Its completion records the owner, outside the participant list, in
+//! the historical `winner` field so no branch is exempted from this check.
 //!
 //! # Invariant
 //!
@@ -151,7 +154,7 @@ struct RaceRecord {
 struct RaceCompleteRecord {
     /// All participants in the completed race.
     participants: Vec<TaskId>,
-    /// The winning task.
+    /// The winning participant, or the cancelling owner outside the participants.
     winner: TaskId,
     /// When the race completed.
     complete_time: Time,
@@ -225,6 +228,11 @@ impl LoserDrainOracle {
     }
 
     /// Records that a race has completed.
+    ///
+    /// For owner cancellation with no winning branch, `winner` is the owner's
+    /// task ID, which must be outside the participant list. Every participant
+    /// must then complete before this event; the owner itself need not finish.
+    /// This representation preserves the existing completion event format.
     ///
     /// br-asupersync-htqzu1: a duplicate completion is no longer silently
     /// swallowed. If the duplicate carries the same `winner` and `time` as
@@ -300,7 +308,8 @@ impl LoserDrainOracle {
     /// - every observed race completion had a matching prior start,
     /// - no races remain active when verification runs, and
     /// - for every completed race, all losing tasks completed before or at the
-    ///   race completion time.
+    ///   race completion time, including every participant of an owner-cancelled
+    ///   race.
     ///
     /// Returns an error with the first violation found.
     ///
@@ -353,7 +362,8 @@ impl LoserDrainOracle {
             let mut undrained = Vec::new();
 
             for &participant in &complete_record.participants {
-                // Skip the winner
+                // A branch winner is exempt. An owner cancellation records a
+                // decision identity outside this list, so every branch is checked.
                 if participant == complete_record.winner {
                     continue;
                 }
@@ -635,6 +645,95 @@ mod tests {
         let ok = oracle.check().is_ok();
         crate::assert_with_log!(ok, "ok", true, ok);
         crate::test_complete!("properly_drained_race_passes");
+    }
+
+    #[test]
+    fn owner_cancelled_race_requires_every_participant_to_drain() {
+        init_test("owner_cancelled_race_requires_every_participant_to_drain");
+        let owner = task(9);
+        let participants = vec![task(1), task(2), task(3)];
+
+        for &missing in &participants {
+            let mut oracle = LoserDrainOracle::new();
+            let race_id = oracle.on_race_start(region(0), participants.clone(), t(0));
+            for &participant in &participants {
+                if participant != missing {
+                    oracle.on_task_complete(participant, t(50));
+                }
+            }
+            oracle.on_race_complete(race_id, owner, t(100));
+
+            // In particular, the first branch cannot be labelled a synthetic
+            // winner and thereby escape the all-participant drain requirement.
+            for completion in [None, Some(t(150))] {
+                if let Some(time) = completion {
+                    oracle.on_task_complete(missing, time);
+                }
+                match oracle.check() {
+                    Err(LoserDrainViolation::UndrainedLosers {
+                        race_id: actual_race,
+                        winner,
+                        undrained_losers,
+                        race_complete_time,
+                    }) => {
+                        crate::assert_with_log!(
+                            actual_race == race_id,
+                            "race",
+                            race_id,
+                            actual_race
+                        );
+                        crate::assert_with_log!(winner == owner, "owner", owner, winner);
+                        crate::assert_with_log!(
+                            undrained_losers == vec![missing],
+                            "undrained participant",
+                            vec![missing],
+                            undrained_losers
+                        );
+                        crate::assert_with_log!(
+                            race_complete_time == t(100),
+                            "completion boundary",
+                            t(100),
+                            race_complete_time
+                        );
+                    }
+                    other => panic!(
+                        "owner-cancelled race must reject participant {missing:?} with completion {completion:?}: {other:?}"
+                    ),
+                }
+            }
+        }
+        crate::test_complete!("owner_cancelled_race_requires_every_participant_to_drain");
+    }
+
+    #[test]
+    fn owner_cancelled_race_passes_after_every_participant_drains() {
+        init_test("owner_cancelled_race_passes_after_every_participant_drains");
+        let mut oracle = LoserDrainOracle::new();
+        let participants = vec![task(1), task(2), task(3)];
+        let owner = task(9);
+        let race_id = oracle.on_race_start(region(0), participants.clone(), t(0));
+        for participant in participants {
+            oracle.on_task_complete(participant, t(100));
+        }
+        // The race's owner is still running: only its branches must retire
+        // before the cancelled race can return to it.
+        oracle.on_race_complete(race_id, owner, t(100));
+
+        let result = oracle.check();
+        crate::assert_with_log!(result.is_ok(), "all participants drained", "Ok", result);
+        crate::assert_with_log!(
+            oracle.active_race_count() == 0,
+            "active races",
+            0,
+            oracle.active_race_count()
+        );
+        crate::assert_with_log!(
+            oracle.completed_race_count() == 1,
+            "completed races",
+            1,
+            oracle.completed_race_count()
+        );
+        crate::test_complete!("owner_cancelled_race_passes_after_every_participant_drains");
     }
 
     #[test]

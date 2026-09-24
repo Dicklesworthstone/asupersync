@@ -427,11 +427,15 @@ pub enum LoserDrainHistoryEvent {
         /// Logical runtime time when the task completed.
         time: Time,
     },
-    /// A race completed with a selected winner after loser drain.
+    /// A race completed after every required participant drained.
     RaceCompleted {
         /// Stable race identifier inside the runtime state.
         race_id: u64,
-        /// Winning task for the completed race.
+        /// Winning participant, or the cancelling owner when no branch won.
+        ///
+        /// A cancelling owner is outside the participant list, so the drain
+        /// oracle requires every participant to complete. The historical
+        /// field name preserves the public and serialized event format.
         winner: TaskId,
         /// Logical runtime time when the race completed.
         time: Time,
@@ -484,6 +488,15 @@ impl LoserDrainHistoryRecorder {
                 winner,
                 time,
             });
+    }
+
+    /// Records owner cancellation after every race participant has drained.
+    ///
+    /// The owner must be outside the participant list. Using that decision
+    /// identity in the existing completion event preserves the public event
+    /// format while ensuring the oracle exempts no participant from draining.
+    pub(crate) fn record_race_cancelled(&self, race_id: u64, owner: TaskId, time: Time) {
+        self.record_race_complete(race_id, owner, time);
     }
 
     #[must_use]

@@ -4,13 +4,13 @@
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::cx::{RaceFactory, cap};
-use asupersync::runtime::{JoinError, RuntimeBuilder};
+use asupersync::runtime::{JoinError, RuntimeBuilder, TaskHandle};
 use asupersync::sync::Notify;
-use asupersync::types::{CancelKind, TaskId};
+use asupersync::types::{CancelKind, CancelReason, TaskId};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,8 @@ struct Witness {
     released: AtomicBool,
     retired: AtomicBool,
     task: Mutex<Option<TaskId>>,
+    reason: Mutex<Option<CancelReason>>,
+    context: Mutex<Option<Cx>>,
     changed: Notify,
 }
 impl Witness {
@@ -104,6 +106,523 @@ async fn wait_cancel<T>(future: &mut Pin<Box<impl Future<Output = T>>>, seen: &W
         cancelled.as_mut().poll(task)
     }).await;
     assert!(!seen.retired.load(Ordering::Acquire));
+}
+
+// This branch witnesses an actual Pending receive, then withholds asynchronous
+// cleanup. Closing its sender provides an independent no-cancellation control
+// and also lets a watchdog failure tear down the test without stranded tasks.
+async fn owner_cancel_branch(
+    child: Cx,
+    mut receiver: mpsc::Receiver<()>,
+    seen: Arc<Witness>,
+    panic_during_cleanup: bool,
+) -> u8 {
+    let _retire = Retire(Arc::clone(&seen));
+    *seen.task.lock().unwrap() = Some(child.task_id());
+    *seen.context.lock().unwrap() = Some(child.clone());
+    let result = {
+        let mut receive = std::pin::pin!(receiver.recv(&child));
+        poll_fn(|task| {
+            let progress = receive.as_mut().poll(task);
+            if progress.is_pending() && !seen.parked.swap(true, Ordering::AcqRel) {
+                seen.changed.notify_waiters();
+            }
+            progress
+        })
+        .await
+    };
+    if !child.is_cancel_requested() {
+        return 7;
+    }
+    assert!(result.is_err());
+    assert!(child.checkpoint().is_err());
+    *seen.reason.lock().unwrap() = child.cancel_reason();
+    seen.cancelled.store(true, Ordering::Release);
+    seen.changed.notify_waiters();
+    seen.changed
+        .wait_until(|| seen.released.load(Ordering::Acquire))
+        .await;
+    assert!(
+        !panic_during_cleanup,
+        "owner-cancelled branch cleanup sentinel"
+    );
+    0
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OwnerRaceForm {
+    Factories,
+    AllHandles,
+    TwoHandles,
+    Legacy,
+    TimedFactories,
+    #[cfg(feature = "proc-macros")]
+    FactoryMacro,
+    #[cfg(feature = "proc-macros")]
+    LegacyMacro,
+    #[cfg(feature = "proc-macros")]
+    SelectMacro,
+    #[cfg(feature = "proc-macros")]
+    BiasedSelectMacro,
+}
+
+async fn owner_race(
+    form: OwnerRaceForm,
+    owner: Cx,
+    receivers: [mpsc::Receiver<()>; 2],
+    witnesses: [Arc<Witness>; 2],
+    panic_first: bool,
+) -> Result<u8, JoinError> {
+    let [ra, rb] = receivers;
+    let [a, b] = witnesses;
+    match form {
+        OwnerRaceForm::Factories => {
+            owner
+                .race_drained_with(vec![
+                    boxed(move |child| owner_cancel_branch(child, ra, a, panic_first)),
+                    boxed(move |child| owner_cancel_branch(child, rb, b, false)),
+                ])
+                .await
+        }
+        OwnerRaceForm::TimedFactories => {
+            owner
+                .race_drained_with_timeout(
+                    Duration::from_secs(3600),
+                    vec![
+                        boxed(move |child| owner_cancel_branch(child, ra, a, panic_first)),
+                        boxed(move |child| owner_cancel_branch(child, rb, b, false)),
+                    ],
+                )
+                .await
+        }
+        OwnerRaceForm::AllHandles | OwnerRaceForm::TwoHandles => {
+            let scope = owner.scope();
+            let ha = owner
+                .spawn_in(&scope, move |child| {
+                    owner_cancel_branch(child, ra, a, panic_first)
+                })
+                .unwrap();
+            let hb = owner
+                .spawn_in(&scope, move |child| {
+                    owner_cancel_branch(child, rb, b, false)
+                })
+                .unwrap();
+            if matches!(form, OwnerRaceForm::TwoHandles) {
+                scope.race(&owner, ha, hb).await
+            } else {
+                scope
+                    .race_all(&owner, vec![ha, hb])
+                    .await
+                    .map(|(value, _)| value)
+            }
+        }
+        OwnerRaceForm::Legacy => {
+            owner
+                .race_drained(vec![
+                    Box::pin(async move {
+                        owner_cancel_branch(Cx::current().unwrap(), ra, a, panic_first).await
+                    }),
+                    Box::pin(async move {
+                        owner_cancel_branch(Cx::current().unwrap(), rb, b, false).await
+                    }),
+                ])
+                .await
+        }
+        #[cfg(feature = "proc-macros")]
+        OwnerRaceForm::FactoryMacro => asupersync::race!(owner, {
+            move |child| owner_cancel_branch(child, ra, a, panic_first),
+            move |child| owner_cancel_branch(child, rb, b, false),
+        }),
+        #[cfg(feature = "proc-macros")]
+        OwnerRaceForm::LegacyMacro => asupersync::race!(owner, {
+            async move {
+                owner_cancel_branch(Cx::current().unwrap(), ra, a, panic_first).await
+            },
+            async move {
+                owner_cancel_branch(Cx::current().unwrap(), rb, b, false).await
+            },
+        }),
+        #[cfg(feature = "proc-macros")]
+        OwnerRaceForm::SelectMacro => asupersync::select!(owner, {
+            value = move |child| owner_cancel_branch(child, ra, a, panic_first) => value,
+            value = move |child| owner_cancel_branch(child, rb, b, false) => value,
+        }),
+        #[cfg(feature = "proc-macros")]
+        OwnerRaceForm::BiasedSelectMacro => asupersync::select!(owner, biased, {
+            value = move |child| owner_cancel_branch(child, ra, a, panic_first) => value,
+            value = move |child| owner_cancel_branch(child, rb, b, false) => value,
+        }),
+    }
+}
+
+async fn cancel_parked_owner(
+    cx: &Cx,
+    owner: TaskHandle<Result<u8, JoinError>>,
+    witnesses: &[Arc<Witness>],
+    panic_first: bool,
+) {
+    for seen in witnesses {
+        seen.changed
+            .wait_until(|| seen.parked.load(Ordering::Acquire))
+            .await;
+        let branch = seen.task.lock().unwrap().unwrap();
+        assert_ne!(branch, owner.task_id());
+        assert_ne!(branch, cx.task_id());
+    }
+    // User is deliberately less severe than RaceLost: dropping armed joins
+    // before propagation would silently replace this exact attribution.
+    let reason = CancelReason::user("stop parked race owner").with_task(owner.task_id());
+    owner.abort_with_reason(reason.clone());
+    finish_cancelled_owner(cx, owner, witnesses, reason, panic_first).await;
+}
+
+async fn finish_cancelled_owner(
+    cx: &Cx,
+    mut owner: TaskHandle<Result<u8, JoinError>>,
+    witnesses: &[Arc<Witness>],
+    reason: CancelReason,
+    panic_first: bool,
+) {
+    let mut joined = Box::pin(owner.join(cx));
+    for seen in witnesses {
+        wait_cancel(&mut joined, seen).await;
+        assert_eq!(*seen.reason.lock().unwrap(), Some(reason.clone()));
+    }
+    assert!(
+        !cx.is_cancel_requested(),
+        "cancellation escaped to the observer"
+    );
+    for seen in witnesses {
+        seen.release();
+    }
+    // The race acknowledges owner cancellation; ordinary spawn preserves the
+    // owner's typed result, including a panic reported by a draining branch.
+    let result = joined
+        .await
+        .expect("owner must preserve its acknowledged result");
+    if panic_first {
+        match result {
+            Err(JoinError::Panicked(payload)) => {
+                assert_eq!(payload.message(), "owner-cancelled branch cleanup sentinel");
+            }
+            other => panic!("cleanup panic must outrank owner cancellation: {other:?}"),
+        }
+    } else {
+        assert!(matches!(result, Err(JoinError::Cancelled(actual)) if actual == reason));
+    }
+    assert!(
+        witnesses
+            .iter()
+            .all(|seen| seen.retired.load(Ordering::Acquire))
+    );
+}
+
+async fn owner_cancellation_scenario(cx: Cx, form: OwnerRaceForm, panic_first: bool) {
+    let seen = [Arc::new(Witness::default()), Arc::new(Witness::default())];
+    let branches = seen.clone();
+    let (sa, ra) = mpsc::channel(1);
+    let (sb, rb) = mpsc::channel(1);
+    let owner = cx
+        .spawn(move |owner| owner_race(form, owner, [ra, rb], branches, panic_first))
+        .unwrap();
+    cancel_parked_owner(&cx, owner, &seen, panic_first).await;
+    for sender in [sa, sb] {
+        let telemetry = sender.telemetry_snapshot(0);
+        assert_eq!(telemetry.recv_waiter_count, 0);
+        assert_eq!(telemetry.reserved_uncommitted_obligations, 0);
+        assert_eq!(telemetry.queued_messages, 0);
+    }
+}
+
+#[test]
+fn owner_cancellation_wakes_and_drains_parked_races_on_both_native_runtimes() {
+    for workers in [1, 2] {
+        for form in [
+            OwnerRaceForm::Factories,
+            OwnerRaceForm::AllHandles,
+            OwnerRaceForm::TwoHandles,
+            OwnerRaceForm::Legacy,
+            OwnerRaceForm::TimedFactories,
+        ] {
+            native(workers, move |cx| {
+                owner_cancellation_scenario(cx, form, false)
+            });
+        }
+    }
+}
+
+#[cfg(feature = "proc-macros")]
+#[test]
+fn owner_cancellation_reaches_race_and_blocking_select_macro_branches() {
+    for workers in [1, 2] {
+        for form in [
+            OwnerRaceForm::FactoryMacro,
+            OwnerRaceForm::LegacyMacro,
+            OwnerRaceForm::SelectMacro,
+            OwnerRaceForm::BiasedSelectMacro,
+        ] {
+            native(workers, move |cx| {
+                owner_cancellation_scenario(cx, form, false)
+            });
+        }
+    }
+}
+
+#[test]
+fn cleanup_panic_outranks_owner_cancellation_after_every_branch_drains() {
+    for workers in [1, 2] {
+        for form in [OwnerRaceForm::Factories, OwnerRaceForm::TwoHandles] {
+            native(workers, move |cx| {
+                owner_cancellation_scenario(cx, form, true)
+            });
+        }
+    }
+}
+
+#[test]
+fn parked_race_control_completes_when_one_channel_closes_without_owner_abort() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let seen = [Arc::new(Witness::default()), Arc::new(Witness::default())];
+            let branches = seen.clone();
+            let (sa, ra) = mpsc::channel(1);
+            let (_sb, rb) = mpsc::channel(1);
+            let mut owner = cx
+                .spawn(move |owner| {
+                    owner_race(OwnerRaceForm::Factories, owner, [ra, rb], branches, false)
+                })
+                .unwrap();
+            for branch in &seen {
+                branch
+                    .changed
+                    .wait_until(|| branch.parked.load(Ordering::Acquire))
+                    .await;
+            }
+            drop(sa);
+            let mut joined = Box::pin(owner.join(&cx));
+            wait_cancel(&mut joined, &seen[1]).await;
+            assert_eq!(
+                seen[1].reason.lock().unwrap().as_ref().unwrap().kind,
+                CancelKind::RaceLost
+            );
+            seen[1].release();
+            assert_eq!(joined.await.unwrap().unwrap(), 7);
+            assert!(
+                seen.iter()
+                    .all(|branch| branch.retired.load(Ordering::Acquire))
+            );
+            assert!(!seen[0].cancelled.load(Ordering::Acquire));
+            assert!(!cx.is_cancel_requested());
+        });
+    }
+}
+
+#[test]
+fn owner_cancellation_drains_nested_races_before_returning() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let seen = [
+                Arc::new(Witness::default()),
+                Arc::new(Witness::default()),
+                Arc::new(Witness::default()),
+            ];
+            let [a, b, c] = seen.clone();
+            let (_sa, ra) = mpsc::channel(1);
+            let (_sb, rb) = mpsc::channel(1);
+            let (_sc, rc) = mpsc::channel(1);
+            let owner = cx
+                .spawn(move |owner| async move {
+                    owner
+                        .race_drained_with(vec![
+                            boxed(move |inner| async move {
+                                let result = inner
+                                    .race_drained_with(vec![
+                                        boxed(move |child| {
+                                            owner_cancel_branch(child, ra, a, false)
+                                        }),
+                                        boxed(move |child| {
+                                            owner_cancel_branch(child, rb, b, false)
+                                        }),
+                                    ])
+                                    .await;
+                                assert!(matches!(result, Err(JoinError::Cancelled(_))));
+                                0
+                            }),
+                            boxed(move |child| owner_cancel_branch(child, rc, c, false)),
+                        ])
+                        .await
+                })
+                .unwrap();
+            cancel_parked_owner(&cx, owner, &seen, false).await;
+        });
+    }
+}
+
+#[test]
+fn masked_owner_poll_defers_branch_cancellation_until_an_unmasked_poll() {
+    for workers in [1, 2] {
+        for form in [OwnerRaceForm::Factories, OwnerRaceForm::TwoHandles] {
+            native(workers, move |cx| async move {
+                let seen = [Arc::new(Witness::default()), Arc::new(Witness::default())];
+                let branches = seen.clone();
+                let checked = seen.clone();
+                let mask = Arc::new(Witness::default());
+                let owner_mask = Arc::clone(&mask);
+                let (_sa, ra) = mpsc::channel(1);
+                let (_sb, rb) = mpsc::channel(1);
+                let owner = cx
+                    .spawn(move |owner| async move {
+                        let mut race =
+                            Box::pin(owner_race(form, owner.clone(), [ra, rb], branches, false));
+                        poll_fn(|task| {
+                            if owner.is_cancel_requested() {
+                                assert!(owner.masked(|| race.as_mut().poll(task)).is_pending());
+                                for branch in &checked {
+                                    assert!(
+                                        !branch
+                                            .context
+                                            .lock()
+                                            .unwrap()
+                                            .as_ref()
+                                            .unwrap()
+                                            .is_cancel_requested()
+                                    );
+                                }
+                                owner_mask.parked.store(true, Ordering::Release);
+                                owner_mask.changed.notify_waiters();
+                                Poll::Ready(())
+                            } else {
+                                assert!(race.as_mut().poll(task).is_pending());
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                        // Keep the owner paused outside the masked poll so the
+                        // observer can inspect both real branch contexts.
+                        owner_mask
+                            .changed
+                            .wait_until(|| owner_mask.released.load(Ordering::Acquire))
+                            .await;
+                        race.await
+                    })
+                    .unwrap();
+                for branch in &seen {
+                    branch
+                        .changed
+                        .wait_until(|| branch.parked.load(Ordering::Acquire))
+                        .await;
+                }
+                let reason = CancelReason::user("masked race owner").with_task(owner.task_id());
+                owner.abort_with_reason(reason.clone());
+                mask.changed
+                    .wait_until(|| mask.parked.load(Ordering::Acquire))
+                    .await;
+                for branch in &seen {
+                    assert!(
+                        !branch
+                            .context
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap()
+                            .is_cancel_requested()
+                    );
+                    assert!(!branch.cancelled.load(Ordering::Acquire));
+                }
+                mask.release();
+                finish_cancelled_owner(&cx, owner, &seen, reason, false).await;
+            });
+        }
+    }
+}
+
+#[test]
+fn lab_owner_cancellation_retires_all_tasks_and_completes_drain_history() {
+    use asupersync::{Budget, LabConfig, LabRuntime};
+
+    for seed in [17, 41, 93] {
+        for form in [OwnerRaceForm::Factories, OwnerRaceForm::TwoHandles] {
+            let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(4096));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (task, mut joined) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    owner_cancellation_scenario(Cx::current().unwrap(), form, false).await;
+                })
+                .unwrap();
+            lab.scheduler.lock().schedule(task, 0);
+            let report = lab.run_until_quiescent_with_report();
+            assert!(
+                matches!(joined.try_join(), Ok(Some(()))),
+                "owner scenario did not finish: {report:?}"
+            );
+            assert!(lab.state.tasks_is_empty(), "race left live task records");
+            assert!(
+                lab.state
+                    .obligations_iter()
+                    .all(|(_, obligation)| !obligation.is_pending()),
+                "race left unsettled obligations"
+            );
+            assert_eq!(lab.oracles.loser_drain.active_race_count(), 0);
+            assert_eq!(lab.oracles.loser_drain.completed_race_count(), 1);
+            assert!(
+                report.lab_test_passed(),
+                "owner-cancelled race oracle failure: {report:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cancellation_after_selection_keeps_the_winner_while_finishing_loser_cleanup() {
+    for workers in [1, 2] {
+        for two_handles in [false, true] {
+            native(workers, move |cx| async move {
+                let seen = Arc::new(Witness::default());
+                let a = Arc::clone(&seen);
+                let b = Arc::clone(&seen);
+                let (_sender, receiver) = mpsc::channel(1);
+                let mut owner = cx
+                    .spawn(move |owner| async move {
+                        let result = if two_handles {
+                            let scope = owner.scope();
+                            let a = owner
+                                .spawn_in(&scope, move |child| loser(child, receiver, a))
+                                .unwrap();
+                            let b = owner.spawn_in(&scope, move |_child| winner(b)).unwrap();
+                            scope.race(&owner, a, b).await
+                        } else {
+                            owner
+                                .race_drained_with(vec![
+                                    boxed(move |child| loser(child, receiver, a)),
+                                    boxed(move |_child| winner(b)),
+                                ])
+                                .await
+                        };
+                        assert!(
+                            matches!(result, Ok(7)),
+                            "late cancellation replaced a selected winner: {result:?}"
+                        );
+                        // Observe the owner's independent request only after the
+                        // race has published its selected result.
+                        assert!(owner.checkpoint().is_err());
+                        result
+                    })
+                    .unwrap();
+                seen.changed
+                    .wait_until(|| seen.cancelled.load(Ordering::Acquire))
+                    .await;
+                owner
+                    .abort_with_reason(CancelReason::user("cancel during selected winner cleanup"));
+                let mut joined = Box::pin(owner.join(&cx));
+                wait_cancel(&mut joined, &seen).await;
+                seen.release();
+                assert_eq!(joined.await.unwrap().unwrap(), 7);
+                assert!(seen.retired.load(Ordering::Acquire));
+                assert!(!cx.is_cancel_requested());
+            });
+        }
+    }
 }
 
 #[test]
