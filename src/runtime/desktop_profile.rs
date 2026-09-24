@@ -7,10 +7,13 @@
 //! default or an accidentally unlimited root region.
 
 use crate::record::RegionLimits;
-use crate::runtime::reactor::BrowserReactor;
+use crate::runtime::reactor::{
+    BrowserReactor, Events, Interest, IoReactorCapabilitySnapshot, Reactor, Source, Token,
+};
 use crate::runtime::{Runtime, RuntimeConfig, RuntimeHandle};
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -158,9 +161,53 @@ impl DesktopRuntimeProfile {
         // slice: it deliberately has no host-I/O authority. Native socket and
         // polling adapters stay behind `native-runtime`; a later host adapter
         // may inject one explicitly when the product actually needs it.
-        Runtime::with_config_and_reactor(config, Some(Arc::new(BrowserReactor::default())))
+        Runtime::with_config_and_reactor(config, Some(Arc::new(DesktopReactor::default())))
             .map(|runtime| DesktopRuntime { runtime })
             .map_err(DesktopRuntimeStartError::Runtime)
+    }
+}
+
+/// The desktop profile's reactor: the non-blocking first-party event reactor
+/// with native host-I/O registration refused.
+///
+/// `BrowserReactor` accepts any source for token bookkeeping but only reports
+/// readiness published by browser host bindings, so a native socket registered
+/// with it parked forever (asupersync-bi2462.121). Refusing with `Unsupported`
+/// is the socket layer's "no reactor can take this fd" signal: the socket
+/// re-polls on its own instead of waiting for a wake that never comes.
+#[derive(Default)]
+struct DesktopReactor(BrowserReactor);
+
+impl Reactor for DesktopReactor {
+    fn capability_snapshot(&self) -> IoReactorCapabilitySnapshot {
+        self.0.capability_snapshot()
+    }
+
+    fn register(&self, _source: &dyn Source, _token: Token, _interest: Interest) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the desktop runtime profile has no host I/O reactor",
+        ))
+    }
+
+    fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+        self.0.modify(token, interest)
+    }
+
+    fn deregister(&self, token: Token) -> io::Result<()> {
+        self.0.deregister(token)
+    }
+
+    fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+        self.0.poll(events, timeout)
+    }
+
+    fn wake(&self) -> io::Result<()> {
+        self.0.wake()
+    }
+
+    fn registration_count(&self) -> usize {
+        self.0.registration_count()
     }
 }
 

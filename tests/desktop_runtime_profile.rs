@@ -187,3 +187,56 @@ fn invalid_profile_cannot_start_a_runtime() {
         )
     ));
 }
+
+/// asupersync-bi2462.121: the profile has no host-I/O reactor. A native socket
+/// used to register with the browser event reactor, which accepted it and never
+/// reported readiness, so an accept parked forever. Registration is refused and
+/// the socket re-polls on its own, so the accept completes once a peer connects.
+#[test]
+fn native_accept_under_the_desktop_profile_completes_instead_of_parking_forever() {
+    let runtime = DesktopRuntimeProfile::standard()
+        .start()
+        .expect("standard profile starts a bounded runtime");
+    let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let accepted = runtime.block_on(async move {
+            let listener = asupersync::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let mut witnessed = false;
+            std::future::poll_fn(|task| {
+                let poll = listener.poll_accept(task);
+                if poll.is_pending() && !witnessed {
+                    // Parked witness: accept returned Pending before any peer exists.
+                    witnessed = true;
+                    parked_tx
+                        .send(address)
+                        .expect("test thread waits for the witness");
+                }
+                poll
+            })
+            .await
+            .map(|(_, peer)| peer)
+        });
+        let _ = done_tx.send(accepted.map_err(|error| error.kind()));
+        runtime.close(Duration::from_secs(1))
+    });
+    let address = parked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("accept parks before any peer connects");
+    let started = std::time::Instant::now();
+    let client = std::net::TcpStream::connect(address).expect("peer connects");
+    let accepted = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("accept completes after the peer connects instead of parking forever");
+    eprintln!(
+        "scenario=desktop-profile-accept address={address} accepted={accepted:?} after_connect={:?}",
+        started.elapsed()
+    );
+    assert_eq!(accepted, Ok(client.local_addr().expect("client address")));
+    drop(client);
+    assert!(
+        worker.join().expect("runtime thread"),
+        "the desktop runtime closes"
+    );
+}
