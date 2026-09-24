@@ -335,7 +335,7 @@ impl<F> TimeoutFuture<F> {
                                 .and_then(|current| current.timer_driver())
                                 .is_some();
                             if (time_getter.is_some() || has_ambient_timer)
-                                && Pin::new(&mut sleep).poll(cx).is_ready()
+                                && Pin::new(&mut sleep).poll_deadline(cx).is_ready()
                             {
                                 // Registering the wake source can also complete
                                 // the sleep. Never retain it for another poll.
@@ -390,8 +390,9 @@ where
 
                     // Preserve wake registration even when timeout decisions use a
                     // manual or virtual clock. Time can advance between the two
-                    // polls, and explicit cancellation can complete Sleep early.
-                    if Pin::new(&mut sleep).poll(cx).is_ready() {
+                    // polls. Only the deadline timer skips cancellation; the
+                    // inner future still observes it and can finish cleanup.
+                    if Pin::new(&mut sleep).poll_deadline(cx).is_ready() {
                         return Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(
                             sleep.deadline(),
                         ))));
@@ -404,7 +405,7 @@ where
                     return Poll::Pending;
                 }
 
-                match Pin::new(&mut sleep).poll(cx) {
+                match Pin::new(&mut sleep).poll_deadline(cx) {
                     Poll::Ready(()) => {
                         Poll::Ready(Err(TimeoutError::Elapsed(Elapsed::new(sleep.deadline()))))
                     }
@@ -720,41 +721,108 @@ mod tests {
     }
 
     #[test]
-    fn timeout_cancelled_registration_returns_error_and_releases_timer() {
-        let clock = Arc::new(VirtualClock::new());
-        let timer = TimerDriverHandle::with_virtual_clock(clock);
-        let runtime_cx = Cx::new_with_drivers(
-            RegionId::new_for_test(1, 0),
-            TaskId::new_for_test(1, 0),
-            Budget::INFINITE,
-            None,
-            None,
-            None,
-            Some(timer.clone()),
-            None,
-        );
-        let _guard = Cx::set_current(Some(runtime_cx.clone()));
-        set_test_time(0);
-        let deadline = Time::from_millis(5);
-        let mut future =
-            TimeoutFuture::with_time_getter(pending::<Result<(), ()>>(), deadline, test_time);
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+    fn timeout_owner_cancellation_preserves_cleanup_until_the_actual_deadline() {
+        use crate::channel::oneshot;
+        use std::sync::atomic::AtomicBool;
 
-        assert!(Future::poll(Pin::new(&mut future), &mut cx).is_pending());
-        assert_eq!(timer.pending_count(), 1);
-        runtime_cx.cancel_with(crate::types::CancelKind::User, Some("cancel timeout wait"));
-        let result = Future::poll(Pin::new(&mut future), &mut cx);
-        assert!(matches!(
-            result,
-            Poll::Ready(Err(TimeoutError::Elapsed(elapsed))) if elapsed.deadline() == deadline
-        ));
-        assert_eq!(test_time(), Time::ZERO);
-        assert_eq!(timer.pending_count(), 0);
-        assert!(matches!(
-            Future::poll(Pin::new(&mut future), &mut cx),
-            Poll::Ready(Err(TimeoutError::PolledAfterCompletion))
-        ));
+        struct CleanupDrop(Arc<AtomicBool>);
+        impl Drop for CleanupDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        // Cover default Future::poll, custom-clock Future::poll, and the
+        // explicit-time registration path. Cancellation does not expire any
+        // of them; cleanup can finish itself or reach the real timer bound.
+        for mode in 0..3 {
+            for finish_cleanup in [false, true] {
+                let clock = Arc::new(VirtualClock::new());
+                let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+                let runtime_cx = Cx::new_with_drivers(
+                    RegionId::new_for_test(1, 0),
+                    TaskId::new_for_test(1, 0),
+                    Budget::INFINITE,
+                    None,
+                    None,
+                    None,
+                    Some(timer.clone()),
+                    None,
+                );
+                let _guard = Cx::set_current(Some(runtime_cx.clone()));
+                set_test_time(0);
+                let deadline = Time::from_millis(5);
+                let observed = Arc::new(AtomicBool::new(false));
+                let dropped = Arc::new(AtomicBool::new(false));
+                let (release, mut cleanup) = oneshot::channel::<()>();
+                let inner_cx = runtime_cx.clone();
+                let inner_observed = observed.clone();
+                let inner_dropped = dropped.clone();
+                let inner = Box::pin(async move {
+                    let _retire = CleanupDrop(inner_dropped);
+                    inner_cx.cancelled().await;
+                    assert!(inner_cx.checkpoint().is_err(), "inner remains unmasked");
+                    inner_observed.store(true, Ordering::SeqCst);
+                    cleanup
+                        .recv_uninterruptible()
+                        .await
+                        .expect("cleanup receipt");
+                    Err::<(), _>("cancelled after cleanup")
+                });
+                let mut future = if mode == 1 {
+                    TimeoutFuture::with_time_getter(inner, deadline, test_time)
+                } else {
+                    TimeoutFuture::new(inner, deadline)
+                };
+                let waker = CountingWaker::new();
+                let task_waker = Waker::from(waker.clone());
+                let mut task = Context::from_waker(&task_waker);
+                let mut poll = |task: &mut Context<'_>| {
+                    if mode == 2 {
+                        future.poll_with_time(timer.now(), task)
+                    } else {
+                        Future::poll(Pin::new(&mut future), task)
+                    }
+                };
+
+                assert!(poll(&mut task).is_pending());
+                assert_eq!(timer.pending_count(), 1);
+                let before_cancel = waker.count();
+                runtime_cx.cancel_with(crate::types::CancelKind::User, Some("cancel timeout wait"));
+                assert!(waker.count() > before_cancel);
+                assert!(poll(&mut task).is_pending());
+                assert!(observed.load(Ordering::SeqCst));
+                assert!(!dropped.load(Ordering::SeqCst));
+                assert_eq!(timer.now(), Time::ZERO);
+                assert_eq!(timer.pending_count(), 1);
+
+                if finish_cleanup {
+                    let before_release = waker.count();
+                    release.send_blocking(()).unwrap();
+                    assert!(waker.count() > before_release);
+                    assert!(matches!(
+                        poll(&mut task),
+                        Poll::Ready(Err(TimeoutError::Inner("cancelled after cleanup")))
+                    ));
+                } else {
+                    let wakes_before = waker.count();
+                    clock.advance(deadline.as_nanos());
+                    set_test_time(deadline.as_nanos());
+                    assert_eq!(timer.process_timers(), 1);
+                    assert!(waker.count() > wakes_before);
+                    assert!(matches!(
+                        poll(&mut task),
+                        Poll::Ready(Err(TimeoutError::Elapsed(elapsed))) if elapsed.deadline() == deadline
+                    ));
+                }
+                assert!(dropped.load(Ordering::SeqCst));
+                assert_eq!(timer.pending_count(), 0);
+                assert!(matches!(
+                    poll(&mut task),
+                    Poll::Ready(Err(TimeoutError::PolledAfterCompletion))
+                ));
+            }
+        }
     }
 
     #[test]

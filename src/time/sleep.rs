@@ -718,6 +718,13 @@ impl Sleep {
         }
     }
 
+    /// Polls a timeout's deadline without mistaking owner cancellation for
+    /// elapsed time. Only this timer skips the cancellation checkpoint; its
+    /// wrapped operation can still observe cancellation and finish cleanup.
+    pub(crate) fn poll_deadline(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        self.poll_inner(cx, false)
+    }
+
     pub(crate) fn poll_ready_with_time(&self, now: Time) -> Poll<()> {
         assert!(
             !self.completed.load(std::sync::atomic::Ordering::Acquire),
@@ -739,8 +746,14 @@ impl Sleep {
 impl Future for Sleep {
     type Output = ();
 
-    #[allow(clippy::too_many_lines)]
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.poll_inner(cx, true)
+    }
+}
+
+impl Sleep {
+    #[allow(clippy::too_many_lines)]
+    fn poll_inner(self: Pin<&mut Self>, cx: &mut Context<'_>, cancel_aware: bool) -> Poll<()> {
         assert!(
             !self.completed.load(std::sync::atomic::Ordering::Acquire),
             "Sleep polled after completion"
@@ -761,12 +774,14 @@ impl Future for Sleep {
         // into a successful response. The surrounding task may run its normal
         // cleanup before returning. Terminal cleanup below cancels the registered
         // timer immediately; a completed future may outlive the surrounding task.
-        if Cx::current().is_some_and(|current| {
-            current.is_cancel_requested()
-                && !current.cancelled_by(CancelKind::Timeout)
-                && !current.cancelled_by(CancelKind::Deadline)
-                && current.checkpoint().is_err()
-        }) {
+        if cancel_aware
+            && Cx::current().is_some_and(|current| {
+                current.is_cancel_requested()
+                    && !current.cancelled_by(CancelKind::Timeout)
+                    && !current.cancelled_by(CancelKind::Deadline)
+                    && current.checkpoint().is_err()
+            })
+        {
             self.polled
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             self.completed
