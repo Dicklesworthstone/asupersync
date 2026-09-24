@@ -5720,6 +5720,27 @@ fn atp_watch(_args: &AtpWatchArgs, _output: &mut Output) -> Result<(), CliError>
     atp_not_implemented("watch")
 }
 
+/// Resolves a leading `~` or `~/` in a directory argument against `home`
+/// (asupersync-bi2462.128). Other paths, including `~user`, are unchanged.
+fn expand_home(path: &Path, home: Option<&Path>) -> Result<PathBuf, CliError> {
+    let Ok(rest) = path.strip_prefix("~") else {
+        return Ok(path.to_path_buf());
+    };
+    let home = home.ok_or_else(|| {
+        CliError::new("home_unset", "Cannot expand ~ because HOME is not set")
+            .detail(format!(
+                "Path: {}; pass an absolute directory",
+                path.display()
+            ))
+            .exit_code(ExitCode::USER_ERROR)
+    })?;
+    if rest.as_os_str().is_empty() {
+        Ok(home.to_path_buf())
+    } else {
+        Ok(home.join(rest))
+    }
+}
+
 fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
     use std::net::ToSocketAddrs;
 
@@ -5742,7 +5763,18 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
             .detail(args.listen.clone())
             .exit_code(ExitCode::USER_ERROR)
         })?;
-    let dest_dir = args.data_dir.join("inbox");
+    let data_dir = expand_home(
+        &args.data_dir,
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    )?;
+    if data_dir != args.data_dir && Path::new("~").join(".atp").is_dir() {
+        eprintln!(
+            "note: ATP serve now resolves ~ from HOME ({}); the ./~/.atp directory an \
+             earlier version created in this working directory is no longer used",
+            data_dir.display()
+        );
+    }
+    let dest_dir = data_dir.join("inbox");
     let listen_label = listen.to_string();
 
     std::fs::create_dir_all(&dest_dir).map_err(|err| {
@@ -17666,6 +17698,36 @@ lab:
             detailed: true,
         };
         assert_atp_not_implemented(atp_bench(&bench, &mut output), "bench must fail closed");
+    }
+
+    /// asupersync-bi2462.128: `atp serve` used to create a directory literally
+    /// named `~` in the working directory for its default `--data-dir ~/.atp`.
+    #[test]
+    fn atp_data_dir_tilde_resolves_from_home_not_the_working_directory() {
+        let home = Path::new("/home/atp-user");
+        let cli = Cli::parse_from(["asupersync", "atp", "serve"]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Serve(args),
+        }) = cli.command
+        else {
+            panic!("expected atp serve");
+        };
+        assert_eq!(
+            expand_home(&args.data_dir, Some(home)).expect("default expands"),
+            home.join(".atp")
+        );
+        assert_eq!(
+            expand_home(Path::new("~"), Some(home)).expect("bare tilde"),
+            home.to_path_buf()
+        );
+        for unchanged in ["/srv/atp", "data/atp", "~alice/atp"] {
+            assert_eq!(
+                expand_home(Path::new(unchanged), Some(home)).expect("no expansion"),
+                PathBuf::from(unchanged)
+            );
+        }
+        let err = expand_home(Path::new("~/.atp"), None).expect_err("HOME unset");
+        assert_eq!(err.error_type, "home_unset");
     }
 
     #[test]
