@@ -134,5 +134,17 @@ fn current_thread_real_probe_ack_and_graceful_leave() { exercise(1, false); }
 #[test]
 fn two_workers_real_probe_ack_and_graceful_leave() { exercise(2, false); }
 
+/// Consecutive runs of the two-worker cancellation case. `ASUPERSYNC_SWIM_REPEAT`
+/// raises it for flake-rate evidence (asupersync-bi2462.161 asks for 20 in one lane).
+fn repetitions() -> usize {
+    std::env::var("ASUPERSYNC_SWIM_REPEAT").ok().and_then(|value| value.parse().ok()).unwrap_or(1).max(1)
+}
+
 #[test]
-fn two_workers_parked_cancel_then_suspicion_and_failure_detection() { exercise(2, true); }
+fn two_workers_parked_cancel_then_suspicion_and_failure_detection() {
+    let runs = repetitions();
+    for run in 1..=runs {
+        exercise(2, true);
+        eprintln!("scenario=two-worker-parked-cancel run={run}/{runs} green");
+    }
+}
