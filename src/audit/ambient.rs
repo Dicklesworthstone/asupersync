@@ -127,6 +127,18 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         exempt: true,
         exemption_reason: Some("Blocking pool requires real OS threads by design"),
     },
+    AmbientFinding {
+        file: "process/reaper.rs",
+        line: 36,
+        evidence_pattern: "std::thread::Builder::new()",
+        category: AmbientCategory::Spawn,
+        severity: Severity::Low,
+        description: "Process-wide Unix child reaper admitted before OS process creation",
+        exempt: true,
+        exemption_reason: Some(
+            "Process cleanup provider: one worker owns abandoned child handles beyond runtime shutdown",
+        ),
+    },
     // ── Entropy ─────────────────────────────────────────────────────────
     // NOTE: net/websocket/handshake.rs and net/websocket/frame.rs now use
     // EntropySource capability plumbing instead of direct ambient randomness.
@@ -1514,7 +1526,11 @@ fn test_function() {
     // br-asupersync-bi2462.23, so this count and the snapshot text move only
     // when a site is added, removed or rewritten — never when code above a
     // site shifts.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 725;
+    // 725 -> 726 (br-asupersync-bi2462.114): one process-lifetime Unix
+    // child-reaper worker is admitted before OS child creation. The exact
+    // spawn remains scanned and pinned in both inventory sections; no
+    // existing scanner exemption or detection pattern is broadened.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 726;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -2022,6 +2038,7 @@ fn test_function() {
             "time/driver.rs",
             "time/sleep.rs",
             "runtime/blocking_pool.rs",
+            "process/reaper.rs",
             "web/debug.rs",
             "util/entropy.rs",
             "fs/",

@@ -127,6 +127,7 @@ expression: inventory
 1	Spawn	database/mysql.rs	std::thread::Builder
 1	Spawn	net/udp.rs	std::thread::Builder
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn
+1	Spawn	process/reaper.rs	std::thread::Builder
 4	Spawn	runtime/builder.rs	std::thread::Builder
 1	Spawn	runtime/spawn_blocking.rs	thread::Builder
 2	Spawn	signal/shutdown.rs	std::thread::Builder
@@ -438,6 +439,7 @@ expression: inventory
 1	Spawn	database/mysql.rs	std::thread::Builder	std::thread::Builder::new()
 1	Spawn	net/udp.rs	std::thread::Builder	match std::thread::Builder::new()
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn	let handle = thread::spawn(move || {
+1	Spawn	process/reaper.rs	std::thread::Builder	std::thread::Builder::new()
 1	Spawn	runtime/builder.rs	std::thread::Builder	let mut builder = std::thread::Builder::new().name(name);
 1	Spawn	runtime/builder.rs	std::thread::Builder	let thread = std::thread::Builder::new()
 2	Spawn	runtime/builder.rs	std::thread::Builder	std::thread::Builder::new()

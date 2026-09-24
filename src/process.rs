@@ -47,6 +47,11 @@ use std::pin::Pin;
 use std::process as std_process;
 use std::task::{Context, Poll};
 
+#[cfg(all(test, target_os = "linux"))]
+mod drop_reap_tests;
+#[cfg(unix)]
+mod reaper;
+
 #[cfg(windows)]
 use std::cmp::Ordering;
 #[cfg(unix)]
@@ -2017,6 +2022,7 @@ impl Command {
     /// Returns an error if:
     /// - The program doesn't exist
     /// - Permission is denied
+    /// - The Unix child reaper cannot be started (before any process is spawned)
     /// - Another I/O error occurs
     ///
     /// # Example
@@ -2030,6 +2036,11 @@ impl Command {
     /// ```
     pub fn spawn(&mut self) -> Result<Child, ProcessError> {
         self.validate_process_group_configuration()?;
+
+        // Admit cleanup before creating a process: failure to start the shared
+        // reaper must not leave an already-running child without a wait owner.
+        #[cfg(unix)]
+        reaper::ensure_started()?;
 
         let mut cmd = std_process::Command::new(&self.program);
 
@@ -2237,8 +2248,11 @@ impl Command {
 ///
 /// # Drop Behavior
 ///
-/// By default, dropping a `Child` does *not* kill the process. Set
-/// `kill_on_drop(true)` on the `Command` to enable automatic cleanup.
+/// By default, dropping a `Child` does *not* kill the process. On Unix,
+/// a shared reaper retains the process handle until the child exits naturally
+/// and collects its status without waiting for process exit on the dropping
+/// thread. Set `kill_on_drop(true)` on the `Command` to also terminate the child
+/// on drop.
 #[derive(Debug)]
 pub struct Child {
     inner: Option<std_process::Child>,
@@ -3050,32 +3064,15 @@ fn reap_kill_on_drop_child(mut child: std_process::Child) {
 }
 
 impl Drop for Child {
-    /// Drop the child handle.
+    /// Close stdin and release the process handle.
     ///
-    /// The previous behavior was: with `kill_on_drop = false` (the default),
-    /// the OS-level child was leaked as a zombie until the parent process
-    /// exited — `std::process::Child` does NOT reap on drop, and we did
-    /// nothing either. Long-lived parents (servers, the runtime itself) would
-    /// accumulate zombies.
+    /// `kill_on_drop(true)` preserves the configured signal target and existing
+    /// kill-and-reap strategy. On Unix the default path does not kill: it reaps
+    /// an already-exited child immediately, or transfers the owned child to the
+    /// shared reaper until natural exit (br-asupersync-bi2462.114). No process-exit
+    /// wait or fallible worker startup occurs in this default drop path.
     ///
-    /// New behavior (br-asupersync-bn2iln):
-    ///
-    ///   * If `kill_on_drop = true`: as before, signal the child and reap
-    ///     it via the runtime's blocking pool / detached reaper / direct
-    ///     wait fallback.
-    ///   * If `kill_on_drop = false` (default): do a non-blocking
-    ///     `waitpid(pid, &mut status, WNOHANG)` to reap the child if it
-    ///     has already exited. This eliminates the zombie-leak class for
-    ///     the common case where the child completed before the handle
-    ///     dropped (test harnesses, short-lived helper processes, racing
-    ///     primitives that drop the loser). If the child is still running,
-    ///     `WNOHANG` returns immediately with 0 and we leave the OS
-    ///     reaping responsibility to whoever called us — preserving the
-    ///     "drop does not kill" contract while removing the silent
-    ///     accumulation.
-    ///
-    /// Windows: no-op. Win32 cleans up child process handles automatically
-    /// via the kernel handle's reference count; there is no zombie class.
+    /// On non-Unix platforms, the default path only closes the process handle.
     fn drop(&mut self) {
         drop(self.stdin.take());
 
@@ -3097,33 +3094,14 @@ impl Drop for Child {
             return;
         }
 
-        // kill_on_drop = false: opportunistic non-blocking reap so an
-        // already-exited child does not linger as a zombie.
         #[cfg(unix)]
-        {
-            if let Some(child) = self.inner.as_ref() {
-                let Ok(pid) = libc::pid_t::try_from(child.id()) else {
-                    return;
-                };
-                let mut status: libc::c_int = 0;
-                // Safety: pid is the kernel-assigned PID for our owned
-                // child; `&mut status` is a valid out-pointer.
-                // `WNOHANG` makes this non-blocking — returns 0 if the
-                // child is still running, the pid if it was reaped, -1 on
-                // error. We ignore the result: success reaps the zombie,
-                // ECHILD means already reaped or never existed, EINTR
-                // means try-later (and we don't), and any other error is
-                // best-effort cleanup.
-                let _ = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-            }
+        if let Some(child) = self.inner.take() {
+            // Preserve the std child's cached status and ownership. An EINTR
+            // or a still-running result must not discard the reaping owner.
+            reaper::reap_or_enqueue(child);
         }
 
-        // Drop std_process::Child without further action. The descriptor
-        // closes, but on Unix the OS still requires SOMEONE to wait() the
-        // child if WNOHANG above didn't catch it. That responsibility
-        // remains with the original caller (per the documented contract:
-        // "drop does not kill"); this commit only added the non-blocking
-        // best-effort reap.
+        #[cfg(not(unix))]
         let _ = self.inner.take();
     }
 }
