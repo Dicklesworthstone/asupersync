@@ -574,7 +574,11 @@ landing code nobody compiled or ran:
 2. **GitHub Actions stays disabled.** The workflow files are retained, but they are not
    enforcement. Any README or docs statement that a CI job "runs", "gates" or "covers" something
    describes a job that does not currently execute. Until the owner re-enables Actions, the main
-   watchdog (`asupersync-bi2462.147`) and the RCH lanes named in this file are the checks.
+   watchdog (`asupersync-bi2462.147`) and the RCH lanes named in this file are the checks. Run the
+   watchdog with `python3 scripts/main_watchdog.py run --file-beads`. It checks each new `main`
+   commit through RCH, bisects a new red to its commit and files a P0 bead. It detects breakage
+   after it lands and never reverts anything. `plan` shows what a run would do, and `summary`
+   reports the daily metrics.
 3. **Commits created through the GitHub web UI or API, or by any agent without a working
    compile path, must not add or modify Rust sources, `Cargo.toml`/`Cargo.lock`, build scripts or
    test code.** Such agents may land docs and tracker changes only, or hand the code to an agent
