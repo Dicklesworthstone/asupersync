@@ -48,6 +48,8 @@ use std::process as std_process;
 use std::task::{Context, Poll};
 
 #[cfg(all(test, target_os = "linux"))]
+mod cancel_drain_tests;
+#[cfg(all(test, target_os = "linux"))]
 mod drop_reap_tests;
 #[cfg(unix)]
 mod reaper;
@@ -448,6 +450,16 @@ unsafe extern "system" {
 const GRACEFUL_KILL_POLLS: u32 = 200;
 const GRACEFUL_KILL_POLL_MAX_BACKOFF_MS: u64 = 10;
 const REAP_AFTER_KILL_POLLS: u32 = 200;
+
+/// Cleanup has its own finite grace/reap window. An ordinary `Sleep` observes
+/// the ambient owner's cancellation and would complete every delay immediately,
+/// escalating to SIGKILL before the child can handle SIGTERM and exhausting the
+/// reap loop before the kernel has delivered the signal. Poll only the timer's
+/// deadline here; cancellation of the parent remains published throughout.
+async fn cancel_drain_delay(duration: std::time::Duration) {
+    let mut delay = std::pin::pin!(crate::time::sleep(crate::time::wall_now(), duration));
+    std::future::poll_fn(|cx| delay.as_mut().poll_deadline(cx)).await;
+}
 
 #[cfg(windows)]
 const WINDOWS_TRUE: i32 = 1;
@@ -2428,8 +2440,7 @@ impl Child {
                 Ok(None) => {}
                 Err(_) => return, // child gone or already reaped — done.
             }
-            let now = crate::time::wall_now();
-            crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
+            cancel_drain_delay(std::time::Duration::from_millis(backoff_ms)).await;
             backoff_ms = (backoff_ms * 2).min(GRACEFUL_KILL_POLL_MAX_BACKOFF_MS);
         }
 
@@ -2447,8 +2458,7 @@ impl Child {
                 Ok(Some(_)) | Err(_) => return,
                 Ok(None) => {}
             }
-            let now = crate::time::wall_now();
-            crate::time::sleep(now, std::time::Duration::from_millis(2)).await;
+            cancel_drain_delay(std::time::Duration::from_millis(2)).await;
         }
     }
 
