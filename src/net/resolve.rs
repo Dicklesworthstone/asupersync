@@ -6,8 +6,10 @@
 use crate::cx::Cx;
 use crate::runtime::spawn_blocking;
 use crate::runtime::spawn_blocking::spawn_blocking_on_thread;
+use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::task::Poll;
 
 const NO_SOCKET_ADDRESSES_FOUND: &str = "no socket addresses found";
 
@@ -16,7 +18,9 @@ const NO_SOCKET_ADDRESSES_FOUND: &str = "no socket addresses found";
 /// # Cancel Safety
 ///
 /// If this future is cancelled, the DNS resolution continues on the blocking
-/// thread, and the result is dropped.
+/// thread, and the result is dropped. If the calling task is cancelled while
+/// the lookup is blocked, this returns an [`io::ErrorKind::Interrupted`] error
+/// without waiting for it.
 pub async fn lookup_one<A>(addr: A) -> io::Result<SocketAddr>
 where
     A: ToSocketAddrs + Send + 'static,
@@ -52,7 +56,9 @@ where
 /// # Cancel Safety
 ///
 /// If this future is cancelled, the DNS resolution continues on the blocking
-/// thread, and the result is dropped.
+/// thread, and the result is dropped. If the calling task is cancelled while
+/// the lookup is blocked, this returns an [`io::ErrorKind::Interrupted`] error
+/// without waiting for it.
 pub async fn lookup_all<A>(addr: A) -> io::Result<Vec<SocketAddr>>
 where
     A: ToSocketAddrs + Send + 'static,
@@ -84,14 +90,36 @@ where
 {
     if let Some(cx) = Cx::current() {
         if cx.blocking_pool_handle().is_some() {
-            return spawn_blocking(f).await;
+            return unless_cancelled(&cx, spawn_blocking(f)).await;
         }
+        return unless_cancelled(&cx, spawn_blocking_on_thread(f)).await;
     }
 
     // No pool available? Force a background thread to avoid blocking the reactor.
     // This maintains the original behavior (dedicated thread per lookup) but
     // uses the optimized Waker-based notification mechanism.
     spawn_blocking_on_thread(f).await
+}
+
+/// Waits for a blocking lookup unless the calling task is cancelled first
+/// (asupersync-bi2462.119). A cancelled caller gets `Interrupted` at once; the
+/// lookup finishes on its thread and its result is dropped.
+async fn unless_cancelled<T>(
+    cx: &Cx,
+    resolution: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    let mut resolution = std::pin::pin!(resolution);
+    let mut cancelled = std::pin::pin!(cx.cancelled());
+    std::future::poll_fn(|task| {
+        if cancelled.as_mut().poll(task).is_ready() && cx.checkpoint().is_err() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "dns resolution cancelled",
+            )));
+        }
+        resolution.as_mut().poll(task)
+    })
+    .await
 }
 
 fn resolve_socket_addrs<A>(addr: A) -> io::Result<Vec<SocketAddr>>
@@ -238,5 +266,52 @@ mod tests {
         *ready = true;
         cvar.notify_one();
         drop(ready);
+    }
+
+    /// asupersync-bi2462.119: a caller cancelled while its lookup is blocked
+    /// in the resolver gets `Interrupted` at once instead of waiting for it.
+    #[test]
+    fn lookup_all_returns_promptly_when_the_caller_is_cancelled() {
+        struct BlockingAddrs {
+            gate: Arc<(Mutex<bool>, Condvar)>,
+        }
+
+        impl ToSocketAddrs for BlockingAddrs {
+            type Iter = std::vec::IntoIter<SocketAddr>;
+
+            fn to_socket_addrs(&self) -> io::Result<Self::Iter> {
+                let (lock, cvar) = &*self.gate;
+                let mut ready = lock.lock();
+                while !*ready {
+                    cvar.wait(&mut ready);
+                }
+                drop(ready);
+                Ok(vec!["127.0.0.1:9091".parse().unwrap()].into_iter())
+            }
+        }
+
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(cx.clone()));
+        let mut fut = Box::pin(lookup_all(BlockingAddrs {
+            gate: Arc::clone(&gate),
+        }));
+        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            fut.as_mut().poll(&mut task).is_pending(),
+            "the lookup is blocked in the resolver"
+        );
+
+        cx.cancel_with(crate::types::CancelKind::User, Some("dns caller cancelled"));
+        let result = fut.as_mut().poll(&mut task);
+        assert!(
+            matches!(&result, Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Interrupted),
+            "a cancelled caller returns Interrupted without waiting, got {result:?}"
+        );
+
+        drop(fut);
+        let (lock, cvar) = &*gate;
+        *lock.lock() = true;
+        cvar.notify_one();
     }
 }
