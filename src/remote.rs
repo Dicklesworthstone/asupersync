@@ -103,6 +103,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+mod admission;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub use admission::{
+    AdmittedNativeRemoteRuntime, NativeRemoteAdmissionError, NativeRemoteAdmissionLimits,
+    NativeRemoteAdmissionUsage, NativeRemoteAdmittedHandle, NativeRemotePeerAdmissionLimits,
+    NativeRemoteReservation,
+};
+
 // ---------------------------------------------------------------------------
 // Identifiers
 // ---------------------------------------------------------------------------
@@ -7143,6 +7152,7 @@ struct NativeRemoteShared {
     drain_timeout: Duration,
     automatic_lease_renewal: bool,
     state: Mutex<NativeRemoteState>,
+    retirement_notify: Option<Arc<crate::sync::Notify>>,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -7257,6 +7267,9 @@ impl NativeRemoteShared {
         for waiter in waiters {
             let _ = waiter.send_blocking(());
         }
+        if let Some(notify) = &self.retirement_notify {
+            notify.notify_waiters();
+        }
     }
 
     fn complete(&self, task_id: RemoteTaskId, result: Result<RemoteOutcome, RemoteError>) {
@@ -7285,6 +7298,9 @@ impl NativeRemoteShared {
         };
         for waiter in waiters {
             let _ = waiter.send_blocking(());
+        }
+        if let Some(notify) = &self.retirement_notify {
+            notify.notify_waiters();
         }
     }
 
@@ -7382,7 +7398,19 @@ impl NativeRemoteShared {
 struct NativeRemoteDriverGuard {
     shared: Arc<NativeRemoteShared>,
     task_id: RemoteTaskId,
-    completed: bool,
+    result: Option<Result<RemoteOutcome, RemoteError>>,
+}
+
+// Field order matters: release optional admission credit only after the owned
+// request buffers are gone, including cancellation before the first task poll.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+struct NativeRemotePublishedRequest {
+    wire: RemoteServiceWireRequest,
+    client: RemoteComputationClient,
+    control: Arc<NativeRemoteControl>,
+    control_receiver: mpsc::Receiver<()>,
+    guard: NativeRemoteDriverGuard,
+    _admission: Option<Arc<admission::NativeRemoteCredit>>,
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
@@ -7391,27 +7419,27 @@ impl NativeRemoteDriverGuard {
         Self {
             shared,
             task_id,
-            completed: false,
+            result: None,
         }
     }
 
-    fn finish(mut self, result: Result<RemoteOutcome, RemoteError>) {
-        self.completed = true;
-        self.shared.complete(self.task_id, result);
+    fn finish(&mut self, result: Result<RemoteOutcome, RemoteError>) {
+        self.result = Some(result);
     }
 }
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 impl Drop for NativeRemoteDriverGuard {
     fn drop(&mut self) {
-        if !self.completed {
-            self.shared.complete(
-                self.task_id,
-                Err(RemoteError::TransportError(
-                    "native remote driver ended before terminal publication".to_owned(),
-                )),
-            );
-        }
+        // The publication owner's earlier fields have already destroyed all
+        // request/control buffers. Only now may native close observe retirement
+        // and a receiving handle transfer its terminal buffer to the caller.
+        let result = self.result.take().unwrap_or_else(|| {
+            Err(RemoteError::TransportError(
+                "native remote driver ended before terminal publication".to_owned(),
+            ))
+        });
+        self.shared.complete(self.task_id, result);
     }
 }
 
@@ -7815,6 +7843,7 @@ impl NativeRemoteRuntime {
                 drain_timeout: config.drain_timeout,
                 automatic_lease_renewal: config.automatic_lease_renewal,
                 state: Mutex::new(NativeRemoteState::new()),
+                retirement_notify: None,
             }),
         })
     }
@@ -7998,6 +8027,16 @@ impl NativeRemoteRuntime {
         sender: &NodeId,
         request: SpawnRequest,
     ) -> Result<(), RemoteError> {
+        self.send_spawn_with_admission(destination, sender, request, None)
+    }
+
+    fn send_spawn_with_admission(
+        &self,
+        destination: &NodeId,
+        sender: &NodeId,
+        request: SpawnRequest,
+        admission: Option<Arc<admission::NativeRemoteCredit>>,
+    ) -> Result<(), RemoteError> {
         self.validate_sender(sender)?;
         if request.origin_node != self.local_node {
             return Err(RemoteError::TransportError(format!(
@@ -8012,25 +8051,36 @@ impl NativeRemoteRuntime {
             RemoteServiceWireRequest::from_spawn_request(route.hello.clone(), &request)
                 .map_err(|error| RemoteError::SerializationError(error.to_string()))?;
         let task_id = request.remote_task_id;
-        let mut control_receiver = self.shared.admit(task_id)?;
+        let control_receiver = self.shared.admit(task_id)?;
         let shared = Arc::clone(&self.shared);
-        let driver_shared = Arc::clone(&shared);
-        let client = route.client.clone();
+        // Establish terminal ownership before handing the factory to the
+        // scheduler. A discarded factory/unpolled future must retire admission.
+        let guard = NativeRemoteDriverGuard::new(Arc::clone(&shared), task_id);
         let control = shared.control(task_id)?;
+        let mut published = NativeRemotePublishedRequest {
+            wire: wire_request,
+            client: route.client,
+            control,
+            control_receiver,
+            guard,
+            _admission: admission,
+        };
         let spawn = self.runtime.try_spawn_with_cx(move |cx| async move {
-            driver_shared.attach_driver_cx(task_id, cx.clone());
-            let guard = NativeRemoteDriverGuard::new(Arc::clone(&driver_shared), task_id);
+            published.guard.shared.attach_driver_cx(task_id, cx.clone());
             let result = drive_native_remote_session(
                 &cx,
-                &driver_shared,
+                &published.guard.shared,
                 task_id,
-                &client,
-                &wire_request,
-                &control,
-                &mut control_receiver,
+                &published.client,
+                &published.wire,
+                &published.control,
+                &mut published.control_receiver,
             )
             .await;
-            guard.finish(result);
+            published.guard.finish(result);
+            // Keep the complete owner captured by the future, rather than a
+            // disjoint capture of `wire` that could release credit too soon.
+            drop(published);
         });
         if let Err(error) = spawn {
             self.shared.roll_back_admission(task_id);

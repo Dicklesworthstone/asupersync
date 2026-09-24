@@ -628,6 +628,19 @@ impl CertificatePinSet {
         self.enforce
     }
 
+    /// An immutable authentication identity for isolated native admission.
+    /// Multiple/rotating pins are deliberately not collapsed into one peer.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub(crate) fn single_enforcing_spki(&self) -> Option<[u8; 32]> {
+        if !self.enforce || self.pins.len() != 1 {
+            return None;
+        }
+        match self.pins.first()? {
+            CertificatePin::SpkiSha256(bytes) => bytes.as_slice().try_into().ok(),
+            CertificatePin::CertSha256(_) => None,
+        }
+    }
+
     /// Set whether to enforce pinning.
     pub fn set_enforce(&mut self, enforce: bool) {
         self.enforce = enforce;
