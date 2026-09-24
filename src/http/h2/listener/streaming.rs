@@ -388,7 +388,12 @@ impl StreamingRequests {
         in_flight: &Arc<AtomicUsize>,
         runtime: &RuntimeHandle,
         response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
+        request_limits: H2RequestLimits,
     ) -> bool {
+        if self.entries.len() >= request_limits.connection {
+            conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+            return false;
+        }
         let (head, declared_length) = match request_head_from_h2_headers(headers) {
             Ok(parts) => parts,
             Err(_) => {
@@ -473,7 +478,11 @@ impl StreamingRequests {
         let handler = Arc::clone(&self.dispatch.handler);
         let response_sender = resp_tx.clone();
         let signal = signal.clone();
-        let guard = InFlightRequestGuard::acquire(Some(in_flight));
+        let Some(guard) = InFlightRequestGuard::try_acquire(in_flight, request_limits.global)
+        else {
+            conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+            return false;
+        };
         let coordinator = runtime.try_spawn(async move {
             let Some(cx) = Cx::current() else {
                 return;

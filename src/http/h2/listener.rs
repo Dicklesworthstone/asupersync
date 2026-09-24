@@ -61,6 +61,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
+mod ownership;
+use ownership::{H2RequestLimits, H2RequestOwners};
+
 #[cfg(feature = "http2-streaming")]
 mod streaming;
 #[cfg(feature = "http2-streaming")]
@@ -1089,6 +1092,18 @@ struct InFlightRequestGuard {
 }
 
 impl InFlightRequestGuard {
+    fn try_acquire(counter: &Arc<AtomicUsize>, limit: usize) -> Option<Self> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < limit).then(|| active + 1)
+            })
+            .ok()
+            .map(|_| Self {
+                counter: Some(Arc::clone(counter)),
+            })
+    }
+
+    #[cfg(any(test, feature = "http2-streaming"))]
     fn acquire(counter: Option<&Arc<AtomicUsize>>) -> Self {
         if let Some(counter) = counter {
             counter.fetch_add(1, Ordering::AcqRel);
@@ -1163,6 +1178,39 @@ impl Drop for H2ParentCancellation<'_> {
     fn drop(&mut self) {
         self.clear();
     }
+}
+
+/// Preserve the producer's own cancellation channel (body rejection, peer
+/// reset, or response abandonment), while also forwarding owner cancellation.
+/// Replacing that channel with only the coordinator would strand a producer
+/// parked in an operation that does not itself inspect its request context.
+async fn forward_h2_producer_cancellation<F: Future>(
+    owner: &Cx,
+    producer: &Cx,
+    future: F,
+) -> F::Output {
+    let mut registration = H2ParentCancellation {
+        cx: owner,
+        registration: None,
+    };
+    let mut forwarded = false;
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        if !forwarded {
+            registration.registration =
+                Some(owner.refresh_cancel_waker(registration.registration, cx.waker()));
+            if owner.is_cancel_requested() {
+                producer.cancel_with(
+                    CancelKind::ParentCancelled,
+                    Some("HTTP/2 request coordinator cancelled its producer"),
+                );
+                forwarded = true;
+                registration.clear();
+            }
+        }
+        future.as_mut().poll(cx)
+    })
+    .await
 }
 
 impl Drop for OwnedH2Request {
@@ -2008,6 +2056,8 @@ fn suppress_response_body_for_head(resp: &mut Response) {
 
 /// One wake-up of the connection driver's event select.
 enum DriverEvent {
+    /// A coordinator has joined after its request subtree closed.
+    RequestRetired(u32, Result<(), JoinError>),
     /// Request-body consumption, source publication, or terminal progress.
     #[cfg(feature = "http2-streaming")]
     StreamingProgress,
@@ -2288,6 +2338,7 @@ async fn next_driver_event(
     continuation_deadline: Option<Time>,
     stream_idle_deadline: Option<(u32, Time)>,
     produced_failure_deadline: Option<(u32, Time)>,
+    request_owners: &mut H2RequestOwners,
 ) -> DriverEvent {
     if watch_drain && signal.is_shutting_down() {
         return DriverEvent::DrainRequested;
@@ -2378,8 +2429,8 @@ async fn next_driver_event(
         }
         // Cancel-correct channels make dropping a partially-polled recv
         // safe: no item is consumed unless the future completes.
-        if let Poll::Ready(Ok(item)) = recv_fut.as_mut().poll(cx) {
-            return Poll::Ready(DriverEvent::Response(item));
+        if let Poll::Ready(event) = request_owners.poll_event(recv_fut.as_mut(), cx) {
+            return Poll::Ready(event);
         }
         if let Poll::Ready(item) =
             poll_produced_body_event(conn, produced_bodies, produced_poll_after, cx)
@@ -2412,14 +2463,15 @@ fn dispatch_h2_request<F, Fut>(
     resp_tx: &mpsc::Sender<FunnelItem>,
     shutdown_signal: &ShutdownSignal,
     in_flight_requests: &Arc<AtomicUsize>,
-    runtime: &RuntimeHandle,
+    coordinator_cx: &Cx,
     host_policy: &HostPolicy,
     request_timeout: Option<Duration>,
     request_timeout_header_cap: Option<Duration>,
     request_drain_grace: Duration,
     stream_idle_timeout: Option<Duration>,
     owned_request: bool,
-) -> bool
+    global_request_limit: usize,
+) -> Option<TaskHandle<()>>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = H2DispatchResponse> + Send + 'static,
@@ -2428,21 +2480,21 @@ where
         Ok(request) => request,
         Err(_) => {
             conn.reset_stream(stream_id, ErrorCode::ProtocolError);
-            return false;
+            return None;
         }
     };
     let suppress_response_body = request.method == Method::Head;
-    let guard = InFlightRequestGuard::acquire(Some(in_flight_requests));
+    let Some(guard) = InFlightRequestGuard::try_acquire(in_flight_requests, global_request_limit)
+    else {
+        conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+        return None;
+    };
     let handler = Arc::clone(handler);
     let resp_tx = resp_tx.clone();
     let signal = shutdown_signal.clone();
     let host_policy = host_policy.clone();
-    let spawned = runtime.try_spawn(async move {
-        let Some(cx) = Cx::current() else {
-            drop(guard);
-            return;
-        };
-
+    let scope = coordinator_cx.scope();
+    let spawned = coordinator_cx.spawn_in(&scope, move |cx| async move {
         // br-asupersync-mfqfst M8: enforce the host allow-list BEFORE the
         // handler runs (h1 parity). h2 carries the effective authority in the
         // synthesized `host` header (see `request_from_h2_headers`); a request
@@ -2497,6 +2549,7 @@ where
         );
 
         let producer_signal = signal.clone();
+        let handler_connection_cx = cx.clone();
         let response = if owned_request {
             let completed = run_owned_h2_hop(
                 &cx,
@@ -2568,7 +2621,7 @@ where
                             &signal,
                             region.run_with_protocol_drain(
                                 budget_source,
-                                None,
+                                Some(handler_connection_cx),
                                 request_drain_grace,
                                 handler(request),
                             ),
@@ -2735,6 +2788,7 @@ where
                     request_drain_grace,
                     producer,
                 );
+                let run = forward_h2_producer_cancellation(&cx, &producer_cx, run);
                 let outcome = classify_h2_producer_hop(
                     race_force_close(&producer_signal, run).await,
                     &producer_cx,
@@ -2746,11 +2800,12 @@ where
             }
         }
     });
-    if spawned.is_err() {
-        conn.reset_stream(stream_id, ErrorCode::InternalError);
-        false
-    } else {
-        true
+    match spawned {
+        Ok(task) => Some(task),
+        Err(_) => {
+            conn.reset_stream(stream_id, ErrorCode::InternalError);
+            None
+        }
     }
 }
 
@@ -2786,7 +2841,7 @@ async fn serve_h2_connection<F, Fut>(
     initial_connection_window_size: u32,
     shutdown_signal: ShutdownSignal,
     in_flight_requests: Arc<AtomicUsize>,
-    runtime: RuntimeHandle,
+    _runtime: RuntimeHandle,
     max_body_size: usize,
     host_policy: HostPolicy,
     request_timeout: Option<Duration>,
@@ -2798,18 +2853,19 @@ async fn serve_h2_connection<F, Fut>(
     time_getter: fn() -> Time,
     owned_request: bool,
     transport_timeouts: H2TransportTimeouts,
+    request_limits: H2RequestLimits,
     #[cfg(feature = "http2-streaming")] streaming: Option<StreamingDispatch>,
 ) -> io::Result<()>
 where
     F: Fn(Request) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = H2DispatchResponse> + Send + 'static,
 {
+    let task_cx = Cx::current()
+        .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
+    let mut request_owners = H2RequestOwners::new(&task_cx).await?;
     #[cfg(feature = "http2-streaming")]
     let mut incoming = streaming.map(StreamingRequests::new);
     let result = async {
-        let task_cx = Cx::current()
-            .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
-
         let mut preface = [0u8; CLIENT_PREFACE.len()];
         let preface_read = crate::time::timeout(
             task_cx.now(),
@@ -3000,10 +3056,30 @@ where
                 continuation_at,
                 stream_idle_at,
                 produced_failure_at,
+                &mut request_owners,
             )
             .await;
 
             match event {
+                DriverEvent::RequestRetired(stream_id, result) => {
+                    request_owners.remove_completed(stream_id);
+                    peer_reset_before_response.remove(&stream_id);
+                    // The funnel is polled before terminal handles, so a
+                    // successful response has already removed this marker.
+                    // A cancelled coordinator that publishes no response must
+                    // still retire the stream and its bookkeeping.
+                    if dispatched_streams.remove(&stream_id) {
+                        let code = if matches!(&result, Err(JoinError::Panicked(_))) {
+                            ErrorCode::InternalError
+                        } else {
+                            ErrorCode::Cancel
+                        };
+                        conn.reset_stream(stream_id, code);
+                    }
+                    if let Err(error) = result {
+                        task_cx.trace(&format!("h2_request_coordinator_terminal: {error:?}"));
+                    }
+                }
                 #[cfg(feature = "http2-streaming")]
                 DriverEvent::StreamingProgress => {}
                 DriverEvent::ForceClose => {
@@ -3217,6 +3293,10 @@ where
                                 );
                             }
                             conn.reset_stream(stream_id, protocol_error.code);
+                            request_owners.cancel(
+                                stream_id,
+                                h2_request_cancel_reason(&task_cx, CancelKind::ParentCancelled),
+                            );
                             pending_requests.remove(&stream_id);
                             pending_stream_idle_deadlines.remove(&stream_id);
                             cancel_produced_body(
@@ -3274,8 +3354,9 @@ where
                                 &resp_tx,
                                 &shutdown_signal,
                                 &in_flight_requests,
-                                &runtime,
+                                &_runtime,
                                 &mut response_guards,
+                                request_limits,
                             ) {
                                 dispatched_streams.insert(stream_id);
                                 requests_dispatched = requests_dispatched.saturating_add(1);
@@ -3302,7 +3383,9 @@ where
                             // END_STREAM). The buffered request is now complete;
                             // dispatch it with the trailer block kept separate on
                             // the shared Request type for protocol adapters.
-                            if dispatch_h2_request(
+                            if request_owners.len() >= request_limits.connection {
+                                conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+                            } else if let Some(task) = dispatch_h2_request(
                                 &mut conn,
                                 stream_id,
                                 req_headers,
@@ -3313,19 +3396,23 @@ where
                                 &resp_tx,
                                 &shutdown_signal,
                                 &in_flight_requests,
-                                &runtime,
+                                request_owners.cx(),
                                 &host_policy,
                                 request_timeout,
                                 request_timeout_header_cap,
                                 request_drain_grace,
                                 stream_idle_timeout,
                                 owned_request,
+                                request_limits.global,
                             ) {
+                                request_owners.insert(stream_id, task);
                                 dispatched_streams.insert(stream_id);
                                 requests_dispatched = requests_dispatched.saturating_add(1);
                             }
                         } else if end_stream {
-                            if dispatch_h2_request(
+                            if request_owners.len() >= request_limits.connection {
+                                conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+                            } else if let Some(task) = dispatch_h2_request(
                                 &mut conn,
                                 stream_id,
                                 headers,
@@ -3336,14 +3423,16 @@ where
                                 &resp_tx,
                                 &shutdown_signal,
                                 &in_flight_requests,
-                                &runtime,
+                                request_owners.cx(),
                                 &host_policy,
                                 request_timeout,
                                 request_timeout_header_cap,
                                 request_drain_grace,
                                 stream_idle_timeout,
                                 owned_request,
+                                request_limits.global,
                             ) {
+                                request_owners.insert(stream_id, task);
                                 dispatched_streams.insert(stream_id);
                                 requests_dispatched = requests_dispatched.saturating_add(1);
                             }
@@ -3406,7 +3495,9 @@ where
                                         .remove(&stream_id)
                                         .expect("pending request present");
                                     pending_stream_idle_deadlines.remove(&stream_id);
-                                    if dispatch_h2_request(
+                                    if request_owners.len() >= request_limits.connection {
+                                        conn.reset_stream(stream_id, ErrorCode::RefusedStream);
+                                    } else if let Some(task) = dispatch_h2_request(
                                         &mut conn,
                                         stream_id,
                                         headers,
@@ -3417,14 +3508,16 @@ where
                                         &resp_tx,
                                         &shutdown_signal,
                                         &in_flight_requests,
-                                        &runtime,
+                                        request_owners.cx(),
                                         &host_policy,
                                         request_timeout,
                                         request_timeout_header_cap,
                                         request_drain_grace,
                                         stream_idle_timeout,
                                         owned_request,
+                                        request_limits.global,
                                     ) {
+                                        request_owners.insert(stream_id, task);
                                         dispatched_streams.insert(stream_id);
                                         requests_dispatched = requests_dispatched.saturating_add(1);
                                     }
@@ -3433,6 +3526,10 @@ where
                         }
                     }
                     Ok(Some(ReceivedFrame::Reset { stream_id, .. })) => {
+                        request_owners.cancel(
+                            stream_id,
+                            h2_request_cancel_reason(&task_cx, CancelKind::ParentCancelled),
+                        );
                         #[cfg(feature = "http2-streaming")]
                         if let Some(incoming) = &mut incoming {
                             incoming.fail(
@@ -3777,6 +3874,17 @@ where
     // The frame driver owns both response-funnel endpoints. They are dropped
     // with the completed async block before close joins request coordinators,
     // waking even a coordinator blocked on a previously full response funnel.
+    let closing_reason = h2_request_cancel_reason(
+        &task_cx,
+        if shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
+            CancelKind::Shutdown
+        } else {
+            CancelKind::ParentCancelled
+        },
+    );
+    // Closing the frame-driver block above dropped both funnel endpoints.
+    // Cancel every coordinator before awaiting streaming or buffered cleanup.
+    request_owners.cancel_all(closing_reason.clone());
     #[cfg(feature = "http2-streaming")]
     if let Some(incoming) = &mut incoming {
         let error = if shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8 {
@@ -3788,7 +3896,8 @@ where
         };
         incoming.close(error).await;
     }
-    result
+    let closed = request_owners.close(closing_reason).await;
+    result.and(closed)
 }
 
 /// How many full-size request bodies one connection may hold in partial
@@ -4051,6 +4160,7 @@ pub struct Http2Listener<F> {
     stats: Arc<Http2ListenerStats>,
     in_flight_requests: Arc<AtomicUsize>,
     transport_timeouts: H2TransportTimeouts,
+    request_limits: H2RequestLimits,
     #[cfg(feature = "http2-streaming")]
     streaming_config: Option<Http2StreamingListenerConfig>,
 }
@@ -4242,6 +4352,7 @@ impl<F> Http2Listener<F> {
             stats,
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
             transport_timeouts: H2TransportTimeouts::default(),
+            request_limits: H2RequestLimits::default(),
             #[cfg(feature = "http2-streaming")]
             streaming_config: None,
         }
@@ -4267,6 +4378,24 @@ impl<F> Http2Listener<F> {
     #[must_use]
     pub fn write_progress_timeout(mut self, timeout: Duration) -> Self {
         self.transport_timeouts.write_progress = timeout;
+        self
+    }
+
+    /// Limits listener-wide requests, including cancellation cleanup and
+    /// responses waiting to flush. Excess requests receive REFUSED_STREAM.
+    /// The default is 4,096; the limit is shared by all connections and modes.
+    #[must_use]
+    pub fn max_in_flight_requests(mut self, max: NonZeroUsize) -> Self {
+        self.request_limits.global = max.get();
+        self
+    }
+
+    /// Limits live request coordinators on each connection. Resetting a stream
+    /// does not free its slot until its coordinator actually joins. The default
+    /// is 256; streaming requests also retain their byte-reservation limit.
+    #[must_use]
+    pub fn max_connection_in_flight_requests(mut self, max: NonZeroUsize) -> Self {
+        self.request_limits.connection = max.get();
         self
     }
 
@@ -4416,6 +4545,7 @@ impl<F> Http2Listener<F> {
             let stream_idle_timeout = self.config.stream_idle_timeout;
             let conn_time_getter = self.config.time_getter;
             let transport_timeouts = self.transport_timeouts;
+            let request_limits = self.request_limits;
             #[cfg(feature = "http2-streaming")]
             let streaming = streaming.clone();
             // Check the connection's Send boundary once before the runtime's
@@ -4442,6 +4572,7 @@ impl<F> Http2Listener<F> {
                     conn_time_getter,
                     owned_request,
                     transport_timeouts,
+                    request_limits,
                     #[cfg(feature = "http2-streaming")]
                     streaming,
                 )
@@ -5534,7 +5665,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -5551,7 +5681,7 @@ mod tests {
                 })
             });
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 request_block(&[]),
@@ -5562,14 +5692,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["example.com".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 false,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let start = resp_rx
                 .recv(&cx)
@@ -5599,7 +5730,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -5631,7 +5761,7 @@ mod tests {
                 Header::new(":authority", "example.com"),
             ];
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 headers,
@@ -5642,14 +5772,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["example.com".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 false,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
@@ -6315,7 +6446,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -6359,7 +6489,7 @@ mod tests {
             let in_flight = Arc::new(AtomicUsize::new(0));
             let handler = Arc::new(panicking_h2_handler);
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 stream_id,
                 headers,
@@ -6370,14 +6500,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["panic.example".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 true,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
@@ -6437,7 +6568,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -6460,7 +6590,7 @@ mod tests {
 
             // request_block carries `:authority example.com:8443` -> host
             // `example.com`, which is NOT on this allow-list.
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 request_block(&[]),
@@ -6471,14 +6601,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["allowed.example".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 true,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
@@ -6515,7 +6646,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -6536,7 +6666,7 @@ mod tests {
                 }
             });
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 request_block(&[]),
@@ -6547,14 +6677,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["example.com".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 None,
                 true,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
@@ -6584,7 +6715,6 @@ mod tests {
         let runtime = crate::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("build current-thread runtime");
-        let handle = runtime.handle();
 
         runtime.block_on(async move {
             let cx = Cx::current().expect("runtime installs Cx for block_on");
@@ -6594,7 +6724,7 @@ mod tests {
             let in_flight = Arc::new(AtomicUsize::new(0));
             let handler = Arc::new(|_req: Request| std::future::pending::<H2DispatchResponse>());
 
-            dispatch_h2_request(
+            let _coordinator = dispatch_h2_request(
                 &mut conn,
                 1,
                 request_block(&[]),
@@ -6605,14 +6735,15 @@ mod tests {
                 &resp_tx,
                 &shutdown_signal,
                 &in_flight,
-                &handle,
+                &cx,
                 &HostPolicy::allow_list(vec!["example.com".to_owned()]),
                 None,
                 None,
                 Duration::from_millis(500),
                 Some(Duration::ZERO),
                 true,
-            );
+                usize::MAX,
+            ).expect("dispatch coordinator");
 
             let item = resp_rx
                 .recv(&cx)
