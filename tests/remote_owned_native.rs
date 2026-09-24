@@ -1,35 +1,43 @@
 //! Real V3 mTLS remote execution through checked child-region proxy ownership.
-//! These are native service tests, not a custom wire or a transport mock.
-#![cfg(all(feature = "tls", feature = "test-internals", not(target_arch = "wasm32")))]
+//! Service tests use the production listener; silent-peer regressions use actual
+//! V3 frames over mTLS and deliberately withhold the peer's terminal response.
+#![cfg(all(
+    feature = "tls",
+    feature = "test-internals",
+    not(target_arch = "wasm32")
+))]
 
 use asupersync::cx::ChildRegionSpec;
-use asupersync::distributed::{HasSchema, SchemaDescriptor};
 use asupersync::distributed::remote_owned::{
     RemoteAdmissionError, RemoteAdmissionLimits, RemoteAdmissionUsage, RemoteExecutor,
-    RemoteExecutorError, RemoteLeaseSettlement, RemotePeerLimits, RemoteRunConfig,
-    RemoteRunReport, RemoteRunTrigger, run_remote,
+    RemoteExecutorError, RemoteLeaseSettlement, RemotePeerLimits, RemoteRunConfig, RemoteRunReport,
+    RemoteRunTrigger, run_remote,
 };
+use asupersync::distributed::{ComputationSchemaRegistry, HasSchema, SchemaDescriptor};
 use asupersync::observability::diagnostics::Reason;
 use asupersync::remote::{
-    ComputationName, NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeConfig,
-    NodeId, RemoteCap, RemoteComputationClient, RemoteComputationClientConfig,
-    RemoteComputationRegistry, RemoteComputationService, RemoteComputationServiceConfig,
-    RemoteComputationServiceHandle, RemoteError, RemoteInput, RemoteOutcome,
-    RemotePeerAdmissionPolicy, RemoteProtocolVersion, RemoteRuntime,
+    ComputationName, LeaseRenewal, MessageEnvelope, NativeRemoteRoute, NativeRemoteRuntime,
+    NativeRemoteRuntimeConfig, NodeId, RemoteCap, RemoteComputationClient,
+    RemoteComputationClientConfig, RemoteComputationRegistry, RemoteComputationService,
+    RemoteComputationServiceConfig, RemoteComputationServiceHandle, RemoteError, RemoteInput,
+    RemoteMessage, RemoteOutcome, RemotePeerAdmissionPolicy, RemotePeerHello,
+    RemoteProtocolVersion, RemoteRuntime, RemoteServiceSessionCommand, RemoteServiceSessionEvent,
+    RemoteServiceWireRequest, RemoteTaskId, RemoteTaskState, spawn_remote,
 };
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::runtime::{RuntimeBuilder, RuntimeHandle, TaskHandle};
+use asupersync::stream::StreamExt;
 use asupersync::sync::Notify;
 use asupersync::tls::{
-    Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth,
-    PrivateKey, RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder,
+    Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
+    RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder,
 };
-use asupersync::types::{RegionId, TaskId};
+use asupersync::types::{CancelReason, RegionId, TaskId};
 use asupersync::{Cx, Outcome};
 use parking_lot::Mutex;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct Request;
 struct Response;
@@ -289,6 +297,599 @@ async fn wait_for_lease(cx: &Cx, diagnostics: &asupersync::observability::diagno
             asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
         }
     }).await.expect("real checked Lease projection before triggering cancellation");
+}
+
+#[derive(Default)]
+struct SilentPeerWitness {
+    request: Mutex<Option<(RemoteTaskId, RegionId, TaskId)>>,
+    accepted: AtomicBool,
+    cancel: Mutex<Option<CancelReason>>,
+    renewed: AtomicBool,
+    release: AtomicBool,
+    closed: AtomicBool,
+    changed: Notify,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SilentPeerControl {
+    None,
+    Cancel,
+    Renewal { acknowledge: bool },
+}
+
+struct SilentNativePeer {
+    remote: Arc<NativeRemoteRuntime>,
+    peer: TaskHandle<()>,
+    witness: Arc<SilentPeerWitness>,
+    cx: Cx,
+}
+
+impl Drop for SilentNativePeer {
+    fn drop(&mut self) {
+        // Failure cleanup only: normal assertions run before this guard can
+        // release the silent peer or force-close the native runtime.
+        self.witness.release.store(true, Ordering::Release);
+        self.witness.changed.notify_waiters();
+        self.remote.force_close();
+    }
+}
+
+async fn silent_native_peer(
+    base: &Cx,
+    runtime: RuntimeHandle,
+    lease: Duration,
+    drain_timeout: Duration,
+    control: SilentPeerControl,
+) -> SilentNativePeer {
+    let cert = Certificate::from_pem(include_bytes!("fixtures/tls/server.crt"))
+        .unwrap()
+        .remove(0);
+    let chain = CertificateChain::from_pem(include_bytes!("fixtures/tls/server.crt")).unwrap();
+    let key = PrivateKey::from_pem(include_bytes!("fixtures/tls/server.key")).unwrap();
+    let mut roots = RootCertStore::empty();
+    roots.add(&cert).unwrap();
+    let acceptor = TlsAcceptorBuilder::new(chain.clone(), key.clone())
+        .client_auth(ClientAuth::Required(roots))
+        .build()
+        .unwrap();
+    let connector = TlsConnectorBuilder::new()
+        .add_root_certificate(&cert)
+        .identity(chain, key)
+        .build()
+        .unwrap();
+    let listener = asupersync::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let witness = Arc::new(SilentPeerWitness::default());
+    let seen = Arc::clone(&witness);
+    let peer = base
+        .spawn(move |cx| async move {
+            let started = Instant::now();
+            let (stream, _) = listener.accept().await.unwrap();
+            let stream = acceptor.accept(stream).await.unwrap();
+            let codec = asupersync::codec::LengthDelimitedCodec::builder()
+                .max_frame_length(64 * 1024)
+                .big_endian()
+                .new_codec();
+            let mut framed =
+                asupersync::codec::Framed::new(stream, codec).with_max_buffer_len(64 * 1024 + 4);
+            let encoded = framed.next().await.unwrap().unwrap();
+            let request: RemoteServiceWireRequest = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(
+                request.hello().protocol_version(),
+                RemoteProtocolVersion::V3
+            );
+            // Observe the real proxy's IDs from the unchanged production wire
+            // request, so accounting assertions cannot name a made-up task.
+            let fields: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+            let region = serde_json::from_value(fields["origin_region"].clone()).unwrap();
+            let holder = serde_json::from_value(fields["origin_task"].clone()).unwrap();
+            let task_id = request.remote_task_id();
+            *seen.request.lock() = Some((task_id, region, holder));
+            let accepted = serde_json::to_vec(&RemoteServiceSessionEvent::Accepted {
+                remote_task_id: task_id.raw(),
+            })
+            .unwrap();
+            framed
+                .send(asupersync::bytes::BytesMut::from(accepted.as_slice()))
+                .unwrap();
+            poll_fn(|task| framed.poll_flush(task)).await.unwrap();
+            seen.accepted.store(true, Ordering::Release);
+            seen.changed.notify_waiters();
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "bead": "asupersync-bi2462.122",
+                    "event": "silent_peer_accepted",
+                    "remote_task_id": task_id.raw(),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                    "control": format!("{control:?}"),
+                })
+            );
+
+            if !matches!(control, SilentPeerControl::None) {
+                let frame = framed.next().await.unwrap().unwrap();
+                let command: RemoteServiceSessionCommand = serde_json::from_slice(&frame).unwrap();
+                match (control, command) {
+                    (
+                        SilentPeerControl::Cancel,
+                        RemoteServiceSessionCommand::Cancel {
+                            remote_task_id,
+                            reason,
+                        },
+                    ) => {
+                        assert_eq!(remote_task_id, task_id.raw());
+                        *seen.cancel.lock() = Some(reason);
+                    }
+                    (
+                        SilentPeerControl::Renewal { acknowledge },
+                        RemoteServiceSessionCommand::RenewLease {
+                            remote_task_id,
+                            renewal_id,
+                            lease_secs,
+                            lease_subsec_nanos,
+                        },
+                    ) => {
+                        assert_eq!(remote_task_id, task_id.raw());
+                        assert_eq!(renewal_id, 1);
+                        if acknowledge {
+                            let event =
+                                serde_json::to_vec(&RemoteServiceSessionEvent::LeaseRenewed {
+                                    remote_task_id,
+                                    renewal_id,
+                                    lease_secs,
+                                    lease_subsec_nanos,
+                                })
+                                .unwrap();
+                            framed
+                                .send(asupersync::bytes::BytesMut::from(event.as_slice()))
+                                .unwrap();
+                            poll_fn(|task| framed.poll_flush(task)).await.unwrap();
+                        }
+                        seen.renewed.store(true, Ordering::Release);
+                    }
+                    (_, other) => panic!("expected {control:?}, received {other:?}"),
+                }
+                seen.changed.notify_waiters();
+            }
+
+            // No read, reply, socket close or self-wake can help the origin
+            // terminate. Only the test's post-result cleanup releases this wait.
+            seen.changed
+                .wait_until(|| seen.release.load(Ordering::Acquire))
+                .await;
+            if matches!(control, SilentPeerControl::Renewal { acknowledge: true }) {
+                // The confirmed-renewal case closes its handle after the old
+                // deadline; this Cancel was deliberately left unanswered too.
+                let frame =
+                    asupersync::time::timeout(cx.now(), Duration::from_secs(2), framed.next())
+                        .await
+                        .expect("renewed handle's Cancel reached the peer")
+                        .unwrap()
+                        .unwrap();
+                let command: RemoteServiceSessionCommand = serde_json::from_slice(&frame).unwrap();
+                assert!(
+                    matches!(command, RemoteServiceSessionCommand::Cancel { remote_task_id, .. }
+                    if remote_task_id == task_id.raw())
+                );
+            }
+            let received =
+                asupersync::time::timeout(cx.now(), Duration::from_secs(2), framed.next())
+                    .await
+                    .expect("origin must have dropped its authenticated transport");
+            assert!(
+                received.is_none() || matches!(received, Some(Err(_))),
+                "silent-peer termination must not replay a dispatched request"
+            );
+            seen.closed.store(true, Ordering::Release);
+            seen.changed.notify_waiters();
+        })
+        .unwrap();
+    let mut schemas = ComputationSchemaRegistry::new();
+    schemas
+        .register_typed::<Request, Response>("silent")
+        .unwrap();
+    let origin = NodeId::new("silent-origin");
+    let hello = RemotePeerHello::new(
+        origin.clone(),
+        RemoteProtocolVersion::V3,
+        schemas.fingerprint(),
+    );
+    let client = RemoteComputationClient::new(
+        endpoint,
+        "localhost",
+        connector,
+        RemoteComputationClientConfig::new()
+            .with_max_attempts(1)
+            .with_attempt_timeout(Duration::from_secs(3)),
+    )
+    .unwrap();
+    let remote = Arc::new(
+        NativeRemoteRuntime::with_config(
+            runtime,
+            origin.clone(),
+            [NativeRemoteRoute::new(
+                NodeId::new("silent-worker"),
+                hello,
+                client,
+            )],
+            NativeRemoteRuntimeConfig::new()
+                .with_max_in_flight(1)
+                .with_drain_timeout(drain_timeout),
+        )
+        .unwrap(),
+    );
+    let cx = base.clone().with_remote_cap(
+        RemoteCap::new()
+            .with_local_node(origin)
+            .with_default_lease(lease)
+            .with_runtime(Arc::clone(&remote) as Arc<dyn RemoteRuntime>),
+    );
+    SilentNativePeer {
+        remote,
+        peer,
+        witness,
+        cx,
+    }
+}
+
+async fn wait_for_silent_native_running(
+    peer: &SilentNativePeer,
+) -> (RemoteTaskId, RegionId, TaskId) {
+    asupersync::time::timeout(peer.cx.now(), Duration::from_secs(3), async {
+        peer.witness
+            .changed
+            .wait_until(|| peer.witness.accepted.load(Ordering::Acquire))
+            .await;
+        let ids = peer
+            .witness
+            .request
+            .lock()
+            .expect("peer observed the actual request IDs");
+        while peer.remote.observe_task_state(ids.0) != Some(RemoteTaskState::Running) {
+            asupersync::time::sleep(peer.cx.now(), Duration::from_millis(1)).await;
+        }
+        ids
+    })
+    .await
+    .expect("the native origin reached Running before the liveness trigger")
+}
+
+async fn finish_silent_native_peer(peer: &mut SilentNativePeer) {
+    // Terminal publication wakes another worker before complete() removes the
+    // active entry. Observe retirement without invoking global close to help it.
+    asupersync::time::timeout(peer.cx.now(), Duration::from_secs(2), async {
+        while peer.remote.active_operations() != 0 {
+            asupersync::time::sleep(peer.cx.now(), Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("local driver retires after terminal publication");
+    assert_eq!(peer.remote.active_operations(), 0);
+    assert!(
+        !peer.witness.release.load(Ordering::Acquire),
+        "peer stayed silent until after the result"
+    );
+    peer.witness.release.store(true, Ordering::Release);
+    peer.witness.changed.notify_waiters();
+    asupersync::time::timeout(
+        peer.cx.now(),
+        Duration::from_secs(3),
+        peer.peer.join(&peer.cx),
+    )
+    .await
+    .expect("silent peer cleanup bound")
+    .expect("silent peer task completed without panic");
+    assert!(peer.witness.closed.load(Ordering::Acquire));
+    assert!(peer.remote.close(&peer.cx).await);
+}
+
+#[test]
+fn native_silent_accepted_peer_expires_without_runtime_close() {
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
+        };
+        runtime.block_on(async {
+            let base = Cx::current().unwrap();
+            let lease = Duration::from_secs(1);
+            let mut peer = silent_native_peer(
+                &base,
+                runtime.handle(),
+                lease,
+                Duration::from_millis(400),
+                SilentPeerControl::None,
+            )
+            .await;
+            let mut handle = spawn_remote(
+                &peer.cx,
+                NodeId::new("silent-worker"),
+                ComputationName::new("silent"),
+                RemoteInput::empty(),
+            )
+            .unwrap();
+            let (task_id, _, _) = wait_for_silent_native_running(&peer).await;
+            assert_eq!(task_id, handle.remote_task_id());
+            assert_eq!(peer.remote.active_operations(), 1);
+            let trigger = Instant::now();
+            let result = asupersync::time::timeout(
+                peer.cx.now(),
+                Duration::from_secs(3),
+                handle.join(&peer.cx),
+            )
+            .await
+            .expect("Accepted without a terminal reply must expire at the origin lease bound");
+            assert!(
+                matches!(result, Outcome::Err(RemoteError::LeaseExpired)),
+                "{result:?}"
+            );
+            assert_eq!(handle.state(), RemoteTaskState::LeaseExpired);
+            assert!(peer.remote.observe_task_state(task_id).is_none());
+            assert!(!peer.cx.is_cancel_requested());
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "bead": "asupersync-bi2462.122",
+                    "scenario": "silent_accepted_lease_expiry",
+                    "workers": workers,
+                    "remote_task_id": task_id.raw(),
+                    "witness": "Running",
+                    "lease_ms": lease.as_millis(),
+                    "elapsed_since_running_ms": trigger.elapsed().as_millis(),
+                    "outcome": "LeaseExpired",
+                })
+            );
+            finish_silent_native_peer(&mut peer).await;
+        });
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
+}
+
+#[test]
+fn native_silent_peer_renewal_extends_deadline_only_after_acknowledgement() {
+    for workers in [1, 2] {
+        for acknowledge in [false, true] {
+            let runtime = if workers == 1 {
+                RuntimeBuilder::current_thread().build().unwrap()
+            } else {
+                RuntimeBuilder::multi_thread()
+                    .worker_threads(workers)
+                    .build()
+                    .unwrap()
+            };
+            runtime.block_on(async {
+                let base = Cx::current().unwrap();
+                let lease = Duration::from_secs(1);
+                let mut peer = silent_native_peer(
+                    &base,
+                    runtime.handle(),
+                    lease,
+                    Duration::from_millis(400),
+                    SilentPeerControl::Renewal { acknowledge },
+                )
+                .await;
+                let mut handle = spawn_remote(
+                    &peer.cx,
+                    NodeId::new("silent-worker"),
+                    ComputationName::new("silent"),
+                    RemoteInput::empty(),
+                )
+                .unwrap();
+                let (task_id, _, _) = wait_for_silent_native_running(&peer).await;
+                let triggered = Instant::now();
+                peer.remote
+                    .send_message(
+                        &NodeId::new("silent-worker"),
+                        MessageEnvelope::new(
+                            NodeId::new("silent-origin"),
+                            peer.cx.logical_tick(),
+                            RemoteMessage::LeaseRenewal(LeaseRenewal {
+                                remote_task_id: task_id,
+                                new_lease: Duration::from_secs(10),
+                                current_state: RemoteTaskState::Running,
+                                node: NodeId::new("silent-origin"),
+                            }),
+                        ),
+                    )
+                    .unwrap();
+                asupersync::time::timeout(
+                    peer.cx.now(),
+                    Duration::from_secs(2),
+                    peer.witness
+                        .changed
+                        .wait_until(|| peer.witness.renewed.load(Ordering::Acquire)),
+                )
+                .await
+                .expect("peer observed the explicit renewal command");
+                if acknowledge {
+                    asupersync::time::sleep(peer.cx.now(), lease + Duration::from_millis(100))
+                        .await;
+                    assert!(
+                        handle.try_join().unwrap().is_none(),
+                        "confirmed renewal survives the original lease"
+                    );
+                    assert_eq!(handle.state(), RemoteTaskState::Running);
+                    let result = asupersync::time::timeout(
+                        peer.cx.now(),
+                        Duration::from_secs(2),
+                        handle.close(&peer.cx),
+                    )
+                    .await
+                    .expect("renewed operation still has a bounded Cancel drain");
+                    assert!(
+                        matches!(result, Outcome::Err(RemoteError::Cancelled(_))),
+                        "{result:?}"
+                    );
+                } else {
+                    let result = asupersync::time::timeout(
+                        peer.cx.now(),
+                        Duration::from_secs(3),
+                        handle.join(&peer.cx),
+                    )
+                    .await
+                    .expect("unacknowledged renewal cannot extend the original lease deadline");
+                    assert!(
+                        matches!(result, Outcome::Err(RemoteError::LeaseExpired)),
+                        "{result:?}"
+                    );
+                }
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "bead": "asupersync-bi2462.122",
+                        "scenario": "manual_renewal_confirmation_bounds_liveness",
+                        "workers": workers,
+                        "remote_task_id": task_id.raw(),
+                        "witness": "Running_then_RenewLease_received",
+                        "acknowledged": acknowledge,
+                        "original_lease_ms": lease.as_millis(),
+                        "elapsed_since_renewal_ms": triggered.elapsed().as_millis(),
+                        "terminal_state": format!("{:?}", handle.state()),
+                    })
+                );
+                finish_silent_native_peer(&mut peer).await;
+            });
+            assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+        }
+    }
+}
+
+#[test]
+fn owned_native_silent_cancel_reply_bounds_parent_close() {
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
+        };
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let base = Cx::current().unwrap();
+            let drain_timeout = Duration::from_millis(400);
+            let mut peer = silent_native_peer(
+                &base,
+                runtime.handle(),
+                Duration::from_secs(30),
+                drain_timeout,
+                SilentPeerControl::Cancel,
+            )
+            .await;
+            let parent = peer
+                .cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let parent_id = parent.region_id();
+            let mut invocation = parent
+                .cx()
+                .spawn(|owner| async move {
+                    let report = run_remote(
+                        &owner,
+                        NodeId::new("silent-worker"),
+                        ComputationName::new("silent"),
+                        RemoteInput::empty(),
+                        RemoteRunConfig {
+                            timeout: Duration::from_secs(10),
+                            child: ChildRegionSpec::inherit(),
+                        },
+                    )
+                    .await;
+                    let _ = owner.checkpoint();
+                    report
+                })
+                .unwrap();
+            let (task_id, region, holder) = wait_for_silent_native_running(&peer).await;
+            wait_for_lease(&peer.cx, &diagnostics, region, holder).await;
+            assert_eq!(peer.remote.active_operations(), 1);
+            assert!(invocation.try_join().unwrap().is_none());
+            let reason = CancelReason::user("silent peer parent close");
+            let triggered = Instant::now();
+            parent.cancel(reason.clone()).unwrap();
+            asupersync::time::timeout(
+                peer.cx.now(),
+                Duration::from_secs(2),
+                peer.witness
+                    .changed
+                    .wait_until(|| peer.witness.cancel.lock().is_some()),
+            )
+            .await
+            .expect("Cancel must reach the peer before its reply is withheld");
+            let (closed, joined) = asupersync::time::timeout(
+                peer.cx.now(),
+                Duration::from_secs(2),
+                futures_lite::future::zip(parent.close(), invocation.join(&peer.cx)),
+            )
+            .await
+            .expect("a silent Cancel reply must not strand the invocation or its closing parent");
+            closed.expect("parent region close receipt");
+            let report = joined
+                .expect("typed cancellation report survives owner cancellation")
+                .expect("owned remote admission");
+            assert!(!report.is_success());
+            assert!(matches!(report.trigger, RemoteRunTrigger::Cancelled(_)));
+            assert!(
+                report.close.is_ok(),
+                "local invocation child reached quiescence"
+            );
+            assert!(report.cancel_error.is_none());
+            let reply = report
+                .task
+                .expect("proxy returned its terminal classification");
+            assert_eq!(reply.remote_task_id, task_id);
+            assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
+            match reply.outcome {
+                Outcome::Err(RemoteError::Cancelled(actual)) => {
+                    assert_eq!(Some(&actual), peer.witness.cancel.lock().as_ref());
+                    assert_eq!(actual.root_cause().kind, reason.kind);
+                    assert_eq!(actual.root_cause().message, reason.message);
+                }
+                other => panic!(
+                    "silent Cancel reply must remain an ambiguous local cancellation: {other:?}"
+                ),
+            }
+            assert!(!holds_lease(&diagnostics, region, holder));
+            assert!(peer.remote.observe_task_state(task_id).is_none());
+            assert!(
+                !peer.cx.is_cancel_requested(),
+                "one parent must not cancel the surrounding context"
+            );
+            assert!(
+                runtime.trace_snapshot().iter().any(|event| matches!(
+                    &event.data,
+                    asupersync::trace::event::TraceData::Message(message)
+                        if message == "remote::cancel_drain_expired_delivery_ambiguous"
+                )),
+                "the per-operation drain timeout classified the unanswered Cancel"
+            );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "bead": "asupersync-bi2462.122",
+                    "scenario": "silent_cancel_parent_close",
+                    "workers": workers,
+                    "remote_task_id": task_id.raw(),
+                    "parent_region": format!("{parent_id:?}"),
+                    "witness": "Running_with_checked_lease_and_Cancel_received",
+                    "drain_ms": drain_timeout.as_millis(),
+                    "elapsed_since_cancel_ms": triggered.elapsed().as_millis(),
+                    "outcome": "Cancelled_delivery_ambiguous",
+                    "settlement": "Aborted",
+                })
+            );
+            finish_silent_native_peer(&mut peer).await;
+        });
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
+    }
 }
 
 #[test]

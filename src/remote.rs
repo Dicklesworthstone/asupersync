@@ -6924,6 +6924,9 @@ impl NativeRemoteRuntimeConfig {
     }
 
     /// Sets the graceful-cancel interval before force-closing transports.
+    ///
+    /// This also bounds each operation's Cancel write and terminal reply wait,
+    /// so closing one handle never requires closing the entire native runtime.
     #[must_use]
     pub const fn with_drain_timeout(mut self, drain_timeout: Duration) -> Self {
         self.drain_timeout = drain_timeout;
@@ -7116,6 +7119,7 @@ impl NativeRemoteState {
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 struct NativeRemoteShared {
     max_in_flight: usize,
+    drain_timeout: Duration,
     state: Mutex<NativeRemoteState>,
 }
 
@@ -7405,7 +7409,14 @@ async fn drive_native_remote_session(
     control: &NativeRemoteControl,
     control_receiver: &mut mpsc::Receiver<()>,
 ) -> Result<RemoteOutcome, RemoteError> {
-    let before_dispatch = || shared.begin_request_dispatch(task_id);
+    let dispatched_at = Mutex::new(None);
+    let before_dispatch = || {
+        if !shared.begin_request_dispatch(task_id) {
+            return false;
+        }
+        *dispatched_at.lock() = Some(cx.now());
+        true
+    };
     let started = client
         .start_session_before_dispatch(cx, request, Some(&before_dispatch))
         .await
@@ -7419,19 +7430,41 @@ async fn drive_native_remote_session(
             return map_native_remote_response(response);
         }
     };
+    // V3 Accepted carries no lease field. Apply the same existing service cap
+    // to the requested lease, starting before the request write rather than
+    // extending origin liveness by a delayed acknowledgement. A dispatched
+    // operation is never replayed when this conservative deadline expires.
+    let lease = request
+        .session_lease()
+        .expect("a running V3 session validated its requested lease");
+    let mut expires_at = dispatched_at
+        .into_inner()
+        .expect("a running native session passed the request dispatch boundary")
+        + remote_service_clamp_lease(lease);
 
     loop {
-        let race = futures_lite::future::race(
-            async {
-                NativeRemoteSessionRace::Event(
-                    session
-                        .exchange_event::<RemoteServiceSessionCommand>(cx, None)
-                        .await,
-                )
-            },
-            async { NativeRemoteSessionRace::Control(control_receiver.recv(cx).await) },
+        if cx.now() >= expires_at {
+            cx.trace(trace_events::LEASE_EXPIRED);
+            return Err(RemoteError::LeaseExpired);
+        }
+        let race = crate::time::timeout_at(
+            expires_at,
+            futures_lite::future::race(
+                async {
+                    NativeRemoteSessionRace::Event(
+                        session
+                            .exchange_event::<RemoteServiceSessionCommand>(cx, None)
+                            .await,
+                    )
+                },
+                async { NativeRemoteSessionRace::Control(control_receiver.recv(cx).await) },
+            ),
         )
-        .await;
+        .await
+        .map_err(|_| {
+            cx.trace(trace_events::LEASE_EXPIRED);
+            RemoteError::LeaseExpired
+        })?;
         match race {
             NativeRemoteSessionRace::Event(Ok(RemoteServiceSessionEvent::Terminal {
                 response,
@@ -7458,18 +7491,43 @@ async fn drive_native_remote_session(
                     // `take_cancel` cleared the pending reason; a failed
                     // Cancel exchange must still surface as this cancellation
                     // rather than as a transport error.
-                    let response = session.cancel(cx, reason.clone()).await.map_err(|error| {
+                    let response = crate::time::timeout(
+                        cx.now(),
+                        shared.drain_timeout,
+                        session.cancel(cx, reason.clone()),
+                    )
+                    .await
+                    .map_err(|_| {
+                        // The authenticated stream is dropped with the timed
+                        // out exchange. This is a local delivery-ambiguous
+                        // cancellation, not proof of remote task quiescence.
+                        cx.trace("remote::cancel_drain_expired_delivery_ambiguous");
+                        RemoteError::Cancelled(reason.clone())
+                    })?
+                    .map_err(|error| {
                         map_native_remote_session_error(cx, Some(reason.clone()), error)
                     })?;
                     return map_native_remote_response(response);
                 }
                 if let Some(lease) = control.take_renewal() {
-                    let event = session.renew_lease(cx, lease).await.map_err(|error| {
-                        map_native_remote_session_error(cx, control.cancel_reason(), error)
-                    })?;
+                    let renewal_sent_at = cx.now();
+                    let event = crate::time::timeout_at(expires_at, session.renew_lease(cx, lease))
+                        .await
+                        .map_err(|_| {
+                            cx.trace(trace_events::LEASE_EXPIRED);
+                            RemoteError::LeaseExpired
+                        })?
+                        .map_err(|error| {
+                            map_native_remote_session_error(cx, control.cancel_reason(), error)
+                        })?;
                     shared.set_control_in_flight(task_id, false);
                     match event {
-                        RemoteServiceSessionEvent::LeaseRenewed { .. } => {}
+                        RemoteServiceSessionEvent::LeaseRenewed { .. } => {
+                            // renew_lease validated the task, sequence and
+                            // exact duration echo. An unacknowledged write
+                            // never extends the prior origin-side deadline.
+                            expires_at = renewal_sent_at + remote_service_clamp_lease(lease);
+                        }
                         RemoteServiceSessionEvent::Terminal { response } => {
                             return map_native_remote_response(response);
                         }
@@ -7582,8 +7640,13 @@ fn map_native_remote_response(
 /// publication; TCP, mTLS, and lifecycle I/O run in child tasks admitted by the
 /// supplied [`RuntimeHandle`]. Per-task cancellation is coalesced out of band,
 /// so a dropped [`RemoteHandle`] cannot lose its cancel request to mailbox
-/// saturation. Call [`close`](Self::close) to stop admission and prove driver
-/// quiescence before releasing the surrounding runtime.
+/// saturation. A silent accepted peer is bounded by the requested lease (at
+/// most the service's 24-hour cap); an acknowledged manual renewal extends
+/// that bound. Each Cancel exchange is bounded by the configured drain timeout.
+/// Local lease expiry or cancellation after that timeout is delivery-ambiguous
+/// and is never replayed or presented as proof of remote execution quiescence.
+/// Call [`close`](Self::close) to stop admission and prove local driver quiescence
+/// before releasing the surrounding runtime.
 ///
 /// The adapter retains a strong [`RuntimeHandle`], and every live
 /// [`RemoteHandle`] retains the adapter copied from its [`RemoteCap`]. Consuming
@@ -7689,6 +7752,7 @@ impl NativeRemoteRuntime {
             config,
             shared: Arc::new(NativeRemoteShared {
                 max_in_flight: config.max_in_flight,
+                drain_timeout: config.drain_timeout,
                 state: Mutex::new(NativeRemoteState::new()),
             }),
         })
