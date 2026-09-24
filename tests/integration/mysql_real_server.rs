@@ -852,3 +852,143 @@ fn mysql_real_first_login_caching_sha2_over_verified_tls() {
     let report = runtime.shutdown_drained(Duration::from_secs(2));
     assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
 }
+
+/// Observe a real MySQL SLEEP in processlist before dropping its parked client
+/// future, then require the server to retire it promptly. The packet-level
+/// native audit separately requires the exact KILL QUERY target on the wire.
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+#[test]
+#[ignore = "requires isolated MySQL 8 with verified TLS and processlist visibility"]
+fn mysql_real_drop_kills_query_observed_in_processlist() {
+    use asupersync::database::mysql::SslMode;
+    use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use std::future::{Future, poll_fn};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    let cfg = RealMySqlConfig::from_env();
+    assert!(cfg.enabled, "real MySQL lane unavailable: {:?}", cfg.reason);
+    let mut options = MySqlConnectOptions::parse(&cfg.url).unwrap();
+    options.ssl_mode = SslMode::Required;
+    options.connect_timeout = Some(Duration::from_secs(5));
+    let query_options = options.clone();
+    let drop_requested = Arc::new(AtomicBool::new(false));
+    let query_drop = Arc::clone(&drop_requested);
+    let (control_tx, control_rx) = std::sync::mpsc::channel();
+    let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+    let query_task = runtime.handle().spawn(async move {
+        let cx = asupersync::Cx::current().unwrap();
+        let mut connection = match MySqlConnection::connect_with_options(&cx, query_options).await {
+            Outcome::Ok(connection) => connection,
+            other => panic!("query connect: {other:?}"),
+        };
+        let thread_id = connection.connection_id();
+        let result = {
+            let mut query = std::pin::pin!(connection.query_static_sql(&cx, "SELECT SLEEP(30)"));
+            let mut control_tx = Some(control_tx);
+            asupersync::time::timeout(
+                cx.now(),
+                Duration::from_secs(8),
+                poll_fn(|task_cx| {
+                    if let Some(sender) = control_tx.take() {
+                        sender.send((thread_id, task_cx.waker().clone())).unwrap();
+                    }
+                    if query_drop.load(Ordering::Acquire) {
+                        return Poll::Ready(None);
+                    }
+                    query.as_mut().poll(task_cx).map(Some)
+                }),
+            )
+            .await
+        };
+        assert!(
+            matches!(result, Ok(None)),
+            "query must remain parked until witnessed: {result:?}"
+        );
+        drop(connection);
+    });
+    let (thread_id, query_waker) = control_rx.recv_timeout(Duration::from_secs(6)).unwrap();
+    let observer_task = runtime.handle().spawn(async move {
+        let cx = asupersync::Cx::current().unwrap();
+        let log = MySqlTestLogger::new("mysql_real", "drop_kills_processlist_query");
+        let mut observer = unwrap_mysql(
+            MySqlConnection::connect_with_options(&cx, options).await,
+            "observer_connect",
+            &log,
+        );
+        let statement = unwrap_mysql(
+            observer
+                .prepare(
+                    &cx,
+                    "SELECT COMMAND, STATE FROM information_schema.processlist WHERE ID = ?",
+                )
+                .await,
+            "prepare_processlist",
+            &log,
+        );
+        asupersync::time::timeout(cx.now(), Duration::from_secs(5), async {
+            loop {
+                let rows = unwrap_mysql(
+                    observer
+                        .query_prepared(&cx, &statement, &[&thread_id])
+                        .await,
+                    "observe_running_query",
+                    &log,
+                );
+                if rows.first().is_some_and(|row| {
+                    row.get_str("COMMAND").ok() == Some("Query")
+                        && row.get_str("STATE").ok() == Some("User sleep")
+                }) {
+                    break;
+                }
+                asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("query never reached MySQL User sleep within the witness deadline");
+        log.line(
+            "server_query_witness",
+            &[
+                ("connection_id", thread_id.to_string()),
+                ("state", "User sleep".to_string()),
+            ],
+        );
+        let dropped = Instant::now();
+        drop_requested.store(true, Ordering::Release);
+        query_waker.wake_by_ref();
+        asupersync::time::timeout(cx.now(), Duration::from_secs(3), async {
+            loop {
+                let rows = unwrap_mysql(
+                    observer
+                        .query_prepared(&cx, &statement, &[&thread_id])
+                        .await,
+                    "observe_query_retirement",
+                    &log,
+                );
+                if rows.is_empty() {
+                    break;
+                }
+                asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("abandoned query remains in processlist after KILL bound");
+        log.line(
+            "server_query_retired",
+            &[
+                ("connection_id", thread_id.to_string()),
+                ("elapsed_ms", dropped.elapsed().as_millis().to_string()),
+            ],
+        );
+        observer.close().await.unwrap();
+        log.end("pass");
+    });
+    runtime.block_on(observer_task);
+    runtime.block_on(query_task);
+    assert_eq!(
+        runtime.shutdown_drained(Duration::from_secs(2)).outcome,
+        RootDrainOutcome::Quiescent
+    );
+}

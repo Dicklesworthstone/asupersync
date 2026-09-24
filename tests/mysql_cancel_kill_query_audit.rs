@@ -1,192 +1,372 @@
-//! Audit test for MySQL client cancellation protocol compliance.
-//!
-//! MySQL protocol requirement: "When a query is cancelled mid-execution,
-//! client must send proper KILL QUERY <connection_id> (correct: clean cancel)
-//! rather than just close connection (causes server rollback)."
-//!
-//! CRITICAL REQUIREMENT: KILL QUERY stops server execution promptly,
-//! releasing locks and preventing resource leaks.
-
-#![cfg(feature = "mysql")]
+//! Native MySQL cancellation: actual parked COM_QUERY, separately authenticated
+//! KILL QUERY, bounded silent cleanup peers, and streaming ownership retirement.
+#![cfg(all(
+    feature = "mysql",
+    feature = "test-internals",
+    not(target_arch = "wasm32")
+))]
 
 use asupersync::cx::Cx;
-use asupersync::database::MySqlConnection;
+use asupersync::database::mysql::{MySqlConnection, MySqlError, test_active_mysql_drop_kills};
+use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+use asupersync::types::{CancelKind, Outcome};
+use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::task::Poll;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-#[tokio::test]
-async fn mysql_cancel_sends_kill_query_audit() {
-    println!("=== MYSQL CANCEL KILL QUERY PROTOCOL AUDIT ===");
+static SERIAL: Mutex<()> = Mutex::new(());
+const OK: &[u8] = &[0, 0, 0, 2, 0, 0, 0];
 
-    // This test verifies that MySQL client correctly sends KILL QUERY
-    // when a connection is dropped mid-query (proper cancellation protocol)
+#[derive(Clone, Copy, Debug)]
+enum Operation {
+    Collect,
+    StreamHeader,
+    StreamRows,
+}
+#[derive(Clone, Copy, Debug)]
+enum KillPeer {
+    Replies,
+    SilentGreeting,
+    SilentAuthentication,
+    SilentReply,
+}
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
-    let addr = listener.local_addr().expect("listener addr");
-
-    let (kill_query_seen_tx, kill_query_seen_rx) = mpsc::channel();
-    let (query_started_tx, query_started_rx) = mpsc::channel();
-    let (proceed_tx, proceed_rx) = mpsc::channel();
-
-    println!("🔍 Test scenario: Drop connection mid-query, verify KILL QUERY");
-
-    let server = thread::spawn(move || {
-        // Accept first connection (main query connection)
-        let (mut main_stream, _) = listener.accept().expect("accept main connection");
-        main_stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("set timeout");
-
-        // Read handshake request and send minimal handshake response
-        let mut handshake_buf = vec![0u8; 1024];
-        let _ = main_stream
-            .read(&mut handshake_buf)
-            .expect("read handshake");
-
-        // Send HandshakeV10 with connection_id = 42
-        let handshake_response = create_handshake_v10_packet(42);
-        main_stream
-            .write_all(&handshake_response)
-            .expect("write handshake");
-        main_stream.flush().expect("flush handshake");
-
-        // Read auth response and send OK
-        let mut auth_buf = vec![0u8; 1024];
-        let _ = main_stream.read(&mut auth_buf).expect("read auth");
-        main_stream
-            .write_all(b"\x07\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00")
-            .expect("write auth OK");
-        main_stream.flush().expect("flush auth OK");
-
-        // Read the long-running query
-        let mut query_buf = vec![0u8; 1024];
-        let _ = main_stream.read(&mut query_buf).expect("read query");
-        query_started_tx.send(()).expect("signal query started");
-
-        // Wait for test to drop the connection
-        proceed_rx
-            .recv_timeout(Duration::from_secs(3))
-            .expect("wait for proceed signal");
-
-        // Accept second connection (KILL QUERY connection)
-        let (mut kill_stream, _) = listener.accept().expect("accept kill connection");
-        kill_stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("set kill timeout");
-
-        // Read handshake request for kill connection
-        let mut kill_handshake_buf = vec![0u8; 1024];
-        let _ = kill_stream
-            .read(&mut kill_handshake_buf)
-            .expect("read kill handshake");
-
-        // Send handshake response for kill connection
-        let kill_handshake_response = create_handshake_v10_packet(43);
-        kill_stream
-            .write_all(&kill_handshake_response)
-            .expect("write kill handshake");
-        kill_stream.flush().expect("flush kill handshake");
-
-        // Read auth for kill connection and send OK
-        let mut kill_auth_buf = vec![0u8; 1024];
-        let _ = kill_stream
-            .read(&mut kill_auth_buf)
-            .expect("read kill auth");
-        kill_stream
-            .write_all(b"\x07\x00\x00\x02\x00\x00\x00\x02\x00\x00\x00")
-            .expect("write kill auth OK");
-        kill_stream.flush().expect("flush kill auth OK");
-
-        // Read the KILL QUERY command
-        let mut kill_query_buf = vec![0u8; 1024];
-        let bytes_read = kill_stream
-            .read(&mut kill_query_buf)
-            .expect("read kill query");
-
-        // Verify it's a KILL QUERY command with correct connection ID
-        if bytes_read > 5 && kill_query_buf[4] == 0x03 {
-            // COM_QUERY
-            let query_text = String::from_utf8_lossy(&kill_query_buf[5..bytes_read]);
-            if query_text
-                .trim_end_matches('\0')
-                .starts_with("KILL QUERY 42")
-            {
-                println!(
-                    "✅ Received correct KILL QUERY command: {}",
-                    query_text.trim_end_matches('\0')
-                );
-                kill_query_seen_tx.send(()).expect("signal kill query seen");
-            } else {
-                println!(
-                    "❌ Wrong command received: {}",
-                    query_text.trim_end_matches('\0')
-                );
+#[test]
+fn mysql_cancel_sends_kill_query_audit() {
+    let _serial = SERIAL.lock().unwrap();
+    for workers in [1, 2] {
+        for cancel in [false, true] {
+            for peer in [
+                KillPeer::Replies,
+                KillPeer::SilentGreeting,
+                KillPeer::SilentAuthentication,
+                KillPeer::SilentReply,
+            ] {
+                cancellation_case(workers, cancel, Operation::Collect, peer);
             }
         }
-
-        // Send OK response to KILL QUERY
-        kill_stream
-            .write_all(b"\x07\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00")
-            .expect("write kill OK");
-        kill_stream.flush().expect("flush kill OK");
-    });
-
-    // Client side: connect and start a long-running query
-    let cx = Cx::for_testing();
-    let url = format!("mysql://test:test@{}:{}/test", addr.ip(), addr.port());
-
-    let mut conn = MySqlConnection::connect(&cx, &url)
-        .await
-        .expect("connect to scripted MySQL server");
-
-    println!("✓ Connection established, starting long-running query");
-
-    // Start and poll the query until it is in flight. The scripted server reads
-    // the COM_QUERY packet but deliberately withholds a response so the future
-    // remains pending and can be cancelled by dropping it.
-    {
-        let mut query_future = std::pin::pin!(conn.query_static_sql(&cx, "SELECT SLEEP(30)"));
-        let query_poll =
-            tokio::time::timeout(Duration::from_millis(100), query_future.as_mut()).await;
-        assert!(
-            query_poll.is_err(),
-            "long-running query should still be pending before cancellation"
-        );
-
-        // Wait for server to observe the query packet.
-        query_started_rx
-            .recv_timeout(Duration::from_secs(3))
-            .expect("server should observe query");
-
-        // Drop the in-flight query future before dropping the connection.
-        proceed_tx.send(()).expect("signal to proceed with kill");
     }
-    drop(conn);
+}
 
-    // Verify that KILL QUERY was sent
-    let kill_query_received = kill_query_seen_rx.recv_timeout(Duration::from_secs(5));
+#[test]
+fn mysql_streaming_drop_and_cancel_retain_kill_ownership() {
+    let _serial = SERIAL.lock().unwrap();
+    for workers in [1, 2] {
+        for cancel in [false, true] {
+            for operation in [Operation::StreamHeader, Operation::StreamRows] {
+                cancellation_case(workers, cancel, operation, KillPeer::Replies);
+            }
+        }
+    }
+}
 
-    server.join().expect("server completes");
+#[test]
+fn mysql_streaming_terminator_restores_reuse_without_spurious_kill() {
+    let _serial = SERIAL.lock().unwrap();
+    for workers in [1, 2] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut socket = accept(&listener);
+            authenticate(&mut socket, 42, true);
+            assert_eq!(read_packet(&mut socket), (0, b"\x03SELECT 7".to_vec()));
+            stream_header(&mut socket);
+            write_packet(&mut socket, 4, b"\x017");
+            write_packet(&mut socket, 5, &[0xfe, 0, 0, 2, 0]);
+            assert_eq!(read_packet(&mut socket), (0, vec![0x0e]));
+            write_packet(&mut socket, 1, OK);
+            assert_eq!(read_packet(&mut socket), (0, vec![1]));
+            assert_eof(&mut socket);
+            dropped_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while test_active_mysql_drop_kills() != 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "cleanup thread permit retained after completed stream"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                matches!(listener.accept(), Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        });
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(workers)
+            .build()
+            .unwrap();
+        let join = runtime.handle().spawn(async move {
+            let cx = Cx::current().unwrap();
+            let mut connection =
+                match MySqlConnection::connect(&cx, &format!("mysql://test:test@{address}/test"))
+                    .await
+                {
+                    Outcome::Ok(connection) => connection,
+                    other => panic!("connect: {other:?}"),
+                };
+            {
+                let mut stream = match connection.query_stream(&cx, "SELECT 7").await {
+                    Outcome::Ok(stream) => stream,
+                    Outcome::Err(error) => panic!("stream: {error:?}"),
+                    Outcome::Cancelled(reason) => panic!("stream cancelled: {reason:?}"),
+                    Outcome::Panicked(_) => panic!("stream panicked"),
+                };
+                let row = match stream.next(&cx).await {
+                    Outcome::Ok(Some(row)) => row,
+                    other => panic!("row: {other:?}"),
+                };
+                assert_eq!(row.get_i32("value").unwrap(), 7);
+                assert!(matches!(stream.next(&cx).await, Outcome::Ok(None)));
+                assert!(matches!(stream.next(&cx).await, Outcome::Ok(None)));
+            }
+            assert!(matches!(connection.ping(&cx).await, Outcome::Ok(())));
+            connection.close().await.unwrap();
+            drop(connection);
+            dropped_tx.send(()).unwrap();
+        });
+        runtime.block_on(join);
+        server.join().unwrap();
+        assert_eq!(
+            runtime.shutdown_drained(Duration::from_secs(2)).outcome,
+            RootDrainOutcome::Quiescent
+        );
+        assert_eq!(test_active_mysql_drop_kills(), 0);
+        eprintln!("event=mysql_stream_finished workers={workers} row=7 reused=true kill_threads=0");
+    }
+}
 
-    assert!(
-        kill_query_received.is_ok(),
-        "KILL QUERY should have been sent when connection was dropped mid-query"
+fn write_packet(stream: &mut impl Write, sequence: u8, payload: &[u8]) {
+    let length = u32::try_from(payload.len()).unwrap().to_le_bytes();
+    stream
+        .write_all(&[length[0], length[1], length[2], sequence])
+        .unwrap();
+    stream.write_all(payload).unwrap();
+    stream.flush().unwrap();
+}
+
+fn read_packet(stream: &mut impl Read) -> (u8, Vec<u8>) {
+    let mut header = [0; 4];
+    stream.read_exact(&mut header).unwrap();
+    let length =
+        usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+    assert!(length < 65536);
+    let mut payload = vec![0; length];
+    stream.read_exact(&mut payload).unwrap();
+    (header[3], payload)
+}
+
+fn accept(listener: &TcpListener) -> std::net::TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((socket, _)) => {
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                return socket;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "expected a separate KILL connection"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("accept: {error}"),
+        }
+    }
+}
+
+fn authenticate(socket: &mut std::net::TcpStream, id: u32, finish: bool) {
+    socket.write_all(&create_handshake_v10_packet(id)).unwrap();
+    let (sequence, response) = read_packet(socket);
+    assert_eq!(sequence, 1);
+    assert!(response.len() > 32);
+    if finish {
+        write_packet(socket, 2, OK);
+    }
+}
+
+fn assert_eof(socket: &mut std::net::TcpStream) {
+    let mut byte = [0];
+    match socket.read(&mut byte) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("cleanup must close the socket: {other:?}"),
+    }
+}
+
+fn stream_header(socket: &mut std::net::TcpStream) {
+    write_packet(socket, 1, &[1]);
+    let mut column = Vec::new();
+    for part in ["def", "", "", "", "value", ""] {
+        column.push(u8::try_from(part.len()).unwrap());
+        column.extend_from_slice(part.as_bytes());
+    }
+    column.extend_from_slice(&[12, 33, 0, 11, 0, 0, 0, 3, 0, 0, 0, 0, 0]);
+    write_packet(socket, 2, &column);
+    write_packet(socket, 3, &[0xfe, 0, 0, 2, 0]);
+}
+
+fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: KillPeer) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (query_tx, query_rx) = mpsc::channel();
+    let (closed_tx, closed_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut main = accept(&listener);
+        authenticate(&mut main, 42, true);
+        assert_eq!(
+            read_packet(&mut main),
+            (0, b"\x03SELECT SLEEP(30)".to_vec())
+        );
+        if matches!(operation, Operation::StreamRows) {
+            stream_header(&mut main);
+        }
+        query_tx.send(()).unwrap();
+        let mut killer = accept(&listener);
+        if !matches!(peer, KillPeer::SilentGreeting) {
+            authenticate(
+                &mut killer,
+                43,
+                !matches!(peer, KillPeer::SilentAuthentication),
+            );
+            if !matches!(peer, KillPeer::SilentAuthentication) {
+                assert_eq!(read_packet(&mut killer), (0, b"\x03KILL QUERY 42".to_vec()));
+                if matches!(peer, KillPeer::Replies) {
+                    write_packet(&mut killer, 1, OK);
+                }
+            }
+        }
+        assert_eof(&mut killer);
+        assert_eof(&mut main);
+        closed_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while test_active_mysql_drop_kills() != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "cleanup thread permit retained after loopback teardown"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            matches!(listener.accept(), Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "timed-out killer recursively spawned another killer"
+        );
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(workers)
+        .build()
+        .unwrap();
+    let (control_tx, control_rx) = mpsc::channel();
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let probe = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let retire = Arc::new(AtomicBool::new(false));
+    let retirement = Arc::new(asupersync::sync::Notify::new());
+    let task_probe = Arc::clone(&probe);
+    let task_release = Arc::clone(&release);
+    let task_retire = Arc::clone(&retire);
+    let task_retirement = Arc::clone(&retirement);
+    let join = runtime.handle().spawn(async move {
+        let cx = Cx::current().unwrap();
+        let url = format!("mysql://test:test@{address}/test");
+        let mut connection = match MySqlConnection::connect(&cx, &url).await {
+            Outcome::Ok(connection) => connection,
+            other => panic!("main connect: {other:?}"),
+        };
+        let result = {
+            let mut execute = Box::pin(async {
+                match operation {
+                    Operation::Collect => connection
+                        .query_static_sql(&cx, "SELECT SLEEP(30)")
+                        .await
+                        .map(|_| ()),
+                    Operation::StreamHeader => connection
+                        .query_stream(&cx, "SELECT SLEEP(30)")
+                        .await
+                        .map(|_| ()),
+                    Operation::StreamRows => {
+                        match connection.query_stream(&cx, "SELECT SLEEP(30)").await {
+                            Outcome::Ok(mut stream) => stream.next(&cx).await.map(|_| ()),
+                            Outcome::Err(error) => Outcome::Err(error),
+                            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+                            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+                        }
+                    }
+                }
+            });
+            let mut control_tx = Some(control_tx);
+            poll_fn(|task_cx| {
+                if let Some(sender) = control_tx.take() {
+                    sender.send((cx.clone(), task_cx.waker().clone())).unwrap();
+                }
+                if !cancel && task_release.load(Ordering::Acquire) {
+                    return Poll::Ready(None);
+                }
+                let result = execute.as_mut().poll(task_cx);
+                if result.is_pending() && task_probe.swap(false, Ordering::AcqRel) {
+                    parked_tx.send(()).unwrap();
+                }
+                result.map(Some)
+            })
+            .await
+        };
+        if cancel {
+            assert!(matches!(result, Some(Outcome::Cancelled(_))), "{result:?}");
+            done_tx.send(()).unwrap();
+            // Retain the original connection until the server observes EOF:
+            // cancellation's fallback must close it before eventual Drop.
+            task_retirement
+                .wait_until(|| task_retire.load(Ordering::Acquire))
+                .await;
+        } else {
+            assert!(result.is_none());
+            // Attempted dirty reuse must not clear the abandoned query's flag.
+            assert!(matches!(
+                connection.query_static_sql(&cx, "SELECT 1").await,
+                Outcome::Err(MySqlError::ConnectionClosed)
+            ));
+            drop(connection);
+            done_tx.send(()).unwrap();
+        }
+    });
+    let (cx, waker) = control_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    query_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    probe.store(true, Ordering::Release);
+    waker.wake_by_ref();
+    parked_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let started = Instant::now();
+    if cancel {
+        cx.cancel_fast(CancelKind::User);
+    } else {
+        release.store(true, Ordering::Release);
+        waker.wake_by_ref();
+    }
+    done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    closed_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    retire.store(true, Ordering::Release);
+    retirement.notify_waiters();
+    runtime.block_on(join);
+    server.join().unwrap();
+    let report = runtime.shutdown_drained(Duration::from_secs(2));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+    assert_eq!(test_active_mysql_drop_kills(), 0);
+    eprintln!(
+        "event=mysql_cancel workers={workers} cancel={cancel} operation={operation:?} peer={peer:?} elapsed_ms={} primary_closed=true cleanup_closed=true cleanup_threads=0",
+        started.elapsed().as_millis()
     );
-
-    println!("✅ AUDIT PASSED: MySQL client correctly sends KILL QUERY on cancellation");
-
-    println!("\n📋 PROTOCOL COMPLIANCE VERIFIED:");
-    println!("  1. Connection drop mid-query: ✅ TRIGGERS KILL QUERY");
-    println!("  2. Separate connection opened: ✅ FRESH CONNECTION FOR KILL");
-    println!("  3. Correct command format: ✅ 'KILL QUERY <connection_id>'");
-    println!("  4. Clean server cancellation: ✅ STOPS EXECUTION PROMPTLY");
-
-    println!("\n✅ STATUS: MYSQL CANCELLATION PROTOCOL IS COMPLIANT");
-    println!("BEHAVIOR: Proper KILL QUERY sent before connection close");
-    println!("IMPACT: Clean cancellation, locks released, no resource leaks");
 }
 
 /// Create a minimal MySQL HandshakeV10 packet for testing
@@ -233,7 +413,7 @@ fn create_handshake_v10_packet(connection_id: u32) -> Vec<u8> {
     packet.extend_from_slice(b"abcdefghijkl\0");
 
     // Auth plugin name
-    packet.extend_from_slice(b"mysql_native_password\0");
+    packet.extend_from_slice(b"caching_sha2_password\0");
 
     // Update packet length
     let payload_len = packet.len() - 4;

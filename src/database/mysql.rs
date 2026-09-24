@@ -684,12 +684,45 @@ pub struct MySqlRowStream<'a> {
     deprecate_eof: bool,
 }
 
+struct MySqlStreamHeader {
+    columns: Option<Arc<Vec<MySqlColumn>>>,
+    column_indices: Option<Arc<BTreeMap<String, usize>>>,
+    finished: bool,
+    deprecate_eof: bool,
+}
+
 impl MySqlRowStream<'_> {
     /// Get the next row from the stream.
     ///
     /// Returns `Ok(Some(row))` for the next row, `Ok(None)` when the stream
     /// is complete, or `Err(...)` on protocol errors.
     pub async fn next(&mut self, cx: &Cx) -> Outcome<Option<MySqlRow>, MySqlError> {
+        if self.finished {
+            return Outcome::Ok(None);
+        }
+        let result = self.next_inner(cx).await;
+        if matches!(result, Outcome::Cancelled(_)) {
+            self.connection.wire_cancel_in_drain(cx).await;
+            self.finished = true;
+            self.connection
+                .inner
+                .query_in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
+        } else if matches!(
+            result,
+            Outcome::Ok(None) | Outcome::Err(MySqlError::Server { .. })
+        ) {
+            self.finished = true;
+            self.connection.inner.closed = false;
+            self.connection
+                .inner
+                .query_in_flight
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    async fn next_inner(&mut self, cx: &Cx) -> Outcome<Option<MySqlRow>, MySqlError> {
         if self.finished {
             return Outcome::Ok(None);
         }
@@ -704,7 +737,7 @@ impl MySqlRowStream<'_> {
         loop {
             let (data, seq) = match self.connection.read_packet().await {
                 Ok((d, s)) => (d, s),
-                Err(e) => return Outcome::Err(e),
+                Err(e) => return outcome_from_error(e),
             };
 
             self.connection.inner.sequence = seq.wrapping_add(1);
@@ -767,19 +800,9 @@ impl MySqlRowStream<'_> {
 
 impl Drop for MySqlRowStream<'_> {
     fn drop(&mut self) {
-        // Fail closed on an unfinished stream. `query_stream` marks the borrowed
-        // connection usable (`closed = false`) once the result-set header is
-        // read, but a stream abandoned before its terminator — an early `break`
-        // after reading a few rows, a cancelled/errored `next()`, or a hard drop
-        // of the driving future mid-`read_packet` — leaves undrained row packets
-        // in the socket. Without this guard the connection would return to the
-        // pool with `closed = false` and get recycled dirty: the next checkout's
-        // sequence-id check usually errors loudly, but for a result set larger
-        // than 256 packets the 8-bit sequence id can wrap and re-align, so a
-        // leftover row packet is accepted as the new query's response header —
-        // silent wrong-result corruption. The collect paths already fail closed
-        // this way (see `read_result_set`/`read_binary_result_set`); a finished
-        // stream drained its terminator and stays usable.
+        // An unfinished stream retains its poison and in-flight ownership.
+        // The connection cannot be reused, and its Drop can still stop the
+        // server query. Only a consumed terminal packet restores reuse.
         if !self.finished {
             self.connection.inner.closed = true;
         }
@@ -799,6 +822,56 @@ impl MySqlConnection {
         cx: &Cx,
         sql: &str,
     ) -> Outcome<MySqlRowStream<'a>, MySqlError> {
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+        self.inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+        match self.query_stream_start(cx, sql).await {
+            Outcome::Ok(header) => {
+                if header.finished {
+                    self.inner
+                        .query_in_flight
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    self.inner.closed = false;
+                }
+                Outcome::Ok(MySqlRowStream {
+                    connection: self,
+                    columns: header.columns,
+                    column_indices: header.column_indices,
+                    finished: header.finished,
+                    pending_row_count: 0,
+                    deprecate_eof: header.deprecate_eof,
+                })
+            }
+            Outcome::Cancelled(reason) => {
+                if self.inner.closed {
+                    self.wire_cancel_in_drain(cx).await;
+                }
+                self.inner
+                    .query_in_flight
+                    .store(false, std::sync::atomic::Ordering::Release);
+                Outcome::Cancelled(reason)
+            }
+            Outcome::Err(error) => {
+                if matches!(error, MySqlError::Server { .. }) {
+                    self.inner.closed = false;
+                    self.inner
+                        .query_in_flight
+                        .store(false, std::sync::atomic::Ordering::Release);
+                }
+                Outcome::Err(error)
+            }
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    async fn query_stream_start(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<MySqlStreamHeader, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -812,7 +885,7 @@ impl MySqlConnection {
 
         // Send COM_QUERY
         let mut buf = PacketBuffer::new();
-        buf.set_sequence(self.inner.sequence);
+        buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(sql.as_bytes());
         let packet = buf.build_packet();
@@ -822,14 +895,14 @@ impl MySqlConnection {
 
         match self.write_all(&packet.bytes).await {
             Ok(()) => {}
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read the initial response to get column info
         let (first_packet, seq) = match self.read_packet().await {
             Ok(p) => p,
-            Err(e) => return Outcome::Err(e),
+            Err(e) => return outcome_from_error(e),
         };
         self.inner.sequence = seq.wrapping_add(1);
 
@@ -847,13 +920,10 @@ impl MySqlConnection {
             }
             0x00 => {
                 // OK packet (no result set)
-                self.inner.closed = false;
-                Outcome::Ok(MySqlRowStream {
-                    connection: self,
+                Outcome::Ok(MySqlStreamHeader {
                     columns: None,
                     column_indices: None,
                     finished: true,
-                    pending_row_count: 0,
                     deprecate_eof,
                 })
             }
@@ -874,13 +944,10 @@ impl MySqlConnection {
                 let column_count = column_count_raw as usize;
                 if column_count == 0 {
                     // Mark connection as usable for successful empty result set
-                    self.inner.closed = false;
-                    return Outcome::Ok(MySqlRowStream {
-                        connection: self,
+                    return Outcome::Ok(MySqlStreamHeader {
                         columns: None,
                         column_indices: None,
                         finished: true,
-                        pending_row_count: 0,
                         deprecate_eof,
                     });
                 }
@@ -888,17 +955,14 @@ impl MySqlConnection {
                 // Read column metadata
                 let (columns, indices) = match self.read_result_set_columns(column_count).await {
                     Ok((cols, idx)) => (cols, idx),
-                    Err(e) => return Outcome::Err(e),
+                    Err(e) => return outcome_from_error(e),
                 };
 
-                // Mark connection as usable for successful result set
-                self.inner.closed = false;
-                Outcome::Ok(MySqlRowStream {
-                    connection: self,
+                // Keep the connection poisoned until the row terminator.
+                Outcome::Ok(MySqlStreamHeader {
                     columns: Some(columns),
                     column_indices: Some(indices),
                     finished: false,
-                    pending_row_count: 0,
                     deprecate_eof,
                 })
             }
@@ -1329,6 +1393,7 @@ pub struct MySqlConnectOptions {
     /// outliving auth as plaintext.
     pub password: Option<SecretString>,
     /// Timeout for TCP connection, TLS negotiation, and authentication together.
+    /// `None` uses a finite 30-second default; `Some` overrides that bound.
     pub connect_timeout: Option<std::time::Duration>,
     /// Require SSL.
     pub ssl_mode: SslMode,
@@ -1857,11 +1922,44 @@ struct MySqlConnectionInner {
 
 impl Drop for MySqlConnectionInner {
     fn drop(&mut self) {
-        if !self.closed {
-            let _ = self.stream.shutdown(std::net::Shutdown::Both);
-            self.closed = true;
-        }
+        // `closed` also means protocol-poisoned, not necessarily socket-closed.
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        self.closed = true;
     }
+}
+
+const MYSQL_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MYSQL_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+const MAX_MYSQL_DROP_KILLS: usize = 8;
+static ACTIVE_MYSQL_DROP_KILLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct MySqlDropKillPermit;
+
+impl MySqlDropKillPermit {
+    fn acquire() -> Option<Self> {
+        ACTIVE_MYSQL_DROP_KILLS
+            .try_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |active| (active < MAX_MYSQL_DROP_KILLS).then_some(active + 1),
+            )
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for MySqlDropKillPermit {
+    fn drop(&mut self) {
+        ACTIVE_MYSQL_DROP_KILLS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Number of live best-effort MySQL drop cleanup threads, for native tests.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn test_active_mysql_drop_kills() -> usize {
+    ACTIVE_MYSQL_DROP_KILLS.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// An async MySQL connection.
@@ -1871,11 +1969,13 @@ impl Drop for MySqlConnectionInner {
 /// # Cancellation mid-query
 ///
 /// MySQL's wire protocol cannot deliver an in-band cancel on the same
-/// socket while a query is in flight: the server only observes the
-/// request after the response is fully written, so dropping the
-/// connection silently leaves the query running on the server until it
-/// finishes naturally (resource leak + correctness gap). To stop the
-/// server-side execution promptly, call
+/// socket while a query is in flight. Cooperative cancellation attempts a
+/// separate `KILL QUERY` exchange before returning, then closes the poisoned
+/// transport. Dropping an in-flight connection starts a best-effort cleanup
+/// thread if one of eight process-wide slots is available; otherwise it closes
+/// the socket. The complete KILL wire exchange has a 500ms bound. A slot remains
+/// owned through runtime teardown, including any OS name-resolution work that
+/// outlives its async future. For an explicit cancellation result, call
 /// [`MySqlConnection::cancel_in_flight_query`], which opens a *separate*
 /// connection and issues `KILL QUERY <connection_id>`. The thread id is
 /// captured from the server's HandshakeV10 packet at connect time and
@@ -1919,89 +2019,54 @@ impl fmt::Debug for MySqlConnection {
 
 impl Drop for MySqlConnection {
     fn drop(&mut self) {
-        // br-asupersync-22i5tn: issue a best-effort KILL QUERY before
-        // the inner Drop tears down the TCP socket. Pre-fix, dropping
-        // a connection mid-query left the server still executing the
-        // statement (MySQL has no in-band cancel; the server only
-        // notices the FIN after the query finishes). For long-running
-        // queries that means LOCKS HELD until natural completion —
-        // every later transaction queues behind the abandoned one.
-        //
-        // The fix: detect the in-flight condition (query_in_flight ==
-        // true && options is Some && connection wasn't already cleanly
-        // closed) and dispatch a daemon thread that opens a fresh
-        // connection and issues KILL QUERY <connection_id>.
-        //
-        // Why a daemon thread:
-        //   - Drop is synchronous; the KILL path is async (it needs to
-        //     read the handshake on the killer connection).
-        //   - We don't want to block the dropping thread for arbitrary
-        //     time — a 5-second cap on the killer + std::thread::spawn
-        //     bounds the worst case.
-        //   - Spinning up a tiny RuntimeBuilder runtime per Drop is
-        //     heavy, so we only do it when query_in_flight indicates
-        //     a real abandoned query.
-        //
-        // The killer thread runs cancel_in_flight_query in a private
-        // mini-runtime; if it succeeds, the server stops the abandoned
-        // query immediately. If it fails (host unreachable, kill conn
-        // refused, runtime build panicked), the inner Drop's TCP
-        // shutdown is still the fallback.
+        // An abandoned exchange deliberately marks `closed` while its future
+        // is pending. That poison flag must not veto KILL-on-drop. A bounded
+        // permit prevents an outage from spawning unbounded cleanup threads;
+        // exhaustion retains the synchronous socket-close fallback.
         let in_flight = self
             .inner
             .query_in_flight
             .load(std::sync::atomic::Ordering::Acquire);
-        let already_closed = self.inner.closed;
-        let kill_options = self.options.clone();
-        #[cfg(feature = "tls")]
-        let kill_connector = self.inner.stream.connector();
         let thread_id = self.inner.connection_id;
-
-        if in_flight && !already_closed && thread_id != 0 {
-            if let Some(options) = kill_options {
-                std::thread::Builder::new()
-                    .name(format!("asupersync-mysql-kill-{thread_id}"))
-                    .spawn(move || {
-                        // Build a one-shot runtime just for the KILL.
-                        // Single worker is enough — the entire path is
-                        // a connect + execute("KILL QUERY <id>") + drop.
-                        let Ok(runtime) = crate::runtime::RuntimeBuilder::new()
-                            .worker_threads(1)
-                            .build()
-                        else {
-                            return;
-                        };
-                        let join = runtime.handle().spawn(async move {
-                            let cx = match crate::cx::Cx::current() {
-                                Some(cx) => cx,
-                                None => return,
-                            };
-                            let killer =
-                                match MySqlConnection::connect_bounded(&cx, options.clone(), #[cfg(feature = "tls")] kill_connector)
-                                    .await
-                                {
-                                    Outcome::Ok(c) => c,
-                                    _ => return,
-                                };
-                            // execute_unchecked sends "KILL QUERY <id>"
-                            // and reads the OK packet; failures here
-                            // are silent — the inner Drop's TCP
-                            // shutdown is the fallback.
-                            let mut killer = killer;
-                            let sql = format!("KILL QUERY {thread_id}");
-                            let _ = killer.execute_unchecked_internal(&cx, &sql).await;
-                        });
-                        // Bound the wall-clock cost. block_on waits
-                        // for the spawn to complete; if the killer
-                        // hangs we leak the daemon thread but that's
-                        // acceptable on a runtime shutdown path.
-                        runtime.block_on(join);
-                    })
-                    .ok();
-            }
+        if !in_flight || thread_id == 0 {
+            return;
         }
-        // Inner Drop runs after this returns (synchronously closes the
-        // TCP socket via Shutdown::Both).
+        let Some(options) = self.options.as_ref() else {
+            return;
+        };
+        let Some(permit) = MySqlDropKillPermit::acquire() else {
+            return;
+        };
+        let options = options.clone();
+        #[cfg(feature = "tls")]
+        let connector = self.inner.stream.connector();
+        let _ = std::thread::Builder::new()
+            .name(format!("asupersync-mysql-kill-{thread_id}"))
+            .spawn(move || {
+                let _permit = permit;
+                let Ok(runtime) = crate::runtime::RuntimeBuilder::new()
+                    .worker_threads(1)
+                    .build()
+                else {
+                    return;
+                };
+                let join = runtime.handle().spawn(async move {
+                    let Some(cx) = Cx::current() else {
+                        return;
+                    };
+                    let _ = MySqlConnection::kill_query_bounded(
+                        &cx,
+                        options,
+                        thread_id,
+                        #[cfg(feature = "tls")]
+                        connector,
+                    )
+                    .await;
+                });
+                // The task bounds the complete exchange, including the final
+                // OK, and cannot recursively spawn another cleanup connection.
+                runtime.block_on(join);
+            });
     }
 }
 
@@ -2288,9 +2353,10 @@ impl MySqlConnection {
     ) -> Outcome<Self, MySqlError> {
         use std::future::Future;
 
-        let mut deadline = options
-            .connect_timeout
-            .map(|duration| crate::time::Sleep::after(cx.now(), duration));
+        let mut deadline = crate::time::Sleep::after(
+            cx.now(),
+            options.connect_timeout.unwrap_or(MYSQL_CONNECT_TIMEOUT),
+        );
         let mut connecting = std::pin::pin!(Self::connect_inner(
             options,
             #[cfg(feature = "tls")]
@@ -2311,13 +2377,11 @@ impl MySqlConnection {
             // Scope ambient authority to this poll, never across an await.
             // TCP, TLS, and the existing packet helpers all see the caller's Cx.
             let _current = Cx::set_current(Some(cx.clone()));
-            if let Some(deadline) = deadline.as_mut() {
-                if Pin::new(deadline).poll_deadline(task_cx).is_ready() {
+            if Pin::new(&mut deadline).poll_deadline(task_cx).is_ready() {
                     return Poll::Ready(Outcome::Err(MySqlError::Io(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "MySQL connection, TLS negotiation, or authentication timed out",
                     ))));
-                }
             }
             connecting.as_mut().poll(task_cx)
         })
@@ -2497,6 +2561,8 @@ impl MySqlConnection {
     /// * `MySqlError::Cancelled` — the kill `cx` was cancelled.
     /// * Any error from connecting to the server or executing
     ///   `KILL QUERY`.
+    /// * An I/O timeout if the complete connect/auth/KILL exchange exceeds
+    ///   500ms (or the configured connect timeout, when smaller).
     ///
     /// After this returns successfully, the original connection (`self`)
     /// should be dropped — the server has already stopped processing
@@ -2515,35 +2581,83 @@ impl MySqlConnection {
         })?;
         let thread_id = self.connection_id();
 
-        let mut killer = match Self::connect_bounded(cx, options, #[cfg(feature = "tls")] self.inner.stream.connector()).await {
-            Outcome::Ok(c) => c,
-            Outcome::Err(e) => return Err(e),
-            Outcome::Cancelled(reason) => return Err(MySqlError::Cancelled(reason)),
-            Outcome::Panicked(_) => {
-                return Err(MySqlError::Protocol(
-                    "cancel_in_flight_query: kill connection panicked during connect".to_string(),
-                ));
-            }
-        };
+        Self::kill_query_bounded(
+            cx,
+            options,
+            thread_id,
+            #[cfg(feature = "tls")]
+            self.inner.stream.connector(),
+        )
+        .await
+    }
 
-        // KILL QUERY <id> stops the executing statement without dropping
-        // the target session — the server returns an OK packet to the
-        // killer connection. KILL <id> (without QUERY) would also close
-        // the target session, which the caller's `Drop` will handle on
-        // its own; we deliberately leave that to the caller to avoid
-        // racing with their session-cleanup logic.
-        let sql = format!("KILL QUERY {thread_id}");
-        match killer.execute_unchecked_internal(cx, &sql).await {
-            Outcome::Ok(_) => {
-                // The killer connection is dropped here, closing its socket.
-                Ok(())
-            }
-            Outcome::Err(e) => Err(e),
-            Outcome::Cancelled(reason) => Err(MySqlError::Cancelled(reason)),
-            Outcome::Panicked(_) => Err(MySqlError::Protocol(
-                "cancel_in_flight_query: KILL QUERY panicked during execute".to_string(),
-            )),
+    /// One bounded cleanup exchange, shared by explicit, drain, and Drop paths.
+    /// All socket operations see the explicit Cx only during their poll.
+    async fn kill_query_bounded(
+        cx: &Cx,
+        mut options: MySqlConnectOptions,
+        thread_id: u32,
+        #[cfg(feature = "tls")] connector: Option<TlsConnector>,
+    ) -> Result<(), MySqlError> {
+        use std::future::Future;
+
+        if thread_id == 0 {
+            return Err(MySqlError::Protocol(
+                "KILL QUERY requires a server connection ID".to_string(),
+            ));
         }
+        let bound = options
+            .connect_timeout
+            .map_or(MYSQL_KILL_TIMEOUT, |bound| bound.min(MYSQL_KILL_TIMEOUT));
+        options.connect_timeout = Some(bound);
+        let exchange = async {
+            let mut killer = match Self::connect_bounded(
+                cx,
+                options,
+                #[cfg(feature = "tls")]
+                connector,
+            )
+            .await
+            {
+                Outcome::Ok(connection) => connection,
+                Outcome::Err(error) => return Err(error),
+                Outcome::Cancelled(reason) => return Err(MySqlError::Cancelled(reason)),
+                Outcome::Panicked(_) => {
+                    return Err(MySqlError::Protocol("KILL connection panicked".to_string()));
+                }
+            };
+            // A dropped/timed-out killer must never start a chain of killers.
+            // Raw COM_QUERY also avoids recursively entering drain handling.
+            killer.options = None;
+            killer.inner.closed = true;
+            killer
+                .raw_query_expect_ok(&format!("KILL QUERY {thread_id}"), "KILL QUERY")
+                .await
+        };
+        let mut exchange = std::pin::pin!(crate::time::timeout(cx.now(), bound, exchange));
+        let mut cancel_wake = CancelWakerGuard {
+            cx: Some(cx.clone()),
+            token: None,
+        };
+        std::future::poll_fn(|task_cx| {
+            cancel_wake.refresh(task_cx.waker());
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(MySqlError::Cancelled(
+                    cx.cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("cancelled")),
+                )));
+            }
+            let _current = Cx::set_current(Some(cx.clone()));
+            exchange.as_mut().poll(task_cx).map(|result| {
+                result.unwrap_or_else(|_| {
+                    Err(MySqlError::Io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "MySQL KILL QUERY exchange timed out",
+                    )))
+                })
+            })
+        })
+        .await
     }
 
     /// Sets the per-connection statement-timeout override
@@ -2674,17 +2788,14 @@ impl MySqlConnection {
     /// bounded per-poll cancellation masking so the killer connection's own
     /// checkpoints pass while the calling task's `Cx` is already cancelled
     /// (including budget-deadline exhaustion — mask depth suppresses both).
-    /// The masked-poll budget keeps the drain step bounded: once exhausted,
-    /// the killer's next checkpoint observes the pending cancel and the
-    /// whole step resolves as a logged failure.
+    /// A 500ms deadline bounds the complete exchange even when the peer never
+    /// wakes a pending socket. The poll budget separately bounds masked work.
     async fn wire_cancel_in_drain(&self, cx: &Cx) {
-        /// Bounded drain window: enough polls for a loopback-or-LAN
-        /// connect + auth handshake + one OK exchange, while still
-        /// guaranteeing the drain step terminates.
         const MASKED_WIRE_CANCEL_POLLS: u32 = 4096;
 
         let thread_id = self.inner.connection_id;
         if thread_id == 0 {
+            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
             cx.trace(
                 "client.wire_cancel proto=mysql outcome=skipped reason=no_connection_id \
                  fallback=connection_close",
@@ -2692,6 +2803,7 @@ impl MySqlConnection {
             return;
         }
         let Some(options) = self.options.clone() else {
+            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
             cx.trace(
                 "client.wire_cancel proto=mysql outcome=skipped reason=no_stored_options \
                  fallback=connection_close",
@@ -2699,47 +2811,23 @@ impl MySqlConnection {
             return;
         };
 
-        // Clamp the killer's connect attempt (mirrors the PostgreSQL
-        // CancelTarget 500ms cap) so a cancelling caller can't be stalled
-        // by an unreachable host on the cancel path.
-        let cap = std::time::Duration::from_millis(500);
-        let mut kill_options = options;
-        kill_options.connect_timeout = Some(
-            kill_options
-                .connect_timeout
-                .map_or(cap, |timeout| timeout.min(cap)),
+        let kill = Self::kill_query_bounded(
+            cx,
+            options,
+            thread_id,
+            #[cfg(feature = "tls")]
+            self.inner.stream.connector(),
         );
-
-        let kill = async {
-            let mut killer = match Self::connect_bounded(cx, kill_options, #[cfg(feature = "tls")] self.inner.stream.connector()).await {
-                Outcome::Ok(conn) => conn,
-                Outcome::Err(err) => return Err(("connect", err.to_string())),
-                Outcome::Cancelled(_) => {
-                    return Err(("connect", "masked poll budget exhausted".to_string()));
-                }
-                Outcome::Panicked(_) => return Err(("connect", "panicked".to_string())),
-            };
-            let sql = format!("KILL QUERY {thread_id}");
-            // Box::pin breaks the async-recursion cycle at the type level
-            // (`execute_unchecked_internal` → `wire_cancel_in_drain` →
-            // `execute_unchecked_internal`); the runtime guard against
-            // actual re-entry is the KILL entry in
-            // `is_session_control_statement`.
-            match Box::pin(killer.execute_unchecked_internal(cx, &sql)).await {
-                Outcome::Ok(_) => Ok(()),
-                Outcome::Err(err) => Err(("kill_query", err.to_string())),
-                Outcome::Cancelled(_) => {
-                    Err(("kill_query", "masked poll budget exhausted".to_string()))
-                }
-                Outcome::Panicked(_) => Err(("kill_query", "panicked".to_string())),
-            }
-        };
-        match crate::combinator::commit_section(cx, MASKED_WIRE_CANCEL_POLLS, kill).await {
+        let result = crate::combinator::commit_section(cx, MASKED_WIRE_CANCEL_POLLS, kill).await;
+        // The caller may retain its poisoned connection after cancellation.
+        // Deliver the promised fallback now, not only on eventual Drop.
+        let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+        match result {
             Ok(()) => cx.trace(&format!(
                 "client.wire_cancel proto=mysql outcome=sent thread_id={thread_id}"
             )),
-            Err((stage, err)) => cx.trace(&format!(
-                "client.wire_cancel proto=mysql outcome=send_failed stage={stage} \
+            Err(err) => cx.trace(&format!(
+                "client.wire_cancel proto=mysql outcome=send_failed stage=kill_exchange \
                  fallback=connection_close err={err}"
             )),
         }
@@ -3421,6 +3509,10 @@ impl MySqlConnection {
         cx: &Cx,
         sql: &str,
     ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        if self.inner.closed {
+            // Preserve an abandoned exchange's in-flight flag for Drop.
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
         // SECURITY: Validate SQL for potential injection patterns
         if let Err(injection_error) = self.validate_sql_security(sql) {
             return Outcome::Err(injection_error);
@@ -4246,6 +4338,9 @@ impl MySqlConnection {
     /// SECURITY: Made private to prevent SQL injection attacks. Use prepared statements
     /// for dynamic queries or specific safe wrapper methods for static literals.
     async fn execute_unchecked_internal(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
         // SECURITY: Validate SQL for potential injection patterns
         if let Err(injection_error) = self.validate_sql_security(sql) {
             return Outcome::Err(injection_error);
@@ -4963,6 +5058,9 @@ impl MySqlConnection {
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
         let was_closed_at_entry = self.inner.closed;
         self.inner
             .query_in_flight
@@ -5102,6 +5200,9 @@ impl MySqlConnection {
         stmt: &MySqlStatement,
         params: &[&dyn ToSql],
     ) -> Outcome<u64, MySqlError> {
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
         let was_closed_at_entry = self.inner.closed;
         self.inner
             .query_in_flight
