@@ -776,6 +776,8 @@ impl Worker {
                         }
                         // Cache waker back in the task record for reuse on next poll
                         let _ = state.update_task(task_id, |record| {
+                            // Inspector poll counts (asupersync-bi2462.116).
+                            record.increment_polls();
                             record.cached_waker = Some((waker, 0));
                         });
                         Self::consume_cancel_ack_locked(&mut state, task_id)
@@ -791,6 +793,7 @@ impl Worker {
                             let _ = state.drain_obligation_posts(64);
                         }
                         let _ = state.update_task(task_id, |record| {
+                            record.increment_polls();
                             record.cached_waker = Some((waker, 0));
                         });
                         Self::consume_cancel_ack_locked(&mut state, task_id)

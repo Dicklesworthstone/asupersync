@@ -224,3 +224,56 @@ fn production_runtime_diagnostics_explains_a_cancelled_task() {
         // The task is left parked on purpose; runtime teardown aborts it.
     });
 }
+
+/// asupersync-bi2462.116: the production dispatch path never advanced a task's
+/// poll count, so the inspector reported 0 for a task that had provably run and
+/// its stuck heuristic flagged healthy parked tasks. Every poll that returns
+/// Pending now counts.
+#[test]
+fn production_runtime_inspector_counts_a_parked_task_s_polls() {
+    const YIELDS: u64 = 5;
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+    let inspector = runtime.task_inspector(TaskInspectorConfig::default());
+    let (tx, mut rx) = mpsc::channel::<u8>(1);
+    let parked = Arc::new(AtomicBool::new(false));
+
+    let received = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a root Cx");
+        let parked_flag = Arc::clone(&parked);
+        let mut handle = cx
+            .spawn(move |task_cx| async move {
+                for _ in 0..YIELDS {
+                    yield_now().await;
+                }
+                parked_flag.store(true, Ordering::SeqCst);
+                rx.recv(&task_cx).await.ok()
+            })
+            .expect("spawn counting task");
+
+        // YIELDS Pending polls, then the Pending poll that parks on recv.
+        let counted = yield_until(|| {
+            parked.load(Ordering::SeqCst)
+                && inspector
+                    .inspect_task(handle.task_id())
+                    .is_some_and(|task| task.poll_count > YIELDS)
+        })
+        .await;
+        let polls = inspector
+            .inspect_task(handle.task_id())
+            .map(|task| task.poll_count);
+        assert!(
+            counted,
+            "the parked task's polls must be counted; parked = {}, poll_count = {polls:?}",
+            parked.load(Ordering::SeqCst)
+        );
+        assert_eq!(polls, Some(YIELDS + 1), "one count per Pending poll");
+        eprintln!("scenario=inspector-poll-count yields={YIELDS} poll_count={polls:?}");
+
+        let permit = tx.reserve(&cx).await.expect("reserve channel capacity");
+        let _ = permit.send(9);
+        handle.join(&cx).await.expect("join released task")
+    });
+    assert_eq!(received, Some(9));
+}

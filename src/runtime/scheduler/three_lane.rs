@@ -8123,6 +8123,8 @@ impl ThreeLaneWorker {
                     AnyStoredTask::Global(t) => self.with_task_table(move |tt| {
                         tt.store_spawned_task(task_id, t);
                         tt.update_task(task_id, |record| {
+                            // Inspector poll counts (asupersync-bi2462.116).
+                            record.increment_polls();
                             record.cached_waker = Some((waker, priority));
                             record.cached_cancel_waker = cancel_waker_for_cache;
                             record.consume_checkpoint_cancel_ack()
@@ -8137,6 +8139,7 @@ impl ThreeLaneWorker {
                         // (since record is global).
                         self.with_task_table(move |tt| {
                             tt.update_task(task_id, |record| {
+                                record.increment_polls();
                                 record.cached_waker = Some((waker, priority));
                                 record.cached_cancel_waker = cancel_waker_for_cache;
                                 record.consume_checkpoint_cancel_ack()

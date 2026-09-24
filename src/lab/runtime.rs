@@ -4919,6 +4919,9 @@ impl LabRuntime {
                 // Record task yielding
                 self.replay_recorder.record_task_yielded(task_id);
                 let _ = self.state.update_task(task_id, |record| {
+                    // Inspector poll counts, as on the native schedulers
+                    // (asupersync-bi2462.116).
+                    record.increment_polls();
                     record.cached_waker = Some((waker, priority));
                     record.cached_cancel_waker = cancel_waker_for_cache;
                 });
