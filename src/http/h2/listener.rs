@@ -77,6 +77,21 @@ const DRAIN_SUPERVISION_TICK: Duration = Duration::from_millis(10);
 /// Capacity of the per-connection handler-response funnel.
 const RESPONSE_FUNNEL_CAPACITY: usize = 64;
 
+#[derive(Clone, Copy)]
+struct H2TransportTimeouts {
+    preface: Duration,
+    write_progress: Duration,
+}
+
+impl Default for H2TransportTimeouts {
+    fn default() -> Self {
+        Self {
+            preface: Duration::from_secs(10),
+            write_progress: Duration::from_secs(10),
+        }
+    }
+}
+
 /// Default maximum DATA bytes retained in one produced-response frame.
 /// Default maximum DATA frame accepted from a produced HTTP/2 response.
 pub const DEFAULT_H2_PRODUCED_FRAME_BYTES: usize = 16 * 1024;
@@ -2099,6 +2114,67 @@ enum H2PumpWriteError {
     Encode(H2Error),
 }
 
+#[derive(Clone, Copy)]
+enum H2WriteOperation {
+    Ready,
+    Flush,
+    Close,
+}
+
+/// The transport's readiness, flush, and shutdown waits all have the same
+/// progress deadline. Only bytes actually accepted by the socket extend it;
+/// wakeups, queued frames, and peer traffic cannot keep a stalled write alive.
+async fn bounded_h2_write(
+    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    signal: &ShutdownSignal,
+    timeout: Duration,
+    operation: H2WriteOperation,
+) -> io::Result<()> {
+    let timer = Cx::current()
+        .and_then(|cx| cx.timer_driver())
+        .ok_or_else(|| io::Error::other("HTTP/2 transport requires a timer driver"))?;
+    let mut expires_at = timer.now() + timeout;
+    let mut deadline = ServerRequestDeadline::new(timer.clone(), expires_at);
+    let mut force = std::pin::pin!(signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    std::future::poll_fn(|cx| {
+        if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+            || force.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "HTTP/2 transport force-closed",
+            )));
+        }
+        if timer.now() > expires_at {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "HTTP/2 transport write made no progress before its deadline",
+            )));
+        }
+        let before = framed.write_buffer().len();
+        let result = match operation {
+            H2WriteOperation::Ready => framed.poll_ready(cx),
+            H2WriteOperation::Flush => framed.poll_flush(cx),
+            H2WriteOperation::Close => framed.poll_close(cx),
+        };
+        if result.is_ready() {
+            return result;
+        }
+        if framed.write_buffer().len() < before {
+            expires_at = timer.now() + timeout;
+            deadline = ServerRequestDeadline::new(timer.clone(), expires_at);
+        }
+        if Pin::new(&mut deadline).poll(cx).is_ready() {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "HTTP/2 transport write made no progress before its deadline",
+            )));
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 fn h2_pump_failure_diagnostic(error: &H2PumpWriteError) -> Option<WebBodyDiagnostic> {
     match error {
         H2PumpWriteError::Transport(_) => Some(WebBodyDiagnostic::ClientAbort),
@@ -2112,12 +2188,14 @@ fn h2_pump_failure_diagnostic(error: &H2PumpWriteError) -> Option<WebBodyDiagnos
 async fn pump_writes(
     conn: &mut Connection,
     framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    signal: &ShutdownSignal,
+    write_timeout: Duration,
 ) -> Result<(), H2PumpWriteError> {
     loop {
         // Respect the codec's soft buffer boundary before removing another
         // frame from Connection. This keeps a blocked transport from turning
         // the connection's pending frame queue into an unbounded BytesMut.
-        std::future::poll_fn(|cx| framed.poll_ready(cx))
+        bounded_h2_write(framed, signal, write_timeout, H2WriteOperation::Ready)
             .await
             .map_err(H2PumpWriteError::Transport)?;
         let Some(frame) = conn.next_frame() else {
@@ -2125,11 +2203,12 @@ async fn pump_writes(
         };
         framed.start_send(frame).map_err(H2PumpWriteError::Encode)?;
     }
-    std::future::poll_fn(|cx| framed.poll_flush(cx))
+    bounded_h2_write(framed, signal, write_timeout, H2WriteOperation::Flush)
         .await
         .map_err(H2PumpWriteError::Transport)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn pump_writes_with_body_diagnostics(
     conn: &mut Connection,
     framed: &mut Framed<TcpStream, ListenerFrameCodec>,
@@ -2137,8 +2216,10 @@ async fn pump_writes_with_body_diagnostics(
     dispatched_streams: &HashSet<u32>,
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
     response_guards: &HashMap<u32, Arc<InFlightRequestGuard>>,
+    signal: &ShutdownSignal,
+    write_timeout: Duration,
 ) -> io::Result<()> {
-    match pump_writes(conn, framed).await {
+    match pump_writes(conn, framed, signal, write_timeout).await {
         Ok(()) => Ok(()),
         Err(error @ H2PumpWriteError::Transport(_)) => {
             let mut affected_streams = HashSet::new();
@@ -2716,6 +2797,7 @@ async fn serve_h2_connection<F, Fut>(
     stream_idle_timeout: Option<Duration>,
     time_getter: fn() -> Time,
     owned_request: bool,
+    transport_timeouts: H2TransportTimeouts,
     #[cfg(feature = "http2-streaming")] streaming: Option<StreamingDispatch>,
 ) -> io::Result<()>
 where
@@ -2729,7 +2811,22 @@ where
             .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
 
         let mut preface = [0u8; CLIENT_PREFACE.len()];
-        stream.read_exact(&mut preface).await?;
+        let preface_read = crate::time::timeout(
+            task_cx.now(),
+            transport_timeouts.preface,
+            stream.read_exact(&mut preface),
+        );
+        match race_force_close(&shutdown_signal, preface_read).await {
+            Some(Ok(result)) => result?,
+            Some(Err(_)) => {
+                task_cx.trace("h2_transport_preface_deadline_expired");
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "HTTP/2 client preface deadline expired",
+                ));
+            }
+            None => return Ok(()),
+        }
         if preface != *CLIENT_PREFACE {
             return Err(io::Error::other("invalid HTTP/2 client preface"));
         }
@@ -2786,6 +2883,8 @@ where
                 &dispatched_streams,
                 &mut produced_bodies,
                 &response_guards,
+                &shutdown_signal,
+                transport_timeouts.write_progress,
             )
             .await?;
             release_flushed_response_guards(&conn, &mut response_guards);
@@ -2815,7 +2914,13 @@ where
             #[cfg(feature = "http2-streaming")]
             let can_close = can_close && incoming.as_ref().is_none_or(StreamingRequests::is_empty);
             if can_close {
-                std::future::poll_fn(|cx| framed.poll_close(cx)).await?;
+                bounded_h2_write(
+                    &mut framed,
+                    &shutdown_signal,
+                    transport_timeouts.write_progress,
+                    H2WriteOperation::Close,
+                )
+                .await?;
                 return Ok(());
             }
 
@@ -2936,9 +3041,17 @@ where
                         &dispatched_streams,
                         &mut produced_bodies,
                         &response_guards,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
                     )
                     .await?;
-                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    let _ = bounded_h2_write(
+                        &mut framed,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        H2WriteOperation::Close,
+                    )
+                    .await;
                     cancel_all_produced_bodies(
                         &mut produced_bodies,
                         "HTTP/2 connection idle timeout",
@@ -2962,9 +3075,17 @@ where
                         &dispatched_streams,
                         &mut produced_bodies,
                         &response_guards,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
                     )
                     .await?;
-                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    let _ = bounded_h2_write(
+                        &mut framed,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        H2WriteOperation::Close,
+                    )
+                    .await;
                     cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 CONTINUATION timeout");
                     return Ok(());
                 }
@@ -3065,9 +3186,17 @@ where
                         &dispatched_streams,
                         &mut produced_bodies,
                         &response_guards,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
                     )
                     .await?;
-                    let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                    let _ = bounded_h2_write(
+                        &mut framed,
+                        &shutdown_signal,
+                        transport_timeouts.write_progress,
+                        H2WriteOperation::Close,
+                    )
+                    .await;
                     cancel_all_produced_bodies(&mut produced_bodies, "HTTP/2 frame decode failed");
                     return Err(io::Error::other(decode_error));
                 }
@@ -3105,9 +3234,17 @@ where
                                 &dispatched_streams,
                                 &mut produced_bodies,
                                 &response_guards,
+                                &shutdown_signal,
+                                transport_timeouts.write_progress,
                             )
                             .await?;
-                            let _ = std::future::poll_fn(|cx| framed.poll_close(cx)).await;
+                            let _ = bounded_h2_write(
+                                &mut framed,
+                                &shutdown_signal,
+                                transport_timeouts.write_progress,
+                                H2WriteOperation::Close,
+                            )
+                            .await;
                             cancel_all_produced_bodies(
                                 &mut produced_bodies,
                                 "HTTP/2 connection protocol error",
@@ -3913,6 +4050,7 @@ pub struct Http2Listener<F> {
     connection_manager: ConnectionManager,
     stats: Arc<Http2ListenerStats>,
     in_flight_requests: Arc<AtomicUsize>,
+    transport_timeouts: H2TransportTimeouts,
     #[cfg(feature = "http2-streaming")]
     streaming_config: Option<Http2StreamingListenerConfig>,
 }
@@ -4103,6 +4241,7 @@ impl<F> Http2Listener<F> {
             connection_manager,
             stats,
             in_flight_requests: Arc::new(AtomicUsize::new(0)),
+            transport_timeouts: H2TransportTimeouts::default(),
             #[cfg(feature = "http2-streaming")]
             streaming_config: None,
         }
@@ -4112,6 +4251,23 @@ impl<F> Http2Listener<F> {
     #[must_use]
     pub fn shutdown_signal(&self) -> ShutdownSignal {
         self.shutdown_signal.clone()
+    }
+
+    /// Bounds receipt of the complete 24-byte client preface. The default is
+    /// ten seconds; partial input never extends the absolute deadline.
+    #[must_use]
+    pub fn preface_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_timeouts.preface = timeout;
+        self
+    }
+
+    /// Bounds a transport write, flush, or shutdown that makes no progress.
+    /// The default is ten seconds. Only bytes accepted by the socket reset
+    /// this deadline; force-close interrupts every pending transport wait.
+    #[must_use]
+    pub fn write_progress_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_timeouts.write_progress = timeout;
+        self
     }
 
     /// Begins graceful shutdown using the listener's configured drain timeout.
@@ -4259,6 +4415,7 @@ impl<F> Http2Listener<F> {
             let idle_timeout = self.config.idle_timeout;
             let stream_idle_timeout = self.config.stream_idle_timeout;
             let conn_time_getter = self.config.time_getter;
+            let transport_timeouts = self.transport_timeouts;
             #[cfg(feature = "http2-streaming")]
             let streaming = streaming.clone();
             // Check the connection's Send boundary once before the runtime's
@@ -4284,6 +4441,7 @@ impl<F> Http2Listener<F> {
                     stream_idle_timeout,
                     conn_time_getter,
                     owned_request,
+                    transport_timeouts,
                     #[cfg(feature = "http2-streaming")]
                     streaming,
                 )
