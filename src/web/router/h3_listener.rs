@@ -114,6 +114,9 @@ pub struct NativeH3ListenerReport {
     pub refused_requests: u64,
     /// Admitted requests cancelled, failed, or reset before completion.
     pub cancelled_requests: u64,
+    /// Closed request regions whose finalizers failed or exhausted cleanup.
+    /// These requests also count as cancelled; other peers continue serving.
+    pub failed_request_cleanups: u64,
     /// The graceful deadline forced cancellation of remaining work.
     pub drain_timed_out: bool,
 }
@@ -127,6 +130,9 @@ pub enum NativeH3ListenerError {
     /// The runtime could not close an admitted request region.
     Ownership(ChildRegionError),
     /// A region finalizer failed or exhausted its shutdown budget.
+    ///
+    /// The listener contains this error after the request region closes and
+    /// records it in [`NativeH3ListenerReport::failed_request_cleanups`].
     CleanupFailed,
 }
 
@@ -329,6 +335,7 @@ type RequestBodySource = (Cx, FramedIncomingRequestBodyWriter);
 const STREAMING_REQUEST_FRAME_CAPACITY: usize = 8;
 const MAX_STREAMING_REQUEST_CHUNK_BYTES: usize = 16 * 1024;
 const H3_NO_ERROR: u64 = 0x100;
+const H3_INTERNAL_ERROR: u64 = 0x102;
 const H3_FRAME_ERROR: u64 = 0x106;
 const H3_REQUEST_CANCELLED: u64 = 0x10c;
 const H3_MESSAGE_ERROR: u64 = 0x10e;
@@ -830,6 +837,20 @@ fn cancel_reason(cx: &Cx) -> CancelReason {
     CancelReason::with_origin(CancelKind::ParentCancelled, cx.region_id(), cx.now())
 }
 
+fn trace_request_cleanup_failure(cx: &Cx, connection_id: ConnectionId, stream_id: StreamId) {
+    let connection = format!("{connection_id:?}");
+    let stream = stream_id.0.to_string();
+    cx.trace_with_fields(
+        "http3.request_cleanup_failed",
+        &[
+            ("connection_id", connection.as_str()),
+            ("stream_id", stream.as_str()),
+            ("region_closed", "true"),
+            ("scope", "request"),
+        ],
+    );
+}
+
 fn shutdown_budget(cx: &Cx, grace: Duration) -> Budget {
     // The cleanup ceiling is independent of an already expired request budget.
     Budget::new().with_timeout(cx.now(), grace)
@@ -1003,11 +1024,15 @@ impl ListenerState {
         }
     }
 
-    fn reap_request(&mut self, success: bool) {
+    fn reap_request(&mut self, success: bool, cleanup_failed: bool) {
         if success {
             self.report.completed_requests = self.report.completed_requests.saturating_add(1);
         } else {
             self.report.cancelled_requests = self.report.cancelled_requests.saturating_add(1);
+        }
+        if cleanup_failed {
+            self.report.failed_request_cleanups =
+                self.report.failed_request_cleanups.saturating_add(1);
         }
     }
 
@@ -1018,23 +1043,27 @@ impl ListenerState {
                 match request.poll_owner(cx, &self.config, task_cx) {
                     Poll::Ready(result) => {
                         let success = request.terminal == Some(true) && result.is_ok();
+                        let cleanup_failed =
+                            matches!(&result, Err(NativeH3ListenerError::CleanupFailed));
                         if request.body.is_some() {
                             connection
                                 .bridge
                                 .release_streaming_dispatch_after_close(*stream_id);
                         }
-                        if let Err(error) = result {
+                        if cleanup_failed {
+                            trace_request_cleanup_failure(cx, connection.id, *stream_id);
+                        } else if let Err(error) = result {
                             self.failure.get_or_insert(error);
                         }
-                        completed.push(success);
+                        completed.push((success, cleanup_failed));
                         false
                     }
                     Poll::Pending => true,
                 }
             });
         }
-        for success in completed {
-            self.reap_request(success);
+        for (success, cleanup_failed) in completed {
+            self.reap_request(success, cleanup_failed);
         }
         if self
             .connections
@@ -1203,6 +1232,33 @@ impl ListenerState {
                     Poll::Pending => true,
                     Poll::Ready(result) => {
                         let success = request.terminal == Some(true) && result.is_ok();
+                        let cleanup_failed =
+                            matches!(&result, Err(NativeH3ListenerError::CleanupFailed));
+                        if cleanup_failed {
+                            // close_with_outcome supplied an actual quiescence
+                            // receipt. A failed finalizer belongs to this
+                            // request, not to unrelated regions or peers. The
+                            // response may have queued FIN before finalization;
+                            // reset its send half directly even if the Router
+                            // already released the completed dispatch token.
+                            trace_request_cleanup_failure(cx, connection.id, *stream_id);
+                            connection.bridge.reset_during_dispatch.remove(stream_id);
+                            connection.bridge.release_in_flight(*stream_id);
+                            if connection.live {
+                                let _ = endpoint.with_connection_mut(cx, connection.id, |transport| {
+                                    if transport
+                                        .inner()
+                                        .streams()
+                                        .stream(*stream_id)
+                                        .is_ok_and(|stream| stream.send_reset.is_none())
+                                    {
+                                        transport.reset_stream(cx, *stream_id, H3_INTERNAL_ERROR)?;
+                                    }
+                                    Ok::<(), crate::net::quic_native::NativeQuicConnectionError>(())
+                                });
+                            }
+                            request.reset_applied = true;
+                        }
                         if !success && !request.reset_applied && connection.live {
                             let _ = endpoint.with_connection_mut(cx, connection.id, |transport| {
                                 if let Some(error_code) = request.input_error_code {
@@ -1231,10 +1287,10 @@ impl ListenerState {
                                 .bridge
                                 .release_streaming_dispatch_after_close(*stream_id);
                         }
-                        if let Err(error) = result {
+                        if !cleanup_failed && let Err(error) = result {
                             self.failure.get_or_insert(error);
                         }
-                        completed.push(success);
+                        completed.push((success, cleanup_failed));
                         progress = true;
                         false
                     }
@@ -1265,8 +1321,8 @@ impl ListenerState {
                 }
             }
         }
-        for success in completed {
-            self.reap_request(success);
+        for (success, cleanup_failed) in completed {
+            self.reap_request(success, cleanup_failed);
         }
         self.connections
             .retain(|connection| connection.live || !connection.requests.is_empty());

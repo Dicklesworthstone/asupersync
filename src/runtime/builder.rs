@@ -4946,6 +4946,31 @@ impl RuntimeHandle {
         }))
     }
 
+    /// Register a real finalizer on an open native region for lifecycle tests.
+    ///
+    /// This uses the owning runtime's ordinary finalizer admission and returns
+    /// false if the runtime or region is gone, or the region has begun closing.
+    /// It does not synthesize a cleanup result or bypass region ownership.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[doc(hidden)]
+    pub fn register_sync_finalizer_for_testing<F>(
+        &self,
+        region_id: crate::types::RegionId,
+        f: F,
+    ) -> bool
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let Ok(inner) = self.try_inner() else {
+            return false;
+        };
+        inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register_sync_finalizer(region_id, f)
+    }
+
     fn try_inner(&self) -> Result<Arc<RuntimeInner>, SpawnError> {
         match &self.inner {
             RuntimeHandleRef::Strong(inner) => Ok(Arc::clone(inner)),

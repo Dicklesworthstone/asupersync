@@ -240,17 +240,24 @@ mod native_h3_listener_live {
         expected_goaway: u64,
         cancelled_stream: Option<asupersync::net::quic_native::StreamId>,
     ) {
+        let mut goaway_seen = false;
         loop {
-            // Receiving also flushes QUIC ACKs. Keep the peer socket alive
-            // until the listener's final GOAWAY is actually acknowledged.
+            // GOAWAY closes admission, not the transport. A late answer to
+            // STOP_SENDING can still elicit ACK/credit traffic after GOAWAY.
+            // Keep driving this authenticated peer until the listener's final
+            // CONNECTION_CLOSE proves its normal acknowledgement drain ended.
             owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
-            let mut goaway = false;
+            if owner.connection().close_was_peer_initiated() {
+                assert!(goaway_seen, "authenticated close must follow GOAWAY");
+                assert_eq!(owner.connection().inner().transport().close_code(), Some(0));
+                return;
+            }
             for event in drain_h3_events(cx, session, owner.connection_mut()) {
                 match event {
                     NativeH3Event::Goaway(id) => {
                         assert_eq!(id, expected_goaway);
-                        assert!(!goaway);
-                        goaway = true;
+                        assert!(!goaway_seen);
+                        goaway_seen = true;
                     }
                     NativeH3Event::StreamReset {
                         stream_id,
@@ -264,9 +271,6 @@ mod native_h3_listener_live {
                 }
             }
             owner.flush(cx).await.unwrap();
-            if goaway {
-                return;
-            }
         }
     }
 
@@ -1307,6 +1311,206 @@ mod native_h3_listener_live {
             });
         }
 
+        #[cfg(feature = "test-internals")]
+        #[test]
+        fn authenticated_listener_finalizer_failure_preserves_parked_peer_and_admission() {
+            use asupersync::web::AsyncCxFnHandler;
+
+            for workers in [1, 2] {
+                for streaming in [false, true] {
+                    run(workers, async move {
+                        let started = Instant::now();
+                        let cx = Cx::current().unwrap();
+                        let finalizers = Arc::new(AtomicUsize::new(0));
+                        let handler_finalizers = Arc::clone(&finalizers);
+                        let (fault_ready_tx, mut fault_ready_rx) =
+                            asupersync::channel::oneshot::channel();
+                        let fault_ready = Arc::new(Mutex::new(Some(fault_ready_tx)));
+                        let (fault_release_tx, fault_release_rx) =
+                            asupersync::channel::oneshot::channel();
+                        let fault_release = Arc::new(Mutex::new(Some(fault_release_rx)));
+                        let (peer_parked_tx, mut peer_parked_rx) =
+                            asupersync::channel::oneshot::channel();
+                        let peer_parked = Arc::new(Mutex::new(Some(peer_parked_tx)));
+                        let (peer_release_tx, peer_release_rx) =
+                            asupersync::channel::oneshot::channel();
+                        let peer_release = Arc::new(Mutex::new(Some(peer_release_rx)));
+                        let router = Router::new()
+                            .route(
+                                "/bad-cleanup",
+                                post(AsyncCxFnHandler::new(move |request_cx: Cx| {
+                                    let ready = fault_ready.lock().unwrap().take().unwrap();
+                                    let mut release = fault_release.lock().unwrap().take().unwrap();
+                                    let finalizers = Arc::clone(&handler_finalizers);
+                                    async move {
+                                        assert!(asupersync::runtime::Runtime::current_handle()
+                                            .unwrap()
+                                            .register_sync_finalizer_for_testing(
+                                                request_cx.region_id(),
+                                                move || {
+                                                    finalizers.fetch_add(1, Ordering::SeqCst);
+                                                    panic!("intentional HTTP/3 request finalizer failure");
+                                                },
+                                            ));
+                                        ready.send(&request_cx, request_cx.clone()).unwrap();
+                                        release.recv(&request_cx).await.unwrap();
+                                        Response::new(StatusCode::OK, "cleanup still has to run")
+                                    }
+                                })),
+                            )
+                            .route(
+                                "/parked-peer",
+                                post(AsyncCxFnHandler::new(move |request_cx: Cx| {
+                                    let mut parked = peer_parked.lock().unwrap().take();
+                                    let mut release = peer_release.lock().unwrap().take().unwrap();
+                                    async move {
+                                        std::future::poll_fn(|task_cx| {
+                                            let poll = release.poll_recv_uninterruptible(task_cx);
+                                            if poll.is_pending() {
+                                                if let Some(signal) = parked.take() {
+                                                    signal.send(&request_cx, request_cx.clone()).unwrap();
+                                                }
+                                            }
+                                            poll
+                                        })
+                                        .await
+                                        .unwrap();
+                                        assert!(!request_cx.is_cancel_requested());
+                                        Response::new(StatusCode::OK, "peer survived finalizer failure")
+                                    }
+                                })),
+                            )
+                            .route(
+                                "/later",
+                                post(FnHandler::new(|| Response::new(StatusCode::OK, "still accepting"))),
+                            );
+                        let mut listener_config = config(8);
+                        listener_config.endpoint.max_connections = 2;
+                        listener_config.max_concurrent_requests = 2;
+                        listener_config.router = listener_config
+                            .router
+                            .max_in_flight_dispatches(1)
+                            .max_total_buffered_body_bytes(16);
+                        if !streaming {
+                            listener_config.streaming_request_body_buffer_bytes = None;
+                        }
+                        let listener = bind(&cx, router, listener_config).await;
+                        let address = listener.local_addr();
+                        let (shutdown_tx, mut shutdown_rx) =
+                            asupersync::channel::oneshot::channel();
+                        let serving = listener.serve_with_shutdown(&cx, async {
+                            shutdown_rx.recv(&cx).await.unwrap();
+                        });
+                        let client = async {
+                            let (mut peer, mut peer_h3) = connect(&cx, address, 81).await;
+                            let peer_stream =
+                                open_upload(&cx, &mut peer, "/parked-peer", Some(0)).await;
+                            peer.connection_mut()
+                                .write_stream(&cx, peer_stream, Bytes::new(), true)
+                                .unwrap();
+                            peer.flush(&cx).await.unwrap();
+                            let peer_cx: Cx = peer_parked_rx.recv(&cx).await.unwrap();
+                            let (mut fault, mut fault_h3) = connect(&cx, address, 82).await;
+                            let fault_stream =
+                                open_upload(&cx, &mut fault, "/bad-cleanup", Some(0)).await;
+                            fault
+                                .connection_mut()
+                                .write_stream(&cx, fault_stream, Bytes::new(), true)
+                                .unwrap();
+                            fault.flush(&cx).await.unwrap();
+                            let fault_cx: Cx = fault_ready_rx.recv(&cx).await.unwrap();
+                            assert_ne!(fault_cx.region_id(), peer_cx.region_id());
+                            assert!(!peer_cx.is_cancel_requested());
+                            fault_release_tx.send(&cx, ()).unwrap();
+                            asupersync::time::timeout(cx.now(), Duration::from_secs(2), async {
+                                loop {
+                                    fault.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                                    for event in drain_h3_events(&cx, &mut fault_h3, fault.connection_mut()) {
+                                        match event {
+                                            NativeH3Event::StreamReset { stream_id, error_code, .. } => {
+                                                assert_eq!(stream_id, fault_stream);
+                                                assert_eq!(error_code, 0x102, "failed cleanup resets only its response with H3_INTERNAL_ERROR");
+                                                return;
+                                            }
+                                            NativeH3Event::ResponseHeaders { stream_id, .. }
+                                            | NativeH3Event::Data { stream_id, .. }
+                                            | NativeH3Event::Finished { stream_id } => {
+                                                assert_eq!(stream_id, fault_stream);
+                                            }
+                                            other => panic!("unexpected cleanup failure event: {other:?}"),
+                                        }
+                                    }
+                                }
+                            })
+                            .await
+                            .expect("a failed finalizer must produce a scoped reset, not stop the listener");
+                            wait_region_closed(&fault_cx).await;
+                            assert_eq!(finalizers.load(Ordering::SeqCst), 1);
+                            assert!(
+                                !peer_cx.is_cancel_requested(),
+                                "other connection's parked region remains live"
+                            );
+                            peer_release_tx.send(&cx, ()).unwrap();
+                            receive_response(
+                                &cx,
+                                &mut peer,
+                                &mut peer_h3,
+                                peer_stream,
+                                &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                                b"peer survived finalizer failure",
+                            )
+                            .await;
+                            wait_region_closed(&peer_cx).await;
+                            response(
+                                &cx,
+                                &mut fault,
+                                &mut fault_h3,
+                                "/later",
+                                &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                                b"still accepting",
+                            )
+                            .await;
+                            shutdown_tx.send(&cx, ()).unwrap();
+                            zip(
+                                acknowledge_shutdown_goaway(
+                                    &cx,
+                                    &mut peer,
+                                    &mut peer_h3,
+                                    peer_stream.0 + 4,
+                                    None,
+                                ),
+                                acknowledge_shutdown_goaway(
+                                    &cx,
+                                    &mut fault,
+                                    &mut fault_h3,
+                                    fault_stream.0 + 8,
+                                    None,
+                                ),
+                            )
+                            .await;
+                        };
+                        let (report, ()) = zip(serving, client).await;
+                        let report =
+                            report.expect("request cleanup failure must not fail the endpoint");
+                        assert_eq!(report.accepted_connections, 2);
+                        assert_eq!(report.completed_requests, 2);
+                        assert_eq!(report.cancelled_requests, 1);
+                        assert_eq!(report.failed_request_cleanups, 1);
+                        assert_eq!(report.failed_connections, 0);
+                        assert_eq!(report.refused_requests, 0);
+                        assert!(!report.drain_timed_out);
+                        eprintln!(
+                            "event=h3_cleanup_isolated workers={workers} streaming={streaming} completed={} cancelled={} cleanup_failures={} elapsed_ms={}",
+                            report.completed_requests,
+                            report.cancelled_requests,
+                            report.failed_request_cleanups,
+                            started.elapsed().as_millis(),
+                        );
+                    });
+                }
+            }
+        }
+
         struct TightenQueuedBody {
             admitted: Mutex<Option<asupersync::channel::oneshot::Sender<Cx>>>,
             resume: Mutex<Option<asupersync::channel::oneshot::Receiver<()>>>,
@@ -1970,7 +2174,5 @@ mod native_h3_listener_live {
                 assert!(!report.drain_timed_out);
             });
         }
-
     }
-
 }
