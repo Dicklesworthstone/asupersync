@@ -1511,6 +1511,200 @@ mod native_h3_listener_live {
             }
         }
 
+        #[test]
+        fn authenticated_listener_buffered_response_budget_covers_peers_and_backing_allocations() {
+            use asupersync::web::AsyncCxFnHandler;
+
+            const BODY_BYTES: usize = 512;
+            const WINDOW: u64 = 64;
+            for workers in [1, 2] {
+                run(workers, async move {
+                    let started = Instant::now();
+                    let cx = Cx::current().unwrap();
+                    let (body_ready_tx, mut body_ready_rx) =
+                        asupersync::channel::oneshot::channel();
+                    let body_ready = Arc::new(Mutex::new(Some(body_ready_tx)));
+                    let rejected_handler_calls = Arc::new(AtomicUsize::new(0));
+                    let rejection_calls = Arc::clone(&rejected_handler_calls);
+                    let router = Router::new()
+                        .route(
+                            "/blocked-response",
+                            post(AsyncCxFnHandler::new(move |request_cx: Cx| {
+                                let ready = body_ready.lock().unwrap().take().unwrap();
+                                async move {
+                                    ready.send(&request_cx, request_cx.clone()).unwrap();
+                                    Response::new(StatusCode::OK, vec![0x41; BODY_BYTES])
+                                }
+                            })),
+                        )
+                        .route(
+                            "/over-budget",
+                            post(FnHandler::new(move || {
+                                rejection_calls.fetch_add(1, Ordering::SeqCst);
+                                Response::new(StatusCode::OK, vec![0x42; BODY_BYTES])
+                            })),
+                        )
+                        .route(
+                            "/large-backing",
+                            post(FnHandler::new(|| {
+                                let mut allocation = Vec::with_capacity(BODY_BYTES * 2);
+                                allocation.extend_from_slice(b"small view");
+                                let retained = Bytes::from(allocation);
+                                Response::new(StatusCode::OK, retained.slice(0..1))
+                            })),
+                        )
+                        .route(
+                            "/reuse-credit",
+                            post(FnHandler::new(|| {
+                                Response::new(StatusCode::OK, vec![0x43; BODY_BYTES])
+                            })),
+                        );
+                    let mut listener_config = config(8);
+                    listener_config.endpoint.max_connections = 2;
+                    listener_config.max_concurrent_requests = 4;
+                    listener_config.max_buffered_response_bytes = BODY_BYTES;
+                    listener_config.max_total_buffered_response_bytes = BODY_BYTES;
+                    let listener = bind(&cx, router, listener_config).await;
+                    let address = listener.local_addr();
+                    let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                    let serving = listener.serve_with_shutdown(&cx, async {
+                        shutdown_rx.recv(&cx).await.unwrap();
+                    });
+                    let client = async {
+                        let (mut blocked, mut blocked_h3) = connect_with_config(
+                            &cx,
+                            address,
+                            83,
+                            NativeQuicConnectionConfig {
+                                recv_window: WINDOW,
+                                ..connection_config()
+                            },
+                        )
+                        .await;
+                        let blocked_stream =
+                            open_upload(&cx, &mut blocked, "/blocked-response", Some(0)).await;
+                        blocked
+                            .connection_mut()
+                            .write_stream(&cx, blocked_stream, Bytes::new(), true)
+                            .unwrap();
+                        blocked.flush(&cx).await.unwrap();
+                        let request_cx: Cx = body_ready_rx.recv(&cx).await.unwrap();
+                        loop {
+                            blocked.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                            let stream = blocked
+                                .connection()
+                                .inner()
+                                .streams()
+                                .stream(blocked_stream)
+                                .unwrap();
+                            assert_eq!(
+                                stream.read_offset, 0,
+                                "do not consume or replenish response credit"
+                            );
+                            assert_eq!(stream.recv_credit.limit(), WINDOW);
+                            assert!(stream.final_size.is_none() && stream.recv_reset.is_none());
+                            if stream.recv_offset == WINDOW {
+                                break;
+                            }
+                        }
+                        let (mut peer, mut peer_h3) = connect(&cx, address, 84).await;
+                        let over_budget =
+                            open_upload(&cx, &mut peer, "/over-budget", Some(0)).await;
+                        peer.connection_mut()
+                            .write_stream(&cx, over_budget, Bytes::new(), true)
+                            .unwrap();
+                        peer.flush(&cx).await.unwrap();
+                        asupersync::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(2),
+                            receive_cancelled(&cx, &mut peer, &mut peer_h3, over_budget, asupersync::http::h3_quic::H3_REQUEST_CANCELLED),
+                        )
+                        .await
+                        .expect("response budget admission must reject without waiting for a blocked peer");
+                        assert_eq!(rejected_handler_calls.load(Ordering::SeqCst), 1);
+                        assert!(
+                            !request_cx.is_cancel_requested(),
+                            "budget refusal must preserve the retained response"
+                        );
+                        blocked
+                            .connection_mut()
+                            .stop_stream_receiving(
+                                &cx,
+                                blocked_stream,
+                                asupersync::http::h3_quic::H3_REQUEST_CANCELLED,
+                            )
+                            .unwrap();
+                        blocked.flush(&cx).await.unwrap();
+                        asupersync::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(2),
+                            wait_region_closed(&request_cx),
+                        )
+                        .await
+                        .expect("reset must release the flow-blocked response and its byte credit");
+                        let large_backing =
+                            open_upload(&cx, &mut peer, "/large-backing", Some(0)).await;
+                        peer.connection_mut()
+                            .write_stream(&cx, large_backing, Bytes::new(), true)
+                            .unwrap();
+                        peer.flush(&cx).await.unwrap();
+                        receive_cancelled(
+                            &cx,
+                            &mut peer,
+                            &mut peer_h3,
+                            large_backing,
+                            asupersync::http::h3_quic::H3_REQUEST_CANCELLED,
+                        )
+                        .await;
+                        response(
+                            &cx,
+                            &mut peer,
+                            &mut peer_h3,
+                            "/reuse-credit",
+                            &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                            &[0x43; BODY_BYTES],
+                        )
+                        .await;
+                        shutdown_tx.send(&cx, ()).unwrap();
+                        zip(
+                            acknowledge_shutdown_goaway(
+                                &cx,
+                                &mut blocked,
+                                &mut blocked_h3,
+                                blocked_stream.0 + 4,
+                                Some(blocked_stream),
+                            ),
+                            acknowledge_shutdown_goaway(
+                                &cx,
+                                &mut peer,
+                                &mut peer_h3,
+                                large_backing.0 + 8,
+                                None,
+                            ),
+                        )
+                        .await;
+                    };
+                    let (report, ()) = zip(serving, client).await;
+                    let report = report.unwrap();
+                    assert_eq!(report.accepted_connections, 2);
+                    assert_eq!(report.completed_requests, 1);
+                    assert_eq!(report.cancelled_requests, 3);
+                    assert_eq!(report.rejected_buffered_responses, 2);
+                    assert_eq!(report.peak_buffered_response_bytes, BODY_BYTES);
+                    assert_eq!(report.failed_request_cleanups, 0);
+                    assert_eq!(report.failed_connections, 0);
+                    assert_eq!(report.refused_requests, 0);
+                    assert!(!report.drain_timed_out);
+                    eprintln!(
+                        "event=h3_response_retention workers={workers} limit={BODY_BYTES} peak={} rejected={} elapsed_ms={}",
+                        report.peak_buffered_response_bytes,
+                        report.rejected_buffered_responses,
+                        started.elapsed().as_millis(),
+                    );
+                });
+            }
+        }
+
         struct TightenQueuedBody {
             admitted: Mutex<Option<asupersync::channel::oneshot::Sender<Cx>>>,
             resume: Mutex<Option<asupersync::channel::oneshot::Receiver<()>>>,

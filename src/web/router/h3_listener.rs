@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::*;
 use crate::bytes::BytesCursor;
@@ -57,6 +58,18 @@ pub struct NativeH3ListenerConfig {
     /// Maximum buffered response body retained after a handler returns.
     /// Larger responses should use [`crate::web::Http3StreamResponder`].
     pub max_buffered_response_bytes: usize,
+    /// Aggregate buffered response retention across all peers, including
+    /// prepared responses waiting for the connection pump. Defaults to 64 MiB.
+    ///
+    /// Admission occurs after the handler creates its response and before
+    /// publication. Over-budget responses are dropped and reset without
+    /// waiting for credit. Each response is charged for the whole retained
+    /// `Bytes` backing capacity, even when its body is a small slice. Credit
+    /// remains owned until that body is dropped after transport submission,
+    /// cancellation, or failure. Application-owned aliases, headers, allocator
+    /// metadata, and separately encoded QUIC retransmission data are excluded.
+    /// Use produced responses when a buffered body exceeds this boundary.
+    pub max_total_buffered_response_bytes: usize,
     /// Opt in to live request bodies dispatched after validated HEADERS.
     ///
     /// This bounds queued body bytes per request. The listener also retains
@@ -91,6 +104,7 @@ impl Default for NativeH3ListenerConfig {
             request_drain_timeout: Duration::from_millis(100),
             drain_timeout: Duration::from_secs(5),
             max_buffered_response_bytes: 16 * 1024 * 1024,
+            max_total_buffered_response_bytes: 64 * 1024 * 1024,
             streaming_request_body_buffer_bytes: None,
         }
     }
@@ -117,6 +131,11 @@ pub struct NativeH3ListenerReport {
     /// Closed request regions whose finalizers failed or exhausted cleanup.
     /// These requests also count as cancelled; other peers continue serving.
     pub failed_request_cleanups: u64,
+    /// Admitted requests whose buffered responses exceeded an individual or
+    /// aggregate retention limit before publication. Also counted as cancelled.
+    pub rejected_buffered_responses: u64,
+    /// Largest aggregate buffered response backing capacity retained at once.
+    pub peak_buffered_response_bytes: usize,
     /// The graceful deadline forced cancellation of remaining work.
     pub drain_timed_out: bool,
 }
@@ -318,6 +337,10 @@ impl NativeH3Listener {
         self.endpoint.stop_authenticated_accepts();
         state.cancel_all(cx);
         std::future::poll_fn(|task_cx| state.poll_cleanup(cx, task_cx)).await;
+        state.report.rejected_buffered_responses =
+            state.response_budget.rejected.load(Ordering::Acquire);
+        state.report.peak_buffered_response_bytes =
+            state.response_budget.peak.load(Ordering::Acquire);
         let shutdown_result = self.endpoint.shutdown(cx).await;
         if let Some(error) = state.failure {
             return Err(error);
@@ -328,7 +351,81 @@ impl NativeH3Listener {
     }
 }
 
-type RequestReply = (Cx, NativeH3RouterProducedDispatch);
+enum RequestReply {
+    Buffered {
+        head: H3ResponseHead,
+        body: RetainedResponseBody,
+    },
+    Produced {
+        cx: Cx,
+        prepared: NativeH3RouterPreparedProducedResponse,
+    },
+}
+
+struct ResponseBudget {
+    limit: usize,
+    used: AtomicUsize,
+    peak: AtomicUsize,
+    rejected: AtomicU64,
+}
+
+impl ResponseBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            rejected: AtomicU64::new(0),
+        }
+    }
+
+    fn try_retain(
+        self: &Arc<Self>,
+        body: Bytes,
+        response_limit: usize,
+    ) -> Option<RetainedResponseBody> {
+        let bytes = body.retained_capacity().max(body.len());
+        let reserved = (body.len() <= response_limit)
+            .then(|| {
+                self.used
+                    .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                        used.checked_add(bytes).filter(|next| *next <= self.limit)
+                    })
+            })
+            .and_then(Result::ok);
+        let Some(previous) = reserved else {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        self.peak.fetch_max(previous + bytes, Ordering::Relaxed);
+        Some(RetainedResponseBody {
+            bytes: body,
+            _credit: ResponseCredit {
+                budget: Arc::clone(self),
+                bytes,
+            },
+        })
+    }
+}
+
+// Fields drop in declaration order: the original body allocation is released
+// before another request can observe its refunded admission credit.
+struct RetainedResponseBody {
+    bytes: Bytes,
+    _credit: ResponseCredit,
+}
+
+struct ResponseCredit {
+    budget: Arc<ResponseBudget>,
+    bytes: usize,
+}
+
+impl Drop for ResponseCredit {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.bytes, Ordering::Release);
+    }
+}
+
 type RegionClose = Pin<Box<dyn Future<Output = Result<bool, ChildRegionError>> + Send>>;
 type RequestBodySource = (Cx, FramedIncomingRequestBodyWriter);
 
@@ -500,6 +597,7 @@ struct RequestWork {
     dispatch: Option<NativeH3RouterDispatch>,
     body: Option<RequestBodyWork>,
     body_publisher: Option<oneshot::Sender<RequestBodySource>>,
+    response_budget: Arc<ResponseBudget>,
     task: Option<TaskHandle<ServerHopOutcome<bool>>>,
     reply: Option<oneshot::Receiver<RequestReply>>,
     command: Option<oneshot::Sender<Option<NativeH3RouterProducer>>>,
@@ -520,6 +618,7 @@ impl RequestWork {
         dispatch: NativeH3RouterDispatch,
         config: &NativeH3ListenerConfig,
         assembly_deadline: Option<Time>,
+        response_budget: Arc<ResponseBudget>,
     ) -> Self {
         let mut budget = cx
             .budget()
@@ -540,6 +639,7 @@ impl RequestWork {
             dispatch: Some(dispatch),
             body,
             body_publisher,
+            response_budget,
             task: None,
             reply: None,
             command: None,
@@ -568,6 +668,10 @@ impl RequestWork {
         }
         self.terminal = Some(false);
         self.dispatch.take();
+        // Closing the publication receiver also drops any already-published
+        // budgeted body. The task handle independently retains cleanup
+        // ownership, so response memory need not wait for a region finalizer.
+        self.reply.take();
         self.body_publisher.take();
         if let Some(body) = &mut self.body {
             body.fail(IncomingBodyError::Cancelled { kind });
@@ -682,6 +786,8 @@ impl RequestWork {
                         let dispatch = self.dispatch.take().expect("opening request owns dispatch");
                         let body_publisher = self.body_publisher.take();
                         let body_queue_bytes = config.streaming_request_body_buffer_bytes;
+                        let response_budget = Arc::clone(&self.response_budget);
+                        let response_limit = config.max_buffered_response_bytes;
                         let (reply_tx, reply_rx) = oneshot::channel();
                         let (command_tx, mut command_rx) = oneshot::channel();
                         let (completion_tx, mut completion_rx) = oneshot::channel();
@@ -725,10 +831,21 @@ impl RequestWork {
                                     } else {
                                         dispatch.run_produced(&request_cx).await
                                     };
-                                    if reply_tx
-                                        .send_blocking((request_cx.clone(), prepared))
-                                        .is_ok()
-                                    {
+                                    let reply = match prepared {
+                                        NativeH3RouterProducedDispatch::Buffered(prepared) => {
+                                            let Ok((_, head, body)) = prepared.response else {
+                                                return false;
+                                            };
+                                            let Some(body) = response_budget.try_retain(body, response_limit) else {
+                                                return false;
+                                            };
+                                            RequestReply::Buffered { head, body }
+                                        }
+                                        NativeH3RouterProducedDispatch::Produced(prepared) => {
+                                            RequestReply::Produced { cx: request_cx.clone(), prepared }
+                                        }
+                                    };
+                                    if reply_tx.send_blocking(reply).is_ok() {
                                         match command_rx.recv(&request_cx).await {
                                             Ok(Some(producer)) => producer.await,
                                             Ok(None) => {}
@@ -902,7 +1019,7 @@ fn request_body_error_code(error: &IncomingBodyError) -> u64 {
 
 struct BufferedResponse {
     writer: NativeH3ResponseWriter,
-    body: Bytes,
+    body: RetainedResponseBody,
     offset: usize,
 }
 
@@ -928,7 +1045,7 @@ impl BufferedResponse {
                         .map_err(NativeH3SessionError::Transport)
                 });
         }
-        if self.offset == self.body.len() {
+        if self.offset == self.body.bytes.len() {
             self.writer.finish()?;
             return Poll::Ready(Ok(false));
         }
@@ -940,7 +1057,7 @@ impl BufferedResponse {
             };
         // Fit DATA framing as well as payload under both flow-control scopes.
         // Small windows must not wait for a fixed-size chunk they cannot grant.
-        let upper = (self.body.len() - self.offset)
+        let upper = (self.body.bytes.len() - self.offset)
             .min(self.writer.max_frame_payload_size())
             .min(16 * 1024);
         let mut low = 0;
@@ -959,7 +1076,7 @@ impl BufferedResponse {
             )));
         }
         self.writer
-            .queue_data(self.body.slice(self.offset..self.offset + low))?;
+            .queue_data(self.body.bytes.slice(self.offset..self.offset + low))?;
         self.offset += low;
         Poll::Ready(Ok(false))
     }
@@ -969,6 +1086,7 @@ struct ListenerConnection {
     id: ConnectionId,
     session: NativeH3Session,
     bridge: NativeH3Router,
+    response_budget: Arc<ResponseBudget>,
     control: StreamId,
     requests: BTreeMap<StreamId, RequestWork>,
     seen_requests: BTreeSet<StreamId>,
@@ -985,6 +1103,7 @@ struct ListenerConnection {
 
 struct ListenerState {
     router: Arc<Router>,
+    response_budget: Arc<ResponseBudget>,
     config: NativeH3ListenerConfig,
     max_peer_uni_streams: u64,
     connections: Vec<ListenerConnection>,
@@ -998,6 +1117,7 @@ impl ListenerState {
     fn new(router: Arc<Router>, config: NativeH3ListenerConfig, max_peer_uni_streams: u64) -> Self {
         Self {
             router,
+            response_budget: Arc::new(ResponseBudget::new(config.max_total_buffered_response_bytes)),
             config,
             max_peer_uni_streams,
             connections: Vec::new(),
@@ -1135,6 +1255,7 @@ impl ListenerState {
                             Arc::clone(&self.router),
                             self.config.router,
                         ),
+                        response_budget: Arc::clone(&self.response_budget),
                         control,
                         requests: BTreeMap::new(),
                         seen_requests: BTreeSet::new(),
@@ -1798,7 +1919,13 @@ impl ListenerConnection {
                         }
                         self.requests.insert(
                             dispatch.stream_id(),
-                            RequestWork::new(cx, dispatch, config, assembly_deadline),
+                            RequestWork::new(
+                                cx,
+                                dispatch,
+                                config,
+                                assembly_deadline,
+                                Arc::clone(&self.response_budget),
+                            ),
                         );
                         *active += 1;
                     }
@@ -1889,38 +2016,29 @@ impl ListenerConnection {
                         request.cancel(cx, config.request_drain_timeout);
                         progress = true;
                     }
-                    Poll::Ready(Ok((request_cx, prepared))) => {
+                    Poll::Ready(Ok(prepared)) => {
                         request.reply = None;
                         request.response_started = true;
                         progress = true;
                         match prepared {
-                            NativeH3RouterProducedDispatch::Buffered(prepared) => {
-                                match prepared.response {
-                                    Ok((_, head, body))
-                                        if body.len() <= config.max_buffered_response_bytes =>
-                                    {
-                                        match self.session.start_response_writer(
-                                            connection,
-                                            *stream_id,
-                                            &head,
-                                            body.is_empty(),
-                                        ) {
-                                            Ok(writer) => {
-                                                request.buffered = Some(BufferedResponse {
-                                                    writer,
-                                                    body,
-                                                    offset: 0,
-                                                })
-                                            }
-                                            Err(_) => {
-                                                request.cancel(cx, config.request_drain_timeout)
-                                            }
-                                        }
+                            RequestReply::Buffered { head, body } => {
+                                match self.session.start_response_writer(
+                                    connection,
+                                    *stream_id,
+                                    &head,
+                                    body.bytes.is_empty(),
+                                ) {
+                                    Ok(writer) => {
+                                        request.buffered = Some(BufferedResponse {
+                                            writer,
+                                            body,
+                                            offset: 0,
+                                        })
                                     }
-                                    _ => request.cancel(cx, config.request_drain_timeout),
+                                    Err(_) => request.cancel(cx, config.request_drain_timeout),
                                 }
                             }
-                            NativeH3RouterProducedDispatch::Produced(prepared) => {
+                            RequestReply::Produced { cx: request_cx, prepared } => {
                                 match self.bridge.start_produced_dispatch_with_cx(
                                     cx,
                                     &mut self.session,
@@ -2037,5 +2155,57 @@ impl ListenerConnection {
             };
         }
         Ok(progress)
+    }
+}
+
+#[cfg(test)]
+mod response_retention_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_response_keeps_backing_credit_until_publication_is_dropped() {
+        let budget = Arc::new(ResponseBudget::new(256));
+        let mut allocation = Vec::with_capacity(256);
+        allocation.extend_from_slice(b"retained backing");
+        let view = Bytes::from(allocation).slice(0..1);
+        let body = budget.try_retain(view, 1).expect("full backing fits");
+        let (publication, receiver) = oneshot::channel();
+        assert!(
+            publication
+                .send_blocking(RequestReply::Buffered {
+                    head: H3ResponseHead::new(200, Vec::new()).unwrap(),
+                    body,
+                })
+                .is_ok()
+        );
+        assert_eq!(budget.used.load(Ordering::Acquire), 256);
+        assert!(budget.try_retain(Bytes::from_static(b"x"), 1).is_none());
+        drop(receiver);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+        let replacement = budget.try_retain(Bytes::from(vec![0; 256]), 256).unwrap();
+        assert_eq!(budget.used.load(Ordering::Acquire), 256);
+        drop(replacement);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+        assert_eq!(budget.peak.load(Ordering::Acquire), 256);
+        assert_eq!(budget.rejected.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn buffered_response_zero_limit_and_individual_limit_fail_before_publication() {
+        let disabled = Arc::new(ResponseBudget::new(0));
+        assert!(disabled.try_retain(Bytes::from_static(b"x"), 1).is_none());
+        let empty = disabled.try_retain(Bytes::new(), 0).unwrap();
+        assert_eq!(disabled.used.load(Ordering::Acquire), 0);
+        drop(empty);
+
+        let budget = Arc::new(ResponseBudget::new(256));
+        assert!(
+            budget
+                .try_retain(Bytes::from_static(b"too long"), 1)
+                .is_none()
+        );
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+        assert_eq!(budget.peak.load(Ordering::Acquire), 0);
+        assert_eq!(budget.rejected.load(Ordering::Acquire), 1);
     }
 }
