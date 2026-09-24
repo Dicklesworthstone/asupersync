@@ -6,8 +6,8 @@
 
 use super::{Cx, cap};
 use crate::runtime::{JoinError, TaskHandle};
-use crate::time::Sleep;
-use crate::types::CancelReason;
+use crate::time::{Sleep, TimerDriverHandle};
+use crate::types::{CancelReason, Time};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -121,21 +121,89 @@ impl Cx<cap::All> {
         B: FnOnce(Cx) -> BF + Send + 'static,
         BF: Future<Output = T> + Send + 'static,
     {
+        self.hedge_drained_impl(delay, None, primary, backup).await
+    }
+
+    /// Hedge under one overall deadline, then cancel and drain both branches.
+    ///
+    /// `delay` controls backup eligibility; `duration` starts on this future's
+    /// first poll and covers admission plus both attempts. Starting the backup
+    /// never resets that deadline. Neither factory starts after expiry is
+    /// observed, and a value completed at or after the deadline is ineligible.
+    /// The delayed backup checks the overall deadline again before invoking
+    /// user code, even when the owner has not yet observed timer completion.
+    ///
+    /// Requires explicit timer authority even with a zero hedge delay, and
+    /// reserves three region-owned tasks (primary, delayed backup, deadline).
+    /// A timely winner may return after the deadline because loser cleanup is
+    /// awaited. Timeout likewise waits for cleanup, preserving loser-panic
+    /// precedence. This is not a wall-clock bound on uncooperative cleanup.
+    ///
+    /// # Errors
+    /// Expiry returns `JoinError::Cancelled` with a timeout reason only after
+    /// drain. A zero duration refuses without invoking either factory. Missing
+    /// timer authority, cancellation and admission retain the existing refusal
+    /// semantics. The non-timeout hedge and legacy Scope APIs are unchanged.
+    pub async fn hedge_drained_with_timeout<T, P, PF, B, BF>(
+        &self,
+        delay: Duration,
+        duration: Duration,
+        primary: P,
+        backup: B,
+    ) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+        P: FnOnce(Cx) -> PF + Send + 'static,
+        PF: Future<Output = T> + Send + 'static,
+        B: FnOnce(Cx) -> BF + Send + 'static,
+        BF: Future<Output = T> + Send + 'static,
+    {
+        self.hedge_drained_impl(delay, Some(duration), primary, backup)
+            .await
+    }
+
+    async fn hedge_drained_impl<T, P, PF, B, BF>(
+        &self,
+        delay: Duration,
+        timeout: Option<Duration>,
+        primary: P,
+        backup: B,
+    ) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+        P: FnOnce(Cx) -> PF + Send + 'static,
+        PF: Future<Output = T> + Send + 'static,
+        B: FnOnce(Cx) -> BF + Send + 'static,
+        BF: Future<Output = T> + Send + 'static,
+    {
         if self.checkpoint().is_err() {
             return Err(hedge_cancelled(self));
         }
-        let delayed = if delay.is_zero() {
+        let schedule = if delay.is_zero() && timeout.is_none() {
             None
         } else {
             let timer = self.timer_driver().ok_or_else(|| {
                 JoinError::Cancelled(
                     CancelReason::resource_unavailable()
-                        .with_message("delayed hedge requires a timer"),
+                        .with_message("delayed or timed hedge requires a timer"),
                 )
             })?;
-            let deadline = timer.now() + delay;
-            Some((timer, deadline))
+            let now = timer.now();
+            Some((timer, now))
         };
+        if timeout.is_some_and(|duration| duration.is_zero()) {
+            return Err(JoinError::Cancelled(CancelReason::timeout()));
+        }
+        let limit = schedule.as_ref().and_then(|(timer, now)| {
+            timeout.map(|duration| (timer.clone(), *now + duration))
+        });
+        let delayed = schedule.as_ref().and_then(|(timer, now)| {
+            (!delay.is_zero()).then(|| {
+                let deadline = *now + delay;
+                let deadline = limit.as_ref().map_or(deadline, |(_, end)| deadline.min(*end));
+                (timer.clone(), deadline)
+            })
+        });
 
         let primary_finished = Arc::new(AtomicBool::new(false));
         let completion = HedgePrimaryCompletion(Arc::clone(&primary_finished));
@@ -148,6 +216,7 @@ impl Cx<cap::All> {
                 Ok(primary(child).await)
             })
         });
+        let backup_limit = limit.clone();
         let backup: RaceFactory<Result<T, JoinError>> = Box::new(move |child| {
             Box::pin(async move {
                 if let Some((timer, deadline)) = delayed {
@@ -180,11 +249,23 @@ impl Cx<cap::All> {
                     child.cancelled().await;
                     return Err(hedge_cancelled(&child));
                 }
+                if backup_limit.as_ref().is_some_and(|(timer, end)| timer.now() >= *end) {
+                    // Delay completion is not permission to start user code
+                    // after the overall deadline. The common timed engine
+                    // classifies this completion as expiry, then drains.
+                    return Err(JoinError::Cancelled(CancelReason::timeout()));
+                }
                 Ok(backup(child).await)
             })
         });
 
-        self.race_drained_with(vec![primary, backup]).await?
+        let factories = vec![primary, backup];
+        match limit {
+            Some((timer, deadline)) => {
+                self.race_factories_until(timer, deadline, factories).await?
+            }
+            None => self.race_drained_with(factories).await?,
+        }
     }
 
     /// Race child-context factories, cancelling and draining losing tasks.
@@ -293,6 +374,20 @@ impl Cx<cap::All> {
             return Err(JoinError::Cancelled(CancelReason::timeout()));
         }
         let deadline = timer.now() + duration;
+        self.race_factories_until(timer, deadline, factories).await
+    }
+
+    // Share the same absolute-deadline engine with hedging. Passing an already
+    // computed deadline avoids restarting a timeout after backup admission.
+    async fn race_factories_until<T>(
+        &self,
+        timer: TimerDriverHandle,
+        deadline: Time,
+        factories: Vec<RaceFactory<T>>,
+    ) -> Result<T, JoinError>
+    where
+        T: Send + 'static,
+    {
         let mut timed: Vec<RaceFactory<Timed<T>>> = Vec::new();
         for factory in factories {
             let clock = timer.clone();

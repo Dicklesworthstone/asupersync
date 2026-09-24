@@ -356,3 +356,203 @@ fn panic_in_backup_cleanup_overrides_a_successful_primary() {
         });
     }
 }
+
+#[test]
+fn overall_timeout_cancels_primary_without_starting_a_delayed_backup() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let seen = Arc::new(Witness::default());
+            let (_sender, receiver) = mpsc::channel(1);
+            let primary = Arc::clone(&seen);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let backup_calls = Arc::clone(&calls);
+            let mut hedge = Box::pin(cx.hedge_drained_with_timeout(
+                Duration::from_secs(3600),
+                Duration::from_millis(500),
+                move |child| parked_loser(child, receiver, primary),
+                move |_child| {
+                    backup_calls.fetch_add(1, Ordering::SeqCst);
+                    async { 9_u8 }
+                },
+            ));
+            wait_cancel(&mut hedge, &seen).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            seen.release();
+            assert!(matches!(hedge.await,
+                Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout));
+            assert!(seen.retired.load(Ordering::Acquire));
+            assert!(!cx.is_cancel_requested());
+        });
+    }
+}
+
+#[test]
+fn overall_timeout_waits_for_cleanup_of_both_started_attempts() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let a = Arc::new(Witness::default());
+            let b = Arc::new(Witness::default());
+            let (_sa, ra) = mpsc::channel(1);
+            let (_sb, rb) = mpsc::channel(1);
+            let primary = Arc::clone(&a);
+            let backup = Arc::clone(&b);
+            let mut hedge = Box::pin(cx.hedge_drained_with_timeout(
+                Duration::ZERO,
+                Duration::from_millis(500),
+                move |child| parked_loser(child, ra, primary),
+                move |child| parked_loser(child, rb, backup),
+            ));
+            wait_cancel(&mut hedge, &a).await;
+            wait_cancel(&mut hedge, &b).await;
+            assert!(a.parked.load(Ordering::Acquire));
+            assert!(b.parked.load(Ordering::Acquire));
+            assert_eq!(*a.reason.lock().unwrap(), Some(CancelKind::RaceLost));
+            assert_eq!(*b.reason.lock().unwrap(), Some(CancelKind::RaceLost));
+            a.release();
+            // Releasing one attempt cannot waive the other's cleanup.
+            poll_fn(|task| {
+                assert!(hedge.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            }).await;
+            b.release();
+            assert!(matches!(hedge.await,
+                Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout));
+            assert!(a.retired.load(Ordering::Acquire));
+            assert!(b.retired.load(Ordering::Acquire));
+            assert!(!cx.is_cancel_requested());
+        });
+    }
+}
+
+#[test]
+fn expired_or_unauthorized_timed_hedges_do_not_invoke_either_factory() {
+    native(1, |cx| async move {
+        for delay in [Duration::ZERO, Duration::from_secs(1)] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let a = Arc::clone(&calls);
+            let b = Arc::clone(&calls);
+            let result = cx.hedge_drained_with_timeout(
+                delay,
+                Duration::ZERO,
+                move |_child| {
+                    a.fetch_add(1, Ordering::SeqCst);
+                    async { 1_u8 }
+                },
+                move |_child| {
+                    b.fetch_add(1, Ordering::SeqCst);
+                    async { 2_u8 }
+                },
+            ).await;
+            assert!(matches!(result,
+                Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+        let no_time = {
+            let _guard = cx.clone()
+                .restrict::<cap::CapSet<true, false, true, true, true>>()
+                .set_current_restricted();
+            Cx::current().unwrap()
+        };
+        let result = no_time.hedge_drained_with_timeout(
+            Duration::ZERO,
+            Duration::from_secs(1),
+            |_child| -> std::future::Ready<u8> { panic!("unauthorized primary invoked") },
+            |_child| -> std::future::Ready<u8> { panic!("unauthorized backup invoked") },
+        ).await;
+        assert!(matches!(result, Err(JoinError::Cancelled(_))));
+    });
+}
+
+#[test]
+fn timely_winner_survives_cleanup_that_finishes_after_overall_deadline() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let seen = Arc::new(Witness::default());
+            let (_sender, receiver) = mpsc::channel(1);
+            let primary = Arc::clone(&seen);
+            let backup = Arc::clone(&seen);
+            let mut hedge = Box::pin(cx.hedge_drained_with_timeout(
+                Duration::ZERO,
+                Duration::from_secs(1),
+                move |child| parked_loser(child, receiver, primary),
+                move |_child| async move {
+                    backup.changed
+                        .wait_until(|| backup.parked.load(Ordering::Acquire))
+                        .await;
+                    9_u8
+                },
+            ));
+            wait_cancel(&mut hedge, &seen).await;
+            asupersync::time::sleep(cx.now(), Duration::from_millis(1100)).await;
+            poll_fn(|task| {
+                assert!(hedge.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            }).await;
+            seen.release();
+            assert_eq!(hedge.await.unwrap(), 9);
+            assert!(seen.retired.load(Ordering::Acquire));
+        });
+    }
+}
+
+#[test]
+fn primary_cleanup_panic_takes_precedence_over_overall_timeout() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let seen = Arc::new(Witness::default());
+            let (_sender, receiver) = mpsc::channel(1);
+            let primary = Arc::clone(&seen);
+            let mut hedge = Box::pin(cx.hedge_drained_with_timeout(
+                Duration::from_secs(3600),
+                Duration::from_millis(500),
+                move |child| async move {
+                    parked_loser(child, receiver, primary).await;
+                    panic!("timed hedge primary cleanup sentinel");
+                },
+                |_child| async { 9_u8 },
+            ));
+            wait_cancel(&mut hedge, &seen).await;
+            seen.release();
+            assert!(matches!(hedge.await, Err(JoinError::Panicked(_))));
+            assert!(seen.retired.load(Ordering::Acquire));
+        });
+    }
+}
+
+#[test]
+fn deadline_prevents_backup_side_effects_while_owner_is_not_polling() {
+    for workers in [1, 2] {
+        native(workers, |cx| async move {
+            let seen = Arc::new(Witness::default());
+            seen.release();
+            let (_sender, receiver) = mpsc::channel(1);
+            let primary = Arc::clone(&seen);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let backup_calls = Arc::clone(&calls);
+            let mut hedge = Box::pin(cx.hedge_drained_with_timeout(
+                Duration::from_secs(2),
+                Duration::from_secs(1),
+                move |child| parked_loser(child, receiver, primary),
+                move |_child| {
+                    backup_calls.fetch_add(1, Ordering::SeqCst);
+                    async { 9_u8 }
+                },
+            ));
+            let mut parked = std::pin::pin!(
+                seen.changed.wait_until(|| seen.parked.load(Ordering::Acquire))
+            );
+            poll_fn(|task| {
+                assert!(hedge.as_mut().poll(task).is_pending());
+                parked.as_mut().poll(task)
+            }).await;
+            // Child tasks and timers progress, but the owner does not select a
+            // winner or send loser cancellation until it resumes polling.
+            asupersync::time::sleep(cx.now(), Duration::from_millis(2100)).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(matches!(hedge.await,
+                Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::Timeout));
+            assert!(seen.cancelled.load(Ordering::Acquire));
+            assert!(seen.retired.load(Ordering::Acquire));
+        });
+    }
+}
