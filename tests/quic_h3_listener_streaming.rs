@@ -1104,6 +1104,14 @@ mod native_h3_listener_live {
                         );
                     let mut listener_config = config(8);
                     listener_config.max_concurrent_requests = 1;
+                    // One live request reserves its eight-byte body queue and
+                    // one eight-byte pending frame. A successful sibling after
+                    // reset therefore proves both ownership and byte credit
+                    // were released, not only that a wire reset was emitted.
+                    listener_config.router = listener_config
+                        .router
+                        .max_in_flight_dispatches(1)
+                        .max_total_buffered_body_bytes(16);
                     let listener = bind(&cx, router, listener_config).await;
                     let address = listener.local_addr();
                     let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
@@ -1124,20 +1132,31 @@ mod native_h3_listener_live {
                             )
                             .unwrap();
                         owner.flush(&cx).await.unwrap();
-                        receive_cancelled(
-                            &cx,
-                            &mut owner,
-                            &mut session,
-                            stream,
-                            asupersync::http::h3_quic::H3_REQUEST_CANCELLED,
+                        asupersync::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(2),
+                            wait_region_closed(&request_cx),
                         )
-                        .await;
-                        wait_region_closed(&request_cx).await;
+                        .await
+                        .expect("peer reset must retire the parked body without another packet");
                         assert_eq!(
                             *terminal.lock().unwrap(),
                             Some(IncomingBodyError::ClientAborted)
                         );
                         assert_eq!(retired.load(Ordering::SeqCst), 1);
+                        asupersync::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(2),
+                            receive_cancelled(
+                                &cx,
+                                &mut owner,
+                                &mut session,
+                                stream,
+                                asupersync::http::h3_quic::H3_REQUEST_CANCELLED,
+                            ),
+                        )
+                        .await
+                        .expect("peer reset must also terminate the independent response half");
                         response(
                             &cx,
                             &mut owner,

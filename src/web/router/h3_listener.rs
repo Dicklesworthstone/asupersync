@@ -1753,6 +1753,26 @@ impl ListenerConnection {
                 }) => {
                     self.assembly.remove(&stream_id);
                     if let Some(request) = self.requests.get_mut(&stream_id) {
+                        // RESET_STREAM terminates only the peer's send half.
+                        // The Router preserves this dispatch's ownership until
+                        // we acknowledge cancellation, but that acknowledgement
+                        // deliberately emits no response. Terminate our send
+                        // half here so a client waiting for the cancelled
+                        // response cannot remain parked indefinitely. Produced
+                        // responses may already have queued this reset while
+                        // ingesting the event; never replace their first code.
+                        if connection
+                            .inner()
+                            .streams()
+                            .stream(stream_id)
+                            .is_ok_and(|stream| stream.send_reset.is_none())
+                        {
+                            connection.reset_stream(cx, stream_id, H3_REQUEST_CANCELLED)?;
+                        }
+                        // A queued response FIN is not a completed ownership
+                        // receipt. A reset received while its region is still
+                        // closing must retain the cancelled outcome.
+                        request.terminal = None;
                         request.cancel(cx, config.request_drain_timeout);
                     }
                 }
