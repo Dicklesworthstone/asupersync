@@ -374,3 +374,61 @@ fn invalid_topology_and_timing_are_refused_before_socket_polling() {
             peers, transport, bounds), Err(SwimDriverError::Configuration(_))), "case {case}");
     }
 }
+
+/// Advances one full maintenance tick on every read, so every re-armed tick
+/// sleep is already due at the arming poll.
+#[derive(Debug)]
+struct StrideClock {
+    reads: std::sync::atomic::AtomicU64,
+    stride_nanos: u64,
+}
+impl crate::time::TimeSource for StrideClock {
+    fn now(&self) -> Time {
+        let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Time::from_nanos(read * self.stride_nanos)
+    }
+}
+
+#[test]
+fn already_due_rearmed_tick_is_consumed_without_repolling_the_completed_sleep() {
+    // asupersync-bi2462.161, end to end through `run`: a runtime worker
+    // panicked with "Sleep polled after completion" when the re-armed tick
+    // sleep completed while it was being armed and the next pass polled it.
+    use crate::runtime::{IoDriverHandle, LabReactor};
+    use crate::types::{Budget, RegionId, TaskId};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const PASSES: u64 = 64;
+    let stride_nanos = config().tick_ms * 1_000_000;
+    let clock = Arc::new(StrideClock { reads: AtomicU64::new(0), stride_nanos });
+    let timer = TimerDriverHandle::new(Arc::new(crate::time::TimerDriver::with_clock(Arc::clone(&clock))));
+    let io = IoDriverHandle::new(Arc::new(LabReactor::new()));
+    let cx = Cx::new_with_drivers(RegionId::new_for_test(0, 1), TaskId::new_for_test(0, 0),
+        Budget::INFINITE, None, Some(io), None, Some(timer), None);
+    let _current = Cx::set_current(Some(cx.clone()));
+    let silent_peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let native = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    native.set_nonblocking(true).unwrap();
+    let transport = UdpMembershipTransport::new(crate::net::UdpSocket::from_std(native).unwrap());
+    let driver = UdpSwimDriver::new_trusted_network(node("a"), protocol(), 7,
+        BTreeMap::from([(node("b"), silent_peer.local_addr().unwrap())]), transport, config()).unwrap();
+    let observer = driver.observer();
+    let mut run = std::pin::pin!(driver.run(&cx));
+    let mut task = Context::from_waker(Waker::noop());
+    for pass in 1..=PASSES {
+        let before = clock.reads.load(Ordering::SeqCst);
+        assert!(run.as_mut().poll(&mut task).is_pending(), "pass {pass}: {:?}", observer.snapshot());
+        let after = clock.reads.load(Ordering::SeqCst);
+        let snapshot = observer.snapshot();
+        // Each pass reads the clock at least twice after its turn time, so the
+        // re-armed deadline (turn time + one stride) is due when it is armed.
+        eprintln!("pass={pass} clock_ns={}..{} ticks={} status={:?}",
+            before * stride_nanos, after * stride_nanos, snapshot.stats.ticks, snapshot.status);
+        assert!(after >= before + 2, "pass {pass} must arm an already-due tick sleep");
+    }
+    let snapshot = observer.snapshot();
+    assert_eq!(snapshot.status, SwimDriverStatus::Running);
+    // Every pass delivered exactly one tick, including those whose sleep
+    // completed during arming.
+    assert_eq!(snapshot.stats.ticks, PASSES);
+}
