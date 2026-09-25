@@ -4,9 +4,7 @@
 
 use super::{AtpSession, SdkMode, TransferId, TransferPhase, TransferProgress};
 use crate::cx::{Cx, Scope};
-use crate::net::atp::protocol::{
-    AtpError, AtpOutcome, DiskError, IdempotencyKey, PlatformError, ProtocolError,
-};
+use crate::net::atp::protocol::{AtpError, AtpOutcome, DiskError, IdempotencyKey, ProtocolError};
 use serde::{Deserialize, Serialize};
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -300,6 +298,19 @@ impl TransferProgressReporter {
     }
 }
 
+/// A failed checkpoint is cancellation, not an operating-system error
+/// (asupersync-bi2462.127).
+fn cancelled_outcome<T>(cx: &Cx) -> AtpOutcome<T> {
+    AtpOutcome::Cancelled(
+        cx.cancel_reason()
+            .unwrap_or_else(CancelReason::parent_cancelled),
+    )
+}
+
+/// Read size for `verify_object`: it hashes one bounded chunk at a time
+/// because transfer policy admits objects far larger than memory.
+const VERIFY_OBJECT_READ_BYTES: usize = 256 * 1024;
+
 impl AtpSession {
     /// Send an object to the remote peer.
     pub async fn send_object(
@@ -447,7 +458,7 @@ impl AtpSession {
         request: TransferRequest,
     ) -> AtpOutcome<ActiveTransfer> {
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+            return cancelled_outcome(cx);
         }
 
         // Validate source data exists and is accessible
@@ -472,7 +483,7 @@ impl AtpSession {
             .clone()
             .unwrap_or_else(TransferId::generate);
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+            return cancelled_outcome(cx);
         }
 
         match &destination {
@@ -499,57 +510,40 @@ impl AtpSession {
 
     async fn verify_object_in_process(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         object_path: &Path,
         expected_hash: Option<&[u8]>,
     ) -> AtpOutcome<ObjectVerification> {
+        if cx.checkpoint().is_err() {
+            return cancelled_outcome(cx);
+        }
         if !object_path.exists() {
             return AtpOutcome::Err(AtpError::Disk(DiskError::FileNotFound));
         }
 
-        // Get file metadata
-        let metadata = match crate::fs::metadata(object_path).await {
-            Ok(meta) => meta,
-            Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
-        };
+        let mut buffer = vec![0_u8; VERIFY_OBJECT_READ_BYTES];
+        let (size_bytes, _, computed_hash) =
+            match crate::net::atp::transport_common::streaming::hash_file_streaming(
+                object_path,
+                &mut buffer,
+            )
+            .await
+            {
+                Ok(digest) => digest,
+                Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
+            };
+        if cx.checkpoint().is_err() {
+            return cancelled_outcome(cx);
+        }
 
-        let size_bytes = metadata.len();
-
-        // Read file contents for hash computation
-        let file_contents = match crate::fs::read(object_path).await {
-            Ok(data) => data,
-            Err(_) => return AtpOutcome::Err(AtpError::Disk(DiskError::IoError)),
-        };
-
-        // Compute SHA-256 hash using proper cryptographic hash
-        use sha2::{Digest, Sha256};
-
-        let mut hasher = Sha256::new();
-        hasher.update(&file_contents);
-        let computed_hash: [u8; 32] = hasher.finalize().into();
-
+        // Only the expected hash decides integrity. File shape proves nothing:
+        // a tar archive ends in zero blocks, and an empty file is valid
+        // content whatever its path says (asupersync-bi2462.127).
         let mut integrity_check_passed = true;
-
-        // Compare with expected hash if provided
         if let Some(expected) = expected_hash {
             use subtle::ConstantTimeEq;
             if !bool::from(computed_hash.ct_eq(expected)) {
                 // ubs:ignore - using constant time eq
-                integrity_check_passed = false;
-            }
-        }
-
-        // Additional integrity checks
-        // Check for zero-length files (might indicate corruption)
-        if size_bytes == 0 && !object_path.to_string_lossy().contains("empty") {
-            integrity_check_passed = false;
-        }
-
-        // Basic corruption detection: check for patterns that suggest truncation
-        if file_contents.len() > 100 {
-            let last_bytes = &file_contents[file_contents.len() - 10..];
-            if last_bytes.iter().all(|&b| b == 0) && file_contents.len() % 512 == 0 {
-                // Suspicious: ends with zeros and is block-aligned
                 integrity_check_passed = false;
             }
         }
@@ -576,7 +570,7 @@ impl AtpSession {
         checkpoint: &str,
     ) -> AtpOutcome<ActiveTransfer> {
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+            return cancelled_outcome(cx);
         }
 
         // Parse checkpoint data as "bytes_transferred:total_bytes:phase" format
@@ -625,7 +619,7 @@ impl AtpSession {
         _reason: Option<String>,
     ) -> AtpOutcome<()> {
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+            return cancelled_outcome(cx);
         }
         AtpOutcome::Err(AtpError::Protocol(ProtocolError::NotImplemented))
     }
@@ -655,7 +649,7 @@ impl AtpSession {
         _expected_hash: Option<&[u8]>,
     ) -> AtpOutcome<ObjectVerification> {
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+            return cancelled_outcome(cx);
         }
         if daemon_endpoint_is_reachable(&self.mode).is_err() {
             return AtpOutcome::Err(AtpError::Daemon(
@@ -681,7 +675,7 @@ impl AtpSession {
         _reason: Option<String>,
     ) -> AtpOutcome<()> {
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+            return cancelled_outcome(cx);
         }
         if daemon_endpoint_is_reachable(&self.mode).is_err() {
             return AtpOutcome::Err(AtpError::Daemon(
@@ -697,7 +691,7 @@ impl AtpSession {
         options: Option<&TransferOptions>,
     ) -> AtpOutcome<ActiveTransfer> {
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
+            return cancelled_outcome(cx);
         }
         if daemon_endpoint_is_reachable(&self.mode).is_err() {
             return AtpOutcome::Err(AtpError::Daemon(
@@ -1799,6 +1793,68 @@ mod tests {
                 !verification.verified,
                 "missing detached signatures must not be treated as authenticated"
             );
+        });
+    }
+
+    #[test]
+    fn verify_object_decides_integrity_by_hash_alone() {
+        // asupersync-bi2462.127: a file ending in zero bytes at a 512-byte
+        // multiple (every tar archive) failed even with a matching hash, and an
+        // empty file failed unless its path contained "empty".
+        use sha2::{Digest, Sha256};
+
+        futures_lite::future::block_on(async {
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::for_testing();
+            let peer = PeerId::from_label("hash_only_peer");
+            let session = sdk
+                .open_session(
+                    &cx,
+                    granted_direct_options(&config, peer, "hash-only-verification"),
+                )
+                .await
+                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let mut archive = vec![0x5a_u8; 512];
+            archive.extend_from_slice(&[0_u8; 1024]);
+            let tar_path = dir.path().join("bundle.tar");
+            std::fs::write(&tar_path, &archive).unwrap();
+            let zero_path = dir.path().join("zero.bin");
+            std::fs::write(&zero_path, b"").unwrap();
+
+            for (path, bytes) in [(&tar_path, &archive[..]), (&zero_path, &[][..])] {
+                let expected: [u8; 32] = Sha256::digest(bytes).into();
+                match session.verify_object(&cx, path, Some(&expected[..])).await {
+                    AtpOutcome::Ok(verification) => {
+                        assert!(verification.integrity_check_passed, "{}", path.display());
+                        assert_eq!(verification.hash, expected.to_vec());
+                        assert_eq!(verification.size_bytes, u64::try_from(bytes.len()).unwrap());
+                    }
+                    other => panic!("verify_object {}: {other:?}", path.display()),
+                }
+            }
+
+            let expected: [u8; 32] = Sha256::digest(&archive).into();
+            let mut tampered = archive.clone();
+            tampered[3] ^= 1;
+            std::fs::write(&tar_path, &tampered).unwrap();
+            match session
+                .verify_object(&cx, &tar_path, Some(&expected[..]))
+                .await
+            {
+                AtpOutcome::Ok(verification) => assert!(!verification.integrity_check_passed),
+                other => panic!("tampered verify_object: {other:?}"),
+            }
+
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_reason(CancelReason::user("verify cancelled"));
+            assert!(matches!(
+                session
+                    .verify_object(&cancelled, &tar_path, Some(&expected[..]))
+                    .await,
+                AtpOutcome::Cancelled(_)
+            ));
         });
     }
 

@@ -146,6 +146,31 @@ match outcome {
 The derive itself is correct and is not changing. Thanks to the
 `mcp_agent_mail_rust` maintainers for reporting the concrete breakage.
 
+### Behavior change — the legacy ATP SDK session refuses work it cannot do
+
+`asupersync::atp::sdk::AtpSession` has no transport and no object store.
+Several of its methods used to report work that never happened. They now
+return typed errors (`asupersync-bi2462.127`):
+
+- `send_object`, `stream_large_buffer`, `verify_object` and `path_diagnose`
+  return `AtpError::Policy(PolicyError::FeatureDisabled)`. Before, they
+  returned a transfer handle that moved no bytes, a stream handle reporting
+  a committed stream with zero bytes sent, a verdict that compared the
+  object id's own hash with itself, and a `NoAvailablePaths` diagnosis that
+  never probed a path.
+- `cancel_transfer` on an id the session does not hold returns
+  `ProtocolError::SessionStateMismatch`. Before, it returned `Ok(())`.
+
+Signatures are unchanged. Use `asupersync::net::atp::sdk`, the canonical
+SDK: `AtpSdk::native_transfers` (feature `tls`) moves bytes.
+
+The net SDK's `AtpSession::verify_object` now hashes files in bounded reads,
+and only the expected hash decides `integrity_check_passed`. Before, a tar
+archive (zero padding at a 512-byte multiple) and any empty file whose path
+lacked "empty" failed even when the hash matched. Its methods now report a
+cancelled `Cx` as `Cancelled` rather than as
+`PlatformError::OperatingSystemError`.
+
 ### Durable ATP resume and journaling
 
 - Sender checkpoints are persisted in bounded, append-only journals before EOF,

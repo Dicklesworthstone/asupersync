@@ -3,26 +3,30 @@
 //! This module provides the programmatic API that gives users the simple
 //! write(really_big_buffer) experience without bypassing ATP correctness.
 //! All APIs are Cx-first and support native Asupersync semantics.
+//!
+//! [`AtpSession`] is the legacy session surface. It has no transport and no
+//! object store, so its transfer and verification methods refuse with a typed
+//! error instead of reporting work that never happened
+//! (asupersync-bi2462.127). The canonical SDK is [`crate::net::atp::sdk`]:
+//! `AtpSdk::native_transfers` (feature `tls`) moves bytes, and
+//! [`AtpSession::verify_object`](crate::net::atp::sdk::AtpSession::verify_object)
+//! hashes a file's content.
 
-use crate::atp::actor::{
-    TransferActorId, TransferActorTopology, TransferChildRole, TransferRegionId,
-};
 use crate::atp::object::{ContentId, ObjectId};
 use crate::atp::stream_object::{
-    ByteRange, ConsumptionPolicy, EpochState, PrefixConsumer, StreamEpoch, StreamManifest,
+    ByteRange, ConsumptionPolicy, PrefixConsumer, StreamEpoch, StreamManifest,
 };
 use crate::atp::sync::{
     DirectoryEarlyUsabilityPolicy, DirectoryEarlyUsabilityReport, DirectoryFinalCommitState,
     DirectoryManifest,
 };
 use crate::atp::transfer::{
-    IdempotencyKey, PeerCapabilities, TransferActor, TransferCommand, TransferCommandKind,
-    TransferId, TransferManifestRef, TransferState,
+    IdempotencyKey, TransferActor, TransferCommand, TransferCommandKind, TransferId, TransferState,
 };
 use crate::atp::writer::{AtpSink, AtpWriter, ResumeToken, TransferProof, WriterConfig};
 use crate::cx::Cx;
 use crate::net::atp::protocol::outcome::{
-    AtpError, AtpOutcome, ManifestError, PathError, PolicyError, ProtocolError,
+    AtpError, AtpOutcome, ManifestError, PolicyError, ProtocolError,
 };
 use crate::sync::ContendedMutex;
 use crate::types::outcome::Outcome;
@@ -34,8 +38,6 @@ use std::sync::{Arc, PoisonError};
 
 const TRANSFER_REGISTRY_SHARDS: usize = 64;
 const CANCEL_IDEMPOTENCY_DOMAIN: &[u8] = b"ATP-SDK-CANCEL-IDEMPOTENCY-V1\0";
-const TRANSFER_ACTOR_ID_DOMAIN: &[u8] = b"ATP-SDK-TRANSFER-ACTOR-ID-V1\0";
-const TRANSFER_REGION_ID_DOMAIN: &[u8] = b"ATP-SDK-TRANSFER-REGION-ID-V1\0";
 
 type TransferActorHandle = Arc<ContendedMutex<TransferActor>>;
 
@@ -125,67 +127,6 @@ fn transfer_shard_index(transfer_id: TransferId, shard_count: usize) -> usize {
     match u64::try_from(shard_count) {
         Ok(shards) => usize::try_from(hash % shards).unwrap_or(0),
         Err(_) => 0,
-    }
-}
-
-fn transfer_actor_id(transfer_id: TransferId) -> TransferActorId {
-    TransferActorId::new(nonzero_hash_u64(
-        TRANSFER_ACTOR_ID_DOMAIN,
-        transfer_id,
-        b"actor",
-    ))
-}
-
-fn transfer_actor_topology(transfer_id: TransferId) -> TransferActorTopology {
-    let mut used = BTreeSet::new();
-    let supervisor_region = transfer_region_id(transfer_id, b"supervisor", &mut used);
-    let actor_region = transfer_region_id(transfer_id, b"actor", &mut used);
-
-    let mut topology = TransferActorTopology::new(supervisor_region, actor_region);
-    for role in [
-        TransferChildRole::PathRace,
-        TransferChildRole::Writer,
-        TransferChildRole::Repair,
-        TransferChildRole::Relay,
-        TransferChildRole::Mailbox,
-        TransferChildRole::Swarm,
-        TransferChildRole::Finalizer,
-    ] {
-        topology = topology.with_child(
-            transfer_region_id(transfer_id, role.code().as_bytes(), &mut used),
-            role,
-        );
-    }
-    topology
-}
-
-fn transfer_region_id(
-    transfer_id: TransferId,
-    label: &[u8],
-    used: &mut BTreeSet<u64>,
-) -> TransferRegionId {
-    let mut raw = nonzero_hash_u64(TRANSFER_REGION_ID_DOMAIN, transfer_id, label);
-    while !used.insert(raw) {
-        raw = raw.wrapping_add(1);
-        if raw == 0 {
-            raw = 1;
-        }
-    }
-    TransferRegionId::new(raw)
-}
-
-fn nonzero_hash_u64(domain: &[u8], transfer_id: TransferId, label: &[u8]) -> u64 {
-    let mut hasher = Sha256::new();
-    hasher.update(domain);
-    hasher.update(transfer_id.as_bytes());
-    hasher.update(label);
-    let digest: [u8; 32] = hasher.finalize().into();
-
-    let mut raw = [0_u8; 8];
-    raw.copy_from_slice(&digest[..8]);
-    match u64::from_be_bytes(raw) {
-        0 => 1,
-        value => value,
     }
 }
 
@@ -324,82 +265,20 @@ impl AtpSession {
     }
 
     /// Send an object to a remote peer.
+    ///
+    /// This session has no transport, so it refuses with
+    /// `AtpError::Policy(PolicyError::FeatureDisabled)`. It used to return a
+    /// handle for a transfer that never moved a byte (asupersync-bi2462.127).
+    /// Use `AtpSdk::native_transfers` to move objects.
     pub async fn send_object(
         &self,
         cx: &Cx,
         object: ObjectId,
-        remote_peer: [u8; 32],
+        _remote_peer: [u8; 32],
     ) -> AtpOutcome<TransferHandle> {
         cx.trace(&format!("sending object {:?} to peer", object));
 
-        // Generate transfer nonce from entropy
-        let mut transfer_nonce = [0u8; 32];
-        cx.random_bytes(&mut transfer_nonce);
-
-        // Calculate manifest root hash for the object
-        let manifest_root = match self.calculate_object_manifest_root(cx, &object).await {
-            Outcome::Ok(root) => root,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        };
-
-        let transfer_id = TransferId::derive(
-            self.local_peer_id,
-            remote_peer,
-            transfer_nonce,
-            manifest_root,
-        );
-
-        let actor_handle = Arc::new(ContendedMutex::new(
-            "transfer_actor",
-            match TransferActor::new(
-                transfer_actor_id(transfer_id),
-                transfer_id,
-                TransferManifestRef {
-                    schema_version: 1,
-                    merkle_root: manifest_root,
-                    object_count: 1,
-                },
-                PeerCapabilities::default(),
-                transfer_actor_topology(transfer_id),
-            ) {
-                Ok(actor) => actor,
-                Err(_) => {
-                    return Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch));
-                }
-            },
-        ));
-
-        // Insert into registry (need to access the Arc contents)
-        let shard = self.active_transfers.shard_for(transfer_id);
-        let mut transfers = self.active_transfers.shards[shard]
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        transfers.insert(
-            transfer_id,
-            TransferRegistryEntry {
-                actor: actor_handle.clone(),
-                direction: TransferDirection::Send,
-                object_id: Some(object.clone()),
-            },
-        );
-
-        let handle = TransferHandle {
-            transfer_id,
-            session_id: self.session_id.clone(),
-            direction: TransferDirection::Send,
-            actor: Some(actor_handle),
-        };
-
-        if self.config.enable_diagnostics {
-            cx.trace(&format!(
-                "created transfer handle {:?} with manifest root {:02x}{:02x}...",
-                handle.transfer_id, manifest_root[0], manifest_root[1]
-            ));
-        }
-
-        Outcome::ok(handle)
+        unsupported_sdk_flow(cx, "send_object")
     }
 
     /// Receive an object from a remote peer.
@@ -462,6 +341,11 @@ impl AtpSession {
     }
 
     /// Stream a large buffer with backpressure control.
+    ///
+    /// This session has no transport, so it refuses with
+    /// `AtpError::Policy(PolicyError::FeatureDisabled)`. It used to return a
+    /// handle whose manifest reported a final, committed stream although no byte
+    /// was sent (asupersync-bi2462.127). Use `AtpSdk::native_transfers`.
     pub async fn stream_large_buffer(
         &self,
         cx: &Cx,
@@ -470,108 +354,25 @@ impl AtpSession {
     ) -> AtpOutcome<StreamHandle> {
         cx.trace(&format!("streaming buffer of {} bytes", data.len()));
 
-        // Create object ID for the stream
-        let content_hash = crate::atp::object::compute_hash(data);
-        let object_id = ObjectId::content(ContentId::new(content_hash));
-
-        // Create streaming manifest with initial epoch
-        let mut manifest = StreamManifest::new(object_id.clone());
-
-        // Determine chunk boundaries based on config
-        let chunk_size = self
-            .config
-            .target_chunk_size
-            .min(self.config.max_chunk_size);
-        let mut offset = 0;
-        let mut epoch_seq = 1;
-
-        while offset < data.len() {
-            let chunk_size_usize = usize::try_from(chunk_size).unwrap_or(usize::MAX);
-            let end_offset = offset.saturating_add(chunk_size_usize).min(data.len());
-            let is_final = end_offset == data.len();
-
-            let epoch = StreamEpoch::new(
-                epoch_seq,
-                object_id.clone(),
-                ByteRange::new(
-                    u64::try_from(offset).unwrap_or(u64::MAX),
-                    u64::try_from(end_offset).unwrap_or(u64::MAX),
-                ),
-                if is_final {
-                    EpochState::Final
-                } else {
-                    EpochState::Verified
-                },
-                vec![], // Chunk boundaries would be computed here
-            );
-
-            match manifest.add_epoch(epoch) {
-                Outcome::Ok(_) => {}
-                Outcome::Err(e) => return Outcome::Err(e),
-                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-            }
-
-            offset = end_offset;
-            epoch_seq += 1;
-        }
-
-        // Derive a unique, lab-deterministic stream id from Cx entropy, matching
-        // the transfer_nonce pattern used elsewhere in this file. std::process::id()
-        // was neither unique (every stream in a process shared one id) nor
-        // deterministic (it broke lab replay — hence its former ubs:ignore).
-        let mut stream_nonce = [0u8; 16];
-        cx.random_bytes(&mut stream_nonce);
-        let stream_hex: String = stream_nonce.iter().map(|b| format!("{b:02x}")).collect();
-
-        let stream_handle = StreamHandle {
-            stream_id: format!("stream-{stream_hex}"),
-            total_bytes: u64::try_from(data.len()).unwrap_or(u64::MAX),
-            bytes_sent: 0,
-            manifest: Some(manifest),
-        };
-
-        if self.config.enable_diagnostics {
-            cx.trace(&format!(
-                "created stream {} with {} epochs",
-                stream_handle.stream_id,
-                epoch_seq - 1
-            ));
-        }
-
-        Outcome::ok(stream_handle)
+        unsupported_sdk_flow(cx, "stream_large_buffer")
     }
 
     /// Verify an object's integrity and authenticity.
+    ///
+    /// This session holds no object content, so there is nothing to hash. It
+    /// refuses with `AtpError::Policy(PolicyError::FeatureDisabled)` instead of
+    /// comparing the id's own hash with the expected one and calling that a
+    /// verification (asupersync-bi2462.127). The net SDK's
+    /// `AtpSession::verify_object` hashes a file's content.
     pub async fn verify_object(
         &self,
         cx: &Cx,
         object_id: ObjectId,
-        expected_hash: Option<[u8; 32]>,
+        _expected_hash: Option<[u8; 32]>,
     ) -> AtpOutcome<VerificationResult> {
         cx.trace(&format!("verifying object {:?}", object_id));
 
-        let computed_hash = *object_id.hash_bytes();
-        let Some(expected) = expected_hash else {
-            return Outcome::Err(AtpError::Manifest(ManifestError::ObjectNotFound));
-        };
-        let verified = computed_hash == expected;
-
-        let result = VerificationResult {
-            object_id: object_id.clone(),
-            verified,
-            computed_hash,
-            signature_valid: false,
-        };
-
-        if self.config.enable_diagnostics {
-            cx.trace(&format!(
-                "verified object {:?}: verified={}, hash={:02x}{:02x}...",
-                object_id, verified, computed_hash[0], computed_hash[1]
-            ));
-        }
-
-        Outcome::ok(result)
+        unsupported_sdk_flow(cx, "verify_object")
     }
 
     /// Resume a paused transfer from journal state.
@@ -621,12 +422,17 @@ impl AtpSession {
     }
 
     /// Cancel an active transfer.
+    ///
+    /// An id this session does not hold is refused with
+    /// `AtpError::Protocol(ProtocolError::SessionStateMismatch)` rather than
+    /// reported as cancelled (asupersync-bi2462.127).
     pub async fn cancel_transfer(&self, cx: &Cx, transfer_id: TransferId) -> AtpOutcome<()> {
         cx.trace(&format!("cancelling transfer {:?}", transfer_id));
 
-        if let Some(entry) = self.active_transfers.remove(transfer_id) {
-            request_transfer_cancel(&entry.actor);
-        }
+        let Some(entry) = self.active_transfers.remove(transfer_id) else {
+            return missing_transfer_state(cx, "cancel_transfer", transfer_id);
+        };
+        request_transfer_cancel(&entry.actor);
 
         if self.config.enable_diagnostics {
             cx.trace(&format!("cancelled transfer {:?}", transfer_id));
@@ -636,6 +442,11 @@ impl AtpSession {
     }
 
     /// Diagnose path connectivity and performance.
+    ///
+    /// This session probes no path. It refuses with
+    /// `AtpError::Policy(PolicyError::FeatureDisabled)` rather than report
+    /// `PathError::NoAvailablePaths`, a verdict it never measured
+    /// (asupersync-bi2462.127).
     pub async fn path_diagnose(
         &self,
         cx: &Cx,
@@ -643,28 +454,7 @@ impl AtpSession {
     ) -> AtpOutcome<PathDiagnostics> {
         cx.trace("diagnosing path to peer");
 
-        Outcome::Err(AtpError::Path(PathError::NoAvailablePaths))
-    }
-
-    /// Calculate manifest root hash for an object.
-    async fn calculate_object_manifest_root(
-        &self,
-        _cx: &Cx,
-        object_id: &ObjectId,
-    ) -> AtpOutcome<[u8; 32]> {
-        use sha2::{Digest, Sha256};
-
-        let mut hasher = Sha256::new();
-        hasher.update(b"ATP-SINGLE-OBJECT-MANIFEST-ROOT-V2\0");
-        hasher.update(object_id.hash_bytes());
-        hasher.update(self.config.min_chunk_size.to_le_bytes());
-        hasher.update(self.config.target_chunk_size.to_le_bytes());
-        hasher.update(self.config.max_chunk_size.to_le_bytes());
-
-        let hash = hasher.finalize();
-        let mut result = [0u8; 32];
-        result.copy_from_slice(&hash);
-        Outcome::ok(result)
+        unsupported_sdk_flow(cx, "path_diagnose")
     }
 
     /// Create a streaming consumer for safe consumption of mutable streams.
@@ -1310,6 +1100,7 @@ pub enum PathType {
 mod tests {
     use super::*;
     use crate::atp::actor::{TransferActorId, TransferActorTopology, TransferRegionId};
+    use crate::atp::stream_object::EpochState;
     use crate::atp::sync::{
         DirectoryEarlyUsabilityState, DirectoryEntryKind, DirectoryEntryMetadata,
         DirectoryManifestEntry, DirectoryPath, PathNormalizationRules,
@@ -1379,48 +1170,6 @@ mod tests {
             )
             .unwrap(),
         ))
-    }
-
-    #[test]
-    fn sdk_transfer_actor_identity_is_stable_unique_and_valid() {
-        let first = TransferId::from_u128(1);
-        let second = TransferId::from_u128(2);
-
-        assert_eq!(transfer_actor_id(first), transfer_actor_id(first));
-        assert_ne!(transfer_actor_id(first), transfer_actor_id(second));
-
-        let topology = transfer_actor_topology(first);
-        assert_eq!(topology, transfer_actor_topology(first));
-        assert_ne!(topology, transfer_actor_topology(second));
-        assert!(topology.validate().is_ok());
-
-        let mut region_ids = BTreeSet::new();
-        assert!(region_ids.insert(topology.supervisor_region.get()));
-        assert!(region_ids.insert(topology.actor_region.get()));
-        assert_ne!(topology.supervisor_region.get(), 0);
-        assert_ne!(topology.actor_region.get(), 0);
-        for child in &topology.child_regions {
-            assert_ne!(child.id.get(), 0);
-            assert!(region_ids.insert(child.id.get()));
-        }
-
-        let roles = topology
-            .child_regions
-            .iter()
-            .map(|child| child.role)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            roles,
-            BTreeSet::from([
-                TransferChildRole::PathRace,
-                TransferChildRole::Writer,
-                TransferChildRole::Repair,
-                TransferChildRole::Relay,
-                TransferChildRole::Mailbox,
-                TransferChildRole::Swarm,
-                TransferChildRole::Finalizer,
-            ])
-        );
     }
 
     fn directory_file(path: &str, content_id: &str, size_bytes: u64) -> DirectoryManifestEntry {
@@ -1948,133 +1697,107 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_path_diagnostics() {
-        futures_lite::future::block_on(async {
-            let cx = test_cx();
-            let cx = &cx;
-            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
-            let remote_peer = [1u8; 32];
-
-            assert!(matches!(
-                session.path_diagnose(cx, remote_peer).await,
-                Outcome::Err(AtpError::Path(PathError::NoAvailablePaths))
-            ));
-        });
+    fn is_feature_refusal<T>(outcome: &AtpOutcome<T>) -> bool {
+        matches!(
+            outcome,
+            Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+        )
     }
 
     #[test]
-    fn test_object_verification() {
+    fn legacy_session_refuses_transfers_and_verdicts_it_cannot_produce() {
+        // asupersync-bi2462.127: each call used to succeed, or return a verdict,
+        // without I/O. The session has no transport and no object store.
         futures_lite::future::block_on(async {
             let cx = test_cx();
             let cx = &cx;
             let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
-            let object_id = ObjectId::content(crate::atp::object::ContentId::new([1u8; 32]));
-
-            assert!(matches!(
-                session.verify_object(cx, object_id.clone(), None).await,
-                Outcome::Err(AtpError::Manifest(ManifestError::ObjectNotFound))
-            ));
-
-            let result = session
-                .verify_object(cx, object_id.clone(), Some(*object_id.hash_bytes()))
-                .await
-                .unwrap();
-            assert_eq!(result.object_id, object_id);
-            assert!(result.verified);
-            assert!(!result.signature_valid);
-        });
-    }
-
-    #[test]
-    fn test_transfer_cancellation() {
-        futures_lite::future::block_on(async {
-            let cx = test_cx();
-            let cx = &cx;
-            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
-            let transfer_id = TransferId::derive([1; 32], [2; 32], [3; 32], [4; 32]);
-
-            // Cancel transfer (should not error even if transfer doesn't exist)
-            session.cancel_transfer(cx, transfer_id).await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_streaming_with_manifest_integration() {
-        futures_lite::future::block_on(async {
-            let cx = test_cx();
-            let cx = &cx;
-            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
-            let data = b"Hello, ATP streaming world!".repeat(100); // ~2800 bytes
             let remote_peer = [2u8; 32];
+            let object_id = ObjectId::content(ContentId::new([1u8; 32]));
 
-            // Stream the buffer
-            let stream_handle = session
-                .stream_large_buffer(cx, &data, remote_peer)
-                .await
+            assert!(is_feature_refusal(
+                &session
+                    .send_object(cx, object_id.clone(), remote_peer)
+                    .await
+            ));
+            assert_eq!(session.active_transfers.len(), 0, "no transfer registered");
+            assert!(is_feature_refusal(
+                &session
+                    .stream_large_buffer(cx, b"payload", remote_peer)
+                    .await
+            ));
+            // The id's own hash as the expected hash used to report verified.
+            assert!(is_feature_refusal(
+                &session
+                    .verify_object(cx, object_id.clone(), Some(*object_id.hash_bytes()))
+                    .await
+            ));
+            assert!(is_feature_refusal(
+                &session.verify_object(cx, object_id, None).await
+            ));
+            assert!(is_feature_refusal(
+                &session.path_diagnose(cx, remote_peer).await
+            ));
+        });
+    }
+
+    #[test]
+    fn cancel_transfer_cancels_a_held_transfer_once_and_refuses_unknown_ids() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let unknown = TransferId::derive([1; 32], [2; 32], [3; 32], [4; 32]);
+            assert!(matches!(
+                session.cancel_transfer(cx, unknown).await,
+                Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+            ));
+
+            let held = TransferId::from_u128(7);
+            let actor = registry_actor(held);
+            session.active_transfers.insert(
+                held,
+                TransferRegistryEntry {
+                    actor: Arc::clone(&actor),
+                    direction: TransferDirection::Send,
+                    object_id: None,
+                },
+            );
+            session.cancel_transfer(cx, held).await.unwrap();
+            assert_eq!(
+                actor.lock().unwrap_or_else(PoisonError::into_inner).state(),
+                TransferState::Cancelling
+            );
+            assert!(matches!(
+                session.cancel_transfer(cx, held).await,
+                Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
+            ));
+        });
+    }
+
+    #[test]
+    fn stream_consumer_reads_a_final_verified_manifest() {
+        futures_lite::future::block_on(async {
+            let cx = test_cx();
+            let cx = &cx;
+            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
+            let object_id = ObjectId::content(ContentId::new([3; 32]));
+            let mut manifest = StreamManifest::new(object_id.clone());
+            manifest
+                .add_epoch(StreamEpoch::new(
+                    1,
+                    object_id,
+                    ByteRange::new(0, 64),
+                    EpochState::Final,
+                    vec![],
+                ))
                 .unwrap();
 
-            // Verify stream manifest integration
-            assert!(stream_handle.manifest().is_some());
-            assert_eq!(stream_handle.total_bytes, data.len() as u64);
-            assert!(stream_handle.verified_epochs_count() > 0);
-            assert!(
-                stream_handle.is_finalized(),
-                "stream_large_buffer has the full payload and should emit a final epoch"
-            );
-
-            let report = stream_handle.early_usability_report(ConsumptionPolicy::VerifiedOnly);
-            assert_eq!(
-                report.usable_state,
-                StreamEarlyUsabilityState::FinalCommitted
-            );
-            assert_eq!(report.final_commit_state, StreamFinalCommitState::Committed);
-            assert!(report.safety_caveats.is_empty());
-
-            // Test consumption policy creation
-            let manifest = stream_handle.manifest().unwrap().clone();
             let consumer = session
                 .create_stream_consumer(manifest, ConsumptionPolicy::VerifiedOnly)
                 .unwrap();
 
-            // Consumer should be ready to consume verified data
             assert!(consumer.data_available());
-        });
-    }
-
-    #[test]
-    fn stream_large_buffer_assigns_unique_stream_ids() {
-        // Regression: stream_id was format!("stream-{}", std::process::id()), so
-        // every stream in a process shared one id. It must now be unique per
-        // stream (Cx-nonce derived), including for identical payloads.
-        futures_lite::future::block_on(async {
-            let cx = test_cx();
-            let cx = &cx;
-            let session = AtpSession::open(cx, AtpConfig::default()).await.unwrap();
-            let remote_peer = [8u8; 32];
-
-            let a = session
-                .stream_large_buffer(cx, b"payload-a", remote_peer)
-                .await
-                .unwrap();
-            let b = session
-                .stream_large_buffer(cx, b"payload-b", remote_peer)
-                .await
-                .unwrap();
-            let a_again = session
-                .stream_large_buffer(cx, b"payload-a", remote_peer)
-                .await
-                .unwrap();
-
-            assert!(a.stream_id.starts_with("stream-"));
-            assert_ne!(
-                a.stream_id, b.stream_id,
-                "distinct streams need distinct ids"
-            );
-            assert_ne!(
-                a.stream_id, a_again.stream_id,
-                "even identical payloads are distinct stream operations"
-            );
         });
     }
 
@@ -2263,64 +1986,30 @@ mod tests {
                 "Session peer ID should not be all zeros"
             );
 
-            // 2. Check send_object creates real transfer handle with non-zero IDs
-            let handle = session
-                .send_object(cx, object_id.clone(), remote_peer)
-                .await
-                .unwrap();
-            assert_ne!(
-                handle.transfer_id.as_bytes(),
-                [0u8; 32],
-                "Transfer ID should not be all zeros"
-            );
+            // 2. send_object refuses rather than hand out a handle for a transfer
+            // that moves nothing (asupersync-bi2462.127).
+            assert!(is_feature_refusal(
+                &session
+                    .send_object(cx, object_id.clone(), remote_peer)
+                    .await
+            ));
 
-            // 3. receive_object must not fabricate a receipt for a send-side transfer
-            let transfer_id = handle.transfer_id;
+            // 3. receive_object must not fabricate a receipt for an unknown transfer.
+            let transfer_id =
+                TransferId::derive(session.local_peer_id, remote_peer, [5; 32], [6; 32]);
             assert!(matches!(
                 session.receive_object(cx, transfer_id).await,
                 Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
             ));
 
-            // 4. Check verify_object uses the content ID hash when expected hash is provided.
-            let verification = session
-                .verify_object(cx, object_id.clone(), Some(*object_id.hash_bytes()))
-                .await
-                .unwrap();
-            assert_ne!(
-                verification.computed_hash, [0u8; 32],
-                "Computed hash should not be all zeros"
-            );
+            // 4. verify_object cannot read content, so it gives no verdict.
+            assert!(is_feature_refusal(
+                &session
+                    .verify_object(cx, object_id.clone(), Some(*object_id.hash_bytes()))
+                    .await
+            ));
 
-            // 5. Check transfer progress is evidence-backed.
-            let progress = handle.progress();
-            assert_eq!(
-                progress.total_bytes, 0,
-                "SDK must not invent byte totals before writer/receiver evidence exists"
-            );
-            assert_eq!(progress.bytes_transferred, 0);
-
-            // 6. Check transfer state is computed from actor state.
-            let state = handle.state();
-            assert!(
-                matches!(
-                    state,
-                    TransferState::Offered
-                        | TransferState::Accepted
-                        | TransferState::Running
-                        | TransferState::Paused
-                        | TransferState::Cancelling
-                        | TransferState::Failed
-                        | TransferState::Committed
-                        | TransferState::Resumed
-                        | TransferState::MailboxStored
-                        | TransferState::RelayForwarded
-                        | TransferState::Seeded
-                        | TransferState::SwarmAssisted
-                ),
-                "Transfer state should be a valid enum value"
-            );
-
-            // 7. Object graph sending must fail closed rather than synthesize bytes.
+            // 5. Object graph sending must fail closed rather than synthesize bytes.
             let root_object = ObjectId::content(ContentId::new([99u8; 32]));
             assert!(matches!(
                 session
