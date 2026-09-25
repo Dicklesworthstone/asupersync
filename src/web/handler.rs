@@ -784,7 +784,14 @@ where
     Res: IntoResponse,
 {
     let ambient_cx = Cx::current();
-    let handler_cx = if caller_cx.timer_driver().is_some() {
+    // A caller whose runtime authority was narrowed keeps its own context,
+    // even without a timer. Swapping in a runtime request context would
+    // silently grant every capability the caller was denied
+    // (asupersync-bi2462.46).
+    let granted = caller_cx.capabilities().runtime;
+    let caller_is_restricted =
+        !(granted.spawn && granted.time && granted.entropy && granted.io && granted.remote);
+    let handler_cx = if caller_cx.timer_driver().is_some() || caller_is_restricted {
         caller_cx
     } else if let Some(current) = ambient_cx
         && (current.timer_driver().is_some() || Runtime::current_handle().is_none())
@@ -1615,6 +1622,38 @@ mod tests {
             futures_lite::future::block_on(handler.call(&cx, Request::new("GET", "/inspect")));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
+    }
+
+    #[test]
+    fn async_cx_handler_keeps_a_capability_restricted_caller_context() {
+        // asupersync-bi2462.46: a TIME-masked caller has no timer driver, and
+        // the handler used to swap in a fresh runtime request context. That
+        // restored every capability the caller had been denied.
+        use crate::cx::cap::{self, CapSetRuntimeMask};
+
+        async fn inspect(cx: Cx) -> &'static str {
+            let caps = cx.capabilities();
+            if caps.time || caps.spawn {
+                "escaped"
+            } else {
+                "restricted"
+            }
+        }
+
+        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+        let resp = runtime.block_on(async {
+            let mut restricted = Cx::current().expect("runtime task context");
+            restricted.runtime_mask = restricted
+                .runtime_mask
+                .intersect(<cap::CapSet<false, false, true, true, true>>::MASK);
+            assert!(restricted.timer_driver().is_none());
+            let handler = AsyncCxFnHandler::new(inspect);
+            handler
+                .call(&restricted, Request::new("GET", "/pure"))
+                .await
+        });
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "restricted");
     }
 
     #[test]
