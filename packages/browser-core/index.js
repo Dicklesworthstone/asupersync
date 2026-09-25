@@ -39,6 +39,13 @@ const reliableStreams = createReliableStreamManager({
 const WEBTRANSPORT_TASK_LABEL = "browser-webtransport";
 const WEBTRANSPORT_CANCEL_KIND = "abort_signal";
 const WEBTRANSPORT_CLOSE_KIND = "webtransport_close";
+// Per-session bounds on facade-owned payloads, not browser/network buffers.
+// The terminal outcome has a reserved slot beyond the datagram count limit.
+const WEBTRANSPORT_DATAGRAM_LIMITS = Object.freeze({
+  maxDatagramBytes: 65_536,
+  maxQueuedDatagrams: 256,
+  maxQueuedBytes: 1_048_576,
+});
 
 const CANCELLATION_PHASE_ORDER = Object.freeze([
   "requested",
@@ -694,6 +701,44 @@ function resolveWebTransportConstructor() {
   return globalObject.WebTransport;
 }
 
+function checkWebTransportDatagramLength(length, label) {
+  if (!Number.isSafeInteger(length) || length < 0
+    || length > WEBTRANSPORT_DATAGRAM_LIMITS.maxDatagramBytes) {
+    throw new RangeError(`${label} exceeds the WebTransport datagram byte limit`);
+  }
+}
+
+function copyWebTransportDatagram(value, label) {
+  let view;
+  if (ArrayBuffer.isView(value)) {
+    const length = value.byteLength;
+    checkWebTransportDatagramLength(length, label);
+    view = new Uint8Array(value.buffer, value.byteOffset, length);
+  } else if (value instanceof ArrayBuffer) {
+    const length = value.byteLength;
+    checkWebTransportDatagramLength(length, label);
+    view = new Uint8Array(value, 0, length);
+  } else if (Array.isArray(value)) {
+    const length = value.length;
+    checkWebTransportDatagramLength(length, label);
+    const bytes = new Uint8Array(length);
+    // Cache the bounded length; do not invoke an arbitrary input iterator or
+    // spread an array whose element getters can change its length mid-copy.
+    for (let i = 0; i < length; i += 1) {
+      const byte = value[i];
+      if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+        throw new TypeError(`${label} must contain only integer bytes`);
+      }
+      bytes[i] = byte;
+    }
+    return bytes;
+  } else {
+    throw new TypeError(`${label} must be Uint8Array, ArrayBuffer, ArrayBufferView, or byte[]`);
+  }
+  // Retain only the admitted bytes, not an arbitrarily large backing buffer.
+  return new Uint8Array(view);
+}
+
 function encodeWebTransportDatagram(value, label) {
   if (typeof value === "string") {
     if (typeof TextEncoder !== "function") {
@@ -710,6 +755,20 @@ function queueWebTransportOutcome(state, outcome, { terminal = false } = {}) {
   }
   if (terminal) {
     state.terminalQueued = true;
+  } else {
+    // Input accessors can close the owner while the datagram is being copied.
+    if (state.closed) return;
+    const bytes = outcome.value.byteLength;
+    if (state.inbox.length >= WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedDatagrams
+      || bytes > WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedBytes - state.inboxBytes) {
+      settleHostWebTransportState(
+        state,
+        failOut("compatibility_rejected", "transient", "webtransport receive queue capacity exhausted"),
+        "receive_overflow",
+      );
+      return;
+    }
+    state.inboxBytes += bytes;
   }
   state.inbox.push(outcome);
 }
@@ -845,7 +904,7 @@ async function pumpWebTransportReads(state, sessionOrigin) {
       if (value !== undefined) {
         queueWebTransportOutcome(
           state,
-          Outcome.ok(Uint8Array.from(normalizeByteArray(value, "webtransport datagram"))),
+          Outcome.ok(copyWebTransportDatagram(value, "webtransport datagram")),
         );
       }
     } catch (error) {
@@ -1247,6 +1306,7 @@ export function webtransport_open(request, consumerVersion = null) {
       sessionOrigin,
       scopeKey: keyOf(request.scope, "request.scope", "region"),
       inbox: [],
+      inboxBytes: 0,
       pendingWrites: [],
       ready: false,
       closed: false,
@@ -1330,6 +1390,9 @@ export function webtransport_recv(request, _consumerVersion = null) {
     );
   }
   const result = state.inbox.shift() ?? Outcome.ok(undefined);
+  if (result.outcome === "ok" && result.value !== undefined) {
+    state.inboxBytes -= result.value.byteLength;
+  }
   if (isTerminalOutcome(result)) {
     INFLIGHT_WEBTRANSPORTS.delete(sessionKey);
   }
