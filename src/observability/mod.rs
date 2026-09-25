@@ -36,6 +36,8 @@
 //! ```
 
 pub mod analyzer_plugin;
+#[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+pub mod async_export;
 #[cfg(test)]
 pub mod batch_span_processor_flush_audit_test;
 pub mod cancellation_analyzer;
@@ -995,7 +997,7 @@ mod tests {
 
     /// br-asupersync-z5ge0x: install_global_observability_clock installs
     /// the singleton at most once per process. The first installation
-    /// returns Ok; subsequent attempts return Err and do NOT replace
+    /// returns Ok; subsequent calls return Err and do NOT replace
     /// the installed clock.
     ///
     /// Because OnceLock is process-wide and other tests may install
