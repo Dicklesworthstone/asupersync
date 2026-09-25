@@ -1250,7 +1250,12 @@ impl PgRowStream<'_> {
                     }
                 }
                 _ => {
-                    // Ignore other message types (notices, etc.)
+                    if let Err(err) = self
+                        .connection
+                        .handle_async_backend_message(msg_type, &data)
+                    {
+                        return self.connection.fail_in_flight(err);
+                    }
                 }
             }
         }
@@ -3034,6 +3039,8 @@ struct PgConnectionInner {
     /// replayed after an idle reconnect so notification consumers do not lose
     /// subscriptions across server-side idle timeouts.
     subscribed_channels: BTreeSet<String>,
+    notifications: NotificationBuffer,
+    backend_frame: BackendFrame,
     /// br-asupersync-server-stack-hardening-eeexl1.1.2: per-connection
     /// statement-timeout override. The effective per-query timeout is
     /// `min(remaining Cx budget, this override)`; see
@@ -3326,6 +3333,7 @@ impl Drop for CancelWakerGuard<'_> {
 /// Keeping the loop generic over the stream gives deterministic tests a narrow
 /// seam for injecting cancellation from inside `poll_read`, after the guard has
 /// run but before the empty-read classification below.
+#[cfg(test)]
 async fn read_exact_from<R>(cx: &Cx, stream: &mut R, buf: &mut [u8]) -> Result<(), PgError>
 where
     R: AsyncRead + Unpin,
@@ -3380,11 +3388,163 @@ const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
 const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 8_000;
 const COPY_TERMINAL_MASKED_POLLS: u32 = 64;
 
+/// A PostgreSQL LISTEN/NOTIFY event, in server delivery order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NotificationResponseFields {
-    process_id: i32,
-    channel: String,
-    payload: String,
+pub struct PgNotification {
+    /// Process ID of the backend that sent the notification.
+    pub process_id: i32,
+    /// Channel on which the notification was sent.
+    pub channel: String,
+    /// Payload supplied to NOTIFY or `pg_notify`.
+    pub payload: String,
+}
+
+type NotificationResponseFields = PgNotification;
+
+/// An error from receiving PostgreSQL notifications.
+#[derive(Debug)]
+pub enum PgNotificationError {
+    /// A connection or protocol failure. The connection is closed on failure.
+    Database(PgError),
+    /// Notifications were dropped after the retained FIFO prefix.
+    ///
+    /// The count saturates at `u64::MAX`. Calling `next` again resumes delivery.
+    Overflow {
+        /// Number of notifications dropped in this overflow episode.
+        dropped: u64,
+    },
+}
+
+impl fmt::Display for PgNotificationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Database(err) => err.fmt(f),
+            Self::Overflow { dropped } => write!(
+                f,
+                "PostgreSQL notification buffer overflow: {dropped} notifications dropped"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PgNotificationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Database(err) => Some(err),
+            Self::Overflow { .. } => None,
+        }
+    }
+}
+
+/// Default maximum number of retained PostgreSQL notifications per connection.
+pub const DEFAULT_NOTIFICATION_CAPACITY: usize = 256;
+
+struct NotificationBuffer {
+    queue: VecDeque<PgNotification>,
+    capacity: usize,
+    dropped: u64,
+}
+
+impl Default for NotificationBuffer {
+    fn default() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            capacity: DEFAULT_NOTIFICATION_CAPACITY,
+            dropped: 0,
+        }
+    }
+}
+
+impl NotificationBuffer {
+    fn push(&mut self, notification: PgNotification) {
+        // Keep a contiguous prefix. Once a gap starts, do not append later
+        // events until the consumer has observed that gap explicitly.
+        if self.dropped != 0 || self.queue.len() >= self.capacity {
+            self.dropped = self.dropped.saturating_add(1);
+        } else {
+            self.queue.push_back(notification);
+        }
+    }
+}
+
+/// Header and body progress belongs to the connection, never to a receive
+/// future. Cancellation or dropping an idle receiver cannot lose frame bytes.
+#[derive(Default)]
+struct BackendFrame {
+    header: [u8; 5],
+    header_read: usize,
+    body: Vec<u8>,
+    body_read: usize,
+    #[cfg(test)]
+    pending_progress: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+/// A borrowing notification receiver that drives an idle connection's socket.
+///
+/// Dropping this receiver leaves LISTEN subscriptions and buffered events in
+/// place. Queries may run between borrows and retain interleaved notifications.
+/// Finish any open transaction before waiting for delivery. Notifications are
+/// not durable across disconnects, including a reconnect triggered by a query.
+pub struct PgNotifications<'a> {
+    connection: &'a mut PgConnection,
+}
+
+impl PgNotifications<'_> {
+    /// Receive the next notification, waiting on the socket when necessary.
+    ///
+    /// Buffered events are returned in order, followed by an explicit overflow
+    /// error if the bounded buffer dropped events. Cancellation takes precedence
+    /// over dequeuing and preserves buffered events and partial frame progress.
+    /// It neither sends CancelRequest nor closes an otherwise idle connection.
+    /// A disconnected connection returns a database error; no automatic reconnect
+    /// hides notifications lost while disconnected.
+    pub async fn next(&mut self, cx: &Cx) -> Outcome<PgNotification, PgNotificationError> {
+        loop {
+            if cx.checkpoint().is_err() {
+                return Outcome::Cancelled(cancelled_reason(cx));
+            }
+            if let Some(notification) = self.connection.inner.notifications.queue.pop_front() {
+                return Outcome::Ok(notification);
+            }
+            let dropped = std::mem::take(&mut self.connection.inner.notifications.dropped);
+            if dropped != 0 {
+                return Outcome::Err(PgNotificationError::Overflow { dropped });
+            }
+            if self.connection.inner.closed {
+                return Outcome::Err(PgNotificationError::Database(PgError::ConnectionClosed));
+            }
+            let message = self
+                .connection
+                .read_message_buffered(cx, MAX_BACKEND_MESSAGE_LEN as usize - 4, "notification")
+                .await;
+            let (msg_type, data) = match message {
+                Ok(message) => message,
+                Err(PgError::Cancelled(reason)) => return Outcome::Cancelled(reason),
+                Err(err) => {
+                    self.connection.abort_in_flight_exchange();
+                    return Outcome::Err(PgNotificationError::Database(err));
+                }
+            };
+            let result = if msg_type == b'E' {
+                match self.connection.parse_error_response(&data) {
+                    Ok(err) | Err(err) => Err(err),
+                }
+            } else {
+                match self
+                    .connection
+                    .handle_async_backend_message(msg_type, &data)
+                {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(unexpected_backend_message("notification receive", msg_type)),
+                    Err(err) => Err(err),
+                }
+            };
+            if let Err(err) = result {
+                self.connection.abort_in_flight_exchange();
+                return Outcome::Err(PgNotificationError::Database(err));
+            }
+        }
+    }
 }
 
 /// Structured `NotificationResponse` fields exposed only for fuzz/test seams.
@@ -3813,6 +3973,16 @@ impl PgConnection {
         }
 
         let PgConnection { inner } = fresh;
+        let mut inner = inner;
+        let fresh_notifications = std::mem::take(&mut inner.notifications);
+        inner.notifications = std::mem::take(&mut self.inner.notifications);
+        for notification in fresh_notifications.queue {
+            inner.notifications.push(notification);
+        }
+        inner.notifications.dropped = inner
+            .notifications
+            .dropped
+            .saturating_add(fresh_notifications.dropped);
         self.inner = inner;
         Outcome::Ok(PgOpenState::Reconnected)
     }
@@ -3851,7 +4021,8 @@ impl PgConnection {
     }
 
     fn handle_notification_response(&mut self, data: &[u8]) -> Result<(), PgError> {
-        let _fields = Self::parse_notification_response_fields(data)?;
+        let fields = Self::parse_notification_response_fields(data)?;
+        self.inner.notifications.push(fields);
         Ok(())
     }
 
@@ -4073,6 +4244,8 @@ impl PgConnection {
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
+                notifications: NotificationBuffer::default(),
+                backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
             },
@@ -5450,6 +5623,35 @@ impl PgConnection {
         copy.finish(cx).await
     }
 
+    /// Borrow a notification receiver. No background task is started.
+    ///
+    /// Call [`Self::listen`] first. The receiver drives socket reads while it is
+    /// awaited; notifications encountered during queries remain queued as well.
+    #[must_use]
+    pub fn notifications(&mut self) -> PgNotifications<'_> {
+        PgNotifications { connection: self }
+    }
+
+    /// Set the maximum number of retained notifications (default: 256).
+    ///
+    /// When full, retain the oldest events and count dropped newer events until
+    /// the receiver reports [`PgNotificationError::Overflow`]. Shrinking below
+    /// the current queue length drops its newest suffix under the same policy.
+    pub fn set_notification_capacity(&mut self, capacity: std::num::NonZeroUsize) {
+        let buffer = &mut self.inner.notifications;
+        buffer.capacity = capacity.get();
+        while buffer.queue.len() > buffer.capacity {
+            buffer.queue.pop_back();
+            buffer.dropped = buffer.dropped.saturating_add(1);
+        }
+    }
+
+    /// Maximum number of retained notifications.
+    #[must_use]
+    pub fn notification_capacity(&self) -> usize {
+        self.inner.notifications.capacity
+    }
+
     /// Register a PostgreSQL LISTEN channel with identifier quoting and
     /// explicit length validation.
     pub async fn listen(&mut self, cx: &Cx, channel: &str) -> Outcome<(), PgError> {
@@ -6815,6 +7017,7 @@ impl PgConnection {
     }
 
     /// Read exactly `len` bytes from the stream.
+    #[cfg(test)]
     async fn read_exact(&mut self, cx: &Cx, buf: &mut [u8]) -> Result<(), PgError> {
         let result = read_exact_from(cx, &mut self.inner.stream, buf).await;
         self.finish_io_result(cx, result).await
@@ -6835,30 +7038,83 @@ impl PgConnection {
         max_body_len: usize,
         context: &str,
     ) -> Result<(u8, Vec<u8>), PgError> {
-        // Read message type (1 byte)
-        let mut type_buf = [0u8; 1];
-        self.read_exact(cx, &mut type_buf).await?;
-        let msg_type = type_buf[0];
+        let result = self.read_message_buffered(cx, max_body_len, context).await;
+        self.finish_io_result(cx, result).await
+    }
 
-        // Read length (4 bytes, includes itself)
-        let mut len_buf = [0u8; 4];
-        self.read_exact(cx, &mut len_buf).await?;
-        let len_i32 = i32::from_be_bytes(len_buf);
-
-        let body_len = backend_message_body_len(len_i32)?;
-        if body_len > max_body_len {
-            return Err(PgError::Protocol(format!(
-                "{context} message body is {body_len} bytes; maximum is {max_body_len}"
-            )));
-        }
-
-        // Read message body
-        let mut body = vec![0u8; body_len];
-        if body_len > 0 {
-            self.read_exact(cx, &mut body).await?;
-        }
-
-        Ok((msg_type, body))
+    /// Frame progress is shared with idle receivers. Only the active-query
+    /// wrapper above sends CancelRequest and closes on cancellation.
+    async fn read_message_buffered(
+        &mut self,
+        cx: &Cx,
+        max_body_len: usize,
+        context: &str,
+    ) -> Result<(u8, Vec<u8>), PgError> {
+        let mut cancel_wake = CancelWakerGuard::new(cx);
+        std::future::poll_fn(|task_cx| {
+            let inner = &mut self.inner;
+            loop {
+                if cx.checkpoint().is_err() {
+                    return Poll::Ready(Err(cancelled_error(cx)));
+                }
+                cancel_wake.refresh(task_cx.waker());
+                let frame = &mut inner.backend_frame;
+                let reading_header = frame.header_read < frame.header.len();
+                let target = if reading_header {
+                    &mut frame.header[frame.header_read..]
+                } else {
+                    let body_len = match backend_message_body_len(i32::from_be_bytes([
+                        frame.header[1],
+                        frame.header[2],
+                        frame.header[3],
+                        frame.header[4],
+                    ])) {
+                        Ok(len) => len,
+                        Err(err) => return Poll::Ready(Err(err)),
+                    };
+                    if body_len > max_body_len {
+                        return Poll::Ready(Err(PgError::Protocol(format!(
+                            "{context} message body is {body_len} bytes; maximum is {max_body_len}"
+                        ))));
+                    }
+                    frame.body.resize(body_len, 0);
+                    if frame.body_read == body_len {
+                        let msg_type = frame.header[0];
+                        let body = std::mem::take(&mut frame.body);
+                        frame.header_read = 0;
+                        frame.body_read = 0;
+                        return Poll::Ready(Ok((msg_type, body)));
+                    }
+                    &mut frame.body[frame.body_read..]
+                };
+                let mut read_buf = ReadBuf::new(target);
+                match Pin::new(&mut inner.stream).poll_read(task_cx, &mut read_buf) {
+                    Poll::Pending => {
+                        #[cfg(test)]
+                        if let Some(progress) = &frame.pending_progress {
+                            progress.store(
+                                frame.header_read + frame.body_read,
+                                std::sync::atomic::Ordering::Release,
+                            );
+                        }
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(io_or_cancelled(cx, err))),
+                    Poll::Ready(Ok(())) => {
+                        let read = read_buf.filled().len();
+                        if read == 0 {
+                            return Poll::Ready(Err(eof_or_cancelled(cx)));
+                        }
+                        if reading_header {
+                            frame.header_read += read;
+                        } else {
+                            frame.body_read += read;
+                        }
+                    }
+                }
+            }
+        })
+        .await
     }
 
     /// Parse RowDescription message.
@@ -8870,6 +9126,8 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
+                notifications: NotificationBuffer::default(),
+                backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
             },

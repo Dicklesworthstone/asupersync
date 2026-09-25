@@ -1177,6 +1177,8 @@ mod tests {
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
                 subscribed_channels: BTreeSet::new(),
+                notifications: NotificationBuffer::default(),
+                backend_frame: BackendFrame::default(),
                 statement_timeout_override: None,
                 applied_statement_timeout_ms: None,
             },
@@ -1213,6 +1215,8 @@ mod tests {
                     consecutive_deallocate_failures: 0,
                     unhealthy: false,
                     subscribed_channels: BTreeSet::new(),
+                    notifications: NotificationBuffer::default(),
+                    backend_frame: BackendFrame::default(),
                     statement_timeout_override: None,
                     applied_statement_timeout_ms: None,
                 },
@@ -5141,6 +5145,306 @@ mod tests {
             Outcome::Ok(rows) => assert!(rows.is_empty(), "unexpected rows: {rows:?}"),
             other => panic!("expected successful query, got {other:?}"),
         }
+        assert_notification(run(conn.notifications().next(&cx)), 42, "jobs", "done");
+    }
+
+    fn assert_notification(
+        outcome: Outcome<PgNotification, PgNotificationError>,
+        process_id: i32,
+        channel: &str,
+        payload: &str,
+    ) {
+        match outcome {
+            Outcome::Ok(notification) => assert_eq!(
+                notification,
+                PgNotification {
+                    process_id,
+                    channel: channel.into(),
+                    payload: payload.into(),
+                }
+            ),
+            other => panic!("expected notification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notifications_preserve_query_interleaving_and_report_bounded_overflow() {
+        use std::io::Write;
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+            .build()
+            .expect("native runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native context");
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            assert_eq!(conn.notification_capacity(), DEFAULT_NOTIFICATION_CAPACITY);
+            conn.set_notification_capacity(std::num::NonZeroUsize::new(2).unwrap());
+            for index in 0..5 {
+                peer.write_all(&notification_response_message(
+                    index,
+                    "jobs",
+                    &format!("event-{index}"),
+                ))
+                .expect("notification frame");
+            }
+            peer.write_all(&command_complete_message("SELECT 0"))
+                .unwrap();
+            peer.write_all(&ready_for_query(b'I')).unwrap();
+            assert!(matches!(
+                conn.query_unchecked(&cx, "SELECT 1").await,
+                Outcome::Ok(_)
+            ));
+            assert_eq!(conn.inner.notifications.queue.len(), 2);
+            assert_notification(conn.notifications().next(&cx).await, 0, "jobs", "event-0");
+            assert_notification(conn.notifications().next(&cx).await, 1, "jobs", "event-1");
+            assert!(matches!(
+                conn.notifications().next(&cx).await,
+                Outcome::Err(PgNotificationError::Overflow { dropped: 3 })
+            ));
+            assert!(
+                !conn.inner.closed,
+                "overflow must not poison the query connection"
+            );
+            peer.write_all(&notification_response_message(9, "jobs", "after-gap"))
+                .unwrap();
+            assert_notification(conn.notifications().next(&cx).await, 9, "jobs", "after-gap");
+
+            for index in 10..12 {
+                conn.handle_notification_response(&notification_response_body(
+                    index, "jobs", "retained",
+                ))
+                .unwrap();
+            }
+            conn.set_notification_capacity(std::num::NonZeroUsize::new(1).unwrap());
+            assert_notification(conn.notifications().next(&cx).await, 10, "jobs", "retained");
+            assert!(matches!(
+                conn.notifications().next(&cx).await,
+                Outcome::Err(PgNotificationError::Overflow { dropped: 1 })
+            ));
+        });
+    }
+
+    #[test]
+    fn notifications_native_cancel_preserves_idle_socket_and_partial_frames() {
+        use std::future::Future;
+        use std::io::Write;
+        use std::time::Duration;
+
+        // Park before any byte, in the length header, and in the body.
+        for prefix_len in [0, 2, 7] {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+                .build()
+                .expect("native runtime");
+            runtime.block_on(async {
+                let native_cx = Cx::current().expect("native context");
+                let receive_cx = Cx::for_testing();
+                let canceller = receive_cx.clone();
+                let (mut conn, mut peer) = make_test_connection_with_peer();
+                let frame = notification_response_message(51, "jobs", "partial-\u{03bb}");
+                let progress = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+                conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
+                peer.write_all(&frame[..prefix_len]).unwrap();
+                let cancel_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                cancel_listener.set_nonblocking(true).unwrap();
+                let cancel_addr = cancel_listener.local_addr().unwrap();
+                conn.inner.process_id = 51;
+                conn.inner.secret_key = 123;
+                conn.inner.cancel_target = CancelTarget {
+                    host: cancel_addr.ip().to_string(),
+                    port: cancel_addr.port(),
+                    connect_timeout: Duration::from_millis(100),
+                };
+                let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+                let canceller_thread = std::thread::spawn(move || {
+                    parked_rx.recv_timeout(Duration::from_secs(3))
+                        .expect("notification receive must actually yield Pending");
+                    canceller.cancel_with(CancelKind::User, Some("cancel idle notification receive"));
+                });
+                let outcome = {
+                    let mut receiver = conn.notifications();
+                    let mut future = std::pin::pin!(receiver.next(&receive_cx));
+                    let mut witness = Some(parked_tx);
+                    let observed = std::future::poll_fn(|task_cx| {
+                        let result = future.as_mut().poll(task_cx);
+                        if result.is_pending()
+                            && progress.load(std::sync::atomic::Ordering::Acquire) == prefix_len
+                            && let Some(tx) = witness.take()
+                        {
+                            tx.send(()).expect("publish native Pending witness");
+                        }
+                        result
+                    });
+                    crate::time::timeout(crate::time::wall_now(), Duration::from_secs(3), observed)
+                        .await.expect("cancel must wake the idle socket receiver")
+                };
+                canceller_thread.join().expect("canceller thread");
+                assert!(matches!(outcome, Outcome::Cancelled(ref reason)
+                    if reason.kind == CancelKind::User
+                    && reason.message.as_deref() == Some("cancel idle notification receive")),
+                    "preserve explicit caller cancellation, got {outcome:?}");
+                assert!(!conn.inner.closed, "idle receive cancellation must keep the socket open");
+                assert_eq!(conn.inner.backend_frame.header_read, prefix_len.min(5));
+                assert_eq!(conn.inner.backend_frame.body_read, prefix_len.saturating_sub(5));
+                assert!(matches!(cancel_listener.accept(), Err(ref err) if err.kind() == io::ErrorKind::WouldBlock),
+                    "idle receive cancellation must never send CancelRequest");
+
+                peer.write_all(&frame[prefix_len..]).unwrap();
+                // Resume through the query decoder, proving shared framing survives
+                // switching from an interrupted receiver to an ordinary operation.
+                peer.write_all(&command_complete_message("SELECT 0")).unwrap();
+                peer.write_all(&ready_for_query(b'I')).unwrap();
+                assert!(matches!(conn.query_unchecked(&native_cx, "SELECT 1").await, Outcome::Ok(_)));
+                assert_notification(conn.notifications().next(&native_cx).await, 51, "jobs", "partial-\u{03bb}");
+                eprintln!("bead=asupersync-bi2462.154 scenario=idle-notification-cancel prefix={prefix_len} parked=true cancelled=true socket_open=true frame_resumed=true");
+            });
+        }
+    }
+
+    #[test]
+    fn notifications_native_dropped_receive_preserves_partial_body() {
+        use std::future::Future;
+        use std::io::Write;
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+            .build()
+            .expect("native runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native context");
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let frame = notification_response_message(8, "jobs", "resume-after-drop");
+            let progress = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+            conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
+            peer.write_all(&frame[..8]).unwrap();
+            {
+                let mut receiver = conn.notifications();
+                let mut future = std::pin::pin!(receiver.next(&cx));
+                let observed = std::future::poll_fn(|task_cx| {
+                    assert!(
+                        future.as_mut().poll(task_cx).is_pending(),
+                        "partial body must park"
+                    );
+                    if progress.load(std::sync::atomic::Ordering::Acquire) == 8 {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                });
+                crate::time::timeout(
+                    crate::time::wall_now(),
+                    std::time::Duration::from_secs(3),
+                    observed,
+                )
+                .await
+                .expect("receive must consume the partial body before being dropped");
+            }
+            assert_eq!(conn.inner.backend_frame.body_read, 3);
+            assert!(!conn.inner.closed);
+            peer.write_all(&frame[8..]).unwrap();
+            assert_notification(
+                conn.notifications().next(&cx).await,
+                8,
+                "jobs",
+                "resume-after-drop",
+            );
+        });
+    }
+
+    #[test]
+    fn notifications_stream_query_retains_events_and_idle_eof_closes() {
+        use std::io::Write;
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        peer.write_all(&notification_response_message(73, "jobs", "streamed"))
+            .unwrap();
+        peer.write_all(&command_complete_message("SELECT 0"))
+            .unwrap();
+        peer.write_all(&ready_for_query(b'I')).unwrap();
+        let cx = Cx::for_testing();
+        {
+            let mut rows = match run(conn.query_stream(&cx, "SELECT 1")) {
+                Outcome::Ok(rows) => rows,
+                _ => panic!("stream query setup failed"),
+            };
+            assert!(matches!(run(rows.next(&cx)), Outcome::Ok(None)));
+        }
+        let cancelled = Cx::for_testing();
+        cancelled.cancel_with(CancelKind::User, Some("before dequeue"));
+        assert!(matches!(
+            run(conn.notifications().next(&cancelled)),
+            Outcome::Cancelled(_)
+        ));
+        assert_notification(run(conn.notifications().next(&cx)), 73, "jobs", "streamed");
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(matches!(run(conn.notifications().next(&cx)),
+            Outcome::Err(PgNotificationError::Database(PgError::Io(ref err)))
+            if err.kind() == io::ErrorKind::UnexpectedEof));
+        assert!(conn.inner.closed);
+    }
+
+    #[test]
+    fn notifications_malformed_frame_fails_closed() {
+        use std::io::Write;
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        peer.write_all(&[b'A', 0, 0, 0, 3]).unwrap();
+        let cx = Cx::for_testing();
+        assert!(matches!(
+            run(conn.notifications().next(&cx)),
+            Outcome::Err(PgNotificationError::Database(PgError::Protocol(_)))
+        ));
+        assert!(conn.inner.closed);
+        assert!(
+            conn.inner.backend_frame.body.is_empty(),
+            "reject length before allocation"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires POSTGRES_NOTIFICATION_TEST_URL pointing to a real PostgreSQL server"]
+    fn notifications_real_postgres_two_connection_listen_notify() {
+        use std::time::Duration;
+        let url = std::env::var("POSTGRES_NOTIFICATION_TEST_URL")
+            .expect("POSTGRES_NOTIFICATION_TEST_URL must be explicitly supplied");
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+            .build()
+            .expect("native runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native context");
+            let mut listener = match PgConnection::connect(&cx, &url).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("listener connect failed: {other:?}"),
+            };
+            let mut sender = match PgConnection::connect(&cx, &url).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("sender connect failed: {other:?}"),
+            };
+            let channel = format!("asupersync_notify_{}", listener.inner.process_id);
+            assert!(matches!(
+                listener.listen(&cx, &channel).await,
+                Outcome::Ok(())
+            ));
+            for payload in ["first", "second-\u{03bb}"] {
+                assert!(matches!(
+                    sender.notify(&cx, &channel, payload).await,
+                    Outcome::Ok(())
+                ));
+                let mut receiver = listener.notifications();
+                let outcome = crate::time::timeout(
+                    crate::time::wall_now(),
+                    Duration::from_secs(5),
+                    receiver.next(&cx),
+                )
+                .await
+                .expect("LISTEN must receive the other connection's NOTIFY");
+                assert_notification(outcome, sender.inner.process_id, &channel, payload);
+            }
+            assert!(matches!(
+                listener.unlisten(&cx, &channel).await,
+                Outcome::Ok(())
+            ));
+            listener.close().await.expect("close listener");
+            sender.close().await.expect("close sender");
+        });
     }
 
     #[test]
@@ -9965,24 +10269,13 @@ mod tests {
         // ✓ No information loss for debugging constraint violations, type errors, etc.
     }
 
-    /// AUDIT MODULE: PostgreSQL notification ordering behavior verification
-    ///
-    /// AUDIT FINDING: SOUND - Current implementation cannot reorder NOTIFY messages
-    /// because no notification storage/delivery mechanism exists. The
-    /// handle_notification_response() method parses and discards all notifications.
-    ///
-    /// This module documents the ordering requirements that must be maintained
-    /// when notification delivery is implemented in the future.
+    /// PostgreSQL notification parsing and FIFO delivery regression checks.
     mod notification_ordering_audit {
         use super::*;
 
-        /// AUDIT: Verify current notification handling discards messages (no reordering risk)
-        ///
-        /// Current implementation is SOUND because handle_notification_response()
-        /// parses notification fields but discards them entirely. No buffering or
-        /// storage means no opportunity for reordering.
+        /// Notifications received outside the idle receiver retain exact fields.
         #[test]
-        fn audit_current_notification_handling_discards_messages() {
+        fn audit_notification_handling_retains_messages() {
             let (mut conn, _peer) = make_test_connection_with_peer();
 
             // Create notification messages with different payloads to verify parsing
@@ -10002,7 +10295,7 @@ mod tests {
                 data
             };
 
-            // Verify both notifications are parsed successfully but discarded
+            // Parsing stores both notifications for the public receiver.
             assert!(
                 conn.handle_notification_response(&notification1).is_ok(),
                 "Notification parsing should succeed"
@@ -10012,17 +10305,25 @@ mod tests {
                 "Notification parsing should succeed"
             );
 
-            // AUDIT VERIFICATION: No state change in connection after notifications
-            // This confirms notifications are discarded, not buffered/stored
+            let cx = Cx::for_testing();
+            assert_notification(
+                run(conn.notifications().next(&cx)),
+                100,
+                "channel1",
+                "payload1",
+            );
+            assert_notification(
+                run(conn.notifications().next(&cx)),
+                200,
+                "channel2",
+                "payload2",
+            );
+            assert!(conn.inner.notifications.queue.is_empty());
         }
 
-        /// AUDIT: Verify notification ordering requirements for future implementation
-        ///
-        /// When notification delivery is implemented, this test documents the
-        /// requirement that PostgreSQL server ordering MUST be preserved.
-        /// TCP guarantees ordered delivery, so client buffering must maintain order.
+        /// A burst below the configured capacity preserves server delivery order.
         #[test]
-        fn audit_notification_ordering_requirements_for_future_delivery() {
+        fn audit_notification_ordering_for_burst_delivery() {
             // AUDIT REQUIREMENT 1: PostgreSQL server determines canonical order
             // Per PostgreSQL documentation, NOTIFY commands execute in transaction
             // commit order, which is the authoritative sequence.
@@ -10032,7 +10333,7 @@ mod tests {
             // client socket in the same order the server sent them.
 
             // AUDIT REQUIREMENT 3: Client buffering must not reorder
-            // Any future notification buffering/queuing mechanism must use:
+            // The notification buffering mechanism must use:
             // - FIFO queue structure (not HashMap or unordered collection)
             // - Sequential processing (not parallel dispatch that could reorder)
             // - Atomic enqueue operations (no partial notification states)
@@ -10066,10 +10367,17 @@ mod tests {
                 );
             }
 
-            // AUDIT VERIFICATION: Current implementation is SOUND
-            // - No buffering = no reordering possible
-            // - When delivery is added, it must maintain sequence order
-            // - Test documents the 100+ rapid succession requirement
+            let cx = Cx::for_testing();
+            for index in 0..150 {
+                assert_notification(
+                    run(conn.notifications().next(&cx)),
+                    1000 + index,
+                    "events",
+                    &format!("event_{index}"),
+                );
+            }
+            assert!(conn.inner.notifications.queue.is_empty());
+            assert_eq!(conn.inner.notifications.dropped, 0);
         }
 
         /// AUDIT: Verify notification message format follows PostgreSQL protocol

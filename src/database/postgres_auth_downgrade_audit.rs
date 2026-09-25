@@ -43,6 +43,8 @@ fn make_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 needs_rollback: false,
                 needs_discard: false,
                 subscribed_channels: BTreeSet::new(),
+                notifications: super::NotificationBuffer::default(),
+                backend_frame: super::BackendFrame::default(),
                 next_stmt_id: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
