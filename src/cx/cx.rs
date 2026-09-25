@@ -4083,6 +4083,8 @@ impl<Caps> Cx<Caps> {
     /// invent ambient authority. A runtime mask without spawning authority
     /// returns [`ChildRegionError::RuntimeUnavailable`] before enqueueing.
     /// The derived context preserves this context's runtime capability mask.
+    /// Scheduler and capability budgets meet both this context's limits and
+    /// the owning region's limits, even when the request supplies an override.
     pub fn open_child_region(
         &self,
         spec: crate::cx::child_region::ChildRegionSpec,
@@ -4098,10 +4100,15 @@ impl<Caps> Cx<Caps> {
         let slot = std::sync::Arc::new(crate::runtime::spawn_mailbox::AdmittedRegionSlot::new());
         let request = crate::runtime::spawn_mailbox::CreateRegionRequest {
             parent: self.region_id(),
-            budget: spec.budget.unwrap_or_else(|| self.budget()),
-            capability_budget: spec
-                .capability_budget
-                .unwrap_or(CapabilityBudget::UNSPECIFIED),
+            // The caller can be narrower than its owning region (for example
+            // a scoped task or an AppSpec worker). The authoritative mint
+            // meets these values with the region record, but cannot recover
+            // constraints held only by this Cx. Carry them in the request so
+            // opening a child cannot restore authority the caller gave up.
+            budget: self.budget().meet(spec.budget.unwrap_or(Budget::INFINITE)),
+            capability_budget: self
+                .capability_budget()
+                .meet(spec.capability_budget.unwrap_or(CapabilityBudget::UNSPECIFIED)),
             requirements: spec.requirements,
             priority: spec.priority,
             principal_task_id,

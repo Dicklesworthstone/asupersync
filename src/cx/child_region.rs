@@ -477,6 +477,123 @@ mod tests {
     }
 
     #[test]
+    fn child_region_preserves_caller_budget_attenuation_on_native_workers() {
+        for workers in [1, 4] {
+            let runtime = if workers == 1 {
+                RuntimeBuilder::current_thread().build().unwrap()
+            } else {
+                RuntimeBuilder::new()
+                    .worker_threads(workers)
+                    .build()
+                    .unwrap()
+            };
+            let parent_budget = Budget::with_deadline_at_secs(60)
+                .with_poll_quota(4096)
+                .with_cost_quota(512);
+            // Request contexts share the runtime root region. Their private
+            // limits are deliberately stricter than that region's record.
+            let parent = runtime.request_cx_with_budget(parent_budget);
+            let envelope = CapabilityBudget::new()
+                .with_io_bytes(128)
+                .with_memory_bytes(256)
+                .with_cpu_units(64)
+                .with_artifact_bytes(32)
+                .with_cleanup_budget(Budget::new().with_poll_quota(128));
+            parent
+                .apply_child_capability_budget(envelope, CapabilityBudgetRequirements::NONE)
+                .unwrap();
+            runtime.block_on_with_cx(parent.clone(), async move {
+                let mut relaxed = ChildRegionSpec::inherit().with_budget(Budget::INFINITE);
+                relaxed.capability_budget = Some(
+                    CapabilityBudget::new()
+                        .with_io_bytes(4096)
+                        .with_memory_bytes(8192)
+                        .with_cpu_units(4096)
+                        .with_artifact_bytes(4096)
+                        .with_cleanup_budget(Budget::INFINITE),
+                );
+                for spec in [ChildRegionSpec::inherit(), relaxed] {
+                    let child = parent.open_child_region(spec).await.unwrap();
+                    assert_eq!(child.cx().budget(), parent_budget);
+                    assert_eq!(child.cx().capability_budget(), envelope);
+                    let mut body = child
+                        .cx()
+                        .spawn(move |cx| async move {
+                            assert_eq!(cx.capability_budget(), envelope);
+                            assert_eq!(cx.budget().deadline, parent_budget.deadline);
+                            assert_eq!(cx.budget().cost_quota, parent_budget.cost_quota);
+                            assert!(cx.budget().poll_quota <= parent_budget.poll_quota);
+                            crate::runtime::yield_now().await;
+                            assert_eq!(cx.capability_budget(), envelope);
+                            let ambient = Cx::current().expect("native task context");
+                            assert_eq!(ambient.capability_budget(), envelope);
+                            7_u32
+                        })
+                        .unwrap();
+                    assert_eq!(body.join(child.cx()).await.unwrap(), 7);
+                    child.close().await.unwrap();
+                    assert_eq!(parent.capability_budget(), envelope);
+                    assert_eq!(parent.budget(), parent_budget);
+                }
+                let mut tighter = ChildRegionSpec::inherit().with_budget(
+                    Budget::with_deadline_at_secs(30)
+                        .with_poll_quota(2048)
+                        .with_cost_quota(256),
+                );
+                tighter.capability_budget = Some(CapabilityBudget::new().with_io_bytes(64));
+                let child = parent.open_child_region(tighter).await.unwrap();
+                assert_eq!(
+                    child.cx().budget().deadline,
+                    Some(crate::types::Time::from_secs(30))
+                );
+                assert_eq!(child.cx().budget().poll_quota, 2048);
+                assert_eq!(child.cx().budget().cost_quota, Some(256));
+                assert_eq!(child.cx().capability_budget(), envelope.with_io_bytes(64));
+                child.close().await.unwrap();
+                assert_eq!(parent.capability_budget(), envelope);
+            });
+            assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(3)));
+        }
+    }
+
+    #[test]
+    fn child_region_cannot_replenish_an_exhausted_caller_envelope() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let parent = runtime.request_cx_with_budget(Budget::INFINITE);
+        parent
+            .apply_child_capability_budget(
+                CapabilityBudget::new().with_io_bytes(0),
+                CapabilityBudgetRequirements::NONE,
+            )
+            .unwrap();
+        runtime.block_on_with_cx(parent.clone(), async move {
+            let mut spec = ChildRegionSpec::inherit();
+            spec.capability_budget = Some(CapabilityBudget::new().with_io_bytes(4096));
+            spec.requirements = CapabilityBudgetRequirements::NONE.require_io_bytes();
+            assert!(matches!(
+                parent.open_child_region(spec).await,
+                Err(ChildRegionError::Create(
+                    RegionCreateError::CapabilityBudgetRefused {
+                        reason: crate::types::CapabilityBudgetRefusal::Exhausted(
+                            crate::types::CapabilityBudgetDimension::IoBytes
+                        ),
+                        ..
+                    }
+                ))
+            ));
+            // A refusal must not poison the parent or silently replenish it.
+            let child = parent
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            assert_eq!(child.cx().capability_budget().io_bytes, Some(0));
+            child.close().await.unwrap();
+            assert_eq!(parent.capability_budget().io_bytes, Some(0));
+        });
+        assert!(runtime.shutdown_timeout(std::time::Duration::from_secs(3)));
+    }
+
+    #[test]
     fn close_resolves_only_at_true_quiescence_draining_an_oblivious_body() {
         let runtime = RuntimeBuilder::current_thread()
             .build()

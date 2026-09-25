@@ -113,11 +113,26 @@ fn assert_pure_work_context(cx: &Cx) {
 }
 
 async fn route_and_restart_scenario(cx: Cx) {
+    route_and_restart_with_envelope(cx, false).await;
+}
+
+async fn route_and_restart_with_envelope(cx: Cx, context_only: bool) {
     let mut envelope = CapabilityBudget::UNSPECIFIED;
     envelope.io_bytes = Some(128);
     envelope.memory_bytes = Some(256);
     let mut spec = ChildRegionSpec::inherit();
-    spec.capability_budget = Some(envelope);
+    if context_only {
+        // A context can be narrower than its owning region. Deriving an
+        // application region must preserve that limit through route calls
+        // and worker restarts, even when the manifest requests more.
+        cx.apply_child_capability_budget(
+            envelope,
+            asupersync::types::CapabilityBudgetRequirements::NONE,
+        )
+        .unwrap();
+    } else {
+        spec.capability_budget = Some(envelope);
+    }
     let parent = cx.open_child_region(spec).await.unwrap();
     let starts = Arc::new(AtomicUsize::new(0));
     let route_calls = Arc::new(AtomicUsize::new(0));
@@ -500,6 +515,13 @@ async fn interval_parent_deadline_scenario(cx: Cx) {
 fn managed_app_executes_routes_restarts_and_enforces_context_on_native_workers() {
     for workers in [1, 4] {
         native(workers, route_and_restart_scenario);
+    }
+}
+
+#[test]
+fn managed_app_preserves_context_only_envelope_across_routes_and_restarts() {
+    for workers in [1, 4] {
+        native(workers, |cx| route_and_restart_with_envelope(cx, true));
     }
 }
 
