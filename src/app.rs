@@ -44,7 +44,12 @@ pub use managed_execution::{
 /// Executing bindings for the declarative manifest, separate from the legacy
 /// state-threaded lowering so existing application contracts remain intact.
 mod managed_execution {
-    use super::*;
+    use super::{
+        AppBudgetSpecV1, AppCxCapabilityV1, AppFeatureFlagV1, AppJobTriggerV1,
+        AppRequiredCapabilitiesV1, AppRouteMethodV1, AppSpecV1, AppSpecV1CompileError,
+        AppSpecV1WorkUnitKind, BTreeMap, BTreeSet, Budget, CancelKind, CancelReason, ChildSpec, Cx,
+        RegistryHandle, RuntimeState, SupervisorBuilder, runtime_restart_policy,
+    };
     use crate::cx::{ChildRegion, ChildRegionSpec, cap};
     use crate::runtime::{JoinError, SpawnError, TaskHandle};
     use crate::supervision::{
@@ -565,6 +570,7 @@ mod managed_execution {
     }
 
     /// Cancellation owner and router for a started managed application.
+    ///
     /// Dropping this handle requests controller cancellation; `join` observes
     /// actual worker and request-region drain through the retained controller.
     pub struct ManagedAppHandle<E> {

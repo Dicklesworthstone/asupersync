@@ -1,5 +1,8 @@
 //! Bounded synchronous admission and caller-owned asynchronous OTLP delivery.
 
+// This split implementation intentionally uses its parent module's private
+// exporter machinery as one cohesive unit (as transport_rq/bonded.rs does).
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use std::collections::VecDeque;
 
