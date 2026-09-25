@@ -37,6 +37,784 @@ use crate::types::{Budget, CancelKind, CancelReason, RegionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use managed_execution::{
+    ManagedApp, ManagedAppBindError, ManagedAppBinding, ManagedAppHandle, ManagedAppWorkError,
+};
+
+/// Executing bindings for the declarative manifest, separate from the legacy
+/// state-threaded lowering so existing application contracts remain intact.
+mod managed_execution {
+    use super::*;
+    use crate::cx::{ChildRegion, ChildRegionSpec, cap};
+    use crate::runtime::{JoinError, SpawnError, TaskHandle};
+    use crate::supervision::{
+        ManagedChildBinding, ManagedChildFactory, ManagedGeneration, ManagedRestartMode,
+        ManagedSupervisor, ManagedSupervisorBindError, ManagedSupervisorHandle,
+        ManagedSupervisorReport, SupervisionConfig,
+    };
+    use crate::types::{CapabilityBudget, CapabilityBudgetRequirements, Outcome};
+    use crate::web::extract::Request;
+    use crate::web::handler::Handler;
+    use crate::web::{MethodRouter, Response, Router, StatusCode};
+    use parking_lot::Mutex;
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    enum BindingKind<E> {
+        Route(Arc<dyn Handler>),
+        Worker(ManagedRestartMode, Arc<dyn ManagedChildFactory<E>>),
+    }
+
+    /// Explicit Rust implementation of one manifest work-unit name.
+    ///
+    /// Bindings use the compiler's qualified child names, such as
+    /// `api.route.health` and `api.actor.cache`; handler symbols remain useful
+    /// metadata and are never resolved through a global registry.
+    pub struct ManagedAppBinding<E> {
+        name: String,
+        kind: BindingKind<E>,
+    }
+
+    impl<E> ManagedAppBinding<E> {
+        /// Bind an HTTP handler to the method and path declared by a route.
+        #[must_use]
+        pub fn route(name: impl Into<String>, handler: impl Handler) -> Self {
+            Self {
+                name: name.into(),
+                kind: BindingKind::Route(Arc::new(handler)),
+            }
+        }
+
+        /// Bind an actor or job to a retained, explicitly restartable factory.
+        #[must_use]
+        pub fn worker(
+            name: impl Into<String>,
+            mode: ManagedRestartMode,
+            factory: impl ManagedChildFactory<E>,
+        ) -> Self {
+            Self {
+                name: name.into(),
+                kind: BindingKind::Worker(mode, Arc::new(factory)),
+            }
+        }
+    }
+
+    /// Rejection before managed application publication or task admission.
+    #[derive(Debug)]
+    #[non_exhaustive]
+    pub enum ManagedAppBindError {
+        /// Invalid manifest or unsupported legacy restart-policy mapping.
+        Compile(AppSpecV1CompileError),
+        /// A qualified work-unit name was supplied more than once.
+        Duplicate(String),
+        /// A manifest work unit has no supplied implementation.
+        Missing(String),
+        /// A binding names no work unit in the manifest.
+        Unexpected(String),
+        /// A route received a worker binding, or a worker received a handler.
+        KindMismatch(String),
+        /// A declaration needs an adapter this execution API does not provide.
+        Unsupported { unit: String, reason: &'static str },
+        /// A runtime effect or driver is absent from the caller's authority.
+        Capability {
+            unit: String,
+            capability: AppCxCapabilityV1,
+        },
+        /// A required Cargo feature was not enabled in this build.
+        Feature {
+            unit: String,
+            feature: AppFeatureFlagV1,
+        },
+        /// A budget cannot be represented or is already exhausted.
+        Budget { name: String, reason: &'static str },
+        /// The compiled managed topology was refused.
+        Supervisor(ManagedSupervisorBindError),
+        /// The runtime refused the controller task.
+        Spawn(SpawnError),
+    }
+
+    impl std::fmt::Display for ManagedAppBindError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "managed AppSpec binding failed: {self:?}")
+        }
+    }
+    impl std::error::Error for ManagedAppBindError {}
+
+    /// Domain and infrastructure failures from an executed application worker.
+    #[derive(Debug)]
+    #[non_exhaustive]
+    pub enum ManagedAppWorkError<E> {
+        /// The supplied worker returned its application error.
+        Domain(E),
+        /// Budget-region admission or quiescent close failed.
+        Region(crate::cx::ChildRegionError),
+        /// The runtime refused the actual workload task.
+        Spawn(SpawnError),
+        /// The actual workload task could not be joined.
+        Join(JoinError),
+        /// The workload's region finalizers reported unsuccessful cleanup.
+        Cleanup(crate::record::task::TaskOutcome),
+    }
+
+    struct WorkPolicy {
+        name: String,
+        required: AppRequiredCapabilitiesV1,
+        budget: Option<AppBudgetSpecV1>,
+        interval: Option<Duration>,
+    }
+
+    impl WorkPolicy {
+        fn validate_runtime(&self, cx: &Cx) -> Result<(), ManagedAppBindError> {
+            let caps = cx.capabilities();
+            for capability in &self.required.cx_capabilities {
+                let present = match capability {
+                    AppCxCapabilityV1::Pure | AppCxCapabilityV1::Trace => true,
+                    AppCxCapabilityV1::Spawn => caps.spawn,
+                    AppCxCapabilityV1::Time => caps.time && cx.timer_driver().is_some(),
+                    AppCxCapabilityV1::Entropy => caps.entropy,
+                    AppCxCapabilityV1::Io | AppCxCapabilityV1::Net => {
+                        caps.io && cx.io_driver_handle().is_some()
+                    }
+                    AppCxCapabilityV1::Remote => caps.remote && cx.has_remote(),
+                    AppCxCapabilityV1::Registry => cx.registry_handle().is_some(),
+                    AppCxCapabilityV1::Blocking => {
+                        caps.spawn && cx.blocking_pool_handle().is_some()
+                    }
+                    // These families need resource-specific binding adapters;
+                    // accepting their metadata alone would grant no resource.
+                    AppCxCapabilityV1::Database
+                    | AppCxCapabilityV1::Messaging
+                    | AppCxCapabilityV1::Tls
+                    | AppCxCapabilityV1::Quic
+                    | AppCxCapabilityV1::BrowserHost => false,
+                };
+                if !present {
+                    return Err(ManagedAppBindError::Capability {
+                        unit: self.name.clone(),
+                        capability: capability.clone(),
+                    });
+                }
+            }
+            if (self.interval.is_some()
+                || cx.budget().deadline.is_some()
+                || self
+                    .budget
+                    .as_ref()
+                    .is_some_and(|b| b.deadline_ms.is_some()))
+                && cx.timer_driver().is_none()
+            {
+                return Err(ManagedAppBindError::Capability {
+                    unit: self.name.clone(),
+                    capability: AppCxCapabilityV1::Time,
+                });
+            }
+            cx.plan_child_capability_budget(self.envelope(), CapabilityBudgetRequirements::NONE)
+                .map_err(|_| ManagedAppBindError::Budget {
+                    name: self.name.clone(),
+                    reason: "capability envelope is exhausted",
+                })?;
+            Ok(())
+        }
+
+        fn envelope(&self) -> CapabilityBudget {
+            let mut budget = CapabilityBudget::UNSPECIFIED;
+            if let Some(spec) = &self.budget {
+                budget.io_bytes = spec.io_bytes;
+                budget.memory_bytes = spec.memory_bytes;
+            }
+            budget
+        }
+
+        fn region_spec(&self, cx: &Cx) -> ChildRegionSpec {
+            let mut budget = Budget::INFINITE;
+            if let Some(spec) = &self.budget {
+                if let Some(polls) = spec.poll_quota {
+                    budget.poll_quota = u32::try_from(polls).expect("validated AppSpec poll quota");
+                }
+                if let Some(ms) = spec.deadline_ms {
+                    budget.deadline = Some(cx.now_for_observability() + Duration::from_millis(ms));
+                }
+            }
+            let mut spec = ChildRegionSpec::inherit().with_budget(budget);
+            spec.capability_budget = Some(self.envelope());
+            spec
+        }
+
+        fn restrict(&self, mut cx: Cx, registry: Option<RegistryHandle>) -> Cx {
+            use cap::CapSetRuntimeMask;
+            let has = |wanted| self.required.cx_capabilities.contains(&wanted);
+            let mut mask = cap::CapMask::all();
+            if !has(AppCxCapabilityV1::Spawn) && !has(AppCxCapabilityV1::Blocking) {
+                mask = mask.intersect(<cap::CapSet<false, true, true, true, true>>::MASK);
+            }
+            if !has(AppCxCapabilityV1::Time) {
+                mask = mask.intersect(<cap::CapSet<true, false, true, true, true>>::MASK);
+            }
+            if !has(AppCxCapabilityV1::Entropy) {
+                mask = mask.intersect(<cap::CapSet<true, true, false, true, true>>::MASK);
+            }
+            if !has(AppCxCapabilityV1::Io) && !has(AppCxCapabilityV1::Net) {
+                mask = mask.intersect(<cap::CapSet<true, true, true, false, true>>::MASK);
+            }
+            if !has(AppCxCapabilityV1::Remote) {
+                mask = mask.intersect(<cap::CapSet<true, true, true, true, false>>::MASK);
+            }
+            cx.runtime_mask = cx.runtime_mask.intersect(mask);
+            cx.with_registry_handle(if has(AppCxCapabilityV1::Registry) {
+                registry
+            } else {
+                None
+            })
+        }
+    }
+
+    async fn poll_restricted<F: Future>(cx: &Cx, future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        poll_fn(|task| {
+            let _current = Cx::set_current(Some(cx.clone()));
+            future.as_mut().poll(task)
+        })
+        .await
+    }
+
+    // Installing a scheduler deadline alone does not create a wake source for
+    // an otherwise parked task. This timer owns the declared limit, requests
+    // cancellation of the whole work region, and still joins actual cleanup.
+    // Ready work has priority over same-poll cancellation/deadline observation.
+    async fn join_work<T: Send + 'static>(
+        task: &mut TaskHandle<T>,
+        region: &ChildRegion,
+        requester: &Cx,
+    ) -> Result<T, JoinError> {
+        let mut join = std::pin::pin!(task.join(requester));
+        let mut cancelled = std::pin::pin!(requester.cancelled());
+        let mut deadline = region.cx().budget().deadline.map(|deadline| {
+            Box::pin(region.cx().timer_driver().map_or_else(
+                || crate::time::Sleep::new(deadline),
+                |timer| crate::time::Sleep::with_timer_driver(deadline, timer),
+            ))
+        });
+        let mut requested = false;
+        poll_fn(|poll_cx| {
+            if let Poll::Ready(result) = join.as_mut().poll(poll_cx) {
+                return Poll::Ready(result);
+            }
+            if !requested
+                && cancelled.as_mut().poll(poll_cx).is_ready()
+                && requester.checkpoint().is_err()
+            {
+                requested = true;
+                let reason = requester
+                    .cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("AppSpec work cancelled"));
+                let _ = region.cancel(reason);
+            }
+            if !requested
+                && deadline
+                    .as_mut()
+                    .is_some_and(|timer| timer.as_mut().poll_deadline(poll_cx).is_ready())
+            {
+                requested = true;
+                let _ = region.cancel(CancelReason::with_origin(
+                    CancelKind::Deadline,
+                    region.region_id(),
+                    region.cx().now_for_observability(),
+                ));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    type RouteSlot = Arc<Mutex<Option<Cx>>>;
+
+    struct RoutePublication(RouteSlot);
+    impl Drop for RoutePublication {
+        fn drop(&mut self) {
+            let retired = self.0.lock().take();
+            drop(retired);
+        }
+    }
+
+    struct AppRoute {
+        slot: RouteSlot,
+        policy: Arc<WorkPolicy>,
+        handler: Arc<dyn Handler>,
+    }
+
+    impl Handler for AppRoute {
+        fn call(
+            &self,
+            requester: &Cx,
+            request: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            let requester = requester.clone();
+            Box::pin(async move {
+                let Some(owner) = self.slot.lock().clone() else {
+                    return Response::empty(StatusCode::SERVICE_UNAVAILABLE);
+                };
+                if owner.is_cancel_requested() {
+                    return Response::empty(StatusCode::SERVICE_UNAVAILABLE);
+                }
+                let region = match owner
+                    .open_child_region(self.policy.region_spec(&owner))
+                    .await
+                {
+                    Ok(region) => region,
+                    Err(_) => return Response::empty(StatusCode::SERVICE_UNAVAILABLE),
+                };
+                let policy = Arc::clone(&self.policy);
+                let handler = Arc::clone(&self.handler);
+                let registry = owner.registry_handle();
+                let spawned = region.cx().spawn(move |cx| async move {
+                    let restricted = policy.restrict(cx, registry);
+                    let future = {
+                        let _current = Cx::set_current(Some(restricted.clone()));
+                        handler.call(&restricted, request)
+                    };
+                    poll_restricted(&restricted, future).await
+                });
+                let result = match spawned {
+                    Ok(mut task) => join_work(&mut task, &region, &requester).await,
+                    Err(_) => Err(JoinError::Cancelled(CancelReason::resource_unavailable())),
+                };
+                let clean = region.close_with_outcome().await.is_ok_and(|closed| {
+                    closed
+                        .cleanup_outcome
+                        .is_none_or(|outcome| matches!(outcome, Outcome::Ok(())))
+                });
+                if clean {
+                    result.unwrap_or_else(|_| Response::empty(StatusCode::INTERNAL_SERVER_ERROR))
+                } else {
+                    Response::empty(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            })
+        }
+    }
+
+    async fn run_worker<E: Send + 'static>(
+        owner: Cx,
+        generation: ManagedGeneration,
+        policy: Arc<WorkPolicy>,
+        factory: Arc<dyn ManagedChildFactory<E>>,
+    ) -> Outcome<(), ManagedAppWorkError<E>> {
+        loop {
+            if let Some(interval) = policy.interval {
+                wait_interval(&owner, interval).await;
+            }
+            if owner.checkpoint().is_err() {
+                return Outcome::Cancelled(
+                    owner
+                        .cancel_reason()
+                        .unwrap_or_else(|| CancelReason::user("AppSpec worker cancelled")),
+                );
+            }
+            let region = match owner.open_child_region(policy.region_spec(&owner)).await {
+                Ok(region) => region,
+                Err(error) => return Outcome::Err(ManagedAppWorkError::Region(error)),
+            };
+            let body_policy = Arc::clone(&policy);
+            let body_factory = Arc::clone(&factory);
+            let registry = owner.registry_handle();
+            let task = region.cx().spawn(move |cx| async move {
+                let identity = ManagedGeneration {
+                    number: generation.number,
+                    region: cx.region_id(),
+                    task: cx.task_id(),
+                };
+                let restricted = body_policy.restrict(cx, registry);
+                let future = {
+                    let _current = Cx::set_current(Some(restricted.clone()));
+                    body_factory.start(restricted.clone(), identity)
+                };
+                poll_restricted(&restricted, future).await
+            });
+            let mut outcome = match task {
+                Ok(mut task) => match join_work(&mut task, &region, &owner).await {
+                    Ok(Outcome::Ok(())) => Outcome::Ok(()),
+                    Ok(Outcome::Err(error)) => Outcome::Err(ManagedAppWorkError::Domain(error)),
+                    Ok(Outcome::Cancelled(reason)) | Err(JoinError::Cancelled(reason)) => {
+                        Outcome::Cancelled(reason)
+                    }
+                    Ok(Outcome::Panicked(payload)) | Err(JoinError::Panicked(payload)) => {
+                        Outcome::Panicked(payload)
+                    }
+                    Err(error) => Outcome::Err(ManagedAppWorkError::Join(error)),
+                },
+                Err(error) => Outcome::Err(ManagedAppWorkError::Spawn(error)),
+            };
+            match region.close_with_outcome().await {
+                Ok(closed) => {
+                    if let Some(cleanup) = closed.cleanup_outcome {
+                        if !matches!(cleanup, Outcome::Ok(()))
+                            && !matches!(outcome, Outcome::Panicked(_))
+                        {
+                            outcome = match cleanup {
+                                Outcome::Panicked(payload) => Outcome::Panicked(payload),
+                                other => Outcome::Err(ManagedAppWorkError::Cleanup(other)),
+                            };
+                        }
+                    }
+                }
+                Err(error) if !matches!(outcome, Outcome::Panicked(_)) => {
+                    outcome = Outcome::Err(ManagedAppWorkError::Region(error))
+                }
+                Err(_) => {}
+            }
+            if policy.interval.is_none() || !matches!(outcome, Outcome::Ok(())) {
+                return outcome;
+            }
+        }
+    }
+
+    async fn wait_interval(owner: &Cx, interval: Duration) {
+        let next = owner.now_for_observability() + interval;
+        let wake_at = owner
+            .budget()
+            .deadline
+            .map_or(next, |deadline| next.min(deadline));
+        let timer = owner.timer_driver().map_or_else(
+            || crate::time::Sleep::new(wake_at),
+            |driver| crate::time::Sleep::with_timer_driver(wake_at, driver),
+        );
+        let mut timer = std::pin::pin!(timer);
+        let mut cancelled = std::pin::pin!(owner.cancelled());
+        poll_fn(|task| {
+            if cancelled.as_mut().poll(task).is_ready() && owner.checkpoint().is_err() {
+                return Poll::Ready(());
+            }
+            // An inherited deadline must wake the controller even when the
+            // next interval is far away; run_worker checkpoints before admission.
+            timer.as_mut().poll_deadline(task)
+        })
+        .await;
+    }
+
+    /// Prepared, executing AppSpec with real routes and managed workers.
+    ///
+    /// The current mapping supports one supervisor group, actors, startup jobs,
+    /// and non-overlapping interval jobs. Routes run only while their managed
+    /// generation is active. Their method/path comes from the manifest; each
+    /// invocation owns a child region and drains before returning its response.
+    /// A handler that acknowledges cancellation can finish cleanup and return
+    /// a response, following the normal task-join contract. New requests after
+    /// route retirement receive 503. Interval jobs wait their declared delay
+    /// before the first invocation and between fully drained invocations.
+    /// Poll/deadline limits and memory/I/O capability envelopes derive from the
+    /// declared budget and can only tighten parent limits. Capability envelopes
+    /// govern participating runtime primitives, not arbitrary Rust allocations.
+    /// The existing five Cx effect bits are attenuated; tracing remains an
+    /// ungated diagnostic capability, as on other restricted Cx values.
+    ///
+    /// External named resources, signal triggers, SLO adapters, and observability
+    /// sink adapters require further explicit bindings and are refused here.
+    /// The legacy `compile_with_child_specs` and `CompiledApp::start` are unchanged.
+    pub struct ManagedApp<E> {
+        supervisor: ManagedSupervisor<ManagedAppWorkError<E>>,
+        router: Arc<Router>,
+        policies: Vec<Arc<WorkPolicy>>,
+        routes: Vec<RouteSlot>,
+    }
+
+    impl<E: Send + 'static> ManagedApp<E> {
+        fn validate_start(&self, cx: &Cx) -> Result<(), ManagedAppBindError> {
+            if !cx.capabilities().spawn {
+                return Err(ManagedAppBindError::Capability {
+                    unit: "application controller".to_string(),
+                    capability: AppCxCapabilityV1::Spawn,
+                });
+            }
+            for policy in &self.policies {
+                policy.validate_runtime(cx)?;
+            }
+            Ok(())
+        }
+
+        /// Inspect or install the actual router; inactive routes return 503.
+        #[must_use]
+        pub fn router(&self) -> Arc<Router> {
+            Arc::clone(&self.router)
+        }
+
+        /// Run until every worker stops or the owner requests cancellation.
+        /// The report is produced only after managed-region quiescence.
+        pub async fn run(
+            self,
+            cx: &Cx,
+        ) -> Result<ManagedSupervisorReport<ManagedAppWorkError<E>>, ManagedAppBindError> {
+            self.validate_start(cx)?;
+            Ok(self.supervisor.run(cx).await)
+        }
+
+        /// Start a region-owned controller after checking every declaration.
+        pub fn start(self, cx: &Cx) -> Result<ManagedAppHandle<E>, ManagedAppBindError> {
+            self.validate_start(cx)?;
+            let controller = self
+                .supervisor
+                .spawn(cx)
+                .map_err(ManagedAppBindError::Spawn)?;
+            Ok(ManagedAppHandle {
+                controller,
+                router: self.router,
+                routes: self.routes,
+            })
+        }
+    }
+
+    /// Cancellation owner and router for a started managed application.
+    /// Dropping this handle requests controller cancellation; `join` observes
+    /// actual worker and request-region drain through the retained controller.
+    pub struct ManagedAppHandle<E> {
+        controller: ManagedSupervisorHandle<ManagedAppWorkError<E>>,
+        router: Arc<Router>,
+        routes: Vec<RouteSlot>,
+    }
+
+    impl<E> ManagedAppHandle<E> {
+        /// Router backed by this application's live route generations.
+        #[must_use]
+        pub fn router(&self) -> Arc<Router> {
+            Arc::clone(&self.router)
+        }
+        /// Whether every declared route has an active generation.
+        #[must_use]
+        pub fn routes_ready(&self) -> bool {
+            self.routes.iter().all(|slot| {
+                slot.lock()
+                    .as_ref()
+                    .is_some_and(|cx| !cx.is_cancel_requested())
+            })
+        }
+        /// Request application stop; joining still awaits all owned cleanup.
+        pub fn abort(&self) {
+            self.controller.abort();
+        }
+        /// Await the controller's terminal report after region quiescence.
+        pub async fn join(
+            &mut self,
+        ) -> Result<ManagedSupervisorReport<ManagedAppWorkError<E>>, JoinError> {
+            self.controller.join().await
+        }
+    }
+
+    fn feature_enabled(feature: &AppFeatureFlagV1) -> bool {
+        match feature {
+            AppFeatureFlagV1::NativeRuntime => cfg!(feature = "native-runtime"),
+            AppFeatureFlagV1::WasmRuntime => cfg!(feature = "wasm-runtime"),
+            AppFeatureFlagV1::BrowserIo => cfg!(feature = "browser-io"),
+            AppFeatureFlagV1::BrowserTrace => cfg!(feature = "browser-trace"),
+            AppFeatureFlagV1::DeterministicMode => cfg!(feature = "deterministic-mode"),
+            AppFeatureFlagV1::MessagingFabric => cfg!(feature = "messaging-fabric"),
+            AppFeatureFlagV1::Metrics => cfg!(feature = "metrics"),
+            AppFeatureFlagV1::TracingIntegration => cfg!(feature = "tracing-integration"),
+            AppFeatureFlagV1::Sqlite => cfg!(feature = "sqlite"),
+            AppFeatureFlagV1::Postgres => cfg!(feature = "postgres"),
+            AppFeatureFlagV1::Mysql => cfg!(feature = "mysql"),
+            AppFeatureFlagV1::Tls => cfg!(feature = "tls"),
+            AppFeatureFlagV1::TlsNativeRoots => cfg!(feature = "tls-native-roots"),
+            AppFeatureFlagV1::TlsWebpkiRoots => cfg!(feature = "tls-webpki-roots"),
+            AppFeatureFlagV1::Quic => cfg!(feature = "quic"),
+            AppFeatureFlagV1::Http3 => cfg!(feature = "http3"),
+            AppFeatureFlagV1::Kafka => cfg!(feature = "kafka"),
+            AppFeatureFlagV1::IoUring => cfg!(feature = "io-uring"),
+            AppFeatureFlagV1::TokioCompat => cfg!(feature = "tokio-compat"),
+        }
+    }
+
+    impl AppSpecV1 {
+        /// Bind manifest routes and workers to actual managed execution.
+        /// All names, kinds, budgets, features and unsupported mappings are
+        /// checked before factories can run. Runtime authority is checked again
+        /// against the context supplied to `ManagedApp::start` or `run`.
+        #[allow(clippy::too_many_lines)]
+        pub fn bind_managed<E: Send + 'static>(
+            self,
+            bindings: Vec<ManagedAppBinding<E>>,
+            config: SupervisionConfig,
+        ) -> Result<ManagedApp<E>, ManagedAppBindError> {
+            let plan = self.compiler_plan().map_err(ManagedAppBindError::Compile)?;
+            if plan.service_groups.len() != 1 || !plan.observability_sinks.is_empty() {
+                return Err(ManagedAppBindError::Unsupported {
+                    unit: plan.app_name,
+                    reason: "managed binding requires one group and explicit observability adapters are not yet supported",
+                });
+            }
+            let restart = runtime_restart_policy(&plan.root_restart_policy)
+                .map_err(ManagedAppBindError::Compile)?;
+            let mut builder = SupervisorBuilder::new(plan.app_name).with_restart_policy(restart);
+            let mut supplied = BTreeMap::new();
+            for binding in bindings {
+                let name = binding.name.clone();
+                if supplied.insert(name.clone(), binding.kind).is_some() {
+                    return Err(ManagedAppBindError::Duplicate(name));
+                }
+            }
+            let budgets: BTreeMap<_, _> = plan
+                .budgets
+                .into_iter()
+                .map(|b| (b.name.clone(), b))
+                .collect();
+            let mut policies = Vec::new();
+            let mut managed = Vec::new();
+            let mut methods: BTreeMap<String, MethodRouter> = BTreeMap::new();
+            let mut route_keys = BTreeSet::new();
+            let mut routes = Vec::new();
+            for child in plan.children {
+                let kind = supplied
+                    .remove(&child.name)
+                    .ok_or_else(|| ManagedAppBindError::Missing(child.name.clone()))?;
+                if child.slo_hook.is_some() || !child.required_capabilities.resources.is_empty() {
+                    return Err(ManagedAppBindError::Unsupported {
+                        unit: child.name,
+                        reason: "SLO hooks and external resource names need explicit runtime adapters",
+                    });
+                }
+                for feature in &child.required_capabilities.feature_flags {
+                    if !feature_enabled(feature) {
+                        return Err(ManagedAppBindError::Feature {
+                            unit: child.name.clone(),
+                            feature: feature.clone(),
+                        });
+                    }
+                }
+                let interval = match &child.trigger {
+                    None | Some(AppJobTriggerV1::Startup) => None,
+                    Some(AppJobTriggerV1::Interval { every_ms }) if *every_ms > 0 => {
+                        Some(Duration::from_millis(*every_ms))
+                    }
+                    Some(_) => {
+                        return Err(ManagedAppBindError::Unsupported {
+                            unit: child.name,
+                            reason: "zero intervals and external signal triggers are not supported",
+                        });
+                    }
+                };
+                let budget = child
+                    .budget
+                    .as_ref()
+                    .and_then(|name| budgets.get(name))
+                    .cloned();
+                if let Some(budget) = &budget {
+                    if budget
+                        .poll_quota
+                        .is_some_and(|n| n == 0 || n > u64::from(u32::MAX))
+                        || budget.deadline_ms == Some(0)
+                        || budget.io_bytes == Some(0)
+                        || budget.memory_bytes == Some(0)
+                    {
+                        return Err(ManagedAppBindError::Budget {
+                            name: budget.name.clone(),
+                            reason: "zero or unrepresentable execution limit",
+                        });
+                    }
+                }
+                let policy = Arc::new(WorkPolicy {
+                    name: child.name.clone(),
+                    required: child.required_capabilities,
+                    budget,
+                    interval,
+                });
+                // Managed binding consumes only ChildSpec's topology. Keep its
+                // legacy callback fail-closed; user factories run exclusively
+                // inside the actual managed generation and budget-region task.
+                builder = builder.child(ChildSpec::new(
+                    child.name.clone(),
+                    |_scope: &crate::cx::Scope<'static>, _state: &mut RuntimeState, _cx: &Cx| {
+                        Err(SpawnError::RuntimeUnavailable)
+                    },
+                ));
+                match (child.kind, kind) {
+                    (AppSpecV1WorkUnitKind::Route, BindingKind::Route(handler)) => {
+                        let route = child.route.expect("compiler includes route binding");
+                        let method_key = format!("{:?}", route.method);
+                        if !route_keys.insert((route.path.clone(), method_key)) {
+                            return Err(ManagedAppBindError::Duplicate(child.name));
+                        }
+                        let slot = Arc::new(Mutex::new(None));
+                        let app_handler = AppRoute {
+                            slot: Arc::clone(&slot),
+                            policy: Arc::clone(&policy),
+                            handler,
+                        };
+                        let method = methods.remove(&route.path).unwrap_or_default();
+                        let method = match route.method {
+                            AppRouteMethodV1::Get => method.get(app_handler),
+                            AppRouteMethodV1::Post => method.post(app_handler),
+                            AppRouteMethodV1::Put => method.put(app_handler),
+                            AppRouteMethodV1::Patch => method.patch(app_handler),
+                            AppRouteMethodV1::Delete => method.delete(app_handler),
+                            AppRouteMethodV1::Head => method.head(app_handler),
+                            AppRouteMethodV1::Options => method.options(app_handler),
+                        };
+                        methods.insert(route.path, method);
+                        let publication = Arc::clone(&slot);
+                        managed.push(ManagedChildBinding::new(
+                            child.name,
+                            ManagedRestartMode::Permanent,
+                            move |cx: Cx, _generation| {
+                                let slot = Arc::clone(&publication);
+                                async move {
+                                    let _publication = RoutePublication(Arc::clone(&slot));
+                                    *slot.lock() = Some(cx.clone());
+                                    cx.cancelled().await;
+                                    let _ = cx.checkpoint();
+                                    Outcome::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
+                                        CancelReason::user("AppSpec route stopped")
+                                    }))
+                                }
+                            },
+                        ));
+                        routes.push(slot);
+                    }
+                    (
+                        AppSpecV1WorkUnitKind::Actor | AppSpecV1WorkUnitKind::BackgroundJob,
+                        BindingKind::Worker(mode, factory),
+                    ) => {
+                        let work_policy = Arc::clone(&policy);
+                        managed.push(ManagedChildBinding::new(
+                            child.name,
+                            mode,
+                            move |cx, generation| {
+                                run_worker(
+                                    cx,
+                                    generation,
+                                    Arc::clone(&work_policy),
+                                    Arc::clone(&factory),
+                                )
+                            },
+                        ));
+                    }
+                    _ => return Err(ManagedAppBindError::KindMismatch(child.name)),
+                }
+                policies.push(policy);
+            }
+            if let Some((name, _)) = supplied.into_iter().next() {
+                return Err(ManagedAppBindError::Unexpected(name));
+            }
+            let supervisor = builder
+                .compile()
+                .map_err(|error| {
+                    ManagedAppBindError::Supervisor(ManagedSupervisorBindError::Topology(error))
+                })?
+                .bind_managed(managed, config)
+                .map_err(ManagedAppBindError::Supervisor)?;
+            let mut router = Router::new().without_default_trace();
+            for (path, method) in methods {
+                router = router.route(&path, method);
+            }
+            Ok(ManagedApp {
+                supervisor,
+                router: Arc::new(router),
+                policies,
+                routes,
+            })
+        }
+    }
+}
+
 /// Schema discriminator for the declarative AppSpec v1 contract.
 pub const APPSPEC_V1_SCHEMA_VERSION: &str = "asupersync.appspec.v1";
 

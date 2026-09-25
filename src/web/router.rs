@@ -158,9 +158,16 @@ pub struct MethodRouter {
     body_policy: Option<RequestBodyPolicy>,
 }
 
+impl Default for MethodRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MethodRouter {
-    /// Create an empty method router.
-    fn new() -> Self {
+    /// Create an empty method router. Add only the methods this route accepts.
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             handlers: HashMap::with_capacity(4),
             method_not_allowed: Box::new(MethodNotAllowedHandler::new(String::new())),
