@@ -10,7 +10,6 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;

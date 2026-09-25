@@ -4,7 +4,9 @@
 use asupersync::app::{AppSpecV1, ManagedAppBindError, ManagedAppBinding};
 use asupersync::cx::{ChildRegionSpec, Cx};
 use asupersync::runtime::{RuntimeBuilder, yield_now};
-use asupersync::supervision::{BackoffStrategy, ManagedRestartMode, SupervisionConfig};
+use asupersync::supervision::{
+    BackoffStrategy, ManagedGeneration, ManagedRestartMode, SupervisionConfig,
+};
 use asupersync::sync::Notify;
 use asupersync::types::{Budget, CancelKind, CapabilityBudget, Outcome};
 use asupersync::web::extract::Request;
@@ -140,7 +142,7 @@ async fn route_and_restart_scenario(cx: Cx) {
                 ManagedAppBinding::worker(
                     "api.actor.cache",
                     ManagedRestartMode::Transient,
-                    move |cx: Cx, generation| {
+                    move |cx: Cx, generation: ManagedGeneration| {
                         // Construction and resumed polling both see the attenuated Cx.
                         assert_pure_work_context(&cx);
                         assert_eq!(generation.task, cx.task_id());
@@ -398,7 +400,7 @@ async fn jobs_scenario(cx: Cx) {
                 ManagedAppBinding::worker(
                     "api.job.interval",
                     ManagedRestartMode::Temporary,
-                    move |cx: Cx, generation| {
+                    move |cx: Cx, generation: ManagedGeneration| {
                         let observations = Arc::clone(&observations);
                         let notify = Arc::clone(&notify);
                         async move {

@@ -122,7 +122,7 @@ fn multi_exporter_delivers_registry_snapshot_to_native_collector() {
                 multi
                     .flush()
                     .unwrap_err()
-                    .message
+                    .to_string()
                     .contains("otlp.queue.pending")
             );
             runtime.block_on(async {
@@ -253,7 +253,7 @@ fn cancelled_parked_delivery_retires_once_and_keeps_later_batches() {
                     result
                 })
                 .await;
-                assert!(result.unwrap_err().message.contains("cancel"));
+                assert!(result.unwrap_err().to_string().contains("cancel"));
             });
             assert_eq!(exporter.queue_stats().failed_batches, 1);
             assert_eq!(exporter.queue_stats().queued_batches, 1);
@@ -275,7 +275,7 @@ fn cancelled_parked_delivery_retires_once_and_keeps_later_batches() {
                 exporter
                     .flush()
                     .unwrap_err()
-                    .message
+                    .to_string()
                     .contains("delivery_failed")
             );
         });
@@ -334,7 +334,7 @@ fn caller_owned_sender_wakes_for_admission_and_cancels_while_idle() {
                     result
                 })
                 .await;
-                assert!(result.unwrap_err().message.contains("cancelled"));
+                assert!(result.unwrap_err().to_string().contains("cancelled"));
             });
             peer.join().unwrap();
             assert_eq!(exporter.queue_stats().delivered_batches, 1);

@@ -522,6 +522,7 @@ fn encode_metrics(
         .encode_to_bytes(ProtobufWireLimits::for_message_size(
             OWNED_OTLP_DEFAULT_REQUEST_BYTES,
         ))
+        .map(|bytes| bytes.to_vec())
         .map_err(|_| ExportError::new("otlp.queue.encoded_batch_too_large"))
 }
 
