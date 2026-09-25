@@ -109,7 +109,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
     // ── Spawn ───────────────────────────────────────────────────────────
     AmbientFinding {
         file: "time/sleep.rs",
-        line: 957,
+        line: 1001,
         evidence_pattern: "std::thread::spawn",
         category: AmbientCategory::Spawn,
         severity: Severity::Medium,
@@ -1530,7 +1530,15 @@ fn test_function() {
     // child-reaper worker is admitted before OS child creation. The exact
     // spawn remains scanned and pinned in both inventory sections; no
     // existing scanner exemption or detection pattern is broadened.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 726;
+    // 726 -> 769 (br-asupersync-bi2462.86.1): the snapshot had not tracked the
+    // 09-18..09-24 landings. New sites: the ATP SDK native_live transport and
+    // its durable checkpoint/journal syncs, gRPC native-stream connect,
+    // replay-group sessions, the MySQL SSL_CERT_FILE root (postgres_tls already
+    // had it), one more H2 bind, and QUIC/desktop clock reads, plus test files
+    // under src/. Fewer clock reads in epoch_tracking, priority_inversion_oracle
+    // and invariant_monitor offset part of it. Every row was reviewed with the
+    // grouped snapshot; no scanner exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 769;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
