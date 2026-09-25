@@ -1415,24 +1415,32 @@ where
             }
 
             state.phase = ConnectionPhase::Reading;
-            let head_and_body =
-                match read_streaming_request_head(cx, &mut io, &mut read_buffer, &self.config).await
-                {
-                    Ok(value) => value,
-                    Err(error) => {
-                        // br-asupersync-hw83se: write the rejected head's status
-                        // (see `head_parse_failure_response`) before closing,
-                        // instead of dropping the streaming connection silently.
-                        let Some(response) = head_parse_failure_response(&error) else {
-                            return Err(error);
-                        };
-                        state.phase = ConnectionPhase::Writing;
-                        response_write.write_streaming_response(cx, &mut io, response).await?;
-                        state.requests_served += 1;
-                        state.phase = ConnectionPhase::Closing;
-                        break;
-                    }
-                };
+            let head_and_body = match read_streaming_request_head(
+                cx,
+                &mut io,
+                &mut read_buffer,
+                &self.config,
+                self.shutdown_signal.as_ref(),
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    // br-asupersync-hw83se: write the rejected head's status
+                    // (see `head_parse_failure_response`) before closing,
+                    // instead of dropping the streaming connection silently.
+                    let Some(response) = head_parse_failure_response(&error) else {
+                        return Err(error);
+                    };
+                    state.phase = ConnectionPhase::Writing;
+                    response_write
+                        .write_streaming_response(cx, &mut io, response)
+                        .await?;
+                    state.requests_served += 1;
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+            };
             let Some((head, body_kind)) = head_and_body else {
                 state.phase = ConnectionPhase::Closing;
                 break;
@@ -1531,45 +1539,54 @@ where
                 &self.config,
             );
 
-            let (hop, writer) =
-                match join_streaming_handler_and_body(cx, handler, body_driver, &self.config).await
-                {
-                    Ok(Some(joined)) => joined,
-                    Ok(None) => {
-                        state.phase = ConnectionPhase::Closing;
-                        break;
-                    }
-                    Err(body_error) => {
-                        record_incoming_body_failure(&body_error);
-                        // br-asupersync-hw83se: incoming_body_failure_response maps
-                        // DrainLimitExceeded to None; deliver an explicit 413 +
-                        // close for it instead of dropping the client's response.
-                        // Genuinely client-gone errors (ClientAborted /
-                        // ConsumerDropped) still write nothing.
-                        let refusal = incoming_body_failure_response(request_version, &body_error)
-                            .or_else(|| {
-                                matches!(body_error, IncomingBodyError::DrainLimitExceeded { .. })
-                                    .then(|| {
-                                        hop_error_response(
-                                            request_version,
-                                            413,
-                                            "[ASUP-E505] request body exceeds the configured limit",
-                                        )
-                                    })
-                            });
-                        if let Some(mut response) = refusal {
-                            add_connection_close(&mut response);
-                            if request_method == Method::Head {
-                                suppress_response_body_for_head(&mut response);
-                            }
-                            state.phase = ConnectionPhase::Writing;
-                            response_write.write_streaming_response(cx, &mut io, response).await?;
-                            state.requests_served += 1;
+            let (hop, writer) = match join_streaming_handler_and_body(
+                cx,
+                handler,
+                body_driver,
+                &self.config,
+                self.shutdown_signal.as_ref(),
+            )
+            .await
+            {
+                Ok(Some(joined)) => joined,
+                Ok(None) => {
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+                Err(body_error) => {
+                    record_incoming_body_failure(&body_error);
+                    // br-asupersync-hw83se: incoming_body_failure_response maps
+                    // DrainLimitExceeded to None; deliver an explicit 413 +
+                    // close for it instead of dropping the client's response.
+                    // Genuinely client-gone errors (ClientAborted /
+                    // ConsumerDropped) still write nothing.
+                    let refusal = incoming_body_failure_response(request_version, &body_error)
+                        .or_else(|| {
+                            matches!(body_error, IncomingBodyError::DrainLimitExceeded { .. }).then(
+                                || {
+                                    hop_error_response(
+                                        request_version,
+                                        413,
+                                        "[ASUP-E505] request body exceeds the configured limit",
+                                    )
+                                },
+                            )
+                        });
+                    if let Some(mut response) = refusal {
+                        add_connection_close(&mut response);
+                        if request_method == Method::Head {
+                            suppress_response_body_for_head(&mut response);
                         }
-                        state.phase = ConnectionPhase::Closing;
-                        break;
+                        state.phase = ConnectionPhase::Writing;
+                        response_write
+                            .write_streaming_response(cx, &mut io, response)
+                            .await?;
+                        state.requests_served += 1;
                     }
-                };
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+            };
             let mut forced_close = false;
             let mut response = match hop {
                 ServerHopOutcome::Ok(response) => response,
@@ -1780,24 +1797,33 @@ where
     }
 
     state.phase = ConnectionPhase::Reading;
-    let head_and_body =
-        match read_streaming_request_head(cx, &mut io, &mut read_buffer, &config).await {
-            Ok(value) => value,
-            Err(error) => {
-                // br-asupersync-hw83se: write the rejected head's status (see
-                // `head_parse_failure_response`) before closing, instead of
-                // dropping the produced/streaming connection silently.
-                let Some(response) = head_parse_failure_response(&error) else {
-                    return Err(error);
-                };
-                state.phase = ConnectionPhase::Writing;
-                response_write.write_streaming_response(cx, &mut io, response).await?;
-                state.requests_served += 1;
-                state.phase = ConnectionPhase::Closing;
-                let _ = response_write.close_transport(&mut io).await;
-                return Ok(state);
-            }
-        };
+    let head_and_body = match read_streaming_request_head(
+        cx,
+        &mut io,
+        &mut read_buffer,
+        &config,
+        shutdown_signal.as_ref(),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            // br-asupersync-hw83se: write the rejected head's status (see
+            // `head_parse_failure_response`) before closing, instead of
+            // dropping the produced/streaming connection silently.
+            let Some(response) = head_parse_failure_response(&error) else {
+                return Err(error);
+            };
+            state.phase = ConnectionPhase::Writing;
+            response_write
+                .write_streaming_response(cx, &mut io, response)
+                .await?;
+            state.requests_served += 1;
+            state.phase = ConnectionPhase::Closing;
+            let _ = response_write.close_transport(&mut io).await;
+            return Ok(state);
+        }
+    };
     let Some((head, body_kind)) = head_and_body else {
         state.phase = ConnectionPhase::Closing;
         let _ = response_write.close_transport(&mut io).await;
@@ -1901,47 +1927,56 @@ where
             writer.max_body_size(u64::try_from(config.max_body_size).unwrap_or(u64::MAX)),
             &config,
         );
-        let (produced, writer) =
-            match join_streaming_handler_and_body(&request_cx, handler, body_driver, &config).await
-            {
-                Ok(Some(joined)) => joined,
-                Ok(None) => {
-                    return Err(HttpError::Io(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "request handler ended before synchronized body EOF",
-                    )));
-                }
-                Err(body_error) => {
-                    record_incoming_body_failure(&body_error);
-                    // br-asupersync-hw83se: mirror the buffered path — a
-                    // DrainLimitExceeded body error (mapped to None by
-                    // incoming_body_failure_response) still owes the client an
-                    // explicit 413 + close rather than a bare I/O error.
-                    let refusal = incoming_body_failure_response(request_version, &body_error)
-                        .or_else(|| {
-                            matches!(body_error, IncomingBodyError::DrainLimitExceeded { .. })
-                                .then(|| {
-                                    hop_error_response(
-                                        request_version,
-                                        413,
-                                        "[ASUP-E505] request body exceeds the configured limit",
-                                    )
-                                })
-                        });
-                    if let Some(mut response) = refusal {
-                        add_connection_close(&mut response);
-                        if request_method == Method::Head {
-                            suppress_response_body_for_head(&mut response);
-                        }
-                        head_committed.store(true, Ordering::Release);
-                        return response_write.write_streaming_response(&request_cx, &mut io, response).await;
+        let (produced, writer) = match join_streaming_handler_and_body(
+            &request_cx,
+            handler,
+            body_driver,
+            &config,
+            shutdown_signal.as_ref(),
+        )
+        .await
+        {
+            Ok(Some(joined)) => joined,
+            Ok(None) => {
+                return Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "request handler ended before synchronized body EOF",
+                )));
+            }
+            Err(body_error) => {
+                record_incoming_body_failure(&body_error);
+                // br-asupersync-hw83se: mirror the buffered path — a
+                // DrainLimitExceeded body error (mapped to None by
+                // incoming_body_failure_response) still owes the client an
+                // explicit 413 + close rather than a bare I/O error.
+                let refusal =
+                    incoming_body_failure_response(request_version, &body_error).or_else(|| {
+                        matches!(body_error, IncomingBodyError::DrainLimitExceeded { .. }).then(
+                            || {
+                                hop_error_response(
+                                    request_version,
+                                    413,
+                                    "[ASUP-E505] request body exceeds the configured limit",
+                                )
+                            },
+                        )
+                    });
+                if let Some(mut response) = refusal {
+                    add_connection_close(&mut response);
+                    if request_method == Method::Head {
+                        suppress_response_body_for_head(&mut response);
                     }
-                    return Err(HttpError::Io(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionAborted,
-                        body_error,
-                    )));
+                    head_committed.store(true, Ordering::Release);
+                    return response_write
+                        .write_streaming_response(&request_cx, &mut io, response)
+                        .await;
                 }
-            };
+                return Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    body_error,
+                )));
+            }
+        };
         // br-asupersync-hw83se: an unread-body drain overrun owes the client a
         // status before the (unreusable) connection closes, instead of dropping
         // it and returning an I/O error. incoming_body_failure_response maps
@@ -2594,6 +2629,7 @@ async fn read_streaming_request_head<T>(
     io: &mut T,
     buffer: &mut BytesMut,
     config: &Http1Config,
+    shutdown_signal: Option<&ShutdownSignal>,
 ) -> Result<Option<(RequestHead, BodyKind)>, HttpError>
 where
     T: AsyncRead + Unpin,
@@ -2605,24 +2641,51 @@ where
     let head_deadline = config
         .idle_timeout
         .map(|idle_timeout| connection_now(cx) + idle_timeout);
+    // No request region exists until a complete head is admitted. An idle
+    // connection (including a partial head) must therefore leave on graceful
+    // drain, without waiting for bytes, an idle deadline, or force-close.
+    // Keep both registrations alive across reads so a parked transport wakes
+    // even when idle_timeout is disabled and the peer never sends again.
+    let mut cancelled = std::pin::pin!(cx.cancelled());
+    let mut draining = std::pin::pin!(async {
+        if let Some(signal) = shutdown_signal {
+            signal.wait_for_phase(ShutdownPhase::Draining).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    });
     loop {
+        if cx.checkpoint().is_err() || shutdown_signal.is_some_and(ShutdownSignal::is_shutting_down)
+        {
+            return Ok(None);
+        }
         if let Some(head) =
             decode_streaming_request_head(buffer, config.max_headers_size, config.max_body_size)?
         {
             return Ok(Some(head));
         }
-        if cx.checkpoint().is_err() {
-            return Ok(None);
-        }
         let mut chunk = [0_u8; 8192];
-        let read = io.read(&mut chunk);
-        let count = if let Some(deadline) = head_deadline {
-            match crate::time::timeout_at(deadline, read).await {
-                Ok(result) => result.map_err(HttpError::Io)?,
-                Err(_) => return Ok(None),
+        let count = {
+            let mut read = std::pin::pin!(io.read(&mut chunk));
+            let read = poll_fn(|task_cx| {
+                if cancelled.as_mut().poll(task_cx).is_ready()
+                    || draining.as_mut().poll(task_cx).is_ready()
+                {
+                    return Poll::Ready(None);
+                }
+                read.as_mut().poll(task_cx).map(Some)
+            });
+            if let Some(deadline) = head_deadline {
+                match crate::time::timeout_at(deadline, read).await {
+                    Ok(Some(result)) => result.map_err(HttpError::Io)?,
+                    Ok(None) | Err(_) => return Ok(None),
+                }
+            } else {
+                match read.await {
+                    Some(result) => result.map_err(HttpError::Io)?,
+                    None => return Ok(None),
+                }
             }
-        } else {
-            read.await.map_err(HttpError::Io)?
         };
         if count == 0 {
             if buffer.is_empty() {
@@ -2720,6 +2783,7 @@ async fn join_streaming_handler_and_body<H, B, R>(
     handler: H,
     body: B,
     config: &Http1StreamingConfig,
+    shutdown_signal: Option<&ShutdownSignal>,
 ) -> Result<Option<(R, IncomingRequestBodyWriter)>, IncomingBodyError>
 where
     H: Future<Output = Option<R>>,
@@ -2765,9 +2829,19 @@ where
             let Some(body) = body.take() else {
                 return Ok(None);
             };
-            let writer = timeout(connection_now(cx), config.unread_body_drain_timeout, body)
-                .await
-                .map_err(|_| IncomingBodyError::DrainTimeout)??;
+            // The handler (and its request-region cleanup) has completed.
+            // Its force-close observer is gone, but the peer may still owe
+            // body bytes. Interrupt only this remaining protocol drain; a
+            // live handler stays owned by the branches above.
+            let Some(drained) = race_force_close(
+                shutdown_signal,
+                timeout(connection_now(cx), config.unread_body_drain_timeout, body),
+            )
+            .await
+            else {
+                return Ok(None);
+            };
+            let writer = drained.map_err(|_| IncomingBodyError::DrainTimeout)??;
             Ok(Some((hop, writer)))
         }
         StreamingJoinFirst::Handler(None) => Ok(None),
