@@ -3219,6 +3219,103 @@ pub struct PgCopyIn<'a> {
     finished: bool,
 }
 
+/// Default maximum backend message body retained by a COPY OUT stream.
+///
+/// This is a per-message bound, not a limit on the complete export. Use
+/// [`PgConnection::copy_out_with_buffer_limit`] for exports with larger rows.
+pub const DEFAULT_MAX_COPY_OUT_MESSAGE_BYTES: usize = 1024 * 1024;
+
+/// Format metadata for a PostgreSQL `COPY ... TO STDOUT` stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgCopyOutResponse {
+    overall_format: Format,
+    column_formats: Vec<Format>,
+}
+
+impl PgCopyOutResponse {
+    /// Overall format announced by the backend.
+    #[must_use]
+    pub const fn overall_format(&self) -> Format {
+        self.overall_format
+    }
+
+    /// Per-column formats announced by the backend.
+    #[must_use]
+    pub fn column_formats(&self) -> &[Format] {
+        &self.column_formats
+    }
+}
+
+/// Summary of a COPY OUT exchange that reached `ReadyForQuery` successfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgCopyOutComplete {
+    affected_rows: u64,
+    chunks_received: u64,
+    bytes_received: u64,
+    response: PgCopyOutResponse,
+}
+
+impl PgCopyOutComplete {
+    /// Row count in the backend's `COPY n` command tag.
+    #[must_use]
+    pub const fn affected_rows(&self) -> u64 {
+        self.affected_rows
+    }
+
+    /// Number of received `CopyData` messages, including empty messages.
+    #[must_use]
+    pub const fn chunks_received(&self) -> u64 {
+        self.chunks_received
+    }
+
+    /// Total payload bytes received, including chunks drained by `finish`.
+    #[must_use]
+    pub const fn bytes_received(&self) -> u64 {
+        self.bytes_received
+    }
+
+    /// COPY OUT format metadata announced by the backend.
+    #[must_use]
+    pub const fn response(&self) -> &PgCopyOutResponse {
+        &self.response
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgCopyOutState {
+    Data,
+    CommandComplete,
+    ReadyForQuery,
+    ErrorDrain,
+    Completed,
+    Failed,
+}
+
+/// A bounded, caller-driven PostgreSQL `COPY ... TO STDOUT` stream.
+///
+/// The connection is exclusively borrowed while the export is active. Each
+/// [`Self::next_chunk`] reads one `CopyData` payload; there is no background
+/// reader or accumulated export buffer. Payloads are opaque bytes, including
+/// binary COPY headers and trailers, rather than decoded query rows.
+///
+/// EOF is reported only after `CopyDone`, `CommandComplete`, and
+/// `ReadyForQuery`. Dropping an unfinished stream closes the connection. A
+/// server error preserves the connection only after its `ReadyForQuery` has
+/// been read. Explicit cancellation sends the bounded PostgreSQL CancelRequest
+/// and closes the connection, using the ordinary query cleanup path.
+#[derive(Debug)]
+pub struct PgCopyOut<'a> {
+    connection: &'a mut PgConnection,
+    response: PgCopyOutResponse,
+    max_message_bytes: usize,
+    chunks_received: u64,
+    bytes_received: u64,
+    affected_rows: Option<u64>,
+    state: PgCopyOutState,
+    pending_error: Option<PgError>,
+    synchronized: bool,
+}
+
 impl fmt::Debug for PgConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PgConnection")
@@ -5462,6 +5559,180 @@ impl PgConnection {
         Outcome::Ok(affected_rows)
     }
 
+    /// Start a PostgreSQL `COPY ... TO STDOUT` export.
+    ///
+    /// `sql` must be one trusted COPY statement. It is sent without SQL
+    /// parameterization. Both text and binary exports preserve their exact
+    /// payload bytes. The stream reads only when its caller requests the next
+    /// chunk and bounds every backend message by
+    /// [`DEFAULT_MAX_COPY_OUT_MESSAGE_BYTES`].
+    pub async fn copy_out<'a>(&'a mut self, cx: &Cx, sql: &str) -> Outcome<PgCopyOut<'a>, PgError> {
+        self.copy_out_with_buffer_limit(cx, sql, DEFAULT_MAX_COPY_OUT_MESSAGE_BYTES)
+            .await
+    }
+
+    /// Start COPY OUT with an explicit maximum backend message body size.
+    ///
+    /// The bound is checked from each frame header before allocating its body.
+    /// It applies to data and control messages, including format metadata and
+    /// errors. It must be nonzero and no greater than the connection's protocol
+    /// maximum of 64 MiB minus the four-byte length field. Applications remain
+    /// responsible for bounding chunks they retain after receiving them.
+    pub async fn copy_out_with_buffer_limit<'a>(
+        &'a mut self,
+        cx: &Cx,
+        sql: &str,
+        max_message_bytes: usize,
+    ) -> Outcome<PgCopyOut<'a>, PgError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(cancelled_reason(cx));
+        }
+        if max_message_bytes == 0 || max_message_bytes > MAX_BACKEND_MESSAGE_LEN as usize - 4 {
+            return Outcome::Err(PgError::Protocol(format!(
+                "COPY OUT message limit must be between 1 and {} bytes",
+                MAX_BACKEND_MESSAGE_LEN as usize - 4
+            )));
+        }
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        match self.ensure_no_orphaned_transaction(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+        match self.apply_statement_timeout(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+
+        let mut buffer = MessageBuffer::new();
+        buffer.write_cstring(sql);
+        let message = match buffer.build_message(FrontendMessage::Query as u8) {
+            Ok(message) => message,
+            Err(error) => return Outcome::Err(error),
+        };
+        self.inner.closed = true;
+        if let Err(error) = self.write_all(cx, &message).await {
+            return self.fail_in_flight(error);
+        }
+
+        loop {
+            if cx.checkpoint().is_err() {
+                return self.cancel_in_flight(cx).await;
+            }
+            let (message_type, data) = match self
+                .read_message_with_body_limit(cx, max_message_bytes, "COPY OUT")
+                .await
+            {
+                Ok(message) => message,
+                Err(error) => return self.fail_in_flight(error),
+            };
+            match message_type {
+                b'H' => {
+                    let (overall_format, column_formats) =
+                        match Self::parse_copy_response("CopyOutResponse", &data) {
+                            Ok(formats) => formats,
+                            Err(error) => return self.fail_in_flight(error),
+                        };
+                    if overall_format == Format::Text && column_formats.contains(&Format::Binary) {
+                        return self.fail_in_flight(PgError::Protocol(
+                            "text CopyOutResponse contains a binary column format".to_string(),
+                        ));
+                    }
+                    return Outcome::Ok(PgCopyOut {
+                        connection: self,
+                        response: PgCopyOutResponse {
+                            overall_format,
+                            column_formats,
+                        },
+                        max_message_bytes,
+                        chunks_received: 0,
+                        bytes_received: 0,
+                        affected_rows: None,
+                        state: PgCopyOutState::Data,
+                        pending_error: None,
+                        synchronized: false,
+                    });
+                }
+                b'E' => {
+                    let error = match self.parse_error_response(&data) {
+                        Ok(error) => error,
+                        Err(error) => return self.fail_in_flight(error),
+                    };
+                    return outcome_from_error(
+                        self.drain_copy_out_startup_error(cx, max_message_bytes, error)
+                            .await,
+                    );
+                }
+                _ => {
+                    match self.handle_async_backend_message(message_type, &data) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => return self.fail_in_flight(error),
+                    }
+                    return self.fail_in_flight(unexpected_backend_message(
+                        "COPY OUT startup",
+                        message_type,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Keep the COPY OUT allocation bound in force even when the backend
+    /// rejects the statement before entering COPY mode.
+    async fn drain_copy_out_startup_error(
+        &mut self,
+        cx: &Cx,
+        max_message_bytes: usize,
+        server_error: PgError,
+    ) -> PgError {
+        loop {
+            let (message_type, data) = match self
+                .read_message_with_body_limit(cx, max_message_bytes, "COPY OUT error drain")
+                .await
+            {
+                Ok(message) => message,
+                Err(error) => {
+                    self.abort_in_flight_exchange();
+                    return error;
+                }
+            };
+            if message_type == b'Z' {
+                if let Err(error) = self.handle_ready_for_query(&data) {
+                    self.abort_in_flight_exchange();
+                    return error;
+                }
+                self.inner.closed = false;
+                return server_error;
+            }
+            match self.handle_async_backend_message(message_type, &data) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.abort_in_flight_exchange();
+                    return unexpected_backend_message("COPY OUT error drain", message_type);
+                }
+                Err(error) => {
+                    self.abort_in_flight_exchange();
+                    return error;
+                }
+            }
+        }
+    }
+
     /// Start a PostgreSQL `COPY ... FROM STDIN` operation.
     ///
     /// The SQL must be a trusted COPY statement that causes the backend to
@@ -7700,6 +7971,201 @@ impl PgConnection {
                 self.handle_ready_for_query(&data)?;
                 return Ok(());
             }
+        }
+    }
+}
+
+impl PgCopyOut<'_> {
+    /// COPY OUT format metadata announced by the backend.
+    #[must_use]
+    pub const fn response(&self) -> &PgCopyOutResponse {
+        &self.response
+    }
+
+    /// Number of `CopyData` messages received so far, including empty messages.
+    #[must_use]
+    pub const fn chunks_received(&self) -> u64 {
+        self.chunks_received
+    }
+
+    /// Total payload bytes received so far.
+    #[must_use]
+    pub const fn bytes_received(&self) -> u64 {
+        self.bytes_received
+    }
+
+    /// Completion metadata, available only after successful end of stream.
+    #[must_use]
+    pub fn completion(&self) -> Option<PgCopyOutComplete> {
+        if self.state != PgCopyOutState::Completed {
+            return None;
+        }
+        Some(PgCopyOutComplete {
+            affected_rows: self.affected_rows?,
+            chunks_received: self.chunks_received,
+            bytes_received: self.bytes_received,
+            response: self.response.clone(),
+        })
+    }
+
+    /// Receive one opaque COPY payload without reading ahead to the next one.
+    ///
+    /// An empty payload is returned as `Some(Vec::new())`; `None` means the
+    /// backend has completed the export and the connection is synchronized.
+    /// The method remains at `None` after successful completion.
+    ///
+    /// Dropping this method's future is safe to retry while retaining the
+    /// stream: partial frame reads and terminal protocol progress are held by
+    /// the stream and its connection. Explicit `Cx` cancellation instead sends
+    /// a bounded CancelRequest and closes the connection. After any error,
+    /// later calls return an error instead of reporting successful EOF.
+    pub async fn next_chunk(&mut self, cx: &Cx) -> Outcome<Option<Vec<u8>>, PgError> {
+        match self.state {
+            PgCopyOutState::Completed => return Outcome::Ok(None),
+            PgCopyOutState::Failed => {
+                return Outcome::Err(PgError::Protocol(
+                    "COPY OUT stream has failed".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        loop {
+            if cx.checkpoint().is_err() {
+                self.state = PgCopyOutState::Failed;
+                return self.connection.cancel_in_flight(cx).await;
+            }
+            let (message_type, data) = match self
+                .connection
+                .read_message_with_body_limit(cx, self.max_message_bytes, "COPY OUT")
+                .await
+            {
+                Ok(message) => message,
+                Err(error) => return self.fail(error),
+            };
+
+            match message_type {
+                b'd' if self.state == PgCopyOutState::Data => {
+                    self.chunks_received = self.chunks_received.saturating_add(1);
+                    self.bytes_received = self.bytes_received.saturating_add(data.len() as u64);
+                    return Outcome::Ok(Some(data));
+                }
+                b'c' if self.state == PgCopyOutState::Data => {
+                    if !data.is_empty() {
+                        return self.fail(PgError::Protocol(
+                            "CopyDone must have an empty body".to_string(),
+                        ));
+                    }
+                    self.state = PgCopyOutState::CommandComplete;
+                }
+                b'C' if self.state == PgCopyOutState::CommandComplete => {
+                    self.affected_rows = match Self::parse_affected_rows(&data) {
+                        Ok(rows) => Some(rows),
+                        Err(error) => return self.fail(error),
+                    };
+                    self.state = PgCopyOutState::ReadyForQuery;
+                }
+                b'Z' if self.state == PgCopyOutState::ReadyForQuery => {
+                    if let Err(error) = self.connection.handle_ready_for_query(&data) {
+                        return self.fail(error);
+                    }
+                    self.connection.inner.closed = false;
+                    self.synchronized = true;
+                    self.state = PgCopyOutState::Completed;
+                    return Outcome::Ok(None);
+                }
+                b'E' if self.state != PgCopyOutState::ErrorDrain => {
+                    self.pending_error = match self.connection.parse_error_response(&data) {
+                        Ok(error) => Some(error),
+                        Err(error) => return self.fail(error),
+                    };
+                    // Persist the original diagnostic before the next await:
+                    // a dropped next_chunk future must be able to resume the
+                    // drain without losing the server's error.
+                    self.state = PgCopyOutState::ErrorDrain;
+                }
+                b'Z' if self.state == PgCopyOutState::ErrorDrain => {
+                    if let Err(error) = self.connection.handle_ready_for_query(&data) {
+                        return self.fail(error);
+                    }
+                    self.connection.inner.closed = false;
+                    self.synchronized = true;
+                    self.state = PgCopyOutState::Failed;
+                    return match self.pending_error.take() {
+                        Some(error) => outcome_from_error(error),
+                        None => self.fail(PgError::Protocol(
+                            "COPY OUT error drain lost its server error".to_string(),
+                        )),
+                    };
+                }
+                _ => {
+                    match self
+                        .connection
+                        .handle_async_backend_message(message_type, &data)
+                    {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => return self.fail(error),
+                    }
+                    return self.fail(unexpected_backend_message("COPY OUT", message_type));
+                }
+            }
+        }
+    }
+
+    /// Drain any unread chunks and return the server's final row count.
+    ///
+    /// This preserves the same per-message bound as `next_chunk`; it never
+    /// collects the unread export in memory. A successful return releases a
+    /// connection that has consumed `ReadyForQuery` and can serve new work.
+    pub async fn finish(mut self, cx: &Cx) -> Outcome<PgCopyOutComplete, PgError> {
+        loop {
+            match self.next_chunk(cx).await {
+                Outcome::Ok(Some(_)) => {}
+                Outcome::Ok(None) => {
+                    return match self.completion() {
+                        Some(completion) => Outcome::Ok(completion),
+                        None => self.fail(PgError::Protocol(
+                            "COPY OUT completed without a command tag".to_string(),
+                        )),
+                    };
+                }
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+    }
+
+    fn parse_affected_rows(data: &[u8]) -> Result<u64, PgError> {
+        let mut reader = MessageReader::new(data);
+        let tag = reader.read_cstring()?;
+        reader.ensure_consumed("COPY OUT CommandComplete")?;
+        let Some(rows) = tag.strip_prefix("COPY ") else {
+            return Err(PgError::Protocol(
+                "COPY OUT requires a COPY row-count command tag".to_string(),
+            ));
+        };
+        if rows.is_empty() || !rows.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(PgError::Protocol(
+                "COPY OUT command tag has an invalid row count".to_string(),
+            ));
+        }
+        rows.parse::<u64>().map_err(|_| {
+            PgError::Protocol("COPY OUT command tag row count overflows u64".to_string())
+        })
+    }
+
+    fn fail<T>(&mut self, error: PgError) -> Outcome<T, PgError> {
+        self.state = PgCopyOutState::Failed;
+        self.connection.fail_in_flight(error)
+    }
+}
+
+impl Drop for PgCopyOut<'_> {
+    fn drop(&mut self) {
+        if !self.synchronized {
+            self.connection.abort_in_flight_exchange();
         }
     }
 }

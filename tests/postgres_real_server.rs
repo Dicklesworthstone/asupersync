@@ -30,7 +30,7 @@
 
 use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
-use asupersync::database::postgres::{PgConnectOptions, PgConnection, PgError};
+use asupersync::database::postgres::{Format, PgConnectOptions, PgConnection, PgError};
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::test_utils::run_test_with_cx;
 use asupersync::time::{sleep, timeout};
@@ -605,6 +605,113 @@ fn pg_real_copy_from_chunks_streams_and_recovers() {
             "backend COPY error should not commit partial rows"
         );
 
+        log.end("pass");
+    });
+}
+
+/// Export text and binary COPY data, drain a partly consumed export, and run a
+/// normal query on the same real PostgreSQL connection afterward.
+#[test]
+fn pg_real_copy_out_streams_and_drains_then_reuses_connection() {
+    let cfg = RealPgConfig::from_env();
+    if skip_if_disabled(&cfg, "pg_real_copy_out_streams_and_drains_then_reuses_connection") {
+        return;
+    }
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_copy_out_streams_and_drains_then_reuses_connection",
+    );
+
+    run_test_with_cx(|cx| async move {
+        log.phase("connect");
+        let mut conn = unwrap_pg(PgConnection::connect(&cx, &cfg.url).await, &log, "connect");
+
+        log.phase("copy_text_export");
+        let mut copy = unwrap_pg(
+            conn.copy_out(
+                &cx,
+                "COPY (SELECT id, name FROM (VALUES (1, 'alice'), (2, 'bob')) \
+                 AS exported_rows(id, name) ORDER BY id) TO STDOUT WITH (FORMAT text)",
+            )
+            .await,
+            &log,
+            "copy_text_start",
+        );
+        assert_eq!(copy.response().overall_format(), Format::Text);
+        assert_eq!(copy.response().column_formats(), &[Format::Text, Format::Text]);
+        let mut text = Vec::new();
+        while let Some(chunk) = unwrap_pg(copy.next_chunk(&cx).await, &log, "copy_text_chunk") {
+            text.extend_from_slice(&chunk);
+        }
+        assert_eq!(text, b"1\talice\n2\tbob\n");
+        let complete = unwrap_pg(copy.finish(&cx).await, &log, "copy_text_finish");
+        assert_eq!(complete.affected_rows(), 2);
+        assert_eq!(complete.bytes_received(), text.len() as u64);
+        assert!(complete.chunks_received() > 0);
+        log.assert_match("copy_text_rows", "2", &complete.affected_rows().to_string());
+
+        log.phase("copy_binary_export");
+        let mut copy = unwrap_pg(
+            conn.copy_out(&cx, "COPY (SELECT 42::int4 AS id) TO STDOUT WITH (FORMAT binary)")
+                .await,
+            &log,
+            "copy_binary_start",
+        );
+        assert_eq!(copy.response().overall_format(), Format::Binary);
+        assert_eq!(copy.response().column_formats(), &[Format::Binary]);
+        let mut binary = Vec::new();
+        while let Some(chunk) = unwrap_pg(copy.next_chunk(&cx).await, &log, "copy_binary_chunk") {
+            binary.extend_from_slice(&chunk);
+        }
+        let mut expected_binary = b"PGCOPY\n\xff\r\n\0".to_vec();
+        expected_binary.extend_from_slice(&0u32.to_be_bytes());
+        expected_binary.extend_from_slice(&0u32.to_be_bytes());
+        expected_binary.extend_from_slice(&1i16.to_be_bytes());
+        expected_binary.extend_from_slice(&4i32.to_be_bytes());
+        expected_binary.extend_from_slice(&42i32.to_be_bytes());
+        expected_binary.extend_from_slice(&(-1i16).to_be_bytes());
+        assert_eq!(binary, expected_binary, "binary COPY bytes must remain exact");
+        let complete = unwrap_pg(copy.finish(&cx).await, &log, "copy_binary_finish");
+        assert_eq!(complete.affected_rows(), 1);
+        assert_eq!(complete.bytes_received(), expected_binary.len() as u64);
+
+        log.phase("copy_finish_drains_unread_rows");
+        let mut copy = unwrap_pg(
+            conn.copy_out(
+                &cx,
+                "COPY (SELECT generate_series(1, 10000)) TO STDOUT WITH (FORMAT text)",
+            )
+            .await,
+            &log,
+            "copy_drain_start",
+        );
+        let first = unwrap_pg(copy.next_chunk(&cx).await, &log, "copy_drain_first")
+            .expect("nonempty export has a first chunk");
+        assert!(!first.is_empty());
+        let complete = unwrap_pg(copy.finish(&cx).await, &log, "copy_drain_finish");
+        assert_eq!(complete.affected_rows(), 10_000);
+        let expected_bytes: usize = (1..=10_000).map(|row| row.to_string().len() + 1).sum();
+        assert_eq!(complete.bytes_received(), expected_bytes as u64);
+        log.assert_match("copy_drained_rows", "10000", &complete.affected_rows().to_string());
+
+        log.phase("copy_server_error");
+        let failed_export = match conn.copy_out(&cx, "COPY (SELECT 1 / 0) TO STDOUT").await {
+            Outcome::Ok(copy) => copy.finish(&cx).await.map(drop),
+            other => other.map(drop),
+        };
+        match failed_export {
+            Outcome::Err(error) => assert_eq!(error.error_code(), Some("22012")),
+            other => panic!("expected COPY division-by-zero SQLSTATE 22012, got {other:?}"),
+        }
+
+        log.phase("query_after_exports_and_error");
+        let rows = unwrap_pg(
+            conn.query_unchecked(&cx, "SELECT 42::int4 AS answer").await,
+            &log,
+            "query_after_copy",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_i32("answer").expect("answer int4"), 42);
         log.end("pass");
     });
 }

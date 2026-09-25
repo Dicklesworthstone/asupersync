@@ -1248,6 +1248,75 @@ mod tests {
         backend_message(b'G', &body)
     }
 
+    fn copy_out_response_message(overall_format: Format, column_formats: &[Format]) -> Vec<u8> {
+        let mut message = copy_in_response_message(overall_format, column_formats);
+        message[0] = b'H';
+        message
+    }
+
+    fn write_copy_out_completion(peer: &mut std::net::TcpStream, rows: u64) {
+        use std::io::Write;
+
+        peer.write_all(&backend_message(b'c', b""))
+            .expect("write CopyDone");
+        peer.write_all(&command_complete_message(&format!("COPY {rows}")))
+            .expect("write COPY command tag");
+        peer.write_all(&ready_for_query(b'I'))
+            .expect("write COPY ReadyForQuery");
+    }
+
+    fn run_copy_out_test(future: impl std::future::Future<Output = ()>) {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+            .build()
+            .expect("native COPY OUT runtime");
+        runtime.block_on(async {
+            crate::time::timeout(
+                crate::time::wall_now(),
+                std::time::Duration::from_secs(10),
+                future,
+            )
+            .await
+            .expect("COPY OUT must complete without waiting for unsent frames");
+        });
+    }
+
+    async fn assert_copy_out_query_reusable(
+        conn: &mut PgConnection,
+        peer: &mut std::net::TcpStream,
+        cx: &Cx,
+    ) {
+        use std::io::Write;
+
+        assert!(!conn.inner.closed, "COPY must synchronize before reuse");
+        peer.write_all(&single_text_row_description()).unwrap();
+        peer.write_all(&data_row_text_message(&["after-copy"]))
+            .unwrap();
+        peer.write_all(&command_complete_message("SELECT 1"))
+            .unwrap();
+        peer.write_all(&ready_for_query(b'I')).unwrap();
+        match conn.query_unchecked(cx, "SELECT 'after-copy' AS value").await {
+            Outcome::Ok(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].get_str("value").unwrap(), "after-copy");
+            }
+            other => panic!("query after COPY must reuse the synchronized socket: {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+    }
+
+    fn assert_copy_out_peer_closed(peer: &mut std::net::TcpStream, query: &[u8]) {
+        use std::io::Read;
+
+        let _ = read_until_contains(peer, query);
+        let mut byte = [0u8; 1];
+        match peer.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            other => panic!("unfinished COPY must physically close its socket: {other:?}"),
+        }
+    }
+
     fn command_complete_message(tag: &str) -> Vec<u8> {
         let mut body = Vec::with_capacity(tag.len() + 1);
         body.extend_from_slice(tag.as_bytes());
@@ -1782,6 +1851,646 @@ mod tests {
         let parsed = fuzz_parse_copy_in_sequence(&written[copy_offset..]).unwrap();
         assert_eq!(parsed.copy_data_chunks, vec![b"not-an-int\n".to_vec()]);
         assert_eq!(parsed.end, FuzzCopyInEnd::Done);
+    }
+
+    #[test]
+    fn copy_out_streams_on_demand_and_preserves_async_messages() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            peer.write_all(&parameter_status_message("application_name", "copy-export"))
+                .unwrap();
+            peer.write_all(&backend_message(b'N', b"SNOTICE\0C00000\0Mexport starting\0\0"))
+                .unwrap();
+            peer.write_all(&copy_out_response_message(
+                Format::Text,
+                &[Format::Text, Format::Text],
+            ))
+            .unwrap();
+
+            // Only metadata is available. Startup must not read the data stream.
+            let mut copy = match conn.copy_out(&cx, "COPY users TO STDOUT").await {
+                Outcome::Ok(copy) => copy,
+                other => panic!("expected COPY OUT stream: {other:?}"),
+            };
+            assert_eq!(copy.response().overall_format(), Format::Text);
+            assert_eq!(copy.response().column_formats(), &[Format::Text, Format::Text]);
+            assert_eq!(copy.chunks_received(), 0);
+            assert_eq!(copy.bytes_received(), 0);
+            assert!(copy.completion().is_none());
+
+            peer.write_all(&notification_response_message(42, "exports", "started"))
+                .unwrap();
+            peer.write_all(&parameter_status_message("TimeZone", "UTC"))
+                .unwrap();
+            let mut bytes = 0u64;
+            for (index, chunk) in [b"alice\t1\n".as_slice(), b"bob\t2\n".as_slice()]
+                .into_iter()
+                .enumerate()
+            {
+                peer.write_all(&backend_message(b'd', chunk)).unwrap();
+                // No later data or completion frame exists yet. Reading one
+                // chunk must return immediately rather than prefetch the export.
+                match copy.next_chunk(&cx).await {
+                    Outcome::Ok(Some(actual)) => assert_eq!(actual, chunk),
+                    other => panic!("expected one available COPY chunk: {other:?}"),
+                }
+                bytes += chunk.len() as u64;
+                assert_eq!(copy.chunks_received(), index as u64 + 1);
+                assert_eq!(copy.bytes_received(), bytes);
+                assert!(copy.completion().is_none());
+            }
+
+            write_copy_out_completion(&mut peer, 2);
+            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Ok(None)));
+            let complete = copy.completion().expect("successful COPY summary");
+            assert_eq!(complete.affected_rows(), 2);
+            assert_eq!(complete.chunks_received(), 2);
+            assert_eq!(complete.bytes_received(), bytes);
+            assert_eq!(complete.response(), copy.response());
+            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Ok(None)));
+            match copy.finish(&cx).await {
+                Outcome::Ok(finished) => assert_eq!(finished, complete),
+                other => panic!("finishing an exhausted COPY must retain its summary: {other:?}"),
+            }
+            assert_eq!(conn.parameter("application_name"), Some("copy-export"));
+            assert_eq!(conn.parameter("TimeZone"), Some("UTC"));
+            assert_notification(conn.notifications().next(&cx).await, 42, "exports", "started");
+            assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
+
+            let written = read_until_contains(&mut peer, b"SELECT 'after-copy' AS value\0");
+            assert_eq!(written[0], FrontendMessage::Query as u8);
+            assert_eq!(frontend_body(&written, 0), b"COPY users TO STDOUT\0");
+            let next_frame = frontend_frame_len(&written, 0);
+            assert_eq!(written[next_frame], FrontendMessage::Query as u8);
+        });
+    }
+
+    #[test]
+    fn copy_out_preserves_binary_and_empty_data_chunks() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            peer.write_all(&copy_out_response_message(Format::Binary, &[Format::Binary]))
+                .unwrap();
+            let chunks: &[&[u8]] = &[
+                b"PGCOPY\n\xff\r\n\0\0\0\0\0\0\0\0\0",
+                b"\0\x01\0\0\0\x04\0\0\0\x2a",
+                b"",
+                b"\xff\xff",
+            ];
+            for chunk in chunks {
+                peer.write_all(&backend_message(b'd', chunk)).unwrap();
+            }
+            write_copy_out_completion(&mut peer, 1);
+            let mut copy = match conn.copy_out(&cx, "COPY binary_rows TO STDOUT BINARY").await {
+                Outcome::Ok(copy) => copy,
+                other => panic!("expected binary COPY OUT stream: {other:?}"),
+            };
+            assert_eq!(copy.response().overall_format(), Format::Binary);
+            assert_eq!(copy.response().column_formats(), &[Format::Binary]);
+            for expected in chunks {
+                match copy.next_chunk(&cx).await {
+                    Outcome::Ok(Some(actual)) => assert_eq!(actual.as_slice(), *expected),
+                    other => panic!("COPY payloads, including empty frames, are opaque: {other:?}"),
+                }
+            }
+            let complete = match copy.finish(&cx).await {
+                Outcome::Ok(complete) => complete,
+                other => panic!("expected binary COPY completion: {other:?}"),
+            };
+            assert_eq!(complete.affected_rows(), 1);
+            assert_eq!(complete.chunks_received(), 4);
+            assert_eq!(
+                complete.bytes_received(),
+                chunks.iter().map(|c| c.len() as u64).sum::<u64>()
+            );
+            assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
+        });
+    }
+
+    #[test]
+    fn copy_out_empty_export_finishes_without_data() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                .unwrap();
+            write_copy_out_completion(&mut peer, 0);
+            let mut copy = match conn.copy_out(&cx, "COPY empty_rows TO STDOUT").await {
+                Outcome::Ok(copy) => copy,
+                other => panic!("expected empty COPY stream: {other:?}"),
+            };
+            assert!(copy.completion().is_none());
+            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Ok(None)));
+            let complete = copy.completion().expect("empty COPY still has a summary");
+            assert_eq!(complete.affected_rows(), 0);
+            assert_eq!(complete.chunks_received(), 0);
+            assert_eq!(complete.bytes_received(), 0);
+            drop(copy);
+            assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
+        });
+    }
+
+    #[test]
+    fn copy_out_finish_drains_unread_chunks_and_reuses_connection() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                .unwrap();
+            for chunk in [b"one\n".as_slice(), b"two\n".as_slice(), b"three\n".as_slice()] {
+                peer.write_all(&backend_message(b'd', chunk)).unwrap();
+            }
+            write_copy_out_completion(&mut peer, 3);
+            let mut copy = match conn.copy_out(&cx, "COPY rows TO STDOUT").await {
+                Outcome::Ok(copy) => copy,
+                other => panic!("expected COPY stream: {other:?}"),
+            };
+            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Ok(Some(chunk)) if chunk == b"one\n"));
+            assert_eq!(copy.chunks_received(), 1);
+            let complete = match copy.finish(&cx).await {
+                Outcome::Ok(complete) => complete,
+                other => panic!("finish must drain unread data and synchronize: {other:?}"),
+            };
+            assert_eq!(complete.affected_rows(), 3);
+            assert_eq!(complete.chunks_received(), 3);
+            assert_eq!(complete.bytes_received(), b"one\ntwo\nthree\n".len() as u64);
+            assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
+        });
+    }
+
+    #[test]
+    fn copy_out_server_errors_preserve_sqlstate_and_resynchronize() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            for after_start in [false, true] {
+                let (mut conn, mut peer) = make_test_connection_with_peer();
+                let cx = Cx::for_testing();
+                if after_start {
+                    peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                        .unwrap();
+                    peer.write_all(&backend_message(b'd', b"partial\n")).unwrap();
+                }
+                peer.write_all(&error_response_message("57014", "backend stopped this COPY"))
+                    .unwrap();
+                peer.write_all(&backend_message(b'N', b"SNOTICE\0C00000\0Mdraining\0\0"))
+                    .unwrap();
+                peer.write_all(&parameter_status_message("TimeZone", "UTC"))
+                    .unwrap();
+                peer.write_all(&notification_response_message(73, "exports", "failed"))
+                    .unwrap();
+                peer.write_all(&ready_for_query(b'I')).unwrap();
+
+                let result = if after_start {
+                    let mut copy = match conn.copy_out(&cx, "COPY broken TO STDOUT").await {
+                        Outcome::Ok(copy) => copy,
+                        other => panic!("expected initial COPY metadata: {other:?}"),
+                    };
+                    assert!(matches!(
+                        copy.next_chunk(&cx).await,
+                        Outcome::Ok(Some(chunk)) if chunk == b"partial\n"
+                    ));
+                    let result = copy.next_chunk(&cx).await.map(drop);
+                    assert!(copy.completion().is_none(), "failed COPY has no success summary");
+                    result
+                } else {
+                    conn.copy_out(&cx, "COPY broken TO STDOUT").await.map(drop)
+                };
+                match result {
+                    Outcome::Err(PgError::Server { code, message, .. }) => {
+                        assert_eq!(code, "57014");
+                        assert_eq!(message, "backend stopped this COPY");
+                    }
+                    other => panic!("backend SQLSTATE must remain a server error: {other:?}"),
+                }
+                assert_eq!(conn.inner.transaction_status, b'I');
+                assert_eq!(conn.parameter("TimeZone"), Some("UTC"));
+                assert_notification(conn.notifications().next(&cx).await, 73, "exports", "failed");
+                assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
+            }
+        });
+    }
+
+    #[test]
+    fn copy_out_drop_and_explicit_cancellation_close_unfinished_stream() {
+        use std::future::Future;
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            for cancel in [false, true] {
+                let (mut conn, mut peer) = make_test_connection_with_peer();
+                let cx = Cx::for_testing();
+                peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                    .unwrap();
+                peer.write_all(&backend_message(b'd', b"first\n")).unwrap();
+                let mut copy = match conn.copy_out(&cx, "COPY active TO STDOUT").await {
+                    Outcome::Ok(copy) => copy,
+                    other => panic!("expected COPY stream: {other:?}"),
+                };
+                assert!(matches!(copy.next_chunk(&cx).await, Outcome::Ok(Some(_))));
+                {
+                    let mut next = Box::pin(copy.next_chunk(&cx));
+                    std::future::poll_fn(|task_cx| {
+                        assert!(next.as_mut().poll(task_cx).is_pending(), "next chunk must park");
+                        Poll::Ready(())
+                    })
+                    .await;
+                    if cancel {
+                        let expected = crate::types::CancelReason::with_origin(
+                            CancelKind::User,
+                            RegionId::new_for_test(31, 2),
+                            crate::types::Time::from_nanos(123_456),
+                        )
+                        .with_task(TaskId::new_for_test(37, 3))
+                        .with_message("stop COPY export")
+                        .with_cause(crate::types::CancelReason::shutdown());
+                        cx.set_cancel_reason(expected.clone());
+                        match next.await {
+                            Outcome::Cancelled(actual) => assert_eq!(actual, expected),
+                            other => panic!("parked COPY must preserve caller cancellation: {other:?}"),
+                        }
+                    }
+                }
+                assert!(copy.completion().is_none());
+                drop(copy);
+                assert!(conn.inner.closed, "unfinished COPY must not be returned to a pool");
+                assert_copy_out_peer_closed(&mut peer, b"COPY active TO STDOUT\0");
+            }
+        });
+    }
+
+    #[test]
+    fn copy_out_dropped_startup_future_leaves_connection_unavailable() {
+        use std::future::Future;
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        run_copy_out_test(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            let progress = Arc::new(AtomicUsize::new(usize::MAX));
+            conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
+            let response = copy_out_response_message(Format::Text, &[Format::Text]);
+            peer.write_all(&response[..2]).unwrap();
+            {
+                let mut startup = Box::pin(conn.copy_out(&cx, "COPY pending TO STDOUT"));
+                std::future::poll_fn(|task_cx| {
+                    assert!(startup.as_mut().poll(task_cx).is_pending());
+                    if progress.load(Ordering::Acquire) == 2 {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            }
+            assert!(conn.inner.closed, "incomplete COPY startup must not appear reusable");
+            assert_eq!(conn.inner.backend_frame.header_read, 2);
+            let written = read_until_contains(&mut peer, b"COPY pending TO STDOUT\0");
+            assert_eq!(frontend_body(&written, 0), b"COPY pending TO STDOUT\0");
+        });
+    }
+
+    #[test]
+    fn copy_out_rejects_wrong_mode_and_invalid_startup_formats() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            for (name, message) in [
+                (
+                    "text stream with binary column",
+                    copy_out_response_message(Format::Text, &[Format::Binary]),
+                ),
+                ("invalid overall format", backend_message(b'H', &[2, 0, 0])),
+                ("truncated column formats", backend_message(b'H', &[0, 0, 1])),
+                ("wrong COPY direction", copy_in_response_message(Format::Text, &[Format::Text])),
+                ("data before metadata", backend_message(b'd', b"unexpected")),
+                ("command before metadata", command_complete_message("SET")),
+                ("empty query before metadata", backend_message(b'I', b"")),
+                ("ready before metadata", ready_for_query(b'I')),
+            ] {
+                let (mut conn, mut peer) = make_test_connection_with_peer();
+                let cx = Cx::for_testing();
+                peer.write_all(&message).unwrap();
+                peer.write_all(&ready_for_query(b'I')).unwrap();
+                match conn.copy_out(&cx, "COPY malformed TO STDOUT").await {
+                    Outcome::Err(PgError::Protocol(_)) => {}
+                    other => panic!("{name}: startup must reject invalid COPY mode: {other:?}"),
+                }
+                assert!(conn.inner.closed, "{name}: startup failure must close the connection");
+                assert_copy_out_peer_closed(&mut peer, b"COPY malformed TO STDOUT\0");
+            }
+        });
+    }
+
+    #[test]
+    fn copy_out_dropped_chunk_future_preserves_partial_frame() {
+        use std::future::Future;
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        run_copy_out_test(async {
+            for prefix_len in [2, 8] {
+                let (mut conn, mut peer) = make_test_connection_with_peer();
+                let cx = Cx::for_testing();
+                let progress = Arc::new(AtomicUsize::new(usize::MAX));
+                conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
+                peer.write_all(&copy_out_response_message(Format::Binary, &[Format::Binary]))
+                    .unwrap();
+                let mut copy = match conn.copy_out(&cx, "COPY bytes TO STDOUT BINARY").await {
+                    Outcome::Ok(copy) => copy,
+                    other => panic!("expected COPY stream: {other:?}"),
+                };
+                let payload = b"\0binary\xffpayload\0";
+                let data = backend_message(b'd', payload);
+                peer.write_all(&data[..prefix_len]).unwrap();
+                {
+                    let mut next = Box::pin(copy.next_chunk(&cx));
+                    std::future::poll_fn(|task_cx| {
+                        assert!(next.as_mut().poll(task_cx).is_pending());
+                        if progress.load(Ordering::Acquire) == prefix_len {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    // Drop only the pending read, as a losing select branch
+                    // would. The enclosing COPY stream remains alive.
+                }
+                assert_eq!(copy.chunks_received(), 0);
+                assert_eq!(copy.bytes_received(), 0);
+                assert!(copy.completion().is_none());
+                peer.write_all(&data[prefix_len..]).unwrap();
+                write_copy_out_completion(&mut peer, 1);
+                match copy.next_chunk(&cx).await {
+                    Outcome::Ok(Some(actual)) => assert_eq!(actual, payload),
+                    other => panic!("partial frame must resume without losing bytes: {other:?}"),
+                }
+                let complete = match copy.finish(&cx).await {
+                    Outcome::Ok(complete) => complete,
+                    other => panic!("resumed COPY must finish: {other:?}"),
+                };
+                assert_eq!(complete.chunks_received(), 1);
+                assert_eq!(complete.bytes_received(), payload.len() as u64);
+                assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
+            }
+        });
+    }
+
+    #[test]
+    fn copy_out_dropped_read_preserves_completion_phases() {
+        use std::future::Future;
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        run_copy_out_test(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            let progress = Arc::new(AtomicUsize::new(usize::MAX));
+            conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
+            peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                .unwrap();
+            let mut copy = match conn.copy_out(&cx, "COPY empty_rows TO STDOUT").await {
+                Outcome::Ok(copy) => copy,
+                other => panic!("expected COPY stream: {other:?}"),
+            };
+            let command = command_complete_message("COPY 0");
+            let ready = ready_for_query(b'I');
+            peer.write_all(&backend_message(b'c', b"")).unwrap();
+            peer.write_all(&command[..2]).unwrap();
+
+            for waiting_for_ready in [false, true] {
+                progress.store(usize::MAX, Ordering::Release);
+                {
+                    let mut next = Box::pin(copy.next_chunk(&cx));
+                    std::future::poll_fn(|task_cx| {
+                        assert!(next.as_mut().poll(task_cx).is_pending());
+                        if progress.load(Ordering::Acquire) == 2 {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                }
+                assert!(copy.completion().is_none(), "ReadyForQuery is required for success");
+                if !waiting_for_ready {
+                    peer.write_all(&command[2..]).unwrap();
+                    peer.write_all(&ready[..2]).unwrap();
+                }
+            }
+
+            peer.write_all(&ready[2..]).unwrap();
+            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Ok(None)));
+            let complete = copy.completion().expect("all completion phases reached");
+            assert_eq!(complete.affected_rows(), 0);
+            assert_eq!(complete.chunks_received(), 0);
+            drop(copy);
+            assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
+        });
+    }
+
+    #[test]
+    fn copy_out_dropped_error_drain_preserves_original_server_error() {
+        use std::future::Future;
+        use std::io::Write;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        run_copy_out_test(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            let progress = Arc::new(AtomicUsize::new(usize::MAX));
+            conn.inner.backend_frame.pending_progress = Some(Arc::clone(&progress));
+            peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                .unwrap();
+            peer.write_all(&error_response_message("XX001", "original export diagnostic"))
+                .unwrap();
+            let ready = ready_for_query(b'I');
+            peer.write_all(&ready[..2]).unwrap();
+            let mut copy = match conn.copy_out(&cx, "COPY failing TO STDOUT").await {
+                Outcome::Ok(copy) => copy,
+                other => panic!("expected COPY metadata: {other:?}"),
+            };
+            {
+                let mut next = Box::pin(copy.next_chunk(&cx));
+                std::future::poll_fn(|task_cx| {
+                    assert!(next.as_mut().poll(task_cx).is_pending());
+                    if progress.load(Ordering::Acquire) == 2 {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            }
+            assert!(copy.completion().is_none());
+            peer.write_all(&ready[2..]).unwrap();
+            match copy.next_chunk(&cx).await {
+                Outcome::Err(PgError::Server { code, message, .. }) => {
+                    assert_eq!(code, "XX001");
+                    assert_eq!(message, "original export diagnostic");
+                }
+                other => panic!("resumed error drain must retain its original error: {other:?}"),
+            }
+            assert!(copy.completion().is_none());
+            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Err(_)));
+            drop(copy);
+            assert_copy_out_query_reusable(&mut conn, &mut peer, &cx).await;
+        });
+    }
+
+    #[test]
+    fn copy_out_rejects_malformed_completion_order_and_command_tags() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            let done = backend_message(b'c', b"");
+            let command = command_complete_message("COPY 0");
+            let mut cases = vec![
+                ("command before done", command.clone()),
+                ("ready before done", ready_for_query(b'I')),
+                ("data after done", [done.clone(), backend_message(b'd', b"late")].concat()),
+                ("duplicate done", [done.clone(), done.clone()].concat()),
+                ("ready before command", [done.clone(), ready_for_query(b'I')].concat()),
+                ("done with body", backend_message(b'c', b"unexpected")),
+                (
+                    "data after command",
+                    [done.clone(), command.clone(), backend_message(b'd', b"late")].concat(),
+                ),
+                (
+                    "duplicate command",
+                    [done.clone(), command.clone(), command.clone()].concat(),
+                ),
+                (
+                    "malformed ready",
+                    [done.clone(), command.clone(), backend_message(b'Z', b"II")].concat(),
+                ),
+            ];
+            for tag in [
+                "SELECT 1",
+                "COPY",
+                "COPY -1",
+                "COPY +1",
+                "COPY 1junk",
+                "COPY 1 2",
+                "COPY 18446744073709551616",
+            ] {
+                cases.push((tag, [done.clone(), command_complete_message(tag)].concat()));
+            }
+            for (name, body) in [
+                ("unterminated command", b"COPY 0".as_slice()),
+                ("trailing command bytes", b"COPY 0\0trailing".as_slice()),
+                ("extra command terminator", b"COPY 0\0\0".as_slice()),
+            ] {
+                cases.push((name, [done.clone(), backend_message(b'C', body)].concat()));
+            }
+
+            for (name, frames) in cases {
+                let (mut conn, mut peer) = make_test_connection_with_peer();
+                let cx = Cx::for_testing();
+                peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                    .unwrap();
+                peer.write_all(&frames).unwrap();
+                peer.write_all(&ready_for_query(b'I')).unwrap();
+                let mut copy = match conn.copy_out(&cx, "COPY malformed TO STDOUT").await {
+                    Outcome::Ok(copy) => copy,
+                    other => panic!("{name}: expected initial COPY metadata: {other:?}"),
+                };
+                let outcome = copy.next_chunk(&cx).await;
+                assert!(
+                    matches!(outcome, Outcome::Err(PgError::Protocol(_))),
+                    "{name}: invalid protocol must fail, got {outcome:?}"
+                );
+                assert!(copy.completion().is_none(), "{name}: malformed stream cannot complete");
+                drop(copy);
+                assert!(conn.inner.closed, "{name}: malformed stream must poison the connection");
+            }
+        });
+    }
+
+    #[test]
+    fn copy_out_frame_limits_reject_oversize_headers_before_body_allocation() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            for stage in ["startup", "startup_error", "stream", "stream_error"] {
+                for message_type in [b'H', b'd', b'N', b'S', b'A', b'E', b'C', b'Z'] {
+                    let (mut conn, mut peer) = make_test_connection_with_peer();
+                    let cx = Cx::for_testing();
+                    let limit = 64usize;
+                    let streaming = stage.starts_with("stream");
+                    if streaming {
+                        peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                            .unwrap();
+                    }
+                    if stage.ends_with("error") {
+                        peer.write_all(&error_response_message("XX000", "export failed"))
+                            .unwrap();
+                    }
+                    let mut header = vec![message_type];
+                    header.extend_from_slice(&i32::try_from(limit + 5).unwrap().to_be_bytes());
+                    // Advertise limit + 1 bytes without supplying any body.
+                    // Waiting for the absent payload or allocating it fails.
+                    peer.write_all(&header).unwrap();
+                    let outcome = if streaming {
+                        let mut copy = match conn
+                            .copy_out_with_buffer_limit(&cx, "COPY rows TO STDOUT", limit)
+                            .await
+                        {
+                            Outcome::Ok(copy) => copy,
+                            other => panic!("{stage}: expected initial COPY metadata: {other:?}"),
+                        };
+                        copy.next_chunk(&cx).await.map(drop)
+                    } else {
+                        conn.copy_out_with_buffer_limit(&cx, "COPY rows TO STDOUT", limit)
+                            .await
+                            .map(drop)
+                    };
+                    assert!(
+                        matches!(outcome, Outcome::Err(PgError::Protocol(_))),
+                        "{stage} / {message_type}: expected bounded-frame rejection: {outcome:?}"
+                    );
+                    assert!(conn.inner.closed);
+                    assert!(conn.inner.backend_frame.body.is_empty());
+                    assert_eq!(conn.inner.backend_frame.body.capacity(), 0);
+                    assert_eq!(conn.inner.backend_frame.body_read, 0);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn copy_out_default_limit_rejects_large_copy_data_without_reading_body() {
+        use std::io::Write;
+
+        run_copy_out_test(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            peer.write_all(&copy_out_response_message(Format::Text, &[Format::Text]))
+                .unwrap();
+            let mut header = vec![b'd'];
+            header.extend_from_slice(&(1_048_576i32 + 5).to_be_bytes());
+            peer.write_all(&header).unwrap();
+            let mut copy = match conn.copy_out(&cx, "COPY huge_rows TO STDOUT").await {
+                Outcome::Ok(copy) => copy,
+                other => panic!("expected initial COPY metadata: {other:?}"),
+            };
+            assert!(matches!(copy.next_chunk(&cx).await, Outcome::Err(PgError::Protocol(_))));
+            drop(copy);
+            assert!(conn.inner.closed);
+            assert_eq!(conn.inner.backend_frame.body.capacity(), 0);
+        });
     }
 
     #[test]
