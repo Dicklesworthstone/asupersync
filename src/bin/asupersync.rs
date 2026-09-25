@@ -703,6 +703,12 @@ struct AtpServeArgs {
     /// Run as daemon (detach from terminal)
     #[arg(long = "daemon", action = ArgAction::SetTrue)]
     daemon: bool,
+
+    /// Permit the plaintext, unauthenticated ATP-over-TCP listener on a
+    /// non-loopback address (including the default 0.0.0.0). Without it such a
+    /// listener is refused; a loopback `--listen` never needs it.
+    #[arg(long = "allow-plaintext", action = ArgAction::SetTrue)]
+    allow_plaintext: bool,
 }
 
 #[derive(Args, Debug)]
@@ -5763,6 +5769,20 @@ fn atp_serve(args: &AtpServeArgs, output: &mut Output) -> Result<(), CliError> {
             .detail(args.listen.clone())
             .exit_code(ExitCode::USER_ERROR)
         })?;
+    // asupersync-bi2462.126: this listener speaks plaintext, unauthenticated
+    // ATP-over-TCP, whose integrity check trusts a manifest an on-path attacker
+    // can substitute. Refuse it off loopback unless the operator opts in.
+    if !listen.ip().is_loopback() && !args.allow_plaintext {
+        return Err(CliError::new(
+            "atp_plaintext_refused",
+            "ATP serve refuses a plaintext, unauthenticated listener on a non-loopback address",
+        )
+        .detail(format!(
+            "{listen}: an on-path attacker could substitute the manifest and the bytes. Listen on \
+             a loopback address, or pass --allow-plaintext to accept the risk."
+        ))
+        .exit_code(ExitCode::USER_ERROR));
+    }
     let data_dir = expand_home(
         &args.data_dir,
         std::env::var_os("HOME").map(PathBuf::from).as_deref(),
@@ -17742,6 +17762,7 @@ lab:
             listen,
             data_dir: temp.path().join("atp"),
             daemon: false,
+            allow_plaintext: false,
         };
 
         let err = atp_serve(&args, &mut output).expect_err("occupied port must fail");
@@ -17751,6 +17772,46 @@ lab:
             capture.contents().is_empty(),
             "serve must not report listening before bind succeeds"
         );
+    }
+
+    /// asupersync-bi2462.126: the plaintext ATP-over-TCP listener is refused off
+    /// loopback (including the default 0.0.0.0) unless the operator opts in, and the
+    /// refusal happens before any directory is created or port is bound.
+    #[test]
+    fn atp_serve_refuses_plaintext_off_loopback_without_the_opt_in() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        let cli = Cli::parse_from(["asupersync", "atp", "serve"]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Serve(mut args),
+        }) = cli.command
+        else {
+            panic!("expected atp serve");
+        };
+        assert_eq!(args.listen, "0.0.0.0:8080");
+        assert!(!args.allow_plaintext);
+        args.data_dir = temp.path().join("atp");
+
+        let err = atp_serve(&args, &mut output).expect_err("default listen must be refused");
+        assert_eq!(err.error_type, "atp_plaintext_refused");
+        assert!(
+            capture.contents().is_empty(),
+            "nothing reported as listening"
+        );
+        assert!(
+            !temp.path().join("atp").exists(),
+            "refusal precedes creating the inbox directory"
+        );
+
+        let cli = Cli::parse_from(["asupersync", "atp", "serve", "--allow-plaintext"]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Serve(args),
+        }) = cli.command
+        else {
+            panic!("expected atp serve");
+        };
+        assert!(args.allow_plaintext);
     }
 
     #[test]

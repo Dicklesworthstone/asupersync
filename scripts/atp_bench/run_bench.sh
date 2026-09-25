@@ -615,7 +615,7 @@ nohup /usr/bin/time -v -o $run_dir/recv_time.txt env -u ATP_RQ_AUTH_KEY_HEX -u R
             sleep 1 ;;
         atp-tcp)
             "${SSH_R[@]}" "nohup env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX $BASE/collect_metrics.sh '$BASE/atp recv' $run_dir/sampler.jsonl </dev/null >/dev/null 2>&1 & echo \$! > $run_dir/sampler.pid
-nohup /usr/bin/time -v -o $run_dir/recv_time.txt env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport tcp > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
+nohup /usr/bin/time -v -o $run_dir/recv_time.txt env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX $BASE/atp recv $run_dest --listen 0.0.0.0:$ATP_PORT --once --transport tcp --allow-plaintext > $run_dir/recv_out.txt 2>&1 & echo \$! > $recv_pid_file"
             sleep 1 ;;
         rsync-ssh)
             "${SSH_R[@]}" "nohup env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX $BASE/collect_metrics.sh 'rsync' $run_dir/sampler.jsonl </dev/null >/dev/null 2>&1 & echo \$! > $run_dir/sampler.pid" ;;
@@ -633,7 +633,7 @@ nohup /usr/bin/time -v -o $run_dir/recv_time.txt env -u ATP_RQ_AUTH_KEY_HEX -u R
         atp-quic)
             sender_json=$("${SSH_S[@]}" "env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX bash $BASE/run_one.sh $label $bytes -- env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport quic --symbol-size $ATP_RQ_SYMBOL_SIZE --max-block-size '$ATP_RQ_MAX_BLOCK_SIZE' --repair-overhead $ATP_RQ_REPAIR_OVERHEAD --rq-tail-drain-ms $ATP_RQ_TAIL_DRAIN_MS --ca $QUIC_CERT --server-name '$ATP_QUIC_SERVER_NAME' --quic-handshake-timeout-ms $ATP_QUIC_HANDSHAKE_TIMEOUT_MS") ;;
         atp-tcp)
-            sender_json=$("${SSH_S[@]}" "env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX bash $BASE/run_one.sh $label $bytes -- env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport tcp") ;;
+            sender_json=$("${SSH_S[@]}" "env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX bash $BASE/run_one.sh $label $bytes -- env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX $BASE/atp send $BASE/payloads/$ppath $RECEIVER_IP:$ATP_PORT --transport tcp --allow-plaintext") ;;
         rsync-ssh)
             sender_json=$("${SSH_S[@]}" "env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX bash $BASE/run_one.sh $label $bytes -- rsync -aW --inplace -e 'ssh -T -x -o Compression=no -o StrictHostKeyChecking=accept-new -c aes128-gcm@openssh.com' $BASE/payloads/$ppath root@$RECEIVER_IP:$run_dest/") ;;
         rsyncd)

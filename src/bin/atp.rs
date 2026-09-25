@@ -442,6 +442,11 @@ struct SendArgs {
     /// RQ and plaintext TCP. Without this opt-in, trust failures never downgrade.
     #[arg(long)]
     allow_plaintext_fallback: bool,
+    /// Permit plaintext, unauthenticated `--transport tcp` to a non-loopback
+    /// peer. Without it such a send is refused; loopback never needs it. An SSH
+    /// bootstrap forwards it to the remote receiver.
+    #[arg(long)]
+    allow_plaintext: bool,
 }
 
 #[derive(Parser)]
@@ -454,6 +459,11 @@ struct RecvArgs {
     /// Transport to accept.
     #[arg(long, value_enum, default_value_t = Transport::Tcp)]
     transport: Transport,
+    /// Permit plaintext, unauthenticated `--transport tcp` on a non-loopback
+    /// listen address (including the default 0.0.0.0). Without it such a
+    /// receiver is refused; a loopback `--listen` never needs it.
+    #[arg(long)]
+    allow_plaintext: bool,
     /// Receive exactly one transfer, then exit (handy for scripted tests).
     #[arg(long)]
     once: bool,
@@ -1912,6 +1922,31 @@ fn validate_auto_security_policy(args: &SendArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// asupersync-bi2462.126: `--transport tcp` is plaintext and unauthenticated, and its
+/// integrity check trusts a manifest an on-path attacker can substitute. It is refused
+/// toward (send) or on (recv/serve listen) any non-loopback address unless the caller
+/// passes `--allow-plaintext`. Loopback keeps working without the flag; other transports
+/// are unaffected (`auto` keeps its own `--allow-plaintext-fallback` opt-in).
+fn validate_plaintext_tcp(
+    transport: Transport,
+    addresses: &[SocketAddr],
+    allow_plaintext: bool,
+    role: &str,
+) -> Result<(), String> {
+    if transport != Transport::Tcp || allow_plaintext {
+        return Ok(());
+    }
+    match addresses.iter().find(|address| !address.ip().is_loopback()) {
+        Some(address) => Err(format!(
+            "refusing plaintext, unauthenticated --transport tcp {role} {address}: an on-path \
+             attacker could substitute the manifest and the bytes. Use --transport quic (or \
+             auto) for an authenticated, encrypted transfer, or pass --allow-plaintext to \
+             accept the risk (loopback addresses never need it)"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Print the transfer plan (file list, sizes, total bytes, Merkle root) the
 /// transport *would* send, computed via a bounded-memory streaming hash pass
 /// with no network I/O. RQ and QUIC also emit transport-owned content and
@@ -3158,6 +3193,9 @@ fn run_send_to_addrs(
                 .to_string(),
         );
     }
+    // Direct and SSH-bootstrapped sends both reach here with their data-path
+    // addresses, so the plaintext policy is enforced once for both.
+    validate_plaintext_tcp(args.transport, addresses, args.allow_plaintext, "to")?;
     let runtime = build_runtime(args.workers)?;
     let report = if args.transport == Transport::Auto {
         run_send_auto_to_addrs(
@@ -3753,6 +3791,8 @@ fn run_send_via_ssh(
     }
     let data_target = socket_target(&data_host, args.remote_listen.port());
     let addresses = resolve(&data_target)?;
+    // Refuse before a remote receiver is started, so a refusal never strands one.
+    validate_plaintext_tcp(args.transport, &addresses, args.allow_plaintext, "to")?;
     let mut child = spawn_remote_receiver(&args, remote, transfer_auth.as_ref(), remote_shell)?;
     let log_redaction = rq_auth_key(transfer_auth.as_ref()).map(auth_key_hex_secret);
     drop(transfer_auth);
@@ -7132,6 +7172,11 @@ fn spawn_remote_receiver(
     if args.no_delta {
         argv.push("--no-delta".to_string());
     }
+    if args.allow_plaintext && args.transport == Transport::Tcp {
+        // The remote receiver listens on `--remote-listen` (non-loopback by
+        // default) and refuses plaintext tcp there without the same opt-in.
+        argv.push("--allow-plaintext".to_string());
+    }
     append_remote_receiver_options(args, &mut argv);
     if args.transport == Transport::Quic {
         // Validated in `run_send_via_ssh`; these are paths on the remote host.
@@ -8882,6 +8927,12 @@ fn run_recv(mut args: RecvArgs, persistent: bool) -> Result<(), String> {
             "atp recv/serve --transport auto is sender-only; choose tcp, rq, or quic".to_string(),
         );
     }
+    validate_plaintext_tcp(
+        args.transport,
+        &[args.listen],
+        args.allow_plaintext,
+        "listening on",
+    )?;
     if args.rq_auth_key_stdin && !matches!(args.transport, Transport::Rq | Transport::Quic) {
         return Err("--rq-auth-key-stdin is valid only with --transport rq or quic".to_string());
     }
@@ -9575,6 +9626,58 @@ fn print_quic_limiter_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// asupersync-bi2462.126: plaintext tcp is refused toward or on a non-loopback
+    /// address unless the caller opts in; loopback and other transports are unaffected.
+    #[test]
+    fn plaintext_tcp_is_refused_off_loopback_without_the_opt_in() {
+        let loopback: SocketAddr = "127.0.0.1:8472".parse().unwrap();
+        let loopback6: SocketAddr = "[::1]:8472".parse().unwrap();
+        let lan: SocketAddr = "192.0.2.7:8472".parse().unwrap();
+        let unspecified: SocketAddr = "0.0.0.0:8472".parse().unwrap();
+
+        assert!(
+            validate_plaintext_tcp(Transport::Tcp, &[loopback, loopback6], false, "to").is_ok()
+        );
+        let err = validate_plaintext_tcp(Transport::Tcp, &[loopback, lan], false, "to")
+            .expect_err("a non-loopback candidate must be refused");
+        assert!(
+            err.contains("192.0.2.7:8472")
+                && err.contains("--allow-plaintext")
+                && err.contains("--transport quic"),
+            "{err}"
+        );
+        // The receiver's default 0.0.0.0 listen accepts non-loopback peers.
+        assert!(
+            validate_plaintext_tcp(Transport::Tcp, &[unspecified], false, "listening on").is_err()
+        );
+        assert!(validate_plaintext_tcp(Transport::Tcp, &[lan, unspecified], true, "to").is_ok());
+        for other in [Transport::Quic, Transport::Rq, Transport::Auto] {
+            assert!(validate_plaintext_tcp(other, &[lan], false, "to").is_ok());
+        }
+    }
+
+    #[test]
+    fn allow_plaintext_parses_on_send_recv_and_serve() {
+        for command in ["recv", "serve"] {
+            for (argv_tail, expected) in [(&["--allow-plaintext"][..], true), (&[][..], false)] {
+                let mut argv = vec!["atp", command, "destination"];
+                argv.extend_from_slice(argv_tail);
+                let cli = Cli::try_parse_from(argv).expect("parse receive command");
+                let args = match cli.command {
+                    Command::Recv(args) | Command::Serve(args) => args,
+                    _ => panic!("expected receive command"),
+                };
+                assert_eq!(args.allow_plaintext, expected, "{command}");
+            }
+        }
+        let cli = Cli::try_parse_from(["atp", "send", "payload", "host:8472", "--allow-plaintext"])
+            .expect("parse send");
+        let Command::Send(send) = cli.command else {
+            panic!("expected send command");
+        };
+        assert!(send.allow_plaintext);
+    }
 
     #[cfg(feature = "tls")]
     #[test]

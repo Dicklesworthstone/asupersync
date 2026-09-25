@@ -600,11 +600,19 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
         extra_send+=(--bwlimit "$ATP_SEND_BWLIMIT")
     fi
 
+    # Plaintext tcp across the netns link needs the explicit opt-in
+    # (asupersync-bi2462.126); other transports are unaffected.
+    local -a plaintext_args=()
+    if [ "$transport" = "tcp" ]; then
+        plaintext_args=(--allow-plaintext)
+    fi
+
     local -a recv_cmd=(
         timeout "$TIMEOUT_S" /usr/bin/time -v env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX "$BIN" recv "$recv_dir"
         --listen "0.0.0.0:${PORT}" --transport "$transport" --once --peer-id "$r_tag"
         --workers "$WORKERS" --max-bytes "$MAX_BYTES" --symbol-size "$sym"
         "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${auth_recv[@]}" "${tls_recv[@]}"
+        "${plaintext_args[@]}"
     )
     set +e
     if [ "$protected_auth_stdin" = "true" ]; then
@@ -625,6 +633,7 @@ run_atp() {  # $1=auth-mode: lab|key|tls   $2=transport: rq|quic
         ip netns exec "$NS" timeout "$TIMEOUT_S" /usr/bin/time -v env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX "$BIN" send "$WL_PATH" "${HOST_IP}:${PORT}"
         --transport "$transport" --symbol-size "$sym" --peer-id "$s_tag" --max-bytes "$MAX_BYTES"
         "${block_args[@]}" "${delta_args[@]}" "${rq_loss_args[@]}" "${extra_send[@]}" "${auth_send[@]}" "${tls_send[@]}"
+        "${plaintext_args[@]}"
     )
     if [ "$protected_auth_stdin" = "true" ]; then
         send_rq_auth_secret | "${send_cmd[@]}" >"$sl" 2>"$st"

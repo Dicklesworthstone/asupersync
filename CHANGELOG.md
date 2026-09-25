@@ -146,6 +146,23 @@ match outcome {
 The derive itself is correct and is not changing. Thanks to the
 `mcp_agent_mail_rust` maintainers for reporting the concrete breakage.
 
+### Breaking CLI change — plaintext ATP-over-TCP is refused off loopback
+
+`atp send`, `atp recv`, `atp serve` and `asupersync atp serve` now refuse
+`--transport tcp` (the default transport) toward or on any non-loopback
+address unless `--allow-plaintext` is given. The receivers' default listen
+address, `0.0.0.0`, counts as non-loopback, so a bare `atp recv DIR` or
+`asupersync atp serve` needs the flag or a loopback `--listen`. Loopback
+transfers are unchanged.
+
+Why: that transport is plaintext and its manifest is unauthenticated. The
+SHA-256 and Merkle checks catch corruption, but an on-path attacker can
+substitute the manifest and the bytes together. For transfers between hosts,
+use `--transport quic` (or `auto`), which is authenticated and encrypted, or
+pass `--allow-plaintext` to accept the risk. An SSH-bootstrapped send forwards
+the flag to the remote receiver, so an older remote `atp` rejects the unknown
+flag and has to be upgraded (`asupersync-bi2462.126`).
+
 ### Behavior change — the legacy ATP SDK session refuses work it cannot do
 
 `asupersync::atp::sdk::AtpSession` has no transport and no object store.
