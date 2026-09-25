@@ -4477,6 +4477,22 @@ impl RuntimeState {
         // at the two task-minting seams above.
         principal_cx.set_trace_buffer(self.trace_handle());
         principal_cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
+        // Carry the envelope the region record admitted (the parent's envelope
+        // narrowed by the requested child budget). Work spawned through this
+        // context inherits it; without it a child region's tasks ran with an
+        // unspecified envelope (asupersync-bi2462.46).
+        let region_capability_budget = self.region(child_region).map_or(
+            capability_budget,
+            crate::record::RegionRecord::capability_budget,
+        );
+        let applied = principal_cx.apply_child_capability_budget(
+            region_capability_budget,
+            crate::types::CapabilityBudgetRequirements::NONE,
+        );
+        debug_assert!(
+            applied.is_ok(),
+            "an unspecified context accepts any admitted region envelope"
+        );
         let close_notify = self
             .region(child_region)
             .map(|region| region.close_notify.clone())
