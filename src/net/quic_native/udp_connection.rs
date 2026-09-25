@@ -594,6 +594,9 @@ impl NativeQuicUdpConnection {
         );
         connection
             .inner_mut()
+            .set_local_max_datagram_frame_size(local_parameters.max_datagram_frame_size);
+        connection
+            .inner_mut()
             .set_initial_stream_windows(bound.send_windows, bound.recv_windows);
         connection.begin_handshake(cx)?;
         connection.mark_handshake_keys_available(cx)?;

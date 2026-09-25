@@ -357,6 +357,11 @@ pub struct NativeQuicConnection {
     datagrams_dropped_on_send: u64,
     /// Peer-advertised maximum DATAGRAM frame size.
     max_datagram_frame_size: usize,
+    /// This endpoint's own advertised `max_datagram_frame_size` once a bind
+    /// path records it (`Some(0)` when DATAGRAM support was not offered).
+    /// `None` keeps accepting every DATAGRAM, for construction paths that do
+    /// not record their offer.
+    local_max_datagram_frame_size: Option<usize>,
     /// Largest frame payload that fits one protected 1-RTT packet on this
     /// connection (GH#66). Admission bounds DATAGRAM frames by the smaller of
     /// this and `max_datagram_frame_size`, so an admitted payload can never
@@ -510,8 +515,19 @@ impl NativeQuicConnection {
             datagrams_sent: 0,
             datagrams_dropped_on_send: 0,
             max_datagram_frame_size: config.max_datagram_frame_size,
+            local_max_datagram_frame_size: None,
             one_rtt_frame_budget: CONSERVATIVE_ONE_RTT_FRAME_BUDGET,
         }
+    }
+
+    /// Record the `max_datagram_frame_size` this endpoint advertised. From then
+    /// on a DATAGRAM frame the peer was never invited to send, or one larger
+    /// than the offer, is a protocol violation and is never queued (RFC 9221
+    /// §3). The TLS bind path in `udp_connection` is the production caller.
+    #[cfg(any(test, feature = "tls"))]
+    pub(crate) fn set_local_max_datagram_frame_size(&mut self, advertised: Option<u64>) {
+        self.local_max_datagram_frame_size =
+            Some(advertised.map_or(0, |max| usize::try_from(max).unwrap_or(usize::MAX)));
     }
 
     /// Bound outbound DATAGRAM admission by this connection's protected 1-RTT
@@ -2607,6 +2623,25 @@ impl NativeQuicConnection {
         checkpoint(cx)?;
         if frames.is_empty() {
             return Ok(());
+        }
+        if let Some(local_max) = self.local_max_datagram_frame_size {
+            if local_max == 0 {
+                return Err(NativeQuicConnectionError::InvalidState(
+                    "DATAGRAM frame received without an advertised max_datagram_frame_size",
+                ));
+            }
+            for frame in frames {
+                let QuicFrame::Datagram { data } = frame else {
+                    unreachable!("datagram frame run contained non-datagram frame");
+                };
+                // The limit covers the whole frame; one type byte is its
+                // smallest possible overhead.
+                if data.len().saturating_add(1) > local_max {
+                    return Err(NativeQuicConnectionError::InvalidState(
+                        "DATAGRAM frame exceeds the advertised max_datagram_frame_size",
+                    ));
+                }
+            }
         }
 
         let available = MAX_INBOUND_DATAGRAMS.saturating_sub(self.inbound_datagrams.len());
@@ -6530,6 +6565,55 @@ mod tests {
             conn.inbound_datagram_remaining_capacity(),
             MAX_INBOUND_DATAGRAMS
         );
+    }
+
+    #[test]
+    fn datagrams_beyond_the_local_offer_are_protocol_violations_and_never_queued() {
+        let cx = test_cx();
+        let space = PacketNumberSpace::ApplicationData;
+        let datagram = |len: usize| QuicFrame::Datagram {
+            data: Bytes::from(vec![7; len]),
+        };
+
+        // A construction path that records no offer keeps the old behaviour.
+        let mut unrecorded = established_conn();
+        unrecorded
+            .process_frame(&cx, &datagram(1), space)
+            .expect("an unrecorded offer keeps accepting DATAGRAM frames");
+        assert_eq!(unrecorded.pending_datagram_count(), 1);
+
+        // RFC 9221 §3: DATAGRAM support was never advertised.
+        let mut unadvertised = established_conn();
+        unadvertised.set_local_max_datagram_frame_size(None);
+        for _ in 0..1_000 {
+            let error = unadvertised
+                .process_frame(&cx, &datagram(1_000), space)
+                .expect_err("an unadvertised DATAGRAM is a protocol violation");
+            assert!(
+                matches!(&error, NativeQuicConnectionError::InvalidState(message)
+                    if message.contains("without an advertised")),
+                "{error:?}"
+            );
+        }
+        assert_eq!(unadvertised.pending_datagram_count(), 0);
+        assert_eq!(unadvertised.datagrams_received(), 0);
+
+        // An offer of 100 bytes covers the whole frame, type byte included.
+        let mut bounded = established_conn();
+        bounded.set_local_max_datagram_frame_size(Some(100));
+        bounded
+            .process_frame(&cx, &datagram(99), space)
+            .expect("a 100-byte frame fits a 100-byte offer");
+        let error = bounded
+            .process_frame(&cx, &datagram(100), space)
+            .expect_err("a frame larger than the offer is a protocol violation");
+        assert!(
+            matches!(&error, NativeQuicConnectionError::InvalidState(message)
+                if message.contains("exceeds the advertised")),
+            "{error:?}"
+        );
+        assert_eq!(bounded.pending_datagram_count(), 1);
+        assert_eq!(bounded.datagrams_received(), 1);
     }
 
     #[test]
