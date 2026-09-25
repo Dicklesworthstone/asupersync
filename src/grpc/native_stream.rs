@@ -80,6 +80,25 @@ const POLL_STEPS: usize = 32;
 // turn a demanded response into an unbounded SETTINGS/PING acknowledgement queue.
 const MAX_UNFLUSHED_READ_FRAMES: usize = 32;
 
+// Channel-backed calls carry their configured receive windows without adding
+// required fields to the publicly constructible NativeStreamConfig.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct NativeStreamWindows {
+    pub(crate) connection: Option<u32>,
+    pub(crate) stream: Option<u32>,
+}
+
+impl NativeStreamWindows {
+    fn validate(self) -> Result<(), Status> {
+        if self.connection.is_some_and(|size| !(65_535..=0x7fff_ffff).contains(&size))
+            || self.stream.is_some_and(|size| size > 0x7fff_ffff)
+        {
+            return Err(Status::invalid_argument("invalid native gRPC receive windows"));
+        }
+        Ok(())
+    }
+}
+
 /// Independent bounds and wire policy for one native response stream.
 #[derive(Debug, Clone)]
 pub struct NativeStreamConfig {
@@ -152,13 +171,13 @@ impl NativeStreamConfig {
 
 // A connected call may have already spent part of its budget dialing. Keep
 // the original absolute value AND its clock; never reconstruct it as now + TTL.
-struct CallDeadline {
+pub(crate) struct CallDeadline {
     clock: Option<TimerDriverHandle>,
     at: Option<Time>,
 }
 
 impl CallDeadline {
-    fn capture(cx: &Cx, metadata: &Metadata, configured: Option<Duration>) -> Result<Self, Status> {
+    pub(crate) fn capture(cx: &Cx, metadata: &Metadata, configured: Option<Duration>) -> Result<Self, Status> {
         let clock = cx.timer_driver();
         let timeout = request_timeout(metadata, configured)?;
         if (timeout.is_some() || cx.budget().deadline.is_some()) && clock.is_none() {
@@ -171,7 +190,7 @@ impl CallDeadline {
         Ok(deadline)
     }
 
-    fn check(&self) -> Result<(), Status> {
+    pub(crate) fn check(&self) -> Result<(), Status> {
         if self.at.zip(self.clock.as_ref()).is_some_and(|(at, clock)| clock.now() >= at) {
             return Err(Status::deadline_exceeded("native gRPC deadline expired before dispatch"));
         }
@@ -299,10 +318,30 @@ where
         admitted: Option<CallDeadline>,
         end_stream: bool,
     ) -> Result<Self, Status> {
+        Self::new_request_with_windows(
+            cx, io, authority, path, request, codec, config, admitted, end_stream,
+            NativeStreamWindows::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_request_with_windows(
+        cx: &Cx,
+        io: IO,
+        authority: &str,
+        path: &str,
+        request: Request<Option<C::Encode>>,
+        codec: C,
+        config: NativeStreamConfig,
+        admitted: Option<CallDeadline>,
+        end_stream: bool,
+        windows: NativeStreamWindows,
+    ) -> Result<Self, Status> {
         // Codec setup/encoding is user code too. Never let a different ambient
         // task silently supply its capabilities during synchronous construction.
         let _ambient = Cx::set_current(Some(cx.clone()));
         check_cancellation(cx)?;
+        windows.validate()?;
         let body_limit = config.validate()?;
         let (compressor, decompressor) = config.frame_hooks()?;
         let admitted = match admitted {
@@ -336,13 +375,20 @@ where
                 return Err(Status::resource_exhausted("outbound gRPC metadata exceeds its byte limit"));
             }
         }
-        let settings = Settings {
+        let mut settings = Settings {
             max_header_list_size: u32::try_from(config.max_metadata_bytes)
                 .map_err(|_| Status::invalid_argument("metadata limit exceeds H2 representation"))?,
             ..Settings::client()
         };
+        if let Some(size) = windows.stream {
+            settings.initial_window_size = size;
+        }
         let mut connection = Connection::client(settings);
         connection.queue_initial_settings();
+        if let Some(size) = windows.connection {
+            connection.set_initial_connection_recv_window(size)
+                .map_err(|error| Status::invalid_argument(format!("invalid native gRPC connection window: {error}")))?;
+        }
         let stream_id = connection.open_stream(headers, false)
             .map_err(|error| Status::invalid_argument(format!("open native gRPC request: {error}")))?;
         if !request_body.is_empty() || end_stream {
@@ -631,7 +677,7 @@ fn earlier(first: Option<Time>, second: Option<Time>) -> Option<Time> {
     }
 }
 
-fn check_cancellation(cx: &Cx) -> Result<(), Status> {
+pub(crate) fn check_cancellation(cx: &Cx) -> Result<(), Status> {
     cx.checkpoint().map_err(|_| match cx.cancel_reason().map(|reason| reason.kind) {
         Some(CancelKind::Deadline | CancelKind::Timeout) => Status::deadline_exceeded("native gRPC caller deadline elapsed"),
         Some(CancelKind::PollQuota | CancelKind::CostBudget) => Status::resource_exhausted("native gRPC caller budget exhausted"),

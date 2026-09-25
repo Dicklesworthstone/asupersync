@@ -562,6 +562,12 @@ impl<C: Codec> FramedCodec<C> {
         &mut self.inner
     }
 
+    /// Recover the owned message codec, discarding this framing state.
+    #[must_use]
+    pub fn into_inner(self) -> C {
+        self.inner
+    }
+
     /// Get the maximum outbound message size.
     #[must_use]
     pub fn max_encode_message_size(&self) -> usize {

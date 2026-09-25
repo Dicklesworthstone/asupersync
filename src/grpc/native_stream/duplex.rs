@@ -94,7 +94,25 @@ where
         config: NativeStreamConfig,
         admitted: Option<CallDeadline>,
     ) -> Result<Self, Status> {
-        let inner = NativeServerStream::new_request(
+        Self::new_admitted_with_windows(
+            cx, io, authority, path, request, codec, config, admitted,
+            NativeStreamWindows::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_admitted_with_windows(
+        cx: &Cx,
+        io: IO,
+        authority: &str,
+        path: &str,
+        request: Request<()>,
+        codec: C,
+        config: NativeStreamConfig,
+        admitted: Option<CallDeadline>,
+        windows: NativeStreamWindows,
+    ) -> Result<Self, Status> {
+        let inner = NativeServerStream::new_request_with_windows(
             cx,
             io,
             authority,
@@ -104,6 +122,7 @@ where
             config,
             admitted,
             false,
+            windows,
         )?;
         Ok(Self {
             inner,

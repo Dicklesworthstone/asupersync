@@ -36,6 +36,11 @@ use crate::tls::TlsConnector;
 use crate::tls::TlsStream;
 
 use super::codec::{Codec, FramedCodec, IdentityCodec};
+#[cfg(not(target_arch = "wasm32"))]
+use super::native_stream::{
+    CallDeadline, NativeDuplexStream, NativeServerStream, NativeStreamConfig, NativeStreamEndpoint,
+    NativeStreamWindows,
+};
 use super::status::{Code, GrpcError, Status, TransportErrorKind};
 use super::streaming::{
     MAX_STREAM_BUFFERED, Metadata, MetadataValue, Request, Response, Streaming,
@@ -711,6 +716,237 @@ impl<C: Codec> GrpcClient<C> {
         Ok(())
     }
 
+    /// Transfer this client and its codec into a native server-streaming call.
+    ///
+    /// The channel selects DNS/IP dialing, TLS identity and trust, message
+    /// limits, compression, receive windows, and setup/call timeouts. Client
+    /// interceptors run once under the supplied `cx` before network I/O.
+    /// Initial and trailing metadata remain separate on the returned owner.
+    /// Consume `message()` through `Ok(None)` to verify terminal gRPC status.
+    ///
+    /// Consuming the client transfers even a non-Clone codec into the stream;
+    /// another call can use a new client built from a cloned [`Channel`].
+    /// The stream owns one connection and has no background task. Dropping it
+    /// closes that connection. Dropping a borrowing `message()` wait preserves
+    /// progress. Cancellation and deadlines use the explicit context.
+    ///
+    /// Keepalive settings are rejected: this demand-driven connection has no
+    /// background heartbeat. Metadata is bounded to 16 KiB per header block.
+    /// Deterministic loopback is supported by [`Self::server_streaming`], not
+    /// this native method. Missing I/O/timer authority, invalid configuration,
+    /// unavailable compression and transport metadata overrides refuse before
+    /// dialing. Setup includes DNS, TCP, TLS, encoding and response headers.
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, bytes::Bytes};
+    /// use asupersync::grpc::{Channel, GrpcClient, Request, Status};
+    ///
+    /// async fn watch(cx: &Cx) -> Result<(), Status> {
+    ///     let channel = Channel::connect("http://localhost:50051")
+    ///         .await.map_err(|error| error.into_status())?;
+    ///     let mut responses = GrpcClient::new(channel)
+    ///         .into_native_server_streaming(
+    ///             cx, "/example.Service/Watch", Request::new(Bytes::new()),
+    ///         ).await?;
+    ///     while let Some(message) = responses.message().await? {
+    ///         cx.trace(&format!("received {} bytes", message.len()));
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn into_native_server_streaming(
+        self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: Request<C::Encode>,
+    ) -> Result<NativeServerStream<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, C>, Status>
+    {
+        let setup = self.prepare_native_stream(cx, path, &request)?;
+        let connector = self.channel.tls_connector().cloned();
+        let request = Request::with_metadata(request.into_inner(), setup.metadata);
+        setup.endpoint.connect_with_transport(
+            cx,
+            path,
+            request,
+            self.codec.into_inner(),
+            setup.config,
+            setup.windows,
+            Some(setup.deadline),
+            |tcp| native_h2_transport(tcp, &setup.target, connector),
+        ).await
+    }
+
+    /// Transfer this client into a native client-streaming or bidirectional RPC.
+    ///
+    /// The unit request carries metadata; messages are supplied with the
+    /// returned owner's `queue_message()`. `next_event()` drives both network
+    /// directions and yields either a response or `RequestFlushed`, which
+    /// releases the single bounded request slot. Always consume responses
+    /// while uploading: a peer may reply before granting more upload credit.
+    /// After the last request is flushed, call `close_requests()` and consume
+    /// events through terminal `Ok(None)` (or its exact error status).
+    ///
+    /// For client-streaming RPCs the peer normally sends one response after
+    /// half-close; bidirectional RPCs can reply before upload finishes. The
+    /// owner exposes both forms without collecting an unbounded response list.
+    /// It does not infer an RPC's cardinality from its path.
+    ///
+    /// Channel configuration, interceptors, explicit capabilities, ownership
+    /// and keepalive restrictions match [`Self::into_native_server_streaming`].
+    /// Setup flushes the initial request headers without waiting for response
+    /// headers, so a server waiting for the upload cannot deadlock setup.
+    /// Dropping `next_event()` preserves progress; do not requeue a message
+    /// already accepted by `queue_message()`. Dropping the owner closes its
+    /// connection without spawning cleanup work or cancelling the parent.
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, bytes::Bytes};
+    /// use asupersync::grpc::{Channel, GrpcClient, NativeDuplexEvent, Request, Status};
+    ///
+    /// async fn upload(cx: &Cx, messages: Vec<Bytes>) -> Result<(), Status> {
+    ///     let channel = Channel::connect("http://localhost:50051")
+    ///         .await.map_err(|error| error.into_status())?;
+    ///     let mut call = GrpcClient::new(channel)
+    ///         .into_native_duplex(cx, "/example.Service/Upload", Request::new(()))
+    ///         .await?;
+    ///     let mut messages = messages.into_iter();
+    ///     let mut closed = false;
+    ///     while let Some(event) = call.next_event().await? {
+    ///         match event {
+    ///             NativeDuplexEvent::RequestFlushed if !closed => {
+    ///                 if let Some(message) = messages.next() {
+    ///                     call.queue_message(&message)?;
+    ///                 } else {
+    ///                     call.close_requests()?;
+    ///                     closed = true;
+    ///                 }
+    ///             }
+    ///             NativeDuplexEvent::Message(response) => {
+    ///                 cx.trace(&format!("received {} bytes", response.len()));
+    ///             }
+    ///             NativeDuplexEvent::RequestFlushed => {}
+    ///         }
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn into_native_duplex(
+        self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: Request<()>,
+    ) -> Result<NativeDuplexStream<impl AsyncRead + AsyncWrite + Unpin + Send + 'static, C>, Status>
+    {
+        let setup = self.prepare_native_stream(cx, path, &request)?;
+        let connector = self.channel.tls_connector().cloned();
+        let request = Request::with_metadata((), setup.metadata);
+        setup.endpoint.connect_duplex_with_transport(
+            cx,
+            path,
+            request,
+            self.codec.into_inner(),
+            setup.config,
+            setup.windows,
+            Some(setup.deadline),
+            |tcp| native_h2_transport(tcp, &setup.target, connector),
+        ).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn prepare_native_stream<T>(
+        &self,
+        cx: &crate::cx::Cx,
+        path: &str,
+        request: &Request<T>,
+    ) -> Result<NativeClientSetup, Status> {
+        // Metadata defaults and application interceptors use the same context
+        // that the native owner installs for every subsequent I/O poll.
+        let _ambient = crate::cx::Cx::set_current(Some(cx.clone()));
+        super::native_stream::check_cancellation(cx)?;
+        validate_rpc_path(path)?;
+        enforce_deadline_budget(self.channel.config.timeout)?;
+        if channel_target_is_loopback(self.channel.uri()) {
+            return Err(Status::failed_precondition(
+                "native streaming requires a network channel, not deterministic loopback",
+            ));
+        }
+        let config = self.channel.config();
+        let deadline = CallDeadline::capture(cx, request.metadata(), config.timeout)?;
+        if config.keepalive_interval.is_some() || config.keepalive_timeout.is_some() {
+            return Err(Status::invalid_argument(
+                "native streaming does not support background keepalive settings",
+            ));
+        }
+        let target = NativeH2Target::parse(
+            self.channel.uri(), config.use_tls, self.channel.tls_server_name(),
+            self.channel.dial_addr(),
+        )?;
+        #[cfg(not(feature = "tls"))]
+        if target.use_tls {
+            return Err(Status::unavailable(
+                "gRPC TLS support is disabled; rebuild with --features tls",
+            ));
+        }
+        let endpoint = match &target.destination {
+            NativeH2Destination::Address(address) => {
+                NativeStreamEndpoint::new(*address, target.authority.clone(), config.connect_timeout)?
+            }
+            NativeH2Destination::Host(host, port) => NativeStreamEndpoint::from_host(
+                host.clone(), *port, target.authority.clone(), config.connect_timeout,
+            )?,
+        };
+        let stream_config = NativeStreamConfig {
+            max_send_message_size: config.max_send_message_size,
+            max_recv_message_size: config.max_recv_message_size,
+            timeout: config.timeout,
+            scheme: target.scheme,
+            send_compression: config.send_compression.unwrap_or(CompressionEncoding::Identity),
+            accept_gzip: config.accept_compression.contains(&CompressionEncoding::Gzip),
+            ..NativeStreamConfig::default()
+        };
+        let mut metadata = self.build_outbound_metadata(request, path)?;
+        // The native owner generates compression fields from its codec policy.
+        // Admit the channel's exact defaults, then remove only those fields so
+        // they are emitted once. A request/interceptor may not select a codec
+        // policy different from the one used to encode/decode message bytes.
+        let send_encoding = effective_send_compression(config)
+            .map(CompressionEncoding::as_header_value);
+        let accept_encoding = effective_accept_compressions(config)
+            .into_iter()
+            .map(CompressionEncoding::as_header_value)
+            .collect::<Vec<_>>()
+            .join(",");
+        for (key, expected) in [
+            ("grpc-encoding", send_encoding),
+            ("grpc-accept-encoding", Some(accept_encoding.as_str())),
+        ] {
+            if metadata.iter().any(|(name, value)| {
+                name == key
+                    && !matches!(value, MetadataValue::Ascii(value) if Some(value.as_str()) == expected)
+            }) {
+                return Err(Status::invalid_argument(
+                    "native streaming metadata cannot override channel compression",
+                ));
+            }
+            metadata.remove(key);
+        }
+        super::native_stream::check_cancellation(cx)?;
+        deadline.check()?;
+        Ok(NativeClientSetup {
+            target,
+            endpoint,
+            config: stream_config,
+            windows: NativeStreamWindows {
+                connection: Some(config.initial_connection_window_size),
+                stream: Some(config.initial_stream_window_size),
+            },
+            metadata,
+            deadline,
+        })
+    }
+
     /// Make a unary RPC call.
     pub async fn unary<Req, Resp>(
         &mut self,
@@ -909,6 +1145,16 @@ struct NativeH2Target {
     server_name: String,
     scheme: &'static str,
     use_tls: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeClientSetup {
+    target: NativeH2Target,
+    endpoint: NativeStreamEndpoint,
+    config: NativeStreamConfig,
+    windows: NativeStreamWindows,
+    metadata: Metadata,
+    deadline: CallDeadline,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -3955,6 +4201,117 @@ mod tests {
                 }
                 other => panic!("expected transport error for {uri:?}, got: {other:?}"),
             }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native_owned_calls {
+        use super::*;
+        use crate::cx::Cx;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+
+        fn context() -> (Cx, Arc<VirtualClock>) {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(10)));
+            let timer = TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+            let cx = Cx::new_with_drivers(
+                RegionId::new_for_test(81, 0), TaskId::new_for_test(82, 0),
+                Budget::INFINITE, None, None, None, Some(timer), None,
+            );
+            (cx, clock)
+        }
+
+        #[test]
+        fn native_stream_preparation_preserves_channel_policy_and_explicit_context() {
+            struct ObserveContext(TaskId, Arc<AtomicUsize>);
+            impl ClientInterceptor for ObserveContext {
+                fn intercept(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+                    assert_eq!(Cx::current().unwrap().task_id(), self.0);
+                    assert!(request.metadata_mut().insert("x-interceptor", "explicit-context"));
+                    self.1.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }
+            }
+            let (cx, _) = context();
+            let unrelated = Cx::for_testing();
+            let _ambient = Cx::set_current(Some(unrelated.clone()));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid:50051")
+                    .timeout(Duration::from_secs(20))
+                    .max_send_message_size(1024)
+                    .max_recv_message_size(2048)
+                    .initial_connection_window_size(131_072)
+                    .initial_stream_window_size(32_768)
+                    .send_compression(CompressionEncoding::Identity)
+                    .connect(),
+            ).unwrap();
+            let client = GrpcClient::new(channel)
+                .with_interceptor(ObserveContext(cx.task_id(), Arc::clone(&calls)));
+            let mut request = Request::new(());
+            assert!(request.metadata_mut().insert("x-request", "kept"));
+            let setup = client.prepare_native_stream(&cx, "/svc/Upload", &request).unwrap();
+            assert_eq!(setup.config.max_send_message_size, 1024);
+            assert_eq!(setup.config.max_recv_message_size, 2048);
+            assert_eq!(setup.config.timeout, Some(Duration::from_secs(20)));
+            assert_eq!(setup.config.scheme, "http");
+            assert_eq!(setup.windows.connection, Some(131_072));
+            assert_eq!(setup.windows.stream, Some(32_768));
+            assert!(setup.metadata.get("grpc-encoding").is_none());
+            assert!(setup.metadata.get("grpc-accept-encoding").is_none());
+            assert!(matches!(setup.metadata.get("x-request"), Some(MetadataValue::Ascii(value)) if value == "kept"));
+            assert!(matches!(setup.metadata.get("x-interceptor"), Some(MetadataValue::Ascii(value)) if value == "explicit-context"));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(Cx::current().unwrap().task_id(), unrelated.task_id());
+        }
+
+        #[test]
+        fn native_stream_preparation_rejects_keepalive_and_conflicting_compression() {
+            let (cx, _) = context();
+            let keepalive = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid")
+                    .keepalive_interval(Duration::from_secs(30)).connect(),
+            ).unwrap();
+            let status = GrpcClient::new(keepalive)
+                .prepare_native_stream(&cx, "/svc/Upload", &Request::new(()))
+                .err().expect("keepalive cannot be silently ignored");
+            assert_eq!(status.code(), Code::InvalidArgument);
+            assert!(status.message().contains("keepalive"));
+
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid")
+                    .send_compression(CompressionEncoding::Identity).connect(),
+            ).unwrap();
+            let client = GrpcClient::new(channel);
+            let mut request = Request::new(());
+            assert!(request.metadata_mut().insert("grpc-encoding", "gzip"));
+            assert!(request.metadata_mut().insert("grpc-encoding", "identity"));
+            let status = client.prepare_native_stream(&cx, "/svc/Upload", &request)
+                .err().expect("last matching value must not hide a conflicting duplicate");
+            assert_eq!(status.code(), Code::InvalidArgument);
+            assert_eq!(status.message(), "native streaming metadata cannot override channel compression");
+        }
+
+        #[test]
+        fn native_stream_interceptor_cannot_restart_the_call_deadline() {
+            struct ExpireAndExtend(Arc<VirtualClock>);
+            impl ClientInterceptor for ExpireAndExtend {
+                fn intercept(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+                    self.0.advance_to(Time::from_secs(16));
+                    assert!(request.metadata_mut().insert_or_replace("grpc-timeout", "50S"));
+                    Ok(())
+                }
+            }
+            let (cx, clock) = context();
+            let channel = futures_lite::future::block_on(
+                Channel::builder("http://service.invalid")
+                    .timeout(Duration::from_secs(5)).connect(),
+            ).unwrap();
+            let client = GrpcClient::new(channel).with_interceptor(ExpireAndExtend(clock));
+            let status = client.prepare_native_stream(&cx, "/svc/Upload", &Request::new(()))
+                .err().expect("interceptor time must consume the original deadline");
+            assert_eq!(status.code(), Code::DeadlineExceeded);
+            assert!(!cx.is_cancel_requested());
         }
     }
 

@@ -1,12 +1,13 @@
 //! Connection establishment for the existing demand-driven stream owner.
 
 use super::{
-    CallDeadline, NativeDuplexStream, NativeServerStream, NativeStreamConfig, check_cancellation,
-    io_status, request_headers,
+    CallDeadline, NativeDuplexStream, NativeServerStream, NativeStreamConfig, NativeStreamWindows,
+    check_cancellation, io_status, request_headers,
 };
 use crate::cx::{CancelWakerToken, Cx};
 use crate::grpc::codec::Codec;
 use crate::grpc::{Request, Status};
+use crate::io::{AsyncRead, AsyncWrite};
 use crate::net::TcpStream;
 use crate::time::{Sleep, TimerDriverHandle};
 #[cfg(feature = "tls")]
@@ -193,22 +194,11 @@ impl NativeStreamEndpoint {
                 "plaintext streaming requires the http scheme",
             ));
         }
-        let (admitted, mut setup) = self.admit(cx, path, &request, &config)?;
-        let io = self.dial(&mut setup).await?;
-        let mut stream = NativeServerStream::new_admitted(
-            cx,
-            io,
-            &self.authority,
-            path,
-            request,
-            codec,
-            config,
-            Some(admitted),
-        )?;
-        setup
-            .run(async { stream.headers().await.map(|_| ()) })
-            .await?;
-        Ok(stream)
+        self.connect_with_transport(
+            cx, path, request, codec, config, NativeStreamWindows::default(), None,
+            |io| async move { Ok(io) },
+        )
+        .await
     }
 
     /// Connect with a caller-owned TLS policy and require negotiated HTTP/2.
@@ -281,10 +271,9 @@ impl NativeStreamEndpoint {
         }
         TlsConnector::validate_domain(server_name)
             .map_err(|_| Status::invalid_argument("invalid gRPC TLS server name"))?;
-        let (admitted, mut setup) = self.admit(cx, path, &request, &config)?;
-        let tcp = self.dial(&mut setup).await?;
-        let tls = setup
-            .run(async {
+        self.connect_with_transport(
+            cx, path, request, codec, config, NativeStreamWindows::default(), None,
+            |tcp| async move {
                 let tls = connector
                     .connect(server_name, tcp)
                     .await
@@ -295,26 +284,9 @@ impl NativeStreamEndpoint {
                     ));
                 }
                 Ok(tls)
-            })
-            .await?;
-        let mut stream = setup
-            .run(async {
-                NativeServerStream::new_admitted(
-                    cx,
-                    tls,
-                    &self.authority,
-                    path,
-                    request,
-                    codec,
-                    config,
-                    Some(admitted),
-                )
-            })
-            .await?;
-        setup
-            .run(async { stream.headers().await.map(|_| ()) })
-            .await?;
-        Ok(stream)
+            },
+        )
+        .await
     }
 
     /// Connect a client-streaming or bidi call and flush its request headers.
@@ -342,24 +314,11 @@ impl NativeStreamEndpoint {
                 "plaintext streaming requires the http scheme",
             ));
         }
-        let (admitted, mut setup) = self.admit(cx, path, &request, &config)?;
-        let io = self.dial(&mut setup).await?;
-        let mut stream = setup
-            .run(async {
-                NativeDuplexStream::new_admitted(
-                    cx,
-                    io,
-                    &self.authority,
-                    path,
-                    request,
-                    codec,
-                    config,
-                    Some(admitted),
-                )
-            })
-            .await?;
-        setup.run(stream.flush_initial_headers()).await?;
-        Ok(stream)
+        self.connect_duplex_with_transport(
+            cx, path, request, codec, config, NativeStreamWindows::default(), None,
+            |io| async move { Ok(io) },
+        )
+        .await
     }
 
     /// Connect a streaming request with the supplied TLS policy and h2 ALPN.
@@ -388,10 +347,9 @@ impl NativeStreamEndpoint {
         }
         TlsConnector::validate_domain(server_name)
             .map_err(|_| Status::invalid_argument("invalid gRPC TLS server name"))?;
-        let (admitted, mut setup) = self.admit(cx, path, &request, &config)?;
-        let tcp = self.dial(&mut setup).await?;
-        let tls = setup
-            .run(async {
+        self.connect_duplex_with_transport(
+            cx, path, request, codec, config, NativeStreamWindows::default(), None,
+            |tcp| async move {
                 let tls = connector
                     .connect(server_name, tcp)
                     .await
@@ -402,24 +360,119 @@ impl NativeStreamEndpoint {
                     ));
                 }
                 Ok(tls)
-            })
-            .await?;
+            },
+        )
+        .await
+    }
+
+    // Both public endpoint methods and GrpcClient's consuming facade use one
+    // admission/setup path. The upgrade closure is polled under the explicit
+    // context and the same absolute deadline as DNS, TCP and request headers.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect_with_transport<C, IO, Upgrade, UpgradeFuture>(
+        &self,
+        cx: &Cx,
+        path: &str,
+        request: Request<C::Encode>,
+        codec: C,
+        config: NativeStreamConfig,
+        windows: NativeStreamWindows,
+        started: Option<CallDeadline>,
+        upgrade: Upgrade,
+    ) -> Result<NativeServerStream<IO, C>, Status>
+    where
+        C: Codec,
+        IO: AsyncRead + AsyncWrite + Unpin,
+        Upgrade: FnOnce(TcpStream) -> UpgradeFuture,
+        UpgradeFuture: Future<Output = Result<IO, Status>>,
+    {
+        windows.validate()?;
+        let (admitted, mut setup) = self.admit_started(cx, path, &request, &config, started)?;
+        let tcp = self.dial(&mut setup).await?;
+        let io = setup.run(async { upgrade(tcp).await }).await?;
         let mut stream = setup
             .run(async {
-                NativeDuplexStream::new_admitted(
+                NativeServerStream::new_request_with_windows(
                     cx,
-                    tls,
+                    io,
+                    &self.authority,
+                    path,
+                    request.map(Some),
+                    codec,
+                    config,
+                    Some(admitted),
+                    true,
+                    windows,
+                )
+            })
+            .await?;
+        setup.run(async { stream.headers().await.map(|_| ()) }).await?;
+        Ok(stream)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn connect_duplex_with_transport<C, IO, Upgrade, UpgradeFuture>(
+        &self,
+        cx: &Cx,
+        path: &str,
+        request: Request<()>,
+        codec: C,
+        config: NativeStreamConfig,
+        windows: NativeStreamWindows,
+        started: Option<CallDeadline>,
+        upgrade: Upgrade,
+    ) -> Result<NativeDuplexStream<IO, C>, Status>
+    where
+        C: Codec,
+        IO: AsyncRead + AsyncWrite + Unpin,
+        Upgrade: FnOnce(TcpStream) -> UpgradeFuture,
+        UpgradeFuture: Future<Output = Result<IO, Status>>,
+    {
+        windows.validate()?;
+        let (admitted, mut setup) = self.admit_started(cx, path, &request, &config, started)?;
+        let tcp = self.dial(&mut setup).await?;
+        let io = setup.run(async { upgrade(tcp).await }).await?;
+        let mut stream = setup
+            .run(async {
+                NativeDuplexStream::new_admitted_with_windows(
+                    cx,
+                    io,
                     &self.authority,
                     path,
                     request,
                     codec,
                     config,
                     Some(admitted),
+                    windows,
                 )
             })
             .await?;
         setup.run(stream.flush_initial_headers()).await?;
         Ok(stream)
+    }
+
+    fn admit_started<T>(
+        &self,
+        cx: &Cx,
+        path: &str,
+        request: &Request<T>,
+        config: &NativeStreamConfig,
+        started: Option<CallDeadline>,
+    ) -> Result<(CallDeadline, Setup), Status> {
+        let (mut admitted, mut setup) = self.admit(cx, path, request, config)?;
+        if let Some(at) = started.and_then(|deadline| deadline.at) {
+            // A GrpcClient interceptor ran before endpoint admission. Its time
+            // is charged against the original whole-call deadline; metadata
+            // written by it can tighten that bound but cannot restart it.
+            admitted.at = Some(admitted.at.map_or(at, |current| current.min(at)));
+            admitted.check()?;
+            if at < setup.until {
+                setup.until = at;
+                setup.timer = Box::pin(Sleep::with_timer_driver(at, setup.clock.clone()));
+            }
+            setup.check()?;
+        }
+        Ok((admitted, setup))
     }
 
     fn admit<T>(
