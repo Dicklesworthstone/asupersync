@@ -836,25 +836,8 @@ impl NativeQuicUdpConnection {
         self.connection
             .inner_mut()
             .set_one_rtt_frame_budget(max_frame_bytes);
-        if self.connection.inner().can_send_1rtt()
-            && self
-                .protection
-                .confidentiality_key_update_due(PacketProtectionSpace::OneRtt)
-            && self.connection.inner().tls().local_key_phase()
-                == self.connection.inner().tls().remote_key_phase()
-        {
-            let next_phase = !self.connection.inner().tls().local_key_phase();
-            if self
-                .protection
-                .ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, next_phase)
-                .is_ok()
-            {
-                self.connection.inner_mut().request_local_key_update(cx)?;
-                self.connection.inner_mut().commit_local_key_update(cx)?;
-                self.protection
-                    .note_local_key_update(PacketProtectionSpace::OneRtt);
-            }
-        }
+        // The shared packet assembler checks key-update eligibility and the
+        // AEAD limit for every new packet, including PTO and close packets.
         // Retry retained output before admitting more application work.
         let packet_budget = if self.pending_outgoing.is_empty() {
             MAX_PACKETS_PER_FLUSH

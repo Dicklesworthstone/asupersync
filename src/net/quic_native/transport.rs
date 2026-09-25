@@ -926,6 +926,13 @@ impl QuicTransportMachine {
             .on_ack_ranges(space, ack_ranges, ack_delay_micros, now_micros)
     }
 
+    /// Highest ACK that matched a packet in this transport's sent history.
+    /// Unsent packet numbers and ACKs from other spaces cannot confirm a
+    /// locally initiated 1-RTT key update.
+    pub(crate) fn largest_acked_packet_number(&self, space: PacketNumberSpace) -> Option<u64> {
+        self.recovery.largest_acked[space.idx()]
+    }
+
     /// Compute PTO deadline from current recovery state.
     #[must_use]
     pub fn pto_deadline_micros(&self, now_micros: u64) -> Option<u64> {

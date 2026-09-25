@@ -2173,6 +2173,73 @@ pub(crate) async fn assemble_protected_1rtt_packet(
     .await
 }
 
+/// Every native 1-RTT assembler uses the same rotation and exhaustion policy.
+/// Checking per packet also covers a batch that crosses the soft threshold,
+/// PTO probes, and a final close packet. Already protected retained packets
+/// never pass through this function again and keep their original key/nonce.
+fn prepare_one_rtt_send_key(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    connection: &mut NativeQuicConnection,
+    packet_protection: &mut AtpPacketProtection,
+) -> Result<(), ConnectionRouterError> {
+    cx.checkpoint()
+        .map_err(|_| ConnectionRouterError::Cancelled)?;
+    let space = PacketProtectionSpace::OneRtt;
+    let mut rotation_failure = None;
+    if packet_protection.confidentiality_key_update_due(space)
+        && connection.can_initiate_local_key_update()
+    {
+        let next_phase = !connection.tls().local_key_phase();
+        // Eligibility is checked before advancing the bidirectional rustls
+        // ratchet. Receiving the peer's phase bit is not a substitute for an
+        // ACK of our current generation (RFC 9001 section 6.1).
+        match packet_protection.ensure_next_gen_keys(cx, space, next_phase) {
+            Outcome::Ok(()) => {
+                connection
+                    .request_local_key_update(cx)
+                    .and_then(|_| connection.commit_local_key_update(cx))
+                    .map_err(|error| {
+                        if matches!(error, NativeQuicConnectionError::Cancelled) {
+                            ConnectionRouterError::Cancelled
+                        } else {
+                            ConnectionRouterError::PacketProcessingFailed {
+                                connection_id,
+                                reason: format!("1-RTT key update failed: {error}"),
+                            }
+                        }
+                    })?;
+                packet_protection.note_local_key_update(space);
+            }
+            Outcome::Err(error) => {
+                rotation_failure = Some(format!("1-RTT key update failed: {error:?}"));
+            }
+            Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+            Outcome::Panicked(payload) => {
+                rotation_failure = Some(format!("1-RTT key update panicked: {payload:?}"));
+            }
+        }
+    }
+    if packet_protection.confidentiality_limit_reached(space) {
+        // No CONNECTION_CLOSE can be encrypted with an exhausted key. Stop
+        // locally with AEAD_LIMIT_REACHED; the router reaps the closed owner.
+        connection
+            .close_immediately(cx, 0x0f)
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: "AEAD_LIMIT_REACHED: 1-RTT confidentiality limit exhausted".to_owned(),
+        });
+    }
+    if let Some(reason) = rotation_failure {
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason,
+        });
+    }
+    Ok(())
+}
+
 pub(crate) async fn assemble_protected_1rtt_packet_inner(
     cx: &Cx,
     connection_id: ConnectionId,
@@ -2208,6 +2275,7 @@ pub(crate) async fn assemble_protected_1rtt_packet_inner(
             connection_id,
             reason: err.to_string(),
         })?;
+    prepare_one_rtt_send_key(cx, connection_id, connection, packet_protection)?;
     let key_phase = connection.tls().local_key_phase();
     let header = PacketHeader::Short(ShortHeader {
         spin: false,
@@ -4688,6 +4756,186 @@ mod tests {
             .await
             .expect("derive 1-RTT keys");
         protection
+    }
+
+    #[test]
+    fn managed_key_updates_require_acknowledgement_of_the_current_generation() {
+        run_test_with_cx(|cx| async move {
+            let cid = ConnectionId::new(b"key-acks").unwrap();
+            let peer = "127.0.0.1:4460".parse().unwrap();
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            add_protected_test_connection(&cx, &mut router, cid, peer).await;
+            let handle = router.connections.get_mut(&cid).unwrap();
+            handle
+                .packet_protection
+                .as_mut()
+                .unwrap()
+                .protection
+                .set_key_update_confidentiality_threshold(2);
+
+            // PN 0/1 use the initial key; PN 2 initiates generation one.
+            // Matching peer phases, old ACKs, unsent ACKs, and other packet
+            // spaces must not authorize the second update.
+            for (pn, phase) in [
+                (0, false),
+                (1, false),
+                (2, true),
+                (3, true),
+                (4, true),
+                (5, true),
+                (6, false),
+                (7, false),
+                (8, false),
+                (9, true),
+            ] {
+                if pn == 4 {
+                    handle.connection.on_peer_key_phase_pn(&cx, true, 0).unwrap();
+                    handle.connection.on_ack_received(
+                        &cx, PacketNumberSpace::ApplicationData, &[0, 999], 0, pn,
+                    ).unwrap();
+                    handle.connection.on_ack_received(
+                        &cx, PacketNumberSpace::Handshake, &[2], 0, pn,
+                    ).unwrap();
+                }
+                if pn == 6 || pn == 9 {
+                    let acknowledged = if pn == 6 { 2 } else { 6 };
+                    let ack = QuicFrame::Ack {
+                        largest_acknowledged: VarInt::from_u64_unchecked(acknowledged),
+                        ack_delay: VarInt::from_u64_unchecked(0),
+                        ack_range_count: VarInt::from_u64_unchecked(0),
+                        first_ack_range: VarInt::from_u64_unchecked(0),
+                        ack_ranges: Vec::new(),
+                        ecn_counts: None,
+                    };
+                    handle.connection.process_frame(
+                        &cx, &ack, PacketNumberSpace::ApplicationData,
+                    ).unwrap();
+                }
+                handle.connection.queue_ping(&cx).unwrap();
+                let packets = drain_connection_frames(
+                    &cx, cid, handle, PacketNumberSpace::ApplicationData, peer, Instant::now(), pn,
+                ).await.unwrap();
+                assert_eq!(packets.len(), 1, "packet {pn}");
+                assert_eq!(handle.connection.tls().local_key_phase(), phase, "packet {pn}");
+                assert_eq!(
+                    handle.connection.next_packet_number_for_protection(
+                        PacketNumberSpace::ApplicationData,
+                    ).unwrap(),
+                    pn + 1,
+                );
+                if matches!(pn, 2 | 6 | 9) {
+                    assert_eq!(
+                        handle.packet_protection.as_ref().unwrap().protection
+                            .protected_packet_count(PacketProtectionSpace::OneRtt),
+                        1,
+                        "exactly one encryption under the new key",
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn managed_key_update_waits_for_handshake_confirmation_before_ratcheting() {
+        run_test_with_cx(|cx| async move {
+            let cid = ConnectionId::new(b"key-hs").unwrap();
+            let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+            connection.begin_handshake(&cx).unwrap();
+            connection.on_handshake_keys_available(&cx).unwrap();
+            connection.on_1rtt_keys_available(&cx).unwrap();
+            connection.record_verified_server_identity();
+            connection.on_authenticated_handshake_complete(&cx).unwrap();
+            let mut protection = deterministic_one_rtt_protection(&cx).await;
+            protection.set_key_update_confidentiality_threshold(1);
+            protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, 1);
+            assert!(connection.can_send_1rtt());
+            assert!(!connection.tls().handshake_confirmed());
+            prepare_one_rtt_send_key(&cx, cid, &mut connection, &mut protection).unwrap();
+            assert!(!connection.tls().local_key_phase());
+            assert!(!protection.next_gen_keys_installed(PacketProtectionSpace::OneRtt, true));
+            assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 1);
+
+            connection.on_handshake_confirmed(&cx).unwrap();
+            prepare_one_rtt_send_key(&cx, cid, &mut connection, &mut protection).unwrap();
+            assert!(connection.tls().local_key_phase());
+            assert!(protection.next_gen_keys_installed(PacketProtectionSpace::OneRtt, true));
+            assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 0);
+        });
+    }
+
+    #[test]
+    fn managed_key_limit_closes_before_encrypting_application_probe_or_close() {
+        run_test_with_cx(|cx| async move {
+            for mode in ["application", "probe", "close"] {
+                let cid = ConnectionId::new(b"key-limit").unwrap();
+                let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+                establish_for_application_data(&cx, &mut connection);
+                let mut protection = deterministic_one_rtt_protection(&cx).await;
+                protection.set_key_update_confidentiality_threshold(1);
+                protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, 1);
+                prepare_one_rtt_send_key(&cx, cid, &mut connection, &mut protection).unwrap();
+                assert!(!connection.can_initiate_local_key_update());
+                protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, 1 << 23);
+                let frames = if mode == "close" {
+                    connection.begin_close(&cx, 0, 7).unwrap();
+                    vec![QuicFrame::ConnectionClose {
+                        error_code: VarInt::from_u64_unchecked(7),
+                        frame_type: None,
+                        reason_phrase: Bytes::new(),
+                    }]
+                } else {
+                    vec![QuicFrame::Ping]
+                };
+                let mut payload = BytesMut::new();
+                NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+                let error = assemble_protected_1rtt_packet_inner(
+                    &cx, cid, &mut connection, &mut protection, &frames, &payload, 0,
+                    mode != "close", mode == "probe",
+                ).await.unwrap_err();
+                assert!(matches!(error, ConnectionRouterError::PacketProcessingFailed {
+                    reason, ..
+                } if reason.starts_with("AEAD_LIMIT_REACHED:")), "{mode}");
+                assert_eq!(connection.state(), QuicConnectionState::Closed, "{mode}");
+                assert_eq!(connection.transport().close_code(), Some(0x0f));
+                assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 1 << 23);
+                assert_eq!(connection.next_packet_number_for_protection(
+                    PacketNumberSpace::ApplicationData,
+                ).unwrap(), 0, "refusal must not consume a packet number");
+            }
+        });
+    }
+
+    #[test]
+    fn managed_key_limit_allows_the_last_packet_without_confirming_an_update() {
+        run_test_with_cx(|cx| async move {
+            let cid = ConnectionId::new(b"key-last").unwrap();
+            let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+            establish_for_application_data(&cx, &mut connection);
+            let mut protection = deterministic_one_rtt_protection(&cx).await;
+            protection.set_key_update_confidentiality_threshold(1);
+            protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, 1);
+            prepare_one_rtt_send_key(&cx, cid, &mut connection, &mut protection).unwrap();
+            protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, (1 << 23) - 1);
+            let frames = [QuicFrame::Ping];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let packet = assemble_protected_1rtt_packet(
+                &cx, cid, &mut connection, &mut protection, &frames, &payload, 0, true,
+            ).await.unwrap();
+            assert!(!packet.is_empty());
+            assert!(connection.tls().local_key_phase());
+            assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 1 << 23);
+            assert_eq!(connection.state(), QuicConnectionState::Established);
+            assert!(!connection.can_initiate_local_key_update());
+            let error = assemble_protected_1rtt_packet(
+                &cx, cid, &mut connection, &mut protection, &frames, &payload, 1, true,
+            ).await.unwrap_err();
+            assert!(matches!(error, ConnectionRouterError::PacketProcessingFailed {
+                reason, ..
+            } if reason.starts_with("AEAD_LIMIT_REACHED:")));
+            assert_eq!(connection.state(), QuicConnectionState::Closed);
+            assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 1 << 23);
+        });
     }
 
     #[test]

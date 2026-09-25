@@ -299,6 +299,10 @@ pub struct NativeQuicConnection {
     transport: QuicTransportMachine,
     streams: StreamTable,
     next_packet_numbers: [u64; 3],
+    /// First packet number eligible to use the current updated send key.
+    /// A subsequent locally initiated update needs a real ACK at this floor
+    /// or above; the peer's key-phase bit alone is not confirmation.
+    local_key_update_floor: Option<u64>,
     received_ack_trackers: [ReceivedPacketTracker; 3],
     migration_disabled: bool,
     /// Peer-advertised `ack_delay_exponent` (RFC 9000 §18.2; default 3). Scales
@@ -486,6 +490,7 @@ impl NativeQuicConnection {
             transport: QuicTransportMachine::new(),
             streams,
             next_packet_numbers: [0, 0, 0],
+            local_key_update_floor: None,
             received_ack_trackers: [
                 ReceivedPacketTracker::default(),
                 ReceivedPacketTracker::default(),
@@ -2156,6 +2161,19 @@ impl NativeQuicConnection {
         Ok(evt)
     }
 
+    /// RFC 9001 section 6.1 eligibility for automatic local initiation.
+    /// Peer-triggered updates use the existing request/commit path directly:
+    /// they must update the send key before acknowledging the peer's packet.
+    pub(crate) fn can_initiate_local_key_update(&self) -> bool {
+        self.can_send_1rtt()
+            && self.tls.handshake_confirmed()
+            && self.local_key_update_floor.is_none_or(|floor| {
+                self.transport
+                    .largest_acked_packet_number(PacketNumberSpace::ApplicationData)
+                    .is_some_and(|acked| acked >= floor)
+            })
+    }
+
     /// Commit local key update once keys are installed.
     pub fn commit_local_key_update(
         &mut self,
@@ -2163,6 +2181,11 @@ impl NativeQuicConnection {
     ) -> Result<KeyUpdateEvent, NativeQuicConnectionError> {
         checkpoint(cx)?;
         let evt = self.tls.commit_local_key_update()?;
+        if matches!(evt, KeyUpdateEvent::LocalUpdateScheduled { .. }) {
+            self.local_key_update_floor = Some(
+                self.next_packet_numbers[packet_number_space_idx(PacketNumberSpace::ApplicationData)],
+            );
+        }
         Ok(evt)
     }
 
