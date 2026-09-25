@@ -7123,6 +7123,9 @@ struct NativeRemoteTaskEntry {
     control_receiver: Option<mpsc::Receiver<()>>,
     driver_cx: Option<Cx>,
     control_in_flight: bool,
+    /// The in-flight control exchange is a graceful Cancel. A later cancel
+    /// request must not interrupt it (asupersync-bi2462.77).
+    cancel_exchange_in_flight: bool,
     request_dispatch_started: bool,
 }
 
@@ -7180,6 +7183,7 @@ impl NativeRemoteShared {
                 control_receiver: Some(control_receiver),
                 driver_cx: None,
                 control_in_flight: false,
+                cancel_exchange_in_flight: false,
                 request_dispatch_started: false,
             },
         );
@@ -7253,6 +7257,27 @@ impl NativeRemoteShared {
         }
     }
 
+    /// Marks a control exchange in flight and takes the coalesced
+    /// cancellation under the state lock, so `request_cancel` sees which kind
+    /// of exchange it would interrupt. A cancellation that arrives during a
+    /// renewal still wakes the driver Cx. One that arrives during a Cancel
+    /// exchange leaves it to finish within its drain bound: interrupting it
+    /// would turn a graceful drain into a local, delivery-ambiguous
+    /// cancellation (asupersync-bi2462.77).
+    fn begin_control_exchange(
+        &self,
+        task_id: RemoteTaskId,
+        control: &NativeRemoteControl,
+    ) -> Option<CancelReason> {
+        let mut state = self.state.lock();
+        let cancel = control.take_cancel();
+        if let Some(entry) = state.tasks.get_mut(&task_id) {
+            entry.control_in_flight = true;
+            entry.cancel_exchange_in_flight = cancel.is_some();
+        }
+        cancel
+    }
+
     fn roll_back_admission(&self, task_id: RemoteTaskId) {
         let waiters = {
             let mut state = self.state.lock();
@@ -7280,6 +7305,7 @@ impl NativeRemoteShared {
                 entry.state = terminal_state;
                 entry.driver_cx = None;
                 entry.control_in_flight = false;
+                entry.cancel_exchange_in_flight = false;
                 entry.result.take()
             })
         };
@@ -7330,9 +7356,11 @@ impl NativeRemoteShared {
                 ))
             })?;
             let signaled = entry.control.request_cancel(reason.clone());
+            // A graceful Cancel exchange already carries this request to the
+            // server; interrupting its driver would abandon the drain.
             let pending_driver = ((entry.state == RemoteTaskState::Pending
                 && !entry.request_dispatch_started)
-                || entry.control_in_flight)
+                || (entry.control_in_flight && !entry.cancel_exchange_in_flight))
                 .then(|| entry.driver_cx.clone())
                 .flatten();
             (signaled, pending_driver)
@@ -7545,12 +7573,11 @@ async fn drive_native_remote_session(
                 ));
             }
             NativeRemoteSessionRace::Control(Ok(())) | NativeRemoteSessionRace::RenewalDue => {
-                // Mark the control exchange before inspecting coalesced state.
-                // A cancellation that races this point can then wake the
+                // Mark the control exchange and inspect coalesced state in one
+                // step. A cancellation that races a renewal can then wake the
                 // driver Cx and fail closed by dropping the authenticated
                 // stream instead of waiting behind a lost renewal reply.
-                shared.set_control_in_flight(task_id, true);
-                if let Some(reason) = control.take_cancel() {
+                if let Some(reason) = shared.begin_control_exchange(task_id, control) {
                     // `take_cancel` cleared the pending reason; a failed
                     // Cancel exchange must still surface as this cancellation
                     // rather than as a transport error.
@@ -14000,5 +14027,54 @@ mod tests {
         assert_ne!(e, RemoteError::LeaseExpired);
         let dbg = format!("{e:?}");
         assert!(dbg.contains("NoCapability"));
+    }
+
+    /// asupersync-bi2462.77: a second drain request reached a driver whose
+    /// graceful Cancel exchange was in flight and cancelled its Cx. The
+    /// server's Cancelled outcome was then lost to a local `Err(Cancelled)`.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    #[test]
+    fn native_cancel_request_interrupts_renewal_but_not_graceful_cancel_exchange() {
+        let shared = NativeRemoteShared {
+            max_in_flight: 4,
+            drain_timeout: Duration::from_secs(1),
+            automatic_lease_renewal: false,
+            state: Mutex::new(NativeRemoteState::new()),
+            retirement_notify: None,
+        };
+        for (raw, cancel_exchange) in [(1_u64, true), (2, false)] {
+            let task_id = RemoteTaskId::from_raw(raw);
+            let (result, _result_rx) = oneshot::channel();
+            shared.register(task_id, result);
+            let _wake = shared.admit(task_id).unwrap();
+            let driver_cx = Cx::for_testing();
+            shared.attach_driver_cx(task_id, driver_cx.clone());
+            shared.set_running(task_id);
+            let control = shared.control(task_id).unwrap();
+
+            if cancel_exchange {
+                shared
+                    .request_cancel(task_id, CancelReason::shutdown())
+                    .unwrap();
+                assert!(!driver_cx.is_cancel_requested());
+                assert!(shared.begin_control_exchange(task_id, &control).is_some());
+                shared
+                    .request_cancel(task_id, CancelReason::shutdown())
+                    .unwrap();
+                assert!(
+                    !driver_cx.is_cancel_requested(),
+                    "a repeated drain must not interrupt the graceful Cancel exchange"
+                );
+            } else {
+                assert!(shared.begin_control_exchange(task_id, &control).is_none());
+                shared
+                    .request_cancel(task_id, CancelReason::shutdown())
+                    .unwrap();
+                assert!(
+                    driver_cx.is_cancel_requested(),
+                    "a cancellation racing a renewal still wakes the driver"
+                );
+            }
+        }
     }
 }
