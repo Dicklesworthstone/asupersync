@@ -475,6 +475,12 @@ struct AtpSendArgs {
     /// Explain path, scheduler, and repair decisions
     #[arg(long = "explain", action = ArgAction::SetTrue)]
     explain: bool,
+
+    /// Permit the plaintext, unauthenticated ATP-over-TCP send to a
+    /// non-loopback target. Without it such a send is refused; a loopback
+    /// target never needs it.
+    #[arg(long = "allow-plaintext", action = ArgAction::SetTrue)]
+    allow_plaintext: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1263,6 +1269,7 @@ impl Outputtable for AtpSendResultOutput {
 fn run_real_atp_send(
     source: &Path,
     target: &str,
+    allow_plaintext: bool,
 ) -> Result<asupersync::net::atp::transport_tcp::SendReport, CliError> {
     use std::net::ToSocketAddrs;
 
@@ -1288,6 +1295,20 @@ fn run_real_atp_send(
             .detail(format!("target '{target}'"))
             .exit_code(ExitCode::USER_ERROR)
         })?;
+    // asupersync-bi2462.126: this send is plaintext, unauthenticated
+    // ATP-over-TCP, as refused for `asupersync atp serve`. Refuse a
+    // non-loopback target before any connection unless the caller opts in.
+    if !addr.ip().is_loopback() && !allow_plaintext {
+        return Err(CliError::new(
+            "atp_plaintext_refused",
+            "ATP send refuses a plaintext, unauthenticated transfer to a non-loopback target",
+        )
+        .detail(format!(
+            "{addr}: an on-path attacker could substitute the manifest and the bytes. Send to a \
+             loopback address, or pass --allow-plaintext to accept the risk."
+        ))
+        .exit_code(ExitCode::USER_ERROR));
+    }
 
     let runtime = asupersync::runtime::RuntimeBuilder::multi_thread()
         .build()
@@ -5543,7 +5564,7 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
         // Real ATP-over-TCP transfer (br-asupersync-qk02uw). This moves actual
         // verified bytes to the peer and fails closed on an unreachable target
         // or a receiver integrity rejection — no simulated progress.
-        let report = run_real_atp_send(&args.source, &args.target)?;
+        let report = run_real_atp_send(&args.source, &args.target, args.allow_plaintext)?;
 
         let payload = AtpSendResultOutput::from_report(&args.source, &args.target, &report);
         output
@@ -17468,6 +17489,7 @@ lab:
             verbose: false,
             progress: false,
             explain: false,
+            allow_plaintext: false,
         };
 
         atp_send(&args, &mut output).expect("atp send should work");
@@ -17608,6 +17630,7 @@ lab:
             verbose: false,
             progress: true,
             explain: true,
+            allow_plaintext: false,
         };
 
         // --explain used to print hardcoded QUIC/RTT/loss numbers; until real
@@ -17810,6 +17833,44 @@ lab:
         }) = cli.command
         else {
             panic!("expected atp serve");
+        };
+        assert!(args.allow_plaintext);
+    }
+
+    /// asupersync-bi2462.126: `asupersync atp send` is plaintext ATP-over-TCP too.
+    /// A non-loopback target is refused before any connection unless opted in.
+    #[test]
+    fn atp_send_refuses_plaintext_off_loopback_without_the_opt_in() {
+        let capture = SharedWrite::default();
+        let mut output = Output::with_writer(OutputFormat::Human, capture.clone());
+        // TEST-NET-1 is unroutable: a send that got past the refusal would
+        // block in connect instead of returning at once.
+        let cli = Cli::parse_from(["asupersync", "atp", "send", "Cargo.toml", "192.0.2.1:9"]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Send(args),
+        }) = cli.command
+        else {
+            panic!("expected atp send");
+        };
+        assert!(!args.allow_plaintext);
+
+        let err = atp_send(&args, &mut output).expect_err("non-loopback target must be refused");
+        assert_eq!(err.error_type, "atp_plaintext_refused");
+        assert!(capture.contents().is_empty(), "nothing reported as sent");
+
+        let cli = Cli::parse_from([
+            "asupersync",
+            "atp",
+            "send",
+            "Cargo.toml",
+            "192.0.2.1:9",
+            "--allow-plaintext",
+        ]);
+        let Command::Atp(AtpArgs {
+            command: AtpCommand::Send(args),
+        }) = cli.command
+        else {
+            panic!("expected atp send");
         };
         assert!(args.allow_plaintext);
     }

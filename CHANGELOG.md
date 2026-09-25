@@ -150,7 +150,8 @@ The derive itself is correct and is not changing. Thanks to the
 
 `atp send`, `atp recv`, `atp serve` and `asupersync atp serve` now refuse
 `--transport tcp` (the default transport) toward or on any non-loopback
-address unless `--allow-plaintext` is given. The receivers' default listen
+address unless `--allow-plaintext` is given. `asupersync atp send`, which
+always sends plaintext TCP, refuses a non-loopback target the same way. The receivers' default listen
 address, `0.0.0.0`, counts as non-loopback, so a bare `atp recv DIR` or
 `asupersync atp serve` needs the flag or a loopback `--listen`. Loopback
 transfers are unchanged.

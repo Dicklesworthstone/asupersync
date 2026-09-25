@@ -68,9 +68,9 @@ These checks protect against corruption, not against an attacker. The transport
 is plaintext and the manifest is unauthenticated, so an on-path attacker can
 substitute the manifest and the bytes together and both checks pass. The CLIs
 therefore refuse it off loopback (asupersync-bi2462.126). `atp send`, `atp
-recv`/`atp serve` and `asupersync atp serve` reject `--transport tcp` toward or
-on a non-loopback address, including the receivers' default 0.0.0.0 listen,
-unless `--allow-plaintext` is given. Loopback needs no flag. For transfers
+recv`/`atp serve` and `asupersync atp send`/`asupersync atp serve` reject
+plaintext TCP toward or on a non-loopback address, including the receivers'
+default 0.0.0.0 listen, unless `--allow-plaintext` is given. Loopback needs no flag. For transfers
 between hosts, use `--transport quic` (or `auto`), which is authenticated and
 encrypted.
 
