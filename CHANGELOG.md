@@ -94,11 +94,23 @@ afterwards, and the clock can be captured and replayed within bounded windows.
 **Correction (2026-09-22):** the attribution below is wrong. The
 `#[derive(Debug, ...)]` on `Outcome<T, E>` is byte-identical at v0.4.3 and at
 v0.5.0 (`src/types/outcome.rs` line 217 in both tags), so it cannot be what
-changed in 0.5.0. The real cause of the downstream break observed with 0.5.0 is
-still unidentified and is tracked in `asupersync-bi2462.139`. The
-conditional-`Debug` behaviour described below is accurate. It has held since
-before v0.4.3, so it may explain an `E0277` in new code, but it is not a
-0.5.0 change.
+changed in 0.5.0. The conditional-`Debug` behaviour described below is
+accurate. It has held since before v0.4.3, so it may explain an `E0277` in new
+code, but it is not a 0.5.0 change.
+
+**Root cause (2026-09-24, `asupersync-bi2462.139`):** the downstream break was
+not an asupersync API change. `Cx::for_request`, `Cx::for_request_with_budget`
+and `Cx::for_testing` have been gated behind the `test-internals` feature since
+before v0.4.3, and that is unchanged in 0.5.0. `sqlmodel` 0.4.0 enabled
+`asupersync/test-internals` in its normal (non-dev) dependencies, so every
+build that pulled in `sqlmodel` 0.4 also had the test-only constructors, and
+production code came to rely on them. `sqlmodel` 0.5.0 stopped leaking the
+feature (sqlmodel_rust `580e66e`). Upgrading to it together with asupersync 0.5
+removed the constructors from production builds. `--all-targets` builds still
+compiled because dev-dependencies enable the feature. Production code should
+not call these constructors: take the ambient context with `Cx::current()`, or
+mint one from the runtime with `Runtime::request_cx_with_budget`. Keep
+`test-internals` in `[dev-dependencies]` only.
 
 This is not new in 0.6.0; it landed in **0.5.0** and is documented here because
 it is a silent, source-breaking change for downstream crates that only surfaces

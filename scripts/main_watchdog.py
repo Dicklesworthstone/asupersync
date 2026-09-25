@@ -23,7 +23,8 @@ Modes:
             stale work in the shared checkout, and duplicate-fix leads (same bead,
             or overlapping lines from different bases: a lead, not proof). `run`
             files the 6 h escalations (one P0 per commit, once) for commits after
-            `--ledger-since`. The owner-decision ledger (item 5) is not built.
+            `--ledger-since`. It also lists owner decisions recorded in bead
+            comments (explicit markers only) that no later commit cites after 48 h.
 
 A lane is green only when the remote exit is 0, cargo reached `Finished`, nothing
 failed to compile, and (for test lanes) every expected target ran at least one
@@ -916,11 +917,23 @@ def phase6_report(commit: dict[str, Any]) -> list[dict[str, Any]]:
 _TARGET_EXISTS_CACHE: dict[tuple[str, str], bool] = {}
 
 
+def target_root_paths(name: str, registry: dict[str, dict[str, Any]]) -> list[str]:
+    """Files whose presence means test target `name` exists.
+
+    Failing tests are keyed `<target>::<test>`, where the lib unit-test target is `lib`:
+    it exists wherever src/lib.rs does. Treating it like an integration target
+    (tests/lib.rs) made every bisect probe read `target-absent` and blamed the head.
+    """
+    if name == "lib":
+        return ["src/lib.rs"]
+    return [path for path, entry in registry.items() if entry["name"] == name] or [f"tests/{name}.rs"]
+
+
 def git_target_exists(sha: str, name: str) -> bool:
-    """Whether integration test target `name` exists at `sha` (registered path or tests/<name>.rs)."""
+    """Whether test target `name` exists at `sha` (see `target_root_paths`)."""
     key = (sha, name)
     if key not in _TARGET_EXISTS_CACHE:
-        paths = [path for path, entry in cargo_test_registry(sha).items() if entry["name"] == name] or [f"tests/{name}.rs"]
+        paths = target_root_paths(name, cargo_test_registry(sha))
         _TARGET_EXISTS_CACHE[key] = any(
             subprocess.run(["git", "cat-file", "-e", f"{sha}:{path}"], capture_output=True, check=False).returncode == 0
             for path in paths
@@ -1581,6 +1594,71 @@ def duplicate_fix_items(window: str = "72.hours") -> tuple[list[dict[str, Any]],
     return origin, local
 
 
+DECISION_RE = re.compile(r"\bOWNER DECISION\b|\brecorded verbatim\b|^Release owner decision:", re.MULTILINE)
+DECISION_DUE = dt.timedelta(hours=48)
+
+
+def decision_ledger(issues: list[dict[str, Any]], commits: list[dict[str, Any]], now: dt.datetime) -> list[dict[str, Any]]:
+    """Owner decisions recorded in bead comments, and the first commit citing that bead after them.
+
+    A decision is a comment carrying an explicit marker ("OWNER DECISION", "recorded
+    verbatim", "Release owner decision:"); a passing mention of the phrase is not one.
+    Status: implemented (a later commit cites the bead), closed (settled in the tracker
+    without one), pending (under 48 h), or stale.
+    """
+    rows = []
+    for issue in issues:
+        for comment in issue.get("comments") or []:
+            text = comment.get("text") or comment.get("body") or ""
+            if not DECISION_RE.search(text):
+                continue
+            decided = dt.datetime.fromisoformat(str(comment.get("created_at")).replace("Z", "+00:00"))
+            later = sorted(
+                (dt.datetime.fromisoformat(c["committed_at"]), c["sha"])
+                for c in commits
+                if issue["id"] in c["beads"] and dt.datetime.fromisoformat(c["committed_at"]) > decided
+            )
+            row = {"bead": issue["id"], "decided_at": decided.isoformat(), "age_h": _hours(now - decided)}
+            if later:
+                row.update(status="implemented", implemented_by=later[0][1])
+            elif issue.get("status") in ("closed", "tombstone"):
+                row["status"] = "closed"  # settled in the tracker; no citing commit required
+            else:
+                row["status"] = "pending" if now - decided < DECISION_DUE else "stale"
+            rows.append(row)
+    return sorted(rows, key=lambda r: r["decided_at"])
+
+
+def recent_commits(days: int = 30) -> list[dict[str, Any]]:
+    """Origin commits of the last `days`, with committer time and cited beads."""
+    out = git("log", "--first-parent", f"--since={days}.days", "--format=%H%x1f%cI%x1f%B%x1e", "origin/main", check=False)
+    commits = []
+    for record in out.split("\x1e"):
+        parts = record.strip("\n").split("\x1f")
+        if len(parts) == 3:
+            commits.append({"sha": parts[0], "committed_at": parts[1], "beads": bead_ids(parts[2])})
+    return commits
+
+
+def recent_issues(issues_path: Path, days: int = 30, now: dt.datetime | None = None) -> list[dict[str, Any]]:
+    """Tracker rows (open or closed) updated within `days`."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    rows = []
+    try:
+        lines = issues_path.read_text().splitlines()
+    except FileNotFoundError:
+        return rows
+    for line in lines:
+        try:
+            issue = json.loads(line)
+            updated = dt.datetime.fromisoformat(str(issue.get("updated_at")).replace("Z", "+00:00"))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(issue, dict) and now - updated <= dt.timedelta(days=days):
+            rows.append(issue)
+    return rows
+
+
 def added_test_targets(since: str, until: str) -> list[str]:
     """Integration test targets whose root file was added in since..until."""
     registry = cargo_test_registry(until)
@@ -1678,6 +1756,11 @@ def summary(receipts_path: Path, since: str, until: str, issues_path: Path, now:
         "first_run_ledger": first_run_ledger(added_test_targets(since, until), receipts),
         "stranded_alerts": stranded_alerts(shared_tree_state(), now),
         "duplicate_fixes": duplicate_fixes(*duplicate_fix_items()),
+        "owner_decisions": [
+            row
+            for row in decision_ledger(recent_issues(issues_path, now=now), recent_commits(), now)
+            if row["status"] in ("pending", "stale")
+        ],
     }
 
 
@@ -1775,6 +1858,13 @@ def main(argv: list[str]) -> int:
             "stranded_alerts": [stranded_alerts(case["tree"], dt.datetime.fromisoformat(case["now"])) for case in probes.get("stranded", [])],
             "duplicate_fixes": [duplicate_fixes(case["origin"], case["local"]) for case in probes.get("duplicate_fixes", [])],
             "diff_hunks": [diff_hunks(text) for text in probes.get("diff_hunks", [])],
+            "target_root_paths": [
+                target_root_paths(case["name"], case.get("registry", {})) for case in probes.get("target_root_paths", [])
+            ],
+            "decision_ledger": [
+                decision_ledger(case["issues"], case["commits"], dt.datetime.fromisoformat(case["now"]))
+                for case in probes.get("decision_ledger", [])
+            ],
             "existing_bead_for": [
                 existing_bead_for(case["new_targets"], case["open_issues"]) for case in probes.get("existing_bead_for", [])
             ],
