@@ -604,9 +604,12 @@ mod tests {
         let batch = delivery.batch.as_ref().unwrap();
         assert!(batch.config.auth_headers.is_empty());
         let body = encode_metrics(&snapshot, 42, &batch.config).unwrap();
+        // Decode under the encoder's envelope, like the sibling OTLP tests. A
+        // body-sized envelope leaves too little work budget for the nested
+        // metric messages.
         let decoded = ExportMetricsServiceRequest::decode_from_bytes(
             &body,
-            ProtobufWireLimits::for_message_size(body.len()),
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
         )
         .unwrap();
         let metrics = &decoded.resource_metrics[0].scope_metrics[0].metrics;
