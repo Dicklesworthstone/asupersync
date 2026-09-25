@@ -2,6 +2,9 @@
 //! FIFO waiting; this domain additionally owns the actual native driver and its
 //! application buffers. No public legacy runtime handle can bypass its quotas.
 
+// This split implementation intentionally uses its parent module's private
+// native-remote machinery as one cohesive unit (as otel/queued.rs does).
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::distributed::remote_owned::{
     RemoteAdmissionLimits, RemoteExecutor, RemotePeerLimits, RemoteQueueLimits,
@@ -547,6 +550,7 @@ fn count_frame(value: &impl Serialize, limit: usize) -> Result<usize, serde_json
 }
 
 /// Charged native handle. The private legacy handle cannot escape this wrapper.
+///
 /// Like the explicit native adapter, this is caller-owned: call `close` before
 /// leaving a region when remote cancellation/terminal collection is required.
 pub struct NativeRemoteAdmittedHandle {
