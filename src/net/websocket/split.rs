@@ -87,14 +87,37 @@ struct WebSocketShared<IO> {
     pending_pong_flush: bool,
     /// Entropy used for client masking when no per-call Cx is available.
     entropy: Arc<dyn EntropySource>,
+    /// Same heartbeat owner before split and after reunite.
+    heartbeat: super::heartbeat::Heartbeat,
     /// True while one half is performing a frame write sequence.
     writer_active: bool,
+    /// Wake the current writer when receive-side heartbeat expires.
+    heartbeat_writer: Option<Waker>,
     /// Wakers for waiters blocked on `writer_active`.
     writer_waiters: SmallVec<[WriterWaiter; 2]>,
     /// Next waiter ID.
     next_waiter_id: u64,
     /// Unique ID for reunite verification.
     id: u64,
+}
+
+impl<IO> WebSocketShared<IO> {
+    fn check_write_heartbeat(&mut self, task: &Context<'_>) -> io::Result<()> {
+        if self.heartbeat.failed() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebSocket heartbeat timed out",
+            ));
+        }
+        if self
+            .heartbeat_writer
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(task.waker()))
+        {
+            self.heartbeat_writer = Some(task.waker().clone());
+        }
+        Ok(())
+    }
 }
 
 struct SplitWritePermit<IO> {
@@ -106,6 +129,7 @@ impl<IO> Drop for SplitWritePermit<IO> {
         let next_waker = {
             let mut shared = self.shared.lock();
             shared.writer_active = false;
+            shared.heartbeat_writer = None;
             shared.writer_waiters.first().map(|w| w.waker.clone())
         };
         if let Some(waker) = next_waker {
@@ -248,6 +272,7 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
                 )));
             }
             let mut guard = shared.lock();
+            guard.check_write_heartbeat(poll_cx)?;
             if guard.write_buf.is_empty() {
                 return Poll::Ready(Ok(0));
             }
@@ -280,6 +305,7 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
             )));
         }
         let mut guard = shared.lock();
+        guard.check_write_heartbeat(poll_cx)?;
         Pin::new(&mut guard.io).poll_flush(poll_cx)
     })
     .await?;
@@ -311,6 +337,7 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
             )));
         }
         let mut guard = shared.lock();
+        guard.check_write_heartbeat(poll_cx)?;
         Pin::new(&mut guard.io).poll_write(poll_cx, &buf[..])
     })
     .await?;
@@ -348,6 +375,7 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
             )));
         }
         let mut guard = shared.lock();
+        guard.check_write_heartbeat(poll_cx)?;
         Pin::new(&mut guard.io).poll_flush(poll_cx)
     })
     .await?;
@@ -481,6 +509,7 @@ where
         // Generate a unique ID for reunite verification
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pending_pong_flush = !self.write_buf.is_empty();
 
         let shared = Arc::new(Mutex::new(WebSocketShared {
             io: self.io,
@@ -492,9 +521,11 @@ where
             assembler: self.assembler,
             protocol: self.protocol,
             pending_pongs: self.pending_pongs,
-            pending_pong_flush: false,
+            pending_pong_flush,
             entropy: self.entropy,
+            heartbeat: self.heartbeat,
             writer_active: false,
+            heartbeat_writer: None,
             writer_waiters: SmallVec::new(),
             next_waiter_id: 0,
             id,
@@ -537,27 +568,75 @@ where
                 )));
             }
 
-            // Send any pending pongs (under lock)
-            let flush_pending_pongs = {
+            let update = {
                 let shared = &mut *self.shared.lock();
-                let mut flush_pending_pongs = shared.pending_pong_flush;
-                // cancel-safe: pop_front() takes one at a time from the front without reversing the whole queue
-                while let Some(payload) = shared.pending_pongs.pop_front() {
-                    flush_pending_pongs = true;
-                    shared.pending_pong_flush = true;
-                    let pong = Frame::pong(payload);
-                    let shared = &mut *shared;
-                    shared
-                        .codec
-                        .encode_with_entropy(&pong, &mut shared.write_buf, cx.entropy())?;
+                if shared.heartbeat.failed() {
+                    return Ok(None);
                 }
-                flush_pending_pongs
+                shared
+                    .heartbeat
+                    .update(
+                        cx,
+                        shared.config.ping_interval,
+                        shared.close_handshake.is_open(),
+                    )
+                    .map(|ping| (ping, shared.heartbeat.write_deadline()))
+            };
+            let (ping, deadline) = match update {
+                Ok(update) => update,
+                Err(error) => {
+                    self.fail_heartbeat();
+                    return Err(error);
+                }
             };
 
-            // Flush pending pongs if this call queued them or a prior recv()
-            // was cancelled after encoding them but before the flush.
-            if flush_pending_pongs {
-                flush_write_buf_with_cx(&self.shared, Some(cx)).await?;
+            let flush_control = {
+                let shared = self.shared.lock();
+                ping.is_some() || shared.pending_pong_flush || !shared.pending_pongs.is_empty()
+            };
+            if flush_control {
+                // Serialize control encoding with the complete write sequence.
+                // A concurrent writer may own a partially committed frame;
+                // inserting a Ping before its retained tail corrupts the wire.
+                // The heartbeat retains a not-yet-encoded Ping if this permit
+                // wait is dropped, including across split/reunite.
+                let flush = async {
+                    let _permit = acquire_write_permit(&self.shared).await;
+                    {
+                        let shared = &mut *self.shared.lock();
+                        if let Some(payload) = ping {
+                            let mut encoded = BytesMut::new();
+                            shared.codec.encode_with_entropy(
+                                &Frame::ping(payload),
+                                &mut encoded,
+                                cx.entropy(),
+                            )?;
+                            shared.config.check_outbound_write_budget(
+                                shared.write_buf.len(),
+                                encoded.len(),
+                            )?;
+                            shared.write_buf.extend_from_slice(&encoded);
+                            shared.heartbeat.ping_queued();
+                            shared.pending_pong_flush = true;
+                        }
+                        while let Some(payload) = shared.pending_pongs.pop_front() {
+                            shared.codec.encode_with_entropy(
+                                &Frame::pong(payload),
+                                &mut shared.write_buf,
+                                cx.entropy(),
+                            )?;
+                            shared.pending_pong_flush = true;
+                        }
+                    }
+                    flush_shared_write_buf_with_permit(&self.shared, Some(cx)).await
+                };
+                if super::heartbeat::wait_until(cx, deadline, flush)
+                    .await?
+                    .is_none()
+                {
+                    self.fail_heartbeat();
+                    return Err(super::heartbeat::timeout_error());
+                }
                 self.shared.lock().pending_pong_flush = false;
             }
 
@@ -578,7 +657,7 @@ where
                         enqueue_pending_pong(&mut shared.pending_pongs, frame.payload);
                     }
                     Opcode::Pong => {
-                        // Pong received - keepalive confirmed
+                        self.shared.lock().heartbeat.received_pong(&frame.payload);
                     }
                     Opcode::Close => {
                         // Handle close handshake
@@ -586,14 +665,21 @@ where
                             { self.shared.lock().close_handshake.receive_close(&frame)? };
 
                         if let Some(response_frame) = response {
-                            let send_result = self
-                                .send_frame_internal_with_entropy(
+                            let deadline = self.shared.lock().heartbeat.write_deadline();
+                            let send_result = super::heartbeat::wait_until(
+                                cx,
+                                deadline,
+                                self.send_frame_internal_with_entropy(
                                     Some(cx),
                                     &response_frame,
                                     cx.entropy(),
-                                )
-                                .await;
-                            send_result?;
+                                ),
+                            )
+                            .await;
+                            if send_result?.is_none() {
+                                self.fail_heartbeat();
+                                return Err(super::heartbeat::timeout_error());
+                            }
                             self.shared.lock().close_handshake.mark_response_sent();
                         }
 
@@ -622,7 +708,12 @@ where
                 }
 
                 // Need more data - read from socket
-                let n = self.read_more(cx).await?;
+                let deadline = self.shared.lock().heartbeat.deadline();
+                let Some(n) =
+                    super::heartbeat::wait_until(cx, deadline, self.read_more(cx)).await?
+                else {
+                    continue;
+                };
                 if n == 0 {
                     // EOF - connection closed
                     self.shared
@@ -645,6 +736,30 @@ where
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.shared.lock().close_handshake.is_closed()
+    }
+
+    fn fail_heartbeat(&self) {
+        let (writer, waiters) = {
+            let shared = &mut *self.shared.lock();
+            shared.heartbeat.fail();
+            shared
+                .close_handshake
+                .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+            (
+                shared.heartbeat_writer.take(),
+                shared
+                    .writer_waiters
+                    .iter()
+                    .map(|waiter| waiter.waker.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        if let Some(writer) = writer {
+            writer.wake();
+        }
+        for waiter in waiters {
+            waiter.wake();
+        }
     }
 
     /// Reunite with the write half to reform the original WebSocket.
@@ -689,6 +804,7 @@ where
             protocol: shared.protocol,
             pending_pongs: shared.pending_pongs,
             entropy: shared.entropy,
+            heartbeat: shared.heartbeat,
         })
     }
 

@@ -49,6 +49,7 @@ mod client;
 mod close;
 mod frame;
 mod handshake;
+mod heartbeat;
 mod server;
 mod split;
 

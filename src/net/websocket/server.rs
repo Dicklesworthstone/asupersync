@@ -285,6 +285,8 @@ pub struct ServerWebSocket<IO> {
     extensions: Vec<String>,
     /// Pending pong payloads to send.
     pending_pongs: std::collections::VecDeque<crate::bytes::Bytes>,
+    /// Retained heartbeat deadlines and the one outstanding Ping payload.
+    heartbeat: super::heartbeat::Heartbeat,
 }
 
 impl<IO> ServerWebSocket<IO>
@@ -315,6 +317,7 @@ where
             protocol: accept.protocol,
             extensions: accept.extensions,
             pending_pongs: std::collections::VecDeque::new(),
+            heartbeat: super::heartbeat::Heartbeat::default(),
         }
     }
 
@@ -422,6 +425,30 @@ where
                 )));
             }
 
+            if self.heartbeat.failed() {
+                return Ok(None);
+            }
+            match self.heartbeat.update(
+                cx,
+                self.config.ping_interval,
+                self.close_handshake.is_open(),
+            ) {
+                Ok(Some(payload)) => {
+                    let mut encoded = BytesMut::new();
+                    self.codec.encode(Frame::ping(payload), &mut encoded)?;
+                    self.config
+                        .check_outbound_write_budget(self.write_buf.len(), encoded.len())?;
+                    self.write_buf.extend_from_slice(&encoded);
+                    self.heartbeat.ping_queued();
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.close_handshake
+                        .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    return Err(error);
+                }
+            }
+
             // Send any pending pongs in FIFO order (cancel-safe: pop_front() takes
             // one at a time from the front without reversing the whole queue).
             while let Some(payload) = self.pending_pongs.pop_front() {
@@ -430,8 +457,21 @@ where
             }
 
             if !self.write_buf.is_empty() {
-                match self.flush_write_buf_with_cx(Some(cx)).await {
-                    Ok(()) => {}
+                let deadline = self.heartbeat.write_deadline();
+                match super::heartbeat::wait_until(
+                    cx,
+                    deadline,
+                    self.flush_write_buf_with_cx(Some(cx)),
+                )
+                .await
+                {
+                    Ok(Some(())) => {}
+                    Ok(None) => {
+                        self.heartbeat.fail();
+                        self.close_handshake
+                            .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                        return Err(super::heartbeat::timeout_error());
+                    }
                     Err(WsError::Io(e))
                         if e.kind() == std::io::ErrorKind::Interrupted
                             && cx.checkpoint().is_err() =>
@@ -451,17 +491,25 @@ where
                         enqueue_pending_pong(&mut self.pending_pongs, frame.payload);
                     }
                     Opcode::Pong => {
-                        // Pong received - keepalive confirmed
+                        self.heartbeat.received_pong(&frame.payload);
                     }
                     Opcode::Close => {
                         // Handle close handshake
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
-                            let send_result = async {
+                            let deadline = self.heartbeat.write_deadline();
+                            let send_result = super::heartbeat::wait_until(cx, deadline, async {
                                 self.encode_frame(response)?;
                                 self.flush_write_buf_with_cx(Some(cx)).await
-                            }
+                            })
                             .await;
-                            send_result?;
+                            if send_result?.is_none() {
+                                self.heartbeat.fail();
+                                self.close_handshake.force_close(CloseReason::new(
+                                    super::CloseCode::Abnormal,
+                                    None,
+                                ));
+                                return Err(super::heartbeat::timeout_error());
+                            }
                             self.close_handshake.mark_response_sent();
                         }
                         let reason = CloseReason::parse(&frame.payload).ok();
@@ -483,8 +531,10 @@ where
                     return Ok(None);
                 }
 
-                let n = match self.read_more(cx).await {
-                    Ok(n) => n,
+                let deadline = self.heartbeat.deadline();
+                let n = match super::heartbeat::wait_until(cx, deadline, self.read_more(cx)).await {
+                    Ok(Some(n)) => n,
+                    Ok(None) => continue,
                     Err(WsError::Io(e))
                         if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
                     {
@@ -684,6 +734,10 @@ where
     async fn flush_write_buf_with_cx(&mut self, op_cx: Option<&Cx>) -> Result<(), WsError> {
         use std::future::poll_fn;
 
+        if self.heartbeat.failed() {
+            return Err(super::heartbeat::timeout_error());
+        }
+
         // br-asupersync-2k3o9x: wake a write parked on a stalled peer on cancel.
         let ambient = op_cx.is_none().then(crate::cx::Cx::current).flatten();
         let cx_for_wake: Option<&Cx> = op_cx.or(ambient.as_ref());
@@ -738,6 +792,10 @@ where
         buf: &mut BytesMut,
     ) -> Result<(), WsError> {
         use std::future::poll_fn;
+
+        if self.heartbeat.failed() {
+            return Err(super::heartbeat::timeout_error());
+        }
 
         if buf.is_empty() {
             return Ok(());
