@@ -2258,6 +2258,26 @@ impl Connection {
             .any(|op| op.references_stream(stream_id))
     }
 
+    /// Streams whose queued nonempty DATA is held by peer credit, even when the
+    /// application's final DATA has already marked its stream locally closed.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn flow_control_blocked_data_streams(&self) -> impl Iterator<Item = u32> + '_ {
+        self.pending_ops.iter().filter_map(|op| {
+            let PendingOp::Data {
+                stream_id, data, ..
+            } = op
+            else {
+                return None;
+            };
+            (!data.is_empty()
+                && self.streams.get(*stream_id).is_some_and(|stream| {
+                    stream.error_code().is_none()
+                        && (self.send_window <= 0 || stream.send_window() <= 0)
+                }))
+            .then_some(*stream_id)
+        })
+    }
+
     fn prune_closed_streams_without_pending_frames(&mut self) {
         let pending_ops = &self.pending_ops;
         self.streams.prune_closed_except(|stream_id| {

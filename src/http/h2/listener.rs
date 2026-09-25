@@ -27,7 +27,6 @@ use crate::http::h2::connection::{
     CLIENT_PREFACE, Connection, DecodedFrame, ListenerFrameCodec, ReceivedFrame,
 };
 use crate::http::h2::error::{ErrorCode, H2Error};
-#[cfg(test)]
 use crate::http::h2::frame::Frame;
 use crate::http::h2::hpack::Header;
 use crate::http::h2::settings::Settings;
@@ -63,6 +62,8 @@ use std::time::Duration;
 
 mod ownership;
 use ownership::{H2RequestLimits, H2RequestOwners};
+mod flow_control;
+use flow_control::{H2FlowControlProgress, reset_flow_control_stream};
 
 #[cfg(feature = "http2-streaming")]
 mod streaming;
@@ -84,6 +85,7 @@ const RESPONSE_FUNNEL_CAPACITY: usize = 64;
 struct H2TransportTimeouts {
     preface: Duration,
     write_progress: Duration,
+    flow_control: Duration,
 }
 
 impl Default for H2TransportTimeouts {
@@ -91,6 +93,7 @@ impl Default for H2TransportTimeouts {
         Self {
             preface: Duration::from_secs(10),
             write_progress: Duration::from_secs(10),
+            flow_control: Duration::from_secs(10),
         }
     }
 }
@@ -2086,6 +2089,8 @@ enum DriverEvent {
     StreamIdleTimeout(u32),
     /// A failed producer exceeded its bounded committed-frame drain grace.
     ProducedDrainTimeout(u32),
+    /// A response could not send DATA within its peer-credit progress budget.
+    FlowControlTimeout(u32),
 }
 
 fn poll_produced_body_event(
@@ -2162,6 +2167,7 @@ fn poll_produced_body_event(
 enum H2PumpWriteError {
     Transport(io::Error),
     Encode(H2Error),
+    FlowControl(u32),
 }
 
 #[derive(Clone, Copy)]
@@ -2231,7 +2237,7 @@ fn h2_pump_failure_diagnostic(error: &H2PumpWriteError) -> Option<WebBodyDiagnos
         H2PumpWriteError::Encode(error) if error.stream_id.is_some() => {
             Some(WebBodyDiagnostic::ResponseProducerFailure)
         }
-        H2PumpWriteError::Encode(_) => None,
+        H2PumpWriteError::Encode(_) | H2PumpWriteError::FlowControl(_) => None,
     }
 }
 
@@ -2240,22 +2246,90 @@ async fn pump_writes(
     framed: &mut Framed<TcpStream, ListenerFrameCodec>,
     signal: &ShutdownSignal,
     write_timeout: Duration,
+    mut progress: Option<&mut H2FlowControlProgress>,
+    response_guards: &HashMap<u32, Arc<InFlightRequestGuard>>,
+    produced_bodies: &BTreeMap<u32, ActiveProducedBody>,
 ) -> Result<(), H2PumpWriteError> {
     loop {
+        if let Some(progress) = &mut progress {
+            let _ = progress.next_deadline(
+                conn,
+                response_guards,
+                produced_bodies,
+                Cx::current().expect("H2 transport context").now(),
+            );
+        }
         // Respect the codec's soft buffer boundary before removing another
         // frame from Connection. This keeps a blocked transport from turning
         // the connection's pending frame queue into an unbounded BytesMut.
-        bounded_h2_write(framed, signal, write_timeout, H2WriteOperation::Ready)
-            .await
-            .map_err(H2PumpWriteError::Transport)?;
+        flow_control::write_with_deadline(
+            framed,
+            signal,
+            write_timeout,
+            H2WriteOperation::Ready,
+            progress
+                .as_deref()
+                .and_then(H2FlowControlProgress::armed_deadline),
+        )
+        .await?;
         let Some(frame) = conn.next_frame() else {
             break;
         };
+        let mut tracked_data = false;
+        if let Frame::Data(data) = &frame
+            && !data.data.is_empty()
+        {
+            tracked_data = progress
+                .as_deref()
+                .is_some_and(|progress| progress.tracks(data.stream_id));
+            if let Some(progress) = &mut progress {
+                progress.queued_data(data.stream_id);
+            }
+        }
         framed.start_send(frame).map_err(H2PumpWriteError::Encode)?;
+        // A previously stalled stream's progress must be observed before a
+        // later sibling write can park the pump. An interrupted write retains
+        // all codec bytes; resetting its stream never truncates a wire frame.
+        if tracked_data {
+            if let Some(progress) = &mut progress {
+                // next_frame consumed credit. A formerly writable stream may
+                // now be blocked again before this flush reaches Pending.
+                let _ = progress.next_deadline(
+                    conn,
+                    response_guards,
+                    produced_bodies,
+                    Cx::current().expect("H2 transport context").now(),
+                );
+            }
+            flow_control::write_with_deadline(
+                framed,
+                signal,
+                write_timeout,
+                H2WriteOperation::Flush,
+                progress
+                    .as_deref()
+                    .and_then(H2FlowControlProgress::armed_deadline),
+            )
+            .await?;
+            if let Some(progress) = &mut progress {
+                progress.flushed(Cx::current().expect("H2 transport context").now());
+            }
+        }
     }
-    bounded_h2_write(framed, signal, write_timeout, H2WriteOperation::Flush)
-        .await
-        .map_err(H2PumpWriteError::Transport)
+    flow_control::write_with_deadline(
+        framed,
+        signal,
+        write_timeout,
+        H2WriteOperation::Flush,
+        progress
+            .as_deref()
+            .and_then(H2FlowControlProgress::armed_deadline),
+    )
+    .await?;
+    if let Some(progress) = &mut progress {
+        progress.flushed(Cx::current().expect("H2 transport context").now());
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2268,9 +2342,21 @@ async fn pump_writes_with_body_diagnostics(
     response_guards: &HashMap<u32, Arc<InFlightRequestGuard>>,
     signal: &ShutdownSignal,
     write_timeout: Duration,
-) -> io::Result<()> {
-    match pump_writes(conn, framed, signal, write_timeout).await {
-        Ok(()) => Ok(()),
+    progress: Option<&mut H2FlowControlProgress>,
+) -> io::Result<Option<u32>> {
+    match pump_writes(
+        conn,
+        framed,
+        signal,
+        write_timeout,
+        progress,
+        response_guards,
+        produced_bodies,
+    )
+    .await
+    {
+        Ok(()) => Ok(None),
+        Err(H2PumpWriteError::FlowControl(stream_id)) => Ok(Some(stream_id)),
         Err(error @ H2PumpWriteError::Transport(_)) => {
             let mut affected_streams = HashSet::new();
             affected_streams.extend(pending_requests.keys().copied());
@@ -2338,6 +2424,7 @@ async fn next_driver_event(
     continuation_deadline: Option<Time>,
     stream_idle_deadline: Option<(u32, Time)>,
     produced_failure_deadline: Option<(u32, Time)>,
+    flow_control_deadline: Option<(u32, Time)>,
     request_owners: &mut H2RequestOwners,
 ) -> DriverEvent {
     if watch_drain && signal.is_shutting_down() {
@@ -2392,6 +2479,12 @@ async fn next_driver_event(
             None => std::future::pending::<()>().await,
         }
     });
+    let mut flow_control_fut = std::pin::pin!(async move {
+        match flow_control_deadline {
+            Some((_, deadline)) => crate::time::sleep_until(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    });
     std::future::poll_fn(move |cx| {
         if signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
             || force_fut.as_mut().poll(cx).is_ready()
@@ -2419,6 +2512,11 @@ async fn next_driver_event(
             if produced_failure_fut.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(DriverEvent::ProducedDrainTimeout(stream_id));
             }
+        }
+        if let Some((stream_id, _)) = flow_control_deadline
+            && flow_control_fut.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(DriverEvent::FlowControlTimeout(stream_id));
         }
         #[cfg(feature = "http2-streaming")]
         if incoming
@@ -2930,9 +3028,11 @@ where
         // connection becomes fully quiescent and cleared as soon as activity
         // resumes (kept fixed in between so it is not pushed forward by wake-ups).
         let mut idle_at: Option<Time> = None;
+        let mut flow_control_progress = H2FlowControlProgress::new(transport_timeouts.flow_control);
 
         loop {
-            pump_writes_with_body_diagnostics(
+            flow_control_progress.retain_live(&conn);
+            let flow_timeout = pump_writes_with_body_diagnostics(
                 &mut conn,
                 &mut framed,
                 &pending_requests,
@@ -2941,8 +3041,24 @@ where
                 &response_guards,
                 &shutdown_signal,
                 transport_timeouts.write_progress,
+                Some(&mut flow_control_progress),
             )
             .await?;
+            if let Some(stream_id) = flow_timeout {
+                reset_flow_control_stream(
+                    stream_id,
+                    &mut conn,
+                    &task_cx,
+                    &request_owners,
+                    &mut produced_bodies,
+                    &mut associated_pushes,
+                    #[cfg(feature = "http2-streaming")]
+                    &mut incoming,
+                );
+                // The interrupted pump has not certified a complete flush.
+                // Retain every response guard until a subsequent pump does.
+                continue;
+            }
             release_flushed_response_guards(&conn, &mut response_guards);
             #[cfg(feature = "http2-streaming")]
             if let Some(incoming) = &mut incoming {
@@ -2984,6 +3100,12 @@ where
             let now = Cx::current()
                 .and_then(|cx| cx.timer_driver())
                 .map_or_else(crate::time::wall_now, |timer| timer.now());
+            let flow_control_at = flow_control_progress.next_deadline(
+                &conn,
+                &response_guards,
+                &produced_bodies,
+                now,
+            );
             // Arm the stage-2 finalize deadline once, when the stage-1 GOAWAY is
             // outstanding; keep it fixed across loop iterations so active traffic
             // cannot reset the window.
@@ -3056,6 +3178,7 @@ where
                 continuation_at,
                 stream_idle_at,
                 produced_failure_at,
+                flow_control_at,
                 &mut request_owners,
             )
             .await;
@@ -3110,7 +3233,7 @@ where
                         ErrorCode::NoError,
                         crate::bytes::Bytes::from_static(b"idle timeout"),
                     );
-                    pump_writes_with_body_diagnostics(
+                    let _ = pump_writes_with_body_diagnostics(
                         &mut conn,
                         &mut framed,
                         &pending_requests,
@@ -3119,6 +3242,7 @@ where
                         &response_guards,
                         &shutdown_signal,
                         transport_timeouts.write_progress,
+                        None,
                     )
                     .await?;
                     let _ = bounded_h2_write(
@@ -3144,7 +3268,7 @@ where
                         ErrorCode::ProtocolError,
                         crate::bytes::Bytes::from_static(b"CONTINUATION timeout"),
                     );
-                    pump_writes_with_body_diagnostics(
+                    let _ = pump_writes_with_body_diagnostics(
                         &mut conn,
                         &mut framed,
                         &pending_requests,
@@ -3153,6 +3277,7 @@ where
                         &response_guards,
                         &shutdown_signal,
                         transport_timeouts.write_progress,
+                        None,
                     )
                     .await?;
                     let _ = bounded_h2_write(
@@ -3224,6 +3349,11 @@ where
                         "HTTP/2 produced response exceeded failure drain grace",
                     );
                 }
+                DriverEvent::FlowControlTimeout(stream_id) => {
+                    reset_flow_control_stream(stream_id, &mut conn, &task_cx, &request_owners,
+                        &mut produced_bodies, &mut associated_pushes,
+                        #[cfg(feature = "http2-streaming")] &mut incoming);
+                }
                 DriverEvent::Frame(None) => {
                     // Peer closed the transport.
                     for stream_id in pending_requests.keys().copied() {
@@ -3255,7 +3385,7 @@ where
                 }
                 DriverEvent::Frame(Some(Err(decode_error))) => {
                     conn.goaway(decode_error.code, crate::bytes::Bytes::new());
-                    pump_writes_with_body_diagnostics(
+                    let _ = pump_writes_with_body_diagnostics(
                         &mut conn,
                         &mut framed,
                         &pending_requests,
@@ -3264,6 +3394,7 @@ where
                         &response_guards,
                         &shutdown_signal,
                         transport_timeouts.write_progress,
+                        None,
                     )
                     .await?;
                     let _ = bounded_h2_write(
@@ -3307,7 +3438,7 @@ where
                             reset_associated_pushes(&mut conn, &mut associated_pushes, stream_id);
                         } else {
                             conn.goaway(protocol_error.code, crate::bytes::Bytes::new());
-                            pump_writes_with_body_diagnostics(
+                            let _ = pump_writes_with_body_diagnostics(
                                 &mut conn,
                                 &mut framed,
                                 &pending_requests,
@@ -3316,6 +3447,7 @@ where
                                 &response_guards,
                                 &shutdown_signal,
                                 transport_timeouts.write_progress,
+                                None,
                             )
                             .await?;
                             let _ = bounded_h2_write(
@@ -4378,6 +4510,16 @@ impl<F> Http2Listener<F> {
     #[must_use]
     pub fn write_progress_timeout(mut self, timeout: Duration) -> Self {
         self.transport_timeouts.write_progress = timeout;
+        self
+    }
+
+    /// Bounds a response stalled by exhausted stream or connection DATA credit.
+    /// The default is ten seconds. Only flushed DATA for the affected stream
+    /// renews its deadline; PINGs, SETTINGS, and sibling traffic do not. Expiry
+    /// cancels that stream and its producer while retaining owned cleanup.
+    #[must_use]
+    pub fn flow_control_progress_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_timeouts.flow_control = timeout;
         self
     }
 
