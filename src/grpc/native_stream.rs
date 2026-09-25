@@ -70,6 +70,8 @@ mod response;
 use response::ResponseHead;
 mod connect;
 pub use connect::NativeStreamEndpoint;
+mod duplex;
+pub use duplex::{NativeDuplexEvent, NativeDuplexStream};
 
 const FRAME_BYTES: usize = 16 * 1024;
 const POLL_STEPS: usize = 32;
@@ -214,6 +216,7 @@ pub struct NativeServerStream<IO, C> {
     timer: Option<Pin<Box<Sleep>>>,
     inbound: BytesMut,
     outbound: BytesMut,
+    outbound_flushed: bool,
     body: BytesMut,
     response: ResponseHead,
     body_limit: usize,
@@ -281,6 +284,21 @@ where
         config: NativeStreamConfig,
         admitted: Option<CallDeadline>,
     ) -> Result<Self, Status> {
+        Self::new_request(cx, io, authority, path, request.map(Some), codec, config, admitted, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_request(
+        cx: &Cx,
+        io: IO,
+        authority: &str,
+        path: &str,
+        request: Request<Option<C::Encode>>,
+        codec: C,
+        config: NativeStreamConfig,
+        admitted: Option<CallDeadline>,
+        end_stream: bool,
+    ) -> Result<Self, Status> {
         // Codec setup/encoding is user code too. Never let a different ambient
         // task silently supply its capabilities during synchronous construction.
         let _ambient = Cx::set_current(Some(cx.clone()));
@@ -298,8 +316,10 @@ where
             codec, config.max_send_message_size, config.max_recv_message_size,
         ).with_frame_hooks(compressor, decompressor);
         let mut request_body = BytesMut::new();
-        codec.encode_message(&request.into_inner(), &mut request_body)
-            .map_err(GrpcError::into_status)?;
+        if let Some(message) = request.into_inner() {
+            codec.encode_message(&message, &mut request_body)
+                .map_err(GrpcError::into_status)?;
+        }
         check_cancellation(cx)?;
         // Both connection setup and synchronous codec work consume the same
         // absolute allowance. Refresh the wire TTL before any request I/O.
@@ -325,8 +345,10 @@ where
         connection.queue_initial_settings();
         let stream_id = connection.open_stream(headers, false)
             .map_err(|error| Status::invalid_argument(format!("open native gRPC request: {error}")))?;
-        connection.send_data(stream_id, request_body.freeze(), true)
-            .map_err(|error| Status::internal(format!("queue native gRPC request: {error}")))?;
+        if !request_body.is_empty() || end_stream {
+            connection.send_data(stream_id, request_body.freeze(), end_stream)
+                .map_err(|error| Status::internal(format!("queue native gRPC request: {error}")))?;
+        }
         let timer = deadline.zip(clock.as_ref()).map(|(at, clock)| {
             Box::pin(Sleep::with_timer_driver(at, clock.clone()))
         });
@@ -334,6 +356,7 @@ where
             io: Some(io), connection: Some(connection), frames: FrameCodec::new(), codec,
             cx: cx.clone(), cancel_waker: None, clock, deadline, timer,
             inbound: BytesMut::new(), outbound: BytesMut::from(CLIENT_PREFACE),
+            outbound_flushed: false,
             body: BytesMut::new(), response: ResponseHead::new(config.max_metadata_bytes, config.accept_gzip),
             body_limit, stream_id, final_status: None, ready_messages: 0,
             unflushed_read_frames: 0,
@@ -505,6 +528,7 @@ where
     }
 
     fn poll_outbound(&mut self, task: &mut Context<'_>) -> Poll<Result<(), Status>> {
+        self.outbound_flushed = false;
         for _ in 0..POLL_STEPS {
             if self.outbound.is_empty() {
                 match self.connection.as_mut().expect("live connection").next_frame() {
@@ -515,7 +539,11 @@ where
                     }
                     None => {
                         return match Pin::new(self.io.as_mut().expect("live transport")).poll_flush(task) {
-                            Poll::Ready(result) => Poll::Ready(result.map_err(|error| self.transport_status(error))),
+                            Poll::Ready(Ok(())) => {
+                                self.outbound_flushed = true;
+                                Poll::Ready(Ok(()))
+                            }
+                            Poll::Ready(Err(error)) => Poll::Ready(Err(self.transport_status(error))),
                             Poll::Pending => Poll::Pending,
                         };
                     }

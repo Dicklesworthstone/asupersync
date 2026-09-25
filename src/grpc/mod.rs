@@ -110,7 +110,7 @@ pub use interceptor::{
     logging_interceptor, metadata_propagator, rate_limiter, timeout_interceptor, trace_interceptor,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use native_stream::NativeStreamConfig;
+pub use native_stream::{NativeDuplexEvent, NativeDuplexStream, NativeStreamConfig};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native_streaming::NativeServerStream;
 pub use protobuf::{
