@@ -1803,7 +1803,44 @@ impl<M: ConnectionManager> fmt::Debug for PooledConnection<'_, M> {
 // ─── AsyncConnectionManager ─────────────────────────────────────────────────
 
 use crate::cx::Cx;
-use crate::types::Outcome;
+use crate::types::{CancelReason, Outcome, PanicPayload};
+
+/// Internal acquisition result shared by the legacy and four-valued APIs.
+enum AsyncAcquireFailure<E: std::error::Error> {
+    Pool(DbPoolError<E>),
+    Cancelled(CancelReason),
+    Panicked(PanicPayload),
+}
+
+impl<E: std::error::Error> From<DbPoolError<E>> for AsyncAcquireFailure<E> {
+    fn from(error: DbPoolError<E>) -> Self {
+        Self::Pool(error)
+    }
+}
+
+impl<E: std::error::Error> AsyncAcquireFailure<E> {
+    fn cancelled(cx: &Cx) -> Self {
+        Self::Cancelled(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("database pool acquisition cancelled")),
+        )
+    }
+
+    fn into_outcome<T>(self) -> Outcome<T, DbPoolError<E>> {
+        match self {
+            Self::Pool(error) => Outcome::Err(error),
+            Self::Cancelled(reason) => Outcome::Cancelled(reason),
+            Self::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    fn into_legacy_error(self) -> DbPoolError<E> {
+        match self {
+            Self::Pool(error) => error,
+            Self::Cancelled(_) | Self::Panicked(_) => DbPoolError::Timeout,
+        }
+    }
+}
 
 fn trace_async_pool_event(
     cx: &Cx,
@@ -1912,6 +1949,7 @@ pub struct AsyncDbPool<M: AsyncConnectionManager> {
 struct AsyncValidationGuard<'a, M: AsyncConnectionManager> {
     pool: &'a AsyncDbPool<M>,
     conn: Option<M::Connection>,
+    client_id: Option<String>,
 }
 
 impl<M: AsyncConnectionManager> Drop for AsyncValidationGuard<'_, M> {
@@ -1919,13 +1957,14 @@ impl<M: AsyncConnectionManager> Drop for AsyncValidationGuard<'_, M> {
         if let Some(conn) = self.conn.take() {
             let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
+            AsyncDbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
             self.pool.wake_next_async_pool_waiter_locked(&mut inner);
             drop(inner);
             self.pool
                 .stats
                 .total_discards
                 .fetch_add(1, Ordering::Relaxed);
-            self.pool.manager.disconnect(conn);
+            self.pool.safe_disconnect(conn);
         }
     }
 }
@@ -1933,6 +1972,23 @@ impl<M: AsyncConnectionManager> Drop for AsyncValidationGuard<'_, M> {
 struct AsyncCreationGuard<'a, M: AsyncConnectionManager> {
     pool: &'a AsyncDbPool<M>,
     disarmed: bool,
+    client_id: Option<String>,
+}
+
+/// Owns the client quota from admission until checkout publication. In
+/// particular, dropping a pending connect/validation future releases its quota.
+struct AsyncClientQuotaGuard<'a, M: AsyncConnectionManager> {
+    pool: &'a AsyncDbPool<M>,
+    client_id: Option<String>,
+}
+
+impl<M: AsyncConnectionManager> Drop for AsyncClientQuotaGuard<'_, M> {
+    fn drop(&mut self) {
+        if let Some(client_id) = self.client_id.take() {
+            let mut inner = self.pool.inner.lock();
+            AsyncDbPool::<M>::release_client_quota_locked(&mut inner, Some(&client_id));
+        }
+    }
 }
 
 impl<M: AsyncConnectionManager> Drop for AsyncCreationGuard<'_, M> {
@@ -1940,6 +1996,7 @@ impl<M: AsyncConnectionManager> Drop for AsyncCreationGuard<'_, M> {
         if !self.disarmed {
             let mut inner = self.pool.inner.lock();
             inner.total = inner.total.saturating_sub(1);
+            AsyncDbPool::<M>::release_client_quota_locked(&mut inner, self.client_id.as_deref());
             self.pool.wake_next_async_pool_waiter_locked(&mut inner);
         }
     }
@@ -2181,12 +2238,26 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         self.wake_next_async_pool_waiter_locked(&mut inner);
     }
 
+    fn release_client_quota_locked(
+        inner: &mut PoolInner<M::Connection>,
+        client_id: Option<&str>,
+    ) {
+        if let Some(client_id) = client_id
+            && let Some(count) = inner.client_connections.get_mut(client_id)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                inner.client_connections.remove(client_id);
+            }
+        }
+    }
+
     async fn wait_for_async_pool_turn(
         &self,
         cx: &Cx,
         waiter_slot: &mut Option<Arc<AsyncPoolWaiter>>,
         client_scope: &'static str,
-    ) -> Result<(), DbPoolError<M::Error>> {
+    ) -> Result<(), AsyncAcquireFailure<M::Error>> {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
         if self.effective_max_size() == 0 {
@@ -2203,7 +2274,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 waiter_slot.take();
             }
             trace_async_pool_event(cx, "wait", "full", client_scope);
-            return Err(DbPoolError::Full);
+            return Err(DbPoolError::Full.into());
         }
         let deadline = cx.now() + self.config.connection_timeout;
 
@@ -2213,7 +2284,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             let waiter = Arc::new(AsyncPoolWaiter::new());
             let mut inner = self.inner.lock();
             if inner.closed {
-                return Err(DbPoolError::Closed);
+                return Err(DbPoolError::Closed.into());
             }
             inner.waiters.push_back(Arc::clone(&waiter));
             self.wake_next_async_pool_waiter_locked(&mut inner);
@@ -2227,13 +2298,13 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 self.cancel_async_pool_waiter(&waiter);
                 waiter_slot.take();
                 trace_async_pool_event(cx, "wait", "cancelled", client_scope);
-                return Err(DbPoolError::Timeout);
+                return Err(AsyncAcquireFailure::cancelled(cx));
             }
             if self.is_closed() {
                 self.cancel_async_pool_waiter(&waiter);
                 waiter_slot.take();
                 trace_async_pool_event(cx, "wait", "closed", client_scope);
-                return Err(DbPoolError::Closed);
+                return Err(DbPoolError::Closed.into());
             }
             if waiter.ready.load(Ordering::Acquire) {
                 trace_async_pool_event(cx, "wait", "ready", client_scope);
@@ -2246,7 +2317,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 waiter_slot.take();
                 self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                 trace_async_pool_event(cx, "wait", "timeout", client_scope);
-                return Err(DbPoolError::AcquireTimeout);
+                return Err(DbPoolError::AcquireTimeout.into());
             }
             let chunk = remaining.min(CANCEL_POLL_INTERVAL);
             let _ = crate::time::timeout(cx.now(), chunk, waiter.notify.notified()).await;
@@ -2273,10 +2344,40 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     }
 
     /// Acquire a connection from the pool.
+    ///
+    /// This compatibility API maps cancellation and a manager's panic outcome
+    /// to [`DbPoolError::Timeout`]. Use [`Self::get_outcome`] to retain them.
     pub async fn get(
         &self,
         cx: &Cx,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        self.acquire(cx)
+            .await
+            .map_err(AsyncAcquireFailure::into_legacy_error)
+    }
+
+    /// Acquire a connection while preserving all four [`Outcome`] variants.
+    ///
+    /// Manager cancellation reasons and panic payloads are returned unchanged.
+    /// Cancellation while queued, connecting, or validating is distinct from
+    /// [`DbPoolError::AcquireTimeout`]. As with [`Self::get`], dropping a pending
+    /// acquisition releases its waiter and reserved pool capacity. Rust panics
+    /// from connect or validation still unwind; explicit manager panic outcomes
+    /// are returned as [`Outcome::Panicked`].
+    pub async fn get_outcome(
+        &self,
+        cx: &Cx,
+    ) -> Outcome<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        match self.acquire(cx).await {
+            Ok(connection) => Outcome::Ok(connection),
+            Err(failure) => failure.into_outcome(),
+        }
+    }
+
+    async fn acquire(
+        &self,
+        cx: &Cx,
+    ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
         trace_async_pool_event(cx, "acquire", "start", "anonymous");
         let mut waiter_guard = AsyncWaiterGuard {
             pool: self,
@@ -2286,14 +2387,14 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         loop {
             if cx.checkpoint().is_err() {
                 trace_async_pool_event(cx, "acquire", "cancelled", "anonymous");
-                return Err(DbPoolError::Timeout);
+                return Err(AsyncAcquireFailure::cancelled(cx));
             }
 
             let step = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
                     trace_async_pool_event(cx, "acquire", "closed", "anonymous");
-                    return Err(DbPoolError::Closed);
+                    return Err(DbPoolError::Closed.into());
                 }
 
                 if !self.async_pool_caller_has_turn_locked(&mut inner, waiter_guard.slot.as_ref()) {
@@ -2324,33 +2425,38 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     let mut creation_guard = AsyncCreationGuard {
                         pool: self,
                         disarmed: false,
+                        client_id: None,
                     };
 
                     match self.manager.connect(cx).await {
                         Outcome::Ok(conn) => {
                             if cx.checkpoint().is_err() {
                                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                                self.manager.disconnect(conn);
+                                self.safe_disconnect(conn);
                                 trace_async_pool_event(
                                     cx,
                                     "create",
                                     "cancelled_after_connect",
                                     "anonymous",
                                 );
-                                return Err(DbPoolError::Timeout);
+                                return Err(AsyncAcquireFailure::cancelled(cx));
                             }
                             creation_guard.disarmed = true;
                             self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
                             trace_async_pool_event(cx, "acquire", "ok_created", "anonymous");
-                            return self.finish_async_checkout(conn, cx.now());
+                            return self.finish_async_checkout(conn, cx.now(), None);
                         }
                         Outcome::Err(e) => {
                             trace_async_pool_event(cx, "create", "err", "anonymous");
-                            return Err(DbPoolError::Connect(e));
+                            return Err(DbPoolError::Connect(e).into());
                         }
-                        Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                        Outcome::Cancelled(reason) => {
                             trace_async_pool_event(cx, "create", "cancelled", "anonymous");
-                            return Err(DbPoolError::Timeout);
+                            return Err(AsyncAcquireFailure::Cancelled(reason));
+                        }
+                        Outcome::Panicked(payload) => {
+                            trace_async_pool_event(cx, "create", "panicked", "anonymous");
+                            return Err(AsyncAcquireFailure::Panicked(payload));
                         }
                     }
                 }
@@ -2407,6 +2513,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     let mut guard = AsyncValidationGuard {
                         pool: self,
                         conn: Some(idle.conn),
+                        client_id: None,
                     };
 
                     let valid = self
@@ -2416,7 +2523,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
                     if cx.checkpoint().is_err() {
                         trace_async_pool_event(cx, "validation", "cancelled", "anonymous");
-                        return Err(DbPoolError::Timeout);
+                        return Err(AsyncAcquireFailure::cancelled(cx));
                     }
 
                     if !valid {
@@ -2429,11 +2536,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
                     let conn = guard.conn.take().unwrap();
                     trace_async_pool_event(cx, "acquire", "ok_idle", "anonymous");
-                    return self.finish_async_checkout(conn, idle.created_at);
+                    return self.finish_async_checkout(conn, idle.created_at, None);
                 }
 
                 trace_async_pool_event(cx, "acquire", "ok_idle", "anonymous");
-                return self.finish_async_checkout(idle.conn, idle.created_at);
+                return self.finish_async_checkout(idle.conn, idle.created_at, None);
             }
         }
     }
@@ -2443,15 +2550,42 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     /// br-asupersync-80525g: Validation bypass fix - adds client-specific connection acquisition to async pool.
     /// Enforces per-client connection quotas when `enforce_client_quotas` is enabled and validates
     /// authentication state to prevent cross-user connection reuse.
+    /// Cancellation and manager panic outcomes retain the legacy `Timeout`
+    /// mapping; [`Self::get_for_client_outcome`] preserves those outcomes.
     pub async fn get_for_client(
         &self,
         cx: &Cx,
         client_id: &str,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        self.acquire_for_client(cx, client_id)
+            .await
+            .map_err(AsyncAcquireFailure::into_legacy_error)
+    }
+
+    /// Acquire for a client with the same quota and authentication checks as
+    /// [`Self::get_for_client`], preserving cancellation and manager panic
+    /// outcomes. A pending acquisition owns its quota until checkout succeeds
+    /// or the acquisition terminates, including when its future is dropped.
+    pub async fn get_for_client_outcome(
+        &self,
+        cx: &Cx,
+        client_id: &str,
+    ) -> Outcome<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        match self.acquire_for_client(cx, client_id).await {
+            Ok(connection) => Outcome::Ok(connection),
+            Err(failure) => failure.into_outcome(),
+        }
+    }
+
+    async fn acquire_for_client(
+        &self,
+        cx: &Cx,
+        client_id: &str,
+    ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
         trace_async_pool_event(cx, "acquire", "start", "client");
         // If client quotas are disabled, delegate to regular get()
         if !self.config.enforce_client_quotas {
-            return self.get(cx).await.map(|mut conn| {
+            return self.acquire(cx).await.map(|mut conn| {
                 conn.client_id = Some(client_id.to_string());
                 conn
             });
@@ -2466,14 +2600,14 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         loop {
             if cx.checkpoint().is_err() {
                 trace_async_pool_event(cx, "acquire", "cancelled", "client");
-                return Err(DbPoolError::Timeout);
+                return Err(AsyncAcquireFailure::cancelled(cx));
             }
 
             let step = {
                 let mut inner = self.inner.lock();
                 if inner.closed {
                     trace_async_pool_event(cx, "acquire", "closed", "client");
-                    return Err(DbPoolError::Closed);
+                    return Err(DbPoolError::Closed.into());
                 }
 
                 // br-asupersync-80525g: Enforce per-client connection quota for async pool
@@ -2485,7 +2619,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         .unwrap_or(0);
                     if current_count >= max_per_client {
                         trace_async_pool_event(cx, "acquire", "client_quota_exceeded", "client");
-                        return Err(DbPoolError::ClientQuotaExceeded(client_id_owned));
+                        return Err(DbPoolError::ClientQuotaExceeded(client_id_owned).into());
                     }
                 }
 
@@ -2547,6 +2681,15 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 }
             };
 
+            let mut quota_guard = AsyncClientQuotaGuard {
+                pool: self,
+                client_id: match &step {
+                    AsyncAcquireStep::Idle(_) | AsyncAcquireStep::Create => {
+                        Some(client_id_owned.clone())
+                    }
+                    AsyncAcquireStep::Wait | AsyncAcquireStep::Discard(_) => None,
+                },
+            };
             let idle = match step {
                 AsyncAcquireStep::Wait => {
                     self.wait_for_async_pool_turn(cx, &mut waiter_guard.slot, "client")
@@ -2559,70 +2702,42 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     let mut creation_guard = AsyncCreationGuard {
                         pool: self,
                         disarmed: false,
+                        client_id: quota_guard.client_id.take(),
                     };
 
                     match self.manager.connect(cx).await {
                         Outcome::Ok(conn) => {
                             if cx.checkpoint().is_err() {
-                                // Decrement client count since we're cancelling
-                                let mut inner = self.inner.lock();
-                                if let Some(count) =
-                                    inner.client_connections.get_mut(&client_id_owned)
-                                {
-                                    *count = count.saturating_sub(1);
-                                    if *count == 0 {
-                                        inner.client_connections.remove(&client_id_owned);
-                                    }
-                                }
-                                drop(inner);
                                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                                self.manager.disconnect(conn);
+                                self.safe_disconnect(conn);
                                 trace_async_pool_event(
                                     cx,
                                     "create",
                                     "cancelled_after_connect",
                                     "client",
                                 );
-                                return Err(DbPoolError::Timeout);
+                                return Err(AsyncAcquireFailure::cancelled(cx));
                             }
                             creation_guard.disarmed = true;
                             self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                            self.stats
-                                .total_acquisitions
-                                .fetch_add(1, Ordering::Relaxed);
                             trace_async_pool_event(cx, "acquire", "ok_created", "client");
-                            return Ok(AsyncPooledConnection {
-                                conn: Some(conn),
-                                pool: self,
-                                created_at: cx.now(),
-                                client_id: Some(client_id_owned),
-                            });
+                            return self.finish_async_checkout(
+                                conn,
+                                cx.now(),
+                                creation_guard.client_id.take(),
+                            );
                         }
                         Outcome::Err(e) => {
-                            // Decrement client count since creation failed.
-                            let mut inner = self.inner.lock();
-                            if let Some(count) = inner.client_connections.get_mut(&client_id_owned)
-                            {
-                                *count = count.saturating_sub(1);
-                                if *count == 0 {
-                                    inner.client_connections.remove(&client_id_owned);
-                                }
-                            }
                             trace_async_pool_event(cx, "create", "err", "client");
-                            return Err(DbPoolError::Connect(e));
+                            return Err(DbPoolError::Connect(e).into());
                         }
-                        Outcome::Cancelled(_) | Outcome::Panicked(_) => {
-                            // Decrement client count on cancellation/panic.
-                            let mut inner = self.inner.lock();
-                            if let Some(count) = inner.client_connections.get_mut(&client_id_owned)
-                            {
-                                *count = count.saturating_sub(1);
-                                if *count == 0 {
-                                    inner.client_connections.remove(&client_id_owned);
-                                }
-                            }
+                        Outcome::Cancelled(reason) => {
                             trace_async_pool_event(cx, "create", "cancelled", "client");
-                            return Err(DbPoolError::Timeout);
+                            return Err(AsyncAcquireFailure::Cancelled(reason));
+                        }
+                        Outcome::Panicked(payload) => {
+                            trace_async_pool_event(cx, "create", "panicked", "client");
+                            return Err(AsyncAcquireFailure::Panicked(payload));
                         }
                     }
                 }
@@ -2639,15 +2754,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 let is_stale = idle.is_idle_too_long(&self.config, now);
 
                 if is_expired || is_stale {
-                    // Decrement client count since we're discarding this connection
                     {
                         let mut inner = self.inner.lock();
-                        if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
-                            *count = count.saturating_sub(1);
-                            if *count == 0 {
-                                inner.client_connections.remove(&client_id_owned);
-                            }
-                        }
+                        Self::release_client_quota_locked(
+                            &mut inner,
+                            quota_guard.client_id.take().as_deref(),
+                        );
                         inner.total = inner.total.saturating_sub(1);
                         self.wake_next_async_pool_waiter_locked(&mut inner);
                     }
@@ -2666,6 +2778,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     let mut guard = AsyncValidationGuard {
                         pool: self,
                         conn: Some(idle.conn),
+                        client_id: quota_guard.client_id.take(),
                     };
 
                     let valid = self
@@ -2674,30 +2787,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         .await;
 
                     if cx.checkpoint().is_err() {
-                        // Decrement client count on cancellation
-                        let mut inner = self.inner.lock();
-                        if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
-                            *count = count.saturating_sub(1);
-                            if *count == 0 {
-                                inner.client_connections.remove(&client_id_owned);
-                            }
-                        }
                         trace_async_pool_event(cx, "validation", "cancelled", "client");
-                        return Err(DbPoolError::Timeout);
+                        return Err(AsyncAcquireFailure::cancelled(cx));
                     }
 
                     if !valid {
-                        // Decrement client count since validation failed
-                        {
-                            let mut inner = self.inner.lock();
-                            if let Some(count) = inner.client_connections.get_mut(&client_id_owned)
-                            {
-                                *count = count.saturating_sub(1);
-                                if *count == 0 {
-                                    inner.client_connections.remove(&client_id_owned);
-                                }
-                            }
-                        }
                         self.stats
                             .total_validation_failures
                             .fetch_add(1, Ordering::Relaxed);
@@ -2705,32 +2799,18 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         continue;
                     }
 
-                    let mut valid_conn = guard.conn.take().unwrap();
-
                     // br-asupersync-80525g: Additional authentication state validation after basic validation
                     if self.config.validate_authentication_state {
-                        let current_auth_state = self.manager.authentication_state(&valid_conn);
+                        let current_auth_state =
+                            self.manager.authentication_state(guard.conn.as_ref().unwrap());
                         match (&current_auth_state, &idle.authenticated_for) {
                             (Some(current_client), Some(expected_client))
                                 if current_client != expected_client =>
                             {
                                 // Authentication state mismatch - connection shows different auth than expected
-                                let mut inner = self.inner.lock();
-                                if let Some(count) =
-                                    inner.client_connections.get_mut(&client_id_owned)
-                                {
-                                    *count = count.saturating_sub(1);
-                                    if *count == 0 {
-                                        inner.client_connections.remove(&client_id_owned);
-                                    }
-                                }
-                                inner.total = inner.total.saturating_sub(1);
-                                self.wake_next_async_pool_waiter_locked(&mut inner);
-                                drop(inner);
                                 self.stats
                                     .total_validation_failures
                                     .fetch_add(1, Ordering::Relaxed);
-                                self.manager.disconnect(valid_conn);
                                 trace_async_pool_event(
                                     cx,
                                     "validation",
@@ -2740,7 +2820,8 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                 return Err(DbPoolError::AuthenticationMismatch {
                                     expected: expected_client.clone(),
                                     found: current_client.clone(),
-                                });
+                                }
+                                .into());
                             }
                             // Not collapsed into the arm guard:
                             // clear_authentication_state mutates the
@@ -2749,24 +2830,14 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                             #[allow(clippy::collapsible_match)]
                             (Some(current_client), None) if current_client != &client_id_owned => {
                                 // Connection has unexpected authentication state - try to clear it
-                                if !self.manager.clear_authentication_state(&mut valid_conn) {
+                                if !self
+                                    .manager
+                                    .clear_authentication_state(guard.conn.as_mut().unwrap())
+                                {
                                     // Failed to clear auth state - discard connection
-                                    let mut inner = self.inner.lock();
-                                    if let Some(count) =
-                                        inner.client_connections.get_mut(&client_id_owned)
-                                    {
-                                        *count = count.saturating_sub(1);
-                                        if *count == 0 {
-                                            inner.client_connections.remove(&client_id_owned);
-                                        }
-                                    }
-                                    inner.total = inner.total.saturating_sub(1);
-                                    self.wake_next_async_pool_waiter_locked(&mut inner);
-                                    drop(inner);
                                     self.stats
                                         .total_validation_failures
                                         .fetch_add(1, Ordering::Relaxed);
-                                    self.manager.disconnect(valid_conn);
                                     trace_async_pool_event(
                                         cx,
                                         "validation",
@@ -2782,79 +2853,117 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         }
                     }
 
-                    self.stats
-                        .total_acquisitions
-                        .fetch_add(1, Ordering::Relaxed);
                     trace_async_pool_event(cx, "acquire", "ok_idle", "client");
-                    return Ok(AsyncPooledConnection {
-                        conn: Some(valid_conn),
-                        pool: self,
-                        created_at: idle.created_at,
-                        client_id: Some(client_id_owned),
-                    });
+                    return self.finish_async_checkout(
+                        guard.conn.take().unwrap(),
+                        idle.created_at,
+                        guard.client_id.take(),
+                    );
                 }
 
-                self.stats
-                    .total_acquisitions
-                    .fetch_add(1, Ordering::Relaxed);
                 trace_async_pool_event(cx, "acquire", "ok_idle", "client");
-                return Ok(AsyncPooledConnection {
-                    conn: Some(idle.conn),
-                    pool: self,
-                    created_at: idle.created_at,
-                    client_id: Some(client_id_owned.clone()),
-                });
+                return self.finish_async_checkout(
+                    idle.conn,
+                    idle.created_at,
+                    quota_guard.client_id.take(),
+                );
             }
         }
     }
 
     /// Acquire a connection with retry and exponential backoff.
+    ///
+    /// Use [`Self::get_with_retry_outcome`] to retain cancellation reasons and
+    /// manager panic payloads instead of the legacy `Timeout` mapping.
     pub async fn get_with_retry(
         &self,
         cx: &Cx,
         policy: &RetryPolicy,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        self.acquire_with_retry(cx, policy)
+            .await
+            .map_err(AsyncAcquireFailure::into_legacy_error)
+    }
+
+    /// Acquire with retry while preserving all four outcome variants.
+    ///
+    /// Only connection errors and capacity errors are retried. Cancellation,
+    /// manager panic outcomes, and other pool errors terminate immediately.
+    /// Cancellation during backoff retains the caller's cancellation reason.
+    pub async fn get_with_retry_outcome(
+        &self,
+        cx: &Cx,
+        policy: &RetryPolicy,
+    ) -> Outcome<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        match self.acquire_with_retry(cx, policy).await {
+            Ok(connection) => Outcome::Ok(connection),
+            Err(failure) => failure.into_outcome(),
+        }
+    }
+
+    async fn acquire_with_retry(
+        &self,
+        cx: &Cx,
+        policy: &RetryPolicy,
+    ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
         let deadline = crate::time::wall_now() + self.config.connection_timeout;
         let mut attempt = 0u32;
 
         loop {
             attempt += 1;
 
-            match self.get(cx).await {
+            match self.acquire(cx).await {
                 Ok(conn) => return Ok(conn),
-                Err(DbPoolError::Closed) => return Err(DbPoolError::Closed),
-                Err(e) => {
+                Err(AsyncAcquireFailure::Pool(DbPoolError::Closed)) => {
+                    return Err(DbPoolError::Closed.into());
+                }
+                Err(
+                    failure
+                    @ (AsyncAcquireFailure::Cancelled(_) | AsyncAcquireFailure::Panicked(_)),
+                ) => {
+                    return Err(failure);
+                }
+                Err(AsyncAcquireFailure::Pool(e)) => {
                     if !matches!(e, DbPoolError::Connect(_) | DbPoolError::Full) {
-                        return Err(e);
+                        return Err(e.into());
                     }
 
                     if attempt >= policy.max_attempts {
-                        return Err(e);
+                        return Err(e.into());
                     }
 
                     let remaining = std::time::Duration::from_nanos(
                         deadline.duration_since(crate::time::wall_now()),
                     );
-                    if remaining.is_zero() || cx.checkpoint().is_err() {
+                    if cx.checkpoint().is_err() {
+                        return Err(AsyncAcquireFailure::cancelled(cx));
+                    }
+                    if remaining.is_zero() {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
-                        return Err(DbPoolError::Timeout);
+                        return Err(DbPoolError::Timeout.into());
                     }
 
                     let delay = calculate_delay(policy, attempt, None);
                     if !self.sleep_retry_backoff(cx, delay.min(remaining)).await {
                         if self.is_closed() {
-                            return Err(DbPoolError::Closed);
+                            return Err(DbPoolError::Closed.into());
+                        }
+                        if cx.checkpoint().is_err() {
+                            return Err(AsyncAcquireFailure::cancelled(cx));
                         }
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
-                        return Err(DbPoolError::Timeout);
+                        return Err(DbPoolError::Timeout.into());
                     }
 
                     if self.is_closed() {
-                        return Err(DbPoolError::Closed);
+                        return Err(DbPoolError::Closed.into());
                     }
-                    if crate::time::wall_now() >= deadline || cx.checkpoint().is_err() {
+                    if cx.checkpoint().is_err() {
+                        return Err(AsyncAcquireFailure::cancelled(cx));
+                    }
+                    if crate::time::wall_now() >= deadline {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
-                        return Err(DbPoolError::Timeout);
+                        return Err(DbPoolError::Timeout.into());
                     }
                 }
             }
@@ -2865,15 +2974,20 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         &self,
         conn: M::Connection,
         created_at: Time,
-    ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        client_id: Option<String>,
+    ) -> Result<AsyncPooledConnection<'_, M>, AsyncAcquireFailure<M::Error>> {
+        let mut quota_guard = AsyncClientQuotaGuard {
+            pool: self,
+            client_id,
+        };
         {
             let mut inner = self.inner.lock();
             if inner.closed {
                 inner.total = inner.total.saturating_sub(1);
                 drop(inner);
                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                self.manager.disconnect(conn);
-                return Err(DbPoolError::Closed);
+                self.safe_disconnect(conn);
+                return Err(DbPoolError::Closed.into());
             }
         }
 
@@ -2884,7 +2998,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             conn: Some(conn),
             pool: self,
             created_at,
-            client_id: None, // br-asupersync-80525g: legacy get() has no client tracking
+            client_id: quota_guard.client_id.take(),
         })
     }
 
@@ -3593,6 +3707,477 @@ mod tests {
                 && entry.get_field("outcome") == Some(outcome)
                 && entry.get_field("client_scope") == Some(client_scope)
         })
+    }
+
+    struct ControlledAsyncPoolManager {
+        connect_outcome: Outcome<(), &'static str>,
+        pause_connect: AtomicBool,
+        pause_validation: AtomicBool,
+        connect_calls: AtomicUsize,
+        validation_calls: AtomicUsize,
+        disconnects: AtomicUsize,
+    }
+
+    impl ControlledAsyncPoolManager {
+        fn new(connect_outcome: Outcome<(), &'static str>) -> Self {
+            Self {
+                connect_outcome,
+                pause_connect: AtomicBool::new(false),
+                pause_validation: AtomicBool::new(false),
+                connect_calls: AtomicUsize::new(0),
+                validation_calls: AtomicUsize::new(0),
+                disconnects: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl AsyncConnectionManager for ControlledAsyncPoolManager {
+        type Connection = TestConnection;
+        type Error = TestError;
+
+        async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+            let id = self.connect_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            std::future::poll_fn(|_| {
+                if self.pause_connect.load(Ordering::SeqCst) {
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready(())
+                }
+            })
+            .await;
+            self.connect_outcome
+                .clone()
+                .map(|()| TestConnection {
+                    id,
+                    valid: Arc::new(AtomicBool::new(true)),
+                })
+                .map_err(|message| TestError(message.to_string()))
+        }
+
+        async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
+            self.validation_calls.fetch_add(1, Ordering::SeqCst);
+            std::future::poll_fn(|_| {
+                if self.pause_validation.load(Ordering::SeqCst) {
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready(conn.valid.load(Ordering::SeqCst))
+                }
+            })
+            .await
+        }
+
+        fn disconnect(&self, _conn: Self::Connection) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn attributed_pool_cancel_reason() -> crate::types::CancelReason {
+        use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
+
+        CancelReason::with_origin(
+            CancelKind::ParentCancelled,
+            RegionId::new_for_test(17, 2),
+            Time::from_nanos(123_456),
+        )
+        .with_task(TaskId::new_for_test(23, 3))
+        .with_message("pool caller stopped")
+        .with_cause(CancelReason::shutdown().with_message("service shutdown"))
+    }
+
+    #[test]
+    fn async_pool_outcome_preserves_manager_terminals_without_retry() {
+        init_test("async_pool_outcome_preserves_manager_terminals_without_retry");
+        let expected = [
+            Outcome::Cancelled(attributed_pool_cancel_reason()),
+            Outcome::Panicked(crate::types::PanicPayload::new("connect panic sentinel")),
+        ];
+
+        for terminal in expected {
+            for entry in ["anonymous", "client", "retry"] {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(terminal.clone()),
+                    DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+                );
+                let cx = Cx::for_testing();
+                let policy = RetryPolicy::immediate(4);
+                let actual = match entry {
+                    "anonymous" => block_on(pool.get_outcome(&cx)),
+                    "client" => block_on(pool.get_for_client_outcome(&cx, "client")),
+                    "retry" => block_on(pool.get_with_retry_outcome(&cx, &policy)),
+                    _ => unreachable!(),
+                };
+                match (actual, &terminal) {
+                    (Outcome::Cancelled(actual), Outcome::Cancelled(expected)) => {
+                        assert_eq!(&actual, expected, "{entry} must retain all attribution");
+                    }
+                    (Outcome::Panicked(actual), Outcome::Panicked(expected)) => {
+                        assert_eq!(&actual, expected, "{entry} must retain the panic payload");
+                    }
+                    (actual, expected) => {
+                        panic!("{entry} returned {actual:?}, expected {expected:?}");
+                    }
+                }
+                assert_eq!(
+                    pool.manager.connect_calls.load(Ordering::SeqCst),
+                    1,
+                    "{entry} must not retry cancellation or panic"
+                );
+                assert_eq!(pool.stats().total, 0, "{entry} leaked pool capacity");
+                assert_eq!(pool.stats().active, 0, "{entry} leaked an active lease");
+                assert!(pool.inner.lock().client_connections.is_empty());
+            }
+        }
+        crate::test_complete!("async_pool_outcome_preserves_manager_terminals_without_retry");
+    }
+
+    #[test]
+    fn async_pool_legacy_acquisition_retains_terminal_timeout_mapping() {
+        init_test("async_pool_legacy_acquisition_retains_terminal_timeout_mapping");
+        for terminal in [
+            Outcome::Cancelled(attributed_pool_cancel_reason()),
+            Outcome::Panicked(crate::types::PanicPayload::new("legacy connect panic")),
+        ] {
+            for entry in ["anonymous", "client", "retry"] {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(terminal.clone()),
+                    DbPoolConfig::with_max_size(1),
+                );
+                let cx = Cx::for_testing();
+                let policy = RetryPolicy::immediate(4);
+                let actual = match entry {
+                    "anonymous" => block_on(pool.get(&cx)),
+                    "client" => block_on(pool.get_for_client(&cx, "client")),
+                    "retry" => block_on(pool.get_with_retry(&cx, &policy)),
+                    _ => unreachable!(),
+                };
+                assert!(matches!(actual, Err(DbPoolError::Timeout)), "{entry}");
+                assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(pool.stats().total, 0);
+                assert!(pool.inner.lock().client_connections.is_empty());
+            }
+        }
+        crate::test_complete!("async_pool_legacy_acquisition_retains_terminal_timeout_mapping");
+    }
+
+    #[test]
+    fn async_client_dropped_acquire_releases_only_its_own_quota() {
+        use std::future::Future;
+
+        init_test("async_client_dropped_acquire_releases_only_its_own_quota");
+        for validating in [false, true] {
+            for legacy in [false, true] {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                    DbPoolConfig::with_max_size(2).max_connections_per_client(Some(2)),
+                );
+                let cx = Cx::for_testing();
+                let sibling = block_on(pool.get_for_client(&cx, "client"))
+                    .expect("first client lease must be available");
+                if validating {
+                    block_on(pool.get_for_client(&cx, "client"))
+                        .expect("seed a second connection for validation")
+                        .return_to_pool();
+                    pool.manager.pause_validation.store(true, Ordering::SeqCst);
+                } else {
+                    pool.manager.pause_connect.store(true, Ordering::SeqCst);
+                }
+
+                let waker = std::task::Waker::noop();
+                let mut task_cx = std::task::Context::from_waker(waker);
+                let mut acquisition = Box::pin(async {
+                    if legacy {
+                        Outcome::from(pool.get_for_client(&cx, "client").await)
+                    } else {
+                        pool.get_for_client_outcome(&cx, "client").await
+                    }
+                });
+                assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+                assert_eq!(pool.stats().total, 2);
+                assert_eq!(pool.stats().active, 2);
+                assert_eq!(
+                    pool.inner.lock().client_connections.get("client"),
+                    Some(&2),
+                    "the pending attempt and sibling must each own a quota slot"
+                );
+                assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 2);
+                assert_eq!(
+                    pool.manager.validation_calls.load(Ordering::SeqCst),
+                    usize::from(validating),
+                    "the future must reach the intended manager await"
+                );
+
+                drop(acquisition);
+                assert_eq!(pool.stats().total, 1);
+                assert_eq!(pool.stats().active, 1);
+                assert_eq!(pool.stats().idle, 0);
+                assert_eq!(
+                    pool.inner.lock().client_connections.get("client"),
+                    Some(&1),
+                    "hard drop must free one quota slot and retain the sibling's slot"
+                );
+                assert_eq!(
+                    pool.manager.disconnects.load(Ordering::SeqCst),
+                    usize::from(validating)
+                );
+
+                pool.manager.pause_connect.store(false, Ordering::SeqCst);
+                pool.manager.pause_validation.store(false, Ordering::SeqCst);
+                let recovered = match block_on(pool.get_for_client_outcome(&cx, "client")) {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("the released client quota must be reusable: {other:?}"),
+                };
+                assert!(matches!(
+                    block_on(pool.get_for_client_outcome(&cx, "client")),
+                    Outcome::Err(DbPoolError::ClientQuotaExceeded(client)) if client == "client"
+                ));
+                drop(recovered);
+                assert_eq!(pool.inner.lock().client_connections.get("client"), Some(&1));
+                drop(sibling);
+                assert!(pool.inner.lock().client_connections.is_empty());
+                assert_eq!(pool.stats().active, 0);
+            }
+        }
+        crate::test_complete!("async_client_dropped_acquire_releases_only_its_own_quota");
+    }
+
+    #[test]
+    fn async_client_close_during_acquire_prevents_checkout_and_releases_quota() {
+        use std::future::Future;
+
+        init_test("async_client_close_during_acquire_prevents_checkout_and_releases_quota");
+        for validating in [false, true] {
+            for legacy in [false, true] {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                    DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+                );
+                let cx = Cx::for_testing();
+                if validating {
+                    block_on(pool.get_for_client(&cx, "client"))
+                        .expect("seed the idle connection")
+                        .return_to_pool();
+                    pool.manager.pause_validation.store(true, Ordering::SeqCst);
+                } else {
+                    pool.manager.pause_connect.store(true, Ordering::SeqCst);
+                }
+
+                let waker = std::task::Waker::noop();
+                let mut task_cx = std::task::Context::from_waker(waker);
+                let mut acquisition = Box::pin(async {
+                    if legacy {
+                        Outcome::from(pool.get_for_client(&cx, "client").await)
+                    } else {
+                        pool.get_for_client_outcome(&cx, "client").await
+                    }
+                });
+                assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+                assert_eq!(pool.stats().active, 1);
+                assert_eq!(pool.inner.lock().client_connections.get("client"), Some(&1));
+                assert_eq!(
+                    pool.manager.validation_calls.load(Ordering::SeqCst),
+                    usize::from(validating)
+                );
+
+                pool.close();
+                pool.manager.pause_connect.store(false, Ordering::SeqCst);
+                pool.manager.pause_validation.store(false, Ordering::SeqCst);
+                assert!(matches!(
+                    acquisition.as_mut().poll(&mut task_cx),
+                    std::task::Poll::Ready(Outcome::Err(DbPoolError::Closed))
+                ));
+                drop(acquisition);
+                assert_eq!(pool.stats().total, 0);
+                assert_eq!(pool.stats().active, 0);
+                assert_eq!(pool.stats().idle, 0);
+                assert_eq!(pool.stats().total_acquisitions, u64::from(validating));
+                assert!(pool.inner.lock().client_connections.is_empty());
+                assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 1);
+            }
+        }
+        crate::test_complete!(
+            "async_client_close_during_acquire_prevents_checkout_and_releases_quota"
+        );
+    }
+
+    #[test]
+    fn async_pool_outcome_preserves_caller_cancellation_before_and_while_queued() {
+        use std::future::Future;
+
+        init_test("async_pool_outcome_preserves_caller_cancellation_before_and_while_queued");
+        for queued in [false, true] {
+            for client in [false, true] {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                    DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+                );
+                let holder_cx = Cx::for_testing();
+                let mut holder = if queued {
+                    Some(block_on(pool.get(&holder_cx)).expect("hold the only pool slot"))
+                } else {
+                    None
+                };
+                let cx = Cx::for_testing();
+                let expected = attributed_pool_cancel_reason();
+                if !queued {
+                    cx.set_cancel_reason(expected.clone());
+                }
+
+                let waker = std::task::Waker::noop();
+                let mut task_cx = std::task::Context::from_waker(waker);
+                let mut acquisition = Box::pin(async {
+                    if client {
+                        pool.get_for_client_outcome(&cx, "client").await
+                    } else {
+                        pool.get_outcome(&cx).await
+                    }
+                });
+                if queued {
+                    assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+                    assert_eq!(pool.stats().pending_waiters, 1);
+                    assert_eq!(pool.stats().active, 1);
+                    cx.set_cancel_reason(expected.clone());
+                    holder
+                        .take()
+                        .expect("holder remains checked out")
+                        .return_to_pool();
+                }
+
+                match acquisition.as_mut().poll(&mut task_cx) {
+                    std::task::Poll::Ready(Outcome::Cancelled(actual)) => {
+                        assert_eq!(actual, expected);
+                    }
+                    other => panic!("caller cancellation must retain its exact reason: {other:?}"),
+                }
+                drop(acquisition);
+                let stats = pool.stats();
+                assert_eq!(stats.pending_waiters, 0);
+                assert_eq!(stats.active, 0);
+                assert_eq!(stats.idle, usize::from(queued));
+                assert_eq!(stats.total, usize::from(queued));
+                assert_eq!(stats.total_acquisitions, u64::from(queued));
+                assert_eq!(stats.total_timeouts, 0);
+                assert_eq!(
+                    pool.manager.connect_calls.load(Ordering::SeqCst),
+                    usize::from(queued),
+                    "the cancelled caller must not create or acquire a connection"
+                );
+                assert!(pool.inner.lock().client_connections.is_empty());
+            }
+        }
+        crate::test_complete!(
+            "async_pool_outcome_preserves_caller_cancellation_before_and_while_queued"
+        );
+    }
+
+    #[test]
+    fn async_pool_outcome_preserves_caller_cancellation_after_manager_success() {
+        use std::future::Future;
+
+        init_test("async_pool_outcome_preserves_caller_cancellation_after_manager_success");
+        for validating in [false, true] {
+            for client in [false, true] {
+                let pool = AsyncDbPool::new(
+                    ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                    DbPoolConfig::with_max_size(1).max_connections_per_client(Some(1)),
+                );
+                if validating {
+                    let warm_cx = Cx::for_testing();
+                    block_on(pool.get(&warm_cx))
+                        .expect("seed the connection to validate")
+                        .return_to_pool();
+                    pool.manager.pause_validation.store(true, Ordering::SeqCst);
+                } else {
+                    pool.manager.pause_connect.store(true, Ordering::SeqCst);
+                }
+
+                let cx = Cx::for_testing();
+                let waker = std::task::Waker::noop();
+                let mut task_cx = std::task::Context::from_waker(waker);
+                let mut acquisition = Box::pin(async {
+                    if client {
+                        pool.get_for_client_outcome(&cx, "client").await
+                    } else {
+                        pool.get_outcome(&cx).await
+                    }
+                });
+                assert!(acquisition.as_mut().poll(&mut task_cx).is_pending());
+                assert_eq!(pool.stats().total, 1);
+                assert_eq!(pool.stats().active, 1);
+                assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    pool.manager.validation_calls.load(Ordering::SeqCst),
+                    usize::from(validating),
+                    "the future must be parked in the intended manager operation"
+                );
+                assert_eq!(
+                    pool.inner
+                        .lock()
+                        .client_connections
+                        .get("client")
+                        .copied()
+                        .unwrap_or(0),
+                    usize::from(client)
+                );
+
+                let expected = attributed_pool_cancel_reason();
+                cx.set_cancel_reason(expected.clone());
+                pool.manager.pause_connect.store(false, Ordering::SeqCst);
+                pool.manager.pause_validation.store(false, Ordering::SeqCst);
+                match acquisition.as_mut().poll(&mut task_cx) {
+                    std::task::Poll::Ready(Outcome::Cancelled(actual)) => {
+                        assert_eq!(actual, expected);
+                    }
+                    other => panic!("late manager success must not erase cancellation: {other:?}"),
+                }
+                drop(acquisition);
+                let stats = pool.stats();
+                assert_eq!(stats.total, 0);
+                assert_eq!(stats.active, 0);
+                assert_eq!(stats.idle, 0);
+                assert_eq!(stats.pending_waiters, 0);
+                assert_eq!(stats.total_acquisitions, u64::from(validating));
+                assert_eq!(stats.total_discards, 1);
+                assert_eq!(stats.total_timeouts, 0);
+                assert!(pool.inner.lock().client_connections.is_empty());
+                assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 1);
+            }
+        }
+        crate::test_complete!(
+            "async_pool_outcome_preserves_caller_cancellation_after_manager_success"
+        );
+    }
+
+    #[test]
+    fn async_pool_outcome_zero_acquire_budget_returns_domain_timeout() {
+        init_test("async_pool_outcome_zero_acquire_budget_returns_domain_timeout");
+        for client in [false, true] {
+            let pool = AsyncDbPool::new(
+                ControlledAsyncPoolManager::new(Outcome::Ok(())),
+                DbPoolConfig::with_max_size(1).connection_timeout(Duration::ZERO),
+            );
+            let holder_cx = Cx::for_testing();
+            let holder = block_on(pool.get(&holder_cx)).expect("hold the only pool slot");
+            let cx = Cx::for_testing();
+            let actual = if client {
+                block_on(pool.get_for_client_outcome(&cx, "client"))
+            } else {
+                block_on(pool.get_outcome(&cx))
+            };
+            assert!(matches!(actual, Outcome::Err(DbPoolError::AcquireTimeout)));
+            let stats = pool.stats();
+            assert_eq!(stats.pending_waiters, 0);
+            assert_eq!(stats.total, 1);
+            assert_eq!(stats.active, 1);
+            assert_eq!(stats.idle, 0);
+            assert_eq!(stats.total_timeouts, 1);
+            assert_eq!(stats.total_acquisitions, 1);
+            assert_eq!(pool.manager.connect_calls.load(Ordering::SeqCst), 1);
+            assert!(pool.inner.lock().client_connections.is_empty());
+            holder.return_to_pool();
+            assert_eq!(pool.stats().active, 0);
+            assert_eq!(pool.stats().idle, 1);
+        }
+        crate::test_complete!("async_pool_outcome_zero_acquire_budget_returns_domain_timeout");
     }
 
     #[test]
