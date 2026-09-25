@@ -871,6 +871,82 @@ fn stranded_work_and_duplicate_fixes_alert_only_past_their_thresholds() {
     );
 }
 
+/// A failing lib unit test is keyed `lib::<test>`. The lib target exists wherever
+/// src/lib.rs does; looking for tests/lib.rs made every bisect probe read
+/// target-absent, so run2 blamed its batch head (bi2462.147.4).
+#[test]
+fn lib_unit_test_target_exists_through_src_lib() {
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"target_root_paths": [
+            {"name": "lib"},
+            {"name": "alpha_native"},
+            {"name": "beta", "registry": {"tests/b/main.rs": {"name": "beta", "features": []}}},
+        ]},
+    });
+    assert_eq!(
+        evaluate(&scenario)["probe_results"]["target_root_paths"],
+        json!([
+            ["src/lib.rs"],
+            ["tests/alpha_native.rs"],
+            ["tests/b/main.rs"]
+        ])
+    );
+}
+
+/// bi2462.147.1 item 5: an owner decision recorded in a bead comment with no later commit
+/// citing the bead is listed after 48 h. A passing mention of the phrase is not a decision.
+#[test]
+fn decision_ledger_lists_owner_decisions_nothing_has_implemented() {
+    let decision =
+        |at: &str| json!({"created_at": at, "text": "OWNER DECISION, recorded verbatim: ship it."});
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"decision_ledger": [{
+            "now": "2026-09-24T12:00:00+00:00",
+            "issues": [
+                {"id": "asupersync-done", "status": "open", "comments": [decision("2026-09-20T00:00:00Z")]},
+                {"id": "asupersync-stale", "status": "open", "comments": [decision("2026-09-21T00:00:00Z")]},
+                {"id": "asupersync-young", "status": "open", "comments": [decision("2026-09-24T00:00:00Z")]},
+                {"id": "asupersync-settled", "status": "closed", "comments": [decision("2026-09-20T00:00:00Z")]},
+                {"id": "asupersync-mention", "status": "open", "comments": [
+                    {"created_at": "2026-09-20T00:00:00Z", "text": "this remains the owner decision to make"}
+                ]},
+            ],
+            "commits": [
+                // Before the decision: does not count as implementing it.
+                {"sha": sha(1), "committed_at": "2026-09-19T00:00:00+00:00", "beads": ["asupersync-stale"]},
+                {"sha": sha(2), "committed_at": "2026-09-21T00:00:00+00:00", "beads": ["asupersync-done"]},
+            ],
+        }]},
+    });
+    let rows = evaluate(&scenario)["probe_results"]["decision_ledger"][0].clone();
+    let statuses: Vec<(String, String)> = rows
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|r| {
+            (
+                r["bead"].as_str().expect("bead").to_owned(),
+                r["status"].as_str().expect("status").to_owned(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, String)> = [
+        ("asupersync-done", "implemented"),
+        ("asupersync-settled", "closed"),
+        ("asupersync-stale", "stale"),
+        ("asupersync-young", "pending"),
+    ]
+    .into_iter()
+    .map(|(b, s)| (b.to_owned(), s.to_owned()))
+    .collect();
+    assert_eq!(statuses, expected, "{rows:#}");
+    assert_eq!(rows[0]["implemented_by"], sha(2));
+}
+
 #[test]
 fn script_documents_its_non_claims() {
     let source = std::fs::read_to_string(

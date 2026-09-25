@@ -2211,13 +2211,17 @@ promises and event loop; no Rust future is polled inside the wasm module.
 
 ### What works today
 
-- **JS/TS consumers (GA)**: `@asupersync/browser` supports the browser main
-  thread and dedicated workers. The shipped direct-runtime lane requires a real
-  browser `window` + `document` + `WebAssembly` environment, or the required
-  worker Web APIs. Its GA signoff (`artifacts/browser_ga_final_signoff_v1.json`)
-  hashes the wasm binary built on 2026-06-19, the last recorded headless-browser
-  runs date from March 2026, and no browser-engine test runs in CI; read the GA
-  label as a package-integrity statement, not as fresh runtime evidence.
+- **JS/TS consumers (release candidate)**: `@asupersync/browser` supports the
+  browser main thread and dedicated workers. The shipped direct-runtime lane
+  requires a real browser `window` + `document` + `WebAssembly` environment, or
+  the required worker Web APIs. The packages are a release candidate, not GA:
+  the current package review in `artifacts/browser_ga_final_signoff_v1.json` is
+  `RELEASE_CANDIDATE_NOT_GA_SIGNOFF`, the last recorded headless-browser runs
+  date from March 2026, no browser-engine test runs in the validation lanes, and
+  the packages are not yet published to npm. They return to GA when the glue and
+  wasm are rebuilt together with the export-consistency check passing, at least
+  one browser-engine test runs in the validation lanes, and the packages are
+  published.
 - **Capability-gated browser transports**: browser networking supports
   `fetch`, `WebSocket`, and WebTransport datagrams plus reliable byte streams
   when the host exposes `globalThis.WebTransport` over HTTPS. Existing sessions
@@ -2406,8 +2410,12 @@ The scoped Browser Edition GA signoff packet is
 with the human report in
 [`docs/browser_ga_final_signoff.md`](./docs/browser_ga_final_signoff.md). It
 aggregates B1 readiness, B2 package integrity, and B3 consumer compatibility
-for the JS/TS package line while keeping the Rust browser API preview-only.
+for the JS/TS package line while keeping the Rust browser API preview-only. Its
+historical decision, as signed, reads:
 JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust browser API preview-only.
+The signoff's current package review, `RELEASE_CANDIDATE_NOT_GA_SIGNOFF`,
+supersedes that decision: today the JS/TS packages are a release candidate, not
+GA.
 
 ---
 
