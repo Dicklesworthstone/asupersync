@@ -225,7 +225,7 @@
       ],
       "docs_markers": {
         "README.md": [
-          "JS/TS consumers (GA)",
+          "JS/TS consumers (release candidate)",
           "@asupersync/browser"
         ],
         "docs/WASM.md": [
