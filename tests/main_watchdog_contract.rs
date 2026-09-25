@@ -645,6 +645,52 @@ fn an_already_tracked_red_is_not_filed_again() {
     );
 }
 
+#[test]
+fn a_failed_bead_filing_is_queued_and_retried_not_lost() {
+    // A red enters known_reds on first sight, so its payload is never produced
+    // again. On 2026-09-25 the tracker refused every write for hours; a filing
+    // that failed then must survive until a later run can file it.
+    let lane = "targeted-tests[default]";
+    let payload =
+        |title: &str, target: &str| json!({"title": title, "lane": lane, "new_targets": [target]});
+    let tracked = json!({"id": "asupersync-x9", "title": "t2 is broken",
+                         "description": "beta_native::t2 fails"});
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"file_or_queue": [{
+            "state": {"known_reds": {lane: {
+                "alpha_native::t1": {"bead": null}, "beta_native::t2": {"bead": null}}}},
+            "rounds": [
+                {"payloads": [payload("RED t1", "alpha_native::t1")], "fail_titles": ["RED t1"]},
+                {"payloads": [payload("RED t2", "beta_native::t2")],
+                 "fail_titles": ["RED t1", "RED t2"]},
+                {"payloads": [], "open_issues": [tracked]},
+                {"payloads": []},
+            ],
+        }]},
+    });
+    let rounds = &evaluate(&scenario)["probe_results"]["file_or_queue"][0];
+    let pending = |i: usize| rounds[i]["pending"].clone();
+    assert_eq!(pending(0), json!(["RED t1"]), "a failed filing is queued");
+    assert_eq!(
+        pending(1),
+        json!(["RED t1", "RED t2"]),
+        "retried, still failing"
+    );
+    assert_eq!(
+        pending(2),
+        json!([]),
+        "the recovered tracker drains the queue"
+    );
+    assert_eq!(
+        rounds[2]["beads"][lane],
+        json!({"alpha_native::t1": "filed:RED t1", "beta_native::t2": "asupersync-x9"}),
+        "the queued red is filed; one that gained an open bead meanwhile is recorded, not refiled"
+    );
+    assert_eq!(pending(3), json!([]));
+}
+
 /// A commit for the rule-3 ledger (bi2462.147.1): `hh:mm` on 2026-09-24 UTC.
 fn ledger_commit(n: u8, email: &str, at: &str, message: &str, path: &str) -> Value {
     let mut c = commit(n, email, message);

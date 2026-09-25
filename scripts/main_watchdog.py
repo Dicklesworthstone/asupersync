@@ -1308,6 +1308,65 @@ def file_bead(payload: dict[str, Any]) -> str | None:
         return None
 
 
+def file_or_queue(
+    payloads: list[dict[str, Any]],
+    state: dict[str, Any],
+    open_issues: list[dict[str, Any]],
+    filer: Callable[[dict[str, Any]], str | None],
+) -> None:
+    """File each red payload once. A failed filing is queued, never lost.
+
+    A red target enters `known_reds` in the run that sees it, so no later run
+    produces its payload again. A `br create` that fails (for example while the
+    tracker refuses writes) therefore used to drop the P0 for good. Failed
+    payloads now wait in `state["pending_beads"]`, and every run retries them
+    first. A payload that meanwhile gained an open bead is recorded, not filed.
+    """
+    pending = state.get("pending_beads", [])
+    titles = {p["title"] for p in pending}
+    still_pending = []
+    for payload in pending + [p for p in payloads if p["title"] not in titles]:
+        existing = existing_bead_for(payload["new_targets"], open_issues)
+        bead = existing or filer(payload)
+        if not bead:
+            still_pending.append(payload)
+            continue
+        payload["existing_bead" if existing else "filed_bead"] = bead
+        for target in payload["new_targets"]:
+            entry = state["known_reds"].get(payload["lane"], {}).get(target)
+            if entry is not None:
+                entry["bead"] = bead
+    state["pending_beads"] = still_pending
+
+
+def file_or_queue_rounds(case: dict[str, Any]) -> list[dict[str, Any]]:
+    """Evaluate helper: successive `file_or_queue` runs sharing one state.
+
+    Each round lists the payload titles whose `br create` fails. Any other
+    title is filed as `filed:<title>`.
+    """
+    state = case["state"]
+    rounds = []
+    for round_ in case["rounds"]:
+        fail = set(round_.get("fail_titles", []))
+        file_or_queue(
+            round_.get("payloads", []),
+            state,
+            round_.get("open_issues", []),
+            lambda payload, fail=fail: None if payload["title"] in fail else f"filed:{payload['title']}",
+        )
+        rounds.append(
+            {
+                "pending": [p["title"] for p in state["pending_beads"]],
+                "beads": {
+                    lane: {target: entry.get("bead") for target, entry in targets.items()}
+                    for lane, targets in state["known_reds"].items()
+                },
+            }
+        )
+    return rounds
+
+
 # ---------------------------------------------------------------------------
 # Summary / exit metrics
 # ---------------------------------------------------------------------------
@@ -1868,6 +1927,7 @@ def main(argv: list[str]) -> int:
             "existing_bead_for": [
                 existing_bead_for(case["new_targets"], case["open_issues"]) for case in probes.get("existing_bead_for", [])
             ],
+            "file_or_queue": [file_or_queue_rounds(case) for case in probes.get("file_or_queue", [])],
         }
         json.dump(result, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
@@ -1892,26 +1952,16 @@ def main(argv: list[str]) -> int:
     if args.ledger_since:
         state["ledger_since"] = args.ledger_since
     if not plan["commits"]:
+        if args.file_beads and state.get("pending_beads"):
+            file_or_queue([], state, open_tracker_issues(), file_bead)
         escalations = escalate_overdue_receipts(state, args.state_dir / "receipts.jsonl", now, args.file_beads)
         state_path.write_text(json.dumps(state, indent=2, sort_keys=True))
         print(json.dumps({"schema": SCHEMA_VERSION, "status": "no new commits", "since": plan["since"], "receipt_escalations": escalations}))
         return 0
     runner = rch_runner(str(args.state_dir / "target"), args.admission_attempts, args.admission_sleep, args.state_dir / "logs")
     result = run_engine(plan, runner, state, now.isoformat(), git_target_exists, args.parallel)
-    open_issues = open_tracker_issues()
-    for payload in result["bead_payloads"]:
-        if args.file_beads:
-            existing = existing_bead_for(payload["new_targets"], open_issues)
-            if existing:
-                payload["existing_bead"] = existing  # already tracked: record it, file nothing
-                bead = existing
-            else:
-                bead = file_bead(payload)
-                payload["filed_bead"] = bead
-            for target in payload["new_targets"]:
-                entry = state["known_reds"].get(payload["lane"], {}).get(target)
-                if entry is not None:
-                    entry["bead"] = bead
+    if args.file_beads:
+        file_or_queue(result["bead_payloads"], state, open_tracker_issues(), file_bead)
     if args.post_receipts:
         post_receipts(plan, result["receipts"])
     with open(args.state_dir / "receipts.jsonl", "a", encoding="utf-8") as handle:
