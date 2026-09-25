@@ -10,11 +10,10 @@
 //! `TlsStream` carries the 24-byte HTTP/2 CLIENT_PREFACE
 //! (RFC 9113 §3.4) and a SETTINGS frame intact, byte-for-byte.
 //!
-//! This is the minimal stack-readiness check for any gRPC-over-TLS
-//! deployment: if it fails, no gRPC unary call can ever start. It runs
-//! both sides over a `VirtualTcpStream::pair` so the test is
-//! deterministic and CI-stable; the real-TCP follow-on is captured in
-//! the bead's "follow-on" note.
+//! The virtual stream composition test is followed by native listener tests:
+//! authenticated TLS carries buffered and produced responses, flow control,
+//! trailers, and graceful drain; incompatible ALPN and stalled handshakes
+//! release their connection ownership without dispatching HTTP requests.
 
 #[cfg(feature = "tls")]
 mod tls_h2_preface {
@@ -193,5 +192,451 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 "non-ACK SETTINGS must NOT have ACK flag set"
             );
         });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native_listener {
+        use super::create_tls_materials;
+        use asupersync::bytes::{Bytes, BytesMut};
+        use asupersync::codec::Decoder as _;
+        use asupersync::cx::Cx;
+        use asupersync::http::body::{HeaderMap, HeaderName, HeaderValue};
+        use asupersync::http::h1::server::HostPolicy;
+        use asupersync::http::h1::types::{Method, Response, Version};
+        use asupersync::http::h2::connection::CLIENT_PREFACE;
+        use asupersync::http::h2::frame::{
+            DataFrame, HeadersFrame, SettingsFrame, WindowUpdateFrame,
+        };
+        use asupersync::http::h2::listener::{
+            Http2Listener, Http2ListenerConfig, Http2ProducedResponse,
+        };
+        use asupersync::http::h2::{
+            ErrorCode, Frame, FrameCodec, Header, HpackDecoder, HpackEncoder,
+        };
+        use asupersync::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use asupersync::net::TcpStream;
+        use asupersync::runtime::RuntimeBuilder;
+        use asupersync::tls::{TlsAcceptor, TlsAcceptorBuilder, TlsConnectorBuilder, TlsStream};
+        use std::future::Future;
+        use std::net::SocketAddr;
+        use std::num::NonZeroUsize;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        const CHUNK: usize = 16 * 1024;
+        const WATCHDOG: Duration = Duration::from_secs(30);
+
+        async fn bounded<F: Future>(future: F) -> F::Output {
+            asupersync::time::timeout(Cx::current().unwrap().now(), WATCHDOG, future)
+                .await
+                .expect("native TLS listener watchdog")
+        }
+
+        async fn until(mut predicate: impl FnMut() -> bool) {
+            bounded(async {
+                while !predicate() {
+                    asupersync::time::sleep(
+                        Cx::current().unwrap().now(),
+                        Duration::from_millis(1),
+                    )
+                    .await;
+                }
+            })
+            .await;
+        }
+
+        fn acceptor() -> TlsAcceptor {
+            let (chain, key, _) = create_tls_materials();
+            TlsAcceptorBuilder::new(chain, key)
+                // Deliberately permit HTTP/1.1 and absent ALPN here. The H2
+                // listener must enforce its own application protocol boundary.
+                .alpn_http()
+                .build()
+                .expect("native listener TLS acceptor")
+        }
+
+        fn config() -> Http2ListenerConfig {
+            Http2ListenerConfig::default()
+                .host_policy(HostPolicy::allow_list(vec!["localhost".to_owned()]))
+                .drain_timeout(Duration::from_secs(2))
+                .hard_drain_timeout(Duration::from_secs(5))
+        }
+
+        async fn connect(address: SocketAddr, alpn: Vec<Vec<u8>>) -> TlsStream<TcpStream> {
+            let (_, _, trust) = create_tls_materials();
+            let connector = TlsConnectorBuilder::new()
+                .add_root_certificates(trust)
+                .alpn_protocols(alpn)
+                .build()
+                .expect("native listener TLS connector");
+            let socket = TcpStream::connect(address).await.expect("native TCP dial");
+            connector
+                .connect("localhost", socket)
+                .await
+                .expect("authenticated native TLS handshake")
+        }
+
+        struct Peer {
+            stream: TlsStream<TcpStream>,
+            buffered: BytesMut,
+            codec: FrameCodec,
+            encoder: HpackEncoder,
+            decoder: HpackDecoder,
+        }
+
+        impl Peer {
+            async fn connect(address: SocketAddr) -> Self {
+                let mut stream = connect(address, vec![b"h2".to_vec()]).await;
+                assert_eq!(stream.alpn_protocol(), Some(b"h2".as_slice()));
+                stream.write_all(CLIENT_PREFACE).await.unwrap();
+                let mut peer = Self {
+                    stream,
+                    buffered: BytesMut::new(),
+                    codec: FrameCodec::new(),
+                    encoder: HpackEncoder::new(),
+                    decoder: HpackDecoder::new(),
+                };
+                peer.send(Frame::Settings(SettingsFrame::new(Vec::new())))
+                    .await;
+                peer
+            }
+
+            async fn send(&mut self, frame: Frame) {
+                let mut wire = BytesMut::new();
+                frame.encode(&mut wire).unwrap();
+                self.stream.write_all(&wire).await.unwrap();
+                self.stream.flush().await.unwrap();
+            }
+
+            async fn request(&mut self, stream_id: u32, path: &str) {
+                let mut block = BytesMut::new();
+                self.encoder.encode(
+                    &[
+                        Header::new(":method", "POST"),
+                        Header::new(":scheme", "https"),
+                        Header::new(":authority", "localhost"),
+                        Header::new(":path", path),
+                    ],
+                    &mut block,
+                );
+                self.send(Frame::Headers(HeadersFrame::new(
+                    stream_id,
+                    block.freeze(),
+                    false,
+                    true,
+                )))
+                .await;
+                self.send(Frame::Data(DataFrame::new(
+                    stream_id,
+                    Bytes::from_static(b"native-tls-request"),
+                    true,
+                )))
+                .await;
+            }
+
+            async fn receive(&mut self) -> Option<Frame> {
+                loop {
+                    if let Some(frame) = self.codec.decode(&mut self.buffered).unwrap() {
+                        if let Frame::Settings(settings) = &frame
+                            && !settings.ack
+                        {
+                            self.send(Frame::Settings(SettingsFrame::ack())).await;
+                        }
+                        return Some(frame);
+                    }
+                    let mut bytes = [0u8; CHUNK];
+                    let read = self.stream.read(&mut bytes).await.unwrap();
+                    if read == 0 {
+                        assert!(self.buffered.is_empty(), "truncated TLS H2 frame");
+                        return None;
+                    }
+                    self.buffered.extend_from_slice(&bytes[..read]);
+                }
+            }
+
+            async fn response(&mut self, stream_id: u32) -> (Vec<Header>, Vec<u8>) {
+                let mut headers = Vec::new();
+                let mut body = Vec::new();
+                loop {
+                    match self.receive().await.expect("complete response before EOF") {
+                        Frame::Headers(mut frame) if frame.stream_id == stream_id => {
+                            assert!(frame.end_headers);
+                            headers.extend(self.decoder.decode(&mut frame.header_block).unwrap());
+                            if frame.end_stream {
+                                return (headers, body);
+                            }
+                        }
+                        Frame::Data(frame) if frame.stream_id == stream_id => {
+                            body.extend_from_slice(&frame.data);
+                            if !frame.data.is_empty() {
+                                let increment = u32::try_from(frame.data.len()).unwrap();
+                                self.send(Frame::WindowUpdate(WindowUpdateFrame::new(0, increment)))
+                                    .await;
+                                if !frame.end_stream {
+                                    self.send(Frame::WindowUpdate(WindowUpdateFrame::new(
+                                        stream_id, increment,
+                                    )))
+                                    .await;
+                                }
+                            }
+                            if frame.end_stream {
+                                return (headers, body);
+                            }
+                        }
+                        Frame::GoAway(frame) => panic!("response lost to GOAWAY: {frame:?}"),
+                        Frame::RstStream(frame) => panic!("response reset: {frame:?}"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn tls_listener_carries_buffered_and_produced_responses_and_graceful_drain() {
+            let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+            let handle = runtime.handle();
+            runtime.block_on(bounded(async move {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let handler_calls = Arc::clone(&calls);
+                let listener = Http2Listener::bind_produced_with_config(
+                    "127.0.0.1:0",
+                    move |request| {
+                        handler_calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(request.method, Method::Post);
+                        assert_eq!(request.version, Version::Http2);
+                        assert_eq!(request.body, b"native-tls-request");
+                        assert!(request.peer_addr.unwrap().ip().is_loopback());
+                        async move {
+                            if request.uri == "/buffered" {
+                                return Http2ProducedResponse::buffered(Response::new(
+                                    200,
+                                    "OK",
+                                    b"native-tls-buffered".to_vec(),
+                                ));
+                            }
+                            assert_eq!(request.uri, "/produced");
+                            Http2ProducedResponse::streaming(
+                                Response::new(200, "OK", Vec::new()),
+                                NonZeroUsize::MIN,
+                                NonZeroUsize::new(CHUNK).unwrap(),
+                                |cx, mut sender| async move {
+                                    // Exceed the default stream and connection
+                                    // windows while retaining one queued chunk.
+                                    for _ in 0..16 {
+                                        sender
+                                            .send_bytes(&cx, Bytes::from(vec![b't'; CHUNK]))
+                                            .await?;
+                                    }
+                                    let mut trailers = HeaderMap::new();
+                                    trailers.insert(
+                                        HeaderName::from_static("x-tls-complete"),
+                                        HeaderValue::from_static("yes"),
+                                    );
+                                    sender.send_trailers(&cx, trailers).await?;
+                                    Ok(sender)
+                                },
+                            )
+                        }
+                    },
+                    config(),
+                )
+                .await
+                .unwrap()
+                .with_tls(acceptor());
+                let address = listener.local_addr().unwrap();
+                let manager = listener.connection_manager().clone();
+                let in_flight = listener.in_flight_requests();
+                let run_runtime = handle.clone();
+                let run = handle
+                    .try_spawn(async move { listener.run_produced(&run_runtime).await })
+                    .unwrap();
+
+                let mut peer = Peer::connect(address).await;
+                peer.request(1, "/buffered").await;
+                let (headers, body) = peer.response(1).await;
+                assert!(headers.iter().any(|h| h.name == ":status" && h.value == "200"));
+                assert_eq!(body, b"native-tls-buffered");
+                peer.request(3, "/produced").await;
+                let (headers, body) = peer.response(3).await;
+                assert!(headers.iter().any(|h| h.name == ":status" && h.value == "200"));
+                assert!(
+                    headers
+                        .iter()
+                        .any(|h| h.name == "x-tls-complete" && h.value == "yes")
+                );
+                assert_eq!(body, vec![b't'; 16 * CHUNK]);
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+                assert!(manager.begin_drain(Duration::from_secs(2)));
+                let mut goaway = false;
+                while let Some(frame) = peer.receive().await {
+                    if let Frame::GoAway(frame) = frame {
+                        assert_eq!(frame.error_code, ErrorCode::NoError);
+                        goaway = true;
+                    }
+                }
+                assert!(goaway, "graceful drain must send GOAWAY through TLS");
+                let stats = run.await.unwrap().unwrap();
+                assert_eq!(stats.force_closed, 0);
+                assert_eq!(manager.active_count(), 0);
+                assert_eq!(in_flight.load(Ordering::Acquire), 0);
+            }));
+        }
+
+        #[test]
+        fn tls_listener_rejects_other_or_absent_alpn_before_http_dispatch() {
+            let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+            let handle = runtime.handle();
+            runtime.block_on(bounded(async move {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let handler_calls = Arc::clone(&calls);
+                let listener = Http2Listener::bind_with_config(
+                    "127.0.0.1:0",
+                    move |_| {
+                        handler_calls.fetch_add(1, Ordering::SeqCst);
+                        async { Response::new(200, "OK", Vec::new()) }
+                    },
+                    config(),
+                )
+                .await
+                .unwrap()
+                .with_tls(acceptor());
+                let address = listener.local_addr().unwrap();
+                let manager = listener.connection_manager().clone();
+                let run_runtime = handle.clone();
+                let run = handle
+                    .try_spawn(async move { listener.run(&run_runtime).await })
+                    .unwrap();
+
+                for protocols in [vec![b"http/1.1".to_vec()], Vec::new()] {
+                    let mut stream = connect(address, protocols.clone()).await;
+                    assert_eq!(
+                        stream.alpn_protocol(),
+                        protocols.first().map(Vec::as_slice)
+                    );
+                    // Offer valid H2 bytes anyway. A permissive acceptor must
+                    // never make this listener treat missing/wrong ALPN as H2.
+                    let mut wire = BytesMut::from(CLIENT_PREFACE.as_slice());
+                    Frame::Settings(SettingsFrame::new(Vec::new()))
+                        .encode(&mut wire)
+                        .unwrap();
+                    let mut block = BytesMut::new();
+                    HpackEncoder::new().encode(
+                        &[
+                            Header::new(":method", "GET"),
+                            Header::new(":scheme", "https"),
+                            Header::new(":authority", "localhost"),
+                            Header::new(":path", "/"),
+                        ],
+                        &mut block,
+                    );
+                    Frame::Headers(HeadersFrame::new(1, block.freeze(), true, true))
+                        .encode(&mut wire)
+                        .unwrap();
+                    let _ = stream.write_all(&wire).await;
+                    let _ = stream.flush().await;
+                    let mut response = [0u8; 1];
+                    assert!(matches!(stream.read(&mut response).await, Ok(0) | Err(_)));
+                    until(|| manager.active_count() == 0).await;
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(manager.begin_drain(Duration::from_secs(2)));
+                run.await.unwrap().unwrap();
+            }));
+        }
+
+        #[test]
+        fn tls_handshake_timeout_releases_capacity_for_a_real_request() {
+            let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+            let handle = runtime.handle();
+            runtime.block_on(bounded(async move {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let handler_calls = Arc::clone(&calls);
+                let listener = Http2Listener::bind_with_config(
+                    "127.0.0.1:0",
+                    move |_| {
+                        handler_calls.fetch_add(1, Ordering::SeqCst);
+                        async { Response::new(200, "OK", b"slot-reused".to_vec()) }
+                    },
+                    config().max_connections(Some(1)),
+                )
+                .await
+                .unwrap()
+                .with_tls(acceptor())
+                .tls_handshake_timeout(Duration::from_secs(1));
+                let address = listener.local_addr().unwrap();
+                let manager = listener.connection_manager().clone();
+                let stats = listener.stats_handle();
+                let run_runtime = handle.clone();
+                let run = handle
+                    .try_spawn(async move { listener.run(&run_runtime).await })
+                    .unwrap();
+
+                let mut silent = TcpStream::connect(address).await.unwrap();
+                let mut byte = [0u8; 1];
+                assert_eq!(silent.read(&mut byte).await.unwrap(), 0);
+                until(|| manager.active_count() == 0).await;
+                assert_eq!(stats.snapshot().accepted_total, 1);
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+                let mut peer = Peer::connect(address).await;
+                peer.request(1, "/after-handshake-timeout").await;
+                let (_, body) = peer.response(1).await;
+                assert_eq!(body, b"slot-reused");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                drop(peer);
+                assert!(manager.begin_drain(Duration::from_secs(2)));
+                run.await.unwrap().unwrap();
+                assert_eq!(manager.active_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn force_close_interrupts_an_owned_tls_handshake() {
+            let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+            let handle = runtime.handle();
+            runtime.block_on(bounded(async move {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let handler_calls = Arc::clone(&calls);
+                let listener = Http2Listener::bind_with_config(
+                    "127.0.0.1:0",
+                    move |_| {
+                        handler_calls.fetch_add(1, Ordering::SeqCst);
+                        async { Response::new(200, "OK", Vec::new()) }
+                    },
+                    config(),
+                )
+                .await
+                .unwrap()
+                .with_tls(acceptor())
+                .tls_handshake_timeout(Duration::from_secs(3600));
+                let address = listener.local_addr().unwrap();
+                let manager = listener.connection_manager().clone();
+                let run_runtime = handle.clone();
+                let run = handle
+                    .try_spawn(async move { listener.run(&run_runtime).await })
+                    .unwrap();
+
+                let mut silent = TcpStream::connect(address).await.unwrap();
+                until(|| manager.active_count() == 1).await;
+                // TLS negotiation belongs to each connection task, so the
+                // silent peer must not serialize the listener's accept loop.
+                let mut sibling = Peer::connect(address).await;
+                sibling.request(1, "/while-handshake-pending").await;
+                let (_, body) = sibling.response(1).await;
+                assert!(body.is_empty());
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                drop(sibling);
+                until(|| manager.active_count() == 1).await;
+                manager.force_close();
+                let stats = run.await.unwrap().unwrap();
+                assert_eq!(stats.force_closed, 1);
+                assert_eq!(manager.active_count(), 0);
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                let mut byte = [0u8; 1];
+                assert_eq!(silent.read(&mut byte).await.unwrap(), 0);
+            }));
+        }
     }
 }

@@ -100,7 +100,7 @@ impl H2FlowControlProgress {
 }
 
 pub(super) async fn write_with_deadline(
-    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
     signal: &ShutdownSignal,
     write_timeout: Duration,
     operation: H2WriteOperation,

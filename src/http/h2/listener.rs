@@ -31,7 +31,7 @@ use crate::http::h2::frame::Frame;
 use crate::http::h2::hpack::Header;
 use crate::http::h2::settings::Settings;
 use crate::http::h2::stream::StreamState;
-use crate::io::AsyncReadExt as _;
+use crate::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf};
 use crate::net::tcp::listener::TcpListener;
 use crate::net::tcp::stream::TcpStream;
 use crate::runtime::{JoinError, JoinHandle, RuntimeHandle, SpawnError, TaskHandle};
@@ -41,6 +41,8 @@ use crate::server::shutdown::{
     ShutdownStats,
 };
 use crate::stream::Stream;
+#[cfg(feature = "tls")]
+use crate::tls::{TlsAcceptor, TlsStream};
 use crate::tracing_compat::error;
 use crate::types::{Budget, CancelKind, CancelReason, Time};
 use crate::web::WebBodyDiagnostic;
@@ -57,7 +59,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 mod ownership;
@@ -83,6 +85,8 @@ const RESPONSE_FUNNEL_CAPACITY: usize = 64;
 
 #[derive(Clone, Copy)]
 struct H2TransportTimeouts {
+    #[cfg(feature = "tls")]
+    tls_handshake: Duration,
     preface: Duration,
     write_progress: Duration,
     flow_control: Duration,
@@ -91,9 +95,147 @@ struct H2TransportTimeouts {
 impl Default for H2TransportTimeouts {
     fn default() -> Self {
         Self {
+            #[cfg(feature = "tls")]
+            tls_handshake: Duration::from_secs(10),
             preface: Duration::from_secs(10),
             write_progress: Duration::from_secs(10),
             flow_control: Duration::from_secs(10),
+        }
+    }
+}
+
+/// Count socket writes beneath TLS, where flushing encrypted records can make
+/// progress after the framed plaintext buffer has already emptied.
+struct H2Socket {
+    stream: TcpStream,
+    bytes_written: u64,
+}
+
+impl AsyncRead for H2Socket {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for H2Socket {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.stream).poll_write(cx, buf);
+        if let Poll::Ready(Ok(written)) = &result {
+            self.bytes_written = self.bytes_written.wrapping_add(*written as u64);
+        }
+        result
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.stream).poll_write_vectored(cx, bufs);
+        if let Poll::Ready(Ok(written)) = &result {
+            self.bytes_written = self.bytes_written.wrapping_add(*written as u64);
+        }
+        result
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
+
+/// Keep the frame pump identical for cleartext and authenticated TLS listeners.
+enum H2Transport {
+    Plain(H2Socket),
+    #[cfg(feature = "tls")]
+    Tls(Box<TlsStream<H2Socket>>),
+}
+
+impl H2Transport {
+    fn bytes_written(&self) -> u64 {
+        match self {
+            Self::Plain(socket) => socket.bytes_written,
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.get_ref().bytes_written,
+        }
+    }
+}
+
+impl AsyncRead for H2Transport {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for H2Transport {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            Self::Plain(stream) => stream.is_write_vectored(),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
         }
     }
 }
@@ -2181,7 +2323,7 @@ enum H2WriteOperation {
 /// progress deadline. Only bytes actually accepted by the socket extend it;
 /// wakeups, queued frames, and peer traffic cannot keep a stalled write alive.
 async fn bounded_h2_write(
-    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
     signal: &ShutdownSignal,
     timeout: Duration,
     operation: H2WriteOperation,
@@ -2207,7 +2349,7 @@ async fn bounded_h2_write(
                 "HTTP/2 transport write made no progress before its deadline",
             )));
         }
-        let before = framed.write_buffer().len();
+        let before = framed.get_ref().bytes_written();
         let result = match operation {
             H2WriteOperation::Ready => framed.poll_ready(cx),
             H2WriteOperation::Flush => framed.poll_flush(cx),
@@ -2216,7 +2358,7 @@ async fn bounded_h2_write(
         if result.is_ready() {
             return result;
         }
-        if framed.write_buffer().len() < before {
+        if framed.get_ref().bytes_written() != before {
             expires_at = timer.now() + timeout;
             deadline = ServerRequestDeadline::new(timer.clone(), expires_at);
         }
@@ -2243,7 +2385,7 @@ fn h2_pump_failure_diagnostic(error: &H2PumpWriteError) -> Option<WebBodyDiagnos
 
 async fn pump_writes(
     conn: &mut Connection,
-    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
     signal: &ShutdownSignal,
     write_timeout: Duration,
     mut progress: Option<&mut H2FlowControlProgress>,
@@ -2335,7 +2477,7 @@ async fn pump_writes(
 #[allow(clippy::too_many_arguments)]
 async fn pump_writes_with_body_diagnostics(
     conn: &mut Connection,
-    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
     pending_requests: &HashMap<u32, (Vec<Header>, Vec<u8>)>,
     dispatched_streams: &HashSet<u32>,
     produced_bodies: &mut BTreeMap<u32, ActiveProducedBody>,
@@ -2409,7 +2551,7 @@ async fn pump_writes_with_body_diagnostics(
 /// Wait for the next driver event: incoming frame, completed handler
 /// response, or a shutdown-phase transition.
 async fn next_driver_event(
-    framed: &mut Framed<TcpStream, ListenerFrameCodec>,
+    framed: &mut Framed<H2Transport, ListenerFrameCodec>,
     resp_rx: &mut mpsc::Receiver<FunnelItem>,
     #[cfg(not(feature = "http2-streaming"))] conn: &Connection,
     #[cfg(feature = "http2-streaming")] conn: &mut Connection,
@@ -2932,7 +3074,8 @@ fn frame_codec_for(max_frame_size: u32) -> ListenerFrameCodec {
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 async fn serve_h2_connection<F, Fut>(
-    mut stream: TcpStream,
+    stream: TcpStream,
+    #[cfg(feature = "tls")] tls_acceptor: Option<TlsAcceptor>,
     peer_addr: Option<SocketAddr>,
     handler: Arc<F>,
     settings: Settings,
@@ -2960,6 +3103,46 @@ where
 {
     let task_cx = Cx::current()
         .ok_or_else(|| io::Error::other("h2 connection task requires a runtime Cx"))?;
+    let socket = H2Socket {
+        stream,
+        bytes_written: 0,
+    };
+    #[cfg(feature = "tls")]
+    let mut stream = if let Some(acceptor) = tls_acceptor {
+        // Handshakes remain in the connection-owned task, so a silent peer
+        // cannot block accepting siblings. Dropping a timed-out or cancelled
+        // handshake also drops its socket and releases its connection slot.
+        let handshake = crate::time::timeout(
+            task_cx.now(),
+            transport_timeouts.tls_handshake,
+            acceptor.accept(socket),
+        );
+        let tls = match race_force_close(&shutdown_signal, handshake).await {
+            Some(Ok(result)) => result.map_err(io::Error::other)?,
+            Some(Err(_)) => {
+                task_cx.trace("h2_transport_tls_handshake_deadline_expired");
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "HTTP/2 TLS handshake deadline expired",
+                ));
+            }
+            None => return Ok(()),
+        };
+        // The acceptor may also serve HTTP/1.1 or allow absent ALPN. This
+        // listener only speaks h2 and must reject those outcomes before the
+        // preface, SETTINGS, or any request handler can reach the wire.
+        if tls.alpn_protocol() != Some(b"h2".as_slice()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP/2 TLS requires h2 ALPN negotiation",
+            ));
+        }
+        H2Transport::Tls(Box::new(tls))
+    } else {
+        H2Transport::Plain(socket)
+    };
+    #[cfg(not(feature = "tls"))]
+    let mut stream = H2Transport::Plain(socket);
     let mut request_owners = H2RequestOwners::new(&task_cx).await?;
     #[cfg(feature = "http2-streaming")]
     let mut incoming = streaming.map(StreamingRequests::new);
@@ -4285,6 +4468,8 @@ fn h2_shutdown_signal_for_time_getter(time_getter: fn() -> Time) -> ShutdownSign
 /// [`Http1Listener`]: crate::http::h1::listener::Http1Listener
 pub struct Http2Listener<F> {
     tcp_listener: TcpListener,
+    #[cfg(feature = "tls")]
+    tls_acceptor: Option<TlsAcceptor>,
     handler: Arc<F>,
     config: Http2ListenerConfig,
     shutdown_signal: ShutdownSignal,
@@ -4477,6 +4662,8 @@ impl<F> Http2Listener<F> {
         let stats = Arc::new(Http2ListenerStats::new(config.time_getter));
         Self {
             tcp_listener,
+            #[cfg(feature = "tls")]
+            tls_acceptor: None,
             handler: Arc::new(handler),
             config,
             shutdown_signal,
@@ -4494,6 +4681,31 @@ impl<F> Http2Listener<F> {
     #[must_use]
     pub fn shutdown_signal(&self) -> ShutdownSignal {
         self.shutdown_signal.clone()
+    }
+
+    /// Serve HTTP/2 over TLS using the supplied certificate and authentication
+    /// policy. The acceptor must advertise `h2`; connections that negotiate
+    /// another protocol or omit ALPN are rejected before HTTP processing.
+    ///
+    /// TLS applies to buffered, produced-response, and streaming listeners.
+    /// Handshakes consume connection capacity and obey force-close as well as
+    /// the listener's handshake deadline. Without this builder, connections
+    /// continue to use the cleartext HTTP/2 prior-knowledge preface.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn with_tls(mut self, acceptor: TlsAcceptor) -> Self {
+        self.tls_acceptor = Some(acceptor);
+        self
+    }
+
+    /// Bounds a TLS handshake independently of the HTTP/2 preface deadline.
+    /// The default is ten seconds; partial handshake progress does not extend
+    /// it. An earlier timeout configured on the acceptor also remains active.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn tls_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_timeouts.tls_handshake = timeout;
+        self
     }
 
     /// Bounds receipt of the complete 24-byte client preface. The default is
@@ -4688,6 +4900,8 @@ impl<F> Http2Listener<F> {
             let conn_time_getter = self.config.time_getter;
             let transport_timeouts = self.transport_timeouts;
             let request_limits = self.request_limits;
+            #[cfg(feature = "tls")]
+            let tls_acceptor = self.tls_acceptor.clone();
             #[cfg(feature = "http2-streaming")]
             let streaming = streaming.clone();
             // Check the connection's Send boundary once before the runtime's
@@ -4696,6 +4910,8 @@ impl<F> Http2Listener<F> {
                 let peer_addr = Some(addr);
                 if let Err(err) = serve_h2_connection(
                     stream,
+                    #[cfg(feature = "tls")]
+                    tls_acceptor,
                     peer_addr,
                     handler,
                     settings,
