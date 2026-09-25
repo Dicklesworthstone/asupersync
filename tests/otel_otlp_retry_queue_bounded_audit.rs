@@ -1,6 +1,14 @@
 //! Audit + regression test for `src/observability/otel.rs` OTLP
 //! exporter retry-queue memory boundedness.
 //!
+//! September 25, br-asupersync-bi2462.117: synchronous exports now use a
+//! finite admission queue, with one explicit caller-owned async consumer.
+//! The historical no-queue findings below describe the old implementation.
+//! Inline network retries remain bounded and never requeue a failed batch.
+//! The admission/completion assertions below supersede (d) and (e); executable
+//! queue and real socket coverage lives in otel::queued::tests and
+//! otlp_queued_native. These source checks are supplemental, not execution proof.
+//!
 //! Operator's question: "when retries exceed configured
 //! max-retries, are old batches dropped (correct: bounded memory)
 //! or accumulated forever (memory leak)?"
@@ -243,13 +251,7 @@ fn send_otlp_protobuf_takes_request_body_by_value() {
 }
 
 #[test]
-fn otlp_sync_export_returns_error_no_queue() {
-    // Pin (d): the MetricsExporter::export sync method on
-    // OtlpHttpExporter returns Err with a clear message.
-    // It does NOT enqueue the snapshot for later async
-    // processing. A regression that buffered the snapshot
-    // for a background task would re-open the accumulation
-    // failure mode.
+fn otlp_sync_export_uses_bounded_admission() {
     let source = read_otel_source();
 
     let impl_marker = "impl MetricsExporter for OtlpHttpExporter {";
@@ -260,15 +262,19 @@ fn otlp_sync_export_returns_error_no_queue() {
     let body = &source[start..start + end_rel];
 
     assert!(
-        body.contains("Err(ExportError::new(")
-            && body.contains("OTLP HTTP export requires async context"),
-        "REGRESSION: OtlpHttpExporter's sync export() no longer \
-         returns an immediate Err. If it now buffers the \
-         snapshot internally for later async processing, that's \
-         a queue — verify it's bounded, has an overflow \
-         strategy, and update this audit test.\n\n\
-         impl body:\n{body}",
+        body.contains("self.enqueue_metrics(metrics)"),
+        "sync metrics must use validated bounded admission: {body}",
     );
+
+    let queued = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/observability/otel/queued.rs"),
+    )
+    .expect("read bounded export queue");
+    assert!(queued.contains("state.stats.retained_batches >= OTLP_EXPORT_QUEUE_MAX_BATCHES"));
+    assert!(queued.contains("retained > OTLP_EXPORT_QUEUE_MAX_BYTES"));
+    assert!(queued.contains("return Err(queue_full())"));
+    assert!(queued.contains("state.stats.retained_batches -= 1"));
+    assert!(queued.contains("state.stats.retained_bytes -= bytes"));
 
     // Forbid suspicious queue-like calls in the export body.
     let suspect_calls = [
@@ -288,11 +294,7 @@ fn otlp_sync_export_returns_error_no_queue() {
 }
 
 #[test]
-fn otlp_flush_is_a_noop() {
-    // Pin (e): flush() has a single-line "stateless, nothing to
-    // flush" comment + Ok(()) return. A regression that made
-    // flush non-trivial would suggest internal state needing
-    // to drain — i.e. a queue.
+fn otlp_flush_checks_delivery_completion() {
     let source = read_otel_source();
 
     // Look up the flush method in the FULL source AFTER the
@@ -311,12 +313,8 @@ fn otlp_flush_is_a_noop() {
     let flush_body = &source[flush_abs..flush_abs + flush_end];
 
     assert!(
-        flush_body.contains("Ok(())") && flush_body.contains("OTLP is stateless"),
-        "REGRESSION: flush() is no longer a no-op. The audit \
-         invariant relies on OTLP being stateless (nothing to \
-         drain). If flush became non-trivial, the exporter now \
-         holds state — verify it's bounded.\n\n\
-         flush body:\n{flush_body}",
+        flush_body.contains("self.export_queue.check_flushed()"),
+        "sync flush must reject pending or failed delivery: {flush_body}",
     );
 }
 
