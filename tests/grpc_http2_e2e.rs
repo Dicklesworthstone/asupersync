@@ -418,12 +418,12 @@ fn http2_grpc_invalid_host_rejection() {
     );
 
     futures_lite::future::block_on(async {
-        test_section!("test_remote_host_rejection");
+        test_section!("test_malformed_authority_rejection");
         let invalid_uris = vec![
-            "http://example.com:50051",
-            "http://evil.com:50051",
-            "http://192.168.1.1:50051",
-            "http://8.8.8.8:50051",
+            "http://loopback:pw@example.com:50051",
+            "http://evil..com:50051",
+            "http://[192.168.1.1]:50051",
+            "http://[::1]:65536",
         ];
 
         for uri in invalid_uris {
@@ -434,10 +434,10 @@ fn http2_grpc_invalid_host_rejection() {
                         "security_violation",
                         json!({
                             "uri": uri,
-                            "issue": "remote_host_allowed"
+                            "issue": "malformed_authority_allowed"
                         }),
                     );
-                    panic!("Should not allow connection to remote host: {}", uri);
+                    panic!("Should reject malformed gRPC authority: {}", uri);
                 }
                 Err(e) => {
                     log_test_event(
@@ -447,7 +447,7 @@ fn http2_grpc_invalid_host_rejection() {
                             "rejected_with": e.to_string()
                         }),
                     );
-                    assert!(e.to_string().contains("loopback and localhost only"));
+                    assert!(matches!(e, GrpcError::Transport(_, _)));
                 }
             }
         }
@@ -457,6 +457,9 @@ fn http2_grpc_invalid_host_rejection() {
             "http://loopback:50051",
             "http://localhost:50051",
             "http://127.0.0.1:50051",
+            "http://grpc.service.invalid:50051",
+            "http://192.0.2.1:50051",
+            "http://[::1]:50051",
         ];
 
         for uri in valid_uris {
@@ -1031,6 +1034,31 @@ impl ServiceHandler for PublicClientEchoService {
 /// localhost `unary` merely cast the request value into the response value.
 #[test]
 fn public_grpc_client_unary_crosses_native_h2_and_maps_status_trailers() {
+    public_grpc_client_native_round_trip("127.0.0.1:0", "127.0.0.1");
+}
+
+/// br-asupersync-bi2462.105: localhost goes through the offloaded resolver,
+/// including fallback when its first family is not bound by the IPv4 server.
+#[test]
+fn public_grpc_client_unary_resolves_hostname_and_maps_status_trailers() {
+    public_grpc_client_native_round_trip("127.0.0.1:0", "LOCALHOST");
+}
+
+/// br-asupersync-bi2462.105: numeric addresses are not limited to 127.0.0.1.
+#[cfg(target_os = "linux")]
+#[test]
+fn public_grpc_client_unary_dials_other_ipv4_loopback_address() {
+    public_grpc_client_native_round_trip("127.0.0.2:0", "127.0.0.2");
+}
+
+/// br-asupersync-bi2462.105: IPv6 brackets remain in :authority, while the
+/// socket address contains the parsed IPv6 address and the selected port.
+#[test]
+fn public_grpc_client_unary_crosses_ipv6_h2_and_maps_status_trailers() {
+    public_grpc_client_native_round_trip("[::1]:0", "[::1]");
+}
+
+fn public_grpc_client_native_round_trip(bind_address: &str, uri_host: &str) {
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
         .build()
@@ -1053,8 +1081,8 @@ fn public_grpc_client_unary_crosses_native_h2_and_maps_status_trailers() {
         );
         let listener = server
             .bind_registered_http2(
-                "127.0.0.1:0",
-                HostPolicy::allow_list(vec!["localhost".to_owned(), "127.0.0.1".to_owned()]),
+                bind_address.to_owned(),
+                HostPolicy::allow_list(vec![uri_host.trim_matches(['[', ']']).to_owned()]),
             )
             .await
             .expect("bind registered-service gRPC H2 listener");
@@ -1066,7 +1094,11 @@ fn public_grpc_client_unary_crosses_native_h2_and_maps_status_trailers() {
             .try_spawn(async move { listener.run(&run_runtime).await })
             .expect("spawn production gRPC H2 listener");
 
-        let channel = Channel::builder(format!("http://127.0.0.1:{}", addr.port()))
+        log_test_event(
+            "native_dial_listener_bound",
+            json!({ "bound_address": addr.to_string(), "uri_host": uri_host }),
+        );
+        let channel = Channel::builder(format!("http://{uri_host}:{}", addr.port()))
             // The target runs alongside several other real-listener tests in
             // this integration binary. Keep the causal assertion about the
             // wire exchange, not scheduler timing under parallel load.
@@ -1134,6 +1166,16 @@ fn public_grpc_client_unary_crosses_native_h2_and_maps_status_trailers() {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
 
+        log_test_event(
+            "native_dial_round_trip_completed",
+            json!({
+                "bound_address": addr.to_string(),
+                "uri_host": uri_host,
+                "service_calls": calls.load(Ordering::SeqCst),
+                "terminal_failure": "ResourceExhausted"
+            }),
+        );
+
         assert!(manager.begin_drain(Duration::from_secs(5)));
         let _ = run_handle.await.expect("listener run join");
     });
@@ -1145,6 +1187,23 @@ fn public_grpc_client_unary_crosses_native_h2_and_maps_status_trailers() {
 #[cfg(feature = "tls")]
 #[test]
 fn public_grpc_client_unary_crosses_authenticated_tls_h2() {
+    public_grpc_client_tls_round_trip("127.0.0.1:0", "LOCALHOST", None);
+}
+
+/// br-asupersync-bi2462.105: an IPv6 authority selects the native socket,
+/// while the caller's TLS override authenticates the fixture's DNS identity.
+#[cfg(feature = "tls")]
+#[test]
+fn public_grpc_client_unary_crosses_ipv6_tls_with_explicit_identity() {
+    public_grpc_client_tls_round_trip("[::1]:0", "[::1]", Some("localhost"));
+}
+
+#[cfg(feature = "tls")]
+fn public_grpc_client_tls_round_trip(
+    bind_address: &str,
+    uri_host: &str,
+    tls_server_name: Option<&str>,
+) {
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
         .build()
@@ -1152,7 +1211,7 @@ fn public_grpc_client_unary_crosses_authenticated_tls_h2() {
     let handle = runtime.handle();
 
     runtime.block_on(async move {
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let listener = TcpListener::bind(bind_address.to_owned())
             .await
             .expect("bind gRPC TLS fixture");
         let addr = listener.local_addr().expect("gRPC TLS fixture address");
@@ -1163,12 +1222,18 @@ fn public_grpc_client_unary_crosses_authenticated_tls_h2() {
             .expect("spawn gRPC TLS fixture");
 
         let connector = grpc_tls_connector(GRPC_TLS_CERT_PEM, true);
-        let channel = Channel::builder(format!("https://localhost:{}", addr.port()))
+        let builder = Channel::builder(format!("https://{uri_host}:{}", addr.port()))
             .tls_connector(connector)
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(10))
             .max_send_message_size(1024)
-            .max_recv_message_size(1024)
+            .max_recv_message_size(1024);
+        let builder = if let Some(server_name) = tls_server_name {
+            builder.tls_server_name(server_name)
+        } else {
+            builder
+        };
+        let channel = builder
             .connect()
             .await
             .expect("construct authenticated gRPC TLS channel");
@@ -1195,9 +1260,21 @@ fn public_grpc_client_unary_crosses_authenticated_tls_h2() {
 
         let observation = server.await.expect("gRPC TLS fixture exchange");
         assert_eq!(observation.scheme, "https");
-        assert_eq!(observation.authority, format!("localhost:{}", addr.port()));
+        assert_eq!(
+            observation.authority,
+            format!("{}:{}", uri_host.to_ascii_lowercase(), addr.port())
+        );
         assert_eq!(observation.client_id, "tls-client");
         assert_eq!(observation.request_payload, b"tls-public-ping");
+        log_test_event(
+            "native_tls_dial_round_trip_completed",
+            json!({
+                "bound_address": addr.to_string(),
+                "authority": observation.authority,
+                "tls_identity": tls_server_name.unwrap_or(uri_host),
+                "scheme": observation.scheme
+            }),
+        );
     });
 }
 
