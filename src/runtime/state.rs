@@ -10903,7 +10903,6 @@ pub(crate) mod completion_observer_test_support {
         completed_state_observed: AtomicUsize,
         completion_panics_remaining: AtomicUsize,
         panic_payload_drop_counter: Option<Arc<AtomicUsize>>,
-        panic_while_recording_task_panic: AtomicBool,
         provider_drop_attempts: Option<Arc<AtomicUsize>>,
         provider_drop_while_state_locked: Option<Arc<AtomicUsize>>,
         panic_on_provider_drop: bool,
@@ -10918,7 +10917,6 @@ pub(crate) mod completion_observer_test_support {
                 completed_state_observed: AtomicUsize::new(0),
                 completion_panics_remaining: AtomicUsize::new(completion_panics_remaining),
                 panic_payload_drop_counter: None,
-                panic_while_recording_task_panic: AtomicBool::new(false),
                 provider_drop_attempts: None,
                 provider_drop_while_state_locked: None,
                 panic_on_provider_drop: false,
@@ -10943,7 +10941,6 @@ pub(crate) mod completion_observer_test_support {
                 completed_state_observed: AtomicUsize::new(0),
                 completion_panics_remaining: AtomicUsize::new(1),
                 panic_payload_drop_counter: Some(drop_counter),
-                panic_while_recording_task_panic: AtomicBool::new(false),
                 provider_drop_attempts: None,
                 provider_drop_while_state_locked: None,
                 panic_on_provider_drop: false,
@@ -10961,7 +10958,6 @@ pub(crate) mod completion_observer_test_support {
                 completed_state_observed: AtomicUsize::new(0),
                 completion_panics_remaining: AtomicUsize::new(0),
                 panic_payload_drop_counter: None,
-                panic_while_recording_task_panic: AtomicBool::new(false),
                 provider_drop_attempts: Some(drop_attempts),
                 provider_drop_while_state_locked: Some(drop_while_state_locked),
                 panic_on_provider_drop: false,
@@ -10978,19 +10974,10 @@ pub(crate) mod completion_observer_test_support {
                 completed_state_observed: AtomicUsize::new(0),
                 completion_panics_remaining: AtomicUsize::new(1),
                 panic_payload_drop_counter: None,
-                panic_while_recording_task_panic: AtomicBool::new(false),
                 provider_drop_attempts: Some(drop_attempts),
                 provider_drop_while_state_locked: None,
                 panic_on_provider_drop: true,
             })
-        }
-
-        pub(crate) fn panic_persistently_and_trigger_guard_drop() -> Arc<Self> {
-            let metrics = Self::panic_persistently();
-            metrics
-                .panic_while_recording_task_panic
-                .store(true, Ordering::Relaxed);
-            metrics
         }
 
         pub(crate) fn attach_state(&self, state: &Arc<ContendedMutex<RuntimeState>>) {
@@ -11089,15 +11076,6 @@ pub(crate) mod completion_observer_test_support {
         fn obligation_leaked(&self, _: RegionId) {}
 
         fn scheduler_tick(&self, _: usize, _: Duration) {}
-
-        fn record_panic(&self, _: &'static str) {
-            if self
-                .panic_while_recording_task_panic
-                .load(Ordering::Relaxed)
-            {
-                panic!("force TaskExecutionGuard unwind fallback");
-            }
-        }
     }
 
     impl Drop for PanickingCompletionMetrics {

@@ -2741,7 +2741,7 @@ mod tests {
         use crate::sync::ContendedMutex;
         use crate::types::{Budget, RegionId};
 
-        let metrics = PanickingCompletionMetrics::panic_persistently_and_trigger_guard_drop();
+        let metrics = PanickingCompletionMetrics::panic_persistently();
         let state = Arc::new(ContendedMutex::new(
             "runtime_state",
             RuntimeState::new_with_metrics(metrics.clone()),
@@ -2770,20 +2770,37 @@ mod tests {
             );
         }
 
-        let worker = Worker::new(
+        let mut worker = Worker::new(
             0,
             Vec::new(),
             Arc::clone(&global),
             Arc::clone(&state),
             Arc::clone(&shutdown),
         );
+        // Observer panics are contained (br-asupersync-909482), so the only
+        // unwind left between the poll and completion is a panic the isolator
+        // does not catch. With task isolation off, the task's own panic is
+        // that unwind, and only the TaskExecutionGuard fallback can finish it.
+        worker.panic_isolator = PanicIsolator::new(
+            PanicIsolationConfig {
+                isolate_task_panics: false,
+                ..PanicIsolationConfig::default()
+            },
+            metrics.clone(),
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             worker.execute(panicking_task);
         }));
 
+        let payload = result.expect_err("the task panic must unwind through the guard fallback");
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or_default();
         assert!(
-            result.is_err(),
-            "test hook must reach the guard Drop fallback"
+            message.contains("force legacy execution guard fallback"),
+            "the unwind is the task's own panic, got {message:?}"
         );
         assert_eq!(metrics.completion_attempts(), 0);
         assert_eq!(global.pop(), Some(waiter_task), "guard must retain waiters");
