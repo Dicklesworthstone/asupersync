@@ -13,6 +13,8 @@
 //! `BufReader<File>` and friends no longer stall the async worker. Regular
 //! files expose no portable readiness notification, which is why the trait
 //! path is a blocking-pool state machine rather than a reactor registration.
+//! Restricting task-spawn authority does not change this I/O placement: an
+//! inherited pool still services file operations without exposing its handle.
 //! On a runtime built without a blocking pool (`blocking_threads(0, 0)`, the
 //! bare `RuntimeBuilder` default) the offload degrades to the deterministic
 //! inline fallback of `spawn_blocking`, which is the pre-existing behaviour.
@@ -625,8 +627,18 @@ impl File {
     {
         let inner = Arc::clone(&self.inner);
         let cursor_gate = Arc::clone(&self.cursor_gate);
+        #[cfg(feature = "test-internals")]
+        let cursor_probe = self.cursor_probe.clone();
         let run = move || {
+            #[cfg(feature = "test-internals")]
+            if let Some(probe) = &cursor_probe {
+                probe.before_gate();
+            }
             let _cursor_guard = cursor_gate.lock();
+            #[cfg(feature = "test-internals")]
+            if let Some(probe) = &cursor_probe {
+                probe.after_gate();
+            }
             op(&inner)
         };
         // Offload only when a runtime blocking pool exists. Outside a runtime,
@@ -634,7 +646,10 @@ impl File {
         // resolve immediately: that is the previous (phase-0 sync) behaviour
         // the owned cursor methods and `fs::file_concurrent_test` rely on, and
         // it avoids parking a caller that has no executor to wake it.
-        match crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle()) {
+        // File I/O is already admitted independently of SPAWN. Use the stored
+        // placement, as spawn_blocking does, without granting the caller a
+        // public submission handle or restoring any restricted capability.
+        match crate::cx::Cx::current().and_then(|cx| cx.blocking_pool_handle_for_inheritance()) {
             Some(pool) => Box::pin(crate::runtime::spawn_blocking::spawn_blocking_on_pool(
                 pool, run,
             )),

@@ -126,6 +126,147 @@ fn read_exact_starves_the_peer_without_a_blocking_pool_planted_negative() {
     );
 }
 
+#[cfg(feature = "test-internals")]
+#[derive(Clone, Copy, Debug)]
+enum RestrictedFileOperation {
+    Read,
+    Write,
+    Seek,
+}
+
+/// Hold the actual file cursor operation on a blocking worker, then wake a
+/// sibling on the sole async worker. The controller releases the operation even
+/// on failure, so the old inline implementation fails without stranding a test
+/// worker. No disk speed or number of cooperative yields is used as evidence.
+#[cfg(feature = "test-internals")]
+fn restricted_file_operation_keeps_worker_available(operation: RestrictedFileOperation) {
+    use asupersync::channel::oneshot;
+    use asupersync::cx::cap;
+    use asupersync::fs::FileCursorOperationProbe;
+    use std::future::{Future, poll_fn};
+
+    let path = scratch_path(&format!("restricted-{operation:?}"));
+    std::fs::write(&path, b"abcdef").expect("write restricted fixture");
+    let native_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open restricted fixture");
+    let probe = Arc::new(FileCursorOperationProbe::new());
+    let mut file = File::from_std(native_file);
+    file.install_cursor_operation_probe_for_test(Arc::clone(&probe));
+    let (wake_peer, mut peer_woken) = oneshot::channel();
+    let (peer_progress, observed_peer_progress) = std::sync::mpsc::channel();
+    let controller_probe = Arc::clone(&probe);
+    let controller = std::thread::spawn(move || {
+        let blocked = controller_probe.wait_until_first_blocked(Duration::from_secs(5));
+        let signalled = wake_peer.send_blocking(()).is_ok();
+        let peer_thread = observed_peer_progress
+            .recv_timeout(Duration::from_secs(5))
+            .ok();
+        controller_probe.release_first();
+        (blocked, signalled, peer_thread)
+    });
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("native runtime with one async worker and one blocking worker");
+    let (io_thread, was_pending) = runtime.block_on(async move {
+        let cx = Cx::current().expect("native root context");
+        let mut peer = cx
+            .spawn(move |peer_cx| async move {
+                peer_woken.recv(&peer_cx).await.expect("controller wake");
+                // Only sent after the controller observed the blocked syscall.
+                let _ = peer_progress.send(std::thread::current().id());
+            })
+            .expect("spawn sibling before restricting I/O context");
+        let mut io_task = cx
+            .spawn(move |task_cx| async move {
+                let io_thread = std::thread::current().id();
+                let restricted = task_cx.restrict::<cap::None>();
+                let mut operation_future = std::pin::pin!(async {
+                    match operation {
+                        RestrictedFileOperation::Read => {
+                            let mut bytes = [0; 3];
+                            file.read_exact(&mut bytes).await.expect("restricted read");
+                            assert_eq!(&bytes, b"abc");
+                        }
+                        RestrictedFileOperation::Write => {
+                            file.write_all(b"XYZ").await.expect("restricted write");
+                        }
+                        RestrictedFileOperation::Seek => {
+                            assert_eq!(
+                                AsyncSeekExt::seek(&mut file, SeekFrom::Start(3))
+                                    .await
+                                    .expect("restricted trait seek"),
+                                3
+                            );
+                        }
+                    }
+                });
+                let mut was_pending = false;
+                poll_fn(|task| {
+                    let _guard = restricted.clone().set_current_restricted();
+                    let ambient = Cx::current().expect("restricted ambient context");
+                    assert!(!ambient.capabilities().spawn);
+                    assert!(ambient.blocking_pool_handle().is_none());
+                    let poll = operation_future.as_mut().poll(task);
+                    was_pending |= poll.is_pending();
+                    poll
+                })
+                .await;
+                (io_thread, was_pending)
+            })
+            .expect("spawn file task");
+        let result = io_task.join(&cx).await.expect("join file task");
+        peer.join(&cx).await.expect("join sibling");
+        result
+    });
+    let (blocked, signalled, peer_thread) = controller.join().expect("join controller");
+    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+    assert!(blocked, "the file operation must reach the cursor gate");
+    assert!(signalled, "the controller must wake the sibling");
+    assert!(
+        was_pending,
+        "the blocked file operation must return Pending"
+    );
+    assert_eq!(
+        peer_thread,
+        Some(io_thread),
+        "the sibling must run on the same async worker before the file gate is released"
+    );
+    assert_eq!(probe.acquisition_count(), 1);
+    let expected: &[u8] = match operation {
+        RestrictedFileOperation::Write => b"XYZdef",
+        RestrictedFileOperation::Read | RestrictedFileOperation::Seek => b"abcdef",
+    };
+    assert_eq!(
+        std::fs::read(path).expect("read completed fixture"),
+        expected
+    );
+    eprintln!(
+        "bead=asupersync-bi2462.118 operation={operation:?} blocked={blocked} pending={was_pending} sibling_before_release=true cursor_acquisitions=1"
+    );
+}
+
+#[cfg(feature = "test-internals")]
+#[test]
+fn restricted_read_offloads_while_a_native_sibling_progresses() {
+    restricted_file_operation_keeps_worker_available(RestrictedFileOperation::Read);
+}
+
+#[cfg(feature = "test-internals")]
+#[test]
+fn restricted_write_offloads_while_a_native_sibling_progresses() {
+    restricted_file_operation_keeps_worker_available(RestrictedFileOperation::Write);
+}
+
+#[cfg(feature = "test-internals")]
+#[test]
+fn restricted_seek_offloads_while_a_native_sibling_progresses() {
+    restricted_file_operation_keeps_worker_available(RestrictedFileOperation::Seek);
+}
+
 #[test]
 fn chunked_writes_read_ahead_and_relative_seek_stay_consistent() {
     let path = scratch_path("roundtrip");

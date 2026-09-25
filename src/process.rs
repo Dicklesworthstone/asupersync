@@ -2971,7 +2971,9 @@ enum KillOnDropReapStrategy {
 fn blocking_pool_for_kill_on_drop_reap() -> Option<crate::runtime::blocking_pool::BlockingPoolHandle>
 {
     Cx::current()
-        .and_then(|cx| cx.blocking_pool_handle())
+        // Reaping an already-owned child is cleanup, not permission to spawn
+        // new work. Preserve the inherited pool under a restricted context.
+        .and_then(|cx| cx.blocking_pool_handle_for_inheritance())
         .filter(|pool| !pool.is_shutdown())
         .or_else(|| {
             crate::runtime::Runtime::current_handle()
@@ -4426,6 +4428,26 @@ mod tests {
 
         drop(runtime);
         crate::test_complete!("test_kill_on_drop_reap_strategy_prefers_cx_blocking_pool");
+    }
+
+    #[test]
+    fn test_kill_on_drop_reap_retains_restricted_cx_pool() {
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let restricted = Cx::for_testing()
+            .with_blocking_pool_handle(Some(pool.handle()))
+            .restrict::<crate::cx::cap::None>();
+        let _guard = restricted.set_current_restricted();
+        let ambient = Cx::current().expect("restricted ambient context");
+        assert!(!ambient.capabilities().spawn);
+        assert!(ambient.blocking_pool_handle().is_none());
+        assert!(
+            blocking_pool_for_kill_on_drop_reap().is_some(),
+            "cleanup must retain its inherited pool without exposing spawn authority"
+        );
+        assert_eq!(
+            kill_on_drop_reap_strategy(),
+            KillOnDropReapStrategy::BlockingPool
+        );
     }
 
     #[test]
