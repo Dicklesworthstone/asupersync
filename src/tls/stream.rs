@@ -302,6 +302,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             if let Err(e) = self.conn.process_new_packets() {
                 #[cfg(feature = "tracing-integration")]
                 error!(error = %e, "TLS error during handshake");
+                self.flush_alert_best_effort(cx);
                 self.state = TlsState::Closed;
                 return Poll::Ready(Err(TlsError::Handshake(e.to_string())));
             }
@@ -384,6 +385,21 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
             Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    /// Best-effort send of the records rustls queued before failing: the
+    /// fatal alert that names the reason (RFC 8446 §6.2), for example a
+    /// refused client certificate. Without it the peer sees a bare EOF and
+    /// cannot tell a refusal from a dropped connection, so it retries
+    /// (br-asupersync-bi2462.86.3). Never waits: a write that would block
+    /// abandons the alert.
+    fn flush_alert_best_effort(&mut self, cx: &mut Context<'_>) {
+        while self.conn.wants_write() {
+            match self.poll_write_tls(cx) {
+                Poll::Ready(Ok(written)) if written > 0 => {}
+                _ => break,
+            }
         }
     }
 
@@ -524,6 +540,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                 Poll::Ready(Ok(_)) => {
                     // Process the new TLS data
                     if let Err(e) = self.conn.process_new_packets() {
+                        self.flush_alert_best_effort(cx);
                         self.state = TlsState::Closed;
                         return Poll::Ready(Err(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -886,6 +903,66 @@ mod tests {
         assert_eq!(client_alpn.as_deref(), Some(b"h2".as_slice()));
         assert_eq!(server_alpn.as_deref(), Some(b"h2".as_slice()));
         assert_eq!(checkpoints.len(), 2);
+        assert!(runtime.is_quiescent());
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn handshake_failure_sends_its_alert_instead_of_a_bare_close() {
+        init_test_logging();
+        let config = TestConfig::new()
+            .with_seed(0xA1E7_0001)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+
+        let (client_error, server_error) = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            // The server speaks only h2 and the client offers only an unknown
+            // protocol, so rustls refuses the ClientHello with a
+            // no_application_protocol alert while the server is handshaking.
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .alpn_protocols(vec![b"h2".to_vec()])
+                .build()
+                .unwrap();
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .alpn_protocols(vec![b"x-unknown".to_vec()])
+                .build()
+                .unwrap();
+
+            let server_name = ServerName::try_from("localhost".to_string()).unwrap();
+            let client_conn =
+                ClientConnection::new(Arc::clone(connector.config()), server_name).unwrap();
+            let server_conn = ServerConnection::new(Arc::clone(acceptor.config())).unwrap();
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5210".parse().unwrap(),
+                "127.0.0.1:5211".parse().unwrap(),
+            );
+            let mut client_stream = TlsStream::new_client(client_io, client_conn);
+            let mut server_stream = TlsStream::new_server(server_io, server_conn);
+            let server = async move {
+                let result = poll_fn(|cx| server_stream.poll_handshake(cx)).await;
+                // An acceptor closes right after a failed handshake, so only
+                // bytes already written can reach the client.
+                drop(server_stream);
+                result
+            };
+            let (client_result, server_result) =
+                zip(poll_fn(|cx| client_stream.poll_handshake(cx)), server).await;
+            (
+                client_result.expect_err("the client handshake must fail"),
+                server_result.expect_err("the server refuses the ALPN offer"),
+            )
+        });
+
+        let client_error = client_error.to_string();
+        tracing::info!(%client_error, server_error = %server_error, "tls_alert_delivery");
+        assert!(
+            client_error.contains("received fatal alert"),
+            "the client must learn why the server refused, not see a bare close: {client_error}"
+        );
         assert!(runtime.is_quiescent());
     }
 }
