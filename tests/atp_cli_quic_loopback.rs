@@ -1194,6 +1194,60 @@ fn atp_tcp_and_rq_send_resolve_localhost_against_ipv4_listener() {
     }
 }
 
+/// asupersync-bi2462.126: the real binary refuses plaintext `--transport tcp`
+/// toward a non-loopback peer, and on the receiver's default 0.0.0.0 listen,
+/// before any network I/O. The loopback tests above need no flag.
+#[test]
+fn atp_plaintext_tcp_is_refused_off_loopback_before_network_io() {
+    let root = unique_tmp("plaintext-refusal");
+    let source = root.join("source/payload.bin");
+    write_file(&source, b"plaintext refusal payload");
+    let dest = root.join("dest");
+    std::fs::create_dir_all(&dest).expect("create refusal destination");
+
+    // TEST-NET-1 (RFC 5737) is unroutable, so a send that got past the refusal
+    // would block in connect well beyond this deadline.
+    let sender = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("send")
+        .arg(&source)
+        .arg("192.0.2.1:9")
+        .args(["--transport", "tcp", "--no-delta"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn refused sender");
+    let sender = wait_with_deadline(
+        sender,
+        "refused plaintext sender",
+        Instant::now() + Duration::from_secs(10),
+    );
+    let stderr = String::from_utf8_lossy(&sender.stderr);
+    assert!(!sender.status.success(), "sender must fail: {stderr}");
+    assert!(
+        stderr.contains("refusing plaintext")
+            && stderr.contains("192.0.2.1:9")
+            && stderr.contains("--allow-plaintext"),
+        "{stderr}"
+    );
+
+    let receiver = Command::new(env!("CARGO_BIN_EXE_atp"))
+        .arg("recv")
+        .arg(&dest)
+        .args(["--transport", "tcp", "--once", "--no-delta"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn refused receiver");
+    let receiver = wait_with_timeout(receiver, "refused plaintext receiver");
+    let stderr = String::from_utf8_lossy(&receiver.stderr);
+    assert!(!receiver.status.success(), "receiver must fail: {stderr}");
+    assert!(
+        stderr.contains("refusing plaintext") && stderr.contains("listening on 0.0.0.0"),
+        "{stderr}"
+    );
+    assert!(staging_dirs(&dest).is_empty());
+}
+
 #[test]
 fn atp_quic_persistent_serve_rejects_port_zero_before_side_effects() {
     let root = unique_tmp("persistent-port-zero");
