@@ -5,6 +5,12 @@
 //! Unix filesystems are required by its no-clobber committing inbox backend.
 
 #![forbid(unsafe_code)]
+// A binary is its own crate and does not inherit `src/lib.rs`'s
+// `recursion_limit`. Boxing the sender checkpoint future as `dyn Future + Send`
+// exceeds rustc's default proof depth, which the future-incompatible
+// `recursion_depth_exceeding_limit` lint (rust-lang #159228) will turn into a
+// hard error.
+#![recursion_limit = "256"]
 
 #[cfg(all(
     feature = "atp-cli",
