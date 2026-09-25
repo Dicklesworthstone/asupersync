@@ -18,7 +18,11 @@ use asupersync::database::postgres::{
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::tls::Certificate;
 use asupersync::types::{CancelKind, Outcome};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+use hmac::{Hmac, KeyInit, Mac};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use sha2::{Digest, Sha256};
 use std::future::{Future, poll_fn};
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -96,10 +100,83 @@ fn startup(stream: &mut impl Read) -> usize {
     length
 }
 
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().into()
+}
+
+/// PBKDF2-HMAC-SHA-256 of the URL's password; one block is the whole key.
+fn salted_password(salt: &[u8], iterations: u32) -> [u8; 32] {
+    let mut block = hmac_sha256(b"tls_secret", &[salt, &1_u32.to_be_bytes()].concat());
+    let mut salted = block;
+    for _ in 1..iterations {
+        block = hmac_sha256(b"tls_secret", &block);
+        for (byte, next) in salted.iter_mut().zip(block) {
+            *byte ^= next;
+        }
+    }
+    salted
+}
+
+fn sasl_message(auth_type: u32, body: &[u8]) -> Vec<u8> {
+    [&auth_type.to_be_bytes()[..], body].concat()
+}
+
+/// Plays the server side of SCRAM-SHA-256 (RFC 5802, RFC 7677). The client
+/// refuses cleartext and MD5 passwords, so this is the exchange it completes.
+/// The peer advertises no -PLUS mechanism, so over TLS the client must send
+/// the `y,,` supported-but-not-used GS2 header. The proof check shows the
+/// client derived its answer from the URL's password.
 fn authenticate(stream: &mut (impl Read + Write)) {
+    const MECHANISM: &[u8] = b"SCRAM-SHA-256\0";
+    const SALT: &[u8] = b"asupersync-pg-tls-salt";
+    const ITERATIONS: u32 = 4096;
+
     startup(stream);
-    backend_message(stream, b'R', &3_u32.to_be_bytes());
-    assert_eq!(frontend_message(stream), (b'p', b"tls_secret\0".to_vec()));
+    backend_message(stream, b'R', &sasl_message(10, b"SCRAM-SHA-256\0\0"));
+    let (tag, initial) = frontend_message(stream);
+    assert_eq!(tag, b'p', "SASLInitialResponse");
+    let rest = initial
+        .strip_prefix(MECHANISM)
+        .expect("client selects SCRAM-SHA-256");
+    let length = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+    let client_first = std::str::from_utf8(&rest[4..]).unwrap();
+    assert_eq!(client_first.len(), length);
+    let client_first_bare = client_first
+        .strip_prefix("y,,")
+        .expect("TLS without an advertised -PLUS must send the y,, GS2 header");
+    let client_nonce = client_first_bare
+        .split(',')
+        .find_map(|part| part.strip_prefix("r="))
+        .expect("client nonce");
+    let nonce = format!("{client_nonce}pg-tls-server-nonce");
+    let server_first = format!("r={nonce},s={},i={ITERATIONS}", STANDARD.encode(SALT));
+    backend_message(stream, b'R', &sasl_message(11, server_first.as_bytes()));
+
+    let (tag, client_final) = frontend_message(stream);
+    assert_eq!(tag, b'p', "SASLResponse");
+    let client_final = String::from_utf8(client_final).unwrap();
+    let (without_proof, proof) = client_final.rsplit_once(",p=").expect("client proof");
+    assert_eq!(
+        without_proof,
+        format!("c={},r={nonce}", STANDARD.encode("y,,"))
+    );
+    let auth_message = format!("{client_first_bare},{server_first},{without_proof}");
+    let salted = salted_password(SALT, ITERATIONS);
+    let client_key = hmac_sha256(&salted, b"Client Key");
+    let stored_key: [u8; 32] = Sha256::digest(client_key).into();
+    let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
+    let expected_proof: Vec<u8> = client_key
+        .iter()
+        .zip(client_signature)
+        .map(|(key, signature)| key ^ signature)
+        .collect();
+    assert_eq!(STANDARD.decode(proof).unwrap(), expected_proof);
+    let server_key = hmac_sha256(&salted, b"Server Key");
+    let server_signature = hmac_sha256(&server_key, auth_message.as_bytes());
+    let server_final = format!("v={}", STANDARD.encode(server_signature));
+    backend_message(stream, b'R', &sasl_message(12, server_final.as_bytes()));
     backend_message(stream, b'R', &0_u32.to_be_bytes());
     backend_message(stream, b'K', &[0, 0, 0, 7, 0, 0, 0, 9]);
     backend_message(stream, b'Z', b"I");
