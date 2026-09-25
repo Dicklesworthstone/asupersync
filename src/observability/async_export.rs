@@ -4,6 +4,40 @@
 //! can drive the native OTLP HTTP transport without blocking a runtime worker
 //! or spawning an unowned exporter task. Timestamps are explicit: a runtime's
 //! monotonic clock is not silently interpreted as a Unix timestamp.
+//!
+//! Direct fan-out preserves a receipt for every destination. The synchronous
+//! bounded-queue API remains available separately; this path acknowledges
+//! completed export operations rather than queue admission.
+//!
+//! ```no_run
+//! use asupersync::Cx;
+//! use asupersync::observability::async_export::{
+//!     AsyncMultiExporter, MetricsExportBatch, OtlpSnapshotExporter,
+//! };
+//! use asupersync::observability::otel::{
+//!     ExportError, InMemoryExporter, MetricsSnapshot, OtlpHttpConfig,
+//! };
+//! use std::sync::Arc;
+//!
+//! async fn publish(
+//!     cx: &Cx,
+//!     config: OtlpHttpConfig,
+//!     snapshot: &MetricsSnapshot,
+//!     epoch_unix_nano: u64,
+//!     collection_unix_nano: u64,
+//! ) -> Result<(), ExportError> {
+//!     let memory = Arc::new(InMemoryExporter::new());
+//!     let exporters = AsyncMultiExporter::try_new(vec![
+//!         Box::new(memory.clone()),
+//!         Box::new(OtlpSnapshotExporter::from_config(config)),
+//!     ])?;
+//!     let batch = MetricsExportBatch::new(snapshot, epoch_unix_nano, collection_unix_nano)?;
+//!     let report = exporters.export_all(cx, batch).await;
+//!     // Inspect report.outcomes() for indexed partial-delivery diagnostics.
+//!     // Do not blindly retry successful or ambiguously failed destinations.
+//!     report.into_result()
+//! }
+//! ```
 
 use super::otel::{ExportError, MetricsSnapshot, OtlpHttpConfig, OtlpHttpExporter};
 use super::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
@@ -19,6 +53,11 @@ use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::future::Future;
 use std::pin::Pin;
+
+mod multi;
+pub use multi::{
+    AsyncExportOutcome, AsyncExportReport, AsyncMultiExporter, MAX_ASYNC_METRICS_EXPORTERS,
+};
 
 const MAX_POINTS: usize = 4096;
 const MAX_POINTS_PER_METRIC: usize = 1000;
