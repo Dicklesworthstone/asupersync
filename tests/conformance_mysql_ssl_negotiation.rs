@@ -65,6 +65,13 @@ fn mysql_handshake_packet_with_connection_id(
     mysql_packet(0, &payload)
 }
 
+/// A minimal protocol-41 OK packet payload: affected rows 0, last insert id 0,
+/// status SERVER_STATUS_AUTOCOMMIT, no warnings. Since 90990d3bf the client reads
+/// the status flags from the authentication OK, so a bare `0x00` is malformed.
+fn auth_ok_payload() -> [u8; 7] {
+    [0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]
+}
+
 fn read_mysql_packet(stream: &mut std::net::TcpStream) -> Vec<u8> {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header).expect("read packet header");
@@ -447,7 +454,7 @@ fn test_prepared_statement_rejects_cross_connection_reuse() {
 
         let _handshake_response = read_mysql_packet(&mut stream);
         stream
-            .write_all(&mysql_packet(2, &[0x00]))
+            .write_all(&mysql_packet(2, &auth_ok_payload()))
             .expect("write auth ok");
         stream.flush().expect("flush auth ok");
 
@@ -486,7 +493,7 @@ fn test_prepared_statement_rejects_cross_connection_reuse() {
 
         let _handshake_response = read_mysql_packet(&mut stream);
         stream
-            .write_all(&mysql_packet(2, &[0x00]))
+            .write_all(&mysql_packet(2, &auth_ok_payload()))
             .expect("write reject auth ok");
         stream.flush().expect("flush reject auth ok");
 
