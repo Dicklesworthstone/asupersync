@@ -22,6 +22,27 @@ enum PeerMode {
     Drop,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum DialMode {
+    Preconnected,
+    Address,
+    Hostname,
+}
+
+fn response_headers(connection: &mut Connection) {
+    connection
+        .send_headers(
+            1,
+            vec![
+                Header::new(":status", "200"),
+                Header::new("content-type", "application/grpc"),
+                Header::new("x-initial", "native"),
+            ],
+            false,
+        )
+        .unwrap();
+}
+
 fn write_pending(socket: &mut std::net::TcpStream, connection: &mut Connection) {
     while let Some(frame) = connection.next_frame() {
         let mut encoded = BytesMut::new();
@@ -100,18 +121,8 @@ fn peer(
                                 .any(|h| h.name == "content-type" && h.value == "application/grpc")
                         );
                         head = true;
-                        connection
-                            .send_headers(
-                                1,
-                                vec![
-                                    Header::new(":status", "200"),
-                                    Header::new("content-type", "application/grpc"),
-                                    Header::new("x-initial", "native"),
-                                ],
-                                false,
-                            )
-                            .unwrap();
                         if !matches!(mode, PeerMode::ClientStreaming) {
+                            response_headers(&mut connection);
                             reply(&mut connection, &mut codec, b"ready");
                         }
                         write_pending(&mut socket, &mut connection);
@@ -165,6 +176,9 @@ fn peer(
                                 "every queued message arrived once and in order"
                             );
                             if matches!(mode, PeerMode::ClientStreaming) {
+                                // A client-streaming server may need the entire
+                                // request before it can send even response HEADERS.
+                                response_headers(&mut connection);
                                 reply(&mut connection, &mut codec, b"three requests");
                             }
                             connection
@@ -195,7 +209,7 @@ fn peer(
     (address, worker)
 }
 
-fn scenario(workers: usize, mode: PeerMode) {
+fn scenario(workers: usize, mode: PeerMode, dial: DialMode) {
     let (witness, witnessed) = mpsc::channel();
     let (address, peer) = peer(mode, witnessed);
     let runtime = if workers == 1 {
@@ -209,27 +223,50 @@ fn scenario(workers: usize, mode: PeerMode) {
     let observed = Arc::clone(&completed);
     runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().unwrap();
-        let io = TcpStream::connect_timeout(address, LIMIT).await.unwrap();
         let timeout = if matches!(mode, PeerMode::Deadline) {
             Duration::from_secs(2)
         } else {
             LIMIT
         };
-        let mut stream = NativeDuplexStream::new(
-            &cx,
-            io,
-            "localhost",
-            "/test.Duplex/Exchange",
-            Request::new(()),
-            IdentityCodec,
-            NativeStreamConfig {
-                max_send_message_size: MESSAGE_BYTES,
-                max_recv_message_size: 64,
-                timeout: Some(timeout),
-                ..NativeStreamConfig::default()
-            },
-        )
-        .unwrap();
+        let config = NativeStreamConfig {
+            max_send_message_size: MESSAGE_BYTES,
+            max_recv_message_size: 64,
+            timeout: Some(timeout),
+            ..NativeStreamConfig::default()
+        };
+        let mut stream = match dial {
+            DialMode::Preconnected => {
+                let io = TcpStream::connect_timeout(address, LIMIT).await.unwrap();
+                NativeDuplexStream::new(
+                    &cx,
+                    io,
+                    "localhost",
+                    "/test.Duplex/Exchange",
+                    Request::new(()),
+                    IdentityCodec,
+                    config,
+                )
+                .unwrap()
+            }
+            DialMode::Address | DialMode::Hostname => {
+                let endpoint = if matches!(dial, DialMode::Hostname) {
+                    NativeStreamEndpoint::from_host("localhost", address.port(), "localhost", LIMIT)
+                } else {
+                    NativeStreamEndpoint::new(address, "localhost", LIMIT)
+                }
+                .unwrap();
+                endpoint
+                    .connect_duplex_tcp(
+                        &cx,
+                        "/test.Duplex/Exchange",
+                        Request::new(()),
+                        IdentityCodec,
+                        config,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
         assert_eq!(
             stream.queue_message(&Bytes::new()).unwrap_err().code(),
             Code::FailedPrecondition
@@ -336,14 +373,15 @@ fn scenario(workers: usize, mode: PeerMode) {
     eprintln!(
         "{}",
         serde_json::json!({"bead":"asupersync-bi2462.105", "workers":workers,
-        "mode":format!("{mode:?}"), "peer_messages":messages, "bytes_per_message":MESSAGE_BYTES})
+        "mode":format!("{mode:?}"), "dial":format!("{dial:?}"),
+        "peer_messages":messages, "bytes_per_message":MESSAGE_BYTES})
     );
 }
 
-fn with_watchdog(workers: usize, mode: PeerMode) {
+fn with_watchdog(workers: usize, mode: PeerMode, dial: DialMode) {
     let (done, received) = mpsc::channel();
     let thread = std::thread::spawn(move || {
-        scenario(workers, mode);
+        scenario(workers, mode, dial);
         done.send(()).unwrap();
     });
     received
@@ -356,7 +394,7 @@ fn with_watchdog(workers: usize, mode: PeerMode) {
 fn native_request_streaming_and_bidi_cross_h2_windows_without_collecting_upload() {
     for workers in [1, 2] {
         for mode in [PeerMode::ClientStreaming, PeerMode::Bidi] {
-            with_watchdog(workers, mode);
+            with_watchdog(workers, mode, DialMode::Preconnected);
         }
     }
 }
@@ -365,7 +403,24 @@ fn native_request_streaming_and_bidi_cross_h2_windows_without_collecting_upload(
 fn native_window_blocked_upload_cancels_expires_and_drops_after_actual_pending() {
     for workers in [1, 2] {
         for mode in [PeerMode::Cancel, PeerMode::Deadline, PeerMode::Drop] {
-            with_watchdog(workers, mode);
+            with_watchdog(workers, mode, DialMode::Preconnected);
         }
+    }
+}
+
+#[test]
+fn native_endpoints_resolve_and_upload_before_response_headers_with_owned_interruption() {
+    for workers in [1, 2] {
+        for dial in [DialMode::Address, DialMode::Hostname] {
+            for mode in [
+                PeerMode::ClientStreaming,
+                PeerMode::Bidi,
+                PeerMode::Cancel,
+                PeerMode::Drop,
+            ] {
+                with_watchdog(workers, mode, dial);
+            }
+        }
+        with_watchdog(workers, PeerMode::Deadline, DialMode::Hostname);
     }
 }

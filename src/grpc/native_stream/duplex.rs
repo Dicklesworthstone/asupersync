@@ -36,10 +36,13 @@ pub enum NativeDuplexEvent<T> {
 /// their own allocation contracts. Responses are decoded before more network
 /// reads, so uploading does not collect an unbounded response queue.
 ///
-/// Supply an already authenticated TLS transport with h2 ALPN for HTTPS. The
-/// authority and scheme are routing labels, not authentication. This supports
-/// streaming requests without changing the legacy codec-free `GrpcClient`
-/// methods or introducing a background connection driver.
+/// Use [`NativeStreamEndpoint::connect_duplex_tcp`] to dial a native endpoint,
+/// or, with the `tls` feature, `NativeStreamEndpoint::connect_duplex_tls` to dial
+/// with an explicit TLS policy and require h2 ALPN. The preconnected constructor
+/// accepts an already authenticated TLS transport for HTTPS. Authority and
+/// scheme are routing labels, not authentication. This supports streaming
+/// requests without changing the legacy codec-free `GrpcClient` methods or
+/// introducing a background connection driver.
 pub struct NativeDuplexStream<IO, C> {
     inner: NativeServerStream<IO, C>,
     request_pending: bool,
@@ -77,6 +80,20 @@ where
         codec: C,
         config: NativeStreamConfig,
     ) -> Result<Self, Status> {
+        Self::new_admitted(cx, io, authority, path, request, codec, config, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_admitted(
+        cx: &Cx,
+        io: IO,
+        authority: &str,
+        path: &str,
+        request: Request<()>,
+        codec: C,
+        config: NativeStreamConfig,
+        admitted: Option<CallDeadline>,
+    ) -> Result<Self, Status> {
         let inner = NativeServerStream::new_request(
             cx,
             io,
@@ -85,7 +102,7 @@ where
             request.map(|()| None),
             codec,
             config,
-            None,
+            admitted,
             false,
         )?;
         Ok(Self {
@@ -93,6 +110,22 @@ where
             request_pending: true,
             request_closed: false,
         })
+    }
+
+    // Endpoint setup flushes only the constructor's SETTINGS and HEADERS.
+    // Waiting for response headers here could deadlock a peer that needs the
+    // request body first. No response is read or decoded, and the caller still
+    // receives the initial RequestFlushed event from next_event().
+    pub(super) async fn flush_initial_headers(&mut self) -> Result<(), Status> {
+        poll_fn(|task| {
+            let _ambient = Cx::set_current(Some(self.inner.cx.clone()));
+            self.inner.gate(task)?;
+            match self.inner.poll_outbound(task) {
+                Poll::Ready(result) => Poll::Ready(self.inner.gate(task).and(result)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await
     }
 
     /// Whether one message or half-close can be admitted without waiting.
