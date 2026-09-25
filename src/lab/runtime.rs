@@ -6689,7 +6689,7 @@ mod tests {
                 self.0.store(true, Ordering::Release);
             }
         }
-        let mut lab = LabRuntime::new(LabConfig::new(0x100_17).max_steps(256));
+        let mut lab = LabRuntime::new(LabConfig::new(0x0001_0017).max_steps(256));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (task, mut joined) = lab
             .state

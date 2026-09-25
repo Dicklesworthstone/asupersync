@@ -4,7 +4,7 @@
 
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::registry::{NameLeaseError, NameRegistry};
-use asupersync::cx::{Cx, Scope};
+use asupersync::cx::{ChildRegionSpec, Cx, Scope};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::{RuntimeState, SpawnError};
 use asupersync::supervision::{
@@ -63,7 +63,7 @@ async fn witnessed<F: Future>(future: F, signal: oneshot::Sender<()>) -> F::Outp
             }
             Poll::Pending
         }
-        ready => ready,
+        ready @ Poll::Ready(_) => ready,
     })
     .await
 }
@@ -301,6 +301,8 @@ async fn replace_fences_stale_lease(cx: Cx) {
     let old_registry = Arc::clone(&registry);
     let retired_lease = Arc::new(Mutex::new(None));
     let old_lease = Arc::clone(&retired_lease);
+    let observed_cancel = Arc::new(Mutex::new(None));
+    let old_observed = Arc::clone(&observed_cancel);
     let mut old = cx
         .spawn(move |holder| async move {
             let lease = old_registry
@@ -314,8 +316,11 @@ async fn replace_fences_stale_lease(cx: Cx) {
                 .unwrap();
             let (_keep_sender, mut stop) = mpsc::channel::<()>(1);
             assert!(witnessed(stop.recv(&holder), parked).await.is_err());
-            // Cancellation dominates a task's typed return. Move the stale token
+            // Record the attributed reason this task observed. `Cx::spawn` keeps
+            // the typed return of a task that acknowledged cancellation after its
+            // first poll, so the join itself reports Ok. Move the stale token
             // through an owned slot so the join cannot discard an armed lease.
+            *old_observed.lock() = holder.cancel_reason();
             *old_lease.lock() = Some(lease);
         })
         .unwrap();
@@ -351,8 +356,17 @@ async fn replace_fences_stale_lease(cx: Cx) {
     let stale_release = registry.lock().unregister_owned_and_grant(&stale, cx.now());
     stale.abort().unwrap();
     assert!(
-        old_result.is_err(),
-        "displaced actual task must observe cancellation"
+        old_result.is_ok(),
+        "an acknowledged cancellation keeps the displaced task's typed return: {old_result:?}"
+    );
+    let reason = observed_cancel
+        .lock()
+        .take()
+        .expect("displaced actual task must observe cancellation");
+    assert_eq!(
+        reason.message(),
+        Some("managed supervisor name replaced"),
+        "the displaced task must be cancelled by the Replace policy: {reason:?}"
     );
     assert!(matches!(
         stale_release,
@@ -481,12 +495,19 @@ async fn journey(cx: Cx) {
 
 #[test]
 fn named_supervisor_lab_restarts_waits_replaces_and_closes() {
-    for seed in [0x100_01, 0x100_02] {
+    for seed in [0x0001_0001, 0x0001_0002] {
         let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(50_000));
         let root = lab.state.create_root_region(Budget::INFINITE);
+        // Name leases are graded obligations, which may not live in the root
+        // region (ASUP-E103). The journey registers names from its own region,
+        // so it runs in a child region, as application code does.
+        let region = lab
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .unwrap();
         let (task, mut join) = lab
             .state
-            .create_task(root, Budget::INFINITE, async {
+            .create_task(region, Budget::INFINITE, async {
                 journey(Cx::current().expect("executing lab task")).await;
             })
             .unwrap();
@@ -502,7 +523,9 @@ fn named_supervisor_lab_restarts_waits_replaces_and_closes() {
             .into_parts();
         assert!(tasks.is_empty());
         wakes.dispatch();
+        lab.state.advance_region_state(region);
         lab.state.advance_region_state(root);
+        assert!(lab.state.region(region).is_none());
         assert!(lab.state.region(root).is_none());
         eprintln!("NAMED_SUPERVISOR backend=lab seed={seed} live_tasks=0 pending_obligations=0");
     }
@@ -522,11 +545,18 @@ fn named_supervisor_native_restarts_waits_replaces_and_closes() {
         .unwrap();
         runtime.block_on(async {
             let cx = Cx::current().expect("native root context");
-            let mut task = cx.spawn(journey).unwrap();
+            // Name leases may not live in the root region (ASUP-E103); the
+            // journey runs in an owned child region, as application code does.
+            let boundary = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let mut task = boundary.cx().spawn(journey).unwrap();
             asupersync::time::timeout(cx.now(), Duration::from_secs(10), task.join(&cx))
                 .await
                 .unwrap()
                 .unwrap();
+            boundary.close().await.unwrap();
         });
         assert!(runtime.is_quiescent());
         eprintln!("NAMED_SUPERVISOR backend=native workers={workers} quiescent=true");
