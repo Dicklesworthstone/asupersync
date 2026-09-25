@@ -251,7 +251,8 @@ pub struct WebSocketConfig {
     pub slow_consumer_policy: SlowConsumerPolicy,
     /// Requested subprotocols.
     pub protocols: Vec<String>,
-    /// Connection timeout.
+    /// Connection timeout. It bounds the TCP connect and, separately, the
+    /// HTTP upgrade exchange that follows it.
     pub connect_timeout: Option<Duration>,
     /// Enable TCP_NODELAY.
     pub nodelay: bool,
@@ -1138,13 +1139,12 @@ impl WebSocket<TcpStream> {
             return Err(WsConnectError::Cancelled);
         }
 
-        // Send request
+        // Send the request and read the response. Trailing bytes after
+        // \r\n\r\n belong to the first WebSocket frame and must be seeded
+        // into the read buffer.
         let request = handshake.request_bytes();
-        write_all(&mut tcp, &request).await?;
-
-        // Read response — trailing bytes after \r\n\r\n belong to the
-        // first WebSocket frame and must be seeded into the read buffer.
-        let (response_bytes, trailing) = read_http_response(&mut tcp).await?;
+        let (response_bytes, trailing) =
+            bounded_upgrade_exchange(cx, &mut tcp, &request, config.connect_timeout).await?;
         let response = HttpResponse::parse(&response_bytes)?;
 
         // Validate response
@@ -1182,6 +1182,47 @@ async fn write_all<IO: AsyncWrite + Unpin>(io: &mut IO, buf: &[u8]) -> io::Resul
         written += n;
     }
     Ok(())
+}
+
+/// Run the client upgrade exchange (write the request, read the response
+/// head) under `limit` and the caller's cancellation.
+///
+/// `connect_timeout` used to cover only the TCP connect, and nothing re-polled
+/// the response read, so a server that accepted TCP and never answered parked
+/// `connect` forever (br-asupersync-bi2462.120).
+async fn bounded_upgrade_exchange<IO: AsyncRead + AsyncWrite + Unpin>(
+    cx: &Cx,
+    io: &mut IO,
+    request: &[u8],
+    limit: Option<Duration>,
+) -> Result<(Vec<u8>, Vec<u8>), WsConnectError> {
+    use std::future::poll_fn;
+
+    let mut exchange = std::pin::pin!(async {
+        write_all(&mut *io, request).await?;
+        read_http_response(&mut *io).await
+    });
+    let mut deadline = limit.map(|limit| crate::time::sleep(cx.now(), limit));
+    let mut cancel_wake = WsCancelWakerGuard::new(cx);
+    poll_fn(|poll_cx| {
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(WsConnectError::Cancelled));
+        }
+        cancel_wake.refresh(poll_cx.waker());
+        if let Poll::Ready(result) = exchange.as_mut().poll(poll_cx) {
+            return Poll::Ready(result.map_err(WsConnectError::Io));
+        }
+        if let Some(sleep) = deadline.as_mut()
+            && Pin::new(sleep).poll_deadline(poll_cx).is_ready()
+        {
+            return Poll::Ready(Err(WsConnectError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "websocket upgrade response not received within connect_timeout",
+            ))));
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// Read HTTP response (until the blank line ending the headers).
@@ -2487,6 +2528,186 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "cancel must wake the parked read promptly, took {elapsed:?}"
+        );
+    }
+
+    /// A peer that takes the whole upgrade request and never answers. Each
+    /// write is reported so a test can prove the exchange reached its parked
+    /// response read before it times out or is cancelled.
+    struct SilentUpgradePeer {
+        written: std::sync::mpsc::Sender<usize>,
+    }
+
+    impl AsyncRead for SilentUpgradePeer {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for SilentUpgradePeer {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let _ = self.written.send(buf.len());
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    type ExchangeOutcome = (
+        Result<(Vec<u8>, Vec<u8>), WsConnectError>,
+        std::time::Duration,
+    );
+
+    /// Runs the upgrade exchange against a silent peer on its own thread.
+    /// Returns once the whole request is written, with the exchange parked on
+    /// the response read.
+    fn park_upgrade_exchange(
+        cx: Cx,
+        limit: Option<std::time::Duration>,
+    ) -> std::sync::mpsc::Receiver<ExchangeOutcome> {
+        let request = b"GET /chat HTTP/1.1\r\nHost: peer\r\n\r\n".to_vec();
+        let (written_tx, written_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let expected = request.len();
+        std::thread::Builder::new()
+            .name("ws-upgrade-exchange".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let mut peer = SilentUpgradePeer {
+                    written: written_tx,
+                };
+                let result =
+                    future::block_on(bounded_upgrade_exchange(&cx, &mut peer, &request, limit));
+                let _ = done_tx.send((result, started.elapsed()));
+            })
+            .expect("spawn exchange thread");
+        let mut written = 0;
+        while written < expected {
+            written += written_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the upgrade request reaches the peer");
+        }
+        done_rx
+    }
+
+    #[test]
+    fn upgrade_exchange_times_out_when_the_peer_never_answers() {
+        let limit = std::time::Duration::from_millis(200);
+        let done = park_upgrade_exchange(Cx::for_testing(), Some(limit));
+        let (result, elapsed) = done
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("a silent peer must not hold the upgrade past connect_timeout");
+        assert!(
+            matches!(&result, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
+            "expected TimedOut, got {result:?}"
+        );
+        assert!(
+            elapsed >= limit && elapsed < std::time::Duration::from_secs(5),
+            "timed out after {elapsed:?} for a {limit:?} bound"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_parked_upgrade_exchange_returns_cancelled() {
+        let cx = Cx::for_testing();
+        let canceller = cx.clone();
+        // No bound: only the cancellation can end this exchange.
+        let done = park_upgrade_exchange(cx, None);
+        canceller.cancel_with(
+            crate::types::CancelKind::User,
+            Some("cancel while the upgrade response is awaited"),
+        );
+        let (result, elapsed) = done
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("cancel must wake the parked upgrade read");
+        assert!(
+            matches!(result, Err(WsConnectError::Cancelled)),
+            "expected Cancelled, got {result:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn connect_times_out_when_a_tcp_server_never_answers_the_upgrade() {
+        // The server accepts, reads the complete upgrade request, then stays
+        // silent with the socket open until the test releases it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            use std::io::Read;
+            let (mut socket, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = socket.read(&mut chunk).expect("read request");
+                assert!(n > 0, "client closed before finishing the request");
+                request.extend_from_slice(&chunk[..n]);
+            }
+            let _ = request_seen_tx.send(request);
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(20));
+        });
+
+        let limit = std::time::Duration::from_millis(300);
+        let url = format!("ws://{addr}/chat");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let runtime = crate::runtime::RuntimeBuilder::new()
+                .build()
+                .expect("runtime");
+            let started = std::time::Instant::now();
+            let handle = runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("runtime task context");
+                let config = WebSocketConfig::new().connect_timeout(Some(limit));
+                WebSocket::connect_with_config(&cx, &url, config)
+                    .await
+                    .map(|_| ())
+            });
+            let result = runtime.block_on(handle);
+            let _ = done_tx.send((result, started.elapsed()));
+        });
+
+        let request = request_seen_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the upgrade request reaches the server");
+        assert!(request.starts_with(b"GET /chat HTTP/1.1\r\n"));
+        let (result, elapsed) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("connect must not hang on a server that never answers");
+        let _ = release_tx.send(());
+        server.join().expect("server thread");
+        client.join().expect("client thread");
+        assert!(
+            matches!(&result, Err(WsConnectError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
+            "expected TimedOut, got {result:?}"
+        );
+        assert!(
+            elapsed >= limit && elapsed < std::time::Duration::from_secs(5),
+            "connect timed out after {elapsed:?} for a {limit:?} bound"
         );
     }
 }
