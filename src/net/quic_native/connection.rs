@@ -2538,6 +2538,35 @@ impl NativeQuicConnection {
                     .map_err(map_stream_table_error)?;
                 Ok(())
             }
+            QuicFrame::MaxStreams {
+                maximum_streams,
+                bidirectional,
+            } => {
+                if space != PacketNumberSpace::ApplicationData {
+                    return Err(NativeQuicConnectionError::InvalidState(
+                        "MAX_STREAMS requires application data packet space",
+                    ));
+                }
+                // Stream IDs have two type bits inside the 62-bit QUIC
+                // integer. A grant of 2^60 streams is valid, but any larger
+                // value would authorize an unencodable ID (RFC 9000 19.11).
+                // Validate before changing either direction's credit.
+                let maximum_streams = maximum_streams.value();
+                if maximum_streams > (1u64 << 60) {
+                    return Err(QuicFrameError::InvalidFormat(
+                        "MAX_STREAMS exceeds the 2^60 stream limit".to_owned(),
+                    )
+                    .into());
+                }
+                let direction = if *bidirectional {
+                    StreamDirection::Bidirectional
+                } else {
+                    StreamDirection::Unidirectional
+                };
+                self.streams
+                    .increase_local_stream_limit(direction, maximum_streams);
+                Ok(())
+            }
             QuicFrame::PathChallenge { data } => {
                 // Answer the newest challenge only: a peer that streams
                 // challenges faster than we send must not grow the control
@@ -2608,7 +2637,6 @@ impl NativeQuicConnection {
             QuicFrame::NewToken { .. }
             | QuicFrame::NewConnectionId { .. }
             | QuicFrame::RetireConnectionId { .. }
-            | QuicFrame::MaxStreams { .. }
             | QuicFrame::DataBlocked { .. }
             | QuicFrame::StreamsBlocked { .. } => Ok(()),
         }
@@ -6330,6 +6358,135 @@ mod tests {
             .generate_frames(&cx, PacketNumberSpace::ApplicationData, 128)
             .expect("lowering limits should not emit MAX_STREAMS");
         assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn received_max_streams_extends_exhausted_connections_in_each_direction() {
+        let cx = test_cx();
+        for mut conn in [established_conn(), established_server_conn()] {
+            let role = conn.role;
+            for seq in 0..128 {
+                assert_eq!(
+                    conn.open_local_bidi(&cx).expect("initial bidi grant"),
+                    StreamId::local(role, StreamDirection::Bidirectional, seq)
+                );
+                conn.open_local_uni(&cx).expect("initial uni grant");
+            }
+            assert!(conn.open_local_bidi(&cx).is_err());
+            assert!(conn.open_local_uni(&cx).is_err());
+            let remote_limits = conn.streams().remote_stream_limits();
+            // Independent wire bytes: MAX_STREAMS_BIDI(256), followed by
+            // duplicate/reordered grants. These must not reduce the new limit.
+            conn.process_packet_payload(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                1,
+                &[0x12, 0x41, 0x00, 0x12, 0x41, 0x00, 0x12, 0x00],
+                100,
+            )
+            .expect("process peer bidi credit");
+            assert_eq!(conn.streams().len(), 256, "grant must allocate nothing");
+            assert!(
+                conn.open_local_uni(&cx).is_err(),
+                "uni is still exhausted"
+            );
+            for seq in 128..256 {
+                assert_eq!(
+                    conn.open_local_bidi(&cx).expect("renewed bidi credit"),
+                    StreamId::local(role, StreamDirection::Bidirectional, seq)
+                );
+            }
+            assert!(conn.open_local_bidi(&cx).is_err());
+
+            // A separate unidirectional grant authorizes exactly one new ID.
+            conn.process_packet_payload(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                2,
+                &[0x13, 0x40, 0x81],
+                200,
+            )
+            .expect("process peer uni credit");
+            assert_eq!(
+                conn.open_local_uni(&cx).expect("renewed uni credit"),
+                StreamId::local(role, StreamDirection::Unidirectional, 128)
+            );
+            assert!(conn.open_local_uni(&cx).is_err());
+            assert!(conn.open_local_bidi(&cx).is_err());
+            assert_eq!(conn.streams().remote_stream_limits(), remote_limits);
+        }
+    }
+
+    #[test]
+    fn received_max_streams_rejects_unencodable_grants_before_mutation() {
+        let cx = test_cx();
+        for frame_type in [0x12, 0x13] {
+            let mut conn = established_conn();
+            let error = conn
+                .process_packet_payload(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    1,
+                    &[frame_type, 0xd0, 0, 0, 0, 0, 0, 0, 1], // 2^60 + 1
+                    100,
+                )
+                .expect_err("MAX_STREAMS above 2^60 is a frame error");
+            assert_eq!(
+                error,
+                NativeQuicConnectionError::Frame(QuicFrameError::InvalidFormat(
+                    "MAX_STREAMS exceeds the 2^60 stream limit".to_owned()
+                ))
+            );
+            assert!(
+                !conn.has_pending_control_frames(),
+                "rejected packet is not ACKed"
+            );
+            for _ in 0..128 {
+                conn.open_local_bidi(&cx)
+                    .expect("original bidi credit unchanged");
+                conn.open_local_uni(&cx)
+                    .expect("original uni credit unchanged");
+            }
+            assert!(conn.open_local_bidi(&cx).is_err());
+            assert!(conn.open_local_uni(&cx).is_err());
+
+            conn.process_packet_payload(
+                &cx,
+                PacketNumberSpace::ApplicationData,
+                2,
+                &[frame_type, 0xd0, 0, 0, 0, 0, 0, 0, 0], // 2^60 exactly
+                200,
+            )
+            .expect("largest encodable grant is valid");
+            let (renewed, unchanged) = if frame_type == 0x12 {
+                (conn.open_local_bidi(&cx), conn.open_local_uni(&cx))
+            } else {
+                (conn.open_local_uni(&cx), conn.open_local_bidi(&cx))
+            };
+            assert!(renewed.is_ok());
+            assert!(unchanged.is_err());
+        }
+    }
+
+    #[test]
+    fn received_max_streams_requires_application_packet_space() {
+        let cx = test_cx();
+        for space in [PacketNumberSpace::Initial, PacketNumberSpace::Handshake] {
+            let mut conn = established_conn();
+            let error = conn
+                .process_packet_payload(&cx, space, 1, &[0x12, 0x41, 0x00], 100)
+                .expect_err("MAX_STREAMS is not permitted in handshake packets");
+            assert_eq!(
+                error,
+                NativeQuicConnectionError::InvalidState(
+                    "MAX_STREAMS requires application data packet space"
+                )
+            );
+            for _ in 0..128 {
+                conn.open_local_bidi(&cx).expect("initial credit unchanged");
+            }
+            assert!(conn.open_local_bidi(&cx).is_err());
+        }
     }
 
     #[test]

@@ -1342,6 +1342,23 @@ impl StreamTable {
         Ok(id)
     }
 
+    /// Apply an already validated peer MAX_STREAMS limit. Limits count all
+    /// streams opened in a direction over the connection's lifetime, including
+    /// closed streams; a new grant never resets the next stream sequence.
+    pub(crate) fn increase_local_stream_limit(
+        &mut self,
+        direction: StreamDirection,
+        maximum_streams: u64,
+    ) {
+        let limit = match direction {
+            StreamDirection::Bidirectional => &mut self.max_local_bidi,
+            StreamDirection::Unidirectional => &mut self.max_local_uni,
+        };
+        // Reordered and retransmitted grants cannot revoke credit already
+        // received (RFC 9000 sections 4.6 and 19.11).
+        *limit = (*limit).max(maximum_streams);
+    }
+
     /// Set the maximum number of remotely-initiated streams (per direction) this
     /// endpoint will accept from the wire (RFC 9000 §4.6 `MAX_STREAMS`).
     ///
@@ -3090,6 +3107,82 @@ mod tests {
                 limit: 1
             }
         );
+    }
+
+    #[test]
+    fn local_stream_credit_preserves_sequences_and_direction() {
+        for role in [StreamRole::Client, StreamRole::Server] {
+            let mut table = StreamTable::new(role, 1, 0, 1024, 1024);
+            table.set_remote_stream_limits(2, 3);
+            let first = table.open_local_bidi().expect("initial bidi credit");
+            let stream = table.stream_mut(first).expect("opened stream");
+            stream.finish_send().expect("finish request");
+            stream.receive_segment(0, 0, true).expect("finish response");
+            assert!(
+                table.open_local_bidi().is_err(),
+                "FIN does not renew credit"
+            );
+
+            table.increase_local_stream_limit(StreamDirection::Unidirectional, 2);
+            for seq in 0..2 {
+                assert_eq!(
+                    table.open_local_uni().expect("new uni credit"),
+                    StreamId::local(role, StreamDirection::Unidirectional, seq)
+                );
+            }
+            assert!(table.open_local_uni().is_err());
+            assert!(
+                table.open_local_bidi().is_err(),
+                "uni grant leaves bidi blocked"
+            );
+
+            table.increase_local_stream_limit(StreamDirection::Bidirectional, 3);
+            assert_eq!(
+                table.open_local_bidi().expect("new bidi credit"),
+                StreamId::local(role, StreamDirection::Bidirectional, 1)
+            );
+            for reordered in [0, 1, 3, 2] {
+                table.increase_local_stream_limit(StreamDirection::Bidirectional, reordered);
+            }
+            assert_eq!(
+                table
+                    .open_local_bidi()
+                    .expect("reordered grant preserves credit"),
+                StreamId::local(role, StreamDirection::Bidirectional, 2)
+            );
+            assert_eq!(
+                table.open_local_bidi(),
+                Err(StreamTableError::StreamLimitExceeded {
+                    direction: StreamDirection::Bidirectional,
+                    limit: 3,
+                })
+            );
+            assert_eq!(table.remote_stream_limits(), (2, 3));
+            assert_eq!(table.len(), 5, "credit updates allocate no streams");
+        }
+    }
+
+    #[test]
+    fn local_stream_credit_accepts_last_encodable_ids_without_wrapping() {
+        let limit = 1u64 << 60;
+        for role in [StreamRole::Client, StreamRole::Server] {
+            let mut table = StreamTable::new(role, 0, 0, 1024, 1024);
+            table.increase_local_stream_limit(StreamDirection::Bidirectional, limit);
+            table.increase_local_stream_limit(StreamDirection::Unidirectional, limit);
+            assert!(table.is_empty(), "a large grant is only a counter update");
+            // Place the counters at the final credit without allocating the
+            // preceding 2^60 - 1 stream owners.
+            table.next_local_bidi_seq = limit - 1;
+            table.next_local_uni_seq = limit - 1;
+            let bidi = table.open_local_bidi().expect("last bidi ID");
+            let uni = table.open_local_uni().expect("last uni ID");
+            let initiator = u64::from(role == StreamRole::Server);
+            assert_eq!(bidi.0, VARINT_MAX - 3 + initiator);
+            assert_eq!(uni.0, VARINT_MAX - 1 + initiator);
+            assert!(table.open_local_bidi().is_err());
+            assert!(table.open_local_uni().is_err());
+            assert_eq!(table.len(), 2, "exhaustion cannot wrap and reuse an ID");
+        }
     }
 
     #[test]
