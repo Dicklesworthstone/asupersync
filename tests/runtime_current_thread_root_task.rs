@@ -332,6 +332,406 @@ fn current_thread_root_cx_is_a_registered_task() {
     });
 }
 
+/// Checked primitives must have the same holder authority on caller-polled
+/// roots as on current-thread roots, including synchronous quota rollback.
+#[test]
+fn block_on_roots_admit_checked_obligations_and_retire_the_holder() {
+    use asupersync::channel::{mpsc as async_mpsc, oneshot};
+    use asupersync::record::{ObligationKind, RegionLimits};
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+    use asupersync::sync::{CheckedAcquireError, Semaphore};
+
+    for (scenario, builder) in [
+        ("current_thread", RuntimeBuilder::current_thread()),
+        (
+            "multi_unified",
+            RuntimeBuilder::multi_thread().worker_threads(2),
+        ),
+        (
+            "multi_sharded",
+            RuntimeBuilder::multi_thread()
+                .worker_threads(2)
+                .with_sharded_state(true),
+        ),
+    ] {
+        let runtime = builder
+            .root_region_limits(RegionLimits {
+                max_obligations: Some(1),
+                ..RegionLimits::UNLIMITED
+            })
+            .build()
+            .expect("build checked-root runtime");
+        let caller = thread::current().id();
+        let local = Rc::new(Cell::new(0));
+        let retained = runtime.block_on(async {
+            let cx = Cx::current().expect("registered root context");
+            assert_eq!(thread::current().id(), caller, "{scenario}");
+            local.set(1);
+            assert!(!runtime.is_quiescent(), "{scenario}: root is live");
+            assert!(
+                runtime
+                    .task_inspector(TaskInspectorConfig::default())
+                    .list_tasks()
+                    .iter()
+                    .any(|task| task.id == cx.task_id()),
+                "{scenario}: holder has a real task record"
+            );
+
+            let (sender, mut receiver) = async_mpsc::channel(1);
+            let permit = sender
+                .try_reserve_checked(&cx)
+                .expect("root checked MPSC reservation");
+            let semaphore = Semaphore::new(1);
+            assert!(
+                matches!(
+                    semaphore.try_acquire_checked(&cx, 1),
+                    Err(CheckedAcquireError::Admission(
+                        ObligationAdmissionError::LimitReached { limit: 1, live: 1 }
+                    ))
+                ),
+                "{scenario}: checked primitives share region quota"
+            );
+            assert_eq!(semaphore.available_permits(), 1, "quota rollback");
+            permit.try_send(41_u32).expect("publish checked MPSC value");
+            assert_eq!(receiver.try_recv(), Ok(41));
+
+            let semaphore_permit = semaphore
+                .try_acquire_checked(&cx, 1)
+                .expect("committing the send releases quota synchronously");
+            assert_eq!(semaphore.available_permits(), 0);
+            drop(semaphore_permit);
+            assert_eq!(semaphore.available_permits(), 1);
+            let (sender, mut receiver) = oneshot::channel();
+            sender
+                .send_checked(&cx, 42_u32)
+                .expect("root checked oneshot send");
+            assert_eq!(receiver.try_recv(), Ok(42));
+            eprintln!(
+                "scenario={scenario} holder={:?} mpsc=41 oneshot=42 quota_rollback=true",
+                cx.task_id()
+            );
+            cx
+        });
+        assert_eq!(local.get(), 1, "non-Send borrowed root ran");
+        assert!(
+            runtime.is_quiescent(),
+            "{scenario}: root retired before return"
+        );
+        assert!(
+            runtime
+                .task_inspector(TaskInspectorConfig::default())
+                .list_tasks()
+                .is_empty(),
+            "{scenario}: no accounting task remains"
+        );
+        assert!(matches!(
+            retained.try_register_obligation_checked(ObligationKind::Lease, retained.task_id()),
+            Err(ObligationAdmissionError::HolderNotLive)
+        ));
+    }
+}
+
+/// A never-waking channel receive witnesses the actual cancellation waker.
+/// Root drain must wake that caller and wait for its owned permit cleanup.
+#[test]
+fn block_on_registered_root_cancellation_drains_parked_checked_work() {
+    use asupersync::channel::{mpsc as async_mpsc, oneshot};
+    use std::future::Future;
+
+    for sharded in [false, true] {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .with_sharded_state(sharded)
+            .build()
+            .expect("build cancellable root runtime");
+        let caller_runtime = runtime.clone();
+        let (sender, mut receiver) = oneshot::channel::<()>();
+        let (parked, parked_rx) = mpsc::channel();
+        let (finished, finished_rx) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                caller_runtime.block_on(async {
+                    let cx = Cx::current().expect("root context");
+                    let (permits, _values) = async_mpsc::channel::<()>(1);
+                    let permit = permits
+                        .try_reserve_checked(&cx)
+                        .expect("caller root must admit a checked permit");
+                    let mut receive = std::pin::pin!(receiver.recv(&cx));
+                    let mut witnessed = false;
+                    let result = poll_fn(|ctx| {
+                        let result = receive.as_mut().poll(ctx);
+                        if result.is_pending() && !witnessed {
+                            witnessed = true;
+                            parked.send(cx.task_id()).expect("publish parked witness");
+                        }
+                        result
+                    })
+                    .await;
+                    assert_eq!(result, Err(oneshot::RecvError::Cancelled));
+                    drop(permit);
+                    cx.task_id()
+                })
+            }));
+            finished.send(outcome).expect("publish caller completion");
+        });
+        let holder = parked_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("caller root parked after checked admission");
+        assert_eq!(sender.telemetry_snapshot(0).recv_waiter_count, 1);
+        let started = Instant::now();
+        let drained = runtime.drain_root_region(Duration::from_secs(5));
+        // A broken cancellation path still gets a physical channel close, so
+        // the negative control can retire instead of hanging the test process.
+        let waiters_after_drain = sender.telemetry_snapshot(0).recv_waiter_count;
+        drop(sender);
+        let result = finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("caller leaves its parked receive");
+        caller.join().expect("caller helper returns");
+        assert_eq!(result.expect("caller cancellation journey"), holder);
+        assert_eq!(drained, RootDrainOutcome::Quiescent);
+        assert_eq!(waiters_after_drain, 0, "receive registration retired");
+        assert!(runtime.is_quiescent(), "caller and permit retired");
+        eprintln!(
+            "scenario=caller_cancel sharded={sharded} holder={holder:?} \
+             parked_waiters=1 terminal_waiters=0 drain={drained:?} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+/// Synchronous registration must work even when the only worker is occupied
+/// by the caller. Waiting for a separately spawned accounting task deadlocks.
+#[test]
+fn block_on_worker_reentry_registers_without_waiting_for_dispatch() {
+    use asupersync::record::{ObligationAbortReason, ObligationKind};
+
+    for sharded in [false, true] {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .with_sharded_state(sharded)
+            .build()
+            .expect("build one-worker runtime");
+        let nested_runtime = runtime.clone();
+        let (finished, finished_rx) = mpsc::channel();
+        let _task = runtime.handle().spawn(async move {
+            let outer = Cx::current().expect("worker task context");
+            let local = Rc::new(Cell::new(7));
+            let nested = nested_runtime.block_on(async {
+                let cx = Cx::current().expect("nested root context");
+                assert_ne!(cx.task_id(), outer.task_id());
+                let token = cx
+                    .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                    .expect("nested root admits obligations")
+                    .expect("nested root is tracked");
+                assert!(token.abort(ObligationAbortReason::Explicit));
+                local.set(42);
+                cx
+            });
+            assert_eq!(local.get(), 42);
+            assert_eq!(Cx::current().unwrap().task_id(), outer.task_id());
+            finished.send(nested).expect("nested root completed");
+        });
+        let retired = finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("nested root never waits for the occupied worker");
+        assert!(matches!(
+            retired.try_register_obligation_checked(ObligationKind::Lease, retired.task_id()),
+            Err(asupersync::runtime::obligation_mailbox::ObligationAdmissionError::HolderNotLive)
+        ));
+        assert_eq!(
+            runtime.drain_root_region(Duration::from_secs(5)),
+            RootDrainOutcome::Quiescent
+        );
+    }
+}
+
+#[test]
+fn block_on_caller_destructor_keeps_authority_through_return_and_unwind() {
+    use asupersync::record::{ObligationAbortReason, ObligationKind};
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::Context;
+
+    struct CallerFuture<'a> {
+        retained: &'a RefCell<Option<Cx>>,
+        drop_admitted: &'a Cell<bool>,
+        panic: bool,
+    }
+
+    impl Future for CallerFuture<'_> {
+        type Output = u32;
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<u32> {
+            *self.retained.borrow_mut() = Cx::current();
+            assert!(!self.panic, "caller panic sentinel");
+            Poll::Ready(42)
+        }
+    }
+
+    impl Drop for CallerFuture<'_> {
+        fn drop(&mut self) {
+            let admitted = Cx::current().is_some_and(|cx| {
+                cx.try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                    .ok()
+                    .flatten()
+                    .is_some_and(|token| token.abort(ObligationAbortReason::Explicit))
+            });
+            self.drop_admitted.set(admitted);
+        }
+    }
+
+    for sharded in [false, true] {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .with_sharded_state(sharded)
+            .build()
+            .expect("build caller destructor runtime");
+        for panic in [false, true] {
+            let retained = RefCell::new(None);
+            let drop_admitted = Cell::new(false);
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                runtime.block_on(CallerFuture {
+                    retained: &retained,
+                    drop_admitted: &drop_admitted,
+                    panic,
+                })
+            }));
+            if panic {
+                let payload = result.expect_err("caller panic propagates");
+                assert_eq!(
+                    payload.downcast_ref::<&str>().copied(),
+                    Some("caller panic sentinel")
+                );
+            } else {
+                assert_eq!(result.expect("caller returned"), 42);
+            }
+            assert!(
+                drop_admitted.get(),
+                "sharded={sharded} panic={panic}: future Drop precedes holder retirement"
+            );
+            let retired = retained.into_inner().expect("root was polled");
+            assert!(matches!(
+                retired.try_register_obligation_checked(ObligationKind::Lease, retired.task_id()),
+                Err(ObligationAdmissionError::HolderNotLive)
+            ));
+            assert!(runtime.is_quiescent(), "caller retired after destructor");
+        }
+    }
+}
+
+/// The caller can catch the default leak-policy panic and keep using the
+/// runtime. Exercise both panic before task detachment (a queued Leak) and
+/// after detachment (the completion audit discovers a forgotten token).
+#[test]
+fn block_on_leak_panic_preserves_remaining_posts_and_retires_the_holder() {
+    use asupersync::record::{ObligationAbortReason, ObligationKind};
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+    use std::sync::Barrier;
+
+    struct ReleaseWorker(Arc<Barrier>);
+    impl Drop for ReleaseWorker {
+        fn drop(&mut self) {
+            self.0.wait();
+        }
+    }
+
+    for sharded in [false, true] {
+        for queued_leak in [false, true] {
+            // Keep the sole scheduler worker parked until caller retirement
+            // has consumed the posts. This makes the caller, rather than a
+            // racing background drainer, hit the configured panic boundary.
+            let entered = Arc::new(Barrier::new(2));
+            let released = Arc::new(Barrier::new(2));
+            let worker_entered = Arc::clone(&entered);
+            let worker_released = Arc::clone(&released);
+            let runtime = RuntimeBuilder::new()
+                .worker_threads(1)
+                .with_sharded_state(sharded)
+                .on_thread_start(move || {
+                    worker_entered.wait();
+                    worker_released.wait();
+                })
+                .build()
+                .expect("build paused-worker runtime");
+            entered.wait();
+            let release_worker = ReleaseWorker(released);
+            let retained = RefCell::new(None);
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("caller context");
+                    *retained.borrow_mut() = Some(cx.clone());
+                    let first = cx
+                        .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                        .expect("first admitted lease")
+                        .expect("first tracked lease");
+                    if queued_leak {
+                        drop(first);
+                    } else {
+                        std::mem::forget(first);
+                    }
+                    // These posts follow the first Leak when queued_leak=true.
+                    // A bulk pop abandoned by that panic would lose them and
+                    // strand the region's unapplied admission barrier.
+                    let second = cx
+                        .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                        .expect("second admitted lease")
+                        .expect("second tracked lease");
+                    assert!(second.abort(ObligationAbortReason::Explicit));
+                    let third = cx
+                        .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                        .expect("third admitted lease")
+                        .expect("third tracked lease");
+                    std::mem::forget(third);
+                })
+            }));
+            let payload = result.expect_err("default leak policy still panics");
+            let message = payload
+                .downcast_ref::<String>()
+                .expect("configured leak panic retains its diagnostic");
+            assert!(message.to_ascii_lowercase().contains("obligation"));
+            let retired = retained.into_inner().expect("root was polled");
+            assert!(matches!(
+                retired.try_register_obligation_checked(ObligationKind::Lease, retired.task_id()),
+                Err(ObligationAdmissionError::HolderNotLive)
+            ));
+            assert!(
+                runtime.is_quiescent(),
+                "sharded={sharded} queued_leak={queued_leak}: no lost record or posts"
+            );
+            assert!(
+                runtime
+                    .task_inspector(TaskInspectorConfig::default())
+                    .list_tasks()
+                    .is_empty()
+            );
+            assert_eq!(
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("replacement caller context");
+                    let token = cx
+                        .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                        .expect("runtime still admits checked work")
+                        .expect("replacement caller is tracked");
+                    assert!(token.abort(ObligationAbortReason::Explicit));
+                    42
+                }),
+                42
+            );
+            drop(release_worker);
+            assert_eq!(
+                runtime.drain_root_region(Duration::from_secs(5)),
+                RootDrainOutcome::Quiescent,
+                "leak panic cannot strand root-region membership"
+            );
+            eprintln!(
+                "scenario=caller_leak_panic sharded={sharded} queued_leak={queued_leak} \
+                 caught=true subsequent_checked_work=42 drain=quiescent"
+            );
+        }
+    }
+}
+
 /// Planted negative: the multi-thread flavor is unchanged — a task spawned
 /// from the root runs on a scheduler worker, not on the calling thread.
 #[test]

@@ -4128,10 +4128,12 @@ impl Runtime {
     ///   the preset's docs for the nesting rules and the synchronous-blocking
     ///   caveat. After the root completes, already-runnable work is drained
     ///   for a bounded number of dispatch turns before this returns.
-    /// - On every other flavor the future is polled in place on the caller
-    ///   with a request-scoped [`Cx`](crate::cx::Cx) and is not a registered
-    ///   task; spawned tasks run on the worker threads and keep running after
-    ///   this returns.
+    /// - Other flavors poll the future on the caller as a registered root task
+    ///   with checked obligation authority and root cancellation. The record
+    ///   retires after the future's destructor, including on panic. Spawned
+    ///   tasks run on workers and may outlive this call. If root admission fails
+    ///   (closed region or task limit), the compatibility fallback runs without
+    ///   checked holder authority.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let _guard = ScopedRuntimeHandle::new(self.handle());
         // #41: install an ambient Cx backed by this runtime's drivers
@@ -4154,7 +4156,7 @@ impl Runtime {
         // back untouched when the worker cannot be borrowed (a call from
         // inside a task poll, a concurrent call from another thread while the
         // worker is on loan, the worker thread itself, shutdown), in which
-        // case the caller-polled path below runs exactly as before.
+        // case the caller-polled path below admits its own ownership record.
         let future = match self.inner.current_thread_driver.get() {
             Some(driver) => match driver.drive(&self.inner.scheduler, &request_cx, future) {
                 Ok(output) => return output,
@@ -4162,6 +4164,14 @@ impl Runtime {
             },
             None => future,
         };
+        // Admit synchronously: this fallback also runs when block_on is nested
+        // inside a worker poll. Waiting for a spawned accounting task here could
+        // require the very worker occupied by the caller. The actual future
+        // remains pinned on this thread and need not be Send or 'static.
+        let registration = CallerTaskRegistration::new(&self.inner, &request_cx).ok();
+        let _caller_cx_guard = registration
+            .as_ref()
+            .map(|registration| crate::cx::Cx::set_current(Some(registration.cx.clone())));
         run_future_with_budget(future, self.inner.config.poll_budget)
     }
 
@@ -5466,6 +5476,258 @@ struct RuntimeInner {
     browser_pump: std::sync::OnceLock<Arc<BrowserWorkerPump>>,
 }
 
+/// A real task record for a future polled outside the scheduler. The future
+/// itself stays on the block_on caller's stack; only its ownership record is
+/// shared with workers. No ready entry or stored future is installed, so a
+/// cancellation wake cannot cause a worker to poll the caller's future.
+struct CallerTaskRegistration {
+    inner: Arc<RuntimeInner>,
+    cx: crate::cx::Cx,
+}
+
+impl CallerTaskRegistration {
+    fn new(inner: &Arc<RuntimeInner>, parent: &crate::cx::Cx) -> Result<Self, SpawnError> {
+        let spawn_guard = inner.spawn_liveness_guard()?;
+        let dispatch_table = inner.scheduler.dispatch_task_table();
+        let (cx, handle, result_tx, spawn_effects) = {
+            let mut state = inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut target = dispatch_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |table| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
+            let (task_id, handle, cx, result_tx, spawn_effects) = state
+                .create_task_infrastructure_in::<()>(
+                    parent,
+                    parent.region_id(),
+                    parent.budget(),
+                    false,
+                    &mut target,
+                    &crate::runtime::state::AdmissionRegionTarget::Embedded,
+                )?;
+            match &mut target {
+                crate::runtime::state::AdmissionTaskTarget::Embedded => {
+                    let _ = state.update_task(task_id, crate::record::TaskRecord::start_running);
+                }
+                crate::runtime::state::AdmissionTaskTarget::External(table) => {
+                    let _ = table.update_task(task_id, crate::record::TaskRecord::start_running);
+                }
+            }
+            (cx, handle, result_tx, spawn_effects)
+        };
+        let registration = Self {
+            inner: Arc::clone(inner),
+            cx,
+        };
+        // These internal channel owners have no consumers. Retire them outside
+        // the state lock, after the task-lifetime guard is established.
+        drop(handle);
+        drop(result_tx);
+        drop(spawn_guard);
+        spawn_effects.dispatch();
+        Ok(registration)
+    }
+
+    fn retire(&self, outcome: crate::record::task::TaskOutcome) {
+        let mut retirement = CallerTaskRetirement {
+            registration: self,
+            record: None,
+            waiters: smallvec::SmallVec::new(),
+            protocol_retired: false,
+            completed: false,
+        };
+        retirement.finish(outcome, std::thread::panicking());
+    }
+}
+
+/// Retains ownership across a configured leak panic in either the mailbox
+/// drain or the completion audit. Its unwind path runs after all state/table
+/// guards have released and finishes the remaining retirement work.
+struct CallerTaskRetirement<'a> {
+    registration: &'a CallerTaskRegistration,
+    record: Option<crate::record::TaskRecord>,
+    waiters: smallvec::SmallVec<[crate::types::TaskId; 4]>,
+    protocol_retired: bool,
+    completed: bool,
+}
+
+impl CallerTaskRetirement<'_> {
+    fn finish(&mut self, outcome: crate::record::task::TaskOutcome, unwinding: bool) {
+        let registration = self.registration;
+        // Fence admission before capturing mailbox ownership. A retained clone
+        // can never publish a new reservation behind the completion sweep.
+        registration.cx.revoke_obligation_admission();
+        let task_id = registration.cx.task_id();
+        let dispatch_table = registration.inner.scheduler.dispatch_task_table();
+        let (observer, retirements, cancel_wakes, finalizers) = {
+            let mut state = registration
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(gateway) = state.obligation_gateway() {
+                // Do not dequeue a whole batch across the deliberate Panic
+                // leak-policy boundary: unwinding would discard the unvisited
+                // posts and their application barriers. One post at a time
+                // leaves the rest available to this guard's unwind cleanup.
+                // Capture once so concurrent producers cannot extend cleanup.
+                let remaining = gateway.mailbox().len();
+                for _ in 0..remaining {
+                    if crate::runtime::obligation_mailbox::apply_obligation_posts_with_task_table(
+                        &mut state,
+                        gateway.mailbox(),
+                        1,
+                        dispatch_table.as_ref(),
+                    ) == 0
+                    {
+                        break;
+                    }
+                }
+            }
+            let (ack, mut cancel_wakes) = if self.record.is_none() {
+                let complete = |tasks: &mut crate::runtime::TaskTable| {
+                    let effects = tasks
+                        .update_task(
+                            task_id,
+                            crate::record::TaskRecord::consume_checkpoint_cancel_ack,
+                        )
+                        .unwrap_or_else(|| {
+                            crate::types::task_context::CancellationEffects::ready(None)
+                        });
+                    let (ack, wakes) = effects.into_parts();
+                    let _ = tasks.update_task(task_id, |record| {
+                        ThreeLaneWorker::complete_polled_record(record, outcome, ack.is_some());
+                    });
+                    (tasks.remove_task(task_id), ack, wakes)
+                };
+                let (record, ack, wakes) = match dispatch_table.as_ref() {
+                    Some(table) => complete(
+                        &mut table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    ),
+                    None => complete(&mut state.tasks),
+                };
+                self.record = record;
+                (ack, wakes)
+            } else {
+                // A completion audit already committed the terminal record
+                // before panicking. Preserve that result during cleanup.
+                (None, crate::types::task_context::CancelWakeEffects::empty())
+            };
+            let Some(record) = self.record.as_mut() else {
+                self.completed = true;
+                return;
+            };
+            if let Some(receipt) = ack.as_ref()
+                && let Some(violation) = state
+                    .external_checkpoint_cancel_materialization_violation(task_id, receipt, true)
+            {
+                cancel_wakes.push_cancel_protocol_violation(
+                    "caller task cancellation materialization",
+                    violation,
+                );
+            }
+            // The record is detached in both layouts. Cross-cutting completion
+            // can now audit obligations and advance the region without holding
+            // the dispatch-table lock or retiring user wakers beneath it.
+            self.waiters.extend(std::mem::take(&mut record.waiters));
+            let effects = state.task_completed_from_external_record_resuming(
+                record,
+                &mut self.protocol_retired,
+            );
+            let (observer, retirements) = if unwinding {
+                let (waiters, retirements) =
+                    effects.into_waiters_and_retirements_without_observers();
+                self.waiters.extend(waiters);
+                (None, Some(retirements))
+            } else {
+                let (waiters, observer) = effects.into_parts();
+                self.waiters.extend(waiters);
+                (Some(observer), None)
+            };
+            let mut target = dispatch_table.as_ref().map_or(
+                crate::runtime::state::AdmissionTaskTarget::Embedded,
+                |table| {
+                    crate::runtime::state::AdmissionTaskTarget::External(
+                        table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                },
+            );
+            let finalizers = state.drain_ready_async_finalizers_in(
+                &crate::runtime::state::AdmissionRegionTarget::Embedded,
+                &mut target,
+            );
+            (observer, retirements, cancel_wakes, finalizers)
+        };
+        self.completed = true;
+        ThreeLaneWorker::retire_detached_task_record(self.record.take());
+        for waiter in self.waiters.drain(..) {
+            registration
+                .inner
+                .scheduler
+                .wake(waiter, Budget::INFINITE.priority);
+        }
+        for (task, priority, spawn_effects) in finalizers {
+            registration.inner.scheduler.inject_ready(task, priority);
+            spawn_effects.dispatch();
+        }
+        if let Some(observer) = observer {
+            observer.dispatch();
+        }
+        if let Some(retirements) = retirements {
+            retirements.retire();
+        }
+        cancel_wakes.dispatch();
+    }
+}
+
+impl Drop for CallerTaskRetirement<'_> {
+    fn drop(&mut self) {
+        if !self.completed && std::thread::panicking() {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.finish(
+                    crate::types::Outcome::Panicked(crate::types::PanicPayload::new(
+                        "block_on caller retirement panicked",
+                    )),
+                    true,
+                );
+            })) {
+                std::mem::forget(payload);
+            }
+        }
+        ThreeLaneWorker::retire_detached_task_record(self.record.take());
+    }
+}
+
+impl Drop for CallerTaskRegistration {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Preserve the original caller panic even if an observer or leak
+            // policy also panics during ownership retirement.
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.retire(crate::types::Outcome::Panicked(
+                    crate::types::PanicPayload::new("block_on caller panicked"),
+                ));
+            })) {
+                std::mem::forget(payload);
+            }
+        } else {
+            self.retire(crate::types::Outcome::Ok(()));
+        }
+    }
+}
+
 impl RuntimeInner {
     fn spawn_liveness_guard(&self) -> Result<Arc<()>, SpawnError> {
         self.spawn_liveness
@@ -6577,26 +6839,44 @@ fn next_block_on_timer_park_duration(timer: &TimerDriverHandle) -> Option<Durati
 const BLOCK_ON_RUNTIME_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
 fn current_runtime_has_live_tasks() -> bool {
+    let caller = crate::cx::Cx::current();
+    let has_other_live_tasks = |tasks: &crate::runtime::TaskTable| {
+        let caller_is_live = caller.as_ref().is_some_and(|cx| {
+            tasks.task(cx.task_id()).is_some_and(|record| {
+                !record.state.is_terminal()
+                    && record
+                        .cx_inner
+                        .as_ref()
+                        .is_some_and(|inner| Arc::ptr_eq(inner, &cx.inner))
+            })
+        });
+        // A registered caller cannot create a new timer while it is parked.
+        // Counting its own record would turn every otherwise-idle block_on
+        // into a 1 ms poll loop and hide missing cancellation wakeups.
+        tasks.live_task_count() > usize::from(caller_is_live)
+    };
     Runtime::current_handle()
         .and_then(|handle| handle.try_inner().ok())
         .is_some_and(|inner| {
-            let embedded_live = inner
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .live_task_count();
-            if embedded_live > 0 {
+            let embedded_live = {
+                let state = inner
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                has_other_live_tasks(&state.tasks)
+            };
+            if embedded_live {
                 return true;
             }
             // E1.2 subsystem 3d (E1.1 row B12): a dispatch-table runtime's
             // live tasks reside in the external shard-A table (sequential
             // B then A; the state lock is released above).
             inner.scheduler.dispatch_task_table().is_some_and(|table| {
-                table
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .live_task_count()
-                    > 0
+                has_other_live_tasks(
+                    &table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                )
             })
         })
 }

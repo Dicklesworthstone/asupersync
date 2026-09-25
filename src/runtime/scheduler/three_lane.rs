@@ -8596,7 +8596,7 @@ impl ThreeLaneWorker {
         }
     }
 
-    fn retire_detached_task_record(record: Option<crate::record::task::TaskRecord>) {
+    pub(crate) fn retire_detached_task_record(record: Option<crate::record::task::TaskRecord>) {
         let Some(record) = record else {
             return;
         };
@@ -8695,7 +8695,7 @@ impl ThreeLaneWorker {
         .unwrap_or_else(|| crate::types::task_context::CancellationEffects::ready(None))
     }
 
-    fn complete_polled_record(
+    pub(crate) fn complete_polled_record(
         record: &mut crate::record::task::TaskRecord,
         task_outcome: crate::types::Outcome<(), crate::error::Error>,
         cancel_ack: bool,

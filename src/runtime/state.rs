@@ -7439,6 +7439,17 @@ impl RuntimeState {
         &mut self,
         task: &mut TaskRecord,
     ) -> TaskCompletionEffects {
+        self.task_completed_from_external_record_resuming(task, &mut false)
+    }
+
+    /// Detached-record completion whose caller retains progress across a
+    /// configured leak panic. Protocol retirement precedes the obligation
+    /// audit and must not run again when the same owned record resumes cleanup.
+    pub(crate) fn task_completed_from_external_record_resuming(
+        &mut self,
+        task: &mut TaskRecord,
+        protocol_retired: &mut bool,
+    ) -> TaskCompletionEffects {
         let task_id = task.id;
         let waiters = std::mem::take(&mut task.waiters);
         let waiter_count = waiters.len();
@@ -7459,12 +7470,18 @@ impl RuntimeState {
         // wins after cancellation was requested. Terminal state alone would
         // lose that ordering witness for Completed(Panicked).
         let cancellation_materialized = task.cancel_epoch > 0;
-        self.validate_and_retire_external_task_protocol(
-            task_id,
-            task_event,
-            &context,
-            cancellation_materialized,
-        );
+        if !*protocol_retired {
+            // Validator mutation is callback-free and removes the generation
+            // before diagnostic dispatch. Retain progress even if that later
+            // diagnostic unwinds before the completion audit begins.
+            *protocol_retired = true;
+            self.validate_and_retire_external_task_protocol(
+                task_id,
+                task_event,
+                &context,
+                cancellation_materialized,
+            );
+        }
 
         let retired_cancel_wakers =
             task.cx_inner
