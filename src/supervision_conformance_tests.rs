@@ -368,21 +368,25 @@ impl ConformanceTest for ChildNameCloningPerformanceTest {
         let name = ChildName::new("test-child");
         let initial_count = name.strong_count();
 
+        const CLONES: usize = 10_000;
         let start = Instant::now();
-        let mut clones = Vec::new();
-        for _ in 0..10000 {
+        let mut clones = Vec::with_capacity(CLONES);
+        for _ in 0..CLONES {
             clones.push(name.clone());
         }
         let clone_time = start.elapsed();
 
-        // Should complete quickly and increase reference count
+        // O(1) cloning means every clone shares the one allocation: the count
+        // grows by exactly one per clone, and a deep copy would break that.
+        // The elapsed time is reported, not judged. A wall-clock bound made this
+        // suite fail on loaded workers (11.7 ms against 10 ms in a debug build).
         let final_count = name.strong_count();
-        let passed = clone_time < Duration::from_millis(10) && final_count > initial_count;
+        let passed = final_count == initial_count + CLONES;
 
         let error_message = if !passed {
             Some(format!(
-                "Cloning performance poor. Time: {:?}, ref counts: {} -> {}",
-                clone_time, initial_count, final_count
+                "Clones do not share one allocation: ref counts {initial_count} -> {final_count} \
+                 after {CLONES} clones (time {clone_time:?})"
             ))
         } else {
             None
