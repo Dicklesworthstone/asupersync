@@ -218,10 +218,47 @@ impl SymbolDistributor {
         transport: &T,
         auth_context: &SecurityContext,
     ) -> DistributionResult {
+        self.distribute_with_strategy(
+            cx, encoded, replicas, transport, auth_context, AssignmentStrategy::Full,
+        ).await
+    }
+
+    /// Distribute an explicit symbol layout through the same bounded fanout.
+    ///
+    /// `Full` preserves [`Self::distribute`]. Other strategies send only each
+    /// replica's assigned symbols. Acknowledgement quorum counts distinct
+    /// replicas; it does not prove that their combined symbols can reconstruct
+    /// the object. Checkpoint publication performs that additional check before
+    /// returning authenticated recovery metadata. Hedging may stop before an
+    /// erasure-coded layout has enough independent symbols for recovery.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn distribute_with_strategy<T: DistributorTransport>(
+        &mut self,
+        cx: &Cx,
+        encoded: &EncodedState,
+        replicas: &[ReplicaInfo],
+        transport: &T,
+        auth_context: &SecurityContext,
+        strategy: AssignmentStrategy,
+    ) -> DistributionResult {
+        let assignments = Self::compute_assignments_with_strategy(
+            encoded, replicas, auth_context, None, strategy,
+        );
+        self.distribute_assignments(cx, encoded, assignments, transport, auth_context).await
+    }
+
+    // Checkpoint preparation retains the exact plan it authenticated. Do not
+    // recompute placement after validating per-replica batch digests.
+    pub(crate) async fn distribute_assignments<T: DistributorTransport>(
+        &mut self,
+        cx: &Cx,
+        encoded: &EncodedState,
+        assignments: Vec<super::assignment::ReplicaAssignment>,
+        transport: &T,
+        auth_context: &SecurityContext,
+    ) -> DistributionResult {
         let timer = cx.timer_driver();
         let start = driver::now(timer.as_ref());
-        let assignments =
-            Self::compute_assignments_with_auth(encoded, replicas, auth_context, None);
         let fanout = driver::run(
             &self.config, cx, encoded, assignments, transport, auth_context, timer.clone(),
         ).await;
@@ -284,7 +321,23 @@ impl SymbolDistributor {
         security_context: &SecurityContext,
         region_id: Option<&str>,
     ) -> Vec<super::assignment::ReplicaAssignment> {
-        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        Self::compute_assignments_with_strategy(
+            encoded, replicas, security_context, region_id, AssignmentStrategy::Full,
+        )
+    }
+
+    /// Computes an explicit placement without changing the full-copy defaults.
+    /// Unauthorized replicas are filtered using the supplied security context.
+    #[inline]
+    #[must_use]
+    pub fn compute_assignments_with_strategy(
+        encoded: &EncodedState,
+        replicas: &[ReplicaInfo],
+        security_context: &SecurityContext,
+        region_id: Option<&str>,
+        strategy: AssignmentStrategy,
+    ) -> Vec<super::assignment::ReplicaAssignment> {
+        let assigner = SymbolAssigner::new(strategy);
         assigner.assign(
             &encoded.symbols,
             replicas,
@@ -761,6 +814,38 @@ mod tests {
         assert!(!result.quorum_achieved);
         assert!(result.acks.is_empty());
         assert_eq!(result.symbols_distributed, 0);
+    }
+
+    #[test]
+    fn explicit_striped_distribution_sends_each_symbol_once_and_keeps_full_default() {
+        struct RecordingTransport(std::sync::Mutex<Vec<(String, Vec<u32>)>>);
+        impl DistributorTransport for RecordingTransport {
+            async fn send_symbols(&self, replica: &str, symbols: Vec<AuthenticatedSymbol>) -> Result<ReplicaAck, ReplicaFailure> {
+                let indices = symbols.iter().map(|symbol| symbol.symbol().esi()).collect();
+                self.0.lock().unwrap().push((replica.to_owned(), indices));
+                Ok(make_ack(replica, u32::try_from(symbols.len()).unwrap()))
+            }
+        }
+        let replicas = create_test_replicas(3);
+        let encoded = create_test_encoded_state();
+        let security = authorized_security_context(&replicas);
+        let cx = Cx::for_testing();
+        let transport = RecordingTransport(std::sync::Mutex::new(Vec::new()));
+        let mut distributor = SymbolDistributor::new(DistributionConfig::default());
+        let striped = futures_lite::future::block_on(distributor.distribute_with_strategy(
+            &cx, &encoded, &replicas, &transport, &security, AssignmentStrategy::Striped,
+        ));
+        assert!(striped.quorum_achieved);
+        assert_eq!(striped.symbols_distributed, 10);
+        assert_eq!(*transport.0.lock().unwrap(), vec![
+            ("r0".into(), vec![0, 3, 6, 9]), ("r1".into(), vec![1, 4, 7]), ("r2".into(), vec![2, 5, 8]),
+        ]);
+        let full = futures_lite::future::block_on(distributor.distribute(
+            &cx, &encoded, &replicas, &MockSuccessTransport, &security,
+        ));
+        assert_eq!(full.symbols_distributed, 30);
+        assert!(full.acks.iter().all(|ack| ack.symbols_received == 10));
+        assert_eq!(distributor.metrics.symbols_sent_total, 40);
     }
 
     /// br-asupersync-307rnt: distribute() reads its start/end

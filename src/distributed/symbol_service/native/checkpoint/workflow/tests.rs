@@ -55,8 +55,9 @@ fn report(draft: &RecoveryManifest, count: u32) -> DistributionResult {
 }
 fn draft() -> (RecoveryManifest, u32, usize) {
     let transport = transport(); let (encoded, expected, security, replicas) = source();
-    prepare(&transport, &SymbolDistributor::new(Default::default()), &encoded, &replicas, &security,
-        &CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(99) }, config()).unwrap()
+    let (draft, count, required, _) = prepare(&transport, &SymbolDistributor::new(Default::default()), &encoded, &replicas, &security,
+        &CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(99) }, config()).unwrap();
+    (draft, count, required)
 }
 fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
@@ -199,4 +200,142 @@ fn signing_context_must_match_the_transports_verification_key_before_dispatch() 
     assert!(matches!(prepare(&transport, &SymbolDistributor::new(Default::default()), &encoded, &replicas,
         &wrong, &authority, config()), Err(CheckpointError::Batch(SymbolStoreError::Authentication))));
     assert_eq!(transport.in_flight(), 0);
+}
+
+fn stripe_report(encoded: &EncodedState, stripes: &[Stripe], replicas: &[&str]) -> DistributionResult {
+    let acks: Vec<_> = replicas.iter().map(|id| {
+        let stripe = stripes.iter().find(|stripe| stripe.assignment.replica_id == *id).unwrap();
+        ReplicaAck { replica_id: (*id).into(), symbols_received: stripe.count, ack_time: Time::ZERO }
+    }).collect();
+    DistributionResult { object_id: encoded.params.object_id,
+        symbols_distributed: acks.iter().map(|ack| ack.symbols_received).sum(), acks,
+        failures: Vec::new(), quorum_achieved: true, duration: Duration::ZERO }
+}
+
+#[test]
+fn striped_receipts_bind_per_replica_counts_and_seal_distinct_batch_keys() {
+    let transport = transport(); let (encoded, expected, security, replicas) = source();
+    let authority = CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(99) };
+    let (mut draft, _, required, snapshot) = prepare(&transport, &SymbolDistributor::new(Default::default()),
+        &encoded, &replicas, &security, &authority, config()).unwrap();
+    let digest = Sha256::digest(snapshot.to_bytes()).into();
+    let stripes = prepare_stripes(&transport, &encoded, &replicas, &security).unwrap();
+    assert_eq!(stripes.iter().map(|stripe| stripe.count as usize).sum::<usize>(), encoded.symbols.len());
+    for replica in &mut draft.replicas {
+        let stripe = stripes.iter().find(|stripe| stripe.assignment.replica_id == replica.replica_id).unwrap();
+        replica.key = stripe.key;
+        assert!((stripe.count as usize) < encoded.source_count as usize);
+    }
+    assert_ne!(stripes[0].key, stripes[1].key);
+    assert_ne!(stripes[1].key, stripes[2].key);
+    let report = stripe_report(&encoded, &stripes, &["a", "b", "c"]);
+    let result = seal_striped(&transport, draft, report, &stripes, &encoded, required, digest,
+        &authority, config().manifest).unwrap();
+    let restored = RecoveryManifest::from_canonical_bytes(result.encoded_manifest(), authority.manifest_key,
+        expected, &NodeId::new("origin"), config().manifest).unwrap();
+    for (actual, stripe) in restored.replicas().iter().zip(&stripes) {
+        assert_eq!(actual.replica_id, stripe.assignment.replica_id);
+        assert_eq!(actual.key, stripe.key);
+    }
+}
+
+#[test]
+fn striped_quorum_without_enough_surviving_symbols_never_returns_a_manifest() {
+    let transport = transport(); let (encoded, expected, security, replicas) = source();
+    let authority = CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(99) };
+    let (draft, _, required, snapshot) = prepare(&transport, &SymbolDistributor::new(Default::default()),
+        &encoded, &replicas, &security, &authority, config()).unwrap();
+    let stripes = prepare_stripes(&transport, &encoded, &replicas, &security).unwrap();
+    let report = stripe_report(&encoded, &stripes, &["a", "b"]);
+    assert!(report.symbols_distributed < u32::from(encoded.source_count));
+    let result = seal_striped(&transport, draft, report, &stripes, &encoded, required,
+        Sha256::digest(snapshot.to_bytes()).into(), &authority, config().manifest);
+    let Err(CheckpointError::InsufficientCoverage { distribution }) = result else { panic!("insufficient union sealed"); };
+    assert!(distribution.quorum_achieved);
+    assert_eq!(distribution.acks.len(), 2);
+}
+
+#[test]
+fn striped_symbol_count_cannot_substitute_for_reconstruction_of_every_source_block() {
+    let transport = transport(); let (_, expected, security, replicas) = source();
+    let mut snapshot = RegionSnapshot::empty(expected.region_id);
+    snapshot.origin_id = expected.origin_id; snapshot.epoch = expected.epoch; snapshot.sequence = expected.sequence;
+    snapshot.metadata = vec![83; 768]; snapshot.sign(&AuthKey::from_seed(88));
+    let mut encoder = StateEncoder::new(EncodingConfig { symbol_size: 128, max_source_blocks: 2,
+        min_repair_symbols: 32, repair_overhead: 1.0, path_quality: None }, DetRng::new(3));
+    let mut encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+    assert_eq!(encoded.params.source_blocks, 2);
+    let mut first: Vec<_> = encoded.symbols.iter().filter(|symbol| symbol.sbn() == 0).cloned().collect();
+    let mut second: Vec<_> = encoded.symbols.iter().filter(|symbol| symbol.sbn() == 1 && symbol.kind().is_source()).cloned().collect();
+    second.push(encoded.symbols.iter().find(|symbol| symbol.sbn() == 1 && symbol.kind().is_repair()).unwrap().clone());
+    first.truncate(second.len() * 2);
+    assert_eq!(first.len(), second.len() * 2);
+    // A real round-robin assignment now places every block-1 equation on c.
+    encoded.symbols.clear();
+    let mut first = first.into_iter();
+    for symbol in second {
+        encoded.symbols.push(first.next().unwrap()); encoded.symbols.push(first.next().unwrap()); encoded.symbols.push(symbol);
+    }
+    encoded.repair_count = u16::try_from(encoded.symbols.len() - usize::from(encoded.source_count)).unwrap();
+    let authority = CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(99) };
+    let (draft, _, required, snapshot) = prepare(&transport, &SymbolDistributor::new(Default::default()),
+        &encoded, &replicas, &security, &authority, config()).unwrap();
+    let stripes = prepare_stripes(&transport, &encoded, &replicas, &security).unwrap();
+    let report = stripe_report(&encoded, &stripes, &["a", "b"]);
+    assert!(report.symbols_distributed >= u32::from(encoded.source_count));
+    assert!(stripes[..2].iter().flat_map(|stripe| &stripe.assignment.symbol_indices)
+        .all(|&index| encoded.symbols[index].sbn() == 0));
+    assert!(matches!(seal_striped(&transport, draft, report, &stripes, &encoded, required,
+        Sha256::digest(snapshot.to_bytes()).into(), &authority, config().manifest),
+        Err(CheckpointError::InsufficientCoverage { .. })));
+}
+
+#[test]
+fn striped_source_rejects_duplicate_symbol_ids_and_unauthorized_targets_before_dispatch() {
+    let transport = transport(); let (mut encoded, expected, security, replicas) = source();
+    let authority = CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(99) };
+    encoded.symbols.push(encoded.symbols[0].clone());
+    assert!(matches!(prepare(&transport, &SymbolDistributor::new(Default::default()), &encoded, &replicas,
+        &security, &authority, config()), Err(CheckpointError::Batch(SymbolStoreError::Identity))));
+    encoded.symbols.pop();
+    let unauthorized = SecurityContext::new(AuthKey::from_seed(42));
+    unauthorized.authorize_replica("a", None).unwrap();
+    assert!(matches!(prepare(&transport, &SymbolDistributor::new(Default::default()), &encoded, &replicas,
+        &unauthorized, &authority, config()), Err(CheckpointError::Configuration)));
+    assert_eq!(transport.in_flight(), 0);
+}
+
+#[test]
+fn striped_outgoing_batch_drift_is_rejected_before_the_native_client_is_called() {
+    let transport = transport(); let (encoded, _, security, replicas) = source();
+    let stripes = prepare_stripes(&transport, &encoded, &replicas, &security).unwrap();
+    let checked = CheckedStripedTransport { inner: &transport, stripes: &stripes };
+    let wrong_stripe: Vec<_> = stripes[1].assignment.symbol_indices.iter()
+        .map(|&index| security.sign_symbol(&encoded.symbols[index])).collect();
+    let error = immediate(checked.send_symbols("a", wrong_stripe)).unwrap_err();
+    assert_eq!(error.error_kind, ErrorKind::ProtocolError);
+    assert_eq!(error.replica_id, "a");
+    assert_eq!(transport.in_flight(), 0);
+}
+
+#[test]
+fn striped_exact_source_digest_and_per_replica_receipts_cannot_be_substituted() {
+    for case in 0..4 {
+        let transport = transport(); let (encoded, expected, security, replicas) = source();
+        let authority = CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(99) };
+        let (draft, _, required, snapshot) = prepare(&transport, &SymbolDistributor::new(Default::default()),
+            &encoded, &replicas, &security, &authority, config()).unwrap();
+        let stripes = prepare_stripes(&transport, &encoded, &replicas, &security).unwrap();
+        let mut report = stripe_report(&encoded, &stripes, &["a", "b", "c"]);
+        let mut digest: [u8; 32] = Sha256::digest(snapshot.to_bytes()).into();
+        match case {
+            0 => report.acks[0].symbols_received += 1,
+            1 => report.acks[0].replica_id = "b".into(),
+            2 => report.acks[0].replica_id = "unknown".into(),
+            _ => digest[0] ^= 1,
+        }
+        let result = seal_striped(&transport, draft, report, &stripes, &encoded, required, digest, &authority, config().manifest);
+        if case == 3 { assert!(matches!(result, Err(CheckpointError::InsufficientCoverage { .. }))); }
+        else { assert!(matches!(result, Err(CheckpointError::Configuration))); }
+    }
 }
