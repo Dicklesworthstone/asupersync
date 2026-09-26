@@ -345,6 +345,73 @@ fn nothing_reads_green_without_evidence() {
     );
 }
 
+/// The worker killed rustc (out of memory); `before` is logged ahead of the kill.
+fn compiler_killed(before: &str) -> String {
+    format!(
+        "  INFO rch::hook: Selected worker: vmi1149989 at ubuntu@host\n{before}error: could not compile `asupersync` (lib test)\n\nCaused by:\n  process didn't exit successfully: `/root/.rustup/toolchains/nightly-2026-08-31-x86_64-unknown-linux-gnu/bin/rustc --crate-name asupersync --edition=2024 src/lib.rs --test -C debuginfo=2` (signal: 9, SIGKILL: kill)\n  Remote command finished: exit=101 in 1363895ms\n"
+    )
+}
+
+#[test]
+fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_beside_it() {
+    let head = sha(9);
+    let one = |id: &str, kind: &str| json!({"id": id, "kind": kind, "argv": ["cargo"], "expected_targets": []});
+    let failed_test = "     Running tests/alpha_native.rs (target/debug/deps/alpha_native-abc)\nrunning 1 test\ntest boom ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n";
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [
+                one("killed-build", "build"),
+                one("killed-test", "test"),
+                one("killed-beside-real-error", "build"),
+                one("killed-beside-failed-test", "test"),
+                one("test-binary-killed", "test"),
+            ],
+        },
+        "lane_logs": {
+            "killed-build": {head.clone(): {"log": compiler_killed("")}},
+            "killed-test": {head.clone(): {"log": compiler_killed("")}},
+            "killed-beside-real-error": {head.clone(): {"log": compiler_killed(
+                "src/lib.rs:10:5: error[E0599]: no method named `frob` found\n"
+            )}},
+            "killed-beside-failed-test": {head.clone(): {"log": compiler_killed(failed_test)}},
+            "test-binary-killed": {head.clone(): {"log": "     Running tests/alpha_native.rs (target/debug/deps/alpha_native-abc)\nrunning 2 tests\nerror: test failed, to rerun pass `--test alpha_native`\n\nCaused by:\n  process didn't exit successfully: `/data/tmp/rch/x/target/debug/deps/alpha_native-abc` (signal: 9, SIGKILL: kill)\n  Remote command finished: exit=101 in 1000ms\n"}},
+        },
+    });
+    let result = evaluate(&scenario);
+    for lane in ["killed-build", "killed-test"] {
+        let outcome = receipt(&result, lane);
+        assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
+        assert!(
+            outcome["reason"].as_str().expect("reason").contains("signal 9"),
+            "{lane}: {outcome:#}"
+        );
+    }
+    // A real diagnostic, a failed test, or a killed test binary (which the code under
+    // test can cause) is still red.
+    for lane in [
+        "killed-beside-real-error",
+        "killed-beside-failed-test",
+        "test-binary-killed",
+    ] {
+        assert_eq!(receipt(&result, lane)["verdict"], "red", "{lane}: {result:#}");
+    }
+    let filed: Vec<&str> = result["bead_payloads"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|payload| payload["lane"].as_str())
+        .collect();
+    assert!(
+        !filed.contains(&"killed-build") && !filed.contains(&"killed-test"),
+        "a killed compiler must never file a bead: {filed:?}"
+    );
+    assert!(
+        result["state"].get("last_covered").is_none(),
+        "an undecided lane does not cover the batch"
+    );
+}
+
 #[test]
 fn predicates_match_real_phrasings_and_reject_look_alikes() {
     let scenario = json!({

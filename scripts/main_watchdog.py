@@ -125,6 +125,8 @@ COULD_NOT_COMPILE_RE = re.compile(r"error: could not compile `([^`]+)`(?: \(([^)
 FIRST_ERROR_RE = re.compile(r"^(?:\S+\.rs:\d+:\d+: error(?:\[E\d+\])?:.*|error(?:\[E\d+\])?: (?!could not compile|aborting).*)$")
 FAILED_TEST_RE = re.compile(r"^test (\S+) \.\.\. FAILED$")
 NO_TARGET_RE = re.compile(r"error: no (?:test|bin|example|bench) target named `([^`]+)`")
+# rustc itself was killed (the worker ran out of memory): it never reached a verdict.
+COMPILER_KILLED_RE = re.compile(r"process didn't exit successfully: `(?:[^`\s]*/)?rustc [^`]*` \(signal: 9, SIGKILL: kill\)")
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -498,8 +500,16 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         failing.append(f"{match.group(1)} ({match.group(2)})" if match.group(2) else match.group(1))
     first_error = next((line.strip() for line in lines if FIRST_ERROR_RE.match(line.strip())), "")
     finished = any(line.strip().startswith("Finished `") for line in lines)
+    # A compiler killed on the worker proves nothing about the code. With no real
+    # diagnostic beside it the lane is undecided, not red: such a red was once bisected
+    # to an innocent commit (lib test, vmi workers, 2026-09-25).
+    compiler_killed = bool(COMPILER_KILLED_RE.search(clean)) and not first_error
+    killed_reason = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
 
     if lane["kind"] == "build":
+        if compiler_killed:
+            result["reason"] = killed_reason
+            return result
         if failing or remote_exit != 0:
             result.update(
                 verdict=VERDICT_RED,
@@ -548,6 +558,9 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     # Informational: a changed module whose filter selected no executed test has no unit
     # test here; the lane still vouches only for what it ran.
     result["unexercised_filters"] = [f for f in lane.get("lib_filters", []) if not any(f in name for name in lib_tests)]
+    if compiler_killed and not failed_tests and not counts["failed"]:
+        result["reason"] = killed_reason
+        return result
     if failing or counts["failed"] or failed_tests or remote_exit != 0:
         result.update(
             verdict=VERDICT_RED,
