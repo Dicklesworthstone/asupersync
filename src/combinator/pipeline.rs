@@ -123,7 +123,8 @@ pub struct PipelineExecutionReport<E> {
     /// Counters also available on partial/failing execution.
     pub summary: PipelineExecutionSummary,
     /// First observed typed error displaced by stage ordering or a stronger outcome.
-    /// A concrete failure takes precedence over a channel disconnection.
+    /// A channel disconnection is a consequence of another party's exit, never
+    /// an initiating failure, so it is not retained here.
     pub suppressed_error: Option<PipelineExecutionError<E>>,
 }
 
@@ -635,19 +636,19 @@ impl<E> PipelineOwner<E> {
         was_current: bool,
     ) {
         let outcome = match outcome {
+            // A disconnection is only ever the consequence of another party's
+            // exit, never the initiating failure. Whether a sibling observes
+            // it before its own cancellation depends on scheduling, so
+            // retaining it made `error()` report `Disconnected` beside a
+            // panic or cancellation on some runs and nothing on others.
             Outcome::Err(error)
-                if (self.suppressed_error.is_none()
-                    || (matches!(
-                        self.suppressed_error.as_ref(),
-                        Some(PipelineExecutionError::Disconnected)
-                    ) && !matches!(&error, PipelineExecutionError::Disconnected)))
+                if !matches!(&error, PipelineExecutionError::Disconnected)
+                    && self.suppressed_error.is_none()
                     && (was_current
                         || self.failure.as_ref().is_some_and(|(_, current)| {
                             current.severity() > crate::types::outcome::Severity::Err
                         })) =>
             {
-                // The only replaced value is Disconnected, which owns no user
-                // data. Concrete error destructors still use the guarded path.
                 self.suppressed_error = Some(error);
                 return;
             }
@@ -1818,6 +1819,39 @@ mod tests {
                     1 => assert!(report.outcome.is_cancelled()),
                     _ => assert!(report.outcome.is_panicked()),
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn a_consequential_disconnection_is_never_reported_beside_a_stronger_outcome() {
+        // A sibling that sees its channel close before its own cancellation
+        // reports Disconnected. That is a consequence of the stronger exit, so
+        // `error()` must stay None whichever the scheduler records first
+        // (e2e_stream_pipeline's panic control failed on some runs only).
+        for disconnection_first in [true, false] {
+            for panic in [false, true] {
+                let cx = Cx::for_testing();
+                let mut owner: PipelineOwner<&'static str> = PipelineOwner::new(cx.clone(), 2);
+                let stronger = if panic {
+                    Outcome::Panicked(PanicPayload::new("stage panic"))
+                } else {
+                    pipeline_cancelled(&cx)
+                };
+                if disconnection_first {
+                    owner.record(0, Outcome::Err(PipelineExecutionError::Disconnected));
+                    owner.record(1, stronger);
+                } else {
+                    owner.record(1, stronger);
+                    owner.record(0, Outcome::Err(PipelineExecutionError::Disconnected));
+                }
+                let report = owner.finish();
+                assert!(
+                    report.error().is_none(),
+                    "disconnection_first={disconnection_first}, panic={panic}: {report:?}"
+                );
+                assert_eq!(report.outcome.is_panicked(), panic, "{report:?}");
+                assert_eq!(report.outcome.is_cancelled(), !panic, "{report:?}");
             }
         }
     }
