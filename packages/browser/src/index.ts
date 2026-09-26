@@ -6919,6 +6919,8 @@ function browserArtifactFailureReasonFromError(
   error: unknown,
   fallback: BrowserArtifactFailureReason,
 ): BrowserArtifactFailureReason {
+  if (typeof error === "object" && error !== null && "name" in error &&
+      error.name === "QuotaExceededError") return "quota_exceeded";
   const code =
     typeof error === "object" && error !== null && "code" in error
       ? (error as { code?: string }).code
@@ -7011,6 +7013,161 @@ function browserUrlLike(
   return urlLike;
 }
 
+/** Requests made by an artifact operation stay inside one host transaction. */
+interface BrowserArtifactTransaction {
+  get(key: string, consume: (bytes: Uint8Array | null) => void): void;
+  set(key: string, bytes: Uint8Array): void;
+  delete(key: string): void;
+  clear(consume: (count: number) => void): void;
+}
+
+async function runBrowserArtifactTransaction<T>(
+  storage: BrowserStorage,
+  namespace: string,
+  mode: "readonly" | "readwrite",
+  execute: (transaction: BrowserArtifactTransaction, finish: (value: T) => void) => void,
+): Promise<T> {
+  assertBrowserStorageSupport(storage.diagnostics());
+  if (storage.backend === "indexeddb") {
+    const database = await openIndexedDbDatabase(
+      storage.globalObject, storage.dbName, storage.storeName, storage.version,
+      storage.onIndexedDbBlocked,
+    );
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        const { transaction, store } = openIndexedDbStore(database, storage.storeName, mode);
+        let result: T;
+        let hasResult = false;
+        let failure: unknown;
+        const guard = (action: () => void): void => {
+          try { action(); }
+          catch (error) {
+            failure ??= error;
+            try { transaction.abort(); }
+            catch { reject(failure); }
+          }
+        };
+        transaction.onerror = () => { failure ??= transaction.error; };
+        transaction.onabort = () => reject(
+          failure ?? transaction.error ?? new Error("IndexedDB artifact transaction aborted"),
+        );
+        transaction.oncomplete = () => {
+          if (hasResult) resolve(result);
+          else reject(new Error("IndexedDB artifact transaction completed without a result"));
+        };
+        const key = (value: string): string =>
+          encodeIndexedDbStorageKey(namespace, value, storage.globalObject);
+        const view: BrowserArtifactTransaction = {
+          get(value, consume) {
+            const request = store.get(key(value));
+            request.onsuccess = () => guard(() => consume(
+              request.result === undefined || request.result === null
+                ? null
+                : compactIndexedDbBytes(normalizeBrowserStorageValue(request.result)),
+            ));
+          },
+          set(value, bytes) { store.put(compactIndexedDbBytes(bytes), key(value)); },
+          delete(value) { store.delete(key(value)); },
+          clear(consume) {
+            const range = indexedDbNamespaceRange(namespace, storage.globalObject);
+            const request = store.count(range);
+            request.onsuccess = () => guard(() => consume(request.result));
+            store.delete(range);
+          },
+        };
+        // Callbacks queue their next requests while the transaction is active;
+        // no unrelated promise or user work can let it auto-commit midway.
+        guard(() => execute(view, (value) => { result = value; hasResult = true; }));
+      });
+    } finally { database.close(); }
+  }
+
+  const local = browserLocalStorage(storage.globalObject);
+  if (!local) throw createBrowserStorageUnsupportedError(storage.diagnostics());
+  const prefix = localStorageNamespacePrefix(namespace, storage.globalObject);
+  const indexKey = encodeLocalStorageKey(namespace, BROWSER_ARTIFACT_INDEX_KEY, storage.globalObject);
+  const run = (): T => {
+    const pending = new Map<string, string | null>();
+    const key = (value: string): string =>
+      encodeLocalStorageKey(namespace, value, storage.globalObject);
+    const ensureWritable = (): void => {
+      if (mode !== "readwrite") throw new Error("artifact transaction is readonly");
+    };
+    let result: T;
+    let hasResult = false;
+    const view: BrowserArtifactTransaction = {
+      get(value, consume) {
+        const encoded = key(value);
+        const raw = pending.has(encoded) ? pending.get(encoded)! : local.getItem(encoded);
+        const bytes = raw === null ? null : decodeBrowserStorageBytes(raw, storage.globalObject);
+        if (raw !== null && bytes === null) throw new Error("invalid BrowserStorage value");
+        consume(bytes);
+      },
+      set(value, bytes) {
+        ensureWritable();
+        pending.set(key(value), encodeBrowserStorageBytes(bytes, storage.globalObject));
+      },
+      delete(value) { ensureWritable(); pending.set(key(value), null); },
+      clear(consume) {
+        ensureWritable();
+        const keys = new Set<string>();
+        for (let index = 0; index < local.length; index += 1) {
+          const raw = local.key(index);
+          if (raw?.startsWith(prefix)) keys.add(raw);
+        }
+        for (const [raw, value] of pending) {
+          if (value === null) keys.delete(raw);
+          else keys.add(raw);
+        }
+        for (const raw of keys) pending.set(raw, null);
+        consume(keys.size);
+      },
+    };
+    // There is deliberately no await between the first read and publication.
+    execute(view, (value) => { result = value; hasResult = true; });
+    if (!hasResult) throw new Error("localStorage artifact transaction did not finish synchronously");
+    const originals = new Map<string, string | null>();
+    for (const raw of pending.keys()) originals.set(raw, local.getItem(raw));
+    try {
+      // Free evicted bytes before writing their replacements. Publish the index
+      // last, and restore the original namespace values if a host write fails.
+      for (const [raw, value] of pending) if (value === null) local.removeItem(raw);
+      for (const [raw, value] of pending) {
+        if (value !== null && raw !== indexKey) local.setItem(raw, value);
+      }
+      if (pending.has(indexKey) && pending.get(indexKey) !== null) {
+        local.setItem(indexKey, pending.get(indexKey)!);
+      }
+    } catch (error) {
+      let rollbackFailure: unknown;
+      for (const raw of originals.keys()) {
+        try { local.removeItem(raw); } catch (failure) { rollbackFailure ??= failure; }
+      }
+      for (const [raw, value] of originals) {
+        if (value !== null) {
+          try { local.setItem(raw, value); } catch (failure) { rollbackFailure ??= failure; }
+        }
+      }
+      if (rollbackFailure !== undefined) {
+        throw new Error(`localStorage artifact rollback failed: ${errorMessage(rollbackFailure)}; original failure: ${errorMessage(error)}`);
+      }
+      throw error;
+    }
+    return result!;
+  };
+  const navigator = storage.globalObject?.navigator as {
+    locks?: { request<V>(name: string, options: { mode: "exclusive" | "shared" }, callback: () => V): Promise<V> };
+  } | undefined;
+  if (typeof navigator?.locks?.request === "function") {
+    return navigator.locks.request(`asupersync:artifact:${prefix}`, {
+      mode: mode === "readonly" ? "shared" : "exclusive",
+    }, run);
+  }
+  // Older hosts without Web Locks retain same-realm serialization only.
+  // localStorage cannot provide crash-atomic or cross-tab multi-key writes.
+  return run();
+}
+
 export class BrowserArtifactStore {
   readonly namespace: string;
   readonly retention: BrowserArtifactRetentionPolicy;
@@ -7093,10 +7250,16 @@ export class BrowserArtifactStore {
     );
   }
 
-  private async namespaceKeys(operation: BrowserArtifactOperation): Promise<string[]> {
+  private async transaction<T>(
+    operation: BrowserArtifactOperation,
+    mode: "readonly" | "readwrite",
+    execute: (transaction: BrowserArtifactTransaction, finish: (value: T) => void) => void,
+  ): Promise<T> {
     try {
-      return await this.storage.listKeys(this.namespace);
+      return await runBrowserArtifactTransaction(this.storage, this.namespace, mode, execute);
     } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error &&
+          error.code === BROWSER_ARTIFACT_OPERATION_FAILED_CODE) throw error;
       throw this.operationError(
         operation,
         browserArtifactFailureReasonFromError(error, "storage_failed"),
@@ -7105,30 +7268,7 @@ export class BrowserArtifactStore {
     }
   }
 
-  private async clearNamespace(operation: BrowserArtifactOperation): Promise<number> {
-    try {
-      return await this.storage.clearNamespace(this.namespace);
-    } catch (error) {
-      throw this.operationError(
-        operation,
-        browserArtifactFailureReasonFromError(error, "storage_failed"),
-        errorMessage(error),
-      );
-    }
-  }
-
-  private async readIndex(operation: BrowserArtifactOperation): Promise<BrowserArtifactIndex> {
-    let raw: Uint8Array | null;
-    try {
-      raw = await this.storage.get(this.namespace, BROWSER_ARTIFACT_INDEX_KEY);
-    } catch (error) {
-      throw this.operationError(
-        operation,
-        browserArtifactFailureReasonFromError(error, "storage_failed"),
-        errorMessage(error),
-      );
-    }
-
+  private readIndex(raw: Uint8Array | null, operation: BrowserArtifactOperation): BrowserArtifactIndex {
     if (raw === null) {
       return emptyBrowserArtifactIndex(this.retention);
     }
@@ -7144,6 +7284,8 @@ export class BrowserArtifactStore {
         throw new Error("browser artifact index schema mismatch");
       }
 
+      const ids = new Set<string>();
+      const sequences = new Set<number>();
       const entries = parsed.entries.map((entry) => {
         if (!entry || typeof entry !== "object") {
           throw new Error("browser artifact index entry must be an object");
@@ -7159,6 +7301,17 @@ export class BrowserArtifactStore {
         ) {
           throw new Error("browser artifact index entry is missing required fields");
         }
+        if (!Number.isSafeInteger(candidate.byteLength) || candidate.byteLength < 0 ||
+            !Number.isSafeInteger(candidate.sequence) || candidate.sequence < 0) {
+          throw new Error("browser artifact index counters must be nonnegative safe integers");
+        }
+        if (normalizeBrowserArtifactId(candidate.id) !== candidate.id ||
+            candidate.payloadKey !== `artifact:${candidate.sequence.toString().padStart(6, "0")}:${encodeBrowserStorageSegment(candidate.id, this.storage.globalObject)}` ||
+            ids.has(candidate.id) || sequences.has(candidate.sequence)) {
+          throw new Error("browser artifact index contains aliased or noncanonical entries");
+        }
+        ids.add(candidate.id);
+        sequences.add(candidate.sequence);
         if (
           candidate.kind !== "trace" &&
           candidate.kind !== "crashpack" &&
@@ -7183,8 +7336,8 @@ export class BrowserArtifactStore {
           format: candidate.format,
           filename: candidate.filename,
           contentType: candidate.contentType,
-          byteLength: Math.max(0, Math.trunc(candidate.byteLength)),
-          sequence: Math.max(0, Math.trunc(candidate.sequence)),
+          byteLength: candidate.byteLength,
+          sequence: candidate.sequence,
           tags: normalizeBrowserArtifactTags(tags),
           payloadKey: candidate.payloadKey,
         };
@@ -7192,13 +7345,15 @@ export class BrowserArtifactStore {
 
       entries.sort((left, right) => right.sequence - left.sequence);
       const highestSequence = entries.reduce((max, entry) => Math.max(max, entry.sequence), 0);
+      const nextSequence = parsed.nextSequence ?? highestSequence;
+      if (!Number.isSafeInteger(nextSequence) || nextSequence < 0 ||
+          !Number.isSafeInteger(sumBrowserArtifactBytes(entries))) {
+        throw new Error("browser artifact index has unsafe sequence or byte totals");
+      }
 
       return {
         schemaVersion: BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION,
-        nextSequence: Math.max(
-          highestSequence,
-          Math.max(0, Math.trunc(parsed.nextSequence ?? highestSequence)),
-        ),
+        nextSequence: Math.max(highestSequence, nextSequence),
         retention: this.retention,
         entries,
       };
@@ -7207,29 +7362,24 @@ export class BrowserArtifactStore {
     }
   }
 
-  private async writeIndex(
+  private writeIndex(
+    transaction: BrowserArtifactTransaction,
     index: BrowserArtifactIndex,
-    operation: BrowserArtifactOperation,
-  ): Promise<void> {
-    try {
-      if (index.entries.length === 0) {
-        await this.storage.delete(this.namespace, BROWSER_ARTIFACT_INDEX_KEY);
-        return;
-      }
-      const payload = browserTextEncoder(this.storage.globalObject).encode(JSON.stringify(index));
-      await this.storage.set(this.namespace, BROWSER_ARTIFACT_INDEX_KEY, payload);
-    } catch (error) {
-      throw this.operationError(
-        operation,
-        browserArtifactFailureReasonFromError(error, "storage_failed"),
-        errorMessage(error),
-      );
+  ): void {
+    if (index.entries.length === 0) {
+      transaction.delete(BROWSER_ARTIFACT_INDEX_KEY);
+      return;
     }
+    const payload = browserTextEncoder(this.storage.globalObject).encode(JSON.stringify(index));
+    transaction.set(BROWSER_ARTIFACT_INDEX_KEY, payload);
   }
 
   async listArtifacts(): Promise<BrowserArtifactRecord[]> {
-    const index = await this.readIndex("list");
-    return index.entries.map(stripBrowserArtifactRecord);
+    return this.transaction("list", "readonly", (transaction, finish) => {
+      transaction.get(BROWSER_ARTIFACT_INDEX_KEY, (raw) => {
+        finish(this.readIndex(raw, "list").entries.map(stripBrowserArtifactRecord));
+      });
+    });
   }
 
   async persistArtifact(
@@ -7237,11 +7387,11 @@ export class BrowserArtifactStore {
   ): Promise<BrowserArtifactPersistResult> {
     const requestedId =
       request.id === undefined ? undefined : normalizeBrowserArtifactId(request.id);
-    const index = await this.readIndex("persist");
     const format = detectBrowserArtifactFormat(request.value, request.format);
     let bytes: Uint8Array;
     try {
-      bytes = normalizeBrowserArtifactBytes(request.value, format, this.storage.globalObject);
+      // Own accepted bytes before waiting for the database or a cross-tab lock.
+      bytes = Uint8Array.from(normalizeBrowserArtifactBytes(request.value, format, this.storage.globalObject));
     } catch (error) {
       throw this.operationError("persist", "serialization_failed", errorMessage(error), request.id);
     }
@@ -7258,13 +7408,48 @@ export class BrowserArtifactStore {
       );
     }
 
+    const kind = request.kind;
+    const requestedFilename = request.filename;
+    const contentType = request.contentType ?? defaultBrowserArtifactContentType(format);
+    const tags = normalizeBrowserArtifactTags(request.tags);
+    if ((kind !== "trace" && kind !== "crashpack" && kind !== "evidence" && kind !== "custom") ||
+        (format !== "binary" && format !== "text" && format !== "json") ||
+        (requestedFilename !== undefined && typeof requestedFilename !== "string") ||
+        typeof contentType !== "string") {
+      throw this.operationError("persist", "serialization_failed", "artifact metadata must use supported kinds and string fields", requestedId);
+    }
+    return this.transaction("persist", "readwrite", (transaction, finish) => {
+      transaction.get(BROWSER_ARTIFACT_INDEX_KEY, (raw) => {
+        const index = this.readIndex(raw, "persist");
+        finish(this.persistInTransaction(transaction, index, {
+          requestedId, kind, format, requestedFilename, contentType, tags, bytes,
+        }));
+      });
+    });
+  }
+
+  private persistInTransaction(
+    transaction: BrowserArtifactTransaction,
+    index: BrowserArtifactIndex,
+    prepared: {
+      requestedId: string | undefined;
+      kind: BrowserArtifactKind;
+      format: BrowserArtifactFormat;
+      requestedFilename: string | undefined;
+      contentType: string;
+      tags: string[];
+      bytes: Uint8Array;
+    },
+  ): BrowserArtifactPersistResult {
+    const { requestedId, kind, format, requestedFilename, contentType, tags, bytes } = prepared;
+    if (index.nextSequence === Number.MAX_SAFE_INTEGER) {
+      throw this.operationError("persist", "corrupt_index", "browser artifact sequence space is exhausted", requestedId);
+    }
     const sequence = index.nextSequence + 1;
     const id =
       requestedId ??
-      normalizeBrowserArtifactId(`${request.kind}-${sequence.toString().padStart(6, "0")}`);
-    const filename = normalizeBrowserArtifactFilename(request.kind, id, format, request.filename);
-    const contentType = request.contentType ?? defaultBrowserArtifactContentType(format);
-    const tags = normalizeBrowserArtifactTags(request.tags);
+      normalizeBrowserArtifactId(`${kind}-${sequence.toString().padStart(6, "0")}`);
+    const filename = normalizeBrowserArtifactFilename(kind, id, format, requestedFilename);
     const payloadKey = `artifact:${sequence.toString().padStart(6, "0")}:${encodeBrowserStorageSegment(id, this.storage.globalObject)}`;
 
     const existing = index.entries.find((entry) => entry.id === id);
@@ -7302,7 +7487,7 @@ export class BrowserArtifactStore {
 
     const entry: BrowserArtifactIndexEntry = {
       id,
-      kind: request.kind,
+      kind,
       format,
       filename,
       contentType,
@@ -7312,17 +7497,6 @@ export class BrowserArtifactStore {
       payloadKey,
     };
 
-    try {
-      await this.storage.set(this.namespace, payloadKey, bytes);
-    } catch (error) {
-      throw this.operationError(
-        "persist",
-        browserArtifactFailureReasonFromError(error, "storage_failed"),
-        errorMessage(error),
-        id,
-      );
-    }
-
     const nextIndex: BrowserArtifactIndex = {
       schemaVersion: BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION,
       nextSequence: sequence,
@@ -7330,17 +7504,12 @@ export class BrowserArtifactStore {
       entries: [...retainedEntries, entry].sort((left, right) => right.sequence - left.sequence),
     };
 
-    try {
-      await this.writeIndex(nextIndex, "persist");
-    } catch (error) {
-      await this.storage.delete(this.namespace, payloadKey).catch(() => false);
-      throw error;
-    }
-
     const staleEntries = [...(existing ? [existing] : []), ...evictedEntries];
     for (const stale of staleEntries) {
-      await this.storage.delete(this.namespace, stale.payloadKey).catch(() => false);
+      transaction.delete(stale.payloadKey);
     }
+    transaction.set(payloadKey, bytes);
+    this.writeIndex(transaction, nextIndex);
 
     return {
       artifact: stripBrowserArtifactRecord(entry),
@@ -7391,38 +7560,25 @@ export class BrowserArtifactStore {
 
   async exportArtifact(id: string): Promise<BrowserArtifactExport> {
     const normalizedId = normalizeBrowserArtifactId(id);
-    const index = await this.readIndex("export");
-    const entry = index.entries.find((artifact) => artifact.id === normalizedId);
-    if (!entry) {
-      throw this.operationError(
-        "export",
-        "artifact_not_found",
-        `browser artifact ${normalizedId} was not found in the current retention window`,
-        normalizedId,
-      );
-    }
-
-    let bytes: Uint8Array | null;
-    try {
-      bytes = await this.storage.get(this.namespace, entry.payloadKey);
-    } catch (error) {
-      throw this.operationError(
-        "export",
-        browserArtifactFailureReasonFromError(error, "storage_failed"),
-        errorMessage(error),
-        normalizedId,
-      );
-    }
-
-    if (bytes === null) {
-      throw this.operationError(
-        "export",
-        "corrupt_index",
-        `browser artifact index references missing payload storage for ${normalizedId}`,
-        normalizedId,
-      );
-    }
-
+    const { entry, bytes } = await this.transaction<{ entry: BrowserArtifactIndexEntry; bytes: Uint8Array }>(
+      "export", "readonly", (transaction, finish) => {
+        transaction.get(BROWSER_ARTIFACT_INDEX_KEY, (raw) => {
+          const index = this.readIndex(raw, "export");
+          const entry = index.entries.find((artifact) => artifact.id === normalizedId);
+          if (!entry) {
+            throw this.operationError("export", "artifact_not_found",
+              `browser artifact ${normalizedId} was not found in the current retention window`, normalizedId);
+          }
+          transaction.get(entry.payloadKey, (bytes) => {
+            if (bytes === null) {
+              throw this.operationError("export", "corrupt_index",
+                `browser artifact index references missing payload storage for ${normalizedId}`, normalizedId);
+            }
+            finish({ entry, bytes });
+          });
+        });
+      },
+    );
     return {
       artifact: stripBrowserArtifactRecord(entry),
       bytes,
@@ -7433,35 +7589,30 @@ export class BrowserArtifactStore {
   }
 
   async exportArchive(): Promise<BrowserArtifactArchiveExport> {
-    const index = await this.readIndex("export_archive");
-    const artifacts: BrowserArtifactArchiveEntry[] = [];
-
-    for (const entry of index.entries) {
-      let bytes: Uint8Array | null;
-      try {
-        bytes = await this.storage.get(this.namespace, entry.payloadKey);
-      } catch (error) {
-        throw this.operationError(
-          "export_archive",
-          browserArtifactFailureReasonFromError(error, "storage_failed"),
-          errorMessage(error),
-          entry.id,
-        );
-      }
-      if (bytes === null) {
-        throw this.operationError(
-          "export_archive",
-          "corrupt_index",
-          `browser artifact index references missing payload storage for ${entry.id}`,
-          entry.id,
-        );
-      }
-      artifacts.push({
-        artifact: stripBrowserArtifactRecord(entry),
-        payloadBase64: encodeBrowserStorageBytes(bytes, this.storage.globalObject),
-      });
-    }
-
+    const artifacts = await this.transaction<BrowserArtifactArchiveEntry[]>(
+      "export_archive", "readonly", (transaction, finish) => {
+        transaction.get(BROWSER_ARTIFACT_INDEX_KEY, (raw) => {
+          const index = this.readIndex(raw, "export_archive");
+          const entries: BrowserArtifactArchiveEntry[] = new Array(index.entries.length);
+          let remaining = entries.length;
+          if (remaining === 0) { finish(entries); return; }
+          index.entries.forEach((entry, offset) => {
+            transaction.get(entry.payloadKey, (bytes) => {
+              if (bytes === null) {
+                throw this.operationError("export_archive", "corrupt_index",
+                  `browser artifact index references missing payload storage for ${entry.id}`, entry.id);
+              }
+              entries[offset] = {
+                artifact: stripBrowserArtifactRecord(entry),
+                payloadBase64: encodeBrowserStorageBytes(bytes, this.storage.globalObject),
+              };
+              remaining -= 1;
+              if (remaining === 0) finish(entries);
+            });
+          });
+        });
+      },
+    );
     const archive: BrowserArtifactArchive = {
       schemaVersion: 1,
       namespace: this.namespace,
@@ -7480,38 +7631,39 @@ export class BrowserArtifactStore {
 
   async deleteArtifact(id: string): Promise<boolean> {
     const normalizedId = normalizeBrowserArtifactId(id);
-    const index = await this.readIndex("delete");
-    const entry = index.entries.find((artifact) => artifact.id === normalizedId);
-    if (!entry) {
-      return false;
-    }
-    const nextIndex: BrowserArtifactIndex = {
-      schemaVersion: BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION,
-      nextSequence: index.nextSequence,
-      retention: this.retention,
-      entries: index.entries.filter((artifact) => artifact.id !== normalizedId),
-    };
-    await this.writeIndex(nextIndex, "delete");
-    await this.storage.delete(this.namespace, entry.payloadKey).catch(() => false);
-    return true;
+    return this.transaction("delete", "readwrite", (transaction, finish) => {
+      transaction.get(BROWSER_ARTIFACT_INDEX_KEY, (raw) => {
+        const index = this.readIndex(raw, "delete");
+        const entry = index.entries.find((artifact) => artifact.id === normalizedId);
+        if (!entry) { finish(false); return; }
+        const nextIndex: BrowserArtifactIndex = {
+          schemaVersion: BROWSER_ARTIFACT_INDEX_SCHEMA_VERSION,
+          nextSequence: index.nextSequence,
+          retention: this.retention,
+          entries: index.entries.filter((artifact) => artifact.id !== normalizedId),
+        };
+        this.writeIndex(transaction, nextIndex);
+        transaction.delete(entry.payloadKey);
+        finish(true);
+      });
+    });
   }
 
   async clearArtifacts(): Promise<number> {
-    try {
-      const index = await this.readIndex("clear");
-      await this.clearNamespace("clear");
-      return index.entries.length;
-    } catch (error) {
-      if (!this.isCorruptIndexError(error)) {
-        throw error;
-      }
-
-      // Recovery path: clear the raw namespace even when the persisted index
-      // is unreadable, so the guidance for corrupt stores stays actionable.
-      const keys = await this.namespaceKeys("clear");
-      await this.clearNamespace("clear");
-      return keys.filter((key) => key !== BROWSER_ARTIFACT_INDEX_KEY).length;
-    }
+    return this.transaction("clear", "readwrite", (transaction, finish) => {
+      transaction.get(BROWSER_ARTIFACT_INDEX_KEY, (raw) => {
+        let count: number;
+        try { count = this.readIndex(raw, "clear").entries.length; }
+        catch (error) {
+          if (!this.isCorruptIndexError(error)) throw error;
+          // Delete raw namespace keys, including malformed records, under the
+          // same transaction that observes the corrupt index.
+          transaction.clear((rawCount) => finish(rawCount - (raw === null ? 0 : 1)));
+          return;
+        }
+        transaction.clear(() => finish(count));
+      });
+    });
   }
 
   async downloadArtifact(id: string): Promise<BrowserArtifactExport> {
