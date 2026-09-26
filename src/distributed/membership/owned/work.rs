@@ -209,11 +209,24 @@ impl OwnedMembershipController {
                 }
                 if cancelled.as_mut().poll(poll_cx).is_ready()
                     || ended.as_mut().poll(poll_cx).is_ready()
-                    || sleep.as_mut().poll(poll_cx).is_ready()
                 {
                     if let Some(cause) = stop(self, cx, &lease, deadline) {
                         return Poll::Ready((cause, None));
                     }
+                }
+                // This timer belongs to the explicit lease owner. An unrelated
+                // ambient Cx cancellation is neither owner cancellation nor
+                // elapsed lease time (br-asupersync-bi2462.168).
+                if sleep.as_mut().poll_deadline(poll_cx).is_ready() {
+                    if let Some(cause) = stop(self, cx, &lease, deadline) {
+                        return Poll::Ready((cause, None));
+                    }
+                    // A coalesced timer may fire before the authoritative
+                    // clock reaches the lease deadline. Reset before retaining
+                    // the Sleep, and schedule a turn to register its next wake.
+                    // Never re-poll a completed Sleep or lose the expiry wake.
+                    sleep.as_mut().get_mut().reset(deadline);
+                    poll_cx.waker().wake_by_ref();
                 }
                 task.poll_join(poll_cx).map(|terminal| {
                     (MembershipWorkTrigger::TaskFinished, Some(terminal.map_err(MembershipWorkTaskError::Join).and_then(|value| value)))

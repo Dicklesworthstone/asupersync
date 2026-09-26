@@ -350,7 +350,10 @@ impl OwnedMembershipController {
             poll_fn(|task| {
                 if cancelled.as_mut().poll(task).is_ready() { return Poll::Ready(Err(OwnedMembershipError::Cancelled)); }
                 if changed.as_mut().poll(task).is_ready() { return Poll::Ready(Ok(())); }
-                if sleep.as_mut().is_some_and(|timer| timer.as_mut().poll(task).is_ready()) { return Poll::Ready(Ok(())); }
+                // Only the explicit owner's cancellation above can stop this
+                // driver. Ambient cancellation must not turn every future
+                // deadline into a ready timer and spin this expiry loop.
+                if sleep.as_mut().is_some_and(|timer| timer.as_mut().poll_deadline(task).is_ready()) { return Poll::Ready(Ok(())); }
                 Poll::Pending
             }).await?;
         }
