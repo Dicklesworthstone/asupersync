@@ -414,6 +414,8 @@ mod tests {
     #[test]
     fn redis_io_observes_cancel_during_registration_replacement() {
         struct CancelOnRetirement(Cx);
+        // Not a no-op waker: retiring it (its Drop) is the cancellation under test.
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for CancelOnRetirement {
             fn wake(self: Arc<Self>) {}
         }
@@ -2715,7 +2717,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "tls")]
+    // `from_url` trusts the bundled webpki roots; with `tls` alone it has no
+    // trust anchors and fails closed (see the test below).
+    #[cfg(feature = "tls-webpki-roots")]
     fn test_redis_tls_hostname_verification_enabled() {
         // SECURITY TEST: Verify TLS connector is configured with hostname verification
         // to prevent MITM attacks (asupersync-xq1qe3)
@@ -2743,6 +2747,22 @@ mod tests {
         let config_plain = RedisConfig::from_url("redis://redis.example.com:6379").unwrap();
         assert!(!config_plain.use_tls);
         assert!(config_plain.tls_connector.is_none());
+    }
+
+    #[test]
+    #[cfg(all(feature = "tls", not(feature = "tls-webpki-roots")))]
+    fn test_redis_tls_url_without_trust_roots_fails_closed() {
+        // Without trust anchors a rediss:// connector could verify no server;
+        // building it must fail rather than yield an unverifiable TLS config.
+        let err = RedisConfig::from_url("rediss://localhost:6380")
+            .expect_err("rediss:// without trust roots must fail closed");
+        assert!(
+            matches!(err, RedisError::InvalidUrl(ref msg) if msg.contains("no root certificates configured")),
+            "{err:?}"
+        );
+        let plain = RedisConfig::from_url("redis://redis.example.com:6379").unwrap();
+        assert!(!plain.use_tls);
+        assert!(plain.tls_connector.is_none());
     }
 
     #[test]

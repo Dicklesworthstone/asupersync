@@ -4184,6 +4184,8 @@ mod tests {
     #[test]
     fn nats_io_observes_cancellation_published_while_retiring_waker() {
         struct CancelOnRetirement(Cx);
+        // Not a no-op waker: retiring it (its Drop) is the cancellation under test.
+        #[allow(clippy::manual_noop_waker)]
         impl std::task::Wake for CancelOnRetirement {
             fn wake(self: Arc<Self>) {}
         }

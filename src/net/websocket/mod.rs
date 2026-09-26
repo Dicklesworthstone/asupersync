@@ -47,6 +47,9 @@
 
 mod client;
 mod close;
+// The negotiation helpers are crate-internal by intent (the web layer calls
+// them); this crate-private module already caps their effective visibility.
+#[allow(clippy::redundant_pub_crate)]
 pub(crate) mod compression;
 mod frame;
 mod handshake;

@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const BASE: &str = r#"
+const BASE: &str = r"
 pub mod pool {
     #[derive(Debug, Clone)]
     pub struct Handle<T> {
@@ -35,7 +35,7 @@ pub mod pool {
 }
 
 pub use pool::Handle;
-"#;
+";
 
 /// Only compatible growth: a new function, a provided trait method, and a public field on a
 /// struct that already had a private one (so nobody outside could construct it).
@@ -80,7 +80,7 @@ pub fn helper() -> u8 {
 
 /// Five planted breaks: a lost `Debug`, a changed return type, a variant on an exhaustive enum,
 /// a required trait method, and a field on a constructible struct.
-const BROKEN: &str = r#"
+const BROKEN: &str = r"
 pub mod pool {
     #[derive(Clone)]
     pub struct Handle<T> {
@@ -112,7 +112,7 @@ pub mod pool {
 }
 
 pub use pool::Handle;
-"#;
+";
 
 fn scratch() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("public_api_diff_contract_{}", std::process::id()));
@@ -177,11 +177,17 @@ fn an_unchanged_surface_diffs_clean() {
 #[test]
 fn compatible_growth_is_reported_but_passes() {
     let dir = scratch();
-    let (code, out) = diff(&render(&dir, "base_a", BASE), &render(&dir, "additive", ADDITIVE));
+    let (code, out) = diff(
+        &render(&dir, "base_a", BASE),
+        &render(&dir, "additive", ADDITIVE),
+    );
     assert_eq!(code, 0, "only additions: the gate must pass");
     let lines: Vec<&str> = out.lines().collect();
     assert!(!lines.is_empty(), "the additions are still listed");
-    assert!(lines.iter().all(|l| l.starts_with("+ ")), "nothing but additions: {lines:?}");
+    assert!(
+        lines.iter().all(|l| l.starts_with("+ ")),
+        "nothing but additions: {lines:?}"
+    );
     for expected in [
         "+ fn surface_fixture::helper fn() -> u8",
         "+ trait_fn surface_fixture::pool::Source::size_hint provided fn(&Self) -> usize",
@@ -194,7 +200,10 @@ fn compatible_growth_is_reported_but_passes() {
 #[test]
 fn every_planted_break_is_flagged_in_its_class() {
     let dir = scratch();
-    let (code, out) = diff(&render(&dir, "base_b", BASE), &render(&dir, "broken", BROKEN));
+    let (code, out) = diff(
+        &render(&dir, "base_b", BASE),
+        &render(&dir, "broken", BROKEN),
+    );
     assert_eq!(code, 1, "a broken surface must fail the gate");
     let lines: Vec<&str> = out.lines().collect();
     for expected in [
@@ -209,7 +218,10 @@ fn every_planted_break_is_flagged_in_its_class() {
         "~- method surface_fixture::pool::Handle::new [impl<T: core::clone::Clone>] fn(T) -> Self",
         "~+ method surface_fixture::pool::Handle::new [impl<T: core::clone::Clone>] fn(T) -> core::option::Option<Self>",
     ] {
-        assert!(lines.contains(&expected), "missing {expected:?} in {lines:?}");
+        assert!(
+            lines.contains(&expected),
+            "missing {expected:?} in {lines:?}"
+        );
     }
     assert!(
         lines.iter().all(|l| !l.starts_with("+ ")),
