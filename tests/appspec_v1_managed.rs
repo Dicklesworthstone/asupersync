@@ -571,8 +571,15 @@ fn managed_app_lab_execution_reaches_quiescence() {
             })
             .unwrap();
         lab.scheduler.lock().schedule(task, 0);
+        // The deadline and interval scenarios park on virtual timers.
+        // run_until_quiescent never advances virtual time, so it idled at
+        // t=0 until max_steps; drive the timers, then take the report.
+        let virtual_time = lab.run_with_auto_advance();
         let report = lab.run_until_quiescent_with_report();
-        assert!(matches!(join.try_join(), Ok(Some(()))), "{report:?}");
+        assert!(
+            matches!(join.try_join(), Ok(Some(()))),
+            "{virtual_time:?} {report:?}"
+        );
         assert!(lab.state.tasks_is_empty(), "managed app left live tasks");
         assert!(lab.state.obligations_iter().all(|(_, o)| !o.is_pending()));
         assert!(report.lab_test_passed(), "{report:?}");
