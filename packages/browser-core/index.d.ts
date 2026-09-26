@@ -309,6 +309,17 @@ export declare function webtransport_open(
   request: WebTransportOpenRequest,
   consumerVersion?: AbiVersion | null,
 ): Outcome<TaskHandle>;
+/**
+ * Admit a datagram to the host write queue. Success means accepted, not delivered.
+ * Each datagram is limited to 65,536 bytes (UTF-8 for strings); each session may
+ * retain at most 256 sends and 1,048,576 bytes, including the in-flight write and
+ * sends waiting for readiness. Input bytes are copied after admission.
+ *
+ * A full queue returns `compatibility_rejected` with `transient` recoverability
+ * without accepting the datagram or closing the session. Retry after host writes
+ * make progress. Oversized or invalid input is a permanent refusal. These limits
+ * cover the browser-core facade, independently of browser and network buffers.
+ */
 export declare function webtransport_send(
   request: WebTransportSendRequest,
   consumerVersion?: AbiVersion | null,

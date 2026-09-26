@@ -67,7 +67,8 @@ async function fixture(t, options = {}) {
     }
   }
   const context = createContext({
-    ArrayBuffer, Uint8Array, URL, TextEncoder, Error, TypeError, RangeError,
+    ArrayBuffer, Uint8Array, URL, TextEncoder: options.TextEncoder ?? TextEncoder,
+    Error, TypeError, RangeError,
     WebTransport: Host,
   });
   const functions = {
@@ -239,4 +240,205 @@ test("WT-RX owner close during input normalization cannot retain a late datagram
   assert.equal(f.state.inbox.length, 0);
   assert.equal(f.core.hostSessions.size, 0);
   assert.equal(f.calls.joins.length, 0, "owner closure, not a second task join, owns retirement");
+});
+
+function assertSendCapacity(outcome) {
+  assert.equal(outcome.outcome, "err");
+  assert.equal(outcome.failure.code, "compatibility_rejected");
+  assert.equal(outcome.failure.recoverability, "transient");
+  assert.match(outcome.failure.message, /send queue capacity exhausted/);
+}
+
+function assertSendReleased(f) {
+  assert.equal(f.state.pendingWrites.length, 0);
+  assert.equal(f.state.pendingWriteCount, 0);
+  assert.equal(f.state.pendingWriteBytes, 0);
+}
+
+test("WT-TX pending readiness is bounded even for empty datagrams", async (t) => {
+  const f = await fixture(t, { pendingHandshake: true });
+  for (let i = 0; i < MAX_COUNT; i += 1) assert.equal(f.send([]).outcome, "ok");
+  assertSendCapacity(f.send([]));
+  assert.equal(f.state.pendingWrites.length, MAX_COUNT);
+  assert.equal(f.state.pendingWriteCount, MAX_COUNT);
+  assert.equal(f.state.pendingWriteBytes, 0);
+  assert.equal(f.state.closed, false, "backpressure must not close the session");
+  f.core.scope_close(f.scope);
+  assertSendReleased(f);
+  f.host.handshake.resolve();
+  await turn();
+  assert.equal(f.host.events.some(([kind]) => kind === "write"), false);
+});
+
+test("WT-TX parked write counts against byte capacity and completion permits retry", async (t) => {
+  const parked = deferred();
+  let writes = 0;
+  const f = await fixture(t, { write: () => ++writes === 1 ? parked.promise : undefined });
+  const count = MAX_BYTES / MAX_DATAGRAM;
+  assert.equal(f.send(new Uint8Array(MAX_DATAGRAM).fill(0)).outcome, "ok");
+  await turn();
+  assert.equal(writes, 1, "the host write is parked before filling the remaining budget");
+  for (let i = 1; i < count; i += 1) {
+    assert.equal(f.send(new Uint8Array(MAX_DATAGRAM).fill(i)).outcome, "ok");
+  }
+  assertSendCapacity(f.send([99]));
+  assert.equal(f.state.pendingWrites.length, count - 1);
+  assert.equal(f.state.pendingWriteCount, count);
+  assert.equal(f.state.pendingWriteBytes, MAX_BYTES);
+  parked.resolve();
+  await turn();
+  assertSendReleased(f);
+  assert.equal(f.send([99]).outcome, "ok");
+  await turn();
+  assertSendReleased(f);
+  assert.deepEqual(
+    f.host.events.filter(([kind]) => kind === "write").map(([, bytes]) => bytes[0]),
+    [...Array.from({ length: count }, (_, i) => i), 99],
+    "accepted datagrams retain FIFO order; a refused send was never written",
+  );
+});
+
+test("WT-TX parked empty write counts against the datagram count cap", async (t) => {
+  const parked = deferred();
+  const f = await fixture(t, { write: () => parked.promise });
+  assert.equal(f.send([]).outcome, "ok");
+  await turn();
+  assert.equal(f.host.events.filter(([kind]) => kind === "write").length, 1);
+  for (let i = 1; i < MAX_COUNT; i += 1) assert.equal(f.send([]).outcome, "ok");
+  assertSendCapacity(f.send([]));
+  assert.equal(f.state.pendingWrites.length, MAX_COUNT - 1);
+  assert.equal(f.state.pendingWriteCount, MAX_COUNT);
+  f.core.scope_close(f.scope);
+  assertSendReleased(f);
+  parked.resolve();
+  await turn();
+  assertSendReleased(f);
+  assert.equal(f.host.events.filter(([kind]) => kind === "write").length, 1);
+  assert.equal(f.calls.joins.length, 0, "late host completion cannot join a closed owner's task");
+});
+
+test("WT-TX oversized bytes and UTF-8 strings are refused before copying or encoding", async (t) => {
+  let encodes = 0;
+  class RecordingEncoder extends TextEncoder {
+    encode(value) { encodes += 1; return super.encode(value); }
+  }
+  const f = await fixture(t, { pendingHandshake: true, TextEncoder: RecordingEncoder });
+  let reads = 0;
+  const array = new Array(MAX_DATAGRAM + 1);
+  Object.defineProperty(array, 0, { get() { reads += 1; return 1; } });
+  for (const value of [array, new Uint8Array(MAX_DATAGRAM + 1),
+    new ArrayBuffer(MAX_DATAGRAM + 1), new DataView(new ArrayBuffer(MAX_DATAGRAM + 1)),
+    "x".repeat(MAX_DATAGRAM + 1), "\u00e9".repeat(MAX_DATAGRAM / 2 + 1),
+    "\ud83d\ude00".repeat(MAX_DATAGRAM / 4 + 1)]) {
+    const outcome = f.send(value);
+    assert.equal(outcome.outcome, "err");
+    assert.equal(outcome.failure.recoverability, "permanent");
+    assert.match(outcome.failure.message, /datagram byte limit/);
+  }
+  assert.equal(reads, 0);
+  assert.equal(encodes, 0, "oversized UTF-8 is refused before TextEncoder allocates");
+  assertSendReleased(f);
+  const boundary = "\ud83d\ude00".repeat(MAX_DATAGRAM / 4);
+  assert.equal(f.send(boundary).outcome, "ok");
+  assert.equal(f.state.pendingWriteBytes, MAX_DATAGRAM);
+  assert.equal(encodes, 1);
+  const mixed = "a\u00e9\u20ac\ud800z\udc00\ud83d\ude00";
+  assert.equal(f.send(mixed).outcome, "ok");
+  assert.equal(f.state.pendingWriteBytes, MAX_DATAGRAM + new TextEncoder().encode(mixed).byteLength);
+  assert.deepEqual(Array.from(f.state.pendingWrites[1]), Array.from(new TextEncoder().encode(mixed)));
+});
+
+test("WT-TX byte capacity is checked before input element access or encoding", async (t) => {
+  let encodes = 0;
+  class RecordingEncoder extends TextEncoder {
+    encode(value) { encodes += 1; return super.encode(value); }
+  }
+  const f = await fixture(t, { pendingHandshake: true, TextEncoder: RecordingEncoder });
+  for (let i = 0; i < MAX_BYTES / MAX_DATAGRAM; i += 1) {
+    assert.equal(f.send(new Uint8Array(MAX_DATAGRAM)).outcome, "ok");
+  }
+  let reads = 0;
+  const input = [1];
+  Object.defineProperty(input, 0, { get() { reads += 1; return 1; } });
+  assertSendCapacity(f.send(input));
+  assertSendCapacity(f.send("x"));
+  assert.equal(reads, 0);
+  assert.equal(encodes, 0);
+  assert.equal(f.state.pendingWriteBytes, MAX_BYTES);
+});
+
+test("WT-TX reserves admission before reentrant input access and rolls back invalid bytes", async (t) => {
+  const f = await fixture(t, { pendingHandshake: true });
+  for (let i = 0; i < MAX_COUNT - 1; i += 1) assert.equal(f.send([]).outcome, "ok");
+  let nested;
+  const input = [1];
+  Object.defineProperty(input, 0, { get() { nested = f.send([]); return 1; } });
+  assert.equal(f.send(input).outcome, "ok");
+  assertSendCapacity(nested);
+  assert.equal(f.state.pendingWriteCount, MAX_COUNT);
+  assert.equal(f.state.pendingWriteBytes, 1);
+
+  const g = await fixture(t, { pendingHandshake: true });
+  for (const invalid of [[256], [-1], [1.5], new Array(1)]) {
+    assert.equal(g.send(invalid).outcome, "err");
+    assertSendReleased(g);
+  }
+  assert.equal(g.send([42]).outcome, "ok");
+  assert.equal(g.state.pendingWriteBytes, 1);
+});
+
+test("WT-TX copies only admitted subviews and ignores arbitrary array iterators", async (t) => {
+  const f = await fixture(t, { pendingHandshake: true });
+  const backing = new Uint8Array(MAX_BYTES * 2);
+  const view = backing.subarray(123, 126);
+  view.set([3, 5, 8]);
+  assert.equal(f.send(view).outcome, "ok");
+  view.fill(0);
+  assert.equal(f.state.pendingWrites[0].buffer.byteLength, 3);
+  assert.deepEqual(Array.from(f.state.pendingWrites[0]), [3, 5, 8]);
+  const input = [1, 2];
+  input[Symbol.iterator] = () => { throw new Error("unbounded iterator must not run"); };
+  assert.equal(f.send(input).outcome, "ok");
+  assert.deepEqual(Array.from(f.state.pendingWrites[1]), [1, 2]);
+});
+
+test("WT-TX owner close during input copying refuses late data and clears reservations", async (t) => {
+  const f = await fixture(t, { pendingHandshake: true });
+  const input = [1];
+  Object.defineProperty(input, 0, { get() { f.core.scope_close(f.scope); return 1; } });
+  const result = f.send(input);
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.code, "invalid_handle");
+  assertSendReleased(f);
+  assert.equal(f.core.hostSessions.size, 0);
+});
+
+test("WT-TX failed host write releases queued capacity and joins exactly once", async (t) => {
+  const parked = deferred();
+  const f = await fixture(t, { write: () => parked.promise });
+  assert.equal(f.send([1, 2]).outcome, "ok");
+  await turn();
+  assert.equal(f.send([3]).outcome, "ok");
+  parked.reject(new Error("host rejected the datagram"));
+  await turn();
+  assertSendReleased(f);
+  assertTerminal(f, /datagram write failed: host rejected the datagram/);
+  assert.equal(f.host.events.filter(([kind]) => kind === "write").length, 1);
+});
+
+test("WT-TX owner close during host write lookup prevents a late host call", async (t) => {
+  const f = await fixture(t);
+  const writer = f.state.writer;
+  const write = writer.write;
+  Object.defineProperty(writer, "write", {
+    get() {
+      f.core.scope_close(f.scope);
+      return write;
+    },
+  });
+  assert.equal(f.send([7]).outcome, "ok");
+  await turn();
+  assertSendReleased(f);
+  assert.equal(f.host.events.some(([kind]) => kind === "write"), false);
+  assert.equal(f.calls.joins.length, 0);
 });
