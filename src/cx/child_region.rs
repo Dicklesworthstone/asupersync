@@ -594,6 +594,60 @@ mod tests {
     }
 
     #[test]
+    fn child_region_work_runs_under_the_planned_capability_budget() {
+        // asupersync-mkybj0: the region record carried the planned envelope
+        // but its principal (and so every task spawned through it) did not.
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime builds");
+        let parent = runtime.request_cx_with_budget(Budget::with_deadline_at_secs(10));
+        runtime.block_on_with_cx(parent.clone(), async move {
+            let mut planned = CapabilityBudget::UNSPECIFIED;
+            planned.io_bytes = Some(128);
+            planned.memory_bytes = Some(256);
+            let mut spec = ChildRegionSpec::inherit();
+            spec.capability_budget = Some(planned);
+            let child = parent
+                .open_child_region(spec)
+                .await
+                .expect("owned child region mints");
+            assert_eq!(child.cx().capability_budget(), planned);
+
+            let mut body = child
+                .cx()
+                .spawn(|task_cx| async move { task_cx.capability_budget() })
+                .expect("child principal context spawns through the gateway");
+            let seen = body.join(child.cx()).await.expect("body joins");
+            assert_eq!(seen, planned, "spawned work must run under the envelope");
+
+            // A nested request can only tighten: a looser ask stays clamped.
+            let mut looser = CapabilityBudget::UNSPECIFIED;
+            looser.io_bytes = Some(512);
+            looser.memory_bytes = Some(64);
+            let mut nested_spec = ChildRegionSpec::inherit();
+            nested_spec.capability_budget = Some(looser);
+            let nested = child
+                .cx()
+                .open_child_region(nested_spec)
+                .await
+                .expect("nested child region mints");
+            let mut nested_body = nested
+                .cx()
+                .spawn(|task_cx| async move { task_cx.capability_budget() })
+                .expect("nested principal spawns");
+            let nested_seen = nested_body
+                .join(nested.cx())
+                .await
+                .expect("nested body joins");
+            assert_eq!(nested_seen.io_bytes, Some(128));
+            assert_eq!(nested_seen.memory_bytes, Some(64));
+
+            nested.close().await.expect("nested close reaches quiescence");
+            child.close().await.expect("close reaches quiescence");
+        });
+    }
+
+    #[test]
     fn close_resolves_only_at_true_quiescence_draining_an_oblivious_body() {
         let runtime = RuntimeBuilder::current_thread()
             .build()
