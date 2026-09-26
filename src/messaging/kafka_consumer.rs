@@ -56,6 +56,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
+mod owned;
+pub use owned::{KafkaConsumerHandle, KafkaConsumerLease};
+
 #[cfg(feature = "kafka")]
 use rdkafka::{
     client::ClientContext,
@@ -580,6 +583,17 @@ struct RebalanceCounters {
     eager_assigns: std::sync::atomic::AtomicU64,
     incremental_unassigns: std::sync::atomic::AtomicU64,
     eager_unassigns: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    native_drop_thread: Mutex<Option<(std::thread::ThreadId, Option<String>)>>,
+}
+
+#[cfg(all(test, feature = "kafka"))]
+impl Drop for BrokerConsumerContext {
+    fn drop(&mut self) {
+        let thread = std::thread::current();
+        *self.counters.native_drop_thread.lock() =
+            Some((thread.id(), thread.name().map(str::to_owned)));
+    }
 }
 
 #[cfg(feature = "kafka")]
@@ -708,6 +722,110 @@ fn leave_group_bounded(consumer: &BaseConsumer<BrokerConsumerContext>) {
     }
 }
 
+/// Serializes native calls and accounts for every handle retained by an
+/// in-flight blocking operation. Scoped teardown fences admission and waits for
+/// these leases; a cancelled async waiter is not evidence that its native call
+/// has returned.
+#[cfg(feature = "kafka")]
+#[derive(Debug, Default)]
+struct BrokerOperations {
+    serial: Mutex<()>,
+    lifetime: Mutex<BrokerOperationLifetime>,
+    retired: parking_lot::Condvar,
+    #[cfg(test)]
+    before_lock: Mutex<Option<crate::channel::oneshot::Sender<()>>>,
+}
+
+#[cfg(feature = "kafka")]
+#[derive(Debug, Default)]
+struct BrokerOperationLifetime {
+    leases: usize,
+    retiring: bool,
+}
+
+#[cfg(feature = "kafka")]
+impl BrokerOperations {
+    fn lock(&self) -> parking_lot::MutexGuard<'_, ()> {
+        #[cfg(test)]
+        let witness = self.before_lock.lock().take();
+        #[cfg(test)]
+        if let Some(witness) = witness {
+            let _ = witness.send_blocking(());
+        }
+        self.serial.lock()
+    }
+
+    fn retire_and_wait(&self) {
+        let mut state = self.lifetime.lock();
+        state.retiring = true;
+        while state.leases != 0 {
+            self.retired.wait(&mut state);
+        }
+    }
+}
+
+/// The native reference is released before the lease's retirement notification.
+/// Consequently observing zero leases after admission is fenced proves that the
+/// lifetime worker retains the only native handle, including after future drop.
+#[cfg(feature = "kafka")]
+struct BrokerConsumerLease {
+    consumer: Option<Arc<BaseConsumer<BrokerConsumerContext>>>,
+    operations: Arc<BrokerOperations>,
+}
+
+#[cfg(feature = "kafka")]
+impl BrokerConsumerLease {
+    fn acquire(
+        consumer: &Arc<BaseConsumer<BrokerConsumerContext>>,
+        operations: &Arc<BrokerOperations>,
+    ) -> Option<Self> {
+        let mut state = operations.lifetime.lock();
+        if state.retiring {
+            return None;
+        }
+        state.leases = state.leases.checked_add(1).expect("native consumer lease count overflow");
+        Some(Self {
+            consumer: Some(Arc::clone(consumer)),
+            operations: Arc::clone(operations),
+        })
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl Clone for BrokerConsumerLease {
+    fn clone(&self) -> Self {
+        let mut state = self.operations.lifetime.lock();
+        // An existing operation may make another attempt after retirement has
+        // begun. Its own lease keeps the count nonzero throughout that handoff.
+        state.leases = state.leases.checked_add(1).expect("native consumer lease count overflow");
+        Self {
+            consumer: Some(Arc::clone(self.consumer.as_ref().expect("live native consumer lease"))),
+            operations: Arc::clone(&self.operations),
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl std::ops::Deref for BrokerConsumerLease {
+    type Target = BaseConsumer<BrokerConsumerContext>;
+
+    fn deref(&self) -> &Self::Target {
+        self.consumer.as_deref().expect("live native consumer lease")
+    }
+}
+
+#[cfg(feature = "kafka")]
+impl Drop for BrokerConsumerLease {
+    fn drop(&mut self) {
+        drop(self.consumer.take());
+        let mut state = self.operations.lifetime.lock();
+        state.leases -= 1;
+        if state.leases == 0 {
+            self.operations.retired.notify_all();
+        }
+    }
+}
+
 impl Drop for KafkaConsumer {
     fn drop(&mut self) {
         #[cfg(feature = "kafka")]
@@ -738,7 +856,7 @@ pub struct KafkaConsumer {
     #[cfg(feature = "kafka")]
     rebalance: Option<(bool, Arc<RebalanceCounters>)>,
     #[cfg(feature = "kafka")]
-    broker_ops: Option<Arc<Mutex<()>>>,
+    broker_ops: Option<Arc<BrokerOperations>>,
     #[cfg(feature = "kafka")]
     buffered_outcome: Arc<Mutex<Option<Result<BrokerPollOutcome, KafkaError>>>>,
     #[cfg(test)]
@@ -1136,7 +1254,7 @@ impl KafkaConsumer {
             None => (None, None),
         };
         #[cfg(feature = "kafka")]
-        let broker_ops = consumer.as_ref().map(|_| Arc::new(Mutex::new(())));
+        let broker_ops = consumer.as_ref().map(|_| Arc::new(BrokerOperations::default()));
         Ok(Self {
             config,
             state: Mutex::new(ConsumerState::default()),
@@ -1205,11 +1323,14 @@ impl KafkaConsumer {
     }
 
     #[cfg(feature = "kafka")]
-    fn broker_backend(&self) -> Option<(Arc<BaseConsumer<BrokerConsumerContext>>, Arc<Mutex<()>>)> {
+    fn broker_backend(&self) -> Option<(BrokerConsumerLease, Arc<BrokerOperations>)> {
         self.consumer
             .as_ref()
             .zip(self.broker_ops.as_ref())
-            .map(|(consumer, broker_ops)| (Arc::clone(consumer), Arc::clone(broker_ops)))
+            .and_then(|(consumer, broker_ops)| {
+                BrokerConsumerLease::acquire(consumer, broker_ops)
+                    .map(|lease| (lease, Arc::clone(broker_ops)))
+            })
     }
 
     #[cfg(test)]
@@ -1553,7 +1674,7 @@ impl KafkaConsumer {
                     };
 
                     let outcome_res = crate::runtime::spawn_blocking::spawn_blocking_on_thread({
-                        let consumer = Arc::clone(&consumer);
+                        let consumer = consumer.clone();
                         let broker_ops = Arc::clone(&broker_ops);
                         let buffered_outcome = Arc::clone(&self.buffered_outcome);
                         move || -> Result<(), KafkaError> {
@@ -1804,7 +1925,7 @@ impl KafkaConsumer {
                 // pinning the executor worker thread through
                 // `thread::scope().join()` for the full broker round-trip.
                 let commit_batch = commit_batch.clone();
-                let consumer = Arc::clone(&consumer);
+                let consumer = consumer.clone();
                 let broker_ops = Arc::clone(&broker_ops);
 
                 async move {
