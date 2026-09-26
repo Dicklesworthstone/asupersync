@@ -14,7 +14,7 @@
 use asupersync::cx::Cx;
 use asupersync::database::mysql::{MySqlConnection, MySqlError, test_active_mysql_drop_kills};
 use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
-use asupersync::types::{CancelKind, Outcome};
+use asupersync::types::{Budget, CancelReason, Outcome};
 use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -30,8 +30,22 @@ const OK: &[u8] = &[0, 0, 0, 2, 0, 0, 0];
 #[derive(Clone, Copy, Debug)]
 enum Operation {
     Collect,
+    Execute,
     StreamHeader,
     StreamRows,
+    Prepare,
+    PrepareMetadata,
+    PreparedCollect,
+    PreparedExecute,
+    PreparedRows,
+    Ping,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CancelSource {
+    SameContext,
+    Caller,
+    Owner,
 }
 #[derive(Clone, Copy, Debug)]
 enum KillPeer {
@@ -65,6 +79,31 @@ fn mysql_streaming_drop_and_cancel_retain_kill_ownership() {
         for cancel in [false, true] {
             for operation in [Operation::StreamHeader, Operation::StreamRows] {
                 cancellation_case(workers, cancel, operation, KillPeer::Replies);
+            }
+        }
+    }
+}
+
+#[test]
+fn mysql_distinct_caller_and_owner_cancel_parked_protocol_exchanges() {
+    let _serial = SERIAL.lock().unwrap();
+    // Zero denotes the actual current-thread runtime, driven by block_on.
+    // A controller thread observes the parked witness before requesting cancel.
+    for workers in [0, 2] {
+        for source in [CancelSource::Caller, CancelSource::Owner] {
+            for operation in [
+                Operation::Collect,
+                Operation::Execute,
+                Operation::StreamHeader,
+                Operation::StreamRows,
+                Operation::Prepare,
+                Operation::PrepareMetadata,
+                Operation::PreparedCollect,
+                Operation::PreparedExecute,
+                Operation::PreparedRows,
+                Operation::Ping,
+            ] {
+                cancellation_case_with_source(workers, true, operation, KillPeer::Replies, source);
             }
         }
     }
@@ -223,6 +262,16 @@ fn stream_header(socket: &mut std::net::TcpStream) {
 }
 
 fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: KillPeer) {
+    cancellation_case_with_source(workers, cancel, operation, peer, CancelSource::SameContext);
+}
+
+fn cancellation_case_with_source(
+    workers: usize,
+    cancel: bool,
+    operation: Operation,
+    peer: KillPeer,
+    source: CancelSource,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -231,29 +280,51 @@ fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: K
     let server = thread::spawn(move || {
         let mut main = accept(&listener);
         authenticate(&mut main, 42, true);
-        assert_eq!(
-            read_packet(&mut main),
-            (0, b"\x03SELECT SLEEP(30)".to_vec())
-        );
-        if matches!(operation, Operation::StreamRows) {
+        if matches!(
+            operation,
+            Operation::PreparedCollect | Operation::PreparedExecute | Operation::PreparedRows
+        ) {
+            assert_eq!(
+                read_packet(&mut main),
+                (0, b"\x16SELECT SLEEP(30)".to_vec())
+            );
+            write_packet(&mut main, 1, &[0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(
+                read_packet(&mut main),
+                (0, vec![0x17, 7, 0, 0, 0, 0, 1, 0, 0, 0])
+            );
+        } else {
+            let expected = match operation {
+                Operation::Prepare | Operation::PrepareMetadata => b"\x16SELECT SLEEP(30)".to_vec(),
+                Operation::Ping => vec![0x0e],
+                _ => b"\x03SELECT SLEEP(30)".to_vec(),
+            };
+            assert_eq!(read_packet(&mut main), (0, expected));
+        }
+        if matches!(operation, Operation::StreamRows | Operation::PreparedRows) {
             stream_header(&mut main);
+        } else if matches!(operation, Operation::PrepareMetadata) {
+            // One promised column, then silence while the client reads metadata.
+            write_packet(&mut main, 1, &[0, 7, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
         }
         query_tx.send(()).unwrap();
-        let mut killer = accept(&listener);
-        if !matches!(peer, KillPeer::SilentGreeting) {
-            authenticate(
-                &mut killer,
-                43,
-                !matches!(peer, KillPeer::SilentAuthentication),
-            );
-            if !matches!(peer, KillPeer::SilentAuthentication) {
-                assert_eq!(read_packet(&mut killer), (0, b"\x03KILL QUERY 42".to_vec()));
-                if matches!(peer, KillPeer::Replies) {
-                    write_packet(&mut killer, 1, OK);
+        if !matches!(operation, Operation::Ping) {
+            let mut killer = accept(&listener);
+            if !matches!(peer, KillPeer::SilentGreeting) {
+                authenticate(
+                    &mut killer,
+                    43,
+                    !matches!(peer, KillPeer::SilentAuthentication),
+                );
+                if !matches!(peer, KillPeer::SilentAuthentication) {
+                    assert_eq!(read_packet(&mut killer), (0, b"\x03KILL QUERY 42".to_vec()));
+                    if matches!(peer, KillPeer::Replies) {
+                        write_packet(&mut killer, 1, OK);
+                    }
                 }
             }
+            assert_eof(&mut killer);
         }
-        assert_eof(&mut killer);
         assert_eof(&mut main);
         closed_tx.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -269,10 +340,23 @@ fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: K
             "timed-out killer recursively spawned another killer"
         );
     });
-    let runtime = RuntimeBuilder::new()
-        .worker_threads(workers)
-        .build()
-        .unwrap();
+    let builder = if workers == 0 {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::multi_thread().worker_threads(workers)
+    };
+    let runtime = builder.build().unwrap();
+    let caller_cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let expected_reason = match source {
+        CancelSource::SameContext => CancelReason::user("mysql audit cancellation"),
+        CancelSource::Caller => CancelReason::deadline()
+            .with_message("explicit MySQL caller deadline")
+            .with_cause(CancelReason::user("request ingress stopped")),
+        CancelSource::Owner => CancelReason::shutdown()
+            .with_message("MySQL owner stopped")
+            .with_cause(CancelReason::user("runtime shutdown request")),
+    };
+    let task_expected_reason = expected_reason.clone();
     let (control_tx, control_rx) = mpsc::channel();
     let (parked_tx, parked_rx) = mpsc::channel();
     let (done_tx, done_rx) = mpsc::channel();
@@ -285,7 +369,13 @@ fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: K
     let task_retire = Arc::clone(&retire);
     let task_retirement = Arc::clone(&retirement);
     let join = runtime.handle().spawn(async move {
-        let cx = Cx::current().unwrap();
+        let owner_cx = Cx::current().unwrap();
+        let cx = if matches!(source, CancelSource::SameContext) {
+            owner_cx.clone()
+        } else {
+            assert_ne!(caller_cx.task_id(), owner_cx.task_id());
+            caller_cx
+        };
         let url = format!("mysql://test:test@{address}/test");
         let mut connection = match MySqlConnection::connect(&cx, &url).await {
             Outcome::Ok(connection) => connection,
@@ -296,6 +386,10 @@ fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: K
                 match operation {
                     Operation::Collect => connection
                         .query_static_sql(&cx, "SELECT SLEEP(30)")
+                        .await
+                        .map(|_| ()),
+                    Operation::Execute => connection
+                        .execute_static_sql(&cx, "SELECT SLEEP(30)")
                         .await
                         .map(|_| ()),
                     Operation::StreamHeader => connection
@@ -310,12 +404,32 @@ fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: K
                             Outcome::Panicked(payload) => Outcome::Panicked(payload),
                         }
                     }
+                    Operation::Prepare | Operation::PrepareMetadata => connection
+                        .prepare(&cx, "SELECT SLEEP(30)")
+                        .await
+                        .map(|_| ()),
+                    Operation::PreparedCollect
+                    | Operation::PreparedExecute
+                    | Operation::PreparedRows => {
+                        let statement = match connection.prepare(&cx, "SELECT SLEEP(30)").await {
+                            Outcome::Ok(statement) => statement,
+                            other => panic!("initial prepare: {other:?}"),
+                        };
+                        if matches!(operation, Operation::PreparedExecute) {
+                            connection.execute_prepared(&cx, &statement, &[]).await.map(|_| ())
+                        } else {
+                            connection.query_prepared(&cx, &statement, &[]).await.map(|_| ())
+                        }
+                    }
+                    Operation::Ping => connection.ping(&cx).await,
                 }
             });
             let mut control_tx = Some(control_tx);
             poll_fn(|task_cx| {
                 if let Some(sender) = control_tx.take() {
-                    sender.send((cx.clone(), task_cx.waker().clone())).unwrap();
+                    sender
+                        .send((cx.clone(), owner_cx.clone(), task_cx.waker().clone()))
+                        .unwrap();
                 }
                 if !cancel && task_release.load(Ordering::Acquire) {
                     return Poll::Ready(None);
@@ -329,7 +443,26 @@ fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: K
             .await
         };
         if cancel {
-            assert!(matches!(result, Some(Outcome::Cancelled(_))), "{result:?}");
+            assert!(
+                matches!(result, Some(Outcome::Cancelled(ref reason)) if reason == &task_expected_reason),
+                "source={source:?} operation={operation:?} expected={task_expected_reason:?} actual={result:?}"
+            );
+            match source {
+                CancelSource::Caller => assert!(owner_cx.checkpoint().is_ok()),
+                CancelSource::Owner => assert!(cx.checkpoint().is_ok()),
+                CancelSource::SameContext => {}
+            }
+            let live_cx = match source {
+                CancelSource::Caller => Some(&owner_cx),
+                CancelSource::Owner => Some(&cx),
+                CancelSource::SameContext => None,
+            };
+            if let Some(live_cx) = live_cx {
+                assert!(matches!(
+                    connection.query_static_sql(live_cx, "SELECT 1").await,
+                    Outcome::Err(MySqlError::ConnectionClosed)
+                ));
+            }
             done_tx.send(()).unwrap();
             // Retain the original connection until the server observes EOF:
             // cancellation's fallback must close it before eventual Drop.
@@ -347,30 +480,61 @@ fn cancellation_case(workers: usize, cancel: bool, operation: Operation, peer: K
             done_tx.send(()).unwrap();
         }
     });
-    let (cx, waker) = control_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-    query_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-    probe.store(true, Ordering::Release);
-    waker.wake_by_ref();
-    parked_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-    let started = Instant::now();
-    if cancel {
-        cx.cancel_fast(CancelKind::User);
-    } else {
-        release.store(true, Ordering::Release);
+    let controller = thread::spawn(move || {
+        let (cx, owner_cx, waker) = control_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        // A failed old-source cancellation witness must fail the test rather
+        // than leave block_on waiting forever for the deliberately silent peer.
+        struct FailureCleanup {
+            owner: Cx,
+            retire: Arc<AtomicBool>,
+            retirement: Arc<asupersync::sync::Notify>,
+        }
+        impl Drop for FailureCleanup {
+            fn drop(&mut self) {
+                if thread::panicking() {
+                    self.owner.cancel_with_reason(CancelReason::shutdown());
+                    self.retire.store(true, Ordering::Release);
+                    self.retirement.notify_waiters();
+                }
+            }
+        }
+        let _failure_cleanup = FailureCleanup {
+            owner: owner_cx.clone(),
+            retire: Arc::clone(&retire),
+            retirement: Arc::clone(&retirement),
+        };
+        query_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        probe.store(true, Ordering::Release);
         waker.wake_by_ref();
-    }
-    done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-    closed_rx.recv_timeout(Duration::from_secs(3)).unwrap();
-    retire.store(true, Ordering::Release);
-    retirement.notify_waiters();
+        parked_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let started = Instant::now();
+        if cancel {
+            let target = if matches!(source, CancelSource::Owner) {
+                &owner_cx
+            } else {
+                &cx
+            };
+            target.cancel_with_reason(expected_reason);
+        } else {
+            release.store(true, Ordering::Release);
+            waker.wake_by_ref();
+        }
+        // After the parked witness, cancellation itself must supply the wake.
+        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        closed_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        retire.store(true, Ordering::Release);
+        retirement.notify_waiters();
+        started.elapsed()
+    });
     runtime.block_on(join);
+    let elapsed = controller.join().unwrap();
     server.join().unwrap();
     let report = runtime.shutdown_drained(Duration::from_secs(2));
     assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
     assert_eq!(test_active_mysql_drop_kills(), 0);
     eprintln!(
-        "event=mysql_cancel workers={workers} cancel={cancel} operation={operation:?} peer={peer:?} elapsed_ms={} primary_closed=true cleanup_closed=true cleanup_threads=0",
-        started.elapsed().as_millis()
+        "event=mysql_cancel workers={workers} cancel={cancel} source={source:?} operation={operation:?} peer={peer:?} elapsed_ms={} parked=true primary_closed=true cleanup_closed=true cleanup_threads=0",
+        elapsed.as_millis()
     );
 }
 

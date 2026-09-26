@@ -735,7 +735,7 @@ impl MySqlRowStream<'_> {
         }
 
         loop {
-            let (data, seq) = match self.connection.read_packet().await {
+            let (data, seq) = match self.connection.read_packet(Some(cx)).await {
                 Ok((d, s)) => (d, s),
                 Err(e) => return outcome_from_error(e),
             };
@@ -893,14 +893,14 @@ impl MySqlConnection {
         // Mark closed during protocol exchange to prevent desync on cancellation
         self.inner.closed = true;
 
-        match self.write_all(&packet.bytes).await {
+        match self.write_all(Some(cx), &packet.bytes).await {
             Ok(()) => {}
             Err(e) => return outcome_from_error(e),
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read the initial response to get column info
-        let (first_packet, seq) = match self.read_packet().await {
+        let (first_packet, seq) = match self.read_packet(Some(cx)).await {
             Ok(p) => p,
             Err(e) => return outcome_from_error(e),
         };
@@ -953,7 +953,8 @@ impl MySqlConnection {
                 }
 
                 // Read column metadata
-                let (columns, indices) = match self.read_result_set_columns(column_count).await {
+                let (columns, indices) = match self.read_result_set_columns(cx, column_count).await
+                {
                     Ok((cols, idx)) => (cols, idx),
                     Err(e) => return outcome_from_error(e),
                 };
@@ -2079,12 +2080,20 @@ fn outcome_from_error<T>(err: MySqlError) -> Outcome<T, MySqlError> {
     }
 }
 
-/// Ambient cancellation reason, or `None` when no cancel is pending.
+/// Caller or ambient owner cancellation, respecting each context's mask.
 ///
-/// The low-level `write_all` / `read_exact` stream helpers have no explicit
-/// `&Cx` parameter, so they consult the ambient task context exactly the way
-/// their in-poll cancel guards already do.
-fn ambient_cancel_reason() -> Option<CancelReason> {
+/// An explicit caller may differ from the task polling the exchange. Its
+/// cancellation takes precedence, but supplying it must not hide cancellation
+/// of the ambient task that owns the connection's work.
+fn io_cancel_reason(cx: Option<&Cx>) -> Option<CancelReason> {
+    if let Some(cx) = cx
+        && cx.checkpoint().is_err()
+    {
+        return Some(
+            cx.cancel_reason()
+                .unwrap_or_else(|| CancelReason::user("cancelled")),
+        );
+    }
     Cx::with_current(|c| {
         if c.checkpoint().is_err() {
             Some(
@@ -2101,19 +2110,19 @@ fn ambient_cancel_reason() -> Option<CancelReason> {
 /// Map a stream I/O error onto `MySqlError`, downgrading `Interrupted` to
 /// `Cancelled` only when a cancel is actually pending.
 ///
-/// The in-poll cancel guards in `write_all` / `read_exact` signal cancellation
-/// as `ErrorKind::Interrupted`, but `outcome_from_error` keys solely off
-/// `MySqlError::Cancelled`, so without this mapping a cancelled read/write
-/// surfaces as `Outcome::Err` (br-asupersync-xwanb4).
+/// Underlying stream implementations can signal cancellation as
+/// `ErrorKind::Interrupted`, but `outcome_from_error` keys solely off
+/// `MySqlError::Cancelled`. Preserve the caller's reason when that stream-level
+/// race occurs after the explicit checkpoint (br-asupersync-xwanb4).
 ///
 /// The downgrade is gated on live cancellation, mirroring the established
 /// idiom in `src/transport/router.rs`: an `Interrupted` that arrives with no
 /// cancel pending stays an I/O error.
-fn stream_io_error(err: io::Error) -> MySqlError {
+fn stream_io_error(cx: Option<&Cx>, err: io::Error) -> MySqlError {
     if err.kind() != io::ErrorKind::Interrupted {
         return MySqlError::Io(err);
     }
-    match ambient_cancel_reason() {
+    match io_cancel_reason(cx) {
         Some(reason) => MySqlError::Cancelled(reason),
         None => MySqlError::Io(err),
     }
@@ -2129,8 +2138,8 @@ fn stream_io_error(err: io::Error) -> MySqlError {
 ///
 /// Gated on cancellation actually being pending: a peer that genuinely hung up
 /// early with no cancel outstanding still reports `UnexpectedEof`.
-fn eof_or_cancelled() -> MySqlError {
-    match ambient_cancel_reason() {
+fn eof_or_cancelled(cx: Option<&Cx>) -> MySqlError {
+    match io_cancel_reason(cx) {
         Some(reason) => MySqlError::Cancelled(reason),
         None => MySqlError::Io(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -2197,13 +2206,7 @@ fn contains_sql_token(sql_lower: &str, pattern: &str) -> bool {
     })
 }
 
-/// Read a complete buffer while preserving cancellation precedence at EOF.
-///
-/// Keeping the loop generic over the stream gives deterministic tests a narrow
-/// seam for injecting cancellation from inside `poll_read`, after the guard has
-/// run but before the empty-read classification below.
-/// Registers exactly one cancellation-Waker on the ambient `Cx` for the
-/// lifetime of a socket poll loop (br-asupersync-w9k2rp).
+/// Registers one cancellation waker for the lifetime of a socket poll loop.
 ///
 /// The in-poll `checkpoint()` guards in `read_exact_from` / `write_all` only
 /// observe cancellation when the task is polled, but a read parked on a socket
@@ -2216,19 +2219,17 @@ fn contains_sql_token(sql_lower: &str, pattern: &str) -> bool {
 /// `Cx` makes the cancel wake the parked poll, after which the checkpoint guard
 /// returns `Interrupted` (mapped to `MySqlError::Cancelled`). This mirrors the
 /// twin `CancelWakerGuard` already shipped in `postgres.rs`; it captures an
-/// owned `Cx` handle once (matching this module's ambient-`Cx` idiom) so the
-/// refresh and the drop-time clear always target the same context.
+/// owned `Cx` handle once so refresh and drop-time clear target the same
+/// context. Normal exchanges register both their explicit caller and ambient
+/// owner without replacing the ambient context or its capability restrictions.
 struct CancelWakerGuard {
     cx: Option<Cx>,
     token: Option<CancelWakerToken>,
 }
 
 impl CancelWakerGuard {
-    fn new() -> Self {
-        Self {
-            cx: Cx::current(),
-            token: None,
-        }
+    fn new(cx: Option<Cx>) -> Self {
+        Self { cx, token: None }
     }
 
     fn refresh(&mut self, waker: &Waker) {
@@ -2248,33 +2249,85 @@ impl Drop for CancelWakerGuard {
     }
 }
 
-async fn read_exact_from<R>(stream: &mut R, buf: &mut [u8]) -> Result<(), MySqlError>
+/// Read a complete buffer while preserving cancellation precedence at EOF.
+/// The generic stream also permits a never-waking parked-read regression.
+async fn read_exact_from<R>(
+    cx: Option<&Cx>,
+    stream: &mut R,
+    buf: &mut [u8],
+) -> Result<(), MySqlError>
 where
     R: AsyncRead + Unpin,
 {
     let mut pos = 0;
     // br-asupersync-w9k2rp: wake a read parked on a silent socket when an
     // external cancel fires, instead of only noticing it on the next poll.
-    let mut cancel_wake = CancelWakerGuard::new();
+    let mut caller_cancel_wake = CancelWakerGuard::new(cx.cloned());
+    let mut owner_cancel_wake = CancelWakerGuard::new(Cx::current());
     while pos < buf.len() {
         let mut read_buf = ReadBuf::new(&mut buf[pos..]);
         std::future::poll_fn(|task_cx| {
-            cancel_wake.refresh(task_cx.waker());
-            if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            caller_cancel_wake.refresh(task_cx.waker());
+            owner_cancel_wake.refresh(task_cx.waker());
+            if let Some(reason) = io_cancel_reason(cx) {
+                return Poll::Ready(Err(MySqlError::Cancelled(reason)));
             }
-            Pin::new(&mut *stream).poll_read(task_cx, &mut read_buf)
+            Pin::new(&mut *stream)
+                .poll_read(task_cx, &mut read_buf)
+                .map_err(|error| stream_io_error(cx, error))
         })
-        .await
-        .map_err(stream_io_error)?;
+        .await?;
 
         let n = read_buf.filled().len();
         if n == 0 {
-            return Err(eof_or_cancelled());
+            return Err(eof_or_cancelled(cx));
         }
         pos += n;
     }
     Ok(())
+}
+
+/// Write and flush one packet, including queued TLS records, under both owners.
+async fn write_all_to<W>(cx: Option<&Cx>, stream: &mut W, data: &[u8]) -> Result<(), MySqlError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut pos = 0;
+    let mut caller_cancel_wake = CancelWakerGuard::new(cx.cloned());
+    let mut owner_cancel_wake = CancelWakerGuard::new(Cx::current());
+    while pos < data.len() {
+        let written = std::future::poll_fn(|task_cx| {
+            caller_cancel_wake.refresh(task_cx.waker());
+            owner_cancel_wake.refresh(task_cx.waker());
+            if let Some(reason) = io_cancel_reason(cx) {
+                return Poll::Ready(Err(MySqlError::Cancelled(reason)));
+            }
+            Pin::new(&mut *stream)
+                .poll_write(task_cx, &data[pos..])
+                .map_err(|error| stream_io_error(cx, error))
+        })
+        .await?;
+
+        if written == 0 {
+            return Err(MySqlError::Io(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write data",
+            )));
+        }
+        pos += written;
+    }
+    // TLS can accept plaintext before its encrypted records reach the socket.
+    std::future::poll_fn(|task_cx| {
+        caller_cancel_wake.refresh(task_cx.waker());
+        owner_cancel_wake.refresh(task_cx.waker());
+        if let Some(reason) = io_cancel_reason(cx) {
+            return Poll::Ready(Err(MySqlError::Cancelled(reason)));
+        }
+        Pin::new(&mut *stream)
+            .poll_flush(task_cx)
+            .map_err(|error| stream_io_error(cx, error))
+    })
+    .await
 }
 
 impl MySqlConnection {
@@ -2507,7 +2560,7 @@ impl MySqlConnection {
         request.write_byte(handshake.charset);
         request.write_bytes(&[0; 23]);
         let packet = request.build_packet();
-        self.write_all(&packet.bytes).await?;
+        self.write_all(None, &packet.bytes).await?;
         self.inner.sequence = packet.next_sequence;
 
         let MySqlStream::Plain(tcp) =
@@ -2631,7 +2684,7 @@ impl MySqlConnection {
             killer.options = None;
             killer.inner.closed = true;
             killer
-                .raw_query_expect_ok(&format!("KILL QUERY {thread_id}"), "KILL QUERY")
+                .raw_query_expect_ok(cx, &format!("KILL QUERY {thread_id}"), "KILL QUERY")
                 .await
         };
         let mut exchange = std::pin::pin!(crate::time::timeout(cx.now(), bound, exchange));
@@ -2835,7 +2888,7 @@ impl MySqlConnection {
 
     /// Read the initial handshake packet.
     async fn read_handshake(&mut self) -> Result<Handshake, MySqlError> {
-        let (data, seq) = self.read_packet().await?;
+        let (data, seq) = self.read_packet(None).await?;
         self.inner.sequence = seq.wrapping_add(1);
 
         // Security: Reject malformed 0x00-length packets in authentication context
@@ -3029,7 +3082,7 @@ impl MySqlConnection {
         buf.write_null_terminated(&handshake.auth_plugin_name);
 
         let packet = buf.build_packet();
-        self.write_all(&packet.bytes).await?;
+        self.write_all(None, &packet.bytes).await?;
         self.inner.sequence = packet.next_sequence;
 
         Ok(())
@@ -3141,7 +3194,7 @@ impl MySqlConnection {
         options: &MySqlConnectOptions,
         handshake: &Handshake,
     ) -> Result<(), MySqlError> {
-        let (data, seq) = self.read_packet().await?;
+        let (data, seq) = self.read_packet(None).await?;
         self.inner.sequence = seq.wrapping_add(1);
 
         if data.is_empty() {
@@ -3232,11 +3285,11 @@ impl MySqlConnection {
         buf.set_sequence(self.inner.sequence);
         buf.write_bytes(&auth_response);
         let packet = buf.build_packet();
-        self.write_all(&packet.bytes).await?;
+        self.write_all(None, &packet.bytes).await?;
         self.inner.sequence = packet.next_sequence;
 
         // Read final response
-        let (data, seq) = self.read_packet().await?;
+        let (data, seq) = self.read_packet(None).await?;
         self.inner.sequence = seq.wrapping_add(1);
 
         match data.first() {
@@ -3275,7 +3328,7 @@ impl MySqlConnection {
         match data.first() {
             Some(0x03) => {
                 // Fast auth success - wait for OK packet
-                let (data, seq) = self.read_packet().await?;
+                let (data, seq) = self.read_packet(None).await?;
                 self.inner.sequence = seq.wrapping_add(1);
                 match data.first() {
                     Some(0x00) => {
@@ -3336,10 +3389,10 @@ impl MySqlConnection {
         packet.0.push(self.inner.sequence);
         packet.0.extend_from_slice(password.as_bytes());
         packet.0.push(0);
-        self.write_all(packet.as_slice()).await?;
+        self.write_all(None, packet.as_slice()).await?;
         self.inner.sequence = self.inner.sequence.wrapping_add(1);
         drop(packet);
-        let (response, sequence) = self.read_packet().await?;
+        let (response, sequence) = self.read_packet(None).await?;
         self.inner.sequence = sequence.wrapping_add(1);
         match response.first() {
             Some(0x00) => {
@@ -3576,7 +3629,7 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
 
-        if let Err(e) = self.drain_abandoned_transaction().await {
+        if let Err(e) = self.drain_abandoned_transaction(cx).await {
             return outcome_from_error(e);
         }
 
@@ -3592,13 +3645,13 @@ impl MySqlConnection {
         // connection stays closed and prevents protocol desynchronization.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&packet.bytes).await {
+        if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read response
-        let (data, seq) = match self.read_packet().await {
+        let (data, seq) = match self.read_packet(Some(cx)).await {
             Ok(p) => p,
             Err(e) => return outcome_from_error(e),
         };
@@ -3673,7 +3726,7 @@ impl MySqlConnection {
             return Ok(Vec::new());
         }
 
-        let (columns, indices) = self.read_result_set_columns(column_count).await?;
+        let (columns, indices) = self.read_result_set_columns(cx, column_count).await?;
 
         // Read rows
         let mut rows = Vec::new();
@@ -3689,7 +3742,7 @@ impl MySqlConnection {
                         .unwrap_or_else(|| crate::types::CancelReason::user("cancelled")),
                 ));
             }
-            let (data, seq) = self.read_packet().await?;
+            let (data, seq) = self.read_packet(Some(cx)).await?;
             self.inner.sequence = seq.wrapping_add(1);
 
             if data.is_empty() {
@@ -3741,7 +3794,7 @@ impl MySqlConnection {
             return Ok(Vec::new());
         }
 
-        let (columns, indices) = self.read_result_set_columns(column_count).await?;
+        let (columns, indices) = self.read_result_set_columns(cx, column_count).await?;
         let mut rows = Vec::new();
 
         loop {
@@ -3753,7 +3806,7 @@ impl MySqlConnection {
                 ));
             }
 
-            let (data, seq) = self.read_packet().await?;
+            let (data, seq) = self.read_packet(Some(cx)).await?;
             self.inner.sequence = seq.wrapping_add(1);
 
             if data.is_empty() {
@@ -3781,13 +3834,14 @@ impl MySqlConnection {
 
     async fn read_result_set_columns(
         &mut self,
+        cx: &Cx,
         column_count: usize,
     ) -> Result<(Arc<Vec<MySqlColumn>>, Arc<BTreeMap<String, usize>>), MySqlError> {
         let mut columns = Vec::with_capacity(column_count);
         let mut indices = BTreeMap::new();
 
         for i in 0..column_count {
-            let (data, seq) = self.read_packet().await?;
+            let (data, seq) = self.read_packet(Some(cx)).await?;
             self.inner.sequence = seq.wrapping_add(1);
 
             let column = Self::parse_column_definition(&data)?;
@@ -3799,14 +3853,14 @@ impl MySqlConnection {
         // column definitions; rows start immediately and the final terminator
         // is an OK packet. Without DEPRECATE_EOF we still expect EOF here.
         if Self::expects_metadata_eof(self.inner.capabilities) {
-            self.read_metadata_eof("columns").await?;
+            self.read_metadata_eof(cx, "columns").await?;
         }
 
         Ok((Arc::new(columns), Arc::new(indices)))
     }
 
-    async fn read_metadata_eof(&mut self, label: &'static str) -> Result<(), MySqlError> {
-        let (data, seq) = self.read_packet().await?;
+    async fn read_metadata_eof(&mut self, cx: &Cx, label: &'static str) -> Result<(), MySqlError> {
+        let (data, seq) = self.read_packet(Some(cx)).await?;
         self.inner.sequence = seq.wrapping_add(1);
         if !Self::is_eof_packet(&data) {
             return Err(MySqlError::Protocol(format!("expected EOF after {label}")));
@@ -4396,7 +4450,7 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
 
-        if let Err(e) = self.drain_abandoned_transaction().await {
+        if let Err(e) = self.drain_abandoned_transaction(cx).await {
             return outcome_from_error(e);
         }
 
@@ -4412,13 +4466,13 @@ impl MySqlConnection {
         // connection stays closed and prevents protocol desynchronization.
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&packet.bytes).await {
+        if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read response
-        let (data, seq) = match self.read_packet().await {
+        let (data, seq) = match self.read_packet(Some(cx)).await {
             Ok(p) => p,
             Err(e) => return outcome_from_error(e),
         };
@@ -4753,6 +4807,16 @@ impl MySqlConnection {
 
     /// Ping the server.
     pub async fn ping(&mut self, cx: &Cx) -> Outcome<(), MySqlError> {
+        let result = self.ping_inner(cx).await;
+        if matches!(result, Outcome::Cancelled(_)) && self.inner.closed {
+            // PING has no server query to kill, but a partial exchange must
+            // close promptly even when the caller retains the poisoned handle.
+            let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
+        }
+        result
+    }
+
+    async fn ping_inner(&mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -4771,12 +4835,12 @@ impl MySqlConnection {
 
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&packet.bytes).await {
+        if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
-        let (data, seq) = match self.read_packet().await {
+        let (data, seq) = match self.read_packet(Some(cx)).await {
             Ok(p) => p,
             Err(e) => return outcome_from_error(e),
         };
@@ -4845,7 +4909,7 @@ impl MySqlConnection {
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUIT);
         let packet = buf.build_packet();
-        let _ = self.write_all(&packet.bytes).await;
+        let _ = self.write_all(None, &packet.bytes).await;
 
         let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
         self.inner.closed = true;
@@ -4868,12 +4932,35 @@ impl MySqlConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
+        if self.inner.closed {
+            return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+        self.inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.prepare_inner(cx, sql).await;
+        if matches!(result, Outcome::Cancelled(_)) && self.inner.closed {
+            self.wire_cancel_in_drain(cx).await;
+        }
+        self.inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    async fn prepare_inner(&mut self, cx: &Cx, sql: &str) -> Outcome<MySqlStatement, MySqlError> {
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(
+                cx.cancel_reason()
+                    .unwrap_or_else(|| CancelReason::user("cancelled")),
+            );
+        }
 
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
 
-        if let Err(e) = self.drain_abandoned_transaction().await {
+        if let Err(e) = self.drain_abandoned_transaction(cx).await {
             return outcome_from_error(e);
         }
 
@@ -4895,13 +4982,13 @@ impl MySqlConnection {
         // Mark closed before the protocol exchange to prevent desync on cancel
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&packet.bytes).await {
+        if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read prepare response
-        let (response_data, seq) = match self.read_packet().await {
+        let (response_data, seq) = match self.read_packet(Some(cx)).await {
             Ok((data, seq)) => (data, seq),
             Err(e) => return outcome_from_error(e),
         };
@@ -4952,7 +5039,7 @@ impl MySqlConnection {
         let mut params = Vec::new();
         if param_count > 0 {
             for _ in 0..param_count {
-                let (param_data, seq) = match self.read_packet().await {
+                let (param_data, seq) = match self.read_packet(Some(cx)).await {
                     Ok((data, seq)) => (data, seq),
                     Err(e) => return outcome_from_error(e),
                 };
@@ -4966,7 +5053,7 @@ impl MySqlConnection {
             }
 
             if expects_metadata_eof {
-                if let Err(e) = self.read_metadata_eof("parameters").await {
+                if let Err(e) = self.read_metadata_eof(cx, "parameters").await {
                     return outcome_from_error(e);
                 }
             }
@@ -4976,7 +5063,7 @@ impl MySqlConnection {
         let mut columns = Vec::new();
         if column_count > 0 {
             for _ in 0..column_count {
-                let (col_data, seq) = match self.read_packet().await {
+                let (col_data, seq) = match self.read_packet(Some(cx)).await {
                     Ok((data, seq)) => (data, seq),
                     Err(e) => return outcome_from_error(e),
                 };
@@ -4990,7 +5077,7 @@ impl MySqlConnection {
             }
 
             if expects_metadata_eof {
-                if let Err(e) = self.read_metadata_eof("columns").await {
+                if let Err(e) = self.read_metadata_eof(cx, "columns").await {
                     return outcome_from_error(e);
                 }
             }
@@ -5013,7 +5100,7 @@ impl MySqlConnection {
             .prepared_cache
             .insert_returning_evicted_id(sql.to_string(), stmt.clone());
         if let Some(statement_id) = evicted_statement_id
-            && let Err(err) = self.close_prepared_statement_id(statement_id).await
+            && let Err(err) = self.close_prepared_statement_id(cx, statement_id).await
         {
             return outcome_from_error(err);
         }
@@ -5021,7 +5108,11 @@ impl MySqlConnection {
         Outcome::Ok(stmt)
     }
 
-    async fn close_prepared_statement_id(&mut self, statement_id: u32) -> Result<(), MySqlError> {
+    async fn close_prepared_statement_id(
+        &mut self,
+        cx: &Cx,
+        statement_id: u32,
+    ) -> Result<(), MySqlError> {
         if self.inner.closed {
             return Err(MySqlError::ConnectionClosed);
         }
@@ -5033,7 +5124,7 @@ impl MySqlConnection {
         let packet = buf.build_packet();
 
         self.inner.closed = true;
-        if let Err(e) = self.write_all(&packet.bytes).await {
+        if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
             return Err(e);
         }
@@ -5114,7 +5205,7 @@ impl MySqlConnection {
             )));
         }
 
-        if let Err(e) = self.drain_abandoned_transaction().await {
+        if let Err(e) = self.drain_abandoned_transaction(cx).await {
             return outcome_from_error(e);
         }
 
@@ -5142,13 +5233,13 @@ impl MySqlConnection {
         // Mark closed before the protocol exchange
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&packet.bytes).await {
+        if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read response
-        let (response_data, seq) = match self.read_packet().await {
+        let (response_data, seq) = match self.read_packet(Some(cx)).await {
             Ok((data, seq)) => (data, seq),
             Err(e) => return outcome_from_error(e),
         };
@@ -5256,7 +5347,7 @@ impl MySqlConnection {
             )));
         }
 
-        if let Err(e) = self.drain_abandoned_transaction().await {
+        if let Err(e) = self.drain_abandoned_transaction(cx).await {
             return outcome_from_error(e);
         }
 
@@ -5284,13 +5375,13 @@ impl MySqlConnection {
         // Mark closed before the protocol exchange
         self.inner.closed = true;
 
-        if let Err(e) = self.write_all(&packet.bytes).await {
+        if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             return outcome_from_error(e);
         }
         self.inner.sequence = packet.next_sequence;
 
         // Read response
-        let (response_data, seq) = match self.read_packet().await {
+        let (response_data, seq) = match self.read_packet(Some(cx)).await {
             Ok((data, seq)) => (data, seq),
             Err(e) => return outcome_from_error(e),
         };
@@ -5347,7 +5438,7 @@ impl MySqlConnection {
 
     /// If a prior transaction was dropped without commit/rollback, issue
     /// an implicit ROLLBACK to return the connection to a clean state.
-    async fn drain_abandoned_transaction(&mut self) -> Result<(), MySqlError> {
+    async fn drain_abandoned_transaction(&mut self, cx: &Cx) -> Result<(), MySqlError> {
         if !self.inner.needs_rollback {
             return Ok(());
         }
@@ -5357,7 +5448,7 @@ impl MySqlConnection {
         // will remain closed, preventing protocol desynchronization.
         self.inner.closed = true;
 
-        self.raw_query_expect_ok("ROLLBACK", "implicit ROLLBACK")
+        self.raw_query_expect_ok(cx, "ROLLBACK", "implicit ROLLBACK")
             .await?;
         self.inner.needs_rollback = false;
         // The abandoned transaction may have been opened by
@@ -5365,7 +5456,7 @@ impl MySqlConnection {
         // connection is reused.
         if let Some(previous) = self.inner.session_isolation_restore.take() {
             let restore_sql = format!("SET SESSION TRANSACTION ISOLATION LEVEL {previous}");
-            self.raw_query_expect_ok(&restore_sql, "session isolation restore")
+            self.raw_query_expect_ok(cx, &restore_sql, "session isolation restore")
                 .await?;
         }
         self.inner.closed = false;
@@ -5373,23 +5464,28 @@ impl MySqlConnection {
     }
 
     /// Sends one `COM_QUERY` on the raw stream and requires an OK packet.
-    /// Used on cleanup paths that run without a caller `Cx`. Any failure
+    /// Used on cleanup paths under their caller's `Cx`. Any failure
     /// shuts the socket down: the connection stays `closed` and cannot be
     /// reused with a desynchronized protocol state.
-    async fn raw_query_expect_ok(&mut self, sql: &str, what: &str) -> Result<(), MySqlError> {
+    async fn raw_query_expect_ok(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        what: &str,
+    ) -> Result<(), MySqlError> {
         let mut buf = PacketBuffer::new();
         buf.set_sequence(0);
         buf.write_byte(command::COM_QUERY);
         buf.write_bytes(sql.as_bytes());
         let packet = buf.build_packet();
 
-        if let Err(e) = self.write_all(&packet.bytes).await {
+        if let Err(e) = self.write_all(Some(cx), &packet.bytes).await {
             let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
             return Err(e);
         }
         self.inner.sequence = packet.next_sequence;
 
-        let (data, seq) = match self.read_packet().await {
+        let (data, seq) = match self.read_packet(Some(cx)).await {
             Ok(res) => res,
             Err(e) => {
                 let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
@@ -5417,62 +5513,24 @@ impl MySqlConnection {
     }
 
     /// Write data to the stream.
-    async fn write_all(&mut self, data: &[u8]) -> Result<(), MySqlError> {
-        let mut pos = 0;
-        // br-asupersync-w9k2rp: as with read_exact_from, wake a write parked on
-        // a full socket (a client whose peer has stopped reading) when an
-        // external cancel fires, instead of only on the next poll.
-        let mut cancel_wake = CancelWakerGuard::new();
-        while pos < data.len() {
-            let written = std::future::poll_fn(|cx| {
-                cancel_wake.refresh(cx.waker());
-                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                    return Poll::Ready(Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "cancelled",
-                    )));
-                }
-                Pin::new(&mut self.inner.stream).poll_write(cx, &data[pos..])
-            })
-            .await
-            .map_err(stream_io_error)?;
-
-            if written == 0 {
-                return Err(MySqlError::Io(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write data",
-                )));
-            }
-            pos += written;
-        }
-        // TLS may accept plaintext while encrypted records are still queued.
-        // Flush before the caller reads the server's next protocol packet.
-        std::future::poll_fn(|cx| {
-            cancel_wake.refresh(cx.waker());
-            if Cx::with_current(|current| current.checkpoint().is_err()).unwrap_or(false) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
-            }
-            Pin::new(&mut self.inner.stream).poll_flush(cx)
-        })
-        .await
-        .map_err(stream_io_error)?;
-        Ok(())
+    async fn write_all(&mut self, cx: Option<&Cx>, data: &[u8]) -> Result<(), MySqlError> {
+        write_all_to(cx, &mut self.inner.stream, data).await
     }
 
     /// Read exactly `len` bytes.
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), MySqlError> {
-        read_exact_from(&mut self.inner.stream, buf).await
+    async fn read_exact(&mut self, cx: Option<&Cx>, buf: &mut [u8]) -> Result<(), MySqlError> {
+        read_exact_from(cx, &mut self.inner.stream, buf).await
     }
 
     /// Read a complete packet.
-    async fn read_packet(&mut self) -> Result<(Vec<u8>, u8), MySqlError> {
+    async fn read_packet(&mut self, cx: Option<&Cx>) -> Result<(Vec<u8>, u8), MySqlError> {
         let mut expected_seq = self.inner.sequence;
         let mut last_seq;
         let mut data = Vec::new();
 
         loop {
             let mut header = [0u8; 4];
-            self.read_exact(&mut header).await?;
+            self.read_exact(cx, &mut header).await?;
 
             let (len, seq) = Self::decode_packet_header(header, expected_seq)?;
             last_seq = seq;
@@ -5486,7 +5544,7 @@ impl MySqlConnection {
                     )));
                 }
                 data.resize(new_len, 0);
-                self.read_exact(&mut data[start..]).await?;
+                self.read_exact(cx, &mut data[start..]).await?;
             }
 
             expected_seq = expected_seq.wrapping_add(1);
