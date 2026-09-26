@@ -3676,6 +3676,33 @@ impl<Caps> Cx<Caps> {
         let _ = (region, task);
     }
 
+    /// Requests local cancellation while preserving an explicit cause chain.
+    ///
+    /// The supplied attribution is published atomically with the cancellation
+    /// flag and strengthens any existing reason using [`CancelReason::strengthen`].
+    /// A weaker request cannot overwrite a concurrent shutdown or another
+    /// stronger cancellation. Registered waiters are woken after the context
+    /// lock is released.
+    ///
+    /// Unlike [`Self::cancel_with`], this preserves the supplied origin and
+    /// timestamp. Like that method, it cancels this context locally; region-tree
+    /// propagation remains the responsibility of the runtime or region owner.
+    pub fn cancel_with_reason(&self, reason: CancelReason) {
+        let wakers = {
+            let mut inner = self.inner.write();
+            inner.set_cancel_requested(true);
+            if let Some(existing) = inner.cancel_reason.as_mut() {
+                existing.strengthen(&reason);
+            } else {
+                inner.cancel_reason = Some(reason);
+            }
+            let wakers = inner.cancel_waker_snapshot();
+            inner.cancel_wakers_pending = false;
+            wakers
+        };
+        crate::types::task_context::CancelWakeEffects::new(wakers).dispatch();
+    }
+
     /// Cancels without building a full attribution chain (performance-critical path).
     ///
     /// Use this when attribution isn't needed and minimizing allocations is important.
@@ -6490,6 +6517,28 @@ mod tests {
     }
 
     #[test]
+    fn cancel_with_reason_preserves_causes_and_stronger_cancellation() {
+        let cx = test_cx();
+        let deadline =
+            CancelReason::with_origin(CancelKind::Deadline, cx.region_id(), Time::from_secs(7))
+                .with_task(cx.task_id());
+        let reason = CancelReason::parent_cancelled()
+            .with_message("request response cancelled")
+            .with_cause(deadline.clone());
+        cx.cancel_with_reason(reason);
+        assert!(cx.is_cancel_requested());
+        assert_eq!(cx.root_cancel_cause(), Some(deadline));
+
+        cx.cancel_with_reason(CancelReason::shutdown());
+        let shutdown = cx.cancel_reason();
+        cx.cancel_with_reason(
+            CancelReason::parent_cancelled().with_cause(CancelReason::deadline()),
+        );
+        assert_eq!(cx.cancel_reason(), shutdown);
+        assert!(cx.cancelled_by(CancelKind::Shutdown));
+    }
+
+    #[test]
     fn local_cancel_apis_never_weaken_existing_reason() {
         let cx = test_cx();
         cx.cancel_fast(CancelKind::Shutdown);
@@ -7057,6 +7106,15 @@ mod tests {
             1,
             "clearing cancellation must not spuriously wake the cancel waker"
         );
+        cx.cancel_with_reason(
+            CancelReason::parent_cancelled().with_cause(CancelReason::deadline()),
+        );
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            2,
+            "a complete cancellation reason must also wake registered waiters"
+        );
+        assert!(cx.any_cause_is(CancelKind::Deadline));
     }
 
     #[test]

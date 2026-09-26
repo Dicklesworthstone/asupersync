@@ -3054,7 +3054,19 @@ mod native_h3_listener_live {
                         break;
                     }
                 }
-                assert!(request_cx.any_cause_is(CancelKind::Deadline));
+                if produced {
+                    assert!(request_cx.cancelled_by(CancelKind::ParentCancelled));
+                    assert!(request_cx.any_cause_is(CancelKind::Deadline));
+                } else {
+                    // The shared server hop has always attributed its own
+                    // request-budget timer as Timeout with ASUP-E501. Require
+                    // that exact contract rather than a different timer kind.
+                    assert!(request_cx.cancelled_by(CancelKind::Timeout));
+                    assert_eq!(
+                        request_cx.cancel_reason().unwrap().message.as_deref(),
+                        Some("[ASUP-E501] server request budget deadline exceeded")
+                    );
+                }
                 let mut closed_seen = false;
                 std::future::poll_fn(|task_cx| {
                     if asupersync::runtime::Runtime::current_handle()

@@ -60,7 +60,8 @@ pub(crate) const HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC: &str =
 /// when the child remains pending through the whole drain grace. A
 /// cancellation-aware producer can instead wake, observe its cancelled `Cx`,
 /// and return `HttpError::BodyCancelled` during that grace. Deadline causes
-/// remain exact here. Structural `ParentCancelled` is deliberately left as an
+/// remain exact here, including causes retained through `ParentCancelled`.
+/// Structural `ParentCancelled` without a time-exceeded cause remains an
 /// ordinary cancellation because it also represents local resets and cleanup;
 /// the protocol transport arm that observed a peer reset/EOF/write error owns
 /// the corresponding client-abort diagnostic.
@@ -73,11 +74,13 @@ pub(crate) enum ServerProducerCancellation {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn classify_server_producer_cancellation(cx: &Cx) -> ServerProducerCancellation {
-    match cx.cancel_reason().map(|reason| reason.kind) {
-        Some(CancelKind::Timeout | CancelKind::Deadline) => {
-            ServerProducerCancellation::DeadlineExceeded
-        }
-        Some(_) | None => ServerProducerCancellation::Cancelled,
+    if cx
+        .cancel_reason()
+        .is_some_and(|reason| reason.chain().any(|cause| cause.is_time_exceeded()))
+    {
+        ServerProducerCancellation::DeadlineExceeded
+    } else {
+        ServerProducerCancellation::Cancelled
     }
 }
 
@@ -1322,6 +1325,35 @@ mod tests {
 
     fn test_request(method: &str, path: &str) -> Request {
         Request::new(method, path)
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn producer_cancellation_classifies_time_causes_through_parent_cleanup() {
+        use crate::types::CancelReason;
+
+        for kind in [CancelKind::Timeout, CancelKind::Deadline] {
+            let cx = test_cx();
+            cx.cancel_with_reason(
+                CancelReason::parent_cancelled().with_cause(CancelReason::new(kind)),
+            );
+            assert_eq!(
+                classify_server_producer_cancellation(&cx),
+                ServerProducerCancellation::DeadlineExceeded,
+            );
+        }
+        for reason in [
+            CancelReason::parent_cancelled(),
+            CancelReason::parent_cancelled().with_cause(CancelReason::user("client reset")),
+            CancelReason::shutdown(),
+        ] {
+            let cx = test_cx();
+            cx.cancel_with_reason(reason);
+            assert_eq!(
+                classify_server_producer_cancellation(&cx),
+                ServerProducerCancellation::Cancelled,
+            );
+        }
     }
 
     // --- RequestRegion::run ---

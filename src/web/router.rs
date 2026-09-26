@@ -85,12 +85,12 @@ use crate::net::quic_native::{
 use crate::service::Layer;
 #[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
 use crate::tracing_compat::error;
-#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
-use crate::types::CancelKind;
 use crate::types::{
     Budget, Time,
     id::{next_bootstrap_region_id, next_bootstrap_task_id},
 };
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+use crate::types::{CancelKind, CancelReason};
 
 #[cfg(all(feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
 mod h3_listener;
@@ -1939,6 +1939,35 @@ impl NativeH3Router {
         connection: &mut QuicConnection,
         token: &NativeH3RouterDispatchToken,
     ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        self.cancel_dispatch_with_optional_reason(cx, session, connection, token, None)
+    }
+
+    /// Cancels a dispatch while retaining the request owner's cancellation cause.
+    ///
+    /// Produced responses observe `ParentCancelled` with `cause` attached, so a
+    /// request deadline remains distinguishable from a client reset or shutdown.
+    /// `cx` must be the live connection-driver context used to queue the reset,
+    /// rather than the cancelled request context. Ownership checks and stream
+    /// cleanup are identical to [`Self::cancel_dispatch_with_cx`].
+    pub fn cancel_dispatch_with_reason(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        token: &NativeH3RouterDispatchToken,
+        cause: CancelReason,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        self.cancel_dispatch_with_optional_reason(cx, session, connection, token, Some(cause))
+    }
+
+    fn cancel_dispatch_with_optional_reason(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        token: &NativeH3RouterDispatchToken,
+        cause: Option<CancelReason>,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
         if !Arc::ptr_eq(&self.identity, &token.bridge_identity) {
             return Err(crate::http::h3::NativeH3SessionError::InvalidState(
                 "HTTP/3 Router cancellation belongs to a different bridge",
@@ -1963,9 +1992,10 @@ impl NativeH3Router {
                 );
             }
             if let Some(mut state) = self.produced.remove(&stream_id) {
-                mark_native_h3_produced_cancelled(
+                mark_native_h3_produced_cancelled_with_reason(
                     &mut state,
                     "HTTP/3 connection closed before dispatch cancellation",
+                    cause,
                 );
             }
             self.take_pending_request(stream_id);
@@ -1976,12 +2006,13 @@ impl NativeH3Router {
             });
         }
         if let Some(state) = self.produced.get_mut(&stream_id) {
-            cancel_native_h3_produced(
+            cancel_native_h3_produced_with_reason(
                 cx,
                 session,
                 connection,
                 state,
                 "HTTP/3 produced response explicitly cancelled",
+                cause,
             )?;
             return Ok(NativeH3RouterEvent::RequestRefused {
                 stream_id,
@@ -2300,12 +2331,24 @@ fn cancel_native_h3_produced(
     state: &mut ActiveNativeH3ProducedResponse,
     message: &'static str,
 ) -> Result<(), crate::http::h3::NativeH3SessionError> {
+    cancel_native_h3_produced_with_reason(cx, session, connection, state, message, None)
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn cancel_native_h3_produced_with_reason(
+    cx: &Cx,
+    session: &mut NativeH3Session,
+    connection: &mut QuicConnection,
+    state: &mut ActiveNativeH3ProducedResponse,
+    message: &'static str,
+    cause: Option<CancelReason>,
+) -> Result<(), crate::http::h3::NativeH3SessionError> {
     let reset = if state.reset_queued {
         Ok(())
     } else {
         session.cancel_request(cx, connection, state.writer.stream_id())
     };
-    mark_native_h3_produced_cancelled(state, message);
+    mark_native_h3_produced_cancelled_with_reason(state, message, cause);
     reset
 }
 
@@ -2331,8 +2374,30 @@ fn mark_native_h3_produced_cancelled(
     state: &mut ActiveNativeH3ProducedResponse,
     message: &'static str,
 ) {
-    if let Some(producer_cx) = &state.producer_cx {
-        producer_cx.cancel_with(CancelKind::ParentCancelled, Some(message));
+    mark_native_h3_produced_cancelled_with_reason(state, message, None);
+}
+
+#[cfg(all(feature = "http3", not(target_arch = "wasm32")))]
+fn mark_native_h3_produced_cancelled_with_reason(
+    state: &mut ActiveNativeH3ProducedResponse,
+    message: &'static str,
+    cause: Option<CancelReason>,
+) {
+    if !state.reset_queued
+        && let Some(producer_cx) = &state.producer_cx
+    {
+        let mut reason = CancelReason::parent_cancelled()
+            .with_region(producer_cx.region_id())
+            .with_task(producer_cx.task_id())
+            .with_message(message);
+        // Preserve an already-observed request timeout even when the caller
+        // uses the legacy cancellation entry point. Repeated cleanup must not
+        // replace the first reset's attribution with a generic parent reason.
+        if let Some(cause) = cause.or_else(|| producer_cx.cancel_reason()) {
+            reason =
+                reason.with_cause_limited(cause, &crate::types::CancelAttributionConfig::default());
+        }
+        producer_cx.cancel_with_reason(reason);
     }
     state.reset_queued = true;
     state.plan = None;
@@ -5090,6 +5155,7 @@ mod tests {
             )
             .expect("prepare response writer");
         let mut peer_bridge = NativeH3Router::new(Router::new());
+        let producer_cx = Cx::for_testing();
         peer_bridge.in_flight.insert(stream_id, 0);
         peer_bridge.produced.insert(
             stream_id,
@@ -5099,7 +5165,7 @@ mod tests {
                 plan: None,
                 body: None,
                 lifecycle: None,
-                producer_cx: None,
+                producer_cx: Some(producer_cx.clone()),
                 owned_request_cx: None,
                 max_data_wire_bytes: 0,
                 emitted_bytes: 0,
@@ -5130,7 +5196,13 @@ mod tests {
         );
         assert_eq!(
             peer_bridge
-                .cancel_dispatch_with_cx(&cx, &mut peer_session, &mut peer_connection, &peer_token,)
+                .cancel_dispatch_with_reason(
+                    &cx,
+                    &mut peer_session,
+                    &mut peer_connection,
+                    &peer_token,
+                    CancelReason::deadline(),
+                )
                 .expect("closed peer dispatch cancellation is terminal"),
             NativeH3RouterEvent::RequestRefused {
                 stream_id,
@@ -5139,6 +5211,8 @@ mod tests {
         );
         assert_eq!(peer_bridge.in_flight_dispatch_count(), 0);
         assert!(!peer_bridge.produced.contains_key(&stream_id));
+        assert!(producer_cx.cancelled_by(CancelKind::ParentCancelled));
+        assert!(producer_cx.any_cause_is(CancelKind::Deadline));
 
         let mut local_connection = established_server(&cx);
         let mut local_session = NativeH3Session::server();
@@ -5173,6 +5247,63 @@ mod tests {
             }
         );
         assert_eq!(local_bridge.in_flight_dispatch_count(), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn h3_producer_cancellation_retains_first_reset_cause() {
+        let cx = Cx::for_testing();
+        let mut connection = QuicConnection::server(Default::default());
+        connection.begin_handshake(&cx).unwrap();
+        connection.mark_handshake_keys_available(&cx).unwrap();
+        connection.mark_app_keys_available(&cx).unwrap();
+        connection.confirm_handshake(&cx).unwrap();
+        let mut session = NativeH3Session::server();
+        session
+            .initialize(&cx, &mut connection, crate::http::h3::H3Settings::default())
+            .unwrap();
+        let writer = session
+            .start_response_writer(
+                &connection,
+                StreamId(0),
+                &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                false,
+            )
+            .unwrap();
+        let mut state = ActiveNativeH3ProducedResponse {
+            status: 200,
+            writer,
+            plan: None,
+            body: None,
+            lifecycle: None,
+            producer_cx: Some(cx.clone()),
+            owned_request_cx: None,
+            max_data_wire_bytes: 0,
+            emitted_bytes: 0,
+            terminal: None,
+            head_only: false,
+            reset_queued: false,
+        };
+        mark_native_h3_produced_cancelled_with_reason(
+            &mut state,
+            "request deadline",
+            Some(CancelReason::deadline()),
+        );
+        let first = cx.cancel_reason();
+        assert!(cx.any_cause_is(CancelKind::Deadline));
+        // Lexically earlier generic messages used to replace the cause chain
+        // when connection teardown repeated cancellation of a reset response.
+        mark_native_h3_produced_cancelled(&mut state, "connection closed");
+        assert_eq!(cx.cancel_reason(), first);
+        assert!(state.reset_queued);
+
+        cx.cancel_with_reason(CancelReason::shutdown());
+        mark_native_h3_produced_cancelled_with_reason(
+            &mut state,
+            "another timeout",
+            Some(CancelReason::timeout()),
+        );
+        assert!(cx.cancelled_by(CancelKind::Shutdown));
     }
 
     #[test]

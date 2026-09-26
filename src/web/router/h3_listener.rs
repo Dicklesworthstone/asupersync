@@ -606,6 +606,7 @@ struct RequestWork {
     close: Option<RegionClose>,
     deadline: Option<ServerRequestDeadline>,
     terminal: Option<bool>,
+    cancellation_reason: Option<CancelReason>,
     task_completed: bool,
     response_started: bool,
     reset_applied: bool,
@@ -651,6 +652,7 @@ impl RequestWork {
                 .zip(budget.deadline)
                 .map(|(timer, deadline)| ServerRequestDeadline::new(timer, deadline)),
             terminal: None,
+            cancellation_reason: None,
             task_completed: false,
             response_started: false,
             reset_applied: false,
@@ -680,6 +682,7 @@ impl RequestWork {
         self.completion.take();
         self.buffered.take();
         let reason = CancelReason::with_origin(kind, cx.region_id(), cx.now());
+        self.cancellation_reason = Some(reason.clone());
         if let Some(task) = &self.task {
             task.abort_with_reason(reason.clone());
         }
@@ -1392,11 +1395,12 @@ impl ListenerState {
                                 } else {
                                     connection
                                         .bridge
-                                        .cancel_dispatch_with_cx(
+                                        .cancel_dispatch_with_optional_reason(
                                             cx,
                                             &mut connection.session,
                                             transport,
                                             &request.token,
+                                            request.cancellation_reason.clone(),
                                         )
                                         .map(|_| ())
                                 }
@@ -1995,11 +1999,12 @@ impl ListenerConnection {
                         error_code,
                     );
                 } else {
-                    let _ = self.bridge.cancel_dispatch_with_cx(
+                    let _ = self.bridge.cancel_dispatch_with_optional_reason(
                         cx,
                         &mut self.session,
                         connection,
                         &request.token,
+                        request.cancellation_reason.clone(),
                     );
                 }
                 request.reset_applied = true;
