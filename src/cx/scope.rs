@@ -938,19 +938,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         (r1, r2)
     }
 
-    /// Races two tasks, waiting for the first to complete.
-    ///
-    /// The loser is cancelled and drained (awaited until it completes cancellation).
-    ///
-    /// # Example
-    /// ```ignore
-    /// let h1 = scope.spawn_registered(...);
-    /// let h2 = scope.spawn_registered(...);
-    /// match scope.race(cx, h1, h2).await {
-    ///     Ok(val) => println!("Winner result: {val}"),
-    ///     Err(e) => println!("Race failed: {e}"),
-    /// }
-    /// ```
+    /// Records the start of a race whose participants must all drain.
     fn record_loser_drain_start(&self, cx: &Cx, participants: Vec<TaskId>) -> Option<u64> {
         let time = cx.now_for_observability();
         cx.loser_drain_history_handle()
@@ -1012,6 +1000,21 @@ impl<'scope, P: Policy> Scope<'scope, P> {
     /// branches receive its reason and are drained before returning cancellation.
     /// A panic during drain takes precedence. Cancellation masking is respected;
     /// cancellation after a winner was selected does not replace that result.
+    ///
+    /// Loser cancellation targets each handle's task. A task that awaits on a
+    /// captured parent context never observes it, and the drain waits until
+    /// that task finishes on its own; spawn each branch with the context its
+    /// spawn closure receives.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let h1 = scope.spawn_registered(state, cx, |child| async move { work_a(&child).await })?;
+    /// let h2 = scope.spawn_registered(state, cx, |child| async move { work_b(&child).await })?;
+    /// match scope.race(cx, h1, h2).await {
+    ///     Ok(val) => println!("Winner result: {val}"),
+    ///     Err(e) => println!("Race failed: {e}"),
+    /// }
+    /// ```
     pub async fn race<T>(
         &self,
         cx: &Cx,
@@ -1286,6 +1289,12 @@ impl<'scope, P: Policy> Scope<'scope, P> {
     /// with the owner's reason and drains all of them. A panic during that drain
     /// takes precedence over cancellation. A same-poll ready branch wins over
     /// owner cancellation; cancellation masking is respected.
+    ///
+    /// As with [`Scope::race`], a participant must observe cancellation on its
+    /// own task context; one awaiting on a captured parent context is never
+    /// reached by loser cancellation, and the drain waits until it finishes.
+    /// [`Diagnostics::find_stalled_race_drains`](crate::observability::Diagnostics::find_stalled_race_drains)
+    /// reports such races.
     ///
     /// # Arguments
     /// * `cx` - The capability context

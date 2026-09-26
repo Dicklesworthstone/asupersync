@@ -4277,6 +4277,13 @@ impl Cx<cap::All> {
     /// fails the race closed with [`JoinError::Cancelled`]; already-spawned
     /// siblings are cancelled as the race future unwinds.
     ///
+    /// **A branch must use its own context to observe loser cancellation.**
+    /// Cancellation targets the branch's spawned task. A prebuilt future that
+    /// awaits a cancel-aware operation on this caller context (for example
+    /// `rx.recv(&cx)`) never sees it, so the drain waits until that branch
+    /// finishes on its own. Prefer [`Cx::race_drained_with`], whose factories
+    /// receive their child context, or call [`Cx::current`] inside the branch.
+    ///
     /// On an empty branch list this is pending until the context is cancelled,
     /// mirroring [`Cx::race`].
     pub async fn race_drained<T>(
@@ -4328,7 +4335,8 @@ impl Cx<cap::All> {
     ///
     /// Names are accepted for source-level symmetry with [`Cx::race_named`];
     /// the drain machinery itself is name-agnostic. See [`Cx::race_drained`]
-    /// for the full guarantee.
+    /// for the full guarantee and the caller-context hazard; the child-context
+    /// counterpart is [`Cx::race_drained_with_named`].
     pub async fn race_drained_named<T>(&self, futures: NamedFutures<T>) -> Result<T, JoinError>
     where
         T: Send + 'static,
@@ -4343,6 +4351,9 @@ impl Cx<cap::All> {
     /// is abandoned: every branch is cancelled by drop. The loser-*drain*
     /// guarantee applies to the ordinary win path; the timeout path mirrors
     /// [`Cx::race_timeout`] (cancel-on-drop, no post-timeout drain).
+    /// [`Cx::race_drained_with_timeout`] instead cancels and drains every
+    /// branch at the deadline, and its factories receive their child context
+    /// (see [`Cx::race_drained`] for the caller-context hazard).
     pub async fn race_drained_timeout<T>(
         &self,
         duration: Duration,
