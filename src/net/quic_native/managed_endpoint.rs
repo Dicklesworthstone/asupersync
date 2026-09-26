@@ -89,6 +89,7 @@ struct PendingAuthenticatedAccept {
     peer_max_udp_payload_size: Option<u64>,
     early: Vec<ReceivedPacket>,
     early_bytes: usize,
+    final_ack_queued: bool,
 }
 
 #[cfg(feature = "tls")]
@@ -201,6 +202,17 @@ impl PendingAuthenticatedAccept {
         self.sent_bytes = self.sent_bytes.saturating_add(bytes as u64);
     }
 
+    fn retain_early_packet(&mut self, packet: ReceivedPacket) -> Result<(), ManagedEndpointError> {
+        if self.early.len() == ACCEPT_MAX_PACKETS
+            || packet.data.len() > ACCEPT_MAX_BYTES.saturating_sub(self.early_bytes)
+        {
+            return Err(accept_error("early application packet bound exhausted"));
+        }
+        self.early_bytes += packet.data.len();
+        self.early.push(packet);
+        Ok(())
+    }
+
     fn receive(
         &mut self,
         packet: ReceivedPacket,
@@ -235,14 +247,8 @@ impl PendingAuthenticatedAccept {
             if self.driver.peer_connection_id().is_none() {
                 return Ok(());
             }
-            if self.early.len() == ACCEPT_MAX_PACKETS
-                || packet.data.len() > ACCEPT_MAX_BYTES.saturating_sub(self.early_bytes)
-            {
-                return Err(accept_error("early application packet bound exhausted"));
-            }
+            self.retain_early_packet(packet)?;
             self.received_packets += 1;
-            self.early_bytes += packet.data.len();
-            self.early.push(packet);
             return Ok(());
         }
         let ProtectedHeaderPrefix::Long(header) = header else {
@@ -257,8 +263,8 @@ impl PendingAuthenticatedAccept {
         {
             return Ok(());
         }
-        let peer_cid = match self.driver.recv_handshake_packet(&packet.data) {
-            Ok(cid) => cid,
+        let (peer_cid, consumed) = match self.driver.recv_handshake_packet_with_consumed(&packet.data) {
+            Ok(accepted) => accepted,
             Err(error)
                 if super::handshake_driver::is_stale_handshake_packet_error(&error)
                     || super::handshake_driver::is_unauthenticated_handshake_packet_error(
@@ -278,6 +284,29 @@ impl PendingAuthenticatedAccept {
             .authenticated_received_bytes
             .saturating_add(packet.data.len() as u64);
         self.address_validated |= header.packet_type == LongPacketType::Handshake;
+        // A short-header packet can follow the client's Finished in the same
+        // UDP datagram (RFC 9000 section 12.2). TLS consumes only the long-
+        // header prefix. Preserve the exact remaining ciphertext for the
+        // authenticated router instead of losing the first application data.
+        // Padding, malformed trailers and packets for another CID are not
+        // admitted. The router still performs AEAD/replay checks after handoff.
+        let tail = &packet.data[consumed..];
+        if matches!(
+            ProtectedHeaderPrefix::decode(tail, self.local_cid.len()),
+            Ok(ProtectedHeaderPrefix::Short { dst_cid, .. }) if dst_cid == self.local_cid
+        ) {
+            if self.early.len() == ACCEPT_MAX_PACKETS
+                || tail.len() > ACCEPT_MAX_BYTES.saturating_sub(self.early_bytes)
+            {
+                return Err(accept_error("early application packet bound exhausted"));
+            }
+            self.retain_early_packet(ReceivedPacket {
+                src_addr: packet.src_addr,
+                data: tail.to_vec(),
+                receive_time: packet.receive_time,
+                transmit_time: packet.transmit_time,
+            })?;
+        }
         // The peer's receive ceiling constrains our output, not our local
         // receive buffer. Until ClientHello parameters are available, retain
         // QUIC's minimum supported datagram size as the conservative send cap.
@@ -357,12 +386,38 @@ impl PendingAuthenticatedAccept {
                 });
             }
         }
+        let final_ack = self.driver.is_complete() && !self.final_ack_queued;
+        if final_ack {
+            let data = self
+                .driver
+                .assemble_final_handshake_ack(peer_cid, self.local_cid, self.packet_number)
+                .map_err(accept_error)?;
+            self.packet_number = self
+                .packet_number
+                .checked_add(1)
+                .ok_or_else(|| accept_error("packet number exhausted"))?;
+            bytes = bytes
+                .checked_add(data.len())
+                .ok_or_else(|| accept_error("flight byte overflow"))?;
+            if packets.len() == ACCEPT_MAX_PACKETS
+                || data.len() > send_packet_size
+                || bytes > ACCEPT_MAX_BYTES
+            {
+                return Err(accept_error("TLS final ACK bound exhausted"));
+            }
+            packets.push(OutgoingPacket {
+                dst_addr: self.peer,
+                data,
+                send_time: None,
+            });
+        }
         if !packets.is_empty() {
             self.flights += 1;
             if self.flights > ACCEPT_MAX_FLIGHTS {
                 return Err(accept_error("handshake flight bound exhausted"));
             }
             self.queue_flight(&packets)?;
+            self.final_ack_queued |= final_ack;
             self.last_flight = packets;
             self.next_pto = now
                 .checked_add(ACCEPT_PTO)
@@ -1067,6 +1122,7 @@ impl ManagedQuicEndpoint {
             peer_max_udp_payload_size: None,
             early: Vec::new(),
             early_bytes: 0,
+            final_ack_queued: false,
         })
     }
 
@@ -3916,6 +3972,418 @@ mod tests {
     mod authenticated_accept_tests {
         use super::*;
         use crate::net::quic_core::PacketHeader;
+
+        /// Encode a STREAM packet independently of the connection assembler.
+        /// Packet protection still uses the real TLS-negotiated client keys.
+        fn first_application_packet(
+            driver: &mut QuicHandshakeDriver,
+            destination: ConnectionId,
+        ) -> Vec<u8> {
+            use crate::net::quic_native::{
+                PacketProtectionRequest, PacketProtectionSpace, QuicPacketProtectionProvider,
+            };
+
+            const REQUEST: &[u8] = b"coalesced first request";
+            // STREAM + LEN + FIN, stream 0, one-byte length, payload. No shared
+            // frame encoder can manufacture the receive oracle for this test.
+            let mut plaintext = vec![0x0b, 0, u8::try_from(REQUEST.len()).unwrap()];
+            plaintext.extend_from_slice(REQUEST);
+            let mut packet = vec![0x43]; // fixed bit, four-byte packet number
+            packet.extend_from_slice(destination.as_bytes());
+            let number_offset = packet.len();
+            packet.extend_from_slice(&0u32.to_be_bytes());
+            let protected = driver
+                .provider_mut()
+                .protect_packet(PacketProtectionRequest {
+                    space: PacketProtectionSpace::OneRtt,
+                    key_phase: false,
+                    packet_number: 0,
+                    associated_data: &packet,
+                    payload: &plaintext,
+                })
+                .unwrap();
+            packet.extend_from_slice(&protected.ciphertext);
+            packet.extend_from_slice(&protected.tag);
+            let sample: [u8; 16] = packet[number_offset + 4..number_offset + 20]
+                .try_into()
+                .unwrap();
+            let mask = driver
+                .provider()
+                .header_protection_mask(PacketProtectionSpace::OneRtt, &sample)
+                .unwrap();
+            packet[0] ^= mask.bytes[0] & 0x1f;
+            for index in 0..4 {
+                packet[number_offset + index] ^= mask.bytes[index + 1];
+            }
+            packet
+        }
+
+        #[test]
+        fn managed_accept_delivers_coalesced_request_and_sends_final_ack_over_native_udp() {
+            use super::super::super::handshake_driver::{
+                client_config, server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+            use crate::net::quic_core::TransportParameters;
+            use crate::net::quic_native::StreamId;
+
+            for case in ["valid", "bad_tag", "wrong_cid", "cancel"] {
+                let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                    .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+                    .build()
+                    .unwrap();
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().unwrap();
+                    let timer = cx.timer_driver().unwrap().clone();
+                    let parameters = TransportParameters {
+                        initial_max_streams_bidi: Some(4),
+                        initial_max_data: Some(4096),
+                        initial_max_stream_data_bidi_remote: Some(4096),
+                        initial_max_stream_data_bidi_local: Some(4096),
+                        ..TransportParameters::default()
+                    };
+                    let mut encoded = Vec::new();
+                    parameters.encode(&mut encoded).unwrap();
+                    let mut endpoint = ManagedQuicEndpoint::bind(
+                        &cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        ManagedEndpointConfig {
+                            is_server: true,
+                            packet_batch_size: 1,
+                            ..ManagedEndpointConfig::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    endpoint
+                        .configure_authenticated_server(
+                            &cx,
+                            server_config(
+                                vec![parse_one_cert(LEAF_CERT_PEM)],
+                                leaf_key(),
+                                vec![b"atp/1".to_vec()],
+                            )
+                            .unwrap(),
+                            encoded.clone(),
+                            b"atp/1",
+                        )
+                        .unwrap();
+                    let server_addr = endpoint.local_addr();
+                    let client_cid = ConnectionId::new(&[0xd4; 8]).unwrap();
+                    let initial_cid = ConnectionId::new(&[0xd5; 8]).unwrap();
+                    let mut client = QuicHandshakeDriver::client(
+                        client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"atp/1".to_vec()])
+                            .unwrap(),
+                        rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                        encoded,
+                    )
+                    .unwrap();
+                    client.install_initial_keys(initial_cid.as_bytes()).unwrap();
+                    let mut peer = QuicUdpEndpoint::bind(
+                        &cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        QuicUdpEndpointConfig::default(),
+                    )
+                    .await
+                    .unwrap();
+                    let client_exchange = async {
+                        let segments = client.pump_outbound().unwrap();
+                        assert_eq!(segments.len(), 1, "actual ClientHello flight");
+                        let hello = client
+                            .assemble_handshake_packet(&segments[0], initial_cid, client_cid, 0)
+                            .unwrap();
+                        let sent = peer
+                            .send_batch(
+                                &cx,
+                                &[OutgoingPacket {
+                                    dst_addr: server_addr,
+                                    data: hello,
+                                    send_time: None,
+                                }],
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(sent.packets_processed, 1);
+                        assert!(sent.error.is_none());
+                        let mut finished = Vec::new();
+                        while !client.is_complete() {
+                            for packet in peer.receive_batch(&cx, 8).await.unwrap() {
+                                assert_eq!(packet.src_addr, server_addr);
+                                client.recv_handshake_packet(&packet.data).unwrap();
+                                finished.extend(client.pump_outbound().unwrap());
+                            }
+                        }
+                        let finished: Vec<_> = finished
+                            .into_iter()
+                            .filter(|segment| segment.level == HandshakeLevel::Handshake)
+                            .collect();
+                        assert_eq!(finished.len(), 1, "actual client Finished flight");
+                        let server_cid = client.peer_connection_id().unwrap();
+                        // Deliberately leave a packet-number gap; the final ACK
+                        // must acknowledge 7 only, never fabricate receipt of 0..6.
+                        let mut datagram = client
+                            .assemble_handshake_packet(&finished[0], server_cid, client_cid, 7)
+                            .unwrap();
+                        let destination = if case == "wrong_cid" {
+                            initial_cid
+                        } else {
+                            server_cid
+                        };
+                        let mut application = first_application_packet(&mut client, destination);
+                        if case == "bad_tag" {
+                            *application.last_mut().unwrap() ^= 1;
+                        }
+                        datagram.extend_from_slice(&application);
+                        assert!(
+                            datagram.len() <= 1200,
+                            "Finished and request share one UDP datagram"
+                        );
+                        let sent = peer
+                            .send_batch(
+                                &cx,
+                                &[OutgoingPacket {
+                                    dst_addr: server_addr,
+                                    data: datagram,
+                                    send_time: None,
+                                }],
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(sent.packets_processed, 1);
+                        assert!(sent.error.is_none());
+                        application
+                    };
+                    let server_exchange =
+                        endpoint.run_event_loop_with_application(&cx, |_, endpoint, _| {
+                            if endpoint
+                                .pending_authenticated_accept
+                                .iter()
+                                .any(|pending| pending.driver.is_complete())
+                                || !endpoint.authenticated_accept_result.is_empty()
+                            {
+                                Poll::Ready(Ok(()))
+                            } else {
+                                Poll::Pending
+                            }
+                        });
+                    let (application, server_result) = crate::time::timeout(
+                        cx.now(),
+                        Duration::from_secs(8),
+                        futures_lite::future::zip(client_exchange, server_exchange),
+                    )
+                    .await
+                    .expect("native TLS admission reached client Finished");
+                    server_result.unwrap();
+
+                    let pending = endpoint
+                        .pending_authenticated_accept
+                        .front()
+                        .expect("final ACK remains owned before send");
+                    assert!(pending.driver.is_complete());
+                    assert!(pending.final_ack_queued);
+                    assert_eq!(pending.outstanding_packets, 1);
+                    assert!(
+                        endpoint.authenticated_accept_result.is_empty(),
+                        "accept receipt must follow real ACK transmission"
+                    );
+                    assert_eq!(endpoint.connection_stats().active_connections, 0);
+                    let server_cid = pending.local_cid;
+                    let retained = pending.early.first().map(|packet| {
+                        (packet.data.clone(), packet.receive_time, packet.transmit_time)
+                    });
+                    if case == "wrong_cid" {
+                        assert!(retained.is_none());
+                        assert_eq!(pending.early_bytes, 0);
+                    } else {
+                        assert_eq!(retained.as_ref().unwrap().0, application);
+                        assert_eq!(pending.early_bytes, application.len());
+                    }
+                    let final_ack = endpoint
+                        .pending_outgoing
+                        .front()
+                        .expect("protected final ACK queued for socket")
+                        .packet
+                        .data
+                        .clone();
+                    assert_eq!(pending.outstanding_bytes, final_ack.len());
+
+                    // Drop a real managed driver at its cooperative Pending
+                    // boundary before the socket gets another send turn. This
+                    // is owner-retention proof, not claimed UDP backpressure.
+                    let mut callback_calls = 0;
+                    {
+                        let mut run = std::pin::pin!(endpoint.run_event_loop_with_application(
+                            &cx,
+                            |_, _, _| {
+                                callback_calls += 1;
+                                Poll::<Result<(), ManagedEndpointError>>::Pending
+                            }
+                        ));
+                        assert!(
+                            run.as_mut()
+                                .poll(&mut Context::from_waker(Waker::noop()))
+                                .is_pending()
+                        );
+                    }
+                    assert_eq!(callback_calls, 1);
+                    let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                    assert_eq!(pending.outstanding_packets, 1);
+                    assert_eq!(
+                        endpoint.pending_outgoing.front().unwrap().packet.data,
+                        final_ack
+                    );
+                    assert_eq!(
+                        pending.early.first().map(|packet| (
+                            packet.data.clone(),
+                            packet.receive_time,
+                            packet.transmit_time
+                        )),
+                        retained
+                    );
+
+                    if case == "cancel" {
+                        let cancel = Cx::for_testing();
+                        cancel.set_cancel_requested(true);
+                        assert_eq!(
+                            endpoint.run_event_loop(&cancel).await,
+                            Err(ManagedEndpointError::Cancelled)
+                        );
+                        assert!(endpoint.pending_authenticated_accept.is_empty());
+                        assert!(endpoint.pending_outgoing.is_empty());
+                        assert!(endpoint.pending_incoming.is_empty());
+                        assert_eq!(endpoint.connection_stats().active_connections, 0);
+                        assert!(matches!(
+                            endpoint.take_authenticated_accept_result_with_id(),
+                            Some((id, Err(ManagedEndpointError::Cancelled))) if id == server_cid
+                        ));
+                    } else {
+                        let mut accepted = None;
+                        crate::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(8),
+                            endpoint.run_event_loop_with_application(&cx, |cx, endpoint, _| {
+                                if let Some(result) = endpoint.take_authenticated_accept_result() {
+                                    accepted = Some(result.unwrap());
+                                }
+                                if let Some(cid) = accepted
+                                    && endpoint.pending_incoming.is_empty()
+                                {
+                                    assert_eq!(cid, server_cid);
+                                    endpoint.with_connection_mut(cx, cid, |connection| {
+                                        let received = connection.read_stream(cx, StreamId(0), 4096);
+                                        if case == "valid" {
+                                            assert_eq!(received.unwrap().as_ref(), b"coalesced first request");
+                                            assert!(connection.is_stream_eof(StreamId(0)).unwrap());
+                                            assert!(connection.read_stream(cx, StreamId(0), 4096).unwrap().is_empty());
+                                        } else {
+                                            assert!(matches!(received, Err(super::super::super::NativeQuicConnectionError::StreamTable(
+                                                super::super::super::StreamTableError::UnknownStream(StreamId(0))
+                                            ))));
+                                        }
+                                    }).unwrap();
+                                    Poll::Ready(Ok(()))
+                                } else {
+                                    Poll::Pending
+                                }
+                            }),
+                        )
+                        .await
+                        .expect("native route consumes the retained coalesced packet")
+                        .unwrap();
+                        let received = crate::time::timeout(
+                            cx.now(),
+                            Duration::from_secs(2),
+                            peer.receive_batch(&cx, 1),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        assert_eq!(received.len(), 1);
+                        assert_eq!(
+                            received[0].data, final_ack,
+                            "socket transmits the retained protected ACK exactly"
+                        );
+                        let ProtectedHeaderPrefix::Long(prefix) =
+                            ProtectedHeaderPrefix::decode(&received[0].data, 0).unwrap()
+                        else {
+                            panic!("final ACK must use Handshake keys");
+                        };
+                        let (header, plaintext) = client
+                            .unprotect_long_header_packet(&prefix, &received[0].data)
+                            .unwrap();
+                        assert_eq!(header.packet_type, LongPacketType::Handshake);
+                        assert_eq!(header.dst_cid, client_cid);
+                        assert_eq!(header.src_cid, server_cid);
+                        assert_eq!(
+                            plaintext,
+                            vec![0x02, 7, 0, 0, 0],
+                            "independent ACK(7), delay=0, zero gaps, first range=0 wire oracle"
+                        );
+                    }
+                    endpoint.shutdown(&cx).await.unwrap();
+                    peer.shutdown(&cx).await.unwrap();
+                    assert_eq!(endpoint.connection_stats().active_connections, 0);
+                    assert!(endpoint.pending_outgoing.is_empty());
+                    assert!(endpoint.pending_incoming.is_empty());
+                    assert_eq!(timer.pending_count(), 0);
+                }));
+            }
+        }
+
+        #[test]
+        fn managed_accept_early_ciphertext_budget_refuses_before_changing_retained_packets() {
+            run_test_with_cx(|cx| async move {
+                let mut endpoint = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                endpoint.authenticated_only = true;
+                let peer = "127.0.0.1:9191".parse().unwrap();
+                for (packet_bytes, packet_count) in [(32, ACCEPT_MAX_PACKETS), (4096, 512)] {
+                    let mut pending = endpoint
+                        .prepare_authenticated_accept(
+                            &cx,
+                            server_driver(None),
+                            peer,
+                            ConnectionId::new(&[0x21; 8]).unwrap(),
+                            ConnectionId::new(&[0x22; 8]).unwrap(),
+                            b"atp/1",
+                        )
+                        .unwrap();
+                    let mut data = vec![0xa5; packet_bytes];
+                    data[0] = 0x43;
+                    data[1..9].copy_from_slice(pending.local_cid.as_bytes());
+                    let packet = ReceivedPacket {
+                        src_addr: peer,
+                        data,
+                        receive_time: Instant::now(),
+                        transmit_time: None,
+                    };
+                    // This is supplemental queue-admission coverage. The
+                    // preceding native test proves production TLS/UDP routing.
+                    for _ in 0..packet_count {
+                        pending.retain_early_packet(packet.clone()).unwrap();
+                    }
+                    let byte_count: usize = pending.early.iter().map(|packet| packet.data.len()).sum();
+                    assert_eq!(pending.early_bytes, byte_count);
+                    assert_eq!(byte_count, packet_count * packet_bytes);
+                    assert_eq!(
+                        pending.retain_early_packet(packet.clone()),
+                        Err(accept_error("early application packet bound exhausted"))
+                    );
+                    assert_eq!(pending.early.len(), packet_count);
+                    assert_eq!(pending.early_bytes, byte_count);
+                    assert!(pending.early.iter().all(|retained| retained == &packet));
+                }
+                endpoint.shutdown(&cx).await.unwrap();
+            });
+        }
 
         // The established route comes from selection_fixture's documented
         // recovery-state fixture. These tests prove pending-owner mechanics,

@@ -1417,17 +1417,15 @@ impl QuicHandshakeDriver {
         Ok(packets)
     }
 
-    /// Acknowledge authenticated client Finished packets before handing the
-    /// server's completed handshake to the application-data owner.
-    async fn send_final_handshake_ack(
+    /// Protect the final Handshake ACK without transferring its ownership to
+    /// an I/O future. Managed admissions retain it until the socket confirms
+    /// transmission, before exposing the completed application-data route.
+    pub(crate) fn assemble_final_handshake_ack(
         &mut self,
-        cx: &Cx,
-        endpoint: &mut QuicUdpEndpoint,
-        peer: SocketAddr,
         dst_cid: ConnectionId,
         src_cid: ConnectionId,
         packet_number: u64,
-    ) -> Result<(), QuicTlsError> {
+    ) -> Result<Vec<u8>, QuicTlsError> {
         let frame = handshake_ack_frame(&self.handshake_recv_packet_numbers[1])
             .ok_or_else(|| handshake_failure("completed_handshake_without_received_packet"))?;
         let mut payload = BytesMut::new();
@@ -1450,12 +1448,26 @@ impl QuicHandshakeDriver {
         header
             .encode(&mut header_bytes)
             .map_err(|_| handshake_failure("long_header_encode"))?;
-        let data = self.protect_long_header_packet(
+        self.protect_long_header_packet(
             PacketProtectionSpace::Handshake,
             &header_bytes,
             packet_number,
             &payload,
-        )?;
+        )
+    }
+
+    /// Acknowledge authenticated client Finished packets before handing the
+    /// server's completed handshake to the application-data owner.
+    async fn send_final_handshake_ack(
+        &mut self,
+        cx: &Cx,
+        endpoint: &mut QuicUdpEndpoint,
+        peer: SocketAddr,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+    ) -> Result<(), QuicTlsError> {
+        let data = self.assemble_final_handshake_ack(dst_cid, src_cid, packet_number)?;
         let report = endpoint
             .send_batch(
                 cx,
