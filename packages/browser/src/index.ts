@@ -1313,6 +1313,10 @@ type BrowserWebTransportConstructorLike = new (
 
 interface BrowserWebTransportState {
   consumerVersion: AbiVersion | null;
+  pendingDatagramCount: number;
+  pendingDatagramBytes: number;
+  datagramTerminal: BrowserOutcome<void> | null;
+  datagramWaiters: Set<(outcome: BrowserOutcome<void>) => void>;
   reader: Promise<BrowserWebTransportReaderLike>;
   ready: Promise<void>;
   session: BrowserWebTransportSessionLike;
@@ -1350,6 +1354,13 @@ const RUNTIME_FETCH_GRANTS = new Map<string, BrowserFetchGrant>();
 const FETCH_OWNER_CLOSES = new Map<string, Promise<BrowserOutcome<void>>>();
 const INFLIGHT_WEBTRANSPORTS = new Map<string, BrowserWebTransportState>();
 const TERMINAL_WEBTRANSPORTS = new Map<string, BrowserWebTransportTerminalState>();
+// Match browser-core's facade-owned send bounds, including readiness waiters
+// and writes queued in or currently held by the host writer.
+const WEBTRANSPORT_DATAGRAM_LIMITS = Object.freeze({
+  maxDatagramBytes: 65_536,
+  maxQueuedDatagrams: 256,
+  maxQueuedBytes: 1_048_576,
+});
 const BROWSER_LANE_HEALTH_REGISTRY = new Map<
   string,
   Map<BrowserExecutionLane, BrowserLaneHealthSnapshot>
@@ -4993,25 +5004,50 @@ function normalizeBrowserWebTransportUrl(url: string): string {
   return parsed.href;
 }
 
-function normalizeWebTransportPayload(value: BrowserWebTransportPayload): Uint8Array {
-  if (value instanceof Uint8Array) {
-    return value;
-  }
-  if (value instanceof ArrayBuffer) {
-    return new Uint8Array(value);
-  }
+function prepareWebTransportPayload(value: BrowserWebTransportPayload): {
+  byteLength: number;
+  copy(): Uint8Array;
+} {
+  const checkLength = (length: number): void => {
+    if (!Number.isSafeInteger(length) || length < 0
+      || length > WEBTRANSPORT_DATAGRAM_LIMITS.maxDatagramBytes) {
+      throw new RangeError("WebTransport datagram byte limit is 65,536 bytes.");
+    }
+  };
+  let view: Uint8Array;
   if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    const length = value.byteLength;
+    checkLength(length);
+    view = new Uint8Array(value.buffer, value.byteOffset, length);
+  } else if (value instanceof ArrayBuffer) {
+    const length = value.byteLength;
+    checkLength(length);
+    view = new Uint8Array(value, 0, length);
+  } else if (Array.isArray(value)) {
+    const length = value.length;
+    checkLength(length);
+    return {
+      byteLength: length,
+      copy() {
+        const bytes = new Uint8Array(length);
+        // Capture length once and bypass arbitrary iterators. A getter may
+        // reenter sendDatagram(), so the caller reserves before copying.
+        for (let i = 0; i < length; i += 1) {
+          const byte = value[i];
+          if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+            throw new TypeError("WebTransport datagrams must contain integer bytes.");
+          }
+          bytes[i] = byte;
+        }
+        return bytes;
+      },
+    };
+  } else {
+    throw new TypeError(
+      "WebTransport datagrams must be Uint8Array, ArrayBuffer, ArrayBufferView, or byte[].",
+    );
   }
-  if (
-    Array.isArray(value) &&
-    value.every((entry) => Number.isInteger(entry) && entry >= 0 && entry <= 255)
-  ) {
-    return Uint8Array.from(value);
-  }
-  throw new TypeError(
-    "WebTransport datagrams must be Uint8Array, ArrayBuffer, ArrayBufferView, or byte[].",
-  );
+  return { byteLength: view.byteLength, copy: () => new Uint8Array(view) };
 }
 
 function browserWebTransportStateKey(handle: BrowserHandleLike): string {
@@ -5091,6 +5127,13 @@ function stopWebTransportStreams(
   state: BrowserWebTransportState,
   outcome: BrowserOutcome<WasmValue>,
 ): void {
+  if (state.datagramTerminal === null) {
+    state.datagramTerminal = outcome.outcome === "ok"
+      ? webTransportCancellationOutcome("webtransport_close", "WebTransport session completed.")
+      : collapseTaskOutcome(outcome);
+    for (const wake of state.datagramWaiters) wake(state.datagramTerminal);
+    state.datagramWaiters.clear();
+  }
   state.streamSession.closed = true;
   // A completed owner cannot admit a new stream. Preserve error/cancellation
   // detail, while preventing an owner's unrelated success payload from being
@@ -5160,6 +5203,69 @@ function collapseTaskOutcome(outcome: BrowserOutcome<WasmValue>): BrowserOutcome
   return outcome as BrowserOutcome<void>;
 }
 
+function waitForWebTransportDatagramHost<T>(
+  state: BrowserWebTransportState,
+  operation: Promise<T>,
+): Promise<{ value: T } | { terminal: BrowserOutcome<void> }> {
+  if (state.datagramTerminal !== null) {
+    // Even an already-closed owner must observe a host rejection.
+    void Promise.resolve(operation).catch(() => undefined);
+    return Promise.resolve({ terminal: state.datagramTerminal });
+  }
+  return new Promise((resolve, reject) => {
+    const stopped = (terminal: BrowserOutcome<void>): void => {
+      state.datagramWaiters.delete(stopped);
+      resolve({ terminal });
+    };
+    state.datagramWaiters.add(stopped);
+    // Remove each waiter when its operation settles. Racing every write with
+    // one never-resolving close promise would itself accumulate unbounded
+    // promise reactions across a long-lived, otherwise healthy session.
+    void Promise.resolve(operation).then(
+      (value) => {
+        state.datagramWaiters.delete(stopped);
+        resolve(state.datagramTerminal === null ? { value } : { terminal: state.datagramTerminal });
+      },
+      (error: unknown) => {
+        state.datagramWaiters.delete(stopped);
+        if (state.datagramTerminal === null) reject(error);
+        else resolve({ terminal: state.datagramTerminal });
+      },
+    );
+  });
+}
+
+async function sendAdmittedWebTransportDatagram(
+  handle: CoreTaskHandle,
+  state: BrowserWebTransportState,
+  payload: Uint8Array | null,
+  byteLength: number,
+): Promise<BrowserOutcome<void>> {
+  try {
+    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    const ready = await waitForWebTransportDatagramHost(state, state.writer);
+    if ("terminal" in ready) return ready.terminal;
+    const writer = ready.value;
+    const write = writer.write;
+    // Host method lookup can reenter owner close before invocation.
+    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    const writing = write.call(writer, payload!);
+    payload = null;
+    const sent = await waitForWebTransportDatagramHost(state, writing);
+    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    return "terminal" in sent ? sent.terminal : OutcomeFactory.ok(undefined);
+  } catch (error) {
+    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    takeTerminalWebTransportOutcome(handle);
+    return webTransportFailureOutcome(
+      `browser WebTransport datagram send failed: ${errorMessage(error)}`,
+    );
+  } finally {
+    state.pendingDatagramCount -= 1;
+    state.pendingDatagramBytes -= byteLength;
+  }
+}
+
 function settleWebTransportTask(
   handle: CoreTaskHandle,
   outcome: BrowserOutcome<WasmValue>,
@@ -5212,7 +5318,9 @@ function cleanupWebTransportState(
   void state.writer
     .then((writer) =>
       Promise.resolve()
-        .then(() => (reason !== undefined ? writer.abort?.(reason) : writer.close?.()))
+        // Owner termination cancels queued datagrams even without a message.
+        // A graceful writer.close() would send bytes already reported cancelled.
+        .then(() => writer.abort?.(reason ?? "WebTransport session closed."))
         .catch(() => undefined)
         .finally(() => {
           try {
@@ -5360,6 +5468,10 @@ function createBrowserWebTransportState(
 
   const state: BrowserWebTransportState = {
     consumerVersion,
+    pendingDatagramCount: 0,
+    pendingDatagramBytes: 0,
+    datagramTerminal: null,
+    datagramWaiters: new Set(),
     reader,
     ready,
     session,
@@ -5897,6 +6009,14 @@ export class WebTransportHandle {
     }
   }
 
+  /**
+   * Copy and send one datagram, waiting for the host write to settle. Admission
+   * is limited to 65,536 bytes per datagram and 256 sends / 1,048,576 bytes per
+   * session, including readiness and in-flight waits. Queue exhaustion returns
+   * a transient `compatibility_rejected` outcome before copying or host I/O;
+   * retry after earlier sends settle. Owner closure cancels pending sends.
+   * Successful host write completion is not a peer-delivery acknowledgement.
+   */
   async sendDatagram(
     value: BrowserWebTransportPayload,
     consumerVersion: AbiVersion | null = this.consumerVersion,
@@ -5910,14 +6030,36 @@ export class WebTransportHandle {
       return invalidHandleOutcome("unknown WebTransport handle; the session may already be closed");
     }
 
+    let input: ReturnType<typeof prepareWebTransportPayload>;
     try {
-      const writer = await state.writer;
-      await writer.write(normalizeWebTransportPayload(value));
-      return OutcomeFactory.ok(undefined);
+      input = prepareWebTransportPayload(value);
     } catch (error) {
-      takeTerminalWebTransportOutcome(this.core);
-      return webTransportFailureOutcome(
-        `browser WebTransport datagram send failed: ${errorMessage(error)}`,
+      return OutcomeFactory.err(
+        "compatibility_rejected", "permanent",
+        `browser WebTransport datagram send rejected: ${errorMessage(error)}`,
+      );
+    }
+    if (state.datagramTerminal !== null) return state.datagramTerminal;
+    if (state.pendingDatagramCount >= WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedDatagrams
+      || input.byteLength > WEBTRANSPORT_DATAGRAM_LIMITS.maxQueuedBytes - state.pendingDatagramBytes) {
+      return OutcomeFactory.err(
+        "compatibility_rejected", "transient",
+        "browser WebTransport send queue capacity exhausted; retry after pending sends settle",
+      );
+    }
+    state.pendingDatagramCount += 1;
+    state.pendingDatagramBytes += input.byteLength;
+    try {
+      // Hand off only the admitted copy. The asynchronous helper never retains
+      // the original payload, its iterator, or an oversized backing buffer.
+      return sendAdmittedWebTransportDatagram(this.core, state, input.copy(), input.byteLength);
+    } catch (error) {
+      state.pendingDatagramCount -= 1;
+      state.pendingDatagramBytes -= input.byteLength;
+      if (state.datagramTerminal !== null) return state.datagramTerminal;
+      return OutcomeFactory.err(
+        "compatibility_rejected", "permanent",
+        `browser WebTransport datagram send rejected: ${errorMessage(error)}`,
       );
     }
   }
@@ -5970,15 +6112,17 @@ export class WebTransportHandle {
     }
 
     try {
-      cleanupWebTransportState(state, options.reason);
+      const reason = options.reason;
+      const terminal = webTransportCancellationOutcome(
+        "webtransport_close",
+        reason ?? "WebTransport session closed by caller.",
+      );
+      cleanupWebTransportState(state, reason, terminal);
       state.session.close(options);
       return collapseTaskOutcome(
         settleWebTransportTask(
           this.core,
-          webTransportCancellationOutcome(
-            "webtransport_close",
-            options.reason ?? "WebTransport session closed by caller.",
-          ),
+          terminal,
           consumerVersion,
         ),
       );
