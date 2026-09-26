@@ -1096,6 +1096,12 @@ def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
     }
 
 
+# Test lanes build without debuginfo or incremental state. With full debuginfo the lib
+# test's rustc was OOM-killed on the smaller workers (2026-09-25), and linking every
+# test binary with it costs time on each bisect probe. What is tested does not change.
+LEAN_TEST_ENV = ["env", "CARGO_INCREMENTAL=0", "CARGO_PROFILE_TEST_DEBUG=0"]
+
+
 def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool) -> tuple[list[dict[str, Any]], list[str]]:
     lanes: list[dict[str, Any]] = [
         {"id": "check-default", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--keep-going", "--message-format=short"]},
@@ -1132,7 +1138,7 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
             },
         )
     for features, names in sorted(groups.items()):
-        argv = ["cargo", "test", "-j", str(jobs), "-p", "asupersync", "--no-fail-fast"]
+        argv = [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", "--no-fail-fast"]
         if features:
             argv += ["--features", features]
         for name in names:
@@ -1149,7 +1155,7 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
             {
                 "id": "targeted-lib",
                 "kind": "test",
-                "argv": ["cargo", "test", "-j", str(jobs), "-p", "asupersync", *feature_args, "--lib", "--", *lib_filters],
+                "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", *feature_args, "--lib", "--", *lib_filters],
                 "expected_targets": [],
                 "lib_filters": lib_filters,
             }
@@ -1159,7 +1165,7 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
             {
                 "id": f"targeted-crate[{crate}]",
                 "kind": "test",
-                "argv": ["cargo", "test", "-j", str(jobs), "-p", crate, "--no-fail-fast"],
+                "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", crate, "--no-fail-fast"],
                 "expected_targets": [],
             }
         )
