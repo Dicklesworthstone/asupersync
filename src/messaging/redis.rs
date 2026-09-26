@@ -2548,14 +2548,17 @@ enum Resp3PushHandling {
 /// Registering the task's Waker with the `Cx` makes the cancel wake the parked
 /// poll, after which the checkpoint guard returns `RedisError::Cancelled`. Same
 /// owned-token pattern shipped in `postgres.rs`/`mysql.rs`.
-struct CancelWakerGuard<'a> {
-    cx: &'a Cx,
+struct CancelWakerGuard {
+    cx: Cx,
     token: Option<CancelWakerToken>,
 }
 
-impl<'a> CancelWakerGuard<'a> {
-    fn new(cx: &'a Cx) -> Self {
-        Self { cx, token: None }
+impl CancelWakerGuard {
+    fn new(cx: &Cx) -> Self {
+        Self {
+            cx: cx.clone(),
+            token: None,
+        }
     }
 
     fn refresh(&mut self, waker: &Waker) {
@@ -2563,12 +2566,53 @@ impl<'a> CancelWakerGuard<'a> {
     }
 }
 
-impl Drop for CancelWakerGuard<'_> {
+impl Drop for CancelWakerGuard {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
             self.cx.clear_cancel_waker(token);
         }
     }
+}
+
+/// Keep both the explicit operation owner and the task driving its transport
+/// subscribed to cancellation. A caller context can differ from the ambient
+/// context during pooled connection creation, redirects, or Pub/Sub work.
+/// Neither context is installed here: ambient capability restrictions and
+/// cancellation masks continue to govern the underlying socket/TLS future.
+async fn redis_io<T, E>(
+    cx: &Cx,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, RedisError>
+where
+    RedisError: From<E>,
+{
+    let mut owner_cancel = CancelWakerGuard::new(cx);
+    let mut driver_cancel = Cx::current().as_ref().map(CancelWakerGuard::new);
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|task_cx| {
+        // Register before checking. Cancellation may occur while a new Waker
+        // is cloned, before its registration becomes visible to the publisher.
+        owner_cancel.refresh(task_cx.waker());
+        if let Some(driver) = driver_cancel.as_mut() {
+            driver.refresh(task_cx.waker());
+        }
+        let cancelled = || {
+            cx.checkpoint().is_err()
+                || driver_cancel
+                    .as_ref()
+                    .is_some_and(|driver| driver.cx.checkpoint().is_err())
+        };
+        if cancelled() {
+            return std::task::Poll::Ready(Err(RedisError::Cancelled));
+        }
+        match future.as_mut().poll(task_cx) {
+            std::task::Poll::Ready(Err(_)) if cancelled() => {
+                std::task::Poll::Ready(Err(RedisError::Cancelled))
+            }
+            result => result.map_err(Into::into),
+        }
+    })
+    .await
 }
 
 impl RedisConnection {
@@ -2704,9 +2748,15 @@ impl RedisConnection {
 
         let mut buf = Vec::new();
         encode_command_into(&mut buf, args);
-        self.stream.write_all(&buf).await?;
-        self.stream.flush().await?;
-        Ok(())
+        self.write_all(cx, &buf).await
+    }
+
+    async fn write_all(&mut self, cx: &Cx, bytes: &[u8]) -> Result<(), RedisError> {
+        redis_io(cx, async {
+            self.stream.write_all(bytes).await?;
+            self.stream.flush().await
+        })
+        .await
     }
 
     fn record_resp3_push(
@@ -2751,10 +2801,14 @@ impl RedisConnection {
         cx: &Cx,
         push_handling: Resp3PushHandling,
     ) -> Result<RespValue, RedisError> {
-        // br-asupersync-r8n4qx: wake a read parked on a silent socket (a stalled
-        // or slow redis server) when an external cancel fires, instead of only
-        // noticing it on the next self-poll. Spans every read iteration below.
-        let mut cancel_wake = CancelWakerGuard::new(cx);
+        redis_io(cx, self.read_response_inner(cx, push_handling)).await
+    }
+
+    async fn read_response_inner(
+        &mut self,
+        cx: &Cx,
+        push_handling: Resp3PushHandling,
+    ) -> Result<RespValue, RedisError> {
         loop {
             cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
@@ -2826,7 +2880,6 @@ impl RedisConnection {
                         "cancelled",
                     )));
                 }
-                cancel_wake.refresh(task_cx.waker());
                 let mut read_buf = ReadBuf::new(&mut tmp);
                 match Pin::new(&mut self.stream).poll_read(task_cx, &mut read_buf) {
                     std::task::Poll::Pending => std::task::Poll::Pending,
@@ -3195,7 +3248,12 @@ impl RedisClient {
 
     async fn acquire(&self, cx: &Cx) -> Result<PooledResource<RedisConnection>, RedisError> {
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
-        self.pool.acquire(cx).await.map_err(Self::map_pool_error)
+        // The pool's factory has no Cx parameter. Enclose acquisition so its
+        // TCP/TLS setup and capacity wait are still owned by this caller.
+        redis_io(cx, async {
+            self.pool.acquire(cx).await.map_err(Self::map_pool_error)
+        })
+        .await
     }
 
     fn validate_redirect_target(&self, host: &str, port: u16) -> Result<(), RedisError> {
@@ -3236,9 +3294,11 @@ impl RedisClient {
         redirect_config.host = host.to_string();
         redirect_config.port = port;
 
-        let mut conn =
-            RedisConnection::connect(redirect_config, Some(Arc::clone(&self.resp3_push_backlog)))
-                .await?;
+        let mut conn = redis_io(
+            cx,
+            RedisConnection::connect(redirect_config, Some(Arc::clone(&self.resp3_push_backlog))),
+        )
+        .await?;
         conn.ensure_initialized(cx).await?;
         Ok(conn)
     }
@@ -3663,13 +3723,7 @@ impl Pipeline<'_> {
 
         cx.checkpoint().map_err(|_| RedisError::Cancelled)?;
 
-        if let Err(e) = conn.stream.write_all(&combined).await {
-            // Guard drop will discard the connection.
-            return Err(RedisError::Io(e));
-        }
-        if let Err(e) = conn.stream.flush().await {
-            return Err(RedisError::Io(e));
-        }
+        conn.write_all(cx, &combined).await?;
 
         // Drain ALL responses from the wire BEFORE returning. A protocol /
         // IO error from `read_response` truly invalidates the connection
@@ -4055,7 +4109,7 @@ impl Drop for RedisPubSub {
 
 impl RedisPubSub {
     async fn connect(cx: &Cx, config: RedisConfig) -> Result<Self, RedisError> {
-        let mut conn = RedisConnection::connect(config.clone(), None).await?;
+        let mut conn = redis_io(cx, RedisConnection::connect(config.clone(), None)).await?;
         conn.ensure_initialized(cx).await?;
         Ok(Self {
             conn,

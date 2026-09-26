@@ -44,6 +44,499 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    #[derive(Clone, Copy, Debug)]
+    enum NativeRedisWait {
+        CommandWrite,
+        PipelineWrite,
+        TransactionWrite,
+        PubSubWrite,
+        CommandRead,
+        RedirectRead,
+        #[cfg(feature = "tls")]
+        PooledTls,
+        #[cfg(feature = "tls")]
+        PubSubTls,
+    }
+
+    impl NativeRedisWait {
+        fn is_write(self) -> bool {
+            matches!(
+                self,
+                Self::CommandWrite
+                    | Self::PipelineWrite
+                    | Self::TransactionWrite
+                    | Self::PubSubWrite
+            )
+        }
+
+        fn is_tls(self) -> bool {
+            #[cfg(feature = "tls")]
+            {
+                matches!(self, Self::PooledTls | Self::PubSubTls)
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                false
+            }
+        }
+    }
+
+    /// Exercise the public Redis API on a native runtime. The peer first
+    /// witnesses request bytes, then the controller witnesses another Pending
+    /// poll before cancellation. It sends no response or readiness wake until
+    /// the cancellation-result deadline has passed.
+    fn native_redis_cancellation(
+        workers: usize,
+        cancel_driver: bool,
+        drop_wait: bool,
+        operation: NativeRedisWait,
+    ) {
+        use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+        use std::sync::atomic::AtomicBool;
+
+        const PAYLOAD_LEN: usize = 16 * 1024 * 1024;
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let redirected = matches!(operation, NativeRedisWait::RedirectRead)
+            .then(|| StdTcpListener::bind("127.0.0.1:0").unwrap());
+        let (request_tx, request_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            if let Some(redirected) = redirected {
+                write_hello3_ok(&mut stream);
+                assert_resp_command(read_resp_frame(&mut stream), &[b"PING"]);
+                write!(stream, "-MOVED 1 {}\r\n", redirected.local_addr().unwrap()).unwrap();
+                drop(stream);
+                stream = redirected.accept().unwrap().0;
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+            }
+            socket2::SockRef::from(&stream)
+                .set_recv_buffer_size(16 * 1024)
+                .unwrap();
+            if !operation.is_tls() {
+                write_hello3_ok(&mut stream);
+                if matches!(operation, NativeRedisWait::TransactionWrite) {
+                    assert_resp_command(read_resp_frame(&mut stream), &[b"MULTI"]);
+                    stream.write_all(b"+OK\r\n").unwrap();
+                }
+            }
+            if operation.is_write() || operation.is_tls() {
+                let mut prefix = [0; 8];
+                stream.read_exact(&mut prefix).unwrap();
+                if operation.is_write() {
+                    assert_eq!(prefix[0], b'*', "expected a partial RESP command");
+                } else {
+                    assert_eq!(prefix[0], 22, "expected a TLS handshake record");
+                }
+            } else {
+                assert_resp_command(read_resp_frame(&mut stream), &[b"PING"]);
+            }
+            request_tx.send(()).unwrap();
+            // The controller opens this gate only after it has captured the
+            // cancellation result, so draining cannot supply a spurious wake.
+            let _ = release_rx.recv_timeout(Duration::from_secs(8));
+            let mut received = 0usize;
+            let mut bytes = [0; 64 * 1024];
+            let closed = loop {
+                match stream.read(&mut bytes) {
+                    Ok(0) => break true,
+                    Ok(n) => received += n,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                        ) =>
+                    {
+                        break true;
+                    }
+                    Err(_) => break false,
+                }
+            };
+            let _ = closed_tx.send((closed, received));
+        });
+
+        let builder = if workers == 0 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(workers)
+        };
+        let runtime = builder.build().unwrap();
+        let caller = runtime.request_cx_with_budget(crate::types::Budget::INFINITE);
+        let probe = Arc::new(AtomicBool::new(false));
+        let drop_requested = Arc::new(AtomicBool::new(false));
+        let retire = Arc::new(AtomicBool::new(false));
+        let retirement = Arc::new(crate::sync::Notify::new());
+        let task_probe = Arc::clone(&probe);
+        let task_drop = Arc::clone(&drop_requested);
+        let task_retire = Arc::clone(&retire);
+        let task_retirement = Arc::clone(&retirement);
+        let (control_tx, control_rx) = mpsc::channel();
+        let (parked_tx, parked_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let task = runtime.handle().spawn(async move {
+            let driver = Cx::current().unwrap();
+            assert_ne!(caller.task_id(), driver.task_id());
+            let client = RedisClient::connect(&driver, &format!("redis://{address}"))
+                .await
+                .unwrap();
+            #[cfg(feature = "tls")]
+            let client = if operation.is_tls() {
+                // A local trust fixture keeps this handshake test independent
+                // of the optional system/webpki root-store features. The peer
+                // never replies, so certificate validation is not bypassed.
+                let certs = crate::tls::Certificate::from_pem(include_bytes!(
+                    "../../tests/fixtures/tls/postgres_ca.crt"
+                ))
+                .unwrap();
+                let connector = TlsConnectorBuilder::new()
+                    .add_root_certificates(certs)
+                    .build()
+                    .unwrap();
+                client_with_config(RedisConfig {
+                    host: address.ip().to_string(),
+                    port: address.port(),
+                    use_tls: true,
+                    tls_connector: Some(connector),
+                    ..RedisConfig::default()
+                })
+            } else {
+                client
+            };
+            let mut transaction = if matches!(operation, NativeRedisWait::TransactionWrite) {
+                Some(client.transaction(&driver).await.unwrap())
+            } else {
+                None
+            };
+            let mut pubsub = if matches!(operation, NativeRedisWait::PubSubWrite) {
+                Some(client.pubsub(&driver).await.unwrap())
+            } else {
+                None
+            };
+            let caller_before = caller.inner.read().cancel_waker_registrations.len();
+            let driver_before = driver.inner.read().cancel_waker_registrations.len();
+            let payload = operation.is_write().then(|| vec![b'x'; PAYLOAD_LEN]);
+            let result = {
+                let work = async {
+                    match operation {
+                        NativeRedisWait::CommandWrite => client
+                            .cmd_bytes(&caller, &[b"SET", b"key", payload.as_ref().unwrap()])
+                            .await
+                            .map(|_| ()),
+                        NativeRedisWait::PipelineWrite => {
+                            let mut pipeline = client.pipeline();
+                            pipeline.cmd_bytes(&[b"SET", b"key", payload.as_ref().unwrap()]);
+                            pipeline.exec(&caller).await.map(|_| ())
+                        }
+                        NativeRedisWait::TransactionWrite => {
+                            transaction
+                                .as_mut()
+                                .unwrap()
+                                .cmd_bytes(&caller, &[b"SET", b"key", payload.as_ref().unwrap()])
+                                .await
+                        }
+                        NativeRedisWait::PubSubWrite => {
+                            pubsub
+                                .as_mut()
+                                .unwrap()
+                                .ping(&caller, Some(payload.as_ref().unwrap()))
+                                .await
+                        }
+                        NativeRedisWait::CommandRead | NativeRedisWait::RedirectRead => {
+                            client.ping(&caller).await
+                        }
+                        #[cfg(feature = "tls")]
+                        NativeRedisWait::PooledTls => client.ping(&caller).await,
+                        #[cfg(feature = "tls")]
+                        NativeRedisWait::PubSubTls => client.pubsub(&caller).await.map(|_| ()),
+                    }
+                };
+                let mut work = std::pin::pin!(work);
+                let mut control_tx = Some(control_tx);
+                std::future::poll_fn(|task_cx| {
+                    if let Some(sender) = control_tx.take() {
+                        sender
+                            .send((caller.clone(), driver.clone(), task_cx.waker().clone()))
+                            .unwrap();
+                    }
+                    if task_drop.load(Ordering::Acquire) {
+                        return Poll::Ready(None);
+                    }
+                    let result = work.as_mut().poll(task_cx);
+                    if result.is_pending() && task_probe.swap(false, Ordering::AcqRel) {
+                        parked_tx.send(()).unwrap();
+                    }
+                    result.map(Some)
+                })
+                .await
+            };
+            let expected = if drop_wait {
+                result.is_none()
+            } else {
+                matches!(result, Some(Err(RedisError::Cancelled)))
+            };
+            let registrations_retired = caller_before
+                == caller.inner.read().cancel_waker_registrations.len()
+                && driver_before == driver.inner.read().cancel_waker_registrations.len();
+            let other_live = if cancel_driver {
+                caller.checkpoint().is_ok()
+            } else {
+                driver.checkpoint().is_ok()
+            };
+            let stats = client.pool.stats();
+            let poisoned = pubsub.as_ref().is_none_or(|pubsub| pubsub.poisoned);
+            done_tx
+                .send((expected, registrations_retired, other_live, poisoned, stats))
+                .unwrap();
+            // Keep every public owner alive until the peer proves transport
+            // shutdown. Eventual object Drop cannot satisfy this oracle.
+            task_retirement
+                .wait_until(|| task_retire.load(Ordering::Acquire))
+                .await;
+            drop((client, transaction, pubsub));
+        });
+        let controller = thread::spawn(move || {
+            let (caller, driver, waker) = control_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            let requested = request_rx.recv_timeout(Duration::from_secs(3));
+            if requested.is_ok() {
+                probe.store(true, Ordering::Release);
+                waker.wake_by_ref();
+            }
+            let parked = parked_rx.recv_timeout(Duration::from_secs(3));
+            if parked.is_ok() {
+                if drop_wait {
+                    drop_requested.store(true, Ordering::Release);
+                    waker.wake_by_ref();
+                } else {
+                    let target = if cancel_driver { &driver } else { &caller };
+                    target.cancel_with(
+                        crate::types::CancelKind::User,
+                        Some("native Redis parked transport cancellation"),
+                    );
+                }
+            }
+            let done = done_rx.recv_timeout(Duration::from_secs(2));
+            let _ = release_tx.send(());
+            let closed = closed_rx.recv_timeout(Duration::from_secs(4));
+            retire.store(true, Ordering::Release);
+            retirement.notify_waiters();
+            // On the old implementation, release the silent peer before
+            // asserting failure so the missing cancellation wake cannot hang.
+            (requested, parked, done, closed)
+        });
+        runtime.block_on(task);
+        let (requested, parked, done, closed) = controller.join().unwrap();
+        server.join().unwrap();
+        let drained = runtime.shutdown_drained(Duration::from_secs(2));
+        assert_eq!(drained.outcome, RootDrainOutcome::Quiescent, "{drained:?}");
+        assert!(
+            requested.is_ok() && parked.is_ok(),
+            "operation={operation:?} request={requested:?} parked={parked:?}"
+        );
+        let (expected, registrations_retired, other_live, poisoned, stats) = done.unwrap();
+        assert!(
+            expected && registrations_retired && other_live && poisoned,
+            "operation={operation:?} workers={workers} driver={cancel_driver} drop={drop_wait} expected={expected} registrations={registrations_retired} other_live={other_live} poisoned={poisoned}"
+        );
+        assert_eq!(
+            stats.active, 0,
+            "cancelled exchange retained a checkout: {stats:?}"
+        );
+        if !matches!(operation, NativeRedisWait::RedirectRead) {
+            assert_eq!(
+                stats.total, 0,
+                "cancelled exchange returned a dirty connection: {stats:?}"
+            );
+        }
+        assert_eq!(
+            stats.waiters, 0,
+            "cancelled pool acquire retained a waiter: {stats:?}"
+        );
+        let (closed, received) = closed.unwrap();
+        assert!(
+            closed,
+            "operation={operation:?}: peer did not observe shutdown before owner drop"
+        );
+        if operation.is_write() {
+            assert!(
+                received < PAYLOAD_LEN,
+                "the full command escaped despite a witnessed blocked write"
+            );
+        }
+        eprintln!(
+            "event=redis_native_cancel operation={operation:?} workers={workers} driver={cancel_driver} drop={drop_wait} parked=true result=cancelled_or_dropped transport_closed=true pool_active=0 pool_waiters=0 registrations_retired=true"
+        );
+    }
+
+    #[test]
+    fn redis_native_caller_and_driver_cancel_parked_transports() {
+        for workers in [0, 2] {
+            for cancel_driver in [false, true] {
+                for operation in [
+                    NativeRedisWait::CommandWrite,
+                    NativeRedisWait::PipelineWrite,
+                    NativeRedisWait::TransactionWrite,
+                    NativeRedisWait::PubSubWrite,
+                    NativeRedisWait::CommandRead,
+                    NativeRedisWait::RedirectRead,
+                ] {
+                    native_redis_cancellation(workers, cancel_driver, false, operation);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn redis_native_dropped_pipeline_closes_partial_write_and_releases_pool_slot() {
+        for workers in [0, 2] {
+            native_redis_cancellation(workers, false, true, NativeRedisWait::PipelineWrite);
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn redis_native_cancellation_releases_pooled_and_pubsub_tls_handshakes() {
+        for workers in [0, 2] {
+            for cancel_driver in [false, true] {
+                for operation in [NativeRedisWait::PooledTls, NativeRedisWait::PubSubTls] {
+                    native_redis_cancellation(workers, cancel_driver, false, operation);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn redis_io_observes_cancel_during_registration_replacement() {
+        struct CancelOnRetirement(Cx);
+        impl std::task::Wake for CancelOnRetirement {
+            fn wake(self: Arc<Self>) {}
+        }
+        impl Drop for CancelOnRetirement {
+            fn drop(&mut self) {
+                self.0.cancel_fast(crate::types::CancelKind::User);
+            }
+        }
+        let caller: Cx = Cx::for_testing();
+        let driver: Cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(driver.clone()));
+        let first = Waker::from(Arc::new(CancelOnRetirement(caller.clone())));
+        let mut wait = Box::pin(redis_io(
+            &caller,
+            std::future::pending::<Result<(), RedisError>>(),
+        ));
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&first))
+                .is_pending()
+        );
+        drop(first);
+        assert!(!caller.is_cancel_requested());
+        // Retiring the last old Waker publishes cancellation inside refresh;
+        // this same poll must see it even though no future socket wake exists.
+        assert!(matches!(
+            poll_once(wait.as_mut()),
+            Poll::Ready(Err(RedisError::Cancelled))
+        ));
+        assert!(!driver.is_cancel_requested());
+        assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+        assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn redis_io_preserves_both_masks_and_retires_dropped_registrations() {
+        struct WakeCount(AtomicU32);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let caller: Cx = Cx::for_testing();
+        let driver: Cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(driver.clone()));
+        let wakes = Arc::new(WakeCount(AtomicU32::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut wait = Box::pin(redis_io(
+            &caller,
+            std::future::pending::<Result<(), RedisError>>(),
+        ));
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert_eq!(caller.inner.read().cancel_waker_registrations.len(), 1);
+        assert_eq!(driver.inner.read().cancel_waker_registrations.len(), 1);
+        drop(wait);
+        caller.cancel_fast(crate::types::CancelKind::User);
+        driver.cancel_fast(crate::types::CancelKind::Shutdown);
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+        caller.masked(|| {
+            driver.masked(|| {
+                assert!(matches!(
+                    future::block_on(redis_io(&caller, async { Ok::<_, RedisError>(7) })),
+                    Ok(7)
+                ));
+            });
+            assert!(matches!(
+                future::block_on(redis_io(&caller, async { Ok::<_, RedisError>(7) })),
+                Err(RedisError::Cancelled)
+            ));
+        });
+        driver.masked(|| {
+            assert!(matches!(
+                future::block_on(redis_io(&caller, async { Ok::<_, RedisError>(7) })),
+                Err(RedisError::Cancelled)
+            ));
+        });
+        assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+        assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn redis_cancelled_factory_releases_creation_capacity() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        let factory: RedisFactory = Box::new(move || {
+            factory_attempts.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        });
+        let client = RedisClient {
+            config: RedisConfig::default(),
+            pool: GenericPool::new(factory, PoolConfig::with_max_size(1)),
+            slot_map: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            resp3_push_backlog: Arc::new(parking_lot::Mutex::new(RedisResp3PushBacklog::default())),
+        };
+        let caller: Cx = Cx::for_testing();
+        let driver: Cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(driver.clone()));
+        let mut first = Box::pin(client.acquire(&caller));
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        caller.cancel_fast(crate::types::CancelKind::User);
+        assert!(matches!(
+            poll_once(first.as_mut()),
+            Poll::Ready(Err(RedisError::Cancelled))
+        ));
+        drop(first);
+        let mut replacement = Box::pin(client.acquire(&driver));
+        assert!(poll_once(replacement.as_mut()).is_pending());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "cancelled factory retained the pool's only creation slot"
+        );
+        drop(replacement);
+        assert_eq!(client.pool.stats().waiters, 0);
+        assert!(caller.inner.read().cancel_waker_registrations.is_empty());
+        assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+    }
+
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
     }
