@@ -424,6 +424,8 @@ impl ConnectionRouter {
             early_one_rtt_packets,
             last_final_flight_retransmit,
             clock_origin,
+            last_activity,
+            sent_since_receive,
             pending_outgoing,
         } = parts;
         let mut router = Self::with_max_connections(config_template, max_connections);
@@ -434,8 +436,8 @@ impl ConnectionRouter {
                 connection: RoutedConnection::Authenticated(connection),
                 packet_protection: Some(ConnectionPacketProtection { protection }),
                 peer_addr,
-                last_activity: now,
-                sent_since_receive: false,
+                last_activity,
+                sent_since_receive,
                 established_at: Some(now),
                 next_timer_deadline,
                 deferred_spaces: [false, false, true],
