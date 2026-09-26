@@ -383,7 +383,10 @@ fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_besid
         let outcome = receipt(&result, lane);
         assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
         assert!(
-            outcome["reason"].as_str().expect("reason").contains("signal 9"),
+            outcome["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("signal 9"),
             "{lane}: {outcome:#}"
         );
     }
@@ -394,7 +397,11 @@ fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_besid
         "killed-beside-failed-test",
         "test-binary-killed",
     ] {
-        assert_eq!(receipt(&result, lane)["verdict"], "red", "{lane}: {result:#}");
+        assert_eq!(
+            receipt(&result, lane)["verdict"],
+            "red",
+            "{lane}: {result:#}"
+        );
     }
     let filed: Vec<&str> = result["bead_payloads"]
         .as_array()
@@ -410,6 +417,46 @@ fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_besid
         result["state"].get("last_covered").is_none(),
         "an undecided lane does not cover the batch"
     );
+}
+
+fn test_red(target: &str, test: &str) -> String {
+    format!(
+        "     Running tests/{target}.rs (target/debug/deps/{target}-abc)\nrunning 1 test\ntest {test} ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n  Remote command finished: exit=101 in 1000ms\n"
+    )
+}
+
+#[test]
+fn a_probe_where_the_red_test_did_not_compile_names_a_range_not_a_culprit() {
+    // alpha_native's `boom` fails at the head. At commit 3 the target does not
+    // compile, so its tests never ran there; commit 4 is the first where it
+    // compiles (and fails). Reading commit 3 as clear would blame commit 4
+    // exactly, the commit that merely made the test compile.
+    let lane = json!({"id": "targeted-tests[default]", "kind": "test",
+        "argv": ["cargo", "test", "--test", "alpha_native"], "expected_targets": ["alpha_native"]});
+    let commits: Vec<Value> = (1..=5u8)
+        .map(|n| commit(n, "dev@example.com", "change"))
+        .collect();
+    let mut logs = serde_json::Map::new();
+    logs.insert(sha(3), json!({"log": build_red(&["alpha_native"])}));
+    for n in [4u8, 5] {
+        logs.insert(sha(n), json!({"log": test_red("alpha_native", "boom")}));
+    }
+    let result = evaluate(&json!({
+        "plan": {"commits": commits, "lanes": [lane]},
+        "state": {"known_reds": {}},
+        "now": "2026-09-26T12:00:00+00:00",
+        "lane_logs": {"targeted-tests[default]": logs},
+    }));
+    let outcome = receipt(&result, "targeted-tests[default]");
+    assert_eq!(outcome["verdict"], "red", "{result:#}");
+    assert_eq!(
+        outcome["culprit_exact"], false,
+        "an uncompiled probe decides nothing: {outcome:#}"
+    );
+    assert_ne!(outcome["culprit"], sha(4), "{outcome:#}");
+    let probes = outcome["bisect_probes"].as_array().expect("probes");
+    assert_eq!(probes.len(), 1, "the search stops at the undecided probe");
+    assert_eq!(probes[0]["sha"], sha(3));
 }
 
 #[test]

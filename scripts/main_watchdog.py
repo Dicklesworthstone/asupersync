@@ -701,9 +701,30 @@ def probe(
     outcome = classify_lane_output(text, exit_code, probe_lane)
     if outcome["verdict"] == VERDICT_RED and red_targets(outcome) & new_targets:
         return "red", outcome
+    if outcome["verdict"] == VERDICT_RED and uncompiled_owners(outcome) & owners_of(new_targets):
+        # The red test's own binary did not compile here, so its tests never ran.
+        # Reading that as clear would blame whichever commit made it compile
+        # (asupersync-bi2462.147.15).
+        return "undecided", outcome
     if outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED):
         return "clear", outcome  # green, or red only for other targets
     return "undecided", outcome
+
+
+def owners_of(targets: set[str]) -> set[str]:
+    """Test targets owning red keys; lib unit tests (`lib::...`) belong to `lib`."""
+    return {owner for owner in (target_of(key) for key in targets) if owner is not None}
+
+
+def uncompiled_owners(outcome: dict[str, Any]) -> set[str]:
+    """Test targets whose binary failed to compile in this outcome."""
+    owners: set[str] = set()
+    for key in red_targets(outcome):
+        if "(lib test)" in key:
+            owners.add("lib")
+        elif compiled := COMPILE_TARGET_RE.search(key):
+            owners.add(compiled.group(1))
+    return owners
 
 
 def bisect_first_red(
