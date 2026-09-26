@@ -11980,6 +11980,13 @@ worker_threads = 16
             assert!(activation_polls >= 2);
             assert!(activation_polls - 1 < active_poll_limit);
             assert_eq!(*shutdown_budget.read(), Some(activated_budget));
+            // The budget is published before its deadline timer is armed, and
+            // this thread reads both without the runtime lock. Wait for the arm
+            // (bounded) instead of racing it on a loaded worker (asupersync-f5fadj).
+            wait_native_shutdown_condition(
+                || driver.pending_count() == 1,
+                "activation must arm exactly one shutdown-budget deadline timer",
+            );
             assert_eq!(driver.pending_count(), 1);
             assert_eq!(driver.next_deadline(), Some(activated_deadline));
             assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -12030,6 +12037,10 @@ worker_threads = 16
                 let finalizer_cx = observed_cx.lock().clone().unwrap();
                 assert!(driver.ptr_eq(&finalizer_cx.timer_driver().unwrap()));
                 wait_native_shutdown_parked(&runtime, finalizer_cx.task_id());
+                wait_native_shutdown_condition(
+                    || driver.pending_count() == 1,
+                    "deadline cleanup must arm exactly one shutdown-budget timer",
+                );
                 assert_eq!(driver.pending_count(), 1);
                 assert_eq!(driver.next_deadline(), expected_deadline);
                 assert!(driver.now() < expected_deadline.unwrap());
