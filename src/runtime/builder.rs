@@ -5829,6 +5829,9 @@ impl RuntimeInner {
         }
         runtime_state.set_spawn_authorization_key(config.security.spawn_authorization_key.clone());
         runtime_state.set_read_biased_region_snapshot(config.enable_read_biased_region_snapshot);
+        // Nothing replays a native runtime's oracle histories; unbounded, they
+        // grew with every region close and every drain-correct race.
+        runtime_state.bound_oracle_histories(NATIVE_ORACLE_HISTORY_LIMIT);
         runtime_state
     }
 
@@ -6872,6 +6875,10 @@ fn next_block_on_timer_park_duration(timer: &TimerDriverHandle) -> Option<Durati
 }
 
 const BLOCK_ON_RUNTIME_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Closed regions and completed races a native runtime keeps in its
+/// oracle-hydration histories (see `RuntimeState::bound_oracle_histories`).
+const NATIVE_ORACLE_HISTORY_LIMIT: usize = 1024;
 
 fn current_runtime_has_live_tasks() -> bool {
     let caller = crate::cx::Cx::current();
@@ -9010,6 +9017,74 @@ mod tests {
         }));
         eprintln!("native_region_admission rounds={rounds} opened={opened}");
         assert_eq!(opened, rounds);
+    }
+
+    #[test]
+    fn native_runtime_bounds_region_and_race_oracle_history() {
+        init_test_logging();
+        // Every round closes a child region and completes a drain-correct race.
+        // Unbounded, each round appended to both histories for the life of the
+        // runtime.
+        let rounds = 2 * NATIVE_ORACLE_HISTORY_LIMIT + 64;
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("admitted native task");
+            for round in 0..rounds {
+                let region = cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .expect("child region opens");
+                region.close().await.expect("child region closes");
+                let branch = move |_child: Cx| -> Pin<Box<dyn Future<Output = usize> + Send>> {
+                    Box::pin(async move { round })
+                };
+                let factories: Vec<crate::cx::RaceFactory<usize>> =
+                    vec![Box::new(branch), Box::new(branch)];
+                let winner = cx
+                    .race_drained_with(factories)
+                    .await
+                    .expect("race completes");
+                assert_eq!(winner, round);
+            }
+        }));
+        let state = runtime
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let races = state
+            .loser_drain_history()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::runtime::state::LoserDrainHistoryEvent::RaceStarted { .. }
+                )
+            })
+            .count();
+        let closed = state
+            .finalizer_history()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    crate::runtime::state::FinalizerHistoryEvent::RegionClosed { .. }
+                )
+            })
+            .count();
+        drop(state);
+        eprintln!(
+            "native_oracle_history rounds={rounds} races_kept={races} closed_regions_kept={closed} limit={NATIVE_ORACLE_HISTORY_LIMIT}"
+        );
+        let recent_tail = NATIVE_ORACLE_HISTORY_LIMIT..=2 * NATIVE_ORACLE_HISTORY_LIMIT;
+        assert!(
+            recent_tail.contains(&races),
+            "races kept: {races} of {rounds}"
+        );
+        assert!(
+            recent_tail.contains(&closed),
+            "closed regions kept: {closed} of {rounds}"
+        );
     }
 
     #[test]
