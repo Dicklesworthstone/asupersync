@@ -11652,9 +11652,10 @@ mod gh67_liveness_tests {
     }
 
     // asupersync-gsnci5: RFC 9001 §6.6 — the send path must not protect beyond
-    // the AEAD confidentiality limit under one key. Key rotation (to continue
-    // under a fresh key) is a tracked follow-up; until then the flush fails
-    // closed at the limit rather than over-using the key.
+    // the AEAD confidentiality limit under one key. Since 1bheeo the flush
+    // rotates the key before the limit, but only when no local update is still
+    // awaiting the peer's confirmation. While one is, it cannot rotate again, so
+    // it must fail closed at the limit rather than over-use the key.
     #[test]
     fn one_rtt_send_fails_closed_at_confidentiality_limit() {
         use crate::net::atp::quic::packet_protection::AEAD_CONFIDENTIALITY_LIMIT;
@@ -11663,6 +11664,25 @@ mod gh67_liveness_tests {
             let cx = Cx::for_testing();
             let config = QuicConfig::default();
             let (mut client, _server) = established_loopback_links(&cx, &config).await;
+            // A local key update the peer never confirms: the flush's own
+            // rotation steps, so the local phase moves ahead of the remote one.
+            let next_phase = !client.conn.tls().local_key_phase();
+            assert!(
+                client
+                    .protection
+                    .ensure_next_gen_keys(&cx, PacketProtectionSpace::OneRtt, next_phase)
+                    .is_ok()
+            );
+            client.conn.request_local_key_update(&cx).unwrap();
+            client.conn.commit_local_key_update(&cx).unwrap();
+            client
+                .protection
+                .note_local_key_update(PacketProtectionSpace::OneRtt);
+            assert_ne!(
+                client.conn.tls().local_key_phase(),
+                client.conn.tls().remote_key_phase(),
+                "a key update must be awaiting the peer's confirmation"
+            );
             client.protection.set_protected_packet_count_for_test(
                 PacketProtectionSpace::OneRtt,
                 AEAD_CONFIDENTIALITY_LIMIT,
@@ -11676,6 +11696,42 @@ mod gh67_liveness_tests {
             assert!(
                 matches!(&result, Err(QuicTransportError::Quic(msg)) if msg.contains("confidentiality limit")),
                 "flush must fail closed at the confidentiality limit, got {result:?}"
+            );
+        });
+    }
+
+    // asupersync-1bheeo: with no key update awaiting confirmation, the same
+    // preloaded limit makes the flush rotate the key instead of failing, and
+    // the batch goes out under the fresh key.
+    #[test]
+    fn one_rtt_send_rotates_before_the_confidentiality_limit() {
+        use crate::net::atp::quic::packet_protection::AEAD_CONFIDENTIALITY_LIMIT;
+        use crate::net::quic_native::tls::PacketProtectionSpace;
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig::default();
+            let (mut client, _server) = established_loopback_links(&cx, &config).await;
+            let phase_before = client.conn.tls().local_key_phase();
+            assert_eq!(phase_before, client.conn.tls().remote_key_phase());
+            client.protection.set_protected_packet_count_for_test(
+                PacketProtectionSpace::OneRtt,
+                AEAD_CONFIDENTIALITY_LIMIT,
+            );
+            let mut client_control = NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
+            let frame = Frame::empty(FrameType::KeepAlive).unwrap();
+            client_control.send(&cx, &mut client.conn, &frame).unwrap();
+            let result = client.flush(&cx).await;
+            assert!(result.is_ok(), "flush must rotate, not fail: {result:?}");
+            assert_ne!(
+                client.conn.tls().local_key_phase(),
+                phase_before,
+                "the send key rotated"
+            );
+            assert!(
+                !client
+                    .protection
+                    .confidentiality_limit_reached(PacketProtectionSpace::OneRtt),
+                "the fresh key starts below the limit"
             );
         });
     }
