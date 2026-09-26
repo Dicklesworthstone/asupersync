@@ -274,6 +274,25 @@ impl RemoteSymbolTransport {
         Ok(self.recover_snapshot(manifest.replicas(), config, manifest.params(), manifest.identity(),
             decode_limits, snapshot_key).await?)
     }
+
+    /// Recover a manifest as soon as its authenticated replica floor and actual
+    /// decodability are established, without waiting for every planned donor.
+    ///
+    /// Preserves the manifest's namespace, exact snapshot provenance and minimum
+    /// distinct-replica requirement. A quorum of insufficient stripes continues
+    /// collecting; only independently authenticated reconstruction can stop the
+    /// remaining local fetches early. See [`Self::recover_snapshot_on_quorum`] for
+    /// decoder bounds, cancellation and local connection ownership semantics.
+    pub async fn recover_checkpoint_on_quorum(
+        &self, manifest: &RecoveryManifest, config: RemoteRecoveryConfig,
+        decode_limits: SnapshotDecodeLimits, snapshot_key: &AuthKey,
+    ) -> Result<RegionSnapshot, CheckpointError> {
+        if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
+        if self.hello.peer_node() != manifest.peer_node() { return Err(ManifestError::Identity.into()); }
+        if config.required_replicas < manifest.minimum_replicas() { return Err(CheckpointError::RecoveryThreshold); }
+        Ok(self.recover_snapshot_on_quorum(manifest.replicas(), config, manifest.params(), manifest.identity(),
+            decode_limits, snapshot_key).await?)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

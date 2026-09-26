@@ -185,8 +185,12 @@ fn recover_checkpoint_refuses_namespace_and_threshold_drift_without_io() {
         max_received_symbols: 128, max_received_payload_bytes: 16384 };
     assert!(matches!(immediate(transport.recover_checkpoint(&draft, recovery, config().decode, &AuthKey::from_seed(88))),
         Err(CheckpointError::RecoveryThreshold)));
+    assert!(matches!(immediate(transport.recover_checkpoint_on_quorum(&draft, recovery, config().decode, &AuthKey::from_seed(88))),
+        Err(CheckpointError::RecoveryThreshold)));
     draft.peer = NodeId::new("wrong-origin");
     assert!(matches!(immediate(transport.recover_checkpoint(&draft, recovery, config().decode, &AuthKey::from_seed(88))),
+        Err(CheckpointError::Manifest(ManifestError::Identity))));
+    assert!(matches!(immediate(transport.recover_checkpoint_on_quorum(&draft, recovery, config().decode, &AuthKey::from_seed(88))),
         Err(CheckpointError::Manifest(ManifestError::Identity))));
     assert_eq!(transport.in_flight(), 0);
 }

@@ -268,3 +268,141 @@ fn decoder_limits_refuse_before_matrix_or_snapshot_allocation() {
         assert!(matches!(recovered.decode_snapshot(encoded.params, expected, bounds, &AuthKey::from_seed(42), &AuthKey::from_seed(88)), Err(RemoteRecoveryError::Limit(_))));
     }
 }
+
+fn quorum_fixture() -> (Vec<ReplicaFetch>, Probe, EncodedState, SnapshotIdentity) {
+    let (recovered, encoded, expected) = decode_fixture();
+    assert!(encoded.params.source_blocks > 1, "exercise per-block coverage");
+    let mut requests = plan(3);
+    for request in &mut requests { request.key.object_id = encoded.params.object_id; }
+    let mut probe = Probe::new(3);
+    probe.ready[0].store(false, Ordering::Release);
+    probe.batches[1] = recovered.symbols.iter().enumerate()
+        .filter(|(index, _)| index % 2 == 0).map(|(_, symbol)| symbol.clone()).collect();
+    probe.batches[2] = recovered.symbols.iter().enumerate()
+        .filter(|(index, _)| index % 2 == 1).map(|(_, symbol)| symbol.clone()).collect();
+    (requests, probe, encoded, expected)
+}
+
+#[test]
+fn authenticated_quorum_finishes_before_a_stalled_donor_and_preserves_collect_all() {
+    let lab = Lab::new();
+    let (requests, probe, encoded, expected) = quorum_fixture();
+    let symbol_key = AuthKey::from_seed(42); let snapshot_key = AuthKey::from_seed(88);
+    let mut cfg = config(); cfg.recovery_timeout = Duration::from_nanos(5);
+    let mut run = Box::pin(recover_on_quorum(&lab.cx, &requests, cfg, lab.timer.clone(),
+        encoded.params, expected, &symbol_key, &snapshot_key, |id, _| probe.fetch(id)));
+    assert!(lab.poll(run.as_mut()).is_pending());
+    assert_eq!(probe.active.load(Ordering::SeqCst), 1, "only stalled donor remains after first partial batch");
+    let snapshot = ready(lab.poll(run.as_mut())).unwrap();
+    assert_eq!(snapshot.metadata, vec![73; 512]);
+    assert_eq!(snapshot.sequence, expected.sequence);
+    assert_eq!(lab.timer.now(), Time::ZERO, "no donor timeout was needed");
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+    assert_eq!(probe.drops.load(Ordering::SeqCst), 3);
+    assert_eq!(probe.peak.load(Ordering::SeqCst), 2);
+    drop(run);
+
+    let mut collect_all = Box::pin(collect(&lab.cx, &requests, cfg, lab.timer.clone(), |id, _| probe.fetch(id)));
+    assert!(lab.poll(collect_all.as_mut()).is_pending());
+    assert!(lab.poll(collect_all.as_mut()).is_pending(), "compatibility API still waits for every donor");
+    lab.advance(5);
+    assert!(matches!(ready(lab.poll(collect_all.as_mut())), Err(RemoteRecoveryError::Deadline)));
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn authenticated_quorum_requires_replica_floor_even_with_complete_redundant_copies() {
+    let lab = Lab::new(); let (recovered, encoded, expected) = decode_fixture();
+    let mut requests = plan(2);
+    for request in &mut requests { request.key.object_id = encoded.params.object_id; }
+    let mut probe = Probe::new(2);
+    for batch in &mut probe.batches { batch.clone_from(&recovered.symbols); }
+    probe.ready[1].store(false, Ordering::Release);
+    let symbol_key = AuthKey::from_seed(42); let snapshot_key = AuthKey::from_seed(88);
+    let mut run = Box::pin(recover_on_quorum(&lab.cx, &requests, config(), lab.timer.clone(),
+        encoded.params, expected, &symbol_key, &snapshot_key, |id, _| probe.fetch(id)));
+    assert!(lab.poll(run.as_mut()).is_pending(), "one full copy does not meet two-replica policy");
+    probe.ready[1].store(true, Ordering::Release);
+    assert_eq!(ready(lab.poll(run.as_mut())).unwrap().metadata, vec![73; 512]);
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn authenticated_quorum_waits_for_missing_source_blocks_after_replica_floor() {
+    let lab = Lab::new(); let (recovered, encoded, expected) = decode_fixture();
+    let mut requests = plan(3);
+    for request in &mut requests { request.key.object_id = encoded.params.object_id; }
+    let mut probe = Probe::new(3);
+    let first: Vec<_> = recovered.symbols.iter().filter(|s| s.symbol().sbn() == 0).cloned().collect();
+    probe.batches[0].clone_from(&first); probe.batches[1] = first;
+    probe.batches[2] = recovered.symbols.iter().filter(|s| s.symbol().sbn() != 0).cloned().collect();
+    probe.ready[2].store(false, Ordering::Release);
+    let symbol_key = AuthKey::from_seed(42); let snapshot_key = AuthKey::from_seed(88);
+    let mut run = Box::pin(recover_on_quorum(&lab.cx, &requests, config(), lab.timer.clone(),
+        encoded.params, expected, &symbol_key, &snapshot_key, |id, _| probe.fetch(id)));
+    assert!(lab.poll(run.as_mut()).is_pending(), "replica count alone cannot decode the absent block");
+    assert!(lab.poll(run.as_mut()).is_pending());
+    assert_eq!(probe.starts[2].load(Ordering::SeqCst), 1);
+    probe.ready[2].store(true, Ordering::Release);
+    assert_eq!(ready(lab.poll(run.as_mut())).unwrap().metadata, vec![73; 512]);
+    assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn authenticated_quorum_never_exposes_unauthenticated_or_wrong_provenance_snapshots() {
+    for wrong_identity in [false, true] {
+        let lab = Lab::new(); let (requests, probe, encoded, mut expected) = quorum_fixture();
+        let symbol_key = AuthKey::from_seed(42);
+        let snapshot_key = AuthKey::from_seed(if wrong_identity { 88 } else { 89 });
+        if wrong_identity { expected.epoch += 1; }
+        let mut run = Box::pin(recover_on_quorum(&lab.cx, &requests, config(), lab.timer.clone(),
+            encoded.params, expected, &symbol_key, &snapshot_key, |id, _| probe.fetch(id)));
+        assert!(lab.poll(run.as_mut()).is_pending());
+        if wrong_identity {
+            assert!(matches!(ready(lab.poll(run.as_mut())), Err(RemoteRecoveryError::SnapshotIdentity)));
+        } else {
+            assert!(lab.poll(run.as_mut()).is_pending());
+            lab.advance(10);
+            assert!(matches!(ready(lab.poll(run.as_mut())), Err(RemoteRecoveryError::Decode)));
+        }
+        assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn quorum_completion_runs_only_after_new_successful_batches_and_after_the_floor() {
+    let lab = Lab::new(); let requests = plan(3); let probe = Probe::new(3);
+    probe.ready[1].store(false, Ordering::Release); probe.ready[2].store(false, Ordering::Release);
+    let calls = AtomicUsize::new(0);
+    let mut run = Box::pin(collect_with_completion(&lab.cx, &requests, config(), lab.timer.clone(),
+        |id, _| probe.fetch(id), |_| { calls.fetch_add(1, Ordering::SeqCst); Ok(None::<()>) }));
+    assert!(lab.poll(run.as_mut()).is_pending());
+    assert!(lab.poll(run.as_mut()).is_pending());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    probe.ready[1].store(true, Ordering::Release);
+    assert!(lab.poll(run.as_mut()).is_pending());
+    for _ in 0..8 { assert!(lab.poll(run.as_mut()).is_pending()); }
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "no decoder work on unchanged parked polls");
+    probe.ready[2].store(true, Ordering::Release);
+    assert!(ready(lab.poll(run.as_mut())).is_ok());
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn cancellation_and_deadline_after_completion_work_discard_the_value_and_drain() {
+    for cancel in [false, true] {
+        let lab = Lab::new(); let requests = plan(3); let probe = Probe::new(3);
+        probe.ready[0].store(false, Ordering::Release);
+        let mut run = Box::pin(collect_with_completion(&lab.cx, &requests, config(), lab.timer.clone(),
+            |id, _| probe.fetch(id), |_| {
+                if cancel { lab.cx.cancel_fast(CancelKind::User); } else { lab.advance(100); }
+                Ok(Some(17_u8))
+            }));
+        assert!(lab.poll(run.as_mut()).is_pending());
+        let result = ready(lab.poll(run.as_mut()));
+        if cancel { assert!(matches!(result, Err(RemoteRecoveryError::Cancelled))); }
+        else { assert!(matches!(result, Err(RemoteRecoveryError::Deadline))); }
+        assert_eq!(probe.active.load(Ordering::SeqCst), 0);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 3);
+    }
+}
