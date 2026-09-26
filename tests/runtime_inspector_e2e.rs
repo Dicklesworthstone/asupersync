@@ -277,3 +277,68 @@ fn production_runtime_inspector_counts_a_parked_task_s_polls() {
     });
     assert_eq!(received, Some(9));
 }
+
+/// The confirmed leak signal must distinguish a healthy live reservation from
+/// the same obligation after the runtime records an unresolved-token drop.
+#[test]
+fn production_runtime_diagnostics_distinguishes_live_and_confirmed_obligation_leaks() {
+    use asupersync::record::ObligationKind;
+    use asupersync::runtime::config::ObligationLeakResponse;
+
+    for (flavor, builder) in [
+        ("current-thread", RuntimeBuilder::current_thread()),
+        (
+            "two-workers",
+            RuntimeBuilder::multi_thread().worker_threads(2),
+        ),
+    ] {
+        let runtime = builder
+            .obligation_leak_response(ObligationLeakResponse::Log)
+            .build()
+            .expect("build diagnostics runtime");
+        let diagnostics = runtime.diagnostics();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("registered root context");
+            let holder = cx.task_id();
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::Ack, holder)
+                .expect("admit checked obligation")
+                .expect("native context tracks the obligation");
+            let reserved = yield_until(|| {
+                diagnostics
+                    .find_leaked_obligations()
+                    .iter()
+                    .any(|obligation| obligation.holder_task == Some(holder))
+            })
+            .await;
+            assert!(reserved, "{flavor}: reservation must reach the runtime table");
+            let legacy = diagnostics.find_leaked_obligations();
+            assert_eq!(legacy.len(), 1, "{flavor}: exactly one held obligation");
+            let obligation_id = legacy[0].obligation_id;
+            assert!(diagnostics.find_confirmed_obligation_leaks().is_empty());
+            assert!(!diagnostics.has_confirmed_obligation_leaks());
+
+            // This is a deliberate leak, with an explicit non-panicking
+            // runtime policy. The previously observed reservation is the
+            // state witness; no sleep or guessed task ordering is involved.
+            drop(token);
+            assert!(
+                yield_until(|| diagnostics.has_confirmed_obligation_leaks()).await,
+                "{flavor}: unresolved-token drop must become a recorded leak"
+            );
+            let confirmed = diagnostics.find_confirmed_obligation_leaks();
+            assert_eq!(confirmed.len(), 1, "{flavor}: one confirmed leak");
+            assert_eq!(confirmed[0].obligation_id, obligation_id);
+            assert_eq!(confirmed[0].holder_task, Some(holder));
+            assert_eq!(confirmed[0].region_id, cx.region_id());
+            assert!(
+                diagnostics.find_leaked_obligations().is_empty(),
+                "{flavor}: legacy reserved-only behavior remains unchanged"
+            );
+            eprintln!(
+                "scenario=confirmed-obligation-leak flavor={flavor} holder={holder:?} \
+                 obligation={obligation_id:?} live_confirmed=0 leaked_confirmed=1"
+            );
+        });
+    }
+}

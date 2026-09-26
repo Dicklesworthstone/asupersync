@@ -594,6 +594,9 @@ impl Diagnostics {
     /// Find obligations that look leaked (still reserved) and return a snapshot.
     ///
     /// This is a low-level heuristic. For stronger guarantees, prefer lab oracles.
+    /// It includes reservations held by live tasks and omits terminal `Leaked`
+    /// records. Use [`Self::find_confirmed_obligation_leaks`] to distinguish
+    /// recorded leaks and abandoned reservations from ordinary live holdings.
     #[must_use]
     pub fn find_leaked_obligations(&self) -> Vec<ObligationLeak> {
         let mut leaks = self.state.with_view(|view| {
@@ -634,6 +637,76 @@ impl Diagnostics {
         }
 
         leaks
+    }
+
+    /// Find recorded leaks and reservations whose holder can no longer resolve them.
+    ///
+    /// An obligation qualifies when the runtime marked it `Leaked`, or when it
+    /// remains `Reserved` but its exact holder task id is missing or terminal.
+    /// Reservations held by live tasks, including tasks draining cancellation
+    /// or running finalizers, are excluded. `Committed` and `Aborted` records
+    /// are excluded regardless of the holder's state.
+    ///
+    /// The query reads the obligation and task tables in one consistent
+    /// snapshot, including external scheduler tables. Results are ordered by
+    /// region id and obligation id; ages use the runtime's current clock.
+    /// The recorded holder id remains available even after its task retires.
+    ///
+    /// This inspects retained runtime records. An empty snapshot does not
+    /// establish that no leak occurred historically or outside runtime tracking.
+    /// [`Self::find_leaked_obligations`] retains its broader legacy heuristic.
+    #[must_use]
+    pub fn find_confirmed_obligation_leaks(&self) -> Vec<ObligationLeak> {
+        let mut leaks = self.state.with_view(|view| {
+            let now = view.now();
+            view.obligations()
+                .filter(|ob| Self::obligation_is_confirmed_leak(view, ob))
+                .map(|ob| ObligationLeak {
+                    obligation_id: ob.id,
+                    obligation_type: format!("{:?}", ob.kind),
+                    holder_task: Some(ob.holder),
+                    region_id: ob.region,
+                    age: std::time::Duration::from_nanos(now.duration_since(ob.reserved_at)),
+                })
+                .collect::<Vec<_>>()
+        });
+        leaks.sort_by_key(|leak| (leak.region_id, leak.obligation_id));
+        if !leaks.is_empty() {
+            warn!(
+                count = leaks.len(),
+                "diagnostics: confirmed obligation leaks detected"
+            );
+        }
+        leaks
+    }
+
+    /// Whether the current snapshot contains a confirmed obligation leak.
+    ///
+    /// This uses the same classification as
+    /// [`Self::find_confirmed_obligation_leaks`] without allocating a report or
+    /// emitting a warning. Health checks can opt into this signal without
+    /// treating every live permit or acknowledgement as a leak. It does not
+    /// change the legacy leak heuristic or structural-health classification.
+    /// Separate query calls may observe different runtime snapshots.
+    #[must_use]
+    pub fn has_confirmed_obligation_leaks(&self) -> bool {
+        self.state.with_view(|view| {
+            view.obligations()
+                .any(|ob| Self::obligation_is_confirmed_leak(view, ob))
+        })
+    }
+
+    fn obligation_is_confirmed_leak(
+        view: &RuntimeStateView<'_>,
+        obligation: &crate::record::ObligationRecord,
+    ) -> bool {
+        match obligation.state {
+            ObligationState::Leaked => true,
+            ObligationState::Reserved => view
+                .task(obligation.holder)
+                .is_none_or(|holder| holder.state.is_terminal()),
+            ObligationState::Committed | ObligationState::Aborted => false,
+        }
     }
 }
 
@@ -5087,6 +5160,201 @@ mod tests {
         crate::assert_with_log!(age_ms == 240, "age uses state clock", 240u128, age_ms);
 
         crate::test_complete!("test_find_leaked_obligations_uses_state_clock_without_timer_driver");
+    }
+
+    #[test]
+    fn confirmed_obligation_leaks_exclude_live_holders_and_successful_resolutions() {
+        init_test("confirmed_obligation_leaks_exclude_live_holders_and_successful_resolutions");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let reason = CancelReason::user("cleanup in progress");
+        let mut live_reservations = Vec::new();
+        for task_state in [
+            TaskState::Created,
+            TaskState::Running,
+            TaskState::CancelRequested {
+                reason: reason.clone(),
+                cleanup_budget: Budget::INFINITE,
+            },
+            TaskState::Cancelling {
+                reason: reason.clone(),
+                cleanup_budget: Budget::INFINITE,
+            },
+            TaskState::Finalizing {
+                reason,
+                cleanup_budget: Budget::INFINITE,
+            },
+        ] {
+            let holder = insert_task(&mut state, root, task_state);
+            live_reservations.push(insert_obligation(
+                &mut state,
+                root,
+                holder,
+                ObligationKind::Ack,
+                Time::ZERO,
+            ));
+        }
+        // Successfully resolved records remain healthy even if their holder
+        // has since been recycled. Insert the terminal state through the table
+        // so its pending counters agree with the records under inspection.
+        let missing_holder = TaskId::from_arena(ArenaIndex::new(50, 1));
+        for resolution in [ObligationState::Committed, ObligationState::Aborted] {
+            let mut record = ObligationRecord::new(
+                ObligationId::from_arena(ArenaIndex::new(0, 0)),
+                ObligationKind::SendPermit,
+                missing_holder,
+                root,
+                Time::ZERO,
+            );
+            record.state = resolution;
+            state.obligations.insert(record);
+        }
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        assert!(diagnostics.find_confirmed_obligation_leaks().is_empty());
+        assert!(!diagnostics.has_confirmed_obligation_leaks());
+        assert_eq!(
+            diagnostics
+                .find_leaked_obligations()
+                .iter()
+                .map(|leak| leak.obligation_id)
+                .collect::<Vec<_>>(),
+            live_reservations,
+            "the legacy heuristic keeps its documented live-reservation behavior"
+        );
+        crate::test_complete!(
+            "confirmed_obligation_leaks_exclude_live_holders_and_successful_resolutions"
+        );
+    }
+
+    #[test]
+    fn confirmed_obligation_leaks_report_recorded_missing_and_terminal_holders() {
+        init_test("confirmed_obligation_leaks_report_recorded_missing_and_terminal_holders");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = insert_child_region(&mut state, root);
+        let live_holder = insert_task(&mut state, root, TaskState::Running);
+        let completed_holder =
+            insert_task(&mut state, root, TaskState::Completed(Outcome::Ok(())));
+        let missing_holder = TaskId::from_arena(ArenaIndex::new(50, 1));
+        // Insert the child first to make insertion order differ from the
+        // required region/id ordering of the report.
+        let missing = insert_obligation(
+            &mut state,
+            child,
+            missing_holder,
+            ObligationKind::Lease,
+            Time::from_millis(20),
+        );
+        let recorded = insert_obligation(
+            &mut state,
+            root,
+            live_holder,
+            ObligationKind::Ack,
+            Time::from_millis(10),
+        );
+        state
+            .obligations
+            .mark_leaked(recorded, Time::from_millis(30))
+            .expect("record leak through the obligation lifecycle");
+        let terminal = insert_obligation(
+            &mut state,
+            root,
+            completed_holder,
+            ObligationKind::SendPermit,
+            Time::from_millis(40),
+        );
+        state.now = Time::from_millis(1);
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
+            VirtualClock::starting_at(Time::from_millis(100)),
+        )));
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+        let leaks = diagnostics.find_confirmed_obligation_leaks();
+        assert_eq!(
+            leaks
+                .iter()
+                .map(|leak| (leak.region_id, leak.obligation_id, leak.holder_task))
+                .collect::<Vec<_>>(),
+            vec![
+                (root, recorded, Some(live_holder)),
+                (root, terminal, Some(completed_holder)),
+                (child, missing, Some(missing_holder)),
+            ]
+        );
+        assert_eq!(
+            leaks.iter().map(|leak| leak.age.as_millis()).collect::<Vec<_>>(),
+            vec![90, 60, 80],
+            "ages use the timer driver, including for terminal leak records"
+        );
+        assert!(diagnostics.has_confirmed_obligation_leaks());
+        assert_eq!(
+            diagnostics.find_leaked_obligations()[0].obligation_id,
+            missing,
+            "the legacy heuristic still omits recorded leaks and completed holders"
+        );
+        crate::test_complete!(
+            "confirmed_obligation_leaks_report_recorded_missing_and_terminal_holders"
+        );
+    }
+
+    #[test]
+    fn confirmed_obligation_leaks_resolve_external_holder_generations() {
+        use crate::runtime::obligation_table::ObligationTable;
+        use crate::runtime::task_table::TaskTable;
+        use crate::sync::ContendedMutex;
+
+        init_test("confirmed_obligation_leaks_resolve_external_holder_generations");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        state.now = Time::from_millis(250);
+        let mut tasks = TaskTable::new();
+        let holder_slot = tasks.insert(TaskRecord::new(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            root,
+            Budget::INFINITE,
+        ));
+        let holder = TaskId::from_arena(holder_slot);
+        let mut obligations = ObligationTable::new();
+        let obligation = ObligationId::from_arena(obligations.insert(ObligationRecord::new(
+            ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            ObligationKind::Lease,
+            holder,
+            root,
+            Time::from_millis(10),
+        )));
+        let tasks = Arc::new(ContendedMutex::new("confirmed_leak_tasks", tasks));
+        let obligations = Arc::new(ContendedMutex::new("confirmed_leak_obligations", obligations));
+        let diagnostics = Diagnostics::from_source(RuntimeStateSource::Shared {
+            state: Arc::new(ContendedMutex::new("confirmed_leak_state", state)),
+            tasks: Some(Arc::clone(&tasks)),
+            obligations: Some(Arc::clone(&obligations)),
+        });
+
+        assert!(!diagnostics.has_confirmed_obligation_leaks());
+        assert!(diagnostics.find_confirmed_obligation_leaks().is_empty());
+        {
+            let mut tasks = tasks.lock().expect("task table lock");
+            tasks.remove_task(holder).expect("retire original holder");
+            let replacement = tasks.insert(TaskRecord::new(holder, root, Budget::INFINITE));
+            assert_eq!(replacement.index(), holder_slot.index());
+            assert_ne!(replacement.generation(), holder_slot.generation());
+        }
+        let leaks = diagnostics.find_confirmed_obligation_leaks();
+        assert_eq!(leaks.len(), 1);
+        assert_eq!(leaks[0].obligation_id, obligation);
+        assert_eq!(leaks[0].holder_task, Some(holder));
+        assert_eq!(leaks[0].age, std::time::Duration::from_millis(240));
+        assert!(diagnostics.has_confirmed_obligation_leaks());
+
+        obligations
+            .lock()
+            .expect("obligation table lock")
+            .commit(obligation, Time::from_millis(250))
+            .expect("settle the abandoned reservation");
+        assert!(!diagnostics.has_confirmed_obligation_leaks());
+        assert!(diagnostics.find_confirmed_obligation_leaks().is_empty());
+        crate::test_complete!("confirmed_obligation_leaks_resolve_external_holder_generations");
     }
 
     // Pure data-type tests (wave 18 – CyanBarn)
