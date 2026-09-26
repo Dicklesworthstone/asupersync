@@ -6495,6 +6495,32 @@ impl Drop for RuntimeInner {
                 });
                 (unified, sharded)
             };
+            // Finalizers admitted into regions that never closed can no longer
+            // run. A retained value that holds this state (a registration, a
+            // Cx) forms a cycle nothing else breaks, so take them out under
+            // the lock and drop them outside it (asupersync-bi2462.147.11).
+            let retired_finalizers = {
+                let state = state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut finalizers: Vec<_> = state
+                    .regions
+                    .iter()
+                    .flat_map(|(_, region)| region.take_finalizers_for_teardown())
+                    .collect();
+                if let Some(sharded) = sharded_state.as_ref() {
+                    let regions = sharded
+                        .regions
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    finalizers.extend(
+                        regions
+                            .iter()
+                            .flat_map(|(_, region)| region.take_finalizers_for_teardown()),
+                    );
+                }
+                finalizers
+            };
             if let Some(mailbox) = gateway_mailbox {
                 mailbox.retire_region_commands();
                 let mut cancelled = Vec::new();
@@ -6512,6 +6538,15 @@ impl Drop for RuntimeInner {
                 }
             }
             drop(retired_tasks);
+            for finalizer in retired_finalizers {
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(finalizer)))
+                {
+                    // Retained values can have arbitrary destructors; one
+                    // failure cannot strand the rest (as for queued commands).
+                    std::mem::forget(payload);
+                }
+            }
             drop(sharded_state);
             drop(state);
         };
@@ -8807,27 +8842,31 @@ mod tests {
             .expect("runtime drop thread should exit cleanly");
     }
 
+    /// Region-retained value that holds the runtime state (the cycle only
+    /// teardown can break) and proves it is dropped outside the state lock.
+    struct TeardownRetained {
+        state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
+        dropped: Arc<AtomicUsize>,
+        panic_on_drop: bool,
+    }
+
+    impl Drop for TeardownRetained {
+        fn drop(&mut self) {
+            drop(
+                self.state
+                    .try_lock()
+                    .expect("retained value drops outside runtime lock"),
+            );
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                !self.panic_on_drop,
+                "injected retained-value destructor panic"
+            );
+        }
+    }
+
     #[test]
     fn runtime_drop_releases_unapplied_region_finalizers_outside_state_lock() {
-        struct Retained {
-            state: Arc<crate::sync::ContendedMutex<RuntimeState>>,
-            dropped: Arc<AtomicUsize>,
-            panic_on_drop: bool,
-        }
-        impl Drop for Retained {
-            fn drop(&mut self) {
-                drop(
-                    self.state
-                        .try_lock()
-                        .expect("retained value drops outside runtime lock"),
-                );
-                self.dropped.fetch_add(1, Ordering::SeqCst);
-                assert!(
-                    !self.panic_on_drop,
-                    "injected retained-value destructor panic"
-                );
-            }
-        }
         struct WakeCounter(AtomicUsize);
         impl std::task::Wake for WakeCounter {
             fn wake(self: Arc<Self>) {
@@ -8846,17 +8885,33 @@ mod tests {
                 .await
                 .unwrap()
         });
+        // Between block_on calls the background thread pumps region commands,
+        // so an idle runtime applies them before teardown (the flake behind
+        // asupersync-bi2462.147.11). Pin its only worker in a task until the
+        // runtime starts stopping: the dispatch loop checks shutdown before
+        // it drains region commands, so the requests below stay queued.
+        let stopping = runtime.inner.scheduler.shutdown_signal_for_test();
+        let (pinned_tx, pinned) = std::sync::mpsc::channel();
+        let _pin = runtime.handle().spawn(async move {
+            pinned_tx.send(()).expect("test thread waits for the pin");
+            while !stopping.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
+        pinned
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the background worker runs the pinning task");
         let state = Arc::clone(&runtime.inner.state);
         let dropped = Arc::new(AtomicUsize::new(0));
         let wake_count = Arc::new(WakeCounter(AtomicUsize::new(0)));
         let waker = Waker::from(Arc::clone(&wake_count));
         let mut context = std::task::Context::from_waker(&waker);
-        let mut first = Box::pin(region.retain_until_finalized(Retained {
+        let mut first = Box::pin(region.retain_until_finalized(TeardownRetained {
             state: Arc::clone(&state),
             dropped: Arc::clone(&dropped),
             panic_on_drop: true,
         }));
-        let mut second = Box::pin(region.retain_until_finalized(Retained {
+        let mut second = Box::pin(region.retain_until_finalized(TeardownRetained {
             state,
             dropped: Arc::clone(&dropped),
             panic_on_drop: false,
@@ -8866,8 +8921,8 @@ mod tests {
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
         assert_eq!(wake_count.0.load(Ordering::SeqCst), 0);
 
-        // No current-thread pump is running. Both requests remain queued, and
-        // the child region plus retained state keep the mailbox reachable.
+        // Both requests remain queued, and the child region plus retained
+        // state keep the mailbox reachable.
         drop(runtime);
         assert_eq!(dropped.load(Ordering::SeqCst), 2);
         assert!(wake_count.0.load(Ordering::SeqCst) >= 2);
@@ -8882,6 +8937,51 @@ mod tests {
         eprintln!(
             "REGION_FINALIZER_TEARDOWN backend=native queued=2 retired=2 acknowledgments=closed locks=reentrant"
         );
+    }
+
+    #[test]
+    fn runtime_drop_releases_applied_region_finalizers_outside_state_lock() {
+        for sharded in [false, true] {
+            let runtime = RuntimeBuilder::current_thread()
+                .with_sharded_state(sharded)
+                .build()
+                .unwrap();
+            let state = Arc::clone(&runtime.inner.state);
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let retained = [true, false].map(|panic_on_drop| TeardownRetained {
+                state: Arc::clone(&state),
+                dropped: Arc::clone(&dropped),
+                panic_on_drop,
+            });
+            drop(state);
+            let region = runtime.block_on(async move {
+                let region = Cx::current()
+                    .unwrap()
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                    .unwrap();
+                for value in retained {
+                    region
+                        .retain_until_finalized(value)
+                        .await
+                        .expect("an open region admits the finalizer");
+                }
+                region
+            });
+            // Both values are applied to the open region's finalizer stack and
+            // each keeps the runtime state alive: only teardown can drop them.
+            assert_eq!(dropped.load(Ordering::SeqCst), 0);
+            drop(runtime);
+            assert_eq!(
+                dropped.load(Ordering::SeqCst),
+                2,
+                "sharded={sharded}: teardown must release admitted finalizers"
+            );
+            drop(region);
+            eprintln!(
+                "REGION_FINALIZER_TEARDOWN backend=native sharded={sharded} applied=2 released=2 locks=reentrant"
+            );
+        }
     }
 
     #[test]

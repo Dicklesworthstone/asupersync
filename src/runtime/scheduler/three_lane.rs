@@ -3162,6 +3162,13 @@ impl ThreeLaneScheduler {
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
     }
+
+    /// Shared shutdown flag, so a test task can hold a worker until the
+    /// runtime begins stopping without retaining the runtime itself.
+    #[cfg(test)]
+    pub(crate) fn shutdown_signal_for_test(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

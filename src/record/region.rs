@@ -1286,6 +1286,17 @@ impl RegionRecord {
         self.finalizers.write().pop()
     }
 
+    /// Removes every pending finalizer, in LIFO order, whatever the region
+    /// state. Runtime teardown only: a region that never reached
+    /// `Finalizing` can no longer run them, and a retained value that keeps
+    /// the runtime state alive would otherwise never be dropped. The caller
+    /// drops them outside every runtime lock.
+    pub(crate) fn take_finalizers_for_teardown(&self) -> Vec<Finalizer> {
+        let _inner = self.inner.write();
+        let mut stack = self.finalizers.write();
+        std::iter::from_fn(|| stack.pop()).collect()
+    }
+
     /// Returns the number of pending finalizers.
     #[must_use]
     pub fn finalizer_count(&self) -> usize {
