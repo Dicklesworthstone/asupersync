@@ -1558,6 +1558,14 @@ mod managed_quiet {
                 ManagedEndpointConfig {
                     is_server: server,
                     packet_batch_size: 2,
+                    // The quiet oracle requires zero pending timers, and the PTO
+                    // phase withholds all peer input for up to 90 s. The default
+                    // 30 s local idle cap (enforced since 57dd29152) would hold an
+                    // idle-reap timer in every quiet state and reap the connection
+                    // mid-recovery. Neither side advertises max_idle_timeout, so
+                    // zero leaves no idle deadline. Idle reaping has its own live
+                    // UDP tests in tests/quic_h3_live_udp.rs.
+                    connection_idle_timeout_micros: 0,
                     ..Default::default()
                 },
             )
@@ -1751,16 +1759,16 @@ mod managed_quiet {
         });
         let (mut receipt, task, region) = runtime.block_on(runtime.handle().spawn(parent));
         reader.join().unwrap();
-        runtime.block_on(async {
-            let started = Instant::now();
-            while !runtime.is_quiescent() {
-                assert!(
-                    started.elapsed() < Duration::from_secs(5),
-                    "actual task/obligation cleanup"
-                );
-                asupersync::runtime::yield_now().await;
-            }
-        });
+        // block_on registers its own root task (d8e81f2cd), so quiescence is
+        // checked outside it; each turn drives work that is still draining.
+        let started = Instant::now();
+        while !runtime.is_quiescent() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "actual task/obligation cleanup"
+            );
+            runtime.block_on(asupersync::runtime::yield_now());
+        }
         assert!(
             runtime
                 .task_inspector(Default::default())
@@ -1892,13 +1900,19 @@ mod managed_quiet {
                     }
                     if line.starts_with("test result:") {
                         assert!(terminal.is_none(), "one selected libtest terminal");
-                        let elapsed = line.strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in ")
-                            .expect("exact helper selection must be 1/0/0/0/4");
+                        // Exactly the helper ran. The filtered count is every other
+                        // test in this binary, so it grows as tests are added.
+                        let rest = line.strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")
+                            .expect("exact helper selection must be 1/0/0/0");
+                        let (filtered, elapsed) = rest
+                            .split_once(" filtered out; finished in ")
+                            .expect("libtest filtered/elapsed terminal");
+                        let filtered: u64 = filtered.parse().expect("filtered count");
                         let elapsed_seconds: f64 =
                             elapsed.strip_suffix('s').unwrap().parse().unwrap();
                         assert!(elapsed_seconds.is_finite() && elapsed_seconds >= 0.0);
                         terminal = Some(json!({"raw":line, "passed":1, "failed":0,
-                            "ignored":0, "measured":0, "filtered":4, "elapsed_seconds":elapsed_seconds}));
+                            "ignored":0, "measured":0, "filtered":filtered, "elapsed_seconds":elapsed_seconds}));
                     }
                 }
                 terminal
