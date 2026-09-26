@@ -8985,6 +8985,34 @@ mod tests {
     }
 
     #[test]
+    fn native_runtime_keeps_admitting_child_regions_after_a_thousand_have_closed() {
+        init_test_logging();
+        // The swarm governor admits Normal-priority regions against its live
+        // envelope count (default cap 1000). Every closed region must release
+        // its envelope, or the 1001st open is refused (asupersync-cgnb7g).
+        let rounds = 1_100_usize;
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let opened = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("admitted native task");
+            let mut opened = 0_usize;
+            for round in 0..rounds {
+                let region = match cx
+                    .open_child_region(crate::cx::ChildRegionSpec::inherit())
+                    .await
+                {
+                    Ok(region) => region,
+                    Err(error) => panic!("child region {round} refused: {error:?}"),
+                };
+                region.close().await.expect("child region closes");
+                opened += 1;
+            }
+            opened
+        }));
+        eprintln!("native_region_admission rounds={rounds} opened={opened}");
+        assert_eq!(opened, rounds);
+    }
+
+    #[test]
     fn native_deadline_monitor_releases_runtime_state_before_warning_callback() {
         init_test_logging();
 

@@ -9537,6 +9537,12 @@ impl RuntimeState {
                                 },
                             );
                             self.resource_monitor.clear_region_priority(region_id);
+                            // The governor admits new regions against its live
+                            // envelope count; a closed region must release its
+                            // envelope (and any workload lease bound to it).
+                            let _ = self
+                                .swarm_pressure_governor
+                                .unregister_region_envelope(region_id);
 
                             if let Some(parent_id) = parent {
                                 let cleanup_outcome = regions
