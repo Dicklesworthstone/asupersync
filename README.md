@@ -97,7 +97,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `JoinHandle<T>` | `TaskHandle<T>` | `.join(cx).await` returns `Result<T, JoinError>`; cancellation and panic remain distinct. |
 | `tokio::task::JoinSet<T>` | `JoinSet<T, E, P>` | `JoinSet::in_cx(cx)` or `JoinSet::new(&scope)` owns dynamic fan-out in one region; `join_next`, `join_all`, and `cancel_all` always retain drain ownership. |
 | `tokio::spawn_blocking(f)` | `cx.spawn_blocking(\|cx\| f())` | Same idea when the runtime has a blocking pool: `#[main]`/`#[test]` configure one on demand (`blocking = N`, `0` opts out). A bare `RuntimeBuilder::new()` ships with `blocking_threads(0, 0)`, and without a pool the closure runs inline on the async worker. |
-| `tokio::select!` | `race!(cx, { a, b })` or `cx.race_drained(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. See [`macros_race.rs`](./examples/macros_race.rs). |
+| `tokio::select!` | `race!(cx, { move \|child\| a(child), move \|child\| b(child) })` or `cx.race_drained_with(...)` | Returns only after the winner is selected and every loser is protocol-cancelled and drained. Each branch receives its own child `Cx`; pass it to the branch's operations. A prebuilt branch that awaits on the caller's `cx` (for example `rx.recv(&cx)`) never sees its cancellation, so the drain waits for it to finish on its own. See [`docs/macro-dsl.md`](./docs/macro-dsl.md#race). |
 | `tokio::join!` | `join!(a, b)`; use `JoinSet::join_all(cx)` for dynamic arity | Inline branches complete together; spawned dynamic members remain region-owned and are collected in spawn order. See [`macros_basic.rs`](./examples/macros_basic.rs). |
 | `tokio::time::sleep(dur)` | `sleep(now, dur)` | Takes current `Time` instead of reading the clock implicitly. Works with virtual time in lab runtime. |
 | `tokio::time::timeout(dur, fut)` | `timeout(now, dur, fut)` or `cx.scope().timeout(&cx, dur, \|cx\| op)` | `time::timeout` returns `Result<T, Elapsed>` and drops the inner future when the clock wins; `Scope::timeout` spawns the operation as a region task and cancels **and drains** it on expiry, reporting a late terminal outcome instead of losing it. |
@@ -1664,9 +1664,11 @@ async fn macro_example(cx: &Cx, state: &mut RuntimeState) {
         join!(a, b)
     });
 
+    // Each branch gets its own child `Cx`, so a losing branch observes its
+    // cancellation and is drained before `race!` returns.
     let winner = race!(cx, {
-        task_a(),
-        task_b(),
+        move |child| task_a(child),
+        move |child| task_b(child),
     });
     let _ = winner;
 }
@@ -1686,7 +1688,7 @@ Current contract:
 - `scope!` binds a `Scope` for the current region; it does not create a fresh child-region boundary. Use `Scope::region(...)` when you need quiescence on scope exit.
 - `spawn!` requires runtime state (`state: &mut RuntimeState` or ambient `__state`) in addition to `Cx`.
 - `join!` and `join_all!` pin every branch once and poll all unfinished branches concurrently inside one `poll_fn`; neither macro serializes branches.
-- `race!` expands only to the drain-correct `Cx::race_drained*` family: spawned losers are protocol-cancelled and drained before return. On a `race!` `timeout:` expiry, the whole race is abandoned by drop.
+- `race!` expands only to the drain-correct `Cx::race_drained*` family: spawned losers are protocol-cancelled and drained before return. Prefer the factory form (`move |child| work(child)`), where each branch receives its own child `Cx`: loser cancellation targets the branch's task, so a prebuilt branch awaiting on the caller's `cx` never observes it and the drain waits for that branch to finish on its own. On a `race!` `timeout:` expiry, the factory form cancels and drains every branch and returns `Err(JoinError::Cancelled(_))`; the prebuilt form abandons the race by drop.
 - Blocking `select!` is also drain-correct; its `else` form instead polls each branch exactly once in source order, returns immediately, and drops all still-pending branches without draining.
 - Branches used by drain-correct `race!` and blocking `select!` must be `Send + 'static`, and the `Cx` must carry spawn authority. Direct `Cx::race*` calls remain the lower-level drop-on-cancel surface for inline, non-`'static` futures.
 - Minimal builds without `proc-macros` do not have a usable macro DSL fallback: `join!` and `race!` intentionally fail with `compile_error!`, while `scope!`, `spawn!`, `join_all!`, and `select!` are unavailable until `proc-macros` is re-enabled.
