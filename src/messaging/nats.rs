@@ -32,6 +32,7 @@ use nkeys::{KeyPair, KeyPairType};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -1612,40 +1613,64 @@ impl fmt::Debug for NatsConnection {
     }
 }
 
-/// Registers one cancellation-Waker on the ambient `Cx` for the lifetime of a
-/// socket read loop (br-asupersync-r8n4qx). A read parked on a silent NATS
-/// server is never re-polled on its own, so without this an external
-/// `cancel_with` went unnoticed until the server answered or the OS TCP timeout.
-/// Owned-`Cx` variant matching this module's ambient (`Cx::with_current`) idiom;
-/// mirrors the mysql/redis/postgres guard.
+/// Owns one cancellation registration for a transport wait. The command's
+/// caller can differ from the task polling the connection supervisor, so the
+/// explicit owner must not be replaced with `Cx::current()`.
 struct NatsCancelWakerGuard {
-    cx: Option<Cx>,
+    cx: Cx,
     token: Option<CancelWakerToken>,
 }
 
 impl NatsCancelWakerGuard {
-    fn new() -> Self {
+    fn new(cx: &Cx) -> Self {
         Self {
-            cx: Cx::current(),
+            cx: cx.clone(),
             token: None,
         }
     }
 
     fn refresh(&mut self, waker: &Waker) {
-        if let Some(cx) = &self.cx {
-            self.token = Some(cx.refresh_cancel_waker(self.token, waker));
-        }
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
     }
 }
 
 impl Drop for NatsCancelWakerGuard {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
-            if let Some(cx) = &self.cx {
-                cx.clear_cancel_waker(token);
-            }
+            self.cx.clear_cancel_waker(token);
         }
     }
+}
+
+/// Poll transport work under both its explicit command owner and the task
+/// driving it. No ambient context is replaced: capability restrictions and
+/// supervisor shutdown remain effective while caller cancellation can wake a
+/// silent read, blocked write, connection attempt, or TLS handshake.
+async fn nats_io<T, E>(cx: &Cx, future: impl Future<Output = Result<T, E>>) -> Result<T, NatsError>
+where
+    NatsError: From<E>,
+{
+    let mut owner_cancel = NatsCancelWakerGuard::new(cx);
+    let mut driver_cancel = Cx::current().as_ref().map(NatsCancelWakerGuard::new);
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|task_cx| {
+        // Registration precedes the checkpoint: cancellation published while
+        // a Waker is being cloned must be observed even if its wake snapshot
+        // ran before the new registration became visible.
+        owner_cancel.refresh(task_cx.waker());
+        if let Some(driver) = driver_cancel.as_mut() {
+            driver.refresh(task_cx.waker());
+        }
+        if cx.checkpoint().is_err()
+            || driver_cancel
+                .as_ref()
+                .is_some_and(|driver| driver.cx.checkpoint().is_err())
+        {
+            return Poll::Ready(Err(NatsError::Cancelled));
+        }
+        future.as_mut().poll(task_cx).map_err(Into::into)
+    })
+    .await
 }
 
 impl NatsConnection {
@@ -1658,7 +1683,7 @@ impl NatsConnection {
         ));
 
         let addr = format!("{}:{}", config.host, config.port);
-        let stream = TcpStream::connect(addr).await?;
+        let stream = nats_io(cx, TcpStream::connect(addr)).await?;
 
         let read_buf_limit = config.max_read_buffer;
         let mut client = Self {
@@ -1765,7 +1790,14 @@ impl NatsConnection {
             };
 
             cx.trace(&format!("nats: starting TLS upgrade for {server_name}"));
-            match connector.connect(&server_name, tcp_stream).await {
+            match nats_io(cx, async {
+                connector
+                    .connect(&server_name, tcp_stream)
+                    .await
+                    .map_err(NatsError::Tls)
+            })
+            .await
+            {
                 Ok(tls_stream) => {
                     self.stream = NatsStream::Tls(Box::new(tls_stream));
                     cx.trace("nats: TLS upgrade complete");
@@ -1773,7 +1805,7 @@ impl NatsConnection {
                 }
                 Err(err) => {
                     self.stream = NatsStream::Closed;
-                    Err(NatsError::Tls(err))
+                    Err(err)
                 }
             }
         }
@@ -1796,7 +1828,7 @@ impl NatsConnection {
                 }
             }
 
-            self.read_more().await?;
+            self.read_more(cx).await?;
         }
     }
 
@@ -1901,8 +1933,8 @@ impl NatsConnection {
         connect.push('}');
 
         let cmd = format!("CONNECT {connect}\r\n");
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         // If verbose mode, wait for +OK
         if self.config.verbose {
@@ -1924,6 +1956,7 @@ impl NatsConnection {
         let mut delay = self.config.reconnect_delay;
 
         loop {
+            cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
             if self.config.max_reconnect_attempts > 0
                 && attempt >= self.config.max_reconnect_attempts
             {
@@ -1942,7 +1975,11 @@ impl NatsConnection {
                 ));
 
                 // Wait before retry
-                crate::time::sleep(cx.now(), delay).await;
+                nats_io(cx, async {
+                    crate::time::sleep(cx.now(), delay).await;
+                    Ok::<(), NatsError>(())
+                })
+                .await?;
 
                 // Exponential backoff with max cap
                 delay = std::cmp::min(delay * 2, self.config.max_reconnect_delay);
@@ -1955,7 +1992,7 @@ impl NatsConnection {
 
             // Attempt TCP reconnection
             let addr = format!("{}:{}", self.config.host, self.config.port);
-            match TcpStream::connect(addr).await {
+            match nats_io(cx, TcpStream::connect(addr)).await {
                 Ok(new_stream) => {
                     cx.trace(&format!(
                         "nats: TCP reconnected to {}:{} (attempt {})",
@@ -1973,11 +2010,13 @@ impl NatsConnection {
                             cx.trace("nats: reconnection successful");
                             return Ok(());
                         }
+                        Err(NatsError::Cancelled) => return Err(NatsError::Cancelled),
                         Err(e) => {
                             cx.trace(&format!("nats: handshake failed during reconnect: {}", e));
                         }
                     }
                 }
+                Err(NatsError::Cancelled) => return Err(NatsError::Cancelled),
                 Err(e) => {
                     cx.trace(&format!("nats: TCP reconnect failed: {}", e));
                 }
@@ -2064,9 +2103,9 @@ impl NatsConnection {
             } else {
                 format!("SUB {} {}\r\n", subscription.subject, subscription.sid)
             };
-            self.stream.write_all(cmd.as_bytes()).await?;
+            nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
         }
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         Ok(subscriptions.len())
     }
@@ -2082,41 +2121,28 @@ impl NatsConnection {
                     NatsMessage::Err(e) => return Err(NatsError::Server(e)),
                     NatsMessage::Ping => {
                         // Respond to PING during handshake
-                        self.send_server_pong().await?;
+                        self.send_server_pong(cx).await?;
                     }
                     _ => {} // Ignore other messages during handshake
                 }
             } else {
-                self.read_more().await?;
+                self.read_more(cx).await?;
             }
         }
     }
 
     /// Read more data from the stream.
-    pub(crate) async fn read_more(&mut self) -> Result<(), NatsError> {
+    pub(crate) async fn read_more(&mut self, cx: &Cx) -> Result<(), NatsError> {
         let mut tmp = [0u8; 4096];
-        // br-asupersync-r8n4qx: wake a read parked on a silent NATS server when
-        // an external cancel fires, instead of only noticing it on the next
-        // self-poll (mirrors the mysql/redis cancel-waker fix). read_more is the
-        // single central read path, so this covers every NATS read. Ambient-Cx
-        // variant (this loop uses Cx::with_current, not a threaded &Cx).
-        let mut cancel_wake = NatsCancelWakerGuard::new();
-        let n = std::future::poll_fn(|task_cx| {
-            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
-                return Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "cancelled",
-                )));
-            }
-            cancel_wake.refresh(task_cx.waker());
+        let read = std::future::poll_fn(|task_cx| {
             let mut read_buf = ReadBuf::new(&mut tmp);
             match Pin::new(&mut self.stream).poll_read(task_cx, &mut read_buf) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
                 Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             }
-        })
-        .await?;
+        });
+        let n = nats_io(cx, read).await?;
 
         if n == 0 {
             return Err(NatsError::Closed);
@@ -2133,7 +2159,7 @@ impl NatsConnection {
     ) -> Result<(), NatsError> {
         let now = timeout_now(cx);
         let remaining = Duration::from_nanos(deadline.duration_since(now));
-        crate::time::timeout(now, remaining, self.read_more())
+        crate::time::timeout(now, remaining, self.read_more(cx))
             .await
             .unwrap_or_else(|_| Err(request_timeout_error()))
     }
@@ -2169,14 +2195,14 @@ impl NatsConnection {
     ///
     /// If the client is currently considered connected, fail closed around
     /// the write so a partial `PONG` cannot leave the connection reusable.
-    pub(crate) async fn send_server_pong(&mut self) -> Result<(), NatsError> {
+    pub(crate) async fn send_server_pong(&mut self, cx: &Cx) -> Result<(), NatsError> {
         let restore_connected = self.connected;
         if restore_connected {
             self.connected = false;
         }
 
-        self.stream.write_all(b"PONG\r\n").await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(b"PONG\r\n")).await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         if restore_connected {
             self.connected = true;
@@ -2511,10 +2537,10 @@ impl NatsConnection {
         self.connected = false;
 
         let cmd = format!("PUB {subject} {}\r\n", payload.len());
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.write_all(payload).await?;
-        self.stream.write_all(b"\r\n").await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.write_all(payload)).await?;
+        nats_io(cx, self.stream.write_all(b"\r\n")).await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         // PUB is now definitively on the wire. Commit to Ok — any post-flush
         // wire-read error must NOT roll the publish back via Err, or callers
@@ -2553,10 +2579,10 @@ impl NatsConnection {
         self.connected = false;
 
         let cmd = format!("PUB {subject} {reply_to} {}\r\n", payload.len());
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.write_all(payload).await?;
-        self.stream.write_all(b"\r\n").await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.write_all(payload)).await?;
+        nats_io(cx, self.stream.write_all(b"\r\n")).await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         self.connected = true;
         Ok(())
@@ -2626,11 +2652,11 @@ impl NatsConnection {
         self.connected = false;
 
         let cmd = format!("HPUB {subject} {reply_to} {header_len} {total_len}\r\n");
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.write_all(&header_block).await?;
-        self.stream.write_all(payload).await?;
-        self.stream.write_all(b"\r\n").await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.write_all(&header_block)).await?;
+        nats_io(cx, self.stream.write_all(payload)).await?;
+        nats_io(cx, self.stream.write_all(b"\r\n")).await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         self.connected = true;
         Ok(())
@@ -2695,7 +2721,7 @@ impl NatsConnection {
 
                 match message {
                     Some(NatsMessage::Ping) => {
-                        if let Err(err) = self.send_server_pong().await {
+                        if let Err(err) = self.send_server_pong(cx).await {
                             self.cleanup_request_subscription(
                                 cx,
                                 sub.sid(),
@@ -2800,7 +2826,7 @@ impl NatsConnection {
 
                 match message {
                     Some(NatsMessage::Ping) => {
-                        if let Err(err) = self.send_server_pong().await {
+                        if let Err(err) = self.send_server_pong(cx).await {
                             self.cleanup_request_subscription(
                                 cx,
                                 sub.sid(),
@@ -2894,8 +2920,8 @@ impl NatsConnection {
         // Send SUB command. The guard prevents a leaked sender on write failure
         // or cancellation.
         let cmd = format!("SUB {subject} {sid}\r\n");
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         self.connected = true;
         guard.defused = true;
@@ -2952,8 +2978,8 @@ impl NatsConnection {
         // Send SUB command. Clean up the subscription entry on write failure
         // or cancellation (same as subscribe()).
         let cmd = format!("SUB {subject} {queue_group} {sid}\r\n");
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         self.connected = true;
         guard.defused = true;
@@ -2980,8 +3006,8 @@ impl NatsConnection {
         // Send UNSUB command. Mark disconnected to prevent reuse on partial write.
         self.connected = false;
         let cmd = format!("UNSUB {sid}\r\n");
-        self.stream.write_all(cmd.as_bytes()).await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.flush()).await?;
         self.connected = true;
 
         Ok(())
@@ -3000,8 +3026,8 @@ impl NatsConnection {
         // desynchronized state.
         self.connected = false;
 
-        self.stream.write_all(b"PING\r\n").await?;
-        self.stream.flush().await?;
+        nats_io(cx, self.stream.write_all(b"PING\r\n")).await?;
+        nats_io(cx, self.stream.flush()).await?;
 
         // Wait for PONG
         loop {
@@ -3015,7 +3041,7 @@ impl NatsConnection {
                     }
                     NatsMessage::Err(e) => return Err(NatsError::Server(e)),
                     NatsMessage::Ping => {
-                        self.send_server_pong().await?;
+                        self.send_server_pong(cx).await?;
                     }
                     NatsMessage::Msg(m) => {
                         // Dispatch to subscription
@@ -3024,18 +3050,18 @@ impl NatsConnection {
                     _ => {}
                 }
             } else {
-                self.read_more().await?;
+                self.read_more(cx).await?;
             }
         }
     }
 
     /// Handle any pending server messages (like PING).
-    async fn handle_pending_messages(&mut self, _cx: &Cx) -> Result<(), NatsError> {
+    async fn handle_pending_messages(&mut self, cx: &Cx) -> Result<(), NatsError> {
         // Non-blocking check for pending messages
         loop {
             match self.try_parse_message()? {
                 Some(NatsMessage::Ping) => {
-                    self.send_server_pong().await?;
+                    self.send_server_pong(cx).await?;
                 }
                 Some(NatsMessage::Msg(m)) => {
                     self.dispatch_message(m);
@@ -3077,7 +3103,7 @@ impl NatsConnection {
         loop {
             match self.try_parse_message()? {
                 Some(NatsMessage::Ping) => {
-                    self.send_server_pong().await?;
+                    self.send_server_pong(cx).await?;
                     processed_any = true;
                 }
                 Some(NatsMessage::Msg(m)) => {
@@ -3095,7 +3121,7 @@ impl NatsConnection {
                         break;
                     }
 
-                    self.read_more().await?;
+                    self.read_more(cx).await?;
                     // We read more data, but we only want to read once per `process` call
                     // if we are waiting for a partial message to complete.
                     processed_any = true;
@@ -3122,7 +3148,7 @@ impl NatsConnection {
 
         if self.connected {
             // Best-effort flush before shutdown
-            let _ = self.stream.flush().await;
+            let _ = nats_io(cx, self.stream.flush()).await;
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
         }
         self.connected = false;
@@ -3606,7 +3632,7 @@ async fn run_nats_supervisor(
     mut commands: mpsc::Receiver<NatsSupervisorCommand>,
 ) {
     loop {
-        match drain_supervisor_frames(&mut connection).await {
+        match drain_supervisor_frames(supervisor_cx, &mut connection).await {
             Ok(processed) => {
                 if processed > 0 {
                     connection
@@ -3629,7 +3655,7 @@ async fn run_nats_supervisor(
         // selected command therefore cannot steal socket bytes, and a selected
         // read cannot lose a command reservation.
         let selected = {
-            let read = Box::pin(connection.read_more());
+            let read = Box::pin(connection.read_more(supervisor_cx));
             let command = Box::pin(commands.recv(supervisor_cx));
             Select::new(read, command).await
         };
@@ -3657,11 +3683,14 @@ async fn run_nats_supervisor(
     let _ = connection.stream.shutdown(std::net::Shutdown::Both);
 }
 
-async fn drain_supervisor_frames(connection: &mut NatsConnection) -> Result<u64, NatsError> {
+async fn drain_supervisor_frames(
+    cx: &Cx,
+    connection: &mut NatsConnection,
+) -> Result<u64, NatsError> {
     let mut processed = 0_u64;
     loop {
         match connection.try_parse_message()? {
-            Some(NatsMessage::Ping) => connection.send_server_pong().await?,
+            Some(NatsMessage::Ping) => connection.send_server_pong(cx).await?,
             Some(NatsMessage::Msg(message)) => connection.dispatch_message(message),
             Some(NatsMessage::Err(error)) => return Err(NatsError::Server(error)),
             Some(NatsMessage::Info(info)) => {
@@ -4036,6 +4065,194 @@ mod tests {
     const NATS_TEST_CERT_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.crt");
     #[cfg(feature = "tls")]
     const NATS_TEST_KEY_PEM: &[u8] = include_bytes!("../../tests/fixtures/tls/server.key");
+
+    fn native_parked_read_cancellation(worker_threads: usize, cancel_driver: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind cancellation listener");
+        let addr = listener
+            .local_addr()
+            .expect("cancellation listener address");
+        let (release_server, released) = std_mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept cancellation client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set cancellation peer timeout");
+            stream
+                .write_all(b"INFO {\"server_id\":\"cancel-owner\",\"max_payload\":1048576}\r\n")
+                .expect("send cancellation INFO");
+            let mut reader = BufReader::new(stream);
+            assert!(read_protocol_line(&mut reader).starts_with("CONNECT "));
+            // No more bytes arrive until the assertion side releases us. An
+            // erroneous implementation therefore cannot pass on a server wake.
+            let _ = released.recv_timeout(Duration::from_secs(8));
+            let _ = reader.get_mut().shutdown(std::net::Shutdown::Both);
+        });
+
+        let owner: Cx = Cx::for_testing();
+        let operation_owner = owner.clone();
+        let (parked_tx, parked_rx) = std_mpsc::channel();
+        let (result_tx, result_rx) = std_mpsc::channel();
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(worker_threads)
+            .build()
+            .expect("build cancellation runtime");
+        let task = runtime.handle().spawn(async move {
+            let driver = Cx::current().expect("native NATS driver context");
+            let config = NatsConfig::from_url(&format!("nats://{addr}"))
+                .expect("parse cancellation peer URL");
+            let mut connection = NatsConnection::connect_with_config(&driver, config)
+                .await
+                .expect("connect cancellation peer");
+            let owner_baseline = operation_owner
+                .inner
+                .read()
+                .cancel_waker_registrations
+                .len();
+            let driver_baseline = driver.inner.read().cancel_waker_registrations.len();
+            let mut parked_tx = Some(parked_tx);
+            let result = {
+                let read = connection.process(&operation_owner);
+                let mut read = std::pin::pin!(read);
+                std::future::poll_fn(|task_cx| {
+                    let result = read.as_mut().poll(task_cx);
+                    if result.is_pending()
+                        && let Some(parked_tx) = parked_tx.take()
+                    {
+                        // This witnesses the real socket returning Pending,
+                        // not a scheduling delay or a self-waking substitute.
+                        let _ = parked_tx.send(driver.clone());
+                    }
+                    result
+                })
+                .await
+            };
+            let owner_after = operation_owner
+                .inner
+                .read()
+                .cancel_waker_registrations
+                .len();
+            let driver_after = driver.inner.read().cancel_waker_registrations.len();
+            drop(connection);
+            let _ = result_tx.send((
+                result,
+                owner_baseline == owner_after,
+                driver_baseline == driver_after,
+            ));
+        });
+
+        let parked = parked_rx.recv_timeout(Duration::from_secs(3));
+        if let Ok(driver) = &parked {
+            if cancel_driver {
+                driver.cancel_with(crate::types::CancelKind::Shutdown, Some("NATS driver stop"));
+            } else {
+                owner.cancel_with(crate::types::CancelKind::User, Some("NATS caller stop"));
+            }
+        }
+        let result = result_rx.recv_timeout(Duration::from_secs(2));
+        // Release the real peer before assertions, including the old-code-red
+        // timeout path, so a failure does not strand a socket or worker.
+        let _ = release_server.send(());
+        server.join().expect("join cancellation peer");
+        drop(task);
+        let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+
+        assert!(parked.is_ok(), "native read never parked: {parked:?}");
+        assert!(drained, "native cancellation runtime did not drain");
+        match result {
+            Ok((Err(NatsError::Cancelled), true, true)) => {}
+            other => panic!(
+                "NATS_CANCEL_OWNER workers={worker_threads} driver={cancel_driver} \
+                 parked=true expected=Cancelled,registrations_retired observed={other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn nats_native_parked_read_observes_noncurrent_owner_and_retires_registrations() {
+        for workers in [1, 2] {
+            native_parked_read_cancellation(workers, false);
+        }
+    }
+
+    #[test]
+    fn nats_native_parked_read_still_observes_supervisor_shutdown() {
+        for workers in [1, 2] {
+            native_parked_read_cancellation(workers, true);
+        }
+    }
+
+    #[test]
+    fn nats_io_observes_cancellation_published_while_retiring_waker() {
+        struct CancelOnRetirement(Cx);
+        impl std::task::Wake for CancelOnRetirement {
+            fn wake(self: Arc<Self>) {}
+        }
+        impl Drop for CancelOnRetirement {
+            fn drop(&mut self) {
+                self.0.cancel_with(
+                    crate::types::CancelKind::User,
+                    Some("cancel during NATS Waker replacement"),
+                );
+            }
+        }
+
+        let owner: Cx = Cx::for_testing();
+        let driver: Cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(driver.clone()));
+        let first = Waker::from(Arc::new(CancelOnRetirement(owner.clone())));
+        let mut operation = Box::pin(nats_io(
+            &owner,
+            std::future::pending::<Result<(), NatsError>>(),
+        ));
+        {
+            let mut task_cx = std::task::Context::from_waker(&first);
+            assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+        }
+        drop(first);
+        assert!(!owner.is_cancel_requested());
+
+        // Replacing the two registrations retires the last old Waker outside
+        // their locks; its safe Drop callback publishes cancellation while the
+        // registration phase is still running. The same poll must observe it.
+        let mut task_cx = std::task::Context::from_waker(Waker::noop());
+        assert!(matches!(
+            operation.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(NatsError::Cancelled))
+        ));
+        assert!(!driver.is_cancel_requested());
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+    }
+
+    #[test]
+    fn nats_io_drop_retires_both_owners_without_stale_wakes() {
+        struct WakeCount(AtomicU64);
+        impl std::task::Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let owner: Cx = Cx::for_testing();
+        let driver: Cx = Cx::for_testing();
+        let _current = Cx::set_current(Some(driver.clone()));
+        let wakes = Arc::new(WakeCount(AtomicU64::new(0)));
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut task_cx = std::task::Context::from_waker(&waker);
+        let mut operation = Box::pin(nats_io(
+            &owner,
+            std::future::pending::<Result<(), NatsError>>(),
+        ));
+        assert!(operation.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(owner.inner.read().cancel_waker_registrations.len(), 1);
+        assert_eq!(driver.inner.read().cancel_waker_registrations.len(), 1);
+        drop(operation);
+        assert!(owner.inner.read().cancel_waker_registrations.is_empty());
+        assert!(driver.inner.read().cancel_waker_registrations.is_empty());
+        owner.cancel_with(crate::types::CancelKind::User, Some("after wait drop"));
+        driver.cancel_with(crate::types::CancelKind::Shutdown, Some("after wait drop"));
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+    }
 
     fn scrub_reply_subject(reply_to: Option<&str>) -> Option<&str> {
         let value = reply_to?;
