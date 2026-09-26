@@ -31,7 +31,7 @@
 //! CRYPTO frame handler + long-header packet I/O + connect/accept is tracked
 //! separately (P1/P2 of the ATP-over-QUIC plan).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -465,7 +465,9 @@ pub struct HandshakeSegment {
 #[derive(Debug, Default)]
 struct HandshakeCryptoReassembler {
     next_offset: u64,
-    pending: BTreeMap<u64, Vec<u8>>,
+    // Ranges are disjoint and non-adjacent. A deque lets a range grow in either
+    // direction without copying its accepted prefix/suffix on every packet.
+    pending: BTreeMap<u64, VecDeque<u8>>,
     pending_bytes: usize,
 }
 
@@ -489,74 +491,128 @@ impl HandshakeCryptoReassembler {
             return Ok(Vec::new());
         }
 
-        // Build the merged candidate transactionally. Overlapping ranges are
-        // removed temporarily so transitive adjacency remains easy to detect,
-        // but every error path restores the exact accepted state. In
-        // particular, a conflicting or oversized fragment must not erase
-        // bytes that authenticated packets already contributed.
-        let original_pending_bytes = self.pending_bytes;
-        let mut removed = Vec::new();
-        let candidate = (|| {
-            let mut merged_start = offset;
-            let mut merged = data.to_vec();
-            loop {
-                let merged_len = u64::try_from(merged.len())
-                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-                let merged_end = merged_start
-                    .checked_add(merged_len)
-                    .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-                let overlapping = self.pending.iter().find_map(|(&start, bytes)| {
-                    let len = u64::try_from(bytes.len()).ok()?;
-                    let end = start.checked_add(len)?;
-                    (start <= merged_end && end >= merged_start).then_some(start)
-                });
-                let Some(existing_start) = overlapping else {
-                    break;
-                };
-                let Some(existing) = self.pending.remove(&existing_start) else {
-                    return Err(handshake_failure("crypto_reassembly_state"));
-                };
-                let existing_len = existing.len();
-                let merged_range =
-                    merge_crypto_ranges(merged_start, &merged, existing_start, &existing);
-                removed.push((existing_start, existing));
-                self.pending_bytes = self
-                    .pending_bytes
-                    .checked_sub(existing_len)
-                    .ok_or_else(|| handshake_failure("crypto_reassembly_state"))?;
-                (merged_start, merged) = merged_range?;
+        // There is at most one predecessor intersecting this fragment. All
+        // other affected ranges start inside it, or exactly at its end. Since
+        // accepted ranges are already coalesced, no full-map scan or repeated
+        // search for transitive adjacency is necessary.
+        let mut merged_start = offset;
+        if let Some((&start, bytes)) = self.pending.range(..offset).next_back() {
+            let existing_end = start
+                .checked_add(
+                    u64::try_from(bytes.len())
+                        .map_err(|_| handshake_failure("crypto_offset_overflow"))?,
+                )
+                .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
+            if existing_end >= offset {
+                merged_start = start;
             }
+        }
 
-            let new_pending_bytes = self
-                .pending_bytes
-                .checked_add(merged.len())
-                .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
-            // A range beginning at the current receive head is removed again
-            // immediately below and fed to rustls. Rejecting that range merely
-            // because either retained-data budget is full would let a peer fill
-            // the cap behind a gap and make the one fragment capable of
-            // advancing the stream permanently inadmissible. The wire packet
-            // already bounds immediately deliverable input; these limits bound
-            // only bytes and tree nodes retained behind a gap.
-            let drains_from_head = merged_start == self.next_offset;
-            if !drains_from_head && new_pending_bytes > MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES {
-                return Err(handshake_failure("crypto_buffer_limit"));
-            }
-            if !drains_from_head && self.pending.len() >= MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES {
-                return Err(handshake_failure("crypto_range_limit"));
-            }
-            Ok((merged_start, merged, new_pending_bytes))
-        })();
-        let (merged_start, merged, new_pending_bytes) = match candidate {
-            Ok(candidate) => candidate,
-            Err(err) => {
-                for (start, bytes) in removed {
-                    let displaced = self.pending.insert(start, bytes);
-                    debug_assert!(displaced.is_none(), "removed CRYPTO range key was reused");
+        // Preflight every overlap and both retention budgets before changing
+        // the accepted state or allocating a merged payload. The prefix and
+        // suffix lengths name existing bytes *outside* the incoming fragment;
+        // its matching interior can replace all smaller interior ranges.
+        let mut affected = Vec::new();
+        let mut merged_end = end;
+        let mut replaced_bytes = 0_usize;
+        let mut largest = None;
+        for (&start, bytes) in self.pending.range(merged_start..=end) {
+            let existing_end = start
+                .checked_add(
+                    u64::try_from(bytes.len())
+                        .map_err(|_| handshake_failure("crypto_offset_overflow"))?,
+                )
+                .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
+            let overlap_start = offset.max(start);
+            let overlap_end = end.min(existing_end);
+            if overlap_start < overlap_end {
+                let overlap_len = usize::try_from(overlap_end - overlap_start)
+                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+                let data_at = usize::try_from(overlap_start - offset)
+                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+                let existing_at = usize::try_from(overlap_start - start)
+                    .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+                if !bytes
+                    .range(existing_at..existing_at + overlap_len)
+                    .eq(data[data_at..data_at + overlap_len].iter())
+                {
+                    return Err(handshake_failure("crypto_overlap_conflict"));
                 }
-                self.pending_bytes = original_pending_bytes;
-                return Err(err);
             }
+            let prefix_len = usize::try_from(offset.saturating_sub(start))
+                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+            let suffix_at = usize::try_from(end.min(existing_end) - start)
+                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+            affected.push((start, prefix_len, suffix_at));
+            replaced_bytes = replaced_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
+            merged_end = merged_end.max(existing_end);
+            if largest.is_none_or(|(_, _, len)| bytes.len() > len) {
+                largest = Some((start, existing_end, bytes.len()));
+            }
+        }
+        let merged_len = usize::try_from(merged_end - merged_start)
+            .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+        let new_pending_bytes = self
+            .pending_bytes
+            .checked_sub(replaced_bytes)
+            .ok_or_else(|| handshake_failure("crypto_reassembly_state"))?
+            .checked_add(merged_len)
+            .ok_or_else(|| handshake_failure("crypto_buffer_limit"))?;
+        // These budgets cover data retained behind a gap. Receive-head data
+        // must remain admissible when either budget is full, so filling the
+        // gap can release the accepted data to TLS immediately.
+        let drains_from_head = merged_start == self.next_offset;
+        if !drains_from_head && new_pending_bytes > MAX_BUFFERED_HANDSHAKE_CRYPTO_BYTES {
+            return Err(handshake_failure("crypto_buffer_limit"));
+        }
+        if !drains_from_head
+            && self.pending.len() - affected.len() >= MAX_BUFFERED_HANDSHAKE_CRYPTO_RANGES
+        {
+            return Err(handshake_failure("crypto_range_limit"));
+        }
+        if merged_len == replaced_bytes {
+            // A contained retransmission adds nothing. In particular, it must
+            // not clone or replace a large accepted range for one repeated byte.
+            return Ok(Vec::new());
+        }
+
+        let merged = if let Some((largest_start, largest_end, _)) = largest {
+            let data_prefix_len = usize::try_from(largest_start.saturating_sub(offset))
+                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+            let data_suffix_at = usize::try_from(end.min(largest_end) - offset)
+                .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
+            let mut merged = self
+                .pending
+                .remove(&largest_start)
+                .ok_or_else(|| handshake_failure("crypto_reassembly_state"))?;
+            // Reuse the largest allocation. Adjacent append/prepend arrivals
+            // are amortized linear; a surviving smaller exterior range is
+            // copied into a range at least as large. Overlap comparison and
+            // interior replacement visit at most the incoming fragment's bytes.
+            merged.reserve(merged_len - merged.len());
+            for &byte in data[..data_prefix_len].iter().rev() {
+                merged.push_front(byte);
+            }
+            merged.extend(data[data_suffix_at..].iter().copied());
+            for (start, prefix_len, suffix_at) in affected {
+                if start == largest_start {
+                    continue;
+                }
+                let existing = self
+                    .pending
+                    .remove(&start)
+                    .expect("preflight retained every affected CRYPTO range");
+                for &byte in existing.range(..prefix_len).rev() {
+                    merged.push_front(byte);
+                }
+                merged.extend(existing.range(suffix_at..).copied());
+            }
+            debug_assert_eq!(merged.len(), merged_len);
+            merged
+        } else {
+            VecDeque::from(data.to_vec())
         };
         self.pending.insert(merged_start, merged);
         self.pending_bytes = new_pending_bytes;
@@ -573,57 +629,10 @@ impl HandshakeCryptoReassembler {
                 .next_offset
                 .checked_add(len)
                 .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-            ready.push(bytes);
+            ready.push(Vec::from(bytes));
         }
         Ok(ready)
     }
-}
-
-fn merge_crypto_ranges(
-    first_start: u64,
-    first: &[u8],
-    second_start: u64,
-    second: &[u8],
-) -> Result<(u64, Vec<u8>), QuicTlsError> {
-    let first_end = first_start
-        .checked_add(
-            u64::try_from(first.len()).map_err(|_| handshake_failure("crypto_offset_overflow"))?,
-        )
-        .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-    let second_end = second_start
-        .checked_add(
-            u64::try_from(second.len()).map_err(|_| handshake_failure("crypto_offset_overflow"))?,
-        )
-        .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
-    let merged_start = first_start.min(second_start);
-    let merged_end = first_end.max(second_end);
-    let merged_len = usize::try_from(merged_end - merged_start)
-        .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-    let mut merged = vec![0; merged_len];
-
-    let first_at = usize::try_from(first_start - merged_start)
-        .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-    merged[first_at..first_at + first.len()].copy_from_slice(first);
-
-    let second_at = usize::try_from(second_start - merged_start)
-        .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-    let overlap_start = first_start.max(second_start);
-    let overlap_end = first_end.min(second_end);
-    if overlap_start < overlap_end {
-        let overlap_len = usize::try_from(overlap_end - overlap_start)
-            .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-        let first_overlap = usize::try_from(overlap_start - first_start)
-            .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-        let second_overlap = usize::try_from(overlap_start - second_start)
-            .map_err(|_| handshake_failure("crypto_offset_overflow"))?;
-        if first[first_overlap..first_overlap + overlap_len]
-            != second[second_overlap..second_overlap + overlap_len]
-        {
-            return Err(handshake_failure("crypto_overlap_conflict"));
-        }
-    }
-    merged[second_at..second_at + second.len()].copy_from_slice(second);
-    Ok((merged_start, merged))
 }
 
 /// Drives a real QUIC/TLS-1.3 handshake via rustls, installing the derived AEAD
@@ -2858,6 +2867,348 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         assert_eq!(&ready[0][..2], b"x\0");
         assert!(reassembler.pending.is_empty());
         assert_eq!(reassembler.pending_bytes, 0);
+    }
+
+    #[test]
+    fn crypto_reassembler_reuses_spare_capacity_from_both_ends_and_for_duplicates() {
+        let mut reassembler = HandshakeCryptoReassembler::default();
+        reassembler.push(4096, &vec![17; 1024]).unwrap();
+        let accepted = reassembler.pending.get_mut(&4096).unwrap();
+        accepted.reserve(3072);
+        let capacity = accepted.capacity();
+        let marker = std::ptr::from_ref(&accepted[0]);
+
+        // The accepted byte must keep its address while spare capacity exists.
+        // This checks allocation reuse, not a wall-clock performance threshold.
+        for index in 1..=1024_usize {
+            let offset = 4096 - u64::try_from(index).unwrap();
+            assert!(reassembler.push(offset, &[17]).unwrap().is_empty());
+            let accepted = &reassembler.pending[&offset];
+            assert_eq!(accepted.capacity(), capacity);
+            assert_eq!(std::ptr::from_ref(&accepted[index]), marker);
+        }
+        for index in 0..1024_u64 {
+            assert!(reassembler.push(5120 + index, &[17]).unwrap().is_empty());
+            let accepted = &reassembler.pending[&3072];
+            assert_eq!(accepted.capacity(), capacity);
+            assert_eq!(std::ptr::from_ref(&accepted[1024]), marker);
+        }
+        assert_eq!(reassembler.pending.len(), 1);
+        assert_eq!(reassembler.pending_bytes, 3072);
+        for offset in [3072, 4096, 6143] {
+            assert!(reassembler.push(offset, &[17]).unwrap().is_empty());
+            let accepted = &reassembler.pending[&3072];
+            assert_eq!(accepted.capacity(), capacity);
+            assert_eq!(std::ptr::from_ref(&accepted[1024]), marker);
+            assert_eq!(reassembler.pending_bytes, 3072);
+        }
+        let ready = reassembler.push(0, &vec![17; 3072]).unwrap();
+        assert_eq!(ready, vec![vec![17; 6144]]);
+        assert!(reassembler.pending.is_empty());
+        assert_eq!(reassembler.pending_bytes, 0);
+    }
+
+    #[test]
+    fn crypto_reassembler_bridges_ranges_without_replacing_the_largest_allocation() {
+        for lengths in [[1024, 13, 29], [13, 1024, 29], [13, 29, 1024]] {
+            let starts = [5, 5 + lengths[0] + 7, 5 + lengths[0] + 7 + lengths[1] + 11];
+            let end = starts[2] + lengths[2];
+            let expected: Vec<u8> = (0..end)
+                .map(|index| u8::try_from(index % 251).unwrap())
+                .collect();
+            let mut reassembler = HandshakeCryptoReassembler::default();
+            for (&start, &len) in starts.iter().zip(&lengths) {
+                reassembler
+                    .push(u64::try_from(start).unwrap(), &expected[start..start + len])
+                    .unwrap();
+            }
+            let largest_index = lengths.iter().position(|&len| len == 1024).unwrap();
+            let largest_start = u64::try_from(starts[largest_index]).unwrap();
+            let largest = reassembler.pending.get_mut(&largest_start).unwrap();
+            largest.reserve(end);
+            let capacity = largest.capacity();
+            let marker = std::ptr::from_ref(&largest[0]);
+            let bridge_start = starts[0] + lengths[0] - 1;
+            let bridge_end = starts[2] + 1;
+            let before = reassembler.pending.clone();
+            let mut conflicting = expected[bridge_start..bridge_end].to_vec();
+            *conflicting.last_mut().unwrap() ^= 0x80;
+            assert!(matches!(
+                reassembler.push(u64::try_from(bridge_start).unwrap(), &conflicting),
+                Err(QuicTlsError::CryptoProviderFailure {
+                    provider: "rustls-quic-handshake",
+                    code: "crypto_overlap_conflict",
+                })
+            ));
+            assert_eq!(reassembler.pending, before);
+            assert_eq!(reassembler.pending_bytes, lengths.iter().sum::<usize>());
+            assert!(
+                reassembler
+                    .push(
+                        u64::try_from(bridge_start).unwrap(),
+                        &expected[bridge_start..bridge_end],
+                    )
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(reassembler.pending.len(), 1);
+            let merged = &reassembler.pending[&5];
+            assert_eq!(merged.capacity(), capacity);
+            assert_eq!(
+                std::ptr::from_ref(&merged[starts[largest_index] - 5]),
+                marker
+            );
+            assert!(merged.iter().eq(expected[5..].iter()));
+            assert_eq!(reassembler.pending_bytes, end - 5);
+            assert_eq!(reassembler.push(0, &expected[..5]).unwrap(), vec![expected]);
+            assert!(reassembler.pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn crypto_reassembler_matches_byte_oracle_under_overlap_reordering_and_conflicts() {
+        fn check_push(
+            reassembler: &mut HandshakeCryptoReassembler,
+            oracle: &mut [Option<u8>],
+            head: &mut usize,
+            offset: usize,
+            data: &[u8],
+        ) {
+            let before = reassembler.pending.clone();
+            let before_bytes = reassembler.pending_bytes;
+            let conflict = data.iter().enumerate().any(|(index, &byte)| {
+                offset + index >= *head
+                    && oracle[offset + index].is_some_and(|accepted| accepted != byte)
+            });
+            let result = reassembler.push(u64::try_from(offset).unwrap(), data);
+            if conflict {
+                assert!(matches!(
+                    result,
+                    Err(QuicTlsError::CryptoProviderFailure {
+                        provider: "rustls-quic-handshake",
+                        code: "crypto_overlap_conflict",
+                    })
+                ));
+                assert_eq!(reassembler.pending, before);
+                assert_eq!(reassembler.pending_bytes, before_bytes);
+            } else {
+                for (index, &byte) in data.iter().enumerate() {
+                    if offset + index >= *head {
+                        oracle[offset + index] = Some(byte);
+                    }
+                }
+                let mut ready = Vec::new();
+                while let Some(Some(byte)) = oracle.get(*head) {
+                    ready.push(*byte);
+                    *head += 1;
+                }
+                assert_eq!(result.unwrap().concat(), ready);
+            }
+            assert_eq!(reassembler.next_offset, u64::try_from(*head).unwrap());
+            let mut retained = vec![None; oracle.len()];
+            let mut previous_end = u64::try_from(*head).unwrap();
+            let mut retained_bytes = 0;
+            for (&start, bytes) in &reassembler.pending {
+                assert!(
+                    start > previous_end,
+                    "accepted ranges must be separated by gaps"
+                );
+                previous_end = start + u64::try_from(bytes.len()).unwrap();
+                let start = usize::try_from(start).unwrap();
+                for (index, &byte) in bytes.iter().enumerate() {
+                    retained[start + index] = Some(byte);
+                }
+                retained_bytes += bytes.len();
+            }
+            assert_eq!(&retained[*head..], &oracle[*head..]);
+            assert_eq!(reassembler.pending_bytes, retained_bytes);
+        }
+
+        const LEN: usize = 2048;
+        let input: Vec<u8> = (0..LEN)
+            .map(|index| u8::try_from((index * 37 + index / 5) % 251).unwrap())
+            .collect();
+        for seed in [1_u64, 17, 0x5eed, 0xdead_beef] {
+            let mut state = seed;
+            let mut reassembler = HandshakeCryptoReassembler::default();
+            let mut oracle = vec![None; LEN];
+            let mut head = 0;
+            for step in 0..512 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                // Leave the initial byte absent until the final drain. This
+                // keeps randomized overlaps and conflicts in retained state.
+                let offset = 1 + usize::try_from(state % 2047).unwrap();
+                let len = (1 + usize::try_from((state >> 32) % 193).unwrap()).min(LEN - offset);
+                let mut bytes = input[offset..offset + len].to_vec();
+                if step % 7 == 0 {
+                    bytes[len / 2] ^= 0x80;
+                }
+                check_push(&mut reassembler, &mut oracle, &mut head, offset, &bytes);
+            }
+            let completion: Vec<u8> = oracle
+                .iter()
+                .zip(&input)
+                .map(|(accepted, &byte)| accepted.unwrap_or(byte))
+                .collect();
+            check_push(&mut reassembler, &mut oracle, &mut head, 0, &completion);
+            assert_eq!(head, LEN);
+            // Delivered bytes remain idempotent even if a retransmission's
+            // discarded prefix differs; the receiver retains no TLS history.
+            check_push(&mut reassembler, &mut oracle, &mut head, 0, &vec![0; LEN]);
+            assert!(reassembler.push(u64::MAX, &[]).unwrap().is_empty());
+            assert!(matches!(
+                reassembler.push(u64::MAX, &[1]),
+                Err(QuicTlsError::CryptoProviderFailure {
+                    provider: "rustls-quic-handshake",
+                    code: "crypto_offset_overflow",
+                })
+            ));
+            assert_eq!(reassembler.next_offset, u64::try_from(LEN).unwrap());
+            assert!(reassembler.pending.is_empty());
+            eprintln!(
+                "bead=asupersync-bi2462.108 scenario=crypto_reassembly_byte_oracle seed={seed} fragments=512 conflicts_transactional=true delivered={head} retained_bytes=0"
+            );
+        }
+    }
+
+    #[test]
+    fn crypto_reassembler_completes_protected_tls_with_delayed_prefixes_and_retransmissions() {
+        for reverse in [false, true] {
+            let (mut client, mut server) = protected_pair();
+            let dcid = ConnectionId::new(DCID_BYTES).unwrap();
+            let client_scid = ConnectionId::new(&[0x11, 0x22, 0x33, 0x44]).unwrap();
+            let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).unwrap();
+            let mut client_pn = 0;
+            let mut server_pn = 0;
+            let mut flights: VecDeque<_> = client
+                .pump_outbound()
+                .unwrap()
+                .into_iter()
+                .map(|segment| (true, segment))
+                .collect();
+            let mut segments = 0;
+            let mut reordered_spaces = BTreeSet::new();
+            while let Some((from_client, segment)) = flights.pop_front() {
+                if segment.level == HandshakeLevel::OneRtt {
+                    continue;
+                }
+                segments += 1;
+                assert!(segments <= 32, "fragmented TLS handshake must converge");
+                let (sender, receiver, pn, dst, src) = if from_client {
+                    (&mut client, &mut server, &mut client_pn, dcid, client_scid)
+                } else {
+                    (
+                        &mut server,
+                        &mut client,
+                        &mut server_pn,
+                        client_scid,
+                        server_scid,
+                    )
+                };
+                let space = level_index(segment.level);
+                let start = sender.crypto_send_offset[space];
+                let head = receiver.handshake_crypto_reassembly[space].next_offset;
+                assert_eq!(start, head);
+                let mut packets = Vec::new();
+                for chunk in segment.data.chunks(17) {
+                    packets.push(
+                        sender
+                            .assemble_handshake_packet(
+                                &HandshakeSegment {
+                                    level: segment.level,
+                                    data: chunk.to_vec(),
+                                },
+                                dst,
+                                src,
+                                *pn,
+                            )
+                            .unwrap(),
+                    );
+                    *pn += 1;
+                }
+                assert!(!packets.is_empty());
+                let mut order: Vec<_> = (1..packets.len()).collect();
+                if reverse {
+                    order.reverse();
+                }
+                for index in order {
+                    receiver.recv_handshake_packet(&packets[index]).unwrap();
+                    assert_eq!(
+                        receiver.handshake_crypto_reassembly[space].next_offset,
+                        head
+                    );
+                    assert!(receiver.pump_outbound().unwrap().is_empty());
+                    reordered_spaces.insert(space);
+                }
+                if packets.len() > 1 {
+                    // A new packet number carrying already buffered CRYPTO
+                    // reaches reassembly, unlike packet-number replay filtering.
+                    let end = sender.crypto_send_offset[space];
+                    sender.crypto_send_offset[space] = start + 17;
+                    let retransmission = sender
+                        .assemble_handshake_packet(
+                            &HandshakeSegment {
+                                level: segment.level,
+                                data: segment.data[17..].to_vec(),
+                            },
+                            dst,
+                            src,
+                            *pn,
+                        )
+                        .unwrap();
+                    *pn += 1;
+                    sender.crypto_send_offset[space] = end;
+                    let retained = receiver.handshake_crypto_reassembly[space].pending_bytes;
+                    receiver.recv_handshake_packet(&retransmission).unwrap();
+                    assert_eq!(
+                        receiver.handshake_crypto_reassembly[space].pending_bytes,
+                        retained
+                    );
+                    assert_eq!(
+                        receiver.handshake_crypto_reassembly[space].next_offset,
+                        head
+                    );
+                    assert!(receiver.pump_outbound().unwrap().is_empty());
+                }
+                receiver.recv_handshake_packet(&packets[0]).unwrap();
+                assert_eq!(
+                    receiver.handshake_crypto_reassembly[space].next_offset,
+                    head + u64::try_from(segment.data.len()).unwrap()
+                );
+                assert!(
+                    receiver.handshake_crypto_reassembly[space]
+                        .pending
+                        .is_empty()
+                );
+                flights.extend(
+                    receiver
+                        .pump_outbound()
+                        .unwrap()
+                        .into_iter()
+                        .map(|segment| (!from_client, segment)),
+                );
+            }
+            assert!(client.is_complete() && server.is_complete());
+            assert!(client.one_rtt_keys_installed() && server.one_rtt_keys_installed());
+            assert_eq!(reordered_spaces, BTreeSet::from([0, 1]));
+            assert_eq!(
+                client.peer_transport_parameters(),
+                Some(b"server-params".as_slice())
+            );
+            assert_eq!(
+                server.peer_transport_parameters(),
+                Some(b"client-params".as_slice())
+            );
+            for driver in [&client, &server] {
+                for reassembler in &driver.handshake_crypto_reassembly {
+                    assert!(reassembler.pending.is_empty());
+                    assert_eq!(reassembler.pending_bytes, 0);
+                }
+            }
+            eprintln!(
+                "bead=asupersync-bi2462.108 scenario=crypto_reassembly_protected_tls reverse={reverse} segments={segments} client_packets={client_pn} server_packets={server_pn} both_crypto_spaces=true tls_complete=true retained_bytes=0"
+            );
+        }
     }
 
     #[test]
