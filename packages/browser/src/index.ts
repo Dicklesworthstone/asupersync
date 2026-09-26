@@ -2442,6 +2442,117 @@ function normalizeBrowserNativeStreamChunk(value: unknown): Uint8Array {
   );
 }
 
+// Unlike Promise.race with a shared terminal promise, settled operations leave
+// no permanent reaction behind. A host promise may never settle after abort;
+// clear its callbacks so it does not retain the stream helper or its payload.
+function observeBrowserNativeStreamPromise<T>(
+  value: T | PromiseLike<T>,
+  callbacks: { fulfilled: ((value: T) => void) | null; rejected: ((error: unknown) => void) | null },
+): void {
+  // This separate closure captures only the detachable callback record.
+  Promise.resolve(value).then(
+    (result) => callbacks.fulfilled?.(result),
+    (error: unknown) => callbacks.rejected?.(error),
+  );
+}
+
+class BrowserNativeStreamWaiters {
+  private readonly pending = new Set<() => void>();
+
+  wait<T>(value: T | PromiseLike<T>, interruption: () => Error | null): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const callbacks: Parameters<typeof observeBrowserNativeStreamPromise<T>>[1] = {
+        fulfilled: null, rejected: null,
+      };
+      let complete: ((failed: boolean, value: unknown) => void) | null = (failed, result) => {
+        complete = null;
+        callbacks.fulfilled = null;
+        callbacks.rejected = null;
+        this.pending.delete(interrupt);
+        if (failed) reject(result);
+        else resolve(result as T);
+      };
+      const interrupt = () => {
+        const error = interruption();
+        if (error) complete?.(true, error);
+      };
+      callbacks.fulfilled = (result) => {
+        interrupt();
+        complete?.(false, result);
+      };
+      callbacks.rejected = (error) => complete?.(true, error);
+      this.pending.add(interrupt);
+      interrupt();
+      observeBrowserNativeStreamPromise(value, callbacks);
+    });
+  }
+
+  interrupt(): void {
+    for (const interrupt of Array.from(this.pending)) interrupt();
+  }
+}
+
+function beginBrowserNativeStreamCleanup(
+  start: () => void | Promise<void>,
+  release: () => void,
+  retain: (promise: Promise<void>) => void,
+): Promise<void> {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+  retain(promise);
+  const finish = (failed: boolean, error?: unknown) => {
+    try { release(); }
+    catch (releaseError) {
+      if (!failed) { failed = true; error = releaseError; }
+    }
+    if (failed) reject(error);
+    else resolve();
+  };
+  // Initiate cancellation before returning control to a caller that might
+  // explicitly transfer the host lock. Retain first for reentrant cleanup.
+  try { Promise.resolve(start()).then(() => finish(false), (error: unknown) => finish(true, error)); }
+  catch (error) { finish(true, error); }
+  return promise;
+}
+
+function prepareBrowserNativeStreamWrite(value: BrowserNativeStreamChunk): {
+  byteLength: number;
+  copy: () => Uint8Array;
+} {
+  if (typeof value === "string") {
+    let byteLength = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      const unit = value.charCodeAt(index);
+      if (unit < 0x80) byteLength += 1;
+      else if (unit < 0x800) byteLength += 2;
+      else if (unit >= 0xd800 && unit <= 0xdbff
+        && value.charCodeAt(index + 1) >= 0xdc00 && value.charCodeAt(index + 1) <= 0xdfff) {
+        byteLength += 4;
+        index += 1;
+      } else byteLength += 3;
+    }
+    return { byteLength, copy: () => new TextEncoder().encode(value) };
+  }
+  if (ARRAY_BUFFER_IS_VIEW(value)) {
+    const { buffer, byteLength, byteOffset } = browserStorageViewParts(value);
+    return { byteLength, copy: () => new Uint8Array(new Uint8Array(buffer, byteOffset, byteLength)) };
+  }
+  if (value instanceof ArrayBuffer) {
+    const byteLength = Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GETTER!, value, []) as number;
+    return { byteLength, copy: () => new Uint8Array(new Uint8Array(value, 0, byteLength)) };
+  }
+  if (Array.isArray(value)) {
+    const byteLength = value.length;
+    return { byteLength, copy: () => {
+      const bytes = new Uint8Array(byteLength);
+      for (let index = 0; index < byteLength; index += 1) bytes[index] = value[index];
+      return bytes;
+    } };
+  }
+  throw new TypeError("Browser-native stream chunks must be Uint8Array, ArrayBuffer, ArrayBufferView, byte[], or string.");
+}
+
 export class BrowserReadableStream {
   private readonly reader: BrowserNativeReadableStreamReaderLike;
   private readonly support: BrowserNativeStreamSupportDiagnostics;
@@ -2451,6 +2562,9 @@ export class BrowserReadableStream {
   private bytesWrittenValue = 0;
   private firstFailure: string | null = null;
   private stateValue: BrowserNativeStreamState = "open";
+  private readonly waiters = new BrowserNativeStreamWaiters();
+  private cancelPromise: Promise<void> | null = null;
+  private lockReleased = false;
 
   constructor(
     stream: BrowserNativeReadableStreamLike,
@@ -2461,12 +2575,12 @@ export class BrowserReadableStream {
       ...options,
       support,
     });
-    this.reader = stream.getReader();
     this.maxBytes = normalizeBrowserNativeStreamByteLimit(
       options.maxBytes,
       "BrowserReadableStream maxBytes",
     );
     this.autoReleaseLock = options.autoReleaseLock !== false;
+    this.reader = stream.getReader();
   }
 
   get state(): BrowserNativeStreamState {
@@ -2485,23 +2599,32 @@ export class BrowserReadableStream {
     this.ensureOpen("read");
     let result: BrowserNativeReadableStreamReadResultLike;
     try {
-      result = await this.reader.read();
+      result = await this.waiters.wait(this.reader.read(), () =>
+        this.stateValue === "open" || this.stateValue === "closed" || this.stateValue === "released"
+          ? null : this.operationError("read", this.stateReason()));
     } catch (error) {
+      if (this.stateValue !== "open") throw this.operationError("read", this.stateReason());
       this.markErrored("errored");
       throw this.operationError("read", "errored", errorMessage(error));
     }
     if (result.done === true) {
-      this.stateValue = "closed";
+      if (this.stateValue !== "open" && this.stateValue !== "closed" && this.stateValue !== "released") {
+        this.ensureOpen("read");
+      }
+      if (this.stateValue === "open") this.stateValue = "closed";
       this.releaseReaderLock();
       return null;
     }
+    if (this.stateValue !== "released") this.ensureOpen("read");
     let chunk: Uint8Array;
     try {
       chunk = normalizeBrowserNativeStreamChunk(result.value);
     } catch (error) {
+      if (this.stateValue !== "open") throw this.operationError("read", this.stateReason());
       this.markErrored("unsupported_chunk");
       throw this.operationError("read", "unsupported_chunk", errorMessage(error));
     }
+    if (this.stateValue !== "released") this.ensureOpen("read");
     this.recordRead(chunk.byteLength);
     return chunk;
   }
@@ -2514,7 +2637,7 @@ export class BrowserReadableStream {
       if (chunk === null) {
         break;
       }
-      chunks.push(chunk);
+      chunks.push(new Uint8Array(chunk));
       total += chunk.byteLength;
     }
     const joined = new Uint8Array(total);
@@ -2527,24 +2650,30 @@ export class BrowserReadableStream {
   }
 
   async cancel(reason = "cancelled"): Promise<void> {
-    if (this.stateValue === "cancelled") {
-      return;
-    }
+    if (this.cancelPromise) return this.cancelPromise;
     if (this.stateValue === "closed" || this.stateValue === "released") {
       return;
     }
     this.stateValue = "cancelled";
     this.firstFailure = reason;
-    await this.reader.cancel?.(reason);
-    this.releaseReaderLock();
+    this.waiters.interrupt();
+    return beginBrowserNativeStreamCleanup(
+      () => this.reader.cancel?.(reason), () => this.releaseReaderLock(),
+      (promise) => { this.cancelPromise = promise; },
+    );
   }
 
+  /**
+   * Transfer the underlying reader lock. Native pending reads reject on release;
+   * a chunk already consumed by a read remains deliverable to its original caller.
+   */
   releaseLock(): void {
     if (this.stateValue === "open") {
       this.stateValue = "released";
       this.firstFailure = "released";
     }
-    this.releaseReaderLock();
+    this.waiters.interrupt();
+    this.releaseReaderLock(true);
   }
 
   private recordRead(bytes: number): void {
@@ -2589,11 +2718,18 @@ export class BrowserReadableStream {
   }
 
   private markErrored(firstFailure: string): void {
-    if (this.stateValue === "errored") {
+    if (this.stateValue !== "open") {
       return;
     }
     this.stateValue = "errored";
     this.firstFailure = firstFailure;
+    this.waiters.interrupt();
+    // Stop unread upstream work even when the caller only observes the error.
+    // Cleanup rejection must not replace the original operation failure.
+    void beginBrowserNativeStreamCleanup(
+      () => this.reader.cancel?.(firstFailure), () => this.releaseReaderLock(),
+      (promise) => { this.cancelPromise = promise; },
+    ).catch(() => {});
   }
 
   private operationError(
@@ -2617,8 +2753,9 @@ export class BrowserReadableStream {
     );
   }
 
-  private releaseReaderLock(): void {
-    if (this.autoReleaseLock) {
+  private releaseReaderLock(explicit = false): void {
+    if ((explicit || this.autoReleaseLock) && !this.lockReleased) {
+      this.lockReleased = true;
       this.reader.releaseLock?.();
     }
   }
@@ -2633,6 +2770,13 @@ export class BrowserWritableStream {
   private bytesWrittenValue = 0;
   private firstFailure: string | null = null;
   private stateValue: BrowserNativeStreamState = "open";
+  private readonly waiters = new BrowserNativeStreamWaiters();
+  private readonly pendingWrites = new Set<Promise<void>>();
+  private reservedBytes = 0;
+  private closing = false;
+  private closePromise: Promise<void> | null = null;
+  private abortPromise: Promise<void> | null = null;
+  private lockReleased = false;
 
   constructor(
     stream: BrowserNativeWritableStreamLike,
@@ -2643,12 +2787,12 @@ export class BrowserWritableStream {
       ...options,
       support,
     });
-    this.writer = stream.getWriter();
     this.maxBytes = normalizeBrowserNativeStreamByteLimit(
       options.maxBytes,
       "BrowserWritableStream maxBytes",
     );
     this.autoReleaseLock = options.autoReleaseLock !== false;
+    this.writer = stream.getWriter();
   }
 
   get state(): BrowserNativeStreamState {
@@ -2665,64 +2809,113 @@ export class BrowserWritableStream {
 
   async write(chunk: BrowserNativeStreamChunk): Promise<number> {
     this.ensureOpen("write");
-    let bytes: Uint8Array;
+    if (this.closing) throw this.operationError("write", "closed");
+    let prepared: ReturnType<typeof prepareBrowserNativeStreamWrite> | null;
     try {
-      bytes = normalizeBrowserNativeStreamChunk(chunk);
+      prepared = prepareBrowserNativeStreamWrite(chunk);
     } catch (error) {
+      if (this.stateValue !== "open") throw this.operationError("write", this.stateReason());
       this.markErrored("unsupported_chunk");
       throw this.operationError("write", "unsupported_chunk", errorMessage(error));
     }
-    this.ensureWriteBudget(bytes.byteLength);
+    this.ensureOpen("write");
+    if (this.closing) throw this.operationError("write", "closed");
+    const byteLength = prepared.byteLength;
+    this.ensureWriteBudget(byteLength);
+    this.reservedBytes += byteLength;
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => { finish = resolve; });
+    this.pendingWrites.add(finished);
+    let submitted = false;
     try {
-      await this.writer.ready;
-      await this.writer.write(bytes);
-      this.bytesWrittenValue += bytes.byteLength;
-      return bytes.byteLength;
+      const bytes = prepared.copy();
+      prepared = null;
+      chunk = bytes;
+      this.ensureOpen("write");
+      await this.waiters.wait(this.writer.ready, () =>
+        this.stateValue === "open" ? null : this.operationError("write", this.stateReason()));
+      this.ensureOpen("write");
+      submitted = true;
+      await this.waiters.wait(this.writer.write(bytes), () =>
+        this.stateValue === "open" || this.stateValue === "released"
+          ? null : this.operationError("write", this.stateReason()));
+      this.bytesWrittenValue += byteLength;
+      return byteLength;
     } catch (error) {
+      if (submitted && this.stateValue === "released") {
+        throw this.operationError("write", "errored", errorMessage(error));
+      }
+      if (this.stateValue !== "open") throw this.operationError("write", this.stateReason());
       this.markErrored("errored");
       throw this.operationError("write", "errored", errorMessage(error));
+    } finally {
+      this.reservedBytes -= byteLength;
+      this.pendingWrites.delete(finished);
+      finish();
     }
   }
 
   async close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     if (this.stateValue === "closed") {
       return;
     }
     this.ensureOpen("close");
-    try {
-      await this.writer.close?.();
-      this.stateValue = "closed";
-      this.releaseWriterLock();
-    } catch (error) {
-      this.markErrored("errored");
-      throw this.operationError("close", "errored", errorMessage(error));
-    }
+    this.closing = true;
+    this.closePromise = (async () => {
+      let submitted = false;
+      try {
+        await Promise.all(this.pendingWrites);
+        this.ensureOpen("close");
+        submitted = true;
+        await this.waiters.wait(this.writer.close?.(), () =>
+          this.stateValue === "open" || this.stateValue === "released"
+            ? null : this.operationError("close", this.stateReason()));
+        if (this.stateValue === "open") this.stateValue = "closed";
+        this.releaseWriterLock();
+      } catch (error) {
+        if (submitted && this.stateValue === "released") {
+          throw this.operationError("close", "errored", errorMessage(error));
+        }
+        if (this.stateValue !== "open") throw this.operationError("close", this.stateReason());
+        this.markErrored("errored");
+        throw this.operationError("close", "errored", errorMessage(error));
+      }
+    })();
+    return this.closePromise;
   }
 
   async abort(reason = "aborted"): Promise<void> {
-    if (this.stateValue === "aborted") {
-      return;
-    }
+    if (this.abortPromise) return this.abortPromise;
     if (this.stateValue === "closed" || this.stateValue === "released") {
       return;
     }
     this.stateValue = "aborted";
     this.firstFailure = reason;
-    await this.writer.abort?.(reason);
-    this.releaseWriterLock();
+    this.waiters.interrupt();
+    return beginBrowserNativeStreamCleanup(
+      () => this.writer.abort?.(reason), () => this.releaseWriterLock(),
+      (promise) => { this.abortPromise = promise; },
+    );
   }
 
+  /**
+   * Transfer the underlying lock without aborting its sink. Writes still waiting
+   * for readiness are refused; already-submitted writes retain their actual
+   * host completion and byte accounting. Use abort() to cancel queued writes.
+   */
   releaseLock(): void {
     if (this.stateValue === "open") {
       this.stateValue = "released";
       this.firstFailure = "released";
     }
-    this.releaseWriterLock();
+    this.waiters.interrupt();
+    this.releaseWriterLock(true);
   }
 
   private ensureWriteBudget(bytes: number): void {
-    const next = this.bytesWrittenValue + bytes;
-    if (this.maxBytes !== null && next > this.maxBytes) {
+    const next = this.bytesWrittenValue + this.reservedBytes + bytes;
+    if (!Number.isSafeInteger(next) || (this.maxBytes !== null && next > this.maxBytes)) {
       this.markErrored("write_limit_exceeded");
       throw createBrowserNativeStreamOperationError(
         nativeStreamOperationDiagnostics(
@@ -2761,11 +2954,16 @@ export class BrowserWritableStream {
   }
 
   private markErrored(firstFailure: string): void {
-    if (this.stateValue === "errored") {
+    if (this.stateValue !== "open") {
       return;
     }
     this.stateValue = "errored";
     this.firstFailure = firstFailure;
+    this.waiters.interrupt();
+    void beginBrowserNativeStreamCleanup(
+      () => this.writer.abort?.(firstFailure), () => this.releaseWriterLock(),
+      (promise) => { this.abortPromise = promise; },
+    ).catch(() => {});
   }
 
   private operationError(
@@ -2789,8 +2987,9 @@ export class BrowserWritableStream {
     );
   }
 
-  private releaseWriterLock(): void {
-    if (this.autoReleaseLock) {
+  private releaseWriterLock(explicit = false): void {
+    if ((explicit || this.autoReleaseLock) && !this.lockReleased) {
+      this.lockReleased = true;
       this.writer.releaseLock?.();
     }
   }
