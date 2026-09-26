@@ -26,7 +26,7 @@ use crate::cx::Cx;
 use crate::record::task::{TaskPhase, TaskRecord, TaskState};
 use crate::record::{ObligationRecord, RegionRecord};
 use crate::runtime::obligation_table::ObligationTable;
-use crate::runtime::state::RuntimeState;
+use crate::runtime::state::{LoserDrainHistoryEvent, RuntimeState};
 use crate::runtime::task_table::TaskTable;
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
@@ -145,6 +145,12 @@ impl<'a> RuntimeStateView<'a> {
             ids.dedup();
         }
         ids
+    }
+
+    /// Loser-drain race history. A native runtime keeps every in-flight race
+    /// and only its most recently completed ones.
+    pub(crate) fn loser_drain_history(&self) -> Vec<LoserDrainHistoryEvent> {
+        self.state.loser_drain_history()
     }
 
     /// Current runtime time for observability.

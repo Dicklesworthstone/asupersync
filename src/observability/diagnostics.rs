@@ -639,6 +639,81 @@ impl Diagnostics {
         leaks
     }
 
+    /// Find drain-correct races whose participants have not all completed
+    /// `min_age` after the race began.
+    ///
+    /// Covers every race recorded through `Scope::race` / `Scope::race_all`:
+    /// `race!`, blocking `select!`, and the `Cx::race_drained*` family. A
+    /// race whose winner is selected but whose loser never finishes usually
+    /// has a prebuilt branch awaiting a cancel-aware operation on the caller's
+    /// context. Loser cancellation targets the branch's own task, so that
+    /// operation never observes it and the race waits for it indefinitely.
+    /// The factory forms (`race!(cx, { move |child| .. })`,
+    /// [`Cx::race_drained_with`](crate::cx::Cx::race_drained_with)) avoid it.
+    ///
+    /// Each entry names the race, its region, and the branch indexes and tasks
+    /// still pending. Results are ordered oldest first. A race that is only
+    /// waiting for its first winner is reported too, with
+    /// `winner_selected == false`; `min_age` filters routine waits.
+    #[must_use]
+    pub fn find_stalled_race_drains(&self, min_age: std::time::Duration) -> Vec<StalledRaceDrain> {
+        use crate::runtime::state::LoserDrainHistoryEvent;
+
+        let (history, now) = self
+            .state
+            .with_view(|view| (view.loser_drain_history(), view.now()));
+        let completed: std::collections::HashSet<TaskId> = history
+            .iter()
+            .filter_map(|event| match event {
+                LoserDrainHistoryEvent::TaskCompleted { task, .. } => Some(*task),
+                _ => None,
+            })
+            .collect();
+        let finished: std::collections::HashSet<u64> = history
+            .iter()
+            .filter_map(|event| match event {
+                LoserDrainHistoryEvent::RaceCompleted { race_id, .. } => Some(*race_id),
+                _ => None,
+            })
+            .collect();
+        let mut stalled: Vec<StalledRaceDrain> = history
+            .iter()
+            .filter_map(|event| match event {
+                LoserDrainHistoryEvent::RaceStarted {
+                    race_id,
+                    region,
+                    participants,
+                    time,
+                } if !finished.contains(race_id) => {
+                    let age = std::time::Duration::from_nanos(now.duration_since(*time));
+                    let pending: Vec<(usize, TaskId)> = participants
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .filter(|(_, task)| !completed.contains(task))
+                        .collect();
+                    (age >= min_age && !pending.is_empty()).then(|| StalledRaceDrain {
+                        race_id: *race_id,
+                        region_id: *region,
+                        age,
+                        winner_selected: pending.len() < participants.len(),
+                        pending,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        stalled.sort_by(|a, b| b.age.cmp(&a.age).then(a.race_id.cmp(&b.race_id)));
+
+        if !stalled.is_empty() {
+            warn!(
+                count = stalled.len(),
+                "diagnostics: drain-correct races with losers still pending"
+            );
+        }
+        stalled
+    }
+
     /// Find recorded leaks and reservations whose holder can no longer resolve them.
     ///
     /// An obligation qualifies when the runtime marked it `Leaked`, or when it
@@ -1148,6 +1223,25 @@ pub struct ObligationLeak {
     pub region_id: RegionId,
     /// Age since creation.
     pub age: std::time::Duration,
+}
+
+/// A drain-correct race whose participants have not all completed.
+///
+/// Returned by [`Diagnostics::find_stalled_race_drains`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalledRaceDrain {
+    /// Race identifier inside the runtime state.
+    pub race_id: u64,
+    /// Region that owns the race.
+    pub region_id: RegionId,
+    /// Time since the race began.
+    pub age: std::time::Duration,
+    /// Whether some participant has already completed. When true, the race is
+    /// draining losers that have not finished.
+    pub winner_selected: bool,
+    /// Branch index (position in the race) and task of every participant
+    /// that has not completed.
+    pub pending: Vec<(usize, TaskId)>,
 }
 
 /// Advanced observability taxonomy contract version.
