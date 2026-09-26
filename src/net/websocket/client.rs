@@ -30,6 +30,12 @@ use crate::codec::Decoder;
 use crate::cx::{CancelWakerToken, Cx};
 use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
+#[cfg(feature = "tls")]
+use crate::time::{Sleep, TimerDriverHandle};
+#[cfg(feature = "tls")]
+use crate::tls::{TlsConnector, TlsError, TlsStream};
+#[cfg(feature = "tls")]
+use crate::types::Time;
 use crate::util::{EntropySource, OsEntropy};
 use std::io;
 use std::pin::Pin;
@@ -261,8 +267,9 @@ pub struct WebSocketConfig {
     pub slow_consumer_policy: SlowConsumerPolicy,
     /// Requested subprotocols.
     pub protocols: Vec<String>,
-    /// Connection timeout. It bounds the TCP connect and, separately, the
-    /// HTTP upgrade exchange that follows it.
+    /// Connection timeout. Plaintext `connect` bounds TCP and HTTP upgrade
+    /// separately. `connect_tls` uses one budget for DNS, TCP, TLS, and upgrade.
+    /// `None` removes this limit; caller deadlines still apply to `connect_tls`.
     pub connect_timeout: Option<Duration>,
     /// Enable TCP_NODELAY.
     pub nodelay: bool,
@@ -1239,56 +1246,274 @@ impl WebSocket<TcpStream> {
         }
 
         // Perform handshake
-        Self::perform_handshake(cx, tcp, &parsed, &config, compression).await
+        perform_client_handshake(cx, tcp, &parsed, &config, compression, config.connect_timeout).await
+    }
+}
+
+#[cfg(feature = "tls")]
+impl WebSocket<TlsStream<TcpStream>> {
+    /// Connect to a secure WebSocket (`wss://`) with explicit TLS policy.
+    ///
+    /// The URL's hostname or IP is the certificate identity. DNS names also
+    /// supply SNI. Configure roots, certificate pins, or client certificates on
+    /// `connector`; this method never installs implicit trust or falls back to
+    /// plaintext. Offer `http/1.1` ALPN (or no ALPN): a negotiated protocol other
+    /// than `http/1.1` is rejected before any HTTP request is sent.
+    ///
+    /// One `connect_timeout` budget covers DNS, TCP, TLS, and the HTTP upgrade,
+    /// tightened by both the explicit caller's and the ambient task's deadlines.
+    /// The connector's own TLS timeout may tighten its handshake phase further.
+    /// `None` removes only the configured setup limit. Successful setup does not
+    /// impose this deadline on subsequent messages.
+    ///
+    /// The explicit context and current native task must both hold I/O and timer
+    /// authority on the same runtime clock. Cancellation wakes a parked setup;
+    /// dropping setup closes any acquired socket. No background WebSocket driver
+    /// is spawned. Hostnames use the native offloaded system resolver: a lookup
+    /// already executing may finish after its cancelled wait. Literal addresses
+    /// avoid that resolver. TLS errors are returned
+    /// as [`WsConnectError::Io`] with the underlying [`TlsError`] as their source.
+    /// Existing plaintext [`WebSocket::connect`] remains a separate entry point.
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "tls")]
+    /// # async fn example(cx: &asupersync::Cx, connector: &asupersync::tls::TlsConnector)
+    /// # -> Result<(), asupersync::net::websocket::WsConnectError> {
+    /// use asupersync::net::websocket::{Message, WebSocket, WebSocketConfig};
+    /// let mut socket = WebSocket::connect_tls(
+    ///     cx, "wss://example.com/events", WebSocketConfig::default(), connector,
+    /// ).await?;
+    /// socket.send(cx, Message::text("subscribe")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_tls(
+        cx: &Cx,
+        url: &str,
+        config: WebSocketConfig,
+        connector: &TlsConnector,
+    ) -> Result<Self, WsConnectError> {
+        Self::connect_tls_configured(cx, url, config, connector, false).await
     }
 
-    /// Internal: perform HTTP upgrade handshake.
-    async fn perform_handshake(
+    /// Connect with TLS and offer bounded permessage-deflate.
+    ///
+    /// TLS policy, ownership, and setup limits match [`Self::connect_tls`]. The
+    /// compression profile matches [`WebSocket::connect_with_compression`]; the
+    /// peer may decline it without preventing the secure connection.
+    #[cfg(feature = "compression")]
+    pub async fn connect_tls_with_compression(
         cx: &Cx,
-        mut tcp: TcpStream,
-        url: &WsUrl,
-        config: &WebSocketConfig,
+        url: &str,
+        config: WebSocketConfig,
+        connector: &TlsConnector,
+    ) -> Result<Self, WsConnectError> {
+        Self::connect_tls_configured(cx, url, config, connector, true).await
+    }
+
+    async fn connect_tls_configured(
+        cx: &Cx,
+        url: &str,
+        config: WebSocketConfig,
+        connector: &TlsConnector,
         compression: bool,
     ) -> Result<Self, WsConnectError> {
-        // Build handshake request
-        let mut handshake = ClientHandshake::new(
-            &format!("ws://{}:{}{}", url.host, url.port, url.path),
-            cx.entropy(),
-        )?;
-
-        for protocol in &config.protocols {
-            handshake = handshake.protocol(protocol);
+        let parsed = WsUrl::parse(url).map_err(WsConnectError::InvalidUrl)?;
+        if !parsed.tls {
+            return Err(WsConnectError::InvalidUrl(HandshakeError::InvalidUrl(
+                "connect_tls requires a wss:// URL".into(),
+            )));
         }
-        if compression { handshake = handshake.extension(super::compression::OFFER); }
+        TlsConnector::validate_domain(&parsed.host).map_err(map_tls_connect_error)?;
+        if parsed.host.parse::<std::net::IpAddr>().is_err() && !connector.config().enable_sni {
+            return Err(WsConnectError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secure WebSocket DNS connections require TLS SNI",
+            )));
+        }
+        let ambient = Cx::current().ok_or_else(missing_tls_setup_authority)?;
+        let mut setup = WsTlsSetup::new(cx, &ambient, config.connect_timeout)?;
+        let tcp = setup.run(async {
+            let result = if let Ok(ip) = parsed.host.parse::<std::net::IpAddr>() {
+                TcpStream::connect(std::net::SocketAddr::new(ip, parsed.port)).await
+            } else {
+                TcpStream::connect((parsed.host.clone(), parsed.port)).await
+            };
+            result.map_err(|error| map_tcp_connect_error(cx, error))
+        }).await?;
+        if config.nodelay {
+            let _ = tcp.set_nodelay(true);
+        }
+        let tls = setup.run(async {
+            connector.connect(&parsed.host, tcp).await.map_err(map_tls_connect_error)
+        }).await?;
+        if tls.alpn_protocol().is_some_and(|protocol| protocol != b"http/1.1") {
+            return Err(WsConnectError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "secure WebSocket peer negotiated a protocol other than HTTP/1.1",
+            )));
+        }
+        // The outer setup retains the original timer. Starting HTTP must not
+        // restore a full timeout after a slow DNS/TCP/TLS phase.
+        setup.run(perform_client_handshake(cx, tls, &parsed, &config, compression, None)).await
+    }
+}
 
-        // Check cancellation
-        if cx.checkpoint().is_err() {
+#[cfg(feature = "tls")]
+fn missing_tls_setup_authority() -> WsConnectError {
+    WsConnectError::Io(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "secure WebSocket setup requires explicit and current native I/O and timer authority",
+    ))
+}
+
+#[cfg(feature = "tls")]
+fn map_tls_connect_error(error: TlsError) -> WsConnectError {
+    let kind = match &error {
+        TlsError::Io(error) => error.kind(),
+        TlsError::Timeout(_) => io::ErrorKind::TimedOut,
+        TlsError::InvalidDnsName(_) => io::ErrorKind::InvalidInput,
+        _ => io::ErrorKind::InvalidData,
+    };
+    WsConnectError::Io(io::Error::new(kind, error))
+}
+
+/// A single retained deadline and cancellation registration across setup phases.
+#[cfg(feature = "tls")]
+struct WsTlsSetup<'a> {
+    cx: &'a Cx,
+    ambient: &'a Cx,
+    clock: TimerDriverHandle,
+    deadline: Option<Time>,
+    timer: Option<Sleep>,
+    caller_cancel: WsCancelWakerGuard<'a>,
+    ambient_cancel: WsCancelWakerGuard<'a>,
+}
+
+#[cfg(feature = "tls")]
+impl<'a> WsTlsSetup<'a> {
+    fn new(cx: &'a Cx, ambient: &'a Cx, timeout: Option<Duration>) -> Result<Self, WsConnectError> {
+        for context in [cx, ambient] {
+            if !context.runtime_mask.has(crate::cx::cap::CapMask::IO)
+                || context.io_driver_handle().is_none()
+                || context.timer_driver().is_none()
+            {
+                return Err(missing_tls_setup_authority());
+            }
+        }
+        let clock = cx.timer_driver().ok_or_else(missing_tls_setup_authority)?;
+        if !ambient.timer_driver().is_some_and(|ambient_clock| clock.ptr_eq(&ambient_clock)) {
+            return Err(missing_tls_setup_authority());
+        }
+        let mut deadline = timeout.map(|timeout| clock.now().saturating_add_nanos(
+            u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX),
+        ));
+        for context in [cx, ambient] {
+            if let Some(bound) = context.budget().deadline {
+                deadline = Some(deadline.map_or(bound, |until| until.min(bound)));
+            }
+        }
+        let setup = Self {
+            cx,
+            ambient,
+            timer: deadline.map(|at| Sleep::with_timer_driver(at, clock.clone())),
+            clock,
+            deadline,
+            caller_cancel: WsCancelWakerGuard::new(cx),
+            ambient_cancel: WsCancelWakerGuard::new(ambient),
+        };
+        setup.check()?;
+        Ok(setup)
+    }
+
+    fn check(&self) -> Result<(), WsConnectError> {
+        if self.cx.checkpoint().is_err() || self.ambient.checkpoint().is_err() {
             return Err(WsConnectError::Cancelled);
         }
-
-        // Send the request and read the response. Trailing bytes after
-        // \r\n\r\n belong to the first WebSocket frame and must be seeded
-        // into the read buffer.
-        let request = handshake.request_bytes();
-        let (response_bytes, trailing) =
-            bounded_upgrade_exchange(cx, &mut tcp, &request, config.connect_timeout).await?;
-        let response = HttpResponse::parse(&response_bytes)?;
-
-        // Validate response
-        handshake.validate_response(&response)?;
-
-        // Create WebSocket
-        let extensions: Vec<String> = response.header("sec-websocket-extensions")
-            .map(|value| value.split(',').map(|field| field.trim().to_owned()).collect())
-            .unwrap_or_default();
-        let mut ws = Self::from_upgraded_with_extensions(tcp, config.clone(), &extensions, cx.entropy_handle())?;
-        ws.protocol = response.header("sec-websocket-protocol").map(String::from);
-        if !trailing.is_empty() {
-            ws.read_buf.extend_from_slice(&trailing);
+        if self.deadline.is_some_and(|until| self.clock.now() >= until) {
+            return Err(WsConnectError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "secure WebSocket connection setup deadline exceeded",
+            )));
         }
-
-        Ok(ws)
+        Ok(())
     }
+
+    async fn run<T>(
+        &mut self,
+        future: impl std::future::Future<Output = Result<T, WsConnectError>>,
+    ) -> Result<T, WsConnectError> {
+        let mut future = std::pin::pin!(future);
+        std::future::poll_fn(|task| {
+            // TCP/DNS/TLS adapters consult the current context. Poll under the
+            // supplied context without restoring any authority attenuated by
+            // the task that created this setup or the current polling task.
+            let current = Cx::current().ok_or_else(missing_tls_setup_authority)?;
+            let mut io_cx = self.cx.clone();
+            io_cx.runtime_mask = io_cx.runtime_mask
+                .intersect(self.ambient.runtime_mask)
+                .intersect(current.runtime_mask);
+            if !io_cx.runtime_mask.has(crate::cx::cap::CapMask::IO)
+                || io_cx.timer_driver().is_none()
+                || !current.timer_driver().is_some_and(|clock| self.clock.ptr_eq(&clock))
+            {
+                return Poll::Ready(Err(missing_tls_setup_authority()));
+            }
+            let _current = Cx::set_current(Some(io_cx));
+            self.caller_cancel.refresh(task.waker());
+            self.ambient_cancel.refresh(task.waker());
+            self.check()?;
+            let timer_ready = self.timer.as_mut()
+                .is_some_and(|timer| Pin::new(timer).poll_deadline(task).is_ready());
+            if timer_ready {
+                self.check()?;
+                // A timer backend may wake early; retain the absolute bound.
+                if let (Some(timer), Some(deadline)) = (&mut self.timer, self.deadline) {
+                    timer.reset(deadline);
+                    task.waker().wake_by_ref();
+                }
+            }
+            match future.as_mut().poll(task) {
+                Poll::Ready(result) => Poll::Ready(self.check().and(result)),
+                Poll::Pending => Poll::Pending,
+            }
+        }).await
+    }
+}
+
+/// Shared HTTP/1 upgrade over an already owned plaintext or TLS transport.
+async fn perform_client_handshake<IO: AsyncRead + AsyncWrite + Unpin>(
+    cx: &Cx,
+    mut io: IO,
+    url: &WsUrl,
+    config: &WebSocketConfig,
+    compression: bool,
+    upgrade_timeout: Option<Duration>,
+) -> Result<WebSocket<IO>, WsConnectError> {
+    let scheme = if url.tls { "wss" } else { "ws" };
+    let mut handshake = ClientHandshake::new(
+        &format!("{scheme}://{}{}", url.host_header(), url.path),
+        cx.entropy(),
+    )?;
+    for protocol in &config.protocols {
+        handshake = handshake.protocol(protocol);
+    }
+    if compression { handshake = handshake.extension(super::compression::OFFER); }
+    if cx.checkpoint().is_err() {
+        return Err(WsConnectError::Cancelled);
+    }
+    let request = handshake.request_bytes();
+    let (response_bytes, trailing) =
+        bounded_upgrade_exchange(cx, &mut io, &request, upgrade_timeout).await?;
+    let response = HttpResponse::parse(&response_bytes)?;
+    handshake.validate_response(&response)?;
+    let extensions: Vec<String> = response.header("sec-websocket-extensions")
+        .map(|value| value.split(',').map(|field| field.trim().to_owned()).collect())
+        .unwrap_or_default();
+    let mut ws = WebSocket::from_upgraded_with_extensions(io, config.clone(), &extensions, cx.entropy_handle())?;
+    ws.protocol = response.header("sec-websocket-protocol").map(String::from);
+    ws.read_buf.extend_from_slice(&trailing);
+    Ok(ws)
 }
 
 fn map_tcp_connect_error(cx: &Cx, err: io::Error) -> WsConnectError {

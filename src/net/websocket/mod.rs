@@ -28,6 +28,14 @@
 //! }
 //! ```
 //!
+//! With the `tls` feature, `WebSocket::connect_tls` connects to `wss://`
+//! using an explicit [`crate::tls::TlsConnector`]. It authenticates the URL's
+//! hostname and bounds DNS, TCP, TLS, and HTTP upgrade with one setup budget.
+//! `connect_tls_with_compression` additionally offers permessage-deflate when
+//! `compression` is enabled. Both return the same generic WebSocket owner, so
+//! messages, bounded writes, receive cancellation, and split/reunite use the
+//! existing connection machinery.
+//!
 //! # Server Example
 //!
 //! ```ignore
