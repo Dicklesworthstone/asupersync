@@ -777,6 +777,13 @@ impl<Fut: Future> Future for CurrentCxFuture<Fut> {
     }
 }
 
+/// Whether `cx` runs with less than full runtime authority (any of spawn,
+/// time, entropy, io or remote masked off).
+fn runtime_authority_is_narrowed(cx: &Cx) -> bool {
+    let granted = cx.capabilities().runtime;
+    !(granted.spawn && granted.time && granted.entropy && granted.io && granted.remote)
+}
+
 async fn run_async_cx_handler<F, Fut, Res>(caller_cx: Cx, func: F) -> Response
 where
     F: FnOnce(Cx) -> Fut,
@@ -787,14 +794,16 @@ where
     // A caller whose runtime authority was narrowed keeps its own context,
     // even without a timer. Swapping in a runtime request context would
     // silently grant every capability the caller was denied
-    // (asupersync-bi2462.46).
-    let granted = caller_cx.capabilities().runtime;
-    let caller_is_restricted =
-        !(granted.spawn && granted.time && granted.entropy && granted.io && granted.remote);
-    let handler_cx = if caller_cx.timer_driver().is_some() || caller_is_restricted {
+    // (asupersync-bi2462.46). A narrowed ambient context (for example under
+    // Cx::push_restriction) is kept for the same reason (asupersync-mkybj0).
+    let handler_cx = if caller_cx.timer_driver().is_some()
+        || runtime_authority_is_narrowed(&caller_cx)
+    {
         caller_cx
     } else if let Some(current) = ambient_cx
-        && (current.timer_driver().is_some() || Runtime::current_handle().is_none())
+        && (current.timer_driver().is_some()
+            || runtime_authority_is_narrowed(&current)
+            || Runtime::current_handle().is_none())
     {
         current
     } else if let Some(runtime_cx) = Runtime::current_request_cx_with_budget(caller_cx.budget()) {
@@ -1650,6 +1659,33 @@ mod tests {
             let handler = AsyncCxFnHandler::new(inspect);
             handler
                 .call(&restricted, Request::new("GET", "/pure"))
+                .await
+        });
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "restricted");
+    }
+
+    #[test]
+    fn async_cx_handler_keeps_a_capability_restricted_ambient_context() {
+        // asupersync-mkybj0: an unrestricted, timerless caller (a test Cx)
+        // under a TIME-restricted ambient context used to receive a fresh,
+        // fully capable runtime request context.
+        use crate::cx::cap::{self, CapSetRuntimeMask};
+
+        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+        let resp = runtime.block_on(async {
+            let ambient_task = Cx::current().expect("runtime task context").task_id();
+            let _restriction =
+                Cx::push_restriction(<cap::CapSet<true, false, true, true, true>>::MASK);
+            let handler = AsyncCxFnHandler::new(move |cx: Cx| async move {
+                if cx.capabilities().time || cx.task_id() != ambient_task {
+                    "escaped"
+                } else {
+                    "restricted"
+                }
+            });
+            handler
+                .call(&Cx::for_testing(), Request::new("GET", "/pure-ambient"))
                 .await
         });
         assert_eq!(resp.status, StatusCode::OK);
