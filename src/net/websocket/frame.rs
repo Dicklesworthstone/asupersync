@@ -419,6 +419,8 @@ pub struct FrameCodec {
     state: DecodeState,
     /// Whether to validate reserved bits.
     validate_reserved_bits: bool,
+    /// Negotiated RFC 7692 profile; never enabled by relaxing generic RSV checks.
+    permessage_deflate: bool,
 }
 
 impl FrameCodec {
@@ -433,6 +435,7 @@ impl FrameCodec {
             role,
             state: DecodeState::Header,
             validate_reserved_bits: true,
+            permessage_deflate: false,
         }
     }
 
@@ -460,6 +463,14 @@ impl FrameCodec {
     pub fn validate_reserved_bits(mut self, validate: bool) -> Self {
         self.validate_reserved_bits = validate;
         self
+    }
+
+    pub(super) fn enable_permessage_deflate(&mut self) {
+        self.permessage_deflate = true;
+    }
+
+    pub(super) const fn permessage_deflate_enabled(&self) -> bool {
+        self.permessage_deflate
     }
 
     /// Encode a frame using the provided entropy source for client masking.
@@ -590,7 +601,9 @@ impl FrameCodec {
                     let payload_len_7 = second_byte & 0x7F;
 
                     // Validate reserved bits
-                    if self.validate_reserved_bits && (rsv1 || rsv2 || rsv3) {
+                    let compressed_data = self.permessage_deflate
+                        && matches!(opcode_raw, 1 | 2);
+                    if self.validate_reserved_bits && ((rsv1 && !compressed_data) || rsv2 || rsv3) {
                         return Err(WsError::ReservedBitsSet);
                     }
 

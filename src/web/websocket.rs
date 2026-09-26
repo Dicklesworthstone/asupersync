@@ -407,7 +407,7 @@ impl WebSocketUpgrade {
     /// `500` response because no transport slot exists.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
-    pub fn on_upgrade<F, Fut>(self, callback: F) -> Response
+    pub fn on_upgrade<F, Fut>(mut self, callback: F) -> Response
     where
         F: FnOnce(Cx, ServerWebSocket<TcpStream>) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -415,11 +415,12 @@ impl WebSocketUpgrade {
         if let Err(reason) = self.evaluate_origin() {
             return Self::plain_response(StatusCode::FORBIDDEN, reason);
         }
-        if !self.selected_extensions.is_empty() {
-            return Self::plain_response(
+        match crate::net::websocket::compression::negotiate(&self.selected_extensions) {
+            Ok(selected) => self.selected_extensions = selected,
+            Err(_) => return Self::plain_response(
                 StatusCode::NOT_IMPLEMENTED,
-                "selected WebSocket extensions are not implemented on the live HTTP/1 path",
-            );
+                "selected WebSocket extension parameters are unsupported",
+            ),
         }
         let Some(slot) = self.http1_upgrade_slot.clone() else {
             return Self::plain_response(
@@ -660,17 +661,31 @@ mod tests {
     fn unimplemented_extension_does_not_register_upgrade_callback() {
         let slot = Http1UpgradeSlot::default();
         let mut request =
-            ws_request().with_header("sec-websocket-extensions", "permessage-deflate");
+            ws_request().with_header("sec-websocket-extensions", "x-unimplemented");
         request.extensions.insert_typed(slot.clone());
 
         let response = WebSocketUpgrade::from_request(request)
             .unwrap()
             .skip_origin_check()
-            .extensions(["permessage-deflate"])
+            .extensions(["x-unimplemented"])
             .on_upgrade(|_, _| async {});
 
         assert_eq!(response.status, StatusCode::NOT_IMPLEMENTED);
         assert!(slot.take().unwrap().is_none());
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "compression"))]
+    #[test]
+    fn permessage_deflate_live_upgrade_registers_validated_parameters() {
+        let slot = Http1UpgradeSlot::default();
+        let mut request = ws_request().with_header("sec-websocket-extensions", "permessage-deflate; client_max_window_bits");
+        request.extensions.insert_typed(slot.clone());
+        let response = WebSocketUpgrade::from_request(request).unwrap().skip_origin_check()
+            .extensions(["permessage-deflate"]).on_upgrade(|_, ws| async move { assert!(ws.compression_enabled()); });
+        assert_eq!(response.status, StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(response.headers.get("sec-websocket-extensions").unwrap(),
+            "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=15");
+        assert!(slot.take().unwrap().is_some());
     }
 
     // ─── CSWSH origin-validation tests (br-asupersync-o2t5gz) ─────────

@@ -94,6 +94,14 @@ impl WebSocketAcceptor {
         self
     }
 
+    /// Enable RFC 7692 compression with 15-bit windows and no context takeover.
+    /// Live negotiation validates every selected parameter before writing 101.
+    #[cfg(feature = "compression")]
+    #[must_use]
+    pub fn permessage_deflate(self) -> Self {
+        self.extension("permessage-deflate")
+    }
+
     /// Set maximum frame size.
     #[must_use]
     pub fn max_frame_size(mut self, size: usize) -> Self {
@@ -166,7 +174,8 @@ impl WebSocketAcceptor {
         let (request, trailing) = HttpRequest::parse_with_trailing(request_bytes)?;
 
         // Validate and generate accept response
-        let accept_response = self.handshake.accept(&request)?;
+        let mut accept_response = self.handshake.accept(&request)?;
+        accept_response.extensions = super::compression::negotiate_server(&accept_response.extensions, request.header("sec-websocket-extensions"))?;
 
         // Check cancellation before sending response
         if cx.checkpoint().is_err() {
@@ -202,7 +211,8 @@ impl WebSocketAcceptor {
         }
 
         // Validate and generate accept response
-        let accept_response = self.handshake.accept(request)?;
+        let mut accept_response = self.handshake.accept(request)?;
+        accept_response.extensions = super::compression::negotiate_server(&accept_response.extensions, request.header("sec-websocket-extensions"))?;
 
         // Check cancellation before sending response
         if cx.checkpoint().is_err() {
@@ -301,7 +311,15 @@ where
         trailing: &[u8],
     ) -> Self {
         let max_message_size = config.max_message_size;
-        let codec = FrameCodec::server().max_payload_size(config.max_frame_size);
+        let mut codec = FrameCodec::server().max_payload_size(config.max_frame_size);
+        let compression = super::compression::negotiated(&accept.extensions);
+        if matches!(compression, Ok(true)) { codec.enable_permessage_deflate(); }
+        let mut close_handshake = CloseHandshake::with_config(config.close_config.clone());
+        if compression.is_err() {
+            // finish_upgrade's caller owns negotiation. A fabricated/unsupported
+            // completed negotiation must not produce an open live connection.
+            close_handshake.force_close(CloseReason::new(super::CloseCode::ProtocolError, None));
+        }
         let mut read_buf = BytesMut::with_capacity(8192);
         if !trailing.is_empty() {
             read_buf.extend_from_slice(trailing);
@@ -311,7 +329,7 @@ where
             codec,
             read_buf,
             write_buf: BytesMut::with_capacity(8192),
-            close_handshake: CloseHandshake::with_config(config.close_config.clone()),
+            close_handshake,
             config,
             assembler: MessageAssembler::new(max_message_size),
             protocol: accept.protocol,
@@ -332,6 +350,10 @@ where
     pub fn extensions(&self) -> &[String] {
         &self.extensions
     }
+
+    /// Whether permessage-deflate is active for this connection.
+    #[must_use]
+    pub fn compression_enabled(&self) -> bool { self.codec.permessage_deflate_enabled() }
 
     /// Check if the connection is open.
     #[must_use]
@@ -375,7 +397,11 @@ where
                 .await;
         }
 
-        let frame = Frame::from(msg);
+        let frame = super::compression::outgoing(
+            Frame::from(msg), self.codec.permessage_deflate_enabled(),
+            self.config.max_message_size,
+            self.config.max_frame_size,
+        )?;
         match self.send_frame_with_cx(Some(cx), frame).await {
             Err(WsError::Io(e))
                 if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
@@ -482,7 +508,11 @@ where
                 }
             }
 
-            if let Some(frame) = self.codec.decode(&mut self.read_buf)? {
+            let decoded = self.codec.decode(&mut self.read_buf).inspect_err(|error| {
+                self.close_handshake
+                    .force_close(CloseReason::new(error.as_close_code(), None));
+            })?;
+            if let Some(frame) = decoded {
                 // Handle control frames
                 match frame.opcode {
                     Opcode::Ping => {

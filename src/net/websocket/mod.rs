@@ -47,6 +47,7 @@
 
 mod client;
 mod close;
+pub(crate) mod compression;
 mod frame;
 mod handshake;
 mod heartbeat;

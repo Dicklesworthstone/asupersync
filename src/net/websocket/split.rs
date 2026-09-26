@@ -644,7 +644,13 @@ where
             let maybe_frame = {
                 let shared = &mut *self.shared.lock();
                 let (codec, read_buf) = (&mut shared.codec, &mut shared.read_buf);
-                codec.decode(read_buf)?
+                match codec.decode(read_buf) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        shared.close_handshake.force_close(CloseReason::new(error.as_close_code(), None));
+                        return Err(error);
+                    }
+                }
             };
 
             if let Some(frame) = maybe_frame {
@@ -687,7 +693,16 @@ where
                         return Ok(Some(Message::Close(reason)));
                     }
                     _ => {
-                        let result = { self.shared.lock().assembler.push_frame(frame) };
+                        // Only the read half mutates assembly. Take it out for
+                        // bounded decompression so a writer never waits for the
+                        // entire inflate operation while holding this mutex.
+                        let mut assembler = {
+                            let mut shared = self.shared.lock();
+                            let max = shared.config.max_message_size;
+                            std::mem::replace(&mut shared.assembler, MessageAssembler::new(max))
+                        };
+                        let result = assembler.push_frame(frame);
+                        self.shared.lock().assembler = assembler;
                         match result {
                             Ok(Some(msg)) => return Ok(Some(msg)),
                             Ok(None) => {}
@@ -923,7 +938,14 @@ where
                 .await;
         }
 
-        let frame = Frame::from(msg);
+        let (enabled, max_message, max_encoded) = {
+            let shared = self.shared.lock();
+            (shared.codec.permessage_deflate_enabled(), shared.config.max_message_size,
+                shared.config.max_frame_size)
+        };
+        // Compression is synchronous and bounded, and must not hold the shared
+        // read/write mutex while doing CPU work. No dictionary crosses messages.
+        let frame = super::compression::outgoing(Frame::from(msg), enabled, max_message, max_encoded)?;
         self.send_frame_with_entropy(Some(cx), &frame, cx.entropy())
             .await
     }

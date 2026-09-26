@@ -94,6 +94,7 @@ impl Message {
 struct PartialMessage {
     opcode: Opcode,
     data: BytesMut,
+    compressed: bool,
 }
 
 #[derive(Debug)]
@@ -134,7 +135,8 @@ impl MessageAssembler {
         }
 
         if frame.fin {
-            return Ok(Some(message_from_payload(frame.opcode, frame.payload)?));
+            let payload = super::compression::incoming(frame.payload, frame.rsv1, self.max_message_size)?;
+            return Ok(Some(message_from_payload(frame.opcode, payload)?));
         }
 
         let mut data = BytesMut::with_capacity(payload_len);
@@ -142,6 +144,7 @@ impl MessageAssembler {
         self.partial = Some(PartialMessage {
             opcode: frame.opcode,
             data,
+            compressed: frame.rsv1,
         });
         Ok(None)
     }
@@ -170,8 +173,10 @@ impl MessageAssembler {
         }
 
         let opcode = partial.opcode;
+        let compressed = partial.compressed;
         let data = std::mem::take(&mut partial.data).freeze();
         self.partial = None;
+        let data = super::compression::incoming(data, compressed, self.max_message_size)?;
         Ok(Some(message_from_payload(opcode, data)?))
     }
 }
@@ -465,6 +470,37 @@ where
         }
     }
 
+    /// Create a client connection after an independently performed upgrade.
+    ///
+    /// The caller must validate the HTTP response, offered extensions, and TLS
+    /// identity before transferring the transport. This method validates the
+    /// agreed RFC 7692 profile: a 15-bit window and no server context takeover.
+    /// An empty list preserves ordinary uncompressed behavior. Compression uses
+    /// the existing `compression` Cargo feature. Encoded fragments and decoded
+    /// messages are independently bounded by `max_message_size`. At most 256
+    /// final DEFLATE sections (including a synthetic terminator) are admitted
+    /// per message, bounding dictionary restoration work below 8 MiB.
+    ///
+    /// # Errors
+    /// Returns an extension mismatch if the negotiated parameters are unsupported.
+    pub fn from_upgraded_with_extensions(
+        io: IO,
+        config: WebSocketConfig,
+        extensions: &[String],
+        entropy: Arc<dyn EntropySource>,
+    ) -> Result<Self, HandshakeError> {
+        let compressed = super::compression::negotiated_client(extensions)?;
+        let mut ws = Self::from_upgraded_with_entropy(io, config, entropy);
+        if compressed { ws.codec.enable_permessage_deflate(); }
+        Ok(ws)
+    }
+
+    /// Whether this connection negotiated permessage-deflate.
+    #[must_use]
+    pub fn compression_enabled(&self) -> bool {
+        self.codec.permessage_deflate_enabled()
+    }
+
     /// Get the negotiated subprotocol (if any).
     #[must_use]
     pub fn protocol(&self) -> Option<&str> {
@@ -519,7 +555,11 @@ where
                 .await;
         }
 
-        let frame = Frame::from(msg);
+        let frame = super::compression::outgoing(
+            Frame::from(msg), self.codec.permessage_deflate_enabled(),
+            self.config.max_message_size,
+            self.config.max_frame_size,
+        )?;
         match self
             .send_frame_with_entropy_with_cx(Some(cx), &frame, cx.entropy())
             .await
@@ -628,7 +668,10 @@ where
                 }
             }
 
-            if let Some(frame) = self.codec.decode(&mut self.read_buf)? {
+            let decoded = self.codec.decode(&mut self.read_buf).inspect_err(|error| {
+                self.close_handshake.force_close(CloseReason::new(error.as_close_code(), None));
+            })?;
+            if let Some(frame) = decoded {
                 // Handle control frames
                 match frame.opcode {
                     Opcode::Ping => {
@@ -1146,6 +1189,25 @@ impl WebSocket<TcpStream> {
         url: &str,
         config: WebSocketConfig,
     ) -> Result<Self, WsConnectError> {
+        Self::connect_configured(cx, url, config, false).await
+    }
+
+    /// Offer bounded permessage-deflate with a fresh dictionary per message.
+    ///
+    /// The peer may decline compression. If it accepts, its response must
+    /// disable server context takeover and use 15-bit windows. The client never
+    /// reuses its outgoing dictionary. Existing deadlines, cancellation and
+    /// encoded-write limits apply to the same owned connection.
+    #[cfg(feature = "compression")]
+    pub async fn connect_with_compression(
+        cx: &Cx, url: &str, config: WebSocketConfig,
+    ) -> Result<Self, WsConnectError> {
+        Self::connect_configured(cx, url, config, true).await
+    }
+
+    async fn connect_configured(
+        cx: &Cx, url: &str, config: WebSocketConfig, compression: bool,
+    ) -> Result<Self, WsConnectError> {
         // Parse URL
         let parsed = WsUrl::parse(url)?;
 
@@ -1177,7 +1239,7 @@ impl WebSocket<TcpStream> {
         }
 
         // Perform handshake
-        Self::perform_handshake(cx, tcp, &parsed, &config).await
+        Self::perform_handshake(cx, tcp, &parsed, &config, compression).await
     }
 
     /// Internal: perform HTTP upgrade handshake.
@@ -1186,6 +1248,7 @@ impl WebSocket<TcpStream> {
         mut tcp: TcpStream,
         url: &WsUrl,
         config: &WebSocketConfig,
+        compression: bool,
     ) -> Result<Self, WsConnectError> {
         // Build handshake request
         let mut handshake = ClientHandshake::new(
@@ -1196,6 +1259,7 @@ impl WebSocket<TcpStream> {
         for protocol in &config.protocols {
             handshake = handshake.protocol(protocol);
         }
+        if compression { handshake = handshake.extension(super::compression::OFFER); }
 
         // Check cancellation
         if cx.checkpoint().is_err() {
@@ -1214,7 +1278,10 @@ impl WebSocket<TcpStream> {
         handshake.validate_response(&response)?;
 
         // Create WebSocket
-        let mut ws = Self::from_upgraded_with_entropy(tcp, config.clone(), cx.entropy_handle());
+        let extensions: Vec<String> = response.header("sec-websocket-extensions")
+            .map(|value| value.split(',').map(|field| field.trim().to_owned()).collect())
+            .unwrap_or_default();
+        let mut ws = Self::from_upgraded_with_extensions(tcp, config.clone(), &extensions, cx.entropy_handle())?;
         ws.protocol = response.header("sec-websocket-protocol").map(String::from);
         if !trailing.is_empty() {
             ws.read_buf.extend_from_slice(&trailing);
