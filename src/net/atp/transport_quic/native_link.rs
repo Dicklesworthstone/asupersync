@@ -6341,6 +6341,12 @@ fn link_from_handshake(
         ..NativeQuicConnectionConfig::default()
     };
     let mut conn = NativeQuicConnection::new(conn_config);
+    // DATAGRAM admission (GH#66) bounds each frame by the connection's 1-RTT
+    // packet budget, which starts at the conservative standard-packet value.
+    // This link assembles its own packets up to `udp_packet_cap_for_config`,
+    // so its budget is `max_app_payload`. Left at the default, every symbol
+    // DATAGRAM above ~1.1 KiB was refused before it reached the wire.
+    conn.set_one_rtt_frame_budget(max_app_payload);
     // ATP already owns reliable STREAM ACK/loss recovery through
     // `in_flight_stream_frames`; keep exactly one retransmission authority.
     conn.set_internal_retransmission_tracking(false)?;
