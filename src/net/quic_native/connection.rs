@@ -1629,6 +1629,18 @@ impl NativeQuicConnection {
         cx: &Cx,
         params: &TransportParameters,
     ) -> Result<(), NativeQuicConnectionError> {
+        self.apply_peer_transport_parameters_with_datagram_cap(cx, params, usize::MAX)
+    }
+
+    /// Apply authenticated peer settings while retaining the UDP owner's local
+    /// DATAGRAM admission policy. Keep all validation and field assignment in
+    /// this shared path so live handshakes cannot omit ACK or migration state.
+    pub(crate) fn apply_peer_transport_parameters_with_datagram_cap(
+        &mut self,
+        cx: &Cx,
+        params: &TransportParameters,
+        local_datagram_cap: usize,
+    ) -> Result<(), NativeQuicConnectionError> {
         checkpoint(cx)?;
         // TransportParameters is publicly constructible, so callers can bypass
         // the wire parser. Reject invalid exponents before changing any state
@@ -1645,8 +1657,7 @@ impl NativeQuicConnection {
                 "peer max_ack_delay must be below 16384 milliseconds",
             ));
         }
-        self.migration_disabled = params.disable_active_migration;
-        self.max_datagram_frame_size = match params.max_datagram_frame_size {
+        let peer_datagram_cap = match params.max_datagram_frame_size {
             Some(max) => usize::try_from(max).map_err(|_| {
                 NativeQuicConnectionError::InvalidState(
                     "peer max_datagram_frame_size exceeds platform usize",
@@ -1654,6 +1665,9 @@ impl NativeQuicConnection {
             })?,
             None => 0,
         };
+        // Preflight every fallible conversion before committing any state.
+        self.migration_disabled = params.disable_active_migration;
+        self.max_datagram_frame_size = peer_datagram_cap.min(local_datagram_cap);
         // The validated exponent scales the ACK Delay field of 1-RTT ACKs.
         self.peer_ack_delay_exponent =
             u32::try_from(ack_delay_exponent).expect("validated QUIC ACK delay exponent");
@@ -3859,6 +3873,53 @@ mod tests {
             conn.decode_ack_delay(PacketNumberSpace::ApplicationData, 0),
             0
         );
+    }
+
+    #[test]
+    fn peer_transport_parameter_refusal_preserves_all_negotiated_settings() {
+        let cx = test_cx();
+        let mut conn = established_conn();
+        let valid = TransportParameters {
+            ack_delay_exponent: Some(10),
+            max_ack_delay: Some(5),
+            max_datagram_frame_size: Some(1200),
+            disable_active_migration: true,
+            ..TransportParameters::default()
+        };
+        conn.apply_peer_transport_parameters_with_datagram_cap(&cx, &valid, 32)
+            .unwrap();
+        for invalid in [
+            TransportParameters {
+                ack_delay_exponent: Some(21),
+                ..TransportParameters::default()
+            },
+            TransportParameters {
+                max_ack_delay: Some(1 << 14),
+                ..TransportParameters::default()
+            },
+        ] {
+            assert!(conn.apply_peer_transport_parameters(&cx, &invalid).is_err());
+            assert!(conn.migration_disabled);
+            assert_eq!(conn.max_datagram_frame_size, 32);
+            assert_eq!(conn.peer_ack_delay_exponent, 10);
+            assert_eq!(conn.peer_max_ack_delay_micros, 5_000);
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            let invalid = TransportParameters {
+                max_datagram_frame_size: Some(u64::from(u32::MAX) + 1),
+                ..TransportParameters::default()
+            };
+            assert!(conn.apply_peer_transport_parameters(&cx, &invalid).is_err());
+            assert!(conn.migration_disabled);
+            assert_eq!(conn.max_datagram_frame_size, 32);
+            assert_eq!(conn.peer_ack_delay_exponent, 10);
+            assert_eq!(conn.peer_max_ack_delay_micros, 5_000);
+        }
+        // The existing public API still replaces the peer cap without a UDP
+        // owner's optional local admission policy.
+        conn.apply_peer_transport_parameters(&cx, &valid).unwrap();
+        assert_eq!(conn.max_datagram_frame_size, 1200);
     }
 
     #[test]
