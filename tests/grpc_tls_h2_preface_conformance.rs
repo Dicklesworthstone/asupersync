@@ -477,7 +477,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                     }
                 }
                 assert!(goaway, "graceful drain must send GOAWAY through TLS");
-                let stats = run.await.unwrap().unwrap();
+                let stats = run.await.unwrap();
                 assert_eq!(stats.force_closed, 0);
                 assert_eq!(manager.active_count(), 0);
                 assert_eq!(in_flight.load(Ordering::Acquire), 0);
@@ -517,7 +517,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                     );
                     // Offer valid H2 bytes anyway. A permissive acceptor must
                     // never make this listener treat missing/wrong ALPN as H2.
-                    let mut wire = BytesMut::from(CLIENT_PREFACE.as_slice());
+                    let mut wire = BytesMut::from(CLIENT_PREFACE);
                     Frame::Settings(SettingsFrame::new(Vec::new()))
                         .encode(&mut wire)
                         .unwrap();
@@ -542,7 +542,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 }
                 assert_eq!(calls.load(Ordering::SeqCst), 0);
                 assert!(manager.begin_drain(Duration::from_secs(2)));
-                run.await.unwrap().unwrap();
+                run.await.unwrap();
             }));
         }
 
@@ -587,7 +587,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
                 drop(peer);
                 assert!(manager.begin_drain(Duration::from_secs(2)));
-                run.await.unwrap().unwrap();
+                run.await.unwrap();
                 assert_eq!(manager.active_count(), 0);
             }));
         }
@@ -630,7 +630,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 drop(sibling);
                 until(|| manager.active_count() == 1).await;
                 manager.force_close();
-                let stats = run.await.unwrap().unwrap();
+                let stats = run.await.unwrap();
                 assert_eq!(stats.force_closed, 1);
                 assert_eq!(manager.active_count(), 0);
                 assert_eq!(calls.load(Ordering::SeqCst), 1);
