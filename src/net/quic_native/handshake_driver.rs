@@ -53,8 +53,8 @@ use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::protocol::varint::VarInt;
 use crate::net::quic_core::{
     ConnectionId, LongHeader, LongPacketType, PacketHeader, ProtectedHeaderPrefix,
-    ProtectedLongHeaderPrefix, apply_header_protection, decode_packet_number_reconstruct,
-    header_protection_sample, remove_header_protection,
+    ProtectedLongHeaderPrefix, RetryHeader, TransportParameters, apply_header_protection,
+    decode_packet_number_reconstruct, header_protection_sample, remove_header_protection,
 };
 use crate::net::quic_native::endpoint::{OutgoingPacket, QuicUdpEndpoint, ReceivedPacket};
 use std::net::SocketAddr;
@@ -153,8 +153,116 @@ pub(crate) fn is_unauthenticated_handshake_packet_error(error: &QuicTlsError) ->
         error,
         QuicTlsError::CryptoProviderFailure { provider, code }
             if *provider == "rustls-quic-handshake"
-                && (*code == PACKET_UNPROTECT_CODE || *code == PACKET_LENGTH_OVERRUN_CODE)
+                && matches!(*code,
+                    PACKET_UNPROTECT_CODE | PACKET_LENGTH_OVERRUN_CODE
+                        | "packet_header_decode" | "packet_body_too_short"
+                        | "expected_long_header" | "unexpected_long_packet_type"
+                        | "unexpected_crypto_packet_space")
     )
+}
+
+/// Verify the RFC 9001 §5.8 Retry pseudo-packet with the QUIC v1 fixed key.
+/// Verify the bytes as received: the Retry header's unused bits participate in
+/// the integrity tag even though their value has no protocol meaning.
+fn validated_client_retry(
+    datagram: &[u8],
+    original_dcid: ConnectionId,
+    client_scid: ConnectionId,
+) -> Option<RetryHeader> {
+    use aes_gcm::aead::{AeadInOut, KeyInit};
+    use aes_gcm::{Aes128Gcm, Nonce, Tag};
+
+    let ProtectedHeaderPrefix::Retry(header) = ProtectedHeaderPrefix::decode(datagram, 0).ok()?
+    else {
+        return None;
+    };
+    if header.version != 1
+        || header.dst_cid != client_scid
+        || header.src_cid == original_dcid
+        || header.token.is_empty()
+    {
+        return None;
+    }
+
+    const KEY: [u8; 16] = [
+        0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8,
+        0x4e,
+    ];
+    const NONCE: [u8; 12] = [
+        0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
+    ];
+    let tag_offset = datagram.len().checked_sub(QUIC_AEAD_TAG_LEN)?;
+    let mut pseudo_packet = Vec::with_capacity(1 + original_dcid.len() + tag_offset);
+    pseudo_packet.push(u8::try_from(original_dcid.len()).ok()?);
+    pseudo_packet.extend_from_slice(original_dcid.as_bytes());
+    pseudo_packet.extend_from_slice(&datagram[..tag_offset]);
+
+    let cipher = Aes128Gcm::new_from_slice(&KEY).ok()?;
+    let nonce = Nonce::try_from(NONCE.as_slice()).ok()?;
+    let tag = Tag::try_from(header.integrity_tag.as_slice()).ok()?;
+    let mut plaintext = [];
+    // The AEAD implementation verifies the tag in constant time; do not
+    // substitute a comparison against a locally generated tag.
+    cipher
+        .decrypt_inout_detached(
+            &nonce,
+            &pseudo_packet,
+            plaintext.as_mut_slice().into(),
+            &tag,
+        )
+        .ok()?;
+    Some(header)
+}
+
+fn validate_retry_transport_parameters(
+    encoded: &[u8],
+    original_dcid: ConnectionId,
+    retry_scid: ConnectionId,
+    server_scid: ConnectionId,
+) -> Result<(), QuicTlsError> {
+    let parameters = TransportParameters::decode(encoded)
+        .map_err(|_| handshake_failure("retry_transport_parameters_decode"))?;
+    for (id, expected, code) in [
+        (
+            0x00,
+            original_dcid,
+            "retry_original_destination_cid_mismatch",
+        ),
+        (0x0f, server_scid, "retry_initial_source_cid_mismatch"),
+        (0x10, retry_scid, "retry_source_cid_mismatch"),
+    ] {
+        if !parameters.unknown.iter().any(|parameter| {
+            parameter.id == id && parameter.value.as_slice() == expected.as_bytes()
+        }) {
+            return Err(handshake_failure(code));
+        }
+    }
+    Ok(())
+}
+
+/// Leave room for the largest legal varint widths in both the Initial header
+/// and CRYPTO frame. Normally Initials fit 1200 bytes. A Retry token already
+/// carried in a larger peer datagram can require a larger Initial; cap that
+/// case at the configured datagram limit and the IPv4 UDP payload maximum.
+/// Prefer room for 128 CRYPTO bytes when the configured limit permits it.
+fn initial_crypto_chunk_size(
+    token_len: usize,
+    dst_cid: ConnectionId,
+    src_cid: ConnectionId,
+    max_packet_size: usize,
+) -> Option<usize> {
+    let overhead = token_len
+        .checked_add(dst_cid.len())?
+        .checked_add(src_cid.len())?
+        .checked_add(64)?;
+    let datagram_budget = MIN_INITIAL_DATAGRAM_BYTES
+        .max(overhead.checked_add(128)?)
+        .min(max_packet_size)
+        .min(65_507);
+    if datagram_budget < MIN_INITIAL_DATAGRAM_BYTES || datagram_budget <= overhead {
+        return None;
+    }
+    Some(datagram_budget - overhead)
 }
 
 fn invalid_certificate(error: CertificateError) -> RustlsError {
@@ -537,6 +645,8 @@ pub struct QuicHandshakeDriver {
     peer_connection_id: Option<ConnectionId>,
     /// Per-level cumulative CRYPTO send offset (indexed Initial=0/Handshake=1/OneRtt=2).
     crypto_send_offset: [u64; 3],
+    /// A validated Retry token is repeated in every subsequent client Initial.
+    initial_token: Vec<u8>,
     /// Exact authenticated packet numbers already accepted for Initial/Handshake.
     handshake_recv_packet_numbers: [BTreeSet<u64>; 2],
     /// Largest authenticated packet number per Initial/Handshake space: the
@@ -654,6 +764,7 @@ impl QuicHandshakeDriver {
             local_transport_parameters,
             peer_connection_id: None,
             crypto_send_offset: [0; 3],
+            initial_token: Vec::new(),
             handshake_recv_packet_numbers: [BTreeSet::new(), BTreeSet::new()],
             handshake_recv_largest_packet_number: [None, None],
             handshake_crypto_reassembly: [
@@ -722,7 +833,7 @@ impl QuicHandshakeDriver {
                 version: 1,
                 dst_cid,
                 src_cid,
-                token: Vec::new(),
+                token: self.initial_token.clone(),
                 payload_length: MIN_INITIAL_DATAGRAM_BYTES as u64,
                 packet_number,
                 packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
@@ -750,7 +861,11 @@ impl QuicHandshakeDriver {
             version: 1,
             dst_cid,
             src_cid,
-            token: Vec::new(),
+            token: if packet_type == LongPacketType::Initial {
+                self.initial_token.clone()
+            } else {
+                Vec::new()
+            },
             payload_length,
             packet_number,
             packet_number_len: HANDSHAKE_PACKET_NUMBER_LEN,
@@ -759,6 +874,15 @@ impl QuicHandshakeDriver {
         header
             .encode(&mut header_bytes)
             .map_err(|_| handshake_failure("long_header_encode"))?;
+        if packet_type == LongPacketType::Initial && payload_length < 64 {
+            // A long Retry token can leave fewer than 64 bytes for the
+            // Length-covered payload. Keep the two-byte Length width used by
+            // the padding probe: minimal encoding would shrink the datagram
+            // to 1199 bytes, and adding padding can jump straight to 1201 at
+            // the 63/64 boundary. QUIC explicitly permits wider varints.
+            let length_at = header_bytes.len() - usize::from(HANDSHAKE_PACKET_NUMBER_LEN) - 1;
+            header_bytes.insert(length_at, 0x40);
+        }
 
         let packet =
             self.protect_long_header_packet(space, &header_bytes, packet_number, &plaintext)?;
@@ -1069,6 +1193,39 @@ impl QuicHandshakeDriver {
             .map(|_| ())
     }
 
+    fn restart_initial_after_retry(
+        &mut self,
+        retry: RetryHeader,
+        initial_segments: &[HandshakeSegment],
+    ) {
+        self.provider
+            .install_retry_initial_keys(retry.src_cid.as_bytes(), &self.transcript);
+        self.initial_token = retry.token;
+        // TLS has already consumed the ClientHello through write_hs. Re-send
+        // the exact saved bytes without creating another TLS connection or
+        // feeding them through TLS again. Only the CRYPTO stream's send cursor
+        // is rewound; packet numbers are owned by the caller and never reset.
+        self.crypto_send_offset[level_index(HandshakeLevel::Initial)] = 0;
+        self.staged_segments = initial_segments.to_vec();
+    }
+
+    fn verify_completed_retry(
+        &self,
+        original_dcid: ConnectionId,
+        retry_scid: Option<ConnectionId>,
+    ) -> Result<(), QuicTlsError> {
+        let Some(retry_scid) = retry_scid else {
+            return Ok(());
+        };
+        let encoded = self
+            .peer_transport_parameters()
+            .ok_or_else(|| handshake_failure("retry_transport_parameters_missing"))?;
+        let server_scid = self
+            .peer_connection_id
+            .ok_or_else(|| handshake_failure("retry_server_cid_missing"))?;
+        validate_retry_transport_parameters(encoded, original_dcid, retry_scid, server_scid)
+    }
+
     /// Drain all currently-available outbound handshake bytes, installing each
     /// key change into the provider and advancing the write level as the
     /// handshake crosses encryption boundaries. Returns one segment per level
@@ -1216,14 +1373,31 @@ impl QuicHandshakeDriver {
             if segment.level == HandshakeLevel::OneRtt {
                 continue;
             }
-            let data =
-                self.assemble_handshake_packet(&segment, dst_cid, src_cid, *packet_number)?;
-            *packet_number += 1;
-            packets.push(OutgoingPacket {
-                dst_addr: peer,
-                data,
-                send_time: None,
-            });
+            let chunk_size = if segment.level == HandshakeLevel::Initial {
+                initial_crypto_chunk_size(
+                    self.initial_token.len(),
+                    dst_cid,
+                    src_cid,
+                    endpoint.config().max_packet_size,
+                )
+                .ok_or_else(|| handshake_failure("initial_token_too_large"))?
+            } else {
+                segment.data.len().max(1)
+            };
+            for chunk in segment.data.chunks(chunk_size) {
+                let chunk = HandshakeSegment {
+                    level: segment.level,
+                    data: chunk.to_vec(),
+                };
+                let data =
+                    self.assemble_handshake_packet(&chunk, dst_cid, src_cid, *packet_number)?;
+                *packet_number += 1;
+                packets.push(OutgoingPacket {
+                    dst_addr: peer,
+                    data,
+                    send_time: None,
+                });
+            }
         }
         if !packets.is_empty() {
             endpoint
@@ -1360,6 +1534,10 @@ pub async fn client_handshake_over_udp(
     client_scid: ConnectionId,
 ) -> Result<Vec<ReceivedPacket>, QuicTlsError> {
     driver.install_initial_keys(dcid.as_bytes())?;
+    // Retry changes packet protection, not the TLS handshake message. Keep the
+    // first flight's plaintext until the server's Initial rules out Retry.
+    let initial_segments = driver.pump_outbound()?;
+    driver.staged_segments = initial_segments.clone();
     let mut packet_number = 0u64;
     let mut last_flight = driver
         .send_pending_flight(
@@ -1377,9 +1555,13 @@ pub async fn client_handshake_over_udp(
     // bound, which is the safe direction for an in-flight cap.
     let mut flight_sent_at = Instant::now();
     let mut early_one_rtt = Vec::new();
+    let mut accepted_retry = None;
+    let mut flights = 0usize;
+    let mut receive_deadline = cx.now() + HANDSHAKE_PTO;
 
-    for _ in 0..HANDSHAKE_MAX_FLIGHTS {
+    while flights < HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
+            driver.verify_completed_retry(dcid, accepted_retry)?;
             // Retain the final flight (client Finished): if it was lost on the
             // wire the server cannot complete, and only the data plane will
             // observe the evidence (the server's retransmitted long-header
@@ -1387,9 +1569,8 @@ pub async fn client_handshake_over_udp(
             driver.final_flight = last_flight;
             return Ok(early_one_rtt);
         }
-        let received = match crate::time::timeout(
-            cx.now(),
-            HANDSHAKE_PTO,
+        let received = match crate::time::timeout_at(
+            receive_deadline,
             endpoint.receive_batch(cx, HANDSHAKE_RECEIVE_BATCH_SIZE),
         )
         .await
@@ -1397,19 +1578,27 @@ pub async fn client_handshake_over_udp(
             Ok(Ok(packets)) => packets,
             Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
             Err(_) => {
+                flights += 1;
                 if retransmit_handshake_flight(cx, endpoint, &last_flight).await? {
                     flight_sent_at = Instant::now();
+                    receive_deadline = cx.now() + HANDSHAKE_PTO;
                     continue;
                 }
                 return Err(handshake_failure("client_handshake_recv_timeout"));
             }
         };
+        let mut accepted_batch = false;
         // Pump after EACH packet: e.g. after the server's Initial (ServerHello)
         // the client must pump to install Handshake keys BEFORE it can unprotect
         // the server's Handshake-level flight that may arrive in the same batch.
         for packet in received {
+            if packet.src_addr != server_addr {
+                continue;
+            }
             if packet.data.first().is_none_or(|byte| byte & 0x80 == 0) {
-                if packet.src_addr != server_addr {
+                // Unauthenticated short-header traffic must not fill an early
+                // application queue before the server has even sent Initial.
+                if driver.peer_connection_id.is_none() {
                     continue;
                 }
                 if early_one_rtt.len() >= MAX_EARLY_ONE_RTT_PACKETS {
@@ -1418,7 +1607,53 @@ pub async fn client_handshake_over_udp(
                 early_one_rtt.push(packet);
                 continue;
             }
-            let (peer_dcid, consumed) = match driver.recv_handshake_packet_with_consumed(&packet.data) {
+            let prefix = match ProtectedHeaderPrefix::decode(&packet.data, 0) {
+                Ok(prefix) => prefix,
+                Err(_) => continue,
+            };
+            if let ProtectedHeaderPrefix::Retry(_) = prefix {
+                if accepted_retry.is_some() || driver.peer_connection_id.is_some() {
+                    continue;
+                }
+                let Some(retry) = validated_client_retry(&packet.data, dcid, client_scid) else {
+                    continue;
+                };
+                if initial_crypto_chunk_size(
+                    retry.token.len(),
+                    retry.src_cid,
+                    client_scid,
+                    endpoint.config().max_packet_size,
+                )
+                .is_none()
+                {
+                    continue;
+                }
+                let retry_scid = retry.src_cid;
+                driver.restart_initial_after_retry(retry, &initial_segments);
+                accepted_retry = Some(retry_scid);
+                last_flight = driver
+                    .send_pending_flight(
+                        cx,
+                        endpoint,
+                        server_addr,
+                        retry_scid,
+                        client_scid,
+                        &mut packet_number,
+                    )
+                    .await?;
+                flight_sent_at = Instant::now();
+                receive_deadline = cx.now() + HANDSHAKE_PTO;
+                accepted_batch = true;
+                continue;
+            }
+            if !matches!(prefix, ProtectedHeaderPrefix::Long(ref header)
+                if header.version == 1 && header.dst_cid == client_scid)
+            {
+                continue;
+            }
+            let (peer_dcid, consumed) = match driver
+                .recv_handshake_packet_with_consumed(&packet.data)
+            {
                 Ok(res) => {
                     // RFC 9000 section 7.2: after authenticating the server's
                     // first flight, address subsequent client handshake packets
@@ -1442,6 +1677,7 @@ pub async fn client_handshake_over_udp(
                 Err(err) if is_unauthenticated_handshake_packet_error(&err) => continue,
                 Err(err) => return Err(err),
             };
+            accepted_batch = true;
             if consumed < packet.data.len()
                 && packet.src_addr == server_addr
                 && packet.data[consumed..].iter().any(|&b| b != 0)
@@ -1466,13 +1702,21 @@ pub async fn client_handshake_over_udp(
                 .await?;
             if !sent.is_empty() {
                 last_flight = sent;
+                receive_deadline = cx.now() + HANDSHAKE_PTO;
             } else if !driver.is_complete() {
                 let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
             }
         }
+        // Stray datagrams neither spend the flight budget nor extend the PTO.
+        // Otherwise a burst of malformed packets can end a healthy handshake,
+        // or an endless trickle can keep it alive indefinitely.
+        if accepted_batch {
+            flights += 1;
+        }
     }
 
     if driver.is_complete() {
+        driver.verify_completed_retry(dcid, accepted_retry)?;
         driver.final_flight = last_flight;
         Ok(early_one_rtt)
     } else {
@@ -1925,6 +2169,542 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
 
     // Client's original Destination CID; both sides derive Initial keys from it.
     const DCID_BYTES: &[u8] = &[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18];
+
+    fn client_retry_wire(
+        original_dcid: ConnectionId,
+        client_scid: ConnectionId,
+        retry_scid: ConnectionId,
+        token: &[u8],
+    ) -> Vec<u8> {
+        use aes_gcm::aead::{AeadInOut, KeyInit};
+        use aes_gcm::{Aes128Gcm, Nonce};
+
+        let mut wire = Vec::new();
+        PacketHeader::Retry(RetryHeader {
+            version: 1,
+            dst_cid: client_scid,
+            src_cid: retry_scid,
+            token: token.to_vec(),
+            integrity_tag: [0; 16],
+        })
+        .encode(&mut wire)
+        .unwrap();
+        wire.truncate(wire.len() - 16);
+        wire[0] |= 0x0b; // Nonzero unused bits must be authenticated as received.
+        let mut pseudo = vec![u8::try_from(original_dcid.len()).unwrap()];
+        pseudo.extend_from_slice(original_dcid.as_bytes());
+        pseudo.extend_from_slice(&wire);
+        let cipher = Aes128Gcm::new_from_slice(&hex("be0c690b9f66575a1d766b54e368c84e")).unwrap();
+        let nonce_bytes = hex("461599d35d632bf2239825bb");
+        let nonce = Nonce::try_from(nonce_bytes.as_slice()).unwrap();
+        let mut empty = [];
+        let tag = cipher
+            .encrypt_inout_detached(&nonce, &pseudo, empty.as_mut_slice().into())
+            .unwrap();
+        wire.extend_from_slice(&tag);
+        wire
+    }
+
+    #[test]
+    fn client_retry_rfc9001_vector_and_invalid_wire_are_distinguished() {
+        let original = ConnectionId::new(&hex("8394c8f03e515708")).unwrap();
+        let client = ConnectionId::new(&[]).unwrap();
+        // RFC 9001 Appendix A.4, independent of the test's signing helper.
+        let vector =
+            hex("ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba");
+        let retry = validated_client_retry(&vector, original, client).unwrap();
+        assert_eq!(retry.token, b"token");
+        assert_eq!(retry.src_cid.as_bytes(), hex("f067a5502a4262b5"));
+        for at in [0, 14, vector.len() - 1] {
+            let mut corrupted = vector.clone();
+            corrupted[at] ^= 1;
+            assert!(validated_client_retry(&corrupted, original, client).is_none());
+        }
+        assert!(validated_client_retry(&vector, retry.src_cid, client).is_none());
+        assert!(validated_client_retry(&vector[..15], original, client).is_none());
+
+        for (destination, source, token) in [
+            (retry.src_cid, retry.src_cid, b"token".as_slice()),
+            (client, original, b"token".as_slice()),
+            (client, retry.src_cid, b"".as_slice()),
+        ] {
+            let rejected = client_retry_wire(original, destination, source, token);
+            assert!(validated_client_retry(&rejected, original, client).is_none());
+        }
+        let zero_cid_retry = client_retry_wire(original, client, client, b"token");
+        assert!(
+            validated_client_retry(&zero_cid_retry, original, client)
+                .unwrap()
+                .src_cid
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn client_retry_zero_length_cid_rekeys_identical_initial_without_tls_restart() {
+        let (mut client, mut server) = protected_pair();
+        let original = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_cid = ConnectionId::new(b"retry-cl").unwrap();
+        let retry_cid = ConnectionId::new(&[]).unwrap();
+        let initial = client.pump_outbound().unwrap();
+        let original_packet = client
+            .assemble_handshake_packet(&initial[0], original, client_cid, 0)
+            .unwrap();
+        let retry = validated_client_retry(
+            &client_retry_wire(original, client_cid, retry_cid, b"bound-token"),
+            original,
+            client_cid,
+        )
+        .unwrap();
+        client.restart_initial_after_retry(retry, &initial);
+        let replay = client.pump_outbound().unwrap();
+        assert_eq!(replay.len(), initial.len());
+        assert_eq!(replay[0].data, initial[0].data);
+        let retried_packet = client
+            .assemble_handshake_packet(&replay[0], retry_cid, client_cid, 1)
+            .unwrap();
+        assert_ne!(retried_packet, original_packet);
+        let prefix = long_prefix(&retried_packet);
+        assert!(prefix.dst_cid.is_empty());
+        assert_eq!(prefix.token, b"bound-token");
+        // The old Initial key cannot authenticate the re-encrypted flight.
+        assert!(
+            server
+                .unprotect_long_header_packet(&prefix, &retried_packet)
+                .is_err()
+        );
+        server
+            .provider
+            .install_retry_initial_keys(&[], &server.transcript);
+        let (header, plaintext) = server
+            .unprotect_long_header_packet(&prefix, &retried_packet)
+            .unwrap();
+        assert_eq!(header.packet_number, 1);
+        let mut bytes = plaintext.as_slice();
+        let Some(QuicFrame::Crypto { offset, data }) = QuicFrame::decode(&mut bytes).unwrap()
+        else {
+            panic!("repeated ClientHello starts with CRYPTO");
+        };
+        assert_eq!(offset.value(), 0);
+        assert_eq!(data.as_ref(), initial[0].data.as_slice());
+        server.recv_handshake_packet(&retried_packet).unwrap();
+        assert!(!server.pump_outbound().unwrap().is_empty());
+        assert!(server.handshake_keys_installed());
+        assert!(initial_crypto_chunk_size(usize::MAX, retry_cid, client_cid, 65_507).is_none());
+        assert!(initial_crypto_chunk_size(65_500, retry_cid, client_cid, 65_507).is_none());
+        assert!(initial_crypto_chunk_size(1500, retry_cid, client_cid, 1500).is_none());
+    }
+
+    #[test]
+    fn client_retry_initial_padding_keeps_minimum_at_length_varint_boundary() {
+        let (mut client, mut server) = protected_pair();
+        let original = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_cid = ConnectionId::new(b"retry-cl").unwrap();
+        let retry_cid = ConnectionId::new(b"retry-id").unwrap();
+        let initial = client.pump_outbound().unwrap();
+        let retry = validated_client_retry(
+            &client_retry_wire(original, client_cid, retry_cid, &vec![0xa5; 1110]),
+            original,
+            client_cid,
+        )
+        .unwrap();
+        client.restart_initial_after_retry(retry, &initial);
+        server
+            .provider
+            .install_retry_initial_keys(retry_cid.as_bytes(), &server.transcript);
+        let chunk_size = initial_crypto_chunk_size(1110, retry_cid, client_cid, 1200).unwrap();
+        assert_eq!(
+            chunk_size, 10,
+            "exercise tiny payload beneath a large Retry token"
+        );
+        let segment = HandshakeSegment {
+            level: HandshakeLevel::Initial,
+            data: initial[0].data[..chunk_size].to_vec(),
+        };
+        let packet = client
+            .assemble_handshake_packet(&segment, retry_cid, client_cid, 1)
+            .unwrap();
+        let prefix = long_prefix(&packet);
+        assert_eq!(
+            prefix.payload_length, 63,
+            "exercise the one-byte Length boundary"
+        );
+        assert_eq!(
+            packet.len(),
+            1200,
+            "Initial must fit the configured path exactly"
+        );
+        server
+            .unprotect_long_header_packet(&prefix, &packet)
+            .expect("wider Length encoding is covered by packet authentication");
+    }
+
+    fn client_retry_parameters(
+        original: ConnectionId,
+        retry: Option<ConnectionId>,
+        server: ConnectionId,
+        invalid_parameter: Option<u64>,
+    ) -> Vec<u8> {
+        use crate::net::quic_core::UnknownTransportParameter;
+
+        let mut parameters = TransportParameters {
+            max_udp_payload_size: Some(1200),
+            initial_max_data: Some(65_536),
+            initial_max_stream_data_bidi_local: Some(4096),
+            initial_max_stream_data_bidi_remote: Some(4096),
+            initial_max_stream_data_uni: Some(4096),
+            initial_max_streams_bidi: Some(4),
+            initial_max_streams_uni: Some(4),
+            ..TransportParameters::default()
+        };
+        for (id, value) in [(0x00, Some(original)), (0x0f, Some(server)), (0x10, retry)] {
+            if let Some(value) = value {
+                parameters.unknown.push(UnknownTransportParameter {
+                    id,
+                    value: if invalid_parameter == Some(id) {
+                        b"wrong-cid".to_vec()
+                    } else {
+                        value.as_bytes().to_vec()
+                    },
+                });
+            }
+        }
+        let mut encoded = Vec::new();
+        parameters.encode(&mut encoded).unwrap();
+        encoded
+    }
+
+    #[test]
+    fn client_retry_requires_all_tls_authenticated_connection_ids() {
+        let original = ConnectionId::new(DCID_BYTES).unwrap();
+        let retry = ConnectionId::new(b"retry-id").unwrap();
+        let server = ConnectionId::new(b"server-id").unwrap();
+        let valid = client_retry_parameters(original, Some(retry), server, None);
+        validate_retry_transport_parameters(&valid, original, retry, server).unwrap();
+        for (id, code) in [
+            (0x00, "retry_original_destination_cid_mismatch"),
+            (0x0f, "retry_initial_source_cid_mismatch"),
+            (0x10, "retry_source_cid_mismatch"),
+        ] {
+            let invalid = client_retry_parameters(original, Some(retry), server, Some(id));
+            let error =
+                validate_retry_transport_parameters(&invalid, original, retry, server).unwrap_err();
+            assert_eq!(failure_code(&error), code);
+        }
+        let missing = client_retry_parameters(original, None, server, None);
+        assert_eq!(
+            failure_code(
+                &validate_retry_transport_parameters(&missing, original, retry, server)
+                    .unwrap_err()
+            ),
+            "retry_source_cid_mismatch"
+        );
+    }
+
+    fn client_retry_crypto_bytes(plaintext: &[u8], ranges: &mut BTreeMap<u64, Vec<u8>>) {
+        let mut input = plaintext;
+        while let Some(frame) = QuicFrame::decode(&mut input).unwrap() {
+            if let QuicFrame::Crypto { offset, data } = frame {
+                if let Some(previous) = ranges.insert(offset.value(), data.to_vec()) {
+                    assert_eq!(
+                        previous,
+                        data.as_ref(),
+                        "retransmitted CRYPTO bytes changed"
+                    );
+                }
+            }
+        }
+    }
+
+    fn client_retry_join_crypto(ranges: &BTreeMap<u64, Vec<u8>>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (&offset, chunk) in ranges {
+            assert_eq!(offset, bytes.len() as u64, "CRYPTO flight has a gap");
+            bytes.extend_from_slice(chunk);
+        }
+        bytes
+    }
+
+    /// A real socket peer owns an independent server TLS driver. It witnesses
+    /// the original ClientHello before sending Retry, inspects the re-encrypted
+    /// Initials, then completes certificate-verified TLS with the native client.
+    fn run_client_retry_native(
+        workers: usize,
+        token_len: Option<usize>,
+        invalid_parameter: Option<u64>,
+    ) {
+        use crate::net::quic_native::{
+            NativeQuicConnectionConfig, NativeQuicUdpConnection, NativeQuicUdpConnectionError,
+            QuicConnectionState, QuicUdpEndpointConfig,
+        };
+
+        let original_cid = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_cid = ConnectionId::new(b"retry-cl").unwrap();
+        let retry_cid = ConnectionId::new(b"retry-id").unwrap();
+        let server_cid = ConnectionId::new(b"retry-sv").unwrap();
+        let other_cid = ConnectionId::new(b"unwanted").unwrap();
+        let peer_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer_socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        peer_socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let server_addr = peer_socket.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let protocols = vec![ATP_QUIC_ALPN.to_vec()];
+            let config = server_config(vec![leaf_cert()], leaf_key(), protocols).unwrap();
+            let parameters = client_retry_parameters(
+                original_cid,
+                token_len.map(|_| retry_cid),
+                server_cid,
+                invalid_parameter,
+            );
+            let mut original_inspector =
+                QuicHandshakeDriver::server(config.clone(), parameters.clone()).unwrap();
+            original_inspector.install_initial_keys(DCID_BYTES).unwrap();
+            let mut buffer = vec![0; 16_384];
+            let (length, client_addr) = peer_socket.recv_from(&mut buffer).unwrap();
+            let first = buffer[..length].to_vec();
+            let prefix = long_prefix(&first);
+            assert_eq!(prefix.dst_cid, original_cid);
+            assert_eq!(prefix.src_cid, client_cid);
+            assert!(prefix.token.is_empty());
+            let (first_header, first_plaintext) = original_inspector
+                .unprotect_long_header_packet(&prefix, &first)
+                .unwrap();
+            let mut first_crypto = BTreeMap::new();
+            client_retry_crypto_bytes(&first_plaintext, &mut first_crypto);
+            let original_hello = client_retry_join_crypto(&first_crypto);
+            assert!(
+                original_hello.len() > 128,
+                "large-token case must fragment this ClientHello"
+            );
+
+            let mut server = QuicHandshakeDriver::server(config, parameters).unwrap();
+            server
+                .install_initial_keys(if token_len.is_some() {
+                    retry_cid.as_bytes()
+                } else {
+                    original_cid.as_bytes()
+                })
+                .unwrap();
+            let token = token_len.map(|len| vec![0xa5; len]);
+            let mut pending_first = Some(first);
+            if let Some(token) = &token {
+                pending_first = None;
+                let retry = client_retry_wire(original_cid, client_cid, retry_cid, token);
+                // A correctly signed Retry from another socket is not this
+                // peer. The remaining rejects all come from the real address.
+                let stray = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                stray.send_to(&retry, client_addr).unwrap();
+                let mut bad_tag = retry.clone();
+                *bad_tag.last_mut().unwrap() ^= 1;
+                for rejected in [
+                    vec![0xc0],
+                    vec![0xc0, 0, 0, 0, 1, 21],
+                    bad_tag,
+                    client_retry_wire(original_cid, other_cid, retry_cid, token),
+                    client_retry_wire(original_cid, client_cid, original_cid, token),
+                    client_retry_wire(original_cid, client_cid, retry_cid, b""),
+                ] {
+                    peer_socket.send_to(&rejected, client_addr).unwrap();
+                }
+                peer_socket.send_to(&retry, client_addr).unwrap();
+                // A second valid Retry must not replace the accepted token/CID.
+                let second = client_retry_wire(original_cid, client_cid, other_cid, b"second");
+                peer_socket.send_to(&second, client_addr).unwrap();
+            }
+
+            let mut initial_numbers = BTreeSet::new();
+            let mut repeated_crypto = BTreeMap::new();
+            let mut server_packet_number = 0;
+            let mut initial_sent = false;
+            for _ in 0..64 {
+                let packet = match pending_first.take() {
+                    Some(packet) => packet,
+                    None => {
+                        let (length, address) = peer_socket.recv_from(&mut buffer).unwrap();
+                        assert_eq!(address, client_addr);
+                        buffer[..length].to_vec()
+                    }
+                };
+                let prefix = long_prefix(&packet);
+                if prefix.packet_type == LongPacketType::Initial {
+                    assert_eq!(prefix.src_cid, client_cid, "Retry must keep the client CID");
+                    assert_eq!(
+                        prefix.dst_cid,
+                        if token.is_some() {
+                            retry_cid
+                        } else {
+                            original_cid
+                        }
+                    );
+                    assert_eq!(prefix.token, token.clone().unwrap_or_default());
+                    let (header, plaintext) = server
+                        .unprotect_long_header_packet(&prefix, &packet)
+                        .unwrap();
+                    if token.is_some() {
+                        assert!(header.packet_number > first_header.packet_number);
+                        assert!(
+                            packet.len() <= 1200,
+                            "test Retry Initial exceeds path budget"
+                        );
+                    }
+                    initial_numbers.insert(header.packet_number);
+                    client_retry_crypto_bytes(&plaintext, &mut repeated_crypto);
+                }
+                server.recv_handshake_packet(&packet).unwrap();
+                for segment in server.pump_outbound().unwrap() {
+                    if segment.level == HandshakeLevel::OneRtt {
+                        continue;
+                    }
+                    let outgoing = server
+                        .assemble_handshake_packet(
+                            &segment,
+                            client_cid,
+                            server_cid,
+                            server_packet_number,
+                        )
+                        .unwrap();
+                    server_packet_number += 1;
+                    peer_socket.send_to(&outgoing, client_addr).unwrap();
+                    if segment.level == HandshakeLevel::Initial && !initial_sent {
+                        initial_sent = true;
+                        let late = client_retry_wire(original_cid, client_cid, other_cid, b"late");
+                        peer_socket.send_to(&late, client_addr).unwrap();
+                    }
+                }
+                if server.is_complete() {
+                    assert!(server.one_rtt_keys_installed());
+                    assert_eq!(client_retry_join_crypto(&repeated_crypto), original_hello);
+                    if token_len == Some(1000) {
+                        assert!(
+                            initial_numbers.len() > 1,
+                            "token must force ClientHello fragmentation"
+                        );
+                    }
+                    return (initial_numbers.len(), original_hello.len(), initial_sent);
+                }
+            }
+            panic!("Retry peer did not complete TLS");
+        });
+
+        let builder = if workers == 1 {
+            crate::runtime::RuntimeBuilder::current_thread()
+        } else {
+            crate::runtime::RuntimeBuilder::multi_thread().worker_threads(workers)
+        };
+        let runtime = builder
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("native Retry caller context");
+            let endpoint = QuicUdpEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                QuicUdpEndpointConfig {
+                    max_packet_size: 16_384,
+                    ..QuicUdpEndpointConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            let config = client_config(vec![ca_cert()], vec![ATP_QUIC_ALPN.to_vec()]).unwrap();
+            let local_parameters = TransportParameters {
+                initial_max_streams_bidi: Some(4),
+                initial_max_streams_uni: Some(4),
+                ..TransportParameters::default()
+            };
+            let mut encoded = Vec::new();
+            local_parameters.encode(&mut encoded).unwrap();
+            let driver = QuicHandshakeDriver::client(
+                config,
+                ServerName::try_from("localhost").unwrap(),
+                encoded,
+            )
+            .unwrap();
+            let result = crate::time::timeout(
+                cx.now(),
+                Duration::from_secs(8),
+                NativeQuicUdpConnection::connect(
+                    &cx,
+                    endpoint,
+                    server_addr,
+                    driver,
+                    original_cid,
+                    client_cid,
+                    NativeQuicConnectionConfig::default(),
+                    ATP_QUIC_ALPN,
+                ),
+            )
+            .await
+            .expect("native Retry handshake must finish before the watchdog");
+            let result = result.map(|connection| {
+                assert_eq!(
+                    connection.connection().state(),
+                    QuicConnectionState::Established
+                );
+                assert!(connection.connection().can_send_app_data());
+                drop(connection);
+            });
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+            result
+        });
+        let (initial_packets, hello_bytes, initial_sent) = peer.join().unwrap();
+        assert!(
+            initial_sent,
+            "peer sent an authenticated Initial before the late Retry"
+        );
+        match invalid_parameter {
+            None => result.expect("native caller establishes despite ignored Retry datagrams"),
+            Some(id) => {
+                let NativeQuicUdpConnectionError::Handshake(error) = result.unwrap_err() else {
+                    panic!("Retry CID mismatch must fail in authenticated handshake completion");
+                };
+                let expected = match id {
+                    0x00 => "retry_original_destination_cid_mismatch",
+                    0x0f => "retry_initial_source_cid_mismatch",
+                    0x10 => "retry_source_cid_mismatch",
+                    _ => panic!("unknown test parameter"),
+                };
+                assert_eq!(failure_code(&error), expected);
+            }
+        }
+        assert!(
+            runtime.is_quiescent(),
+            "Retry test leaves no runtime tasks or obligations"
+        );
+        eprintln!(
+            "bead=asupersync-bi2462.108 scenario=client_retry workers={workers} token_len={token_len:?} invalid_parameter={invalid_parameter:?} initial_packets={initial_packets} identical_client_hello_bytes={hello_bytes} tls_peer_complete=true runtime_quiescent=true"
+        );
+    }
+
+    #[test]
+    fn client_retry_native_establishes_with_token_fragmentation_and_ignored_forgeries() {
+        for workers in [1, 2] {
+            for token_len in [16, 1000] {
+                run_client_retry_native(workers, Some(token_len), None);
+            }
+        }
+    }
+
+    #[test]
+    fn client_retry_native_ignores_retry_after_authenticated_initial_without_prior_retry() {
+        for workers in [1, 2] {
+            run_client_retry_native(workers, None, None);
+        }
+    }
+
+    #[test]
+    fn client_retry_native_rejects_each_authenticated_cid_mismatch() {
+        for workers in [1, 2] {
+            for id in [0x00, 0x0f, 0x10] {
+                run_client_retry_native(workers, Some(16), Some(id));
+            }
+        }
+    }
 
     #[test]
     fn crypto_reassembler_waits_for_gaps_and_rejects_conflicting_overlap() {
