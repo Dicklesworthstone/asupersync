@@ -733,6 +733,79 @@ fn a_targeted_green_heals_only_the_targets_it_ran() {
 }
 
 #[test]
+fn a_healed_red_is_reported_on_its_bead_and_closes_it_only_when_nothing_it_tracks_is_red() {
+    let lane = |id: &str, target: &str| json!({"id": id, "kind": "test", "argv": ["cargo", "test", "--test", target], "expected_targets": [target]});
+    let scenario = json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "c")],
+                 "lanes": [lane("a", "alpha_native"), lane("b", "beta_native")]},
+        "state": {
+            "known_reds": {
+                "a": {
+                    "alpha_native::shared": {"bead": "asupersync-shared"},
+                    "alpha_native::solo": {"bead": "asupersync-solo"},
+                    "alpha_native::owned": {"bead": "asupersync-owned"},
+                    "alpha_native::queued": {"bead": null},
+                },
+                // Lane b never runs gamma_native, so this red cannot heal here.
+                "b": {"gamma_native::other": {"bead": "asupersync-shared"}},
+            },
+            "pending_beads": [
+                {"lane": "a", "new_targets": ["alpha_native::queued"], "title": "healed before filing"},
+                {"lane": "b", "new_targets": ["gamma_native::x"], "title": "still red"},
+            ],
+        },
+        "lane_logs": {
+            "a": {sha(1): {"log": test_green("alpha_native", 4)}},
+            "b": {sha(1): {"log": test_green("beta_native", 2)}},
+        },
+        "open_issues": [
+            {"id": "asupersync-shared", "status": "open"},
+            {"id": "asupersync-solo", "status": "open"},
+            {"id": "asupersync-owned", "status": "in_progress", "assignee": "SomeAgent"},
+        ],
+    });
+    let result = evaluate(&scenario);
+    let calls: Vec<Vec<String>> =
+        serde_json::from_value(result["heal_calls"].clone()).expect("recorded br calls");
+    let commented: Vec<&str> = calls
+        .iter()
+        .filter(|call| call[1] == "comments")
+        .map(|call| call[3].as_str())
+        .collect();
+    let closed: Vec<&str> = calls
+        .iter()
+        .filter(|call| call[1] == "close")
+        .map(|call| call[2].as_str())
+        .collect();
+    assert_eq!(
+        commented,
+        ["asupersync-owned", "asupersync-shared", "asupersync-solo"],
+        "every filed bead with a heal gets the receipt: {calls:?}"
+    );
+    assert_eq!(
+        closed,
+        ["asupersync-solo"],
+        "closed only when open, unassigned and nothing it tracks is red: {calls:?}"
+    );
+    let shared_note = calls
+        .iter()
+        .find(|call| call[1] == "comments" && call[3] == "asupersync-shared")
+        .expect("shared comment");
+    assert!(shared_note[5].contains("stays open"), "{shared_note:?}");
+    let pending: Vec<&str> = result["state"]["pending_beads"]
+        .as_array()
+        .expect("pending")
+        .iter()
+        .map(|payload| payload["title"].as_str().expect("title"))
+        .collect();
+    assert_eq!(
+        pending,
+        ["still red"],
+        "a queued filing for a healed red is dropped"
+    );
+}
+
+#[test]
 fn an_already_tracked_red_is_not_filed_again() {
     let hedge = "hedge_factory_native::cancellation_during_backup_delay_stops_primary_and_never_launches_backup";
     let tracked = json!({

@@ -754,6 +754,74 @@ def bisect_first_red(
     return hi, exact and lo == hi, probes
 
 
+def record_heals(
+    lane: dict[str, Any],
+    lane_known: dict[str, Any],
+    healed: list[str],
+    head: str,
+    outcome: dict[str, Any],
+    receipt: dict[str, Any],
+    notes: list[str],
+    heals: list[dict[str, Any]],
+) -> None:
+    """Forget healed known reds; remember which bead (if already filed) each belonged to."""
+    for target in healed:
+        entry = lane_known.pop(target)
+        heals.append(
+            {"bead": entry.get("bead"), "lane": lane["id"], "target": target, "sha": head, "worker": outcome.get("worker")}
+        )
+    if healed:
+        receipt["healed"] = healed
+        notes.append(f"{lane['id']}: healed at {head[:9]}: {', '.join(healed)}")
+
+
+def report_heals(
+    heals: list[dict[str, Any]],
+    open_issues: list[dict[str, Any]],
+    run: Callable[..., Any] = subprocess.run,
+) -> None:
+    """Post each heal on its bead, and close a bead once nothing it tracks is red.
+
+    Only an open, unassigned bead is closed: an owner working a bead keeps that
+    decision and just gets the receipt. Beads already closed are left alone.
+    """
+    by_id = {issue.get("id"): issue for issue in open_issues}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for heal in heals:
+        if heal["bead"]:
+            grouped.setdefault(heal["bead"], []).append(heal)
+    for bead, group in grouped.items():
+        issue = by_id.get(bead)
+        if issue is None:
+            continue
+        lines = [
+            f"main-watchdog: healed at `{heal['sha']}` in lane `{heal['lane']}` "
+            f"(worker {heal.get('worker') or 'unknown'}): `{heal['target']}` ran and passed."
+            for heal in group
+        ]
+        closable = all(heal["close"] for heal in group)
+        if not closable:
+            lines.append("Other targets this bead tracks are still red; it stays open.")
+        run(["br", "comments", "add", bead, "-m", "\n".join(lines), "--author", "main-watchdog"], capture_output=True, check=False)
+        if closable and issue.get("status") == "open" and not issue.get("assignee"):
+            run(
+                ["br", "close", bead, "--reason", f"healed at {group[0]['sha'][:9]} (main watchdog)", "--actor", "main-watchdog"],
+                capture_output=True,
+                check=False,
+            )
+
+
+def forget_healed_pending(state: dict[str, Any], heals: list[dict[str, Any]]) -> None:
+    """Drop queued filings whose every target has healed: a P0 for a gone red is noise."""
+    healed = {(heal["lane"], heal["target"]) for heal in heals}
+    state["pending_beads"] = [
+        payload
+        for payload in state.get("pending_beads", [])
+        if not all((payload.get("lane"), target) in healed for target in payload.get("new_targets", []))
+        or not payload.get("new_targets")
+    ]
+
+
 def heal_candidates(lane: dict[str, Any], lane_known: dict[str, Any], failing: set[str], outcome: dict[str, Any]) -> list[str]:
     """Known reds this outcome proves healed.
 
@@ -781,6 +849,7 @@ def run_engine(
     known = state.setdefault("known_reds", {})
     receipts: list[dict[str, Any]] = []
     payloads: list[dict[str, Any]] = []
+    heals: list[dict[str, Any]] = []
     notes: list[str] = []
     all_green = True
     head_runs: list[tuple[str, int]] | None = None
@@ -813,11 +882,7 @@ def run_engine(
         if outcome["verdict"] == VERDICT_RED:
             failing = red_targets(outcome)
             healed = heal_candidates(lane, lane_known, failing, outcome)
-            for target in healed:
-                lane_known.pop(target)
-            if healed:
-                receipt["healed"] = healed
-                notes.append(f"{lane['id']}: healed at {head[:9]}: {', '.join(healed)}")
+            record_heals(lane, lane_known, healed, head, outcome, receipt, notes, heals)
             still = sorted(failing & set(lane_known))
             if still:
                 receipt["still_red"] = {t: lane_known[t].get("bead") for t in still}
@@ -867,19 +932,20 @@ def run_engine(
                     }
         elif outcome["verdict"] == VERDICT_GREEN and lane_known:
             healed = heal_candidates(lane, lane_known, set(), outcome)
-            for target in healed:
-                lane_known.pop(target)
-            if healed:
-                receipt["healed"] = healed
-                notes.append(f"{lane['id']}: healed at {head[:9]}: {', '.join(healed)}")
+            record_heals(lane, lane_known, healed, head, outcome, receipt, notes, heals)
         if not lane_known:
             known.pop(lane["id"], None)
         receipts.append(receipt)
+    # A bead may track several targets, even across lanes: it is closable only
+    # once none of them is still red.
+    still_tracked = {entry.get("bead") for reds in known.values() for entry in reds.values()}
+    for heal in heals:
+        heal["close"] = heal["bead"] is not None and heal["bead"] not in still_tracked
     if all_green:
         state["last_green"] = head
     if all(r["verdict"] in (VERDICT_GREEN, VERDICT_RED) for r in receipts):
         state["last_covered"] = head  # decisive for every lane (green or attributed red)
-    return {"receipts": receipts, "bead_payloads": payloads, "notes": notes, "state": state}
+    return {"receipts": receipts, "bead_payloads": payloads, "bead_heals": heals, "notes": notes, "state": state}
 
 
 # ---------------------------------------------------------------------------
@@ -1931,6 +1997,12 @@ def main(argv: list[str]) -> int:
             None if scenario.get("disable_target_filter") else fake_target_exists,
             scenario.get("parallel", 1),
         )
+        # As in run mode: drop healed queued filings, then report heals (the br
+        # calls are recorded, not executed).
+        forget_healed_pending(result["state"], result["bead_heals"])
+        heal_calls: list[list[str]] = []
+        report_heals(result["bead_heals"], scenario.get("open_issues", []), lambda argv, **_: heal_calls.append(argv))
+        result["heal_calls"] = heal_calls
         probes = scenario.get("probes", {})
         result["probe_results"] = {
             "declares_not_compiled": [declares_not_compiled(m) for m in probes.get("declares_not_compiled", [])],
@@ -2000,8 +2072,10 @@ def main(argv: list[str]) -> int:
         return 0
     runner = rch_runner(str(args.state_dir / "target"), args.admission_attempts, args.admission_sleep, args.state_dir / "logs")
     result = run_engine(plan, runner, state, now.isoformat(), git_target_exists, args.parallel)
+    forget_healed_pending(state, result["bead_heals"])
     if args.file_beads:
         file_or_queue(result["bead_payloads"], state, open_tracker_issues(), file_bead)
+        report_heals(result["bead_heals"], open_tracker_issues())
     if args.post_receipts:
         post_receipts(plan, result["receipts"])
     with open(args.state_dir / "receipts.jsonl", "a", encoding="utf-8") as handle:
