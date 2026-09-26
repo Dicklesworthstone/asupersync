@@ -5,6 +5,7 @@
 
 use crate::config::EncodingConfig as PipelineEncodingConfig;
 use crate::encoding::EncodingPipeline;
+use crate::raptorq::systematic::SystematicParams;
 use crate::types::Time;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
@@ -22,11 +23,17 @@ use super::snapshot::RegionSnapshot;
 pub struct EncodingConfig {
     /// Symbol size in bytes.
     pub symbol_size: u16,
-    /// Minimum repair symbols to generate (for redundancy).
+    /// Minimum total repair symbols to generate across all source blocks.
     pub min_repair_symbols: u16,
     /// Maximum source blocks (for large objects).
     pub max_source_blocks: u16,
-    /// Repair symbol overhead factor (e.g., 1.2 = 20% overhead).
+    /// Total symbol overhead factor (e.g., 1.2 = at least 20% overhead).
+    ///
+    /// Must be finite and at least `1.0`. The total repair budget is the larger
+    /// of `ceil(source_count * repair_overhead) - source_count` and the
+    /// (possibly adaptive) minimum, distributed across the actual source
+    /// blocks. A factor of `1.0` with a zero minimum enables source-only
+    /// encoding when the adaptive policy does not raise that minimum.
     pub repair_overhead: f32,
     /// Optional replayable path-quality snapshot for adaptive block layout.
     pub path_quality: Option<PathQualitySnapshot>,
@@ -176,6 +183,7 @@ impl StateEncoder {
         object_id: ObjectId,
         encoded_at: Time,
     ) -> Result<EncodedState, EncodingError> {
+        validate_repair_overhead(self.config.repair_overhead)?;
         let data = snapshot.to_bytes();
         if data.is_empty() {
             return Err(EncodingError::EmptyData);
@@ -188,12 +196,17 @@ impl StateEncoder {
             layout_decision.effective_source_blocks,
         )?;
         layout_decision.effective_source_blocks = layout.source_blocks;
+        let source_count = checked_source_count(data.len(), self.config.symbol_size)?;
+        let repair_count = total_repair_budget(
+            source_count,
+            self.config.repair_overhead,
+            layout_decision.effective_min_repair_symbols,
+        )?;
         let params = self.calculate_params(data.len(), object_id, layout)?;
-        let mut symbols = Vec::new();
-        let mut total_source = 0usize;
-        let mut total_repair = 0usize;
+        let mut symbols =
+            Vec::with_capacity(usize::from(source_count) + usize::from(repair_count));
         let repair_distribution = distribute_repairs(
-            usize::from(layout_decision.effective_min_repair_symbols),
+            usize::from(repair_count),
             usize::from(layout.source_blocks),
         );
 
@@ -210,26 +223,9 @@ impl StateEncoder {
                 self.config.symbol_size,
                 repairs,
             )? {
-                match symbol.kind() {
-                    SymbolKind::Source => total_source += 1,
-                    SymbolKind::Repair => total_repair += 1,
-                }
                 symbols.push(symbol);
             }
         }
-
-        let source_count =
-            u16::try_from(total_source).map_err(|_| EncodingError::SymbolCountOverflow {
-                field: "source_count",
-                value: total_source,
-                max: usize::from(u16::MAX),
-            })?;
-        let repair_count =
-            u16::try_from(total_repair).map_err(|_| EncodingError::SymbolCountOverflow {
-                field: "repair_count",
-                value: total_repair,
-                max: usize::from(u16::MAX),
-            })?;
 
         Ok(EncodedState {
             params,
@@ -242,7 +238,12 @@ impl StateEncoder {
         })
     }
 
-    /// Generates additional repair symbols for an existing encoding.
+    /// Generates exactly `count` additional repair symbols for an existing encoding.
+    ///
+    /// Each block resumes after its highest retained repair ESI, including
+    /// when earlier repairs have been removed. Append the returned symbols to
+    /// the state before requesting a further, non-overlapping range. This
+    /// method does not mutate the state or reapply the initial overhead budget.
     pub fn generate_repair(
         &mut self,
         state: &EncodedState,
@@ -256,17 +257,33 @@ impl StateEncoder {
             return Err(EncodingError::NoSourceSymbols);
         }
 
-        validate_complete_source_coverage(state)?;
-
-        let data = rebuild_source_bytes(state);
+        validate_repair_overhead(self.config.repair_overhead)?;
         let layout = derive_block_layout(
-            data.len(),
+            state.original_size,
             state.params.symbol_size,
             state.params.source_blocks,
         )?;
+        checked_source_count(state.original_size, state.params.symbol_size)?;
+        validate_complete_source_coverage(state)?;
+
         let source_blocks = usize::from(layout.source_blocks);
-        let additional_repairs = distribute_repairs(count as usize, source_blocks);
-        let mut existing_repairs = vec![0usize; source_blocks];
+        let additional_repairs = distribute_repairs(usize::from(count), source_blocks);
+        let mut next_repair_esi = Vec::with_capacity(source_blocks);
+        let mut maximum_repair_esi = Vec::with_capacity(source_blocks);
+        for block in 0..source_blocks {
+            let (start, end) =
+                block_bounds(block, layout.max_block_size, state.original_size);
+            let source_count = (end - start).div_ceil(usize::from(state.params.symbol_size));
+            let systematic = SystematicParams::try_for_source_block(
+                source_count,
+                usize::from(state.params.symbol_size),
+            )
+            .map_err(|err| EncodingError::Pipeline(format!("invalid source block: {err:?}")))?;
+            next_repair_esi.push(source_count as u64);
+            maximum_repair_esi.push(
+                u64::from(u32::MAX) - (systematic.k_prime - systematic.k) as u64,
+            );
+        }
         for symbol in state.repair_symbols() {
             let block = usize::from(symbol.id().sbn());
             if block >= source_blocks {
@@ -274,10 +291,40 @@ impl StateEncoder {
                     "repair symbol block {block} exceeds declared source_blocks {source_blocks}"
                 )));
             }
-            existing_repairs[block] += 1;
+            let (start, end) =
+                block_bounds(block, layout.max_block_size, state.original_size);
+            let source_count = (end - start).div_ceil(usize::from(state.params.symbol_size));
+            let esi = u64::from(symbol.id().esi());
+            if symbol.id().object_id() != state.params.object_id
+                || symbol.len() != usize::from(state.params.symbol_size)
+                || esi < source_count as u64
+                || esi > maximum_repair_esi[block]
+            {
+                return Err(EncodingError::Pipeline(format!(
+                    "invalid repair symbol identity, size, or ESI in block {block}"
+                )));
+            }
+            next_repair_esi[block] = next_repair_esi[block].max(esi + 1);
         }
 
-        let mut repairs = Vec::with_capacity(count as usize);
+        // Check every requested range before rebuilding bytes or constructing
+        // any RaptorQ matrices. The RFC ESI-to-ISI padding delta also has to fit.
+        for block in 0..source_blocks {
+            if additional_repairs[block] == 0 {
+                continue;
+            }
+            let last_esi = next_repair_esi[block] + additional_repairs[block] as u64 - 1;
+            if last_esi > maximum_repair_esi[block] {
+                return Err(EncodingError::InvalidConfig {
+                    reason: format!(
+                        "repair ESI range in block {block} exceeds the RFC encoding limit"
+                    ),
+                });
+            }
+        }
+
+        let data = rebuild_source_bytes(state);
+        let mut repairs = Vec::with_capacity(usize::from(count));
         for block in 0..source_blocks {
             let extra = additional_repairs[block];
             if extra == 0 {
@@ -289,28 +336,20 @@ impl StateEncoder {
             let block_source_count = block_bytes
                 .len()
                 .div_ceil(usize::from(state.params.symbol_size));
-            let requested_repairs = existing_repairs[block] + extra;
-            let first_new_repair_esi = u32::try_from(block_source_count + existing_repairs[block])
-                .map_err(|_| EncodingError::SymbolCountOverflow {
-                    field: "first_new_repair_esi",
-                    value: block_source_count + existing_repairs[block],
-                    max: u32::MAX as usize,
-                })?;
-
-            for symbol in self.encode_block_symbols(
+            let first_repair = usize::try_from(next_repair_esi[block])
+                .expect("validated repair ESI fits u32 and usize")
+                - block_source_count;
+            repairs.extend(self.encode_block_repair_range(
                 state.params.object_id,
                 block,
                 block_bytes,
                 state.params.symbol_size,
-                requested_repairs,
-            )? {
-                if symbol.kind().is_repair() && symbol.id().esi() >= first_new_repair_esi {
-                    repairs.push(symbol);
-                }
-            }
+                first_repair,
+                extra,
+            )?);
         }
 
-        if repairs.len() != count as usize {
+        if repairs.len() != usize::from(count) {
             return Err(EncodingError::Pipeline(format!(
                 "generated {} repair symbols, expected {}",
                 repairs.len(),
@@ -378,6 +417,43 @@ impl StateEncoder {
 
         Ok(symbols)
     }
+
+    fn encode_block_repair_range(
+        &self,
+        object_id: ObjectId,
+        block: usize,
+        block_bytes: &[u8],
+        symbol_size: u16,
+        first_repair: usize,
+        repair_count: usize,
+    ) -> Result<Vec<Symbol>, EncodingError> {
+        let pipeline_config = PipelineEncodingConfig {
+            repair_overhead: f64::from(self.config.repair_overhead),
+            max_block_size: block_bytes.len(),
+            symbol_size,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let mut pipeline =
+            EncodingPipeline::new(pipeline_config, SymbolPool::new(PoolConfig::default()));
+        let block_sbn = u8::try_from(block).expect("validated source block index fits in u8");
+        // Use the same per-block pipeline seed as encode_block_symbols, then
+        // restore the enclosing object's SBN. Skip all previous source/repair
+        // output instead of regenerating the entire retained prefix.
+        pipeline
+            .encode_repair_range(object_id, block_bytes, first_repair, repair_count)
+            .map(|encoded| {
+                let symbol = encoded
+                    .map_err(|err| EncodingError::Pipeline(err.to_string()))?
+                    .into_symbol();
+                Ok(Symbol::new(
+                    SymbolId::new(object_id, block_sbn, symbol.id().esi()),
+                    symbol.into_data(),
+                    SymbolKind::Repair,
+                ))
+            })
+            .collect()
+    }
 }
 
 /// Rebuild source data bytes from an encoded state by concatenating source symbols.
@@ -400,6 +476,19 @@ fn validate_complete_source_coverage(encoded: &EncodedState) -> Result<(), Encod
         encoded.params.symbol_size,
         encoded.params.source_blocks,
     )?;
+    if encoded.params.object_size
+        != u64::try_from(encoded.original_size).map_err(|_| EncodingError::ObjectSizeOverflow {
+            size: encoded.original_size,
+        })?
+        || encoded.params.source_blocks != layout.source_blocks
+        || encoded.params.symbols_per_block != layout.symbols_per_block
+        || encoded.source_count
+            != checked_source_count(encoded.original_size, encoded.params.symbol_size)?
+    {
+        return Err(EncodingError::Pipeline(
+            "source object parameters do not match the encoded state".to_string(),
+        ));
+    }
     let symbol_size = usize::from(encoded.params.symbol_size);
     let source_blocks = usize::from(layout.source_blocks);
     let mut seen_by_block = Vec::with_capacity(source_blocks);
@@ -415,6 +504,11 @@ fn validate_complete_source_coverage(encoded: &EncodedState) -> Result<(), Encod
     }
 
     for symbol in encoded.source_symbols() {
+        if symbol.id().object_id() != encoded.params.object_id || symbol.len() != symbol_size {
+            return Err(EncodingError::Pipeline(
+                "source symbol identity or size does not match the encoded state".to_string(),
+            ));
+        }
         let block = usize::from(symbol.id().sbn());
         if block >= source_blocks {
             return Err(EncodingError::Pipeline(format!(
@@ -664,6 +758,13 @@ fn derive_block_layout(
             value: symbols_per_block,
             max: usize::from(u16::MAX),
         })?;
+    if usize::from(source_blocks) > crate::encoding::MAX_SOURCE_BLOCKS {
+        return Err(EncodingError::SymbolCountOverflow {
+            field: "source_blocks",
+            value: usize::from(source_blocks),
+            max: crate::encoding::MAX_SOURCE_BLOCKS,
+        });
+    }
 
     Ok(BlockLayout {
         max_block_size,
@@ -766,6 +867,44 @@ fn adaptive_repair_symbols(
     })
 }
 
+fn validate_repair_overhead(overhead: f32) -> Result<(), EncodingError> {
+    if !overhead.is_finite() || overhead < 1.0 {
+        return Err(EncodingError::InvalidConfig {
+            reason: "repair_overhead must be finite and >= 1.0".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn checked_source_count(data_size: usize, symbol_size: u16) -> Result<u16, EncodingError> {
+    let count = data_size.div_ceil(usize::from(symbol_size));
+    u16::try_from(count).map_err(|_| EncodingError::SymbolCountOverflow {
+        field: "source_count",
+        value: count,
+        max: usize::from(u16::MAX),
+    })
+}
+
+fn total_repair_budget(
+    source_count: u16,
+    overhead: f32,
+    minimum: u16,
+) -> Result<u16, EncodingError> {
+    validate_repair_overhead(overhead)?;
+    // Both operands retain their full precision in f64. Refuse oversized
+    // requests before any float-to-integer cast or symbol allocation.
+    let requested = (f64::from(source_count) * f64::from(overhead)).ceil()
+        - f64::from(source_count);
+    if requested > f64::from(u16::MAX) {
+        return Err(EncodingError::InvalidConfig {
+            reason: "repair_overhead requires more than 65535 repair symbols".to_string(),
+        });
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let repairs = requested as u16;
+    Ok(repairs.max(minimum))
+}
+
 fn distribute_repairs(total: usize, blocks: usize) -> Vec<usize> {
     if blocks == 0 {
         return Vec::new();
@@ -781,6 +920,280 @@ fn block_bounds(block: usize, max_block_size: usize, data_len: usize) -> (usize,
     let start = block * max_block_size;
     let end = min(start + max_block_size, data_len);
     (start, end)
+}
+
+#[cfg(test)]
+mod repair_budget_tests {
+    use super::*;
+    use crate::distributed::recovery::{RecoveryDecodingConfig, StateDecoder};
+    use crate::security::{AuthKey, SecurityContext};
+    use crate::types::RegionId;
+    use raptorq::{ObjectTransmissionInformation, SourceBlockEncoder};
+    use std::collections::BTreeSet;
+
+    fn snapshot_with_size(size: usize) -> RegionSnapshot {
+        let mut snapshot = RegionSnapshot::empty(RegionId::new_for_test(37, 0));
+        let envelope_size = snapshot.to_bytes().len();
+        assert!(size >= envelope_size);
+        snapshot.metadata.resize(size - envelope_size, 0);
+        DetRng::new(71).fill_bytes(&mut snapshot.metadata);
+        assert_eq!(snapshot.to_bytes().len(), size);
+        snapshot
+    }
+
+    fn config(overhead: f32) -> EncodingConfig {
+        EncodingConfig {
+            symbol_size: 128,
+            min_repair_symbols: 0,
+            max_source_blocks: 4,
+            repair_overhead: overhead,
+            path_quality: None,
+        }
+    }
+
+    #[test]
+    fn overhead_budget_is_total_and_rounded_once_for_uneven_blocks() {
+        // 2065 bytes need 17 source symbols. Four actual blocks contain
+        // 5, 5, 5, 2 source symbols; no per-block ceil may multiply the budget.
+        let snapshot = snapshot_with_size(16 * 128 + 17);
+        for (overhead, expected_repairs, per_block) in [
+            (1.0, 0, [0, 0, 0, 0]),
+            (1.25, 5, [2, 1, 1, 1]),
+            (1.5, 9, [3, 2, 2, 2]),
+            (2.0, 17, [5, 4, 4, 4]),
+        ] {
+            let encoded = StateEncoder::new(config(overhead), DetRng::new(42))
+                .encode(&snapshot, Time::ZERO)
+                .unwrap();
+            assert_eq!(encoded.source_count, 17);
+            assert_eq!(encoded.repair_count, expected_repairs);
+            assert_eq!(encoded.params.source_blocks, 4);
+            assert_eq!(encoded.symbols.len(), 17 + usize::from(expected_repairs));
+            assert_eq!(rebuild_source_bytes(&encoded), snapshot.to_bytes());
+            for (block, expected) in per_block.into_iter().enumerate() {
+                let repairs = encoded
+                    .repair_symbols()
+                    .filter(|symbol| usize::from(symbol.id().sbn()) == block)
+                    .map(|symbol| symbol.id().esi())
+                    .collect::<Vec<_>>();
+                let source_count = [5, 5, 5, 2][block];
+                assert_eq!(repairs, (source_count..source_count + expected).collect::<Vec<_>>());
+            }
+        }
+    }
+
+    #[test]
+    fn overhead_budget_preserves_minimum_and_adaptive_floors() {
+        let snapshot = snapshot_with_size(16 * 128);
+        let severe = Some(PathQualitySnapshot::new(400, 300, 32));
+        for (overhead, minimum, quality, expected_floor, expected_repairs) in [
+            (1.0, 0, None, 0, 0),
+            (1.125, 3, None, 3, 3),
+            (1.125, 3, severe, 8, 8),
+            (2.0, 3, severe, 8, 16),
+            (1.0, 0, severe, 3, 3),
+        ] {
+            let mut settings = config(overhead);
+            settings.min_repair_symbols = minimum;
+            settings.path_quality = quality;
+            let encoded = StateEncoder::new(settings, DetRng::new(43))
+                .encode(&snapshot, Time::ZERO)
+                .unwrap();
+            assert_eq!(encoded.source_count, 16);
+            assert_eq!(encoded.layout_decision.effective_min_repair_symbols, expected_floor);
+            assert_eq!(encoded.repair_count, expected_repairs);
+            assert_eq!(encoded.repair_symbols().count(), usize::from(expected_repairs));
+        }
+    }
+
+    #[test]
+    fn overhead_budget_uses_the_configured_f32_value_without_rounding_down() {
+        // 1.2_f32 represents a value slightly above 1.2. Five source
+        // symbols therefore need two repairs to meet that exact configured
+        // bound. Widening before multiplication intentionally preserves it.
+        let encoded = StateEncoder::new(config(1.2), DetRng::new(44))
+            .encode(&snapshot_with_size(5 * 128), Time::ZERO)
+            .unwrap();
+        assert!(f64::from(1.2_f32) > 1.2_f64);
+        assert_eq!(encoded.source_count, 5);
+        assert_eq!(encoded.repair_count, 2);
+    }
+
+    #[test]
+    fn overhead_budget_rejects_invalid_and_unrepresentable_requests() {
+        let snapshot = snapshot_with_size(16 * 128);
+        for overhead in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.999] {
+            let error = StateEncoder::new(config(overhead), DetRng::new(45))
+                .encode(&snapshot, Time::ZERO)
+                .unwrap_err();
+            assert_eq!(error, EncodingError::InvalidConfig {
+                reason: "repair_overhead must be finite and >= 1.0".to_string(),
+            });
+        }
+        for overhead in [4097.0, f32::MAX] {
+            let error = StateEncoder::new(config(overhead), DetRng::new(46))
+                .encode(&snapshot, Time::ZERO)
+                .unwrap_err();
+            assert_eq!(error, EncodingError::InvalidConfig {
+                reason: "repair_overhead requires more than 65535 repair symbols".to_string(),
+            });
+        }
+        assert_eq!(total_repair_budget(u16::MAX, 2.0, 0), Ok(u16::MAX));
+        assert_eq!(total_repair_budget(1, 1.0, u16::MAX), Ok(u16::MAX));
+        assert!(total_repair_budget(u16::MAX, 2.000_001, 0).is_err());
+
+        let error = StateEncoder::new(EncodingConfig {
+            symbol_size: 1,
+            max_source_blocks: 256,
+            ..config(1.0)
+        }, DetRng::new(47))
+        .encode(&snapshot_with_size(65536), Time::ZERO)
+        .unwrap_err();
+        assert_eq!(error, EncodingError::SymbolCountOverflow {
+            field: "source_count", value: 65536, max: 65535,
+        });
+
+        let error = StateEncoder::new(EncodingConfig {
+            max_source_blocks: 257,
+            ..config(1.0)
+        }, DetRng::new(48))
+        .encode(&snapshot_with_size(257 * 128), Time::ZERO)
+        .unwrap_err();
+        assert_eq!(error, EncodingError::SymbolCountOverflow {
+            field: "source_blocks", value: 257, max: 256,
+        });
+    }
+
+    #[test]
+    fn overhead_repairs_recover_authenticated_snapshot_after_multiblock_erasure() {
+        let snapshot_key = AuthKey::from_seed(75);
+        let security = SecurityContext::new(AuthKey::from_seed(76));
+        let snapshot = snapshot_with_size(32 * 128).signed(&snapshot_key);
+        let encoded = StateEncoder::new(config(2.0), DetRng::new(49))
+            .encode(&snapshot, Time::ZERO)
+            .unwrap();
+        assert_eq!((encoded.source_count, encoded.repair_count), (32, 32));
+        assert_eq!(encoded.params.source_blocks, 4);
+
+        let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
+            auth_context: Some(security.clone()),
+            snapshot_auth_key: Some(snapshot_key.clone()),
+            ..Default::default()
+        });
+        let mut source_only = StateDecoder::new(RecoveryDecodingConfig {
+            auth_context: Some(security.clone()),
+            snapshot_auth_key: Some(snapshot_key),
+            ..Default::default()
+        });
+        let mut lost_by_block = [0; 4];
+        for symbol in &encoded.symbols {
+            if symbol.kind().is_source() && symbol.id().esi() < 2 {
+                lost_by_block[usize::from(symbol.id().sbn())] += 1;
+                continue;
+            }
+            let authenticated = security.sign_symbol(symbol);
+            decoder.add_symbol(&authenticated).unwrap();
+            if symbol.kind().is_source() {
+                source_only.add_symbol(&authenticated).unwrap();
+            }
+        }
+        assert_eq!(lost_by_block, [2, 2, 2, 2]);
+        assert_eq!(source_only.symbols_received(), 24);
+        assert!(source_only.decode_snapshot(&encoded.params).is_err());
+        let recovered = decoder.decode_snapshot(&encoded.params).unwrap();
+        assert_eq!(recovered.to_bytes(), snapshot.to_bytes());
+    }
+
+    #[test]
+    fn repair_continuation_skips_sparse_prefix_and_matches_independent_encoder() {
+        let snapshot = snapshot_with_size(16 * 128 + 17);
+        let mut encoder = StateEncoder::new(config(2.0), DetRng::new(50));
+        let mut encoded = encoder.encode(&snapshot, Time::ZERO).unwrap();
+        let last_esi = [9, 8, 8, 5];
+        encoded.symbols.retain(|symbol| symbol.kind().is_source()
+            || symbol.id().esi() == last_esi[usize::from(symbol.id().sbn())]);
+        encoded.repair_count = 4;
+        let additional = encoder.generate_repair(&encoded, 7).unwrap();
+        assert_eq!(additional.len(), 7);
+        let expected_esis = [vec![10, 11], vec![9, 10], vec![9, 10], vec![6]];
+        for (block, expected) in expected_esis.into_iter().enumerate() {
+            let generated = additional.iter()
+                .filter(|symbol| usize::from(symbol.id().sbn()) == block)
+                .collect::<Vec<_>>();
+            assert_eq!(generated.iter().map(|symbol| symbol.id().esi()).collect::<Vec<_>>(), expected);
+            let source_bytes = encoded.source_symbols()
+                .filter(|symbol| usize::from(symbol.id().sbn()) == block)
+                .flat_map(|symbol| symbol.data().iter().copied())
+                .collect::<Vec<_>>();
+            let reference_config = ObjectTransmissionInformation::new(
+                u64::try_from(source_bytes.len()).unwrap(), 128, 1, 1, 1,
+            );
+            let reference = SourceBlockEncoder::new(0, &reference_config, &source_bytes);
+            let first = expected[0] - u32::try_from(source_bytes.len() / 128).unwrap();
+            let reference_repairs = reference.repair_packets(first, u32::try_from(expected.len()).unwrap());
+            for (actual, expected) in generated.into_iter().zip(reference_repairs) {
+                assert_eq!(actual.id().esi(), expected.payload_id().encoding_symbol_id());
+                assert_eq!(actual.data(), expected.data());
+            }
+        }
+        encoded.symbols.extend(additional);
+        encoded.repair_count += 7;
+        let second = encoder.generate_repair(&encoded, 4).unwrap();
+        assert_eq!(second.iter().map(|symbol| symbol.id().esi()).collect::<Vec<_>>(), [12, 11, 11, 7]);
+        let mut ids = encoded.symbols.iter().map(Symbol::id).collect::<BTreeSet<_>>();
+        for symbol in second {
+            assert!(ids.insert(symbol.id()), "continuation must not duplicate retained ESIs");
+        }
+        assert!(encoder.generate_repair(&encoded, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn repair_continuation_refuses_invalid_source_shape_and_rfc_esi_exhaustion() {
+        let snapshot = snapshot_with_size(5 * 128);
+        let mut encoder = StateEncoder::new(EncodingConfig {
+            max_source_blocks: 1, ..config(1.0)
+        }, DetRng::new(51));
+        for defect in 0..6 {
+            let mut state = encoder.encode(&snapshot, Time::ZERO).unwrap();
+            let source = state.symbols[0].clone();
+            match defect {
+                0 => state.params.object_size += 1,
+                1 => state.symbols[0] = Symbol::new(
+                    SymbolId::new(ObjectId::new_for_test(999), 0, 0),
+                    source.into_data(), SymbolKind::Source,
+                ),
+                2 => state.symbols[0] = Symbol::new(
+                    source.id(), vec![0; 127], SymbolKind::Source,
+                ),
+                3 => state.symbols.push(Symbol::new(
+                    SymbolId::new(state.params.object_id, 0, 4),
+                    vec![0; 128], SymbolKind::Repair,
+                )),
+                4 => state.symbols.push(Symbol::new(
+                    SymbolId::new(state.params.object_id, 0, u32::MAX),
+                    vec![0; 128], SymbolKind::Repair,
+                )),
+                5 => {
+                    // K=5 maps to K'=10, so u32::MAX-5 is the last valid
+                    // repair ESI. A request after it must return an error,
+                    // before the lower-level encoder's panicking ESI API.
+                    state.symbols.push(Symbol::new(
+                        SymbolId::new(state.params.object_id, 0, u32::MAX - 5),
+                        vec![0; 128], SymbolKind::Repair,
+                    ));
+                }
+                _ => unreachable!(),
+            }
+            let error = encoder.generate_repair(&state, 1).unwrap_err();
+            if defect == 5 {
+                assert_eq!(error, EncodingError::InvalidConfig {
+                    reason: "repair ESI range in block 0 exceeds the RFC encoding limit".to_string(),
+                });
+            } else {
+                assert!(matches!(error, EncodingError::Pipeline(_)), "defect {defect}: {error}");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1254,6 +1667,7 @@ mod tests {
             symbol_size: 128,
             min_repair_symbols: 0,
             max_source_blocks: 2,
+            repair_overhead: 1.0,
             ..Default::default()
         };
         let mut encoder = StateEncoder::new(config, DetRng::new(17));
@@ -1275,6 +1689,7 @@ mod tests {
             symbol_size: 128,
             min_repair_symbols: 3,
             max_source_blocks: 2,
+            repair_overhead: 1.0,
             ..Default::default()
         };
         let mut encoder = StateEncoder::new(config, DetRng::new(19));
@@ -1298,6 +1713,7 @@ mod tests {
             symbol_size: 128,
             min_repair_symbols: 0,
             max_source_blocks: 2,
+            repair_overhead: 1.0,
             ..Default::default()
         };
         let mut encoder = StateEncoder::new(config, DetRng::new(23));
@@ -1317,6 +1733,7 @@ mod tests {
             symbol_size: 128,
             min_repair_symbols: 0,
             max_source_blocks: 2,
+            repair_overhead: 1.0,
             ..Default::default()
         };
         let mut encoder = StateEncoder::new(config, DetRng::new(31));
@@ -1360,6 +1777,7 @@ mod tests {
         let config = EncodingConfig {
             symbol_size: 128,
             min_repair_symbols: 0,
+            repair_overhead: 1.0,
             ..Default::default()
         };
         let mut encoder = StateEncoder::new(config, DetRng::new(37));
@@ -1397,6 +1815,7 @@ mod tests {
             symbol_size: 1,
             min_repair_symbols: 0,
             max_source_blocks: 256,
+            repair_overhead: 1.0,
             ..Default::default()
         };
         let mut encoder = StateEncoder::new(config, DetRng::new(29));
@@ -1622,6 +2041,7 @@ mod tests {
         let config = EncodingConfig {
             symbol_size: 128,
             min_repair_symbols: 0,
+            repair_overhead: 1.0,
             ..Default::default()
         };
         let mut encoder = StateEncoder::new(config, DetRng::new(11));
@@ -1707,11 +2127,14 @@ mod tests {
 
     #[test]
     fn encoding_envelope_v2_snapshot() {
+        // Keep this wire/layout fixture's explicit one/two-repair budgets;
+        // overhead-derived counts are covered independently below.
         let mut base_encoder = StateEncoder::new(
             EncodingConfig {
                 symbol_size: 48,
                 min_repair_symbols: 1,
                 max_source_blocks: 1,
+                repair_overhead: 1.0,
                 ..Default::default()
             },
             DetRng::new(111),
@@ -1721,6 +2144,7 @@ mod tests {
                 symbol_size: 24,
                 min_repair_symbols: 2,
                 max_source_blocks: 2,
+                repair_overhead: 1.0,
                 ..Default::default()
             },
             DetRng::new(222),
