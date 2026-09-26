@@ -9,8 +9,11 @@
 //! - [`settings`]: HTTP/2 connection settings (RFC 7540 Section 6.5)
 //! - [`stream`]: Stream state management (RFC 7540 Section 5)
 //! - [`connection`]: Connection management
+//! - `client` (native): Bounded requests with caller-owned connection driving
 //! - [`error`]: HTTP/2 error types (RFC 7540 Section 7)
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod client;
 pub mod connection;
 pub mod error;
 pub mod frame;
@@ -23,6 +26,8 @@ pub mod settings;
 pub mod stream;
 
 // Re-export commonly used types
+#[cfg(not(target_arch = "wasm32"))]
+pub use client::{Http2Client, Http2ClientError, Http2RequestBuilder, Http2Response};
 pub use connection::{Connection, ConnectionState, FrameCodec};
 pub use error::{ErrorCode, H2Error};
 pub use frame::{Frame, FrameHeader, FrameType, Setting};
