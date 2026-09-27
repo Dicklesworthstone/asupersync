@@ -1585,6 +1585,17 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
             "src/cx/scope.rs|crate::runtime::task_handle::task_handle_channel::<".to_owned(),
             1,
         ),
+        // Classified (ecda43b5b, bi2462.156, q1fhxo): a `#[cfg(test)]` fixture
+        // in the drained blocking unit tests that builds a handle over a
+        // directly held publisher, so it can close the task's terminal
+        // publisher before the pool finishes. It is not a spawn adapter:
+        // production drained blocking work is spawned with `Cx::spawn` /
+        // `Cx::spawn_in`, whose pair factories are counted under src/cx/cx.rs.
+        (
+            "src/runtime/spawn_blocking.rs|crate::runtime::task_handle::task_handle_channel::<"
+                .to_owned(),
+            1,
+        ),
         (
             "src/runtime/spawn_mailbox.rs|TaskHandle::new_pending(".to_owned(),
             3,

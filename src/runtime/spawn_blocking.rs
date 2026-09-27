@@ -766,7 +766,7 @@ mod tests {
         assert!(state.finished);
         assert!(matches!(state.result.take(),
             Some(Err(crate::runtime::JoinError::Panicked(payload)))
-                if payload.to_string() == "drained capture retirement sentinel"));
+                if payload.message() == "drained capture retirement sentinel"));
     }
 
     #[test]

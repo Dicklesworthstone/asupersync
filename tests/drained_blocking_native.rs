@@ -273,7 +273,7 @@ fn success_panic_prestart_abort_and_missing_pool_have_exact_results() {
                     panic!("drained closure panic sentinel");
                 }).unwrap();
                 assert!(matches!(panicked.join().await,
-                    Err(JoinError::Panicked(payload)) if payload.to_string() == "drained closure panic sentinel"));
+                    Err(JoinError::Panicked(payload)) if payload.message() == "drained closure panic sentinel"));
             });
             drained(&runtime);
         }
