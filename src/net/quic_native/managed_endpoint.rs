@@ -4332,7 +4332,13 @@ mod tests {
 
         #[test]
         fn managed_accept_early_ciphertext_budget_refuses_before_changing_retained_packets() {
-            run_test_with_cx(|cx| async move {
+            // Preparing an authenticated accept schedules QUIC timers, which
+            // need a runtime Cx with a timer driver (the siblings' pattern).
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
                 let mut endpoint = ManagedQuicEndpoint::bind(
                     &cx,
                     "127.0.0.1:0".parse().unwrap(),
@@ -4382,7 +4388,7 @@ mod tests {
                     assert!(pending.early.iter().all(|retained| retained == &packet));
                 }
                 endpoint.shutdown(&cx).await.unwrap();
-            });
+            }));
         }
 
         // The established route comes from selection_fixture's documented
