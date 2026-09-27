@@ -395,10 +395,31 @@ impl RecvPacketRuns {
     }
 }
 
+/// Resident cost of one retained slice: its handle plus its own allocation.
+/// A run whose slices cost more than the bytes they hold is joined into one.
+const RECV_PIECE_OVERHEAD: u64 = 64;
+
 impl RecvRun {
     fn push_back(&mut self, bytes: Bytes) {
         self.len += bytes.len() as u64;
         self.pieces.push_back(bytes);
+        self.compact_if_fragmented();
+    }
+
+    /// A peer can split credited bytes into one-byte frames, in either order.
+    /// Joining only when the slices outweigh their payload keeps large frames
+    /// zero-copy and costs about `RECV_PIECE_OVERHEAD` copied bytes per tiny
+    /// frame, amortized.
+    fn compact_if_fragmented(&mut self) {
+        let pieces = self.pieces.len() as u64;
+        if pieces <= 1 || pieces.saturating_mul(RECV_PIECE_OVERHEAD) <= self.len {
+            return;
+        }
+        let mut joined = BytesMut::with_capacity(usize::try_from(self.len).unwrap_or(0));
+        for piece in self.pieces.drain(..) {
+            joined.extend_from_slice(&piece);
+        }
+        self.pieces.push_back(joined.freeze());
     }
 
     fn append(&mut self, mut other: Self) {
@@ -413,6 +434,7 @@ impl RecvRun {
         } else {
             self.pieces.append(&mut other.pieces);
         }
+        self.compact_if_fragmented();
     }
 
     fn read(&mut self, max_len: usize) -> Bytes {
@@ -2755,6 +2777,43 @@ mod tests {
                 assert_eq!(&data[..], &payload[consumed..consumed + data.len()]);
                 consumed += data.len();
             }
+            assert!(stream.recv_chunks.is_empty());
+        }
+    }
+
+    #[test]
+    fn tiny_frames_do_not_keep_one_retained_slice_per_credited_byte() {
+        const FRAMES: usize = 100_000;
+        for reverse in [false, true] {
+            let mut stream = QuicStream::new(StreamId(0), 0, FRAMES as u64);
+            for index in 0..FRAMES {
+                let offset = if reverse { FRAMES - 1 - index } else { index };
+                stream
+                    .receive_bytes(
+                        offset as u64,
+                        Bytes::from(vec![(offset % 251) as u8]),
+                        false,
+                    )
+                    .expect("one-byte frame");
+            }
+            assert_eq!(stream.recv_chunks.len(), 1, "reverse={reverse}");
+            let slices = stream.recv_chunks[&0].pieces.len();
+            assert!(
+                slices as u64 <= FRAMES as u64 / RECV_PIECE_OVERHEAD + 1,
+                "reverse={reverse}: {slices} slices retained for {FRAMES} one-byte frames"
+            );
+            let mut read = Vec::with_capacity(FRAMES);
+            while read.len() < FRAMES {
+                let data = stream.read_bytes(4096);
+                assert!(!data.is_empty(), "reverse={reverse}");
+                read.extend_from_slice(&data);
+            }
+            assert!(
+                read.iter()
+                    .enumerate()
+                    .all(|(i, byte)| *byte == (i % 251) as u8),
+                "reverse={reverse}: bytes out of order"
+            );
             assert!(stream.recv_chunks.is_empty());
         }
     }
