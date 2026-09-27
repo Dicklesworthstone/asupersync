@@ -494,13 +494,17 @@ impl<C: Codec> FramedCodec<C> {
     }
 
     /// Set optional frame-level compressor and decompressor hooks.
+    ///
+    /// Outbound compression turns on only with a compressor. A decompressor
+    /// alone accepts compressed input and still encodes uncompressed frames;
+    /// enabling compression without a compressor would fail every encode.
     #[must_use]
     pub fn with_frame_hooks(
         mut self,
         compressor: Option<FrameCompressor>,
         decompressor: Option<FrameDecompressor>,
     ) -> Self {
-        if compressor.is_some() || decompressor.is_some() {
+        if compressor.is_some() {
             self.use_compression = true;
         }
         self.compressor = compressor;
@@ -1711,6 +1715,40 @@ mod tests {
         crate::assert_with_log!(buf.is_empty(), "buffer drained", true, buf.is_empty());
         crate::test_complete!(
             "test_framed_codec_identity_frame_codec_accepts_explicit_flagged_input"
+        );
+    }
+
+    #[test]
+    fn test_framed_codec_decompressor_only_hooks_still_encode_uncompressed() {
+        init_test("test_framed_codec_decompressor_only_hooks_still_encode_uncompressed");
+        // Accepting compressed input must not turn on outbound compression,
+        // which would have no compressor to use.
+        let mut codec = FramedCodec::new(IdentityCodec)
+            .with_frame_hooks(None, Some(identity_frame_decompress as FrameDecompressor));
+        let mut buf = BytesMut::new();
+        let original = Bytes::from_static(b"accept-only");
+
+        codec
+            .encode_message(&original, &mut buf)
+            .expect("encode must succeed without a compressor");
+        crate::assert_with_log!(
+            buf.first().copied() == Some(0),
+            "outbound flag clear",
+            Some(0u8),
+            buf.first().copied()
+        );
+
+        let mut flagged = BytesMut::new();
+        flagged.put_u8(1);
+        flagged.put_u32(u32::try_from(original.len()).expect("fixture length fits u32"));
+        flagged.extend_from_slice(&original);
+        let decoded = codec
+            .decode_message(&mut flagged)
+            .expect("flagged input decodes through the decompressor")
+            .expect("frame must decode");
+        crate::assert_with_log!(decoded == original, "decoded", original, decoded);
+        crate::test_complete!(
+            "test_framed_codec_decompressor_only_hooks_still_encode_uncompressed"
         );
     }
 
