@@ -30,7 +30,7 @@ mod common;
 
 use asupersync::cx::Cx;
 use asupersync::messaging::RedisClient;
-use asupersync::messaging::redis::{PubSubEvent, RespValue};
+use asupersync::messaging::redis::{PubSubEvent, RedisTransactionOutcome, RespValue};
 use asupersync::trace::{TraceBufferHandle, TraceData, TraceEventKind};
 use std::time::Duration;
 
@@ -54,6 +54,83 @@ fn redis_url_or_skip(name: &str) -> Option<String> {
 
 fn key_for(test_name: &str, suffix: &str) -> String {
     format!("asupersync:e2e:redis_advanced:{test_name}:{suffix}")
+}
+
+/// WATCH protects the value read on a reserved connection. A competing write
+/// aborts EXEC; a deliberate new attempt can commit on that same connection.
+#[test]
+fn redis_e2e_native_session_watch_conflict_commit_and_drop() {
+    use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder};
+
+    let name = "redis_e2e_native_session_watch_conflict_commit_and_drop";
+    init_redis_test(name);
+    let Some(url) = redis_url_or_skip(name) else {
+        return;
+    };
+    let key = key_for(name, "value");
+    let missing = key_for(name, "missing");
+    let nonnumeric = key_for(name, "nonnumeric");
+    let runtime = RuntimeBuilder::multi_thread().worker_threads(2).build().expect("native runtime");
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("native task Cx");
+        let client = RedisClient::connect(&cx, &url).await.expect("client");
+        client.cmd(&cx, &["DEL", &key, &missing, &nonnumeric]).await.unwrap();
+        client.cmd(&cx, &["SET", &key, "1"]).await.unwrap();
+        client.cmd(&cx, &["SET", &nonnumeric, "text"]).await.unwrap();
+        let mut session = client.session(&cx).await.expect("reserved connection");
+        let connection_id = session.cmd(&cx, &["CLIENT", "ID"]).await.unwrap();
+        session.watch(&cx, &[&key]).await.unwrap();
+        assert_eq!(session.cmd(&cx, &["GET", &key]).await.unwrap().as_bytes(), Some(b"1".as_slice()));
+        // The pool must open another connection because the session holds its
+        // lease. Redis observes this mutation before the watched EXEC arrives.
+        client.cmd(&cx, &["SET", &key, "2"]).await.unwrap();
+        let mut transaction = session.transaction(&cx).await.unwrap();
+        transaction.cmd(&cx, &["SET", &key, "3"]).await.unwrap();
+        assert_eq!(transaction.exec(&cx).await.unwrap(), RedisTransactionOutcome::WatchConflict);
+        assert_eq!(client.cmd(&cx, &["GET", &key]).await.unwrap().as_bytes(), Some(b"2".as_slice()));
+        assert_eq!(session.cmd(&cx, &["CLIENT", "ID"]).await.unwrap(), connection_id);
+
+        session.watch(&cx, &[&key]).await.unwrap();
+        assert_eq!(session.cmd(&cx, &["GET", &key]).await.unwrap().as_bytes(), Some(b"2".as_slice()));
+        let mut transaction = session.transaction(&cx).await.unwrap();
+        transaction.cmd(&cx, &["SET", &key, "3"]).await.unwrap();
+        transaction.cmd(&cx, &["GET", &missing]).await.unwrap();
+        transaction.cmd(&cx, &["INCR", &nonnumeric]).await.unwrap();
+        let RedisTransactionOutcome::Committed(values) = transaction.exec(&cx).await.unwrap() else {
+            panic!("an unchanged WATCH set must commit");
+        };
+        assert_eq!(values.len(), 3);
+        assert!(values[0].is_ok());
+        assert!(matches!(values[1], RespValue::Null | RespValue::BulkString(None)));
+        assert!(matches!(&values[2], RespValue::Error(_) | RespValue::BlobError(_)));
+        assert_eq!(client.cmd(&cx, &["GET", &key]).await.unwrap().as_bytes(), Some(b"3".as_slice()));
+
+        session.watch(&cx, &[&key]).await.unwrap();
+        client.cmd(&cx, &["SET", &key, "4"]).await.unwrap();
+        session.unwatch(&cx).await.unwrap();
+        let mut transaction = session.transaction(&cx).await.unwrap();
+        transaction.cmd(&cx, &["SET", &key, "5"]).await.unwrap();
+        assert!(matches!(transaction.exec(&cx).await.unwrap(), RedisTransactionOutcome::Committed(_)));
+
+        let mut transaction = session.transaction(&cx).await.unwrap();
+        transaction.cmd(&cx, &["SET", &key, "discarded"]).await.unwrap();
+        transaction.discard(&cx).await.unwrap();
+        assert_eq!(session.cmd(&cx, &["GET", &key]).await.unwrap().as_bytes(), Some(b"5".as_slice()));
+        let mut transaction = session.transaction(&cx).await.unwrap();
+        transaction.cmd(&cx, &["SET", &key, "abandoned"]).await.unwrap();
+        drop(transaction);
+        assert!(session.is_closed());
+        let mut replacement = client.session(&cx).await.unwrap();
+        assert_ne!(replacement.cmd(&cx, &["CLIENT", "ID"]).await.unwrap(), connection_id);
+        assert_eq!(replacement.cmd(&cx, &["GET", &key]).await.unwrap().as_bytes(), Some(b"5".as_slice()));
+        replacement.close();
+        client.cmd(&cx, &["DEL", &key, &missing, &nonnumeric]).await.unwrap();
+        tracing::info!(?connection_id, "native Redis WATCH conflict, commit, DISCARD, and dropped transaction observed");
+    });
+    runtime.block_on(task);
+    let report = runtime.shutdown_drained(Duration::from_secs(2));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+    test_complete!(name);
 }
 
 /// True if the response is an Array/Map/Set/Push that carries at

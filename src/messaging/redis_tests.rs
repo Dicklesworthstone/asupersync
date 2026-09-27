@@ -52,6 +52,12 @@ mod tests {
         PubSubWrite,
         CommandRead,
         RedirectRead,
+        SessionWatch,
+        SessionUnwatch,
+        SessionMulti,
+        SessionQueued,
+        SessionExec,
+        SessionDiscard,
         #[cfg(feature = "tls")]
         PooledTls,
         #[cfg(feature = "tls")]
@@ -59,6 +65,18 @@ mod tests {
     }
 
     impl NativeRedisWait {
+        fn is_session(self) -> bool {
+            matches!(
+                self,
+                Self::SessionWatch
+                    | Self::SessionUnwatch
+                    | Self::SessionMulti
+                    | Self::SessionQueued
+                    | Self::SessionExec
+                    | Self::SessionDiscard
+            )
+        }
+
         fn is_write(self) -> bool {
             matches!(
                 self,
@@ -126,6 +144,23 @@ mod tests {
                     assert_resp_command(read_resp_frame(&mut stream), &[b"MULTI"]);
                     stream.write_all(b"+OK\r\n").unwrap();
                 }
+                if operation.is_session() && !matches!(operation, NativeRedisWait::SessionWatch) {
+                    assert_resp_command(read_resp_frame(&mut stream), &[b"WATCH", b"key"]);
+                    stream.write_all(b"+OK\r\n").unwrap();
+                    if matches!(
+                        operation,
+                        NativeRedisWait::SessionQueued
+                            | NativeRedisWait::SessionExec
+                            | NativeRedisWait::SessionDiscard
+                    ) {
+                        assert_resp_command(read_resp_frame(&mut stream), &[b"MULTI"]);
+                        stream.write_all(b"+OK\r\n").unwrap();
+                    }
+                    if matches!(operation, NativeRedisWait::SessionExec) {
+                        assert_resp_command(read_resp_frame(&mut stream), &[b"SET", b"key", b"value"]);
+                        stream.write_all(b"+QUEUED\r\n").unwrap();
+                    }
+                }
             }
             if operation.is_write() || operation.is_tls() {
                 let mut prefix = [0; 8];
@@ -135,6 +170,17 @@ mod tests {
                 } else {
                     assert_eq!(prefix[0], 22, "expected a TLS handshake record");
                 }
+            } else if operation.is_session() {
+                let expected: &[&[u8]] = match operation {
+                    NativeRedisWait::SessionWatch => &[b"WATCH", b"key"],
+                    NativeRedisWait::SessionUnwatch => &[b"UNWATCH"],
+                    NativeRedisWait::SessionMulti => &[b"MULTI"],
+                    NativeRedisWait::SessionQueued => &[b"SET", b"key", b"value"],
+                    NativeRedisWait::SessionExec => &[b"EXEC"],
+                    NativeRedisWait::SessionDiscard => &[b"DISCARD"],
+                    _ => unreachable!(),
+                };
+                assert_resp_command(read_resp_frame(&mut stream), expected);
             } else {
                 assert_resp_command(read_resp_frame(&mut stream), &[b"PING"]);
             }
@@ -166,6 +212,13 @@ mod tests {
                 }
             };
             let _ = closed_tx.send((closed, received));
+            if operation.is_session() {
+                let (mut replacement, _) = listener.accept().unwrap();
+                replacement.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                write_hello3_ok(&mut replacement);
+                assert_resp_command(read_resp_frame(&mut replacement), &[b"PING"]);
+                replacement.write_all(b"+PONG\r\n").unwrap();
+            }
         });
 
         let builder = if workers == 0 {
@@ -225,6 +278,11 @@ mod tests {
             } else {
                 None
             };
+            let mut session = if operation.is_session() {
+                Some(client.session(&driver).await.unwrap())
+            } else {
+                None
+            };
             let caller_before = caller.inner.read().cancel_waker_registrations.len();
             let driver_before = driver.inner.read().cancel_waker_registrations.len();
             let payload = operation.is_write().then(|| vec![b'x'; PAYLOAD_LEN]);
@@ -256,6 +314,34 @@ mod tests {
                         }
                         NativeRedisWait::CommandRead | NativeRedisWait::RedirectRead => {
                             client.ping(&caller).await
+                        }
+                        NativeRedisWait::SessionWatch => {
+                            session.as_mut().unwrap().watch(&caller, &["key"]).await
+                        }
+                        NativeRedisWait::SessionUnwatch
+                        | NativeRedisWait::SessionMulti
+                        | NativeRedisWait::SessionQueued
+                        | NativeRedisWait::SessionExec
+                        | NativeRedisWait::SessionDiscard => {
+                            let session = session.as_mut().unwrap();
+                            session.watch(&caller, &["key"]).await?;
+                            if matches!(operation, NativeRedisWait::SessionUnwatch) {
+                                session.unwatch(&caller).await
+                            } else {
+                                let mut transaction = session.transaction(&caller).await?;
+                                match operation {
+                                    NativeRedisWait::SessionMulti => Ok(()),
+                                    NativeRedisWait::SessionQueued => {
+                                        transaction.cmd(&caller, &["SET", "key", "value"]).await
+                                    }
+                                    NativeRedisWait::SessionExec => {
+                                        transaction.cmd(&caller, &["SET", "key", "value"]).await?;
+                                        transaction.exec(&caller).await.map(|_| ())
+                                    }
+                                    NativeRedisWait::SessionDiscard => transaction.discard(&caller).await,
+                                    _ => unreachable!(),
+                                }
+                            }
                         }
                         #[cfg(feature = "tls")]
                         NativeRedisWait::PooledTls => client.ping(&caller).await,
@@ -296,7 +382,8 @@ mod tests {
                 driver.checkpoint().is_ok()
             };
             let stats = client.pool.stats();
-            let poisoned = pubsub.as_ref().is_none_or(|pubsub| pubsub.poisoned);
+            let poisoned = pubsub.as_ref().is_none_or(|pubsub| pubsub.poisoned)
+                && session.as_ref().is_none_or(RedisSession::is_closed);
             done_tx
                 .send((expected, registrations_retired, other_live, poisoned, stats))
                 .unwrap();
@@ -305,7 +392,8 @@ mod tests {
             task_retirement
                 .wait_until(|| task_retire.load(Ordering::Acquire))
                 .await;
-            drop((client, transaction, pubsub));
+            drop((transaction, pubsub, session));
+            operation.is_session().then_some(client)
         });
         let controller = thread::spawn(move || {
             let (caller, driver, waker) = control_rx.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -336,7 +424,21 @@ mod tests {
             // asserting failure so the missing cancellation wake cannot hang.
             (requested, parked, done, closed)
         });
-        runtime.block_on(task);
+        let replacement_client = runtime.block_on(task);
+        if let Some(client) = replacement_client {
+            let replacement = runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let mut session = client.session(&cx).await.expect("fresh session after cancellation");
+                assert_eq!(
+                    session.cmd(&cx, &["PING"]).await.unwrap(),
+                    RespValue::SimpleString("PONG".into())
+                );
+                session.close();
+                assert_eq!(client.pool.stats().active, 0);
+                assert_eq!(client.pool.stats().total, 0);
+            });
+            runtime.block_on(replacement);
+        }
         let (requested, parked, done, closed) = controller.join().unwrap();
         server.join().unwrap();
         let drained = runtime.shutdown_drained(Duration::from_secs(2));
@@ -402,6 +504,24 @@ mod tests {
     fn redis_native_dropped_pipeline_closes_partial_write_and_releases_pool_slot() {
         for workers in [0, 2] {
             native_redis_cancellation(workers, false, true, NativeRedisWait::PipelineWrite);
+        }
+    }
+
+    #[test]
+    fn redis_session_native_parked_cancel_and_drop_fence_every_transaction_phase() {
+        for workers in [0, 2] {
+            for (cancel_driver, drop_wait) in [(false, false), (true, false), (false, true)] {
+                for operation in [
+                    NativeRedisWait::SessionWatch,
+                    NativeRedisWait::SessionUnwatch,
+                    NativeRedisWait::SessionMulti,
+                    NativeRedisWait::SessionQueued,
+                    NativeRedisWait::SessionExec,
+                    NativeRedisWait::SessionDiscard,
+                ] {
+                    native_redis_cancellation(workers, cancel_driver, drop_wait, operation);
+                }
+            }
         }
     }
 
@@ -3064,6 +3184,185 @@ mod tests {
             let err = client.unwatch(&cx).expect_err("UNWATCH must fail closed");
             assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("connection-scoped")));
         });
+    }
+
+    #[test]
+    fn redis_session_native_watch_results_and_discard_reuse_one_connection() {
+        use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+
+        for workers in [0, 2] {
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                write_hello3_ok(&mut stream);
+                let mut exchange = |expected: &[&[u8]], response: &[u8]| {
+                    assert_resp_command(read_resp_frame(&mut stream), expected);
+                    stream.write_all(response).unwrap();
+                };
+                exchange(&[b"WATCH", b"key\0binary"], b"+OK\r\n");
+                exchange(&[b"GET", b"key\0binary"], b"$1\r\n7\r\n");
+                exchange(&[b"MULTI"], b"+OK\r\n");
+                exchange(&[b"GET", b"missing"], b"+QUEUED\r\n");
+                exchange(&[b"INCR", b"nonnumeric"], b"+QUEUED\r\n");
+                exchange(&[b"SET", b"key\0binary", b"8"], b"+QUEUED\r\n");
+                exchange(&[b"EXEC"], b"*3\r\n_\r\n-WRONGTYPE value\r\n+OK\r\n");
+                for conflict in [b"_\r\n".as_slice(), b"*-1\r\n".as_slice()] {
+                    exchange(&[b"WATCH", b"key"], b"+OK\r\n");
+                    exchange(&[b"MULTI"], b"+OK\r\n");
+                    exchange(&[b"SET", b"key", b"9"], b"+QUEUED\r\n");
+                    exchange(&[b"EXEC"], conflict);
+                    exchange(&[b"PING"], b"+PONG\r\n");
+                }
+                exchange(&[b"WATCH", b"key"], b"+OK\r\n");
+                exchange(&[b"MULTI"], b"+OK\r\n");
+                exchange(&[b"INVALID_COMMAND"], b"-ERR unknown command\r\n");
+                exchange(&[b"DISCARD"], b"+OK\r\n");
+                exchange(&[b"WATCH", b"key"], b"+OK\r\n");
+                exchange(&[b"GET", b"key"], b"-MOVED 42 127.0.0.1:1\r\n");
+                exchange(&[b"UNWATCH"], b"+OK\r\n");
+                exchange(&[b"MULTI"], b"+OK\r\n");
+                exchange(&[b"EXEC"], b"*0\r\n");
+                drop(exchange);
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).unwrap(), 0, "session close must close its socket");
+            });
+            let runtime = if workers == 0 {
+                RuntimeBuilder::current_thread().build().unwrap()
+            } else {
+                RuntimeBuilder::multi_thread().worker_threads(workers).build().unwrap()
+            };
+            let task = runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let client = RedisClient::connect(&cx, &format!("redis://{address}")).await.unwrap();
+                let mut session = client.session(&cx).await.unwrap();
+                assert_eq!(client.pool.stats().active, 1);
+                for command in [
+                    vec!["mUlTi"], vec!["EXEC"], vec!["WATCH", "key"], vec!["HELLO", "3"],
+                    vec!["SUBSCRIBE", "channel"], vec!["CLIENT", "rEpLy", "OFF"],
+                ] {
+                    assert!(matches!(session.cmd(&cx, &command).await, Err(RedisError::Protocol(_))));
+                    assert!(!session.is_closed(), "preflight refusal must not close a healthy session");
+                }
+                session.watch_bytes(&cx, &[b"key\0binary"]).await.unwrap();
+                assert_eq!(
+                    session.cmd_bytes(&cx, &[b"GET", b"key\0binary"]).await.unwrap(),
+                    RespValue::BulkString(Some(b"7".to_vec()))
+                );
+                let mut transaction = session.transaction(&cx).await.unwrap();
+                transaction.cmd(&cx, &["GET", "missing"]).await.unwrap();
+                transaction.cmd(&cx, &["INCR", "nonnumeric"]).await.unwrap();
+                transaction.cmd_bytes(&cx, &[b"SET", b"key\0binary", b"8"]).await.unwrap();
+                assert_eq!(transaction.queued_commands(), 3);
+                assert_eq!(
+                    transaction.exec(&cx).await.unwrap(),
+                    RedisTransactionOutcome::Committed(vec![
+                        RespValue::Null,
+                        RespValue::Error("WRONGTYPE value".into()),
+                        RespValue::SimpleString("OK".into()),
+                    ])
+                );
+                for _ in 0..2 {
+                    session.watch(&cx, &["key"]).await.unwrap();
+                    let mut transaction = session.transaction(&cx).await.unwrap();
+                    transaction.cmd(&cx, &["SET", "key", "9"]).await.unwrap();
+                    assert_eq!(transaction.exec(&cx).await.unwrap(), RedisTransactionOutcome::WatchConflict);
+                    assert_eq!(session.cmd(&cx, &["PING"]).await.unwrap(), RespValue::SimpleString("PONG".into()));
+                }
+                session.watch(&cx, &["key"]).await.unwrap();
+                let mut transaction = session.transaction(&cx).await.unwrap();
+                assert!(matches!(transaction.cmd(&cx, &["INVALID_COMMAND"]).await, Err(RedisError::Redis(_))));
+                assert!(matches!(transaction.cmd(&cx, &["SET", "key", "ignored"]).await, Err(RedisError::Protocol(_))));
+                transaction.discard(&cx).await.unwrap();
+                session.watch(&cx, &["key"]).await.unwrap();
+                assert!(matches!(
+                    session.cmd(&cx, &["GET", "key"]).await,
+                    Err(RedisError::Redis(message)) if message == "MOVED 42 127.0.0.1:1"
+                ));
+                session.unwatch(&cx).await.unwrap();
+                assert_eq!(
+                    session.transaction(&cx).await.unwrap().exec(&cx).await.unwrap(),
+                    RedisTransactionOutcome::Committed(Vec::new())
+                );
+                session.close();
+                assert_eq!(client.pool.stats().active, 0);
+                assert_eq!(client.pool.stats().total, 0);
+            });
+            runtime.block_on(task);
+            server.join().unwrap();
+            let report = runtime.shutdown_drained(Duration::from_secs(2));
+            assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        }
+    }
+
+    #[test]
+    fn redis_session_native_terminal_failures_discard_and_allow_replacement() {
+        use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+
+        for failure in ["queue", "exec_count", "exec_type", "exec_error", "drop", "forget"] {
+            let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                write_hello3_ok(&mut stream);
+                assert_resp_command(read_resp_frame(&mut stream), &[b"MULTI"]);
+                stream.write_all(b"+OK\r\n").unwrap();
+                if failure == "queue" {
+                    assert_resp_command(read_resp_frame(&mut stream), &[b"INVALID_COMMAND"]);
+                    stream.write_all(b"-ERR unknown command\r\n").unwrap();
+                } else if failure.starts_with("exec_") {
+                    assert_resp_command(read_resp_frame(&mut stream), &[b"EXEC"]);
+                    let response = match failure {
+                        "exec_count" => b"*1\r\n+OK\r\n".as_slice(),
+                        "exec_type" => b"$-1\r\n".as_slice(),
+                        "exec_error" => b"-EXECABORT transaction discarded\r\n".as_slice(),
+                        _ => unreachable!(),
+                    };
+                    stream.write_all(response).unwrap();
+                }
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).unwrap(), 0, "failed transaction must close without another command");
+                let (mut replacement, _) = listener.accept().unwrap();
+                replacement.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                write_hello3_ok(&mut replacement);
+                assert_resp_command(read_resp_frame(&mut replacement), &[b"PING"]);
+                replacement.write_all(b"+PONG\r\n").unwrap();
+                assert_eq!(replacement.read(&mut byte).unwrap(), 0);
+            });
+            let runtime = RuntimeBuilder::multi_thread().worker_threads(2).build().unwrap();
+            let task = runtime.handle().spawn(async move {
+                let cx = Cx::current().unwrap();
+                let client = RedisClient::connect(&cx, &format!("redis://{address}")).await.unwrap();
+                let mut session = client.session(&cx).await.unwrap();
+                let mut transaction = session.transaction(&cx).await.unwrap();
+                match failure {
+                    "queue" => {
+                        assert!(matches!(transaction.cmd(&cx, &["INVALID_COMMAND"]).await, Err(RedisError::Redis(_))));
+                        assert!(matches!(transaction.exec(&cx).await, Err(RedisError::Protocol(_))));
+                    }
+                    "drop" => drop(transaction),
+                    "forget" => {
+                        std::mem::forget(transaction);
+                        assert!(matches!(session.cmd(&cx, &["PING"]).await, Err(RedisError::Protocol(_))));
+                        session.invalidate();
+                    }
+                    "exec_error" => assert!(matches!(transaction.exec(&cx).await, Err(RedisError::Redis(_)))),
+                    _ => assert!(matches!(transaction.exec(&cx).await, Err(RedisError::Protocol(_)))),
+                }
+                assert!(session.is_closed());
+                assert_eq!(client.pool.stats().active, 0);
+                assert_eq!(client.pool.stats().total, 0);
+                let mut replacement = client.session(&cx).await.unwrap();
+                assert_eq!(replacement.cmd(&cx, &["PING"]).await.unwrap(), RespValue::SimpleString("PONG".into()));
+                replacement.close();
+            });
+            runtime.block_on(task);
+            server.join().unwrap();
+            let report = runtime.shutdown_drained(Duration::from_secs(2));
+            assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{failure}: {report:?}");
+        }
     }
 
     #[test]
