@@ -39,7 +39,7 @@ use super::codec::{Codec, FramedCodec, IdentityCodec};
 #[cfg(not(target_arch = "wasm32"))]
 use super::native_stream::{
     CallDeadline, NativeDuplexStream, NativeServerStream, NativeStreamConfig, NativeStreamEndpoint,
-    NativeStreamWindows,
+    NativeStreamKeepalive, NativeStreamWindows,
 };
 use super::status::{Code, GrpcError, Status, TransportErrorKind};
 use super::streaming::{
@@ -730,8 +730,12 @@ impl<C: Codec> GrpcClient<C> {
     /// closes that connection. Dropping a borrowing `message()` wait preserves
     /// progress. Cancellation and deadlines use the explicit context.
     ///
-    /// Keepalive settings are rejected: this demand-driven connection has no
-    /// background heartbeat. Metadata is bounded to 16 KiB per header block.
+    /// Configured keepalive is driven by polling the returned owner, without a
+    /// background task. An interval enables HTTP/2 PINGs; an omitted timeout
+    /// defaults to twenty seconds. A timeout without an interval is invalid.
+    /// Neither probes nor reads progress while the owner is unpolled. Setup
+    /// remains covered by its existing deadline before keepalive is enabled.
+    /// Metadata is bounded to 16 KiB per header block.
     /// Deterministic loopback is supported by [`Self::server_streaming`], not
     /// this native method. Missing I/O/timer authority, invalid configuration,
     /// unavailable compression and transport metadata overrides refuse before
@@ -765,7 +769,7 @@ impl<C: Codec> GrpcClient<C> {
         let setup = self.prepare_native_stream(cx, path, &request)?;
         let connector = self.channel.tls_connector().cloned();
         let request = Request::with_metadata(request.into_inner(), setup.metadata);
-        setup.endpoint.connect_with_transport(
+        let stream = setup.endpoint.connect_with_transport(
             cx,
             path,
             request,
@@ -774,7 +778,11 @@ impl<C: Codec> GrpcClient<C> {
             setup.windows,
             Some(setup.deadline),
             |tcp| native_h2_transport(tcp, &setup.target, connector),
-        ).await
+        ).await?;
+        match setup.keepalive {
+            Some(keepalive) => stream.with_keepalive(keepalive),
+            None => Ok(stream),
+        }
     }
 
     /// Transfer this client into a native client-streaming or bidirectional RPC.
@@ -793,7 +801,7 @@ impl<C: Codec> GrpcClient<C> {
     /// It does not infer an RPC's cardinality from its path.
     ///
     /// Channel configuration, interceptors, explicit capabilities, ownership
-    /// and keepalive restrictions match [`Self::into_native_server_streaming`].
+    /// and demand-driven keepalive match [`Self::into_native_server_streaming`].
     /// Setup flushes the initial request headers without waiting for response
     /// headers, so a server waiting for the upload cannot deadlock setup.
     /// Dropping `next_event()` preserves progress; do not requeue a message
@@ -842,7 +850,7 @@ impl<C: Codec> GrpcClient<C> {
         let setup = self.prepare_native_stream(cx, path, &request)?;
         let connector = self.channel.tls_connector().cloned();
         let request = Request::with_metadata((), setup.metadata);
-        setup.endpoint.connect_duplex_with_transport(
+        let stream = setup.endpoint.connect_duplex_with_transport(
             cx,
             path,
             request,
@@ -851,7 +859,11 @@ impl<C: Codec> GrpcClient<C> {
             setup.windows,
             Some(setup.deadline),
             |tcp| native_h2_transport(tcp, &setup.target, connector),
-        ).await
+        ).await?;
+        match setup.keepalive {
+            Some(keepalive) => stream.with_keepalive(keepalive),
+            None => Ok(stream),
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -874,11 +886,23 @@ impl<C: Codec> GrpcClient<C> {
         }
         let config = self.channel.config();
         let deadline = CallDeadline::capture(cx, request.metadata(), config.timeout)?;
-        if config.keepalive_interval.is_some() || config.keepalive_timeout.is_some() {
-            return Err(Status::invalid_argument(
-                "native streaming does not support background keepalive settings",
-            ));
-        }
+        let keepalive = match (config.keepalive_interval, config.keepalive_timeout) {
+            (Some(interval), timeout) => {
+                let policy = NativeStreamKeepalive::new(
+                    interval, timeout.unwrap_or(Duration::from_secs(20)),
+                )?;
+                if cx.timer_driver().is_none() {
+                    return Err(Status::failed_precondition(
+                        "native gRPC keepalive requires an explicit timer",
+                    ));
+                }
+                Some(policy)
+            }
+            (None, Some(_)) => return Err(Status::invalid_argument(
+                "native gRPC keepalive timeout requires an interval",
+            )),
+            (None, None) => None,
+        };
         let target = NativeH2Target::parse(
             self.channel.uri(), config.use_tls, self.channel.tls_server_name(),
             self.channel.dial_addr(),
@@ -944,6 +968,7 @@ impl<C: Codec> GrpcClient<C> {
             },
             metadata,
             deadline,
+            keepalive,
         })
     }
 
@@ -1155,6 +1180,7 @@ struct NativeClientSetup {
     windows: NativeStreamWindows,
     metadata: Metadata,
     deadline: CallDeadline,
+    keepalive: Option<NativeStreamKeepalive>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -4266,17 +4292,18 @@ mod tests {
         }
 
         #[test]
-        fn native_stream_preparation_rejects_keepalive_and_conflicting_compression() {
+        fn native_stream_preparation_admits_bounded_keepalive_and_rejects_conflicting_compression() {
             let (cx, _) = context();
             let keepalive = futures_lite::future::block_on(
                 Channel::builder("http://service.invalid")
                     .keepalive_interval(Duration::from_secs(30)).connect(),
             ).unwrap();
-            let status = GrpcClient::new(keepalive)
+            let setup = GrpcClient::new(keepalive)
                 .prepare_native_stream(&cx, "/svc/Upload", &Request::new(()))
-                .err().expect("keepalive cannot be silently ignored");
-            assert_eq!(status.code(), Code::InvalidArgument);
-            assert!(status.message().contains("keepalive"));
+                .expect("keepalive is explicitly driven by the native owner");
+            assert_eq!(setup.keepalive, Some(NativeStreamKeepalive::new(
+                Duration::from_secs(30), Duration::from_secs(20),
+            ).unwrap()));
 
             let channel = futures_lite::future::block_on(
                 Channel::builder("http://service.invalid")
@@ -4290,6 +4317,31 @@ mod tests {
                 .err().expect("last matching value must not hide a conflicting duplicate");
             assert_eq!(status.code(), Code::InvalidArgument);
             assert_eq!(status.message(), "native streaming metadata cannot override channel compression");
+        }
+
+        #[test]
+        fn native_stream_keepalive_defaults_and_invalid_configuration_refuse_before_dial() {
+            let (cx, _) = context();
+            let channel = futures_lite::future::block_on(Channel::connect("http://service.invalid")).unwrap();
+            let setup = GrpcClient::new(channel)
+                .prepare_native_stream(&cx, "/svc/Upload", &Request::new(())).unwrap();
+            assert!(setup.keepalive.is_none());
+
+            for (interval, timeout) in [
+                (None, Some(Duration::from_secs(2))),
+                (Some(Duration::ZERO), None),
+                (Some(Duration::from_secs(2)), Some(Duration::ZERO)),
+            ] {
+                let mut builder = Channel::builder("http://service.invalid");
+                if let Some(interval) = interval { builder = builder.keepalive_interval(interval); }
+                if let Some(timeout) = timeout { builder = builder.keepalive_timeout(timeout); }
+                let channel = futures_lite::future::block_on(builder.connect()).unwrap();
+                let status = GrpcClient::new(channel)
+                    .prepare_native_stream(&cx, "/svc/Upload", &Request::new(()))
+                    .err().expect("invalid heartbeat policy must refuse before network effects");
+                assert_eq!(status.code(), Code::InvalidArgument);
+                assert!(status.message().contains("keepalive"));
+            }
         }
 
         #[test]

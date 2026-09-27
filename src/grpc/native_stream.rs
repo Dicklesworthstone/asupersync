@@ -55,7 +55,8 @@ use crate::grpc::server::{format_grpc_timeout, parse_grpc_timeout};
 use crate::grpc::status::{Code, GrpcError, Status, TransportErrorKind};
 use crate::grpc::streaming::{Metadata, MetadataValue, Request, Streaming};
 use crate::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
-use crate::http::h2::{Connection, FrameCodec, Header, Settings};
+use crate::http::h2::frame::PingFrame;
+use crate::http::h2::{Connection, Frame, FrameCodec, Header, Settings};
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::time::{Sleep, TimerDriverHandle};
 use crate::types::{CancelKind, Time};
@@ -169,6 +170,122 @@ impl NativeStreamConfig {
     }
 }
 
+/// HTTP/2 liveness probes for an actively polled native RPC owner.
+///
+/// A probe starts after `interval` without an incoming frame. Exactly one PING
+/// is outstanding; its absolute `timeout` includes local write stalls and the
+/// matching ACK. Other traffic cannot extend that deadline. An unanswered
+/// probe closes the dedicated connection and returns `UNAVAILABLE`.
+///
+/// No background task is created. Pending `message`, initial `headers`, and
+/// `next_event` waits drive probes; an unpolled owner sends nothing. Calling
+/// `headers` after initial metadata is available does not drive I/O. Coordinate
+/// the interval with the server's keepalive policy to avoid `too_many_pings`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeStreamKeepalive {
+    interval: Duration,
+    timeout: Duration,
+}
+
+impl NativeStreamKeepalive {
+    /// Configure positive idle and acknowledgement intervals.
+    pub fn new(interval: Duration, timeout: Duration) -> Result<Self, Status> {
+        if interval.is_zero() || timeout.is_zero() {
+            return Err(Status::invalid_argument(
+                "native gRPC keepalive intervals must be positive",
+            ));
+        }
+        Ok(Self { interval, timeout })
+    }
+
+    /// Idle duration before the next probe is admitted.
+    #[must_use]
+    pub fn interval(self) -> Duration { self.interval }
+
+    /// Absolute allowance from probe admission through its matching ACK.
+    #[must_use]
+    pub fn timeout(self) -> Duration { self.timeout }
+}
+
+#[derive(Clone, Copy)]
+enum ProbeState {
+    Idle,
+    Queued([u8; 8]),
+    AwaitingAck([u8; 8]),
+}
+
+struct Keepalive {
+    config: NativeStreamKeepalive,
+    clock: TimerDriverHandle,
+    at: Time,
+    timer: Pin<Box<Sleep>>,
+    sequence: u64,
+    state: ProbeState,
+}
+
+impl Keepalive {
+    fn new(config: NativeStreamKeepalive, clock: TimerDriverHandle) -> Self {
+        let at = clock.now() + config.interval;
+        let timer = Box::pin(Sleep::with_timer_driver(at, clock.clone()));
+        Self { config, clock, at, timer, sequence: 0, state: ProbeState::Idle }
+    }
+
+    fn arm(&mut self, duration: Duration) {
+        self.at = self.clock.now() + duration;
+        // Never poll a completed Sleep again, including when an ACK and the
+        // next idle interval are observed in the same outer future poll.
+        self.timer = Box::pin(Sleep::with_timer_driver(self.at, self.clock.clone()));
+    }
+
+    fn poll(&mut self, task: &mut Context<'_>) -> Result<(), Status> {
+        if self.clock.now() < self.at && self.timer.as_mut().poll_deadline(task).is_pending() {
+            return Ok(());
+        }
+        match self.state {
+            ProbeState::Idle => {
+                self.sequence = self.sequence.checked_add(1).ok_or_else(|| {
+                    Status::unavailable("native gRPC keepalive probe identifiers exhausted")
+                })?;
+                self.state = ProbeState::Queued(self.sequence.to_be_bytes());
+                self.arm(self.config.timeout);
+                // Register the new ACK deadline before a transport write/read
+                // can park this outer poll. Rearming alone registers no waker.
+                let _ = self.timer.as_mut().poll_deadline(task);
+                Ok(())
+            }
+            ProbeState::Queued(_) | ProbeState::AwaitingAck(_) => {
+                Err(Status::unavailable("native gRPC keepalive acknowledgement timed out"))
+            }
+        }
+    }
+
+    fn take_probe(&mut self) -> Option<Frame> {
+        if let ProbeState::Queued(data) = self.state {
+            self.state = ProbeState::AwaitingAck(data);
+            Some(Frame::Ping(PingFrame::new(data)))
+        } else {
+            None
+        }
+    }
+
+    fn observe(&mut self, frame: &Frame) -> Result<(), Status> {
+        if !matches!(self.state, ProbeState::Idle) && self.clock.now() >= self.at {
+            return Err(Status::unavailable("native gRPC keepalive acknowledgement timed out"));
+        }
+        match self.state {
+            ProbeState::Idle => self.arm(self.config.interval),
+            ProbeState::AwaitingAck(expected)
+                if matches!(frame, Frame::Ping(ping) if ping.ack && ping.opaque_data == expected) =>
+            {
+                self.state = ProbeState::Idle;
+                self.arm(self.config.interval);
+            }
+            ProbeState::Queued(_) | ProbeState::AwaitingAck(_) => {}
+        }
+        Ok(())
+    }
+}
+
 // A connected call may have already spent part of its budget dialing. Keep
 // the original absolute value AND its clock; never reconstruct it as now + TTL.
 pub(crate) struct CallDeadline {
@@ -243,6 +360,8 @@ pub struct NativeServerStream<IO, C> {
     final_status: Option<Status>,
     ready_messages: usize,
     unflushed_read_frames: usize,
+    keepalive: Option<Keepalive>,
+    outbound_allows_probe: bool,
 }
 
 impl<IO: Unpin, C> Unpin for NativeServerStream<IO, C> {}
@@ -406,7 +525,28 @@ where
             body: BytesMut::new(), response: ResponseHead::new(config.max_metadata_bytes, config.accept_gzip),
             body_limit, stream_id, final_status: None, ready_messages: 0,
             unflushed_read_frames: 0,
+            keepalive: None, outbound_allows_probe: false,
         })
+    }
+
+    /// Enable demand-driven HTTP/2 keepalive on this dedicated connection.
+    ///
+    /// The explicit constructor context must provide a timer. This can be set
+    /// once before terminal completion; replacing an outstanding probe would
+    /// discard its liveness deadline and is refused. Setup timeouts remain
+    /// independent. No work progresses while this owner is unpolled.
+    pub fn with_keepalive(mut self, config: NativeStreamKeepalive) -> Result<Self, Status> {
+        if self.keepalive.is_some() || self.final_status.is_some() {
+            return Err(Status::failed_precondition(
+                "native gRPC keepalive requires a live owner without a probe policy",
+            ));
+        }
+        check_cancellation(&self.cx)?;
+        let clock = self.cx.timer_driver().ok_or_else(|| {
+            Status::failed_precondition("native gRPC keepalive requires an explicit timer")
+        })?;
+        self.keepalive = Some(Keepalive::new(config, clock));
+        Ok(self)
     }
 
     /// Wait for initial response headers, without consuming a message.
@@ -457,6 +597,9 @@ where
             || self.timer.as_mut().is_some_and(|timer| timer.as_mut().poll(task).is_ready())
         {
             return Err(Status::deadline_exceeded("native gRPC stream deadline exceeded"));
+        }
+        if let Some(keepalive) = &mut self.keepalive {
+            keepalive.poll(task)?;
         }
         Ok(())
     }
@@ -545,6 +688,11 @@ where
             match self.frames.decode(&mut self.inbound) {
                 Ok(Some(frame)) => {
                     self.unflushed_read_frames += 1;
+                    if let Some(keepalive) = &mut self.keepalive {
+                        if let Err(error) = keepalive.observe(&frame) {
+                            return Poll::Ready(Err(error));
+                        }
+                    }
                     let received = self.connection.as_mut().expect("live connection")
                         .process_frame(frame)
                         .map_err(|error| Status::internal(format!("invalid HTTP/2 response: {error}")));
@@ -577,8 +725,22 @@ where
         self.outbound_flushed = false;
         for _ in 0..POLL_STEPS {
             if self.outbound.is_empty() {
-                match self.connection.as_mut().expect("live connection").next_frame() {
+                // The preface must be followed by SETTINGS. A PING also must
+                // not split a HEADERS/CONTINUATION block. The previous encoded
+                // frame has completely left our byte cursor before this point.
+                let probe = if self.outbound_allows_probe {
+                    self.keepalive.as_mut().and_then(Keepalive::take_probe)
+                } else {
+                    None
+                };
+                match probe.or_else(|| self.connection.as_mut().expect("live connection").next_frame()) {
                     Some(frame) => {
+                        match &frame {
+                            Frame::Settings(settings) if !settings.ack => self.outbound_allows_probe = true,
+                            Frame::Headers(headers) => self.outbound_allows_probe = headers.end_headers,
+                            Frame::Continuation(continuation) => self.outbound_allows_probe = continuation.end_headers,
+                            _ => {}
+                        }
                         if let Err(error) = frame.encode(&mut self.outbound) {
                             return Poll::Ready(Err(Status::internal(format!("encode HTTP/2 request: {error}"))));
                         }
@@ -641,6 +803,7 @@ where
         self.final_status = Some(status.clone());
         if let Some(token) = self.cancel_waker.take() { self.cx.clear_cancel_waker(token); }
         self.timer = None;
+        self.keepalive = None;
         self.io = None;
         self.connection = None;
         self.inbound = BytesMut::new();

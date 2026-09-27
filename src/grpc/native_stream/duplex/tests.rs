@@ -424,3 +424,280 @@ fn native_endpoints_resolve_and_upload_before_response_headers_with_owned_interr
         with_watchdog(workers, PeerMode::Deadline, DialMode::Hostname);
     }
 }
+
+mod keepalive {
+    use super::*;
+    use crate::grpc::{Channel, GrpcClient};
+    use crate::http::h2::Frame;
+    use crate::http::h2::frame::PingFrame;
+    use crate::runtime::RootDrainOutcome;
+
+    #[derive(Clone, Copy, Debug)]
+    enum Mode { Ack, Silent, WrongAck, Cancel }
+
+    fn write_ping(socket: &mut std::net::TcpStream, ping: PingFrame) {
+        let mut encoded = BytesMut::new();
+        Frame::Ping(ping).encode(&mut encoded).unwrap();
+        socket.write_all(&encoded).unwrap();
+    }
+
+    fn terminal(connection: &mut Connection) {
+        connection.send_headers(1, vec![
+            Header::new("grpc-status", "0"), Header::new("x-terminal", "keepalive"),
+        ], true).unwrap();
+    }
+
+    fn heartbeat_peer(
+        mode: Mode,
+        watch: bool,
+        witnessed: mpsc::Receiver<Cx>,
+    ) -> (SocketAddr, std::thread::JoinHandle<(usize, usize)>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || {
+            let until = Instant::now() + LIMIT;
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < until, "keepalive accept watchdog");
+                        std::thread::park_timeout(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("keepalive accept: {error}"),
+                }
+            };
+            socket.set_read_timeout(Some(LIMIT)).unwrap();
+            socket.set_write_timeout(Some(LIMIT)).unwrap();
+            let mut connection = Connection::server(Settings::server());
+            connection.queue_initial_settings();
+            write_pending(&mut socket, &mut connection);
+            let mut preface = [0; 24];
+            socket.read_exact(&mut preface).unwrap();
+            assert_eq!(&preface, CLIENT_PREFACE);
+            let mut frames = FrameCodec::new();
+            let mut input = BytesMut::new();
+            let mut body = BytesMut::new();
+            let mut codec = FramedCodec::new(IdentityCodec);
+            let mut received_data = false;
+            let mut probes = 0;
+            let mut peer_acks = 0;
+            let mut previous_probe = None;
+            loop {
+                let mut bytes = [0; FRAME_BYTES];
+                let read = socket.read(&mut bytes).expect("keepalive peer read or retirement EOF");
+                if read == 0 {
+                    assert!(received_data && body.is_empty());
+                    return (probes, peer_acks);
+                }
+                input.extend_from_slice(&bytes[..read]);
+                while let Some(frame) = frames.decode(&mut input).unwrap() {
+                    if let Frame::Ping(ping) = &frame {
+                        if ping.ack {
+                            if ping.opaque_data == 99_u64.to_be_bytes() { peer_acks += 1; }
+                        } else if !received_data {
+                            // A slow test worker may spend an idle interval
+                            // before uploading; acknowledge setup probes too.
+                            write_ping(&mut socket, PingFrame::ack(ping.opaque_data));
+                        } else {
+                            probes += 1;
+                            assert_ne!(previous_probe, Some(ping.opaque_data));
+                            previous_probe = Some(ping.opaque_data);
+                            match mode {
+                                Mode::Ack => {
+                                    write_ping(&mut socket, PingFrame::ack(ping.opaque_data));
+                                    if probes == 1 {
+                                        write_ping(&mut socket, PingFrame::new(99_u64.to_be_bytes()));
+                                    }
+                                    reply(&mut connection, &mut codec, b"beat");
+                                    if watch && probes == 2 { terminal(&mut connection); }
+                                }
+                                Mode::WrongAck => {
+                                    let mut wrong = ping.opaque_data;
+                                    wrong[0] ^= 0x80;
+                                    write_ping(&mut socket, PingFrame::ack(wrong));
+                                    write_ping(&mut socket, PingFrame::new(99_u64.to_be_bytes()));
+                                    reply(&mut connection, &mut codec, b"noise");
+                                }
+                                Mode::Silent => {}
+                                Mode::Cancel => {
+                                    let owner = witnessed.recv_timeout(LIMIT)
+                                        .expect("actual parked native owner witness");
+                                    owner.cancel_with(CancelKind::User, Some("keepalive parked call"));
+                                }
+                            }
+                            write_pending(&mut socket, &mut connection);
+                        }
+                        // Deliberately control ACK policy. Connection would
+                        // otherwise acknowledge even the silent-peer fixture.
+                        continue;
+                    }
+                    match connection.process_frame(frame).unwrap() {
+                        Some(ReceivedFrame::Headers { stream_id, .. }) => {
+                            assert_eq!(stream_id, 1);
+                            response_headers(&mut connection);
+                        }
+                        Some(ReceivedFrame::Data { data, end_stream, .. }) => {
+                            body.extend_from_slice(&data);
+                            while let Some(message) = codec.decode_message(&mut body).unwrap() {
+                                assert!(!received_data, "request message is sent exactly once");
+                                assert_eq!(message.as_ref(), b"upload");
+                                received_data = true;
+                                reply(&mut connection, &mut codec, b"echo");
+                            }
+                            if end_stream && !watch {
+                                assert!(matches!(mode, Mode::Ack));
+                                assert_eq!(probes, 2);
+                                terminal(&mut connection);
+                            }
+                        }
+                        _ => {}
+                    }
+                    write_pending(&mut socket, &mut connection);
+                }
+            }
+        });
+        (address, thread)
+    }
+
+    fn scenario(workers: usize, mode: Mode, watch: bool) {
+        let (witness, witnessed) = mpsc::channel();
+        let (address, peer) = heartbeat_peer(mode, watch, witnessed);
+        let runtime = if workers == 1 { RuntimeBuilder::current_thread() }
+            else { RuntimeBuilder::new().worker_threads(workers) }.build().unwrap();
+        let result = runtime.block_on(runtime.handle().spawn_checked(async move {
+            let cx = Cx::current().unwrap();
+            let channel = Channel::builder(format!("http://{address}"))
+                .keepalive_interval(Duration::from_millis(100))
+                .keepalive_timeout(Duration::from_secs(1))
+                .connect_timeout(LIMIT)
+                .connect().await.unwrap();
+            let mut beats = 0;
+            let mut echoed = false;
+            let result = if watch {
+                let mut stream = GrpcClient::new(channel).into_native_server_streaming(
+                    &cx, "/svc/Watch", Request::new(Bytes::from_static(b"upload")),
+                ).await.unwrap();
+                let result = loop {
+                    match stream.message().await {
+                        Ok(Some(message)) if message.as_ref() == b"echo" => echoed = true,
+                        Ok(Some(message)) => {
+                            assert_eq!(message.as_ref(), b"beat");
+                            beats += 1;
+                        }
+                        Ok(None) => break Ok(()),
+                        Err(status) => break Err(status),
+                    }
+                };
+                assert_eq!(stream.buffered_data_bytes(), 0);
+                assert_eq!(stream.status().unwrap().code(), result.as_ref().err().map_or(Code::Ok, Status::code));
+                assert!(stream.message().await.unwrap().is_none());
+                result
+            } else {
+                let mut stream = GrpcClient::new(channel).into_native_duplex(
+                    &cx, "/svc/Exchange", Request::new(()),
+                ).await.unwrap();
+                let mut uploaded = false;
+                let mut witness = Some(witness);
+                let result = loop {
+                    match stream.next_event().await {
+                        Ok(Some(NativeDuplexEvent::RequestFlushed)) if !uploaded => {
+                            stream.queue_message(&Bytes::from_static(b"upload")).unwrap();
+                            uploaded = true;
+                        }
+                        Ok(Some(NativeDuplexEvent::RequestFlushed)) => {}
+                        Ok(Some(NativeDuplexEvent::Message(message))) if message.as_ref() == b"echo" => {
+                            echoed = true;
+                            if matches!(mode, Mode::Cancel) {
+                                // The cancelling peer waits for this actual
+                                // socket/heartbeat Pending witness. Other peer
+                                // modes may already have a ready response.
+                                let mut parked = false;
+                                for _ in 0..2 {
+                                    let outcome = {
+                                        let mut wait = std::pin::pin!(stream.next_event());
+                                        poll_fn(|task| Poll::Ready(wait.as_mut().poll(task))).await
+                                    };
+                                    match outcome {
+                                        Poll::Pending => { parked = true; break; }
+                                        Poll::Ready(Ok(Some(NativeDuplexEvent::RequestFlushed))) => {}
+                                        other => panic!("unexpected call progress before cancellation: {other:?}"),
+                                    }
+                                }
+                                assert!(parked, "one queued send boundary precedes the actual read wait");
+                                witness.take().unwrap().send(cx.clone()).unwrap();
+                            }
+                        }
+                        Ok(Some(NativeDuplexEvent::Message(message))) => {
+                            if matches!(mode, Mode::WrongAck) {
+                                assert_eq!(message.as_ref(), b"noise");
+                            } else {
+                                assert_eq!(message.as_ref(), b"beat");
+                                beats += 1;
+                                if beats == 2 { stream.close_requests().unwrap(); }
+                            }
+                        }
+                        Ok(None) => break Ok(()),
+                        Err(status) => break Err(status),
+                    }
+                };
+                assert!(uploaded);
+                assert_eq!(stream.buffered_data_bytes(), 0);
+                assert_eq!(stream.status().unwrap().code(), result.as_ref().err().map_or(Code::Ok, Status::code));
+                assert!(stream.next_event().await.unwrap().is_none());
+                result
+            };
+            assert!(echoed, "actual request and response DATA precede the idle probe");
+            assert_eq!(beats, if matches!(mode, Mode::Ack) { 2 } else { 0 });
+            assert_eq!(cx.is_cancel_requested(), matches!(mode, Mode::Cancel));
+            if matches!(mode, Mode::Cancel) {
+                assert_eq!(cx.cancel_reason().unwrap().kind, CancelKind::User);
+            }
+            result
+        })).expect("cooperatively acknowledged cancellation retains the typed RPC result");
+        match mode {
+            Mode::Ack => assert!(result.is_ok()),
+            Mode::Silent | Mode::WrongAck => {
+                let status = result.unwrap_err();
+                assert_eq!(status.code(), Code::Unavailable);
+                assert!(status.message().contains("keepalive"));
+            }
+            Mode::Cancel => assert_eq!(result.unwrap_err().code(), Code::Cancelled),
+        }
+        let (probes, peer_acks) = peer.join().expect("peer observed transport retirement EOF");
+        assert_eq!(probes, if matches!(mode, Mode::Ack) { 2 } else { 1 });
+        assert_eq!(peer_acks, usize::from(matches!(mode, Mode::Ack | Mode::WrongAck)));
+        let report = runtime.shutdown_drained(LIMIT);
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+        assert_eq!(report.live_tasks + report.pending_obligations + report.live_regions
+            + report.queued_finalizers + report.pending_spawns, 0);
+        assert!(!report.has_pending_obligation_posts);
+        assert!(runtime.shutdown_timeout(LIMIT));
+    }
+
+    fn checked(workers: usize, mode: Mode, watch: bool) {
+        let (done, finished) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            scenario(workers, mode, watch);
+            done.send(()).unwrap();
+        });
+        finished.recv_timeout(Duration::from_secs(20)).expect("keepalive native wall watchdog");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn native_channel_keepalive_drives_idle_watch_and_bidi_with_live_data_and_peer_probes() {
+        for workers in [1, 2] {
+            for watch in [false, true] { checked(workers, Mode::Ack, watch); }
+        }
+    }
+
+    #[test]
+    fn native_channel_keepalive_silent_wrong_ack_and_parked_cancellation_retire_ownership() {
+        for workers in [1, 2] {
+            for mode in [Mode::Silent, Mode::WrongAck, Mode::Cancel] {
+                checked(workers, mode, false);
+            }
+        }
+    }
+}

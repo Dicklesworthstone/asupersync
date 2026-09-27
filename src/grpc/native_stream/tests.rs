@@ -230,6 +230,181 @@ fn timed_cx(clock: &Arc<VirtualClock>) -> Cx {
         Some(TimerDriverHandle::with_virtual_clock(Arc::clone(clock))), None)
 }
 
+mod keepalive {
+    use super::*;
+
+    fn policy() -> NativeStreamKeepalive {
+        NativeStreamKeepalive::new(Duration::from_secs(2), Duration::from_secs(1)).unwrap()
+    }
+
+    fn ping(ack: bool, sequence: u64) -> Vec<u8> {
+        let mut encoded = BytesMut::new();
+        let ping = if ack { PingFrame::ack(sequence.to_be_bytes()) }
+            else { PingFrame::new(sequence.to_be_bytes()) };
+        Frame::Ping(ping).encode(&mut encoded).unwrap();
+        encoded.to_vec()
+    }
+
+    fn sent_frames(probe: &Probe) -> Vec<Frame> {
+        let bytes = probe.writes.lock().unwrap();
+        assert!(bytes.starts_with(CLIENT_PREFACE));
+        let mut bytes = BytesMut::from(&bytes[CLIENT_PREFACE.len()..]);
+        let mut codec = FrameCodec::new();
+        let mut frames = Vec::new();
+        while let Some(frame) = codec.decode(&mut bytes).unwrap() { frames.push(frame); }
+        assert!(bytes.is_empty(), "all outgoing frames are complete");
+        frames
+    }
+
+    fn probes(probe: &Probe) -> Vec<u64> {
+        sent_frames(probe).into_iter().filter_map(|frame| match frame {
+            Frame::Ping(ping) if !ping.ack => Some(u64::from_be_bytes(ping.opaque_data)),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn keepalive_requires_positive_intervals_and_the_explicit_owner_timer() {
+        for (interval, timeout) in [(Duration::ZERO, Duration::from_secs(1)),
+            (Duration::from_secs(1), Duration::ZERO)] {
+            assert_eq!(NativeStreamKeepalive::new(interval, timeout).unwrap_err().code(), Code::InvalidArgument);
+        }
+        let (io, probe) = fixture(start(), FRAME_BYTES, false);
+        let status = call(io).with_keepalive(policy()).unwrap_err();
+        assert_eq!(status.code(), Code::FailedPrecondition);
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+        assert!(probe.writes.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn keepalive_correlates_ack_and_rearms_without_repolling_completed_sleep() {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+        let cx = timed_cx(&clock);
+        let mut bytes = start();
+        let initial = bytes.len();
+        bytes.extend(ping(true, 1));
+        let (io, probe) = fixture(bytes, FRAME_BYTES, false);
+        probe.readable.store(initial, Ordering::SeqCst);
+        let mut stream = NativeServerStream::new(&cx, io, "localhost", "/svc/Watch",
+            Request::new(Bytes::new()), IdentityCodec, NativeStreamConfig::default())
+            .unwrap().with_keepalive(policy()).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(stream.poll_headers(&mut task).is_ready());
+        clock.advance_to(Time::from_secs(22));
+        assert!(stream.poll_message(&mut task).is_pending());
+        assert_eq!(probes(&probe), vec![1]);
+        for _ in 0..4 { assert!(stream.poll_message(&mut task).is_pending()); }
+        assert_eq!(probes(&probe), vec![1], "one outstanding PING");
+        probe.readable.store(usize::MAX, Ordering::SeqCst);
+        assert!(stream.poll_message(&mut task).is_pending());
+        clock.advance_to(Time::from_secs(23));
+        assert!(stream.poll_message(&mut task).is_pending(), "the acknowledged timer retired");
+        clock.advance_to(Time::from_secs(24));
+        assert!(stream.poll_message(&mut task).is_pending());
+        assert_eq!(probes(&probe), vec![1, 2]);
+        clock.advance_to(Time::from_secs(25));
+        assert!(matches!(stream.poll_message(&mut task), Poll::Ready(Some(Err(status)))
+            if status.code() == Code::Unavailable && status.message().contains("keepalive")));
+        assert!(stream.keepalive.is_none() && stream.io.is_none() && stream.connection.is_none());
+        assert!(!cx.is_cancel_requested());
+        assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+        assert!(matches!(stream.poll_message(&mut task), Poll::Ready(None)));
+    }
+
+    #[test]
+    fn keepalive_wrong_ack_and_peer_traffic_cannot_extend_an_outstanding_deadline() {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+        let cx = timed_cx(&clock);
+        let mut bytes = start();
+        let initial = bytes.len();
+        bytes.extend(ping(true, 99));
+        bytes.extend(ping(false, 7));
+        bytes.extend(frame(0, 0, &message(b"traffic")));
+        let (io, probe) = fixture(bytes, FRAME_BYTES, false);
+        probe.readable.store(initial, Ordering::SeqCst);
+        let mut stream = NativeServerStream::new(&cx, io, "localhost", "/svc/Watch",
+            Request::new(Bytes::new()), IdentityCodec, NativeStreamConfig::default())
+            .unwrap().with_keepalive(policy()).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(stream.poll_headers(&mut task).is_ready());
+        clock.advance_to(Time::from_secs(22));
+        assert!(stream.poll_message(&mut task).is_pending());
+        probe.readable.store(usize::MAX, Ordering::SeqCst);
+        assert_eq!(run(stream.message()).unwrap().unwrap().as_ref(), b"traffic");
+        assert!(stream.poll_message(&mut task).is_pending());
+        assert!(sent_frames(&probe).iter().any(|frame| matches!(frame, Frame::Ping(ping)
+            if ping.ack && ping.opaque_data == 7_u64.to_be_bytes())), "peer probes are still acknowledged");
+        clock.advance_to(Time::from_secs(23));
+        assert_eq!(run(stream.message()).unwrap_err().code(), Code::Unavailable);
+        assert_eq!(probes(&probe), vec![1]);
+        assert_eq!(stream.buffered_data_bytes(), 0);
+    }
+
+    #[test]
+    fn keepalive_late_matching_ack_cannot_rescue_an_expired_probe() {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+        let cx = timed_cx(&clock);
+        let mut state = Keepalive::new(policy(), cx.timer_driver().unwrap());
+        let mut task = Context::from_waker(Waker::noop());
+        clock.advance_to(Time::from_secs(22));
+        state.poll(&mut task).unwrap();
+        assert!(state.take_probe().is_some());
+        // A transport poll may consume the remaining time before returning.
+        clock.advance_to(Time::from_secs(23));
+        assert_eq!(state.observe(&Frame::Ping(PingFrame::ack(1_u64.to_be_bytes())))
+            .unwrap_err().code(), Code::Unavailable);
+    }
+
+    #[test]
+    fn keepalive_unpolled_owner_is_idle_and_probe_never_splits_a_header_block() {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+        let cx = timed_cx(&clock);
+        let (io, probe) = fixture(start(), 1, false);
+        let mut request = Request::new(Bytes::new());
+        assert!(request.metadata_mut().insert("x-large", "A".repeat(100_000)));
+        let mut stream = NativeServerStream::new(&cx, io, "localhost", "/svc/Watch", request,
+            IdentityCodec, NativeStreamConfig { max_metadata_bytes: 200_000, ..NativeStreamConfig::default() })
+            .unwrap().with_keepalive(policy()).unwrap();
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(probe.writes.lock().unwrap().is_empty());
+        for _ in 0..10 {
+            assert!(!matches!(stream.poll_outbound(&mut task), Poll::Ready(Err(_))));
+            if !stream.outbound_allows_probe && probe.writes.lock().unwrap().len() > 100 { break; }
+        }
+        assert!(!stream.outbound_allows_probe, "witness a partial fragmented header block");
+        assert!(!stream.outbound.is_empty());
+        let written = probe.writes.lock().unwrap().len();
+        clock.advance_to(Time::from_secs(22));
+        assert_eq!(probe.writes.lock().unwrap().len(), written, "unpolled time writes nothing");
+        stream.gate(&mut task).unwrap();
+        for _ in 0..10_000 {
+            if matches!(stream.poll_outbound(&mut task), Poll::Ready(Ok(()))) { break; }
+        }
+        let frames = sent_frames(&probe);
+        let mut header_open = false;
+        let mut saw_continuation = false;
+        let mut saw_ping = false;
+        assert!(matches!(frames.first(), Some(Frame::Settings(settings)) if !settings.ack));
+        for frame in frames {
+            match frame {
+                Frame::Headers(headers) => header_open = !headers.end_headers,
+                Frame::Continuation(continuation) => {
+                    assert!(header_open);
+                    saw_continuation = true;
+                    header_open = !continuation.end_headers;
+                }
+                Frame::Ping(ping) if !ping.ack => {
+                    assert!(!header_open, "PING cannot interrupt CONTINUATION sequencing");
+                    saw_ping = true;
+                }
+                _ => assert!(!header_open),
+            }
+        }
+        assert!(saw_continuation && saw_ping);
+        assert!(!header_open);
+    }
+}
+
 #[test]
 fn absolute_deadline_covers_idle_consumption_and_never_cancels_parent() {
     let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
@@ -604,6 +779,40 @@ mod duplex {
             assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
             assert_eq!(cx.is_cancel_requested(), cancel);
             assert!(stream.io.is_none() && stream.connection.is_none());
+        }
+    }
+
+    #[test]
+    fn keepalive_deadline_retires_a_parked_partial_write_or_flush_without_spinning() {
+        struct Counter(AtomicUsize);
+        impl Wake for Counter {
+            fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        for block_flush in [false, true] {
+            let (io, probe, gate) = gated(start(), block_flush, false);
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_secs(20)));
+            let cx = timed_cx(&clock);
+            let mut stream = NativeServerStream::new(&cx, io, "localhost", "/svc/Watch",
+                Request::new(Bytes::new()), IdentityCodec, NativeStreamConfig::default())
+                .unwrap().with_keepalive(NativeStreamKeepalive::new(
+                    Duration::from_secs(2), Duration::from_secs(1),
+                ).unwrap()).unwrap();
+            let counter = Arc::new(Counter(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task = Context::from_waker(&waker);
+            assert!(stream.poll_message(&mut task).is_pending());
+            assert!(gate.blocked.load(Ordering::SeqCst) > 0);
+            clock.advance_to(Time::from_secs(22));
+            assert!(stream.poll_message(&mut task).is_pending());
+            let wakes = counter.0.load(Ordering::SeqCst);
+            for _ in 0..4 { assert!(stream.poll_message(&mut task).is_pending()); }
+            assert_eq!(counter.0.load(Ordering::SeqCst), wakes, "blocked heartbeat does not self-wake");
+            clock.advance_to(Time::from_secs(23));
+            assert_eq!(run(stream.message()).unwrap_err().code(), Code::Unavailable);
+            assert!(!gate.open.load(Ordering::SeqCst));
+            assert_eq!(probe.drops.load(Ordering::SeqCst), 1);
+            assert!(stream.keepalive.is_none() && stream.outbound.is_empty());
+            assert!(!cx.is_cancel_requested());
         }
     }
 }

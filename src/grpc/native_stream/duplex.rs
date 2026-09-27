@@ -156,6 +156,14 @@ where
             && !self.inner.response.ended
     }
 
+    /// Enable the shared connection owner's demand-driven HTTP/2 keepalive.
+    /// Both upload and response waits use one outstanding probe and deadline.
+    /// An unpolled owner does not send probes or start background work.
+    pub fn with_keepalive(mut self, config: NativeStreamKeepalive) -> Result<Self, Status> {
+        self.inner = self.inner.with_keepalive(config)?;
+        Ok(self)
+    }
+
     fn check_request(&mut self) -> Result<(), Status> {
         if !self.request_ready() {
             return Err(Status::failed_precondition(
