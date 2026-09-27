@@ -34,6 +34,9 @@ if [[ "${1:-}" == "__remote_scan" ]]; then
         'version = "0.1.0"' \
         'edition = "2024"' \
         > "${REMOTE_STAGE_ROOT}/beta/Cargo.toml"
+    # The committed template stays a valid workspace (RCH preflight parses it).
+    printf '%s\n' '[workspace]' 'members = ["alpha", "beta", "missing_member"]' \
+        > "${REMOTE_STAGE_ROOT}/Cargo.toml"
     env CARGO_TARGET_DIR="${REMOTE_TARGET_DIR}" \
         "${CARGO_BIN}" run --quiet --features cli --bin asupersync -- \
         --format json \
