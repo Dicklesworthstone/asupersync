@@ -1392,8 +1392,8 @@ impl QuicHandshakeDriver {
     /// Pump pending outbound handshake segments, assemble + protect each as a
     /// long-header packet to `peer`, and send them over `endpoint`. OneRtt-level
     /// segments (post-handshake tickets) belong to the 1-RTT data plane and are
-    /// skipped. Returns the sent packet flight so the caller can retransmit it on
-    /// a handshake PTO.
+    /// skipped. Returns the sent flight so the caller can retransmit it on a
+    /// handshake PTO.
     async fn send_pending_flight(
         &mut self,
         cx: &Cx,
@@ -1402,9 +1402,10 @@ impl QuicHandshakeDriver {
         dst_cid: ConnectionId,
         src_cid: ConnectionId,
         packet_number: &mut u64,
-    ) -> Result<Vec<OutgoingPacket>, QuicTlsError> {
+    ) -> Result<SentHandshakeFlight, QuicTlsError> {
         let segments = self.pump_outbound()?;
         let mut packets = Vec::new();
+        let mut crypto = Vec::new();
         for segment in segments {
             if segment.level == HandshakeLevel::OneRtt {
                 continue;
@@ -1425,6 +1426,7 @@ impl QuicHandshakeDriver {
                     level: segment.level,
                     data: chunk.to_vec(),
                 };
+                let offset = self.next_crypto_offset(chunk.level);
                 let data =
                     self.assemble_handshake_packet(&chunk, dst_cid, src_cid, *packet_number)?;
                 *packet_number += 1;
@@ -1433,6 +1435,7 @@ impl QuicHandshakeDriver {
                     data,
                     send_time: None,
                 });
+                crypto.push((chunk, offset));
             }
         }
         if !packets.is_empty() {
@@ -1441,7 +1444,49 @@ impl QuicHandshakeDriver {
                 .await
                 .map_err(|_| handshake_failure("udp_send"))?;
         }
-        Ok(packets)
+        Ok(SentHandshakeFlight {
+            packets,
+            crypto,
+            dst_cid,
+            src_cid,
+        })
+    }
+
+    /// Resend a flight's CRYPTO offsets and bytes in new packets. RFC 9000
+    /// section 12.3 forbids reusing a packet number, and a peer that already
+    /// processed the first copy suppresses an exact duplicate.
+    async fn retransmit_flight(
+        &mut self,
+        cx: &Cx,
+        endpoint: &mut QuicUdpEndpoint,
+        flight: &mut SentHandshakeFlight,
+        packet_number: &mut u64,
+    ) -> Result<bool, QuicTlsError> {
+        let Some(peer) = flight.packets.first().map(|packet| packet.dst_addr) else {
+            return Ok(false);
+        };
+        let mut packets = Vec::with_capacity(flight.crypto.len());
+        for (segment, offset) in &flight.crypto {
+            let data = self.assemble_handshake_packet_at(
+                segment,
+                *offset,
+                flight.dst_cid,
+                flight.src_cid,
+                *packet_number,
+            )?;
+            *packet_number += 1;
+            packets.push(OutgoingPacket {
+                dst_addr: peer,
+                data,
+                send_time: None,
+            });
+        }
+        endpoint
+            .send_batch(cx, &packets)
+            .await
+            .map_err(|_| handshake_failure("udp_send"))?;
+        flight.packets = packets;
+        Ok(true)
     }
 
     /// Protect the final Handshake ACK without transferring its ownership to
@@ -1550,19 +1595,14 @@ fn handshake_ack_frame(received: &BTreeSet<u64>) -> Option<QuicFrame> {
     })
 }
 
-async fn retransmit_handshake_flight(
-    cx: &Cx,
-    endpoint: &mut QuicUdpEndpoint,
-    packets: &[OutgoingPacket],
-) -> Result<bool, QuicTlsError> {
-    if packets.is_empty() {
-        return Ok(false);
-    }
-    endpoint
-        .send_batch(cx, packets)
-        .await
-        .map_err(|_| handshake_failure("udp_send"))?;
-    Ok(true)
+/// A sent handshake flight and the CRYPTO data behind each packet, so a
+/// retransmission resends the same offsets and bytes under new packet numbers.
+#[derive(Debug, Default)]
+struct SentHandshakeFlight {
+    packets: Vec<OutgoingPacket>,
+    crypto: Vec<(HandshakeSegment, u64)>,
+    dst_cid: ConnectionId,
+    src_cid: ConnectionId,
 }
 
 /// Drive a client QUIC/TLS-1.3 handshake to completion over `endpoint`.
@@ -1614,7 +1654,7 @@ pub async fn client_handshake_over_udp(
             // wire the server cannot complete, and only the data plane will
             // observe the evidence (the server's retransmitted long-header
             // flight). See `QuicHandshakeDriver::final_flight`.
-            driver.final_flight = last_flight;
+            driver.final_flight = last_flight.packets;
             return Ok(early_one_rtt);
         }
         let received = match crate::time::timeout_at(
@@ -1627,7 +1667,10 @@ pub async fn client_handshake_over_udp(
             Ok(Err(_)) => return Err(handshake_failure("udp_recv")),
             Err(_) => {
                 flights += 1;
-                if retransmit_handshake_flight(cx, endpoint, &last_flight).await? {
+                if driver
+                    .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                    .await?
+                {
                     flight_sent_at = Instant::now();
                     receive_deadline = cx.now() + HANDSHAKE_PTO;
                     continue;
@@ -1716,7 +1759,9 @@ pub async fn client_handshake_over_udp(
                     res
                 }
                 Err(err) if is_stale_handshake_packet_error(&err) => {
-                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                    let _ = driver
+                        .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                        .await?;
                     continue;
                 }
                 // A forged, corrupted or stray datagram is discarded (RFC
@@ -1748,11 +1793,13 @@ pub async fn client_handshake_over_udp(
                     &mut packet_number,
                 )
                 .await?;
-            if !sent.is_empty() {
+            if !sent.packets.is_empty() {
                 last_flight = sent;
                 receive_deadline = cx.now() + HANDSHAKE_PTO;
             } else if !driver.is_complete() {
-                let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                let _ = driver
+                    .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                    .await?;
             }
         }
         // Stray datagrams neither spend the flight budget nor extend the PTO.
@@ -1765,7 +1812,7 @@ pub async fn client_handshake_over_udp(
 
     if driver.is_complete() {
         driver.verify_completed_retry(dcid, accepted_retry)?;
-        driver.final_flight = last_flight;
+        driver.final_flight = last_flight.packets;
         Ok(early_one_rtt)
     } else {
         Err(handshake_failure("client_handshake_incomplete"))
@@ -1805,7 +1852,7 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
     driver.install_initial_keys(dcid.as_bytes())?;
     let mut packet_number = 0u64;
     let mut peer: Option<(SocketAddr, ConnectionId)> = None;
-    let mut last_flight = Vec::new();
+    let mut last_flight = SentHandshakeFlight::default();
     let mut early_one_rtt = Vec::new();
     let mut last_early_data_resend: Option<Instant> = None;
     let mut no_peer_idle_timeouts = 0usize;
@@ -1831,7 +1878,10 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                     }
                     continue;
                 }
-                if retransmit_handshake_flight(cx, endpoint, &last_flight).await? {
+                if driver
+                    .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                    .await?
+                {
                     continue;
                 }
                 return Err(handshake_failure("server_handshake_recv_timeout"));
@@ -1855,11 +1905,13 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                 }
                 early_one_rtt.push(packet);
                 if !driver.is_complete()
-                    && !last_flight.is_empty()
+                    && !last_flight.packets.is_empty()
                     && last_early_data_resend.is_none_or(|at| at.elapsed() >= HANDSHAKE_PTO)
                 {
                     last_early_data_resend = Some(Instant::now());
-                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                    let _ = driver
+                        .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                        .await?;
                 }
                 continue;
             }
@@ -1867,7 +1919,9 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                 Ok(res) => res,
                 Err(err) if is_stale_handshake_packet_error(&err) => {
                     if peer.is_some() {
-                        let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                        let _ = driver
+                            .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                            .await?;
                     }
                     continue;
                 }
@@ -1902,10 +1956,12 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                         &mut packet_number,
                     )
                     .await?;
-                if !sent.is_empty() {
+                if !sent.packets.is_empty() {
                     last_flight = sent;
                 } else if !driver.is_complete() {
-                    let _ = retransmit_handshake_flight(cx, endpoint, &last_flight).await?;
+                    let _ = driver
+                        .retransmit_flight(cx, endpoint, &mut last_flight, &mut packet_number)
+                        .await?;
                 }
             }
         }
@@ -2008,6 +2064,88 @@ pub(crate) mod tests {
         assert_eq!(ack_ranges[1].gap.value(), 0);
         assert_eq!(ack_ranges[1].ack_range_length.value(), 0);
         assert!(ecn_counts.is_none());
+    }
+
+    #[test]
+    fn client_pto_resends_its_initial_under_a_new_packet_number() {
+        // A silent peer captures the client's first flight and its PTO copy.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        silent
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let server_addr = silent.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut datagrams = Vec::new();
+            let mut buffer = vec![0_u8; 65_535];
+            while datagrams.len() < 2 {
+                let (length, _) = silent
+                    .recv_from(&mut buffer)
+                    .expect("client flight and its PTO copy");
+                datagrams.push(buffer[..length].to_vec());
+            }
+            datagrams
+        });
+        let original_cid = ConnectionId::new(&[0x4f; 8]).unwrap();
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().unwrap())
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().expect("native client context");
+            let mut endpoint = QuicUdpEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                crate::net::quic_native::QuicUdpEndpointConfig::default(),
+            )
+            .await
+            .unwrap();
+            let mut driver = QuicHandshakeDriver::client(
+                client_config(vec![ca_cert()], vec![ATP_QUIC_ALPN.to_vec()]).unwrap(),
+                ServerName::try_from("localhost").unwrap(),
+                Vec::new(),
+            )
+            .unwrap();
+            // The peer never answers; stop once the first PTO has fired.
+            let result = crate::time::timeout(
+                cx.now(),
+                HANDSHAKE_PTO + Duration::from_millis(500),
+                client_handshake_over_udp(
+                    &cx,
+                    &mut endpoint,
+                    server_addr,
+                    &mut driver,
+                    original_cid,
+                    ConnectionId::new(&[0x50; 8]).unwrap(),
+                ),
+            )
+            .await;
+            assert!(result.is_err(), "a silent peer cannot complete TLS");
+        });
+        let datagrams = peer.join().unwrap();
+        assert_eq!(
+            datagrams[0].len(),
+            datagrams[1].len(),
+            "the same CRYPTO bytes"
+        );
+        assert_ne!(
+            datagrams[0], datagrams[1],
+            "a PTO copy never reuses a packet number"
+        );
+        let mut server = QuicHandshakeDriver::server(
+            server_config(vec![leaf_cert()], leaf_key(), vec![ATP_QUIC_ALPN.to_vec()]).unwrap(),
+            Vec::new(),
+        )
+        .unwrap();
+        server
+            .install_initial_keys(original_cid.as_bytes())
+            .unwrap();
+        server.recv_handshake_packet(&datagrams[0]).unwrap();
+        server.recv_handshake_packet(&datagrams[1]).unwrap();
+        assert_eq!(
+            server.received_handshake_packet_numbers(HandshakeLevel::Initial),
+            [0, 1],
+            "the peer authenticates the PTO copy as a new packet"
+        );
     }
 
     #[test]

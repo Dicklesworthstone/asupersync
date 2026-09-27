@@ -156,8 +156,13 @@ fn run_handshake_drop_proxy(
                         client_addr = Some(src);
                         server_addr
                     };
-                    if deduplicate_server && from_server {
-                        let fresh = seen_server_packets.insert(buf[..len].to_vec());
+                    if deduplicate_server && from_server && buf[0] & 0x80 != 0 {
+                        // A resent server flight carries new packet numbers,
+                        // so its bytes differ (RFC 9000 section 12.3). Header
+                        // protection masks only the low first-byte bits, so
+                        // the long-header form and type plus the datagram
+                        // length identify a resent flight datagram.
+                        let fresh = seen_server_packets.insert((buf[0] & 0xf0, len));
                         eprintln!("handshake proxy server packet: bytes={len} fresh={fresh}");
                         if !fresh {
                             continue;
@@ -708,8 +713,8 @@ fn real_tls13_final_ack_does_not_retransmit_client_finished() {
                 .unwrap();
         let server_addr = server_endpoint.local_addr();
         // Retained server CRYPTO flights legitimately request a Finished
-        // resend. Remove byte-identical server retransmissions in this
-        // fixture so the post-handoff receive isolates the fresh final ACK.
+        // resend. Remove resent server flights in this fixture so the
+        // post-handoff receive isolates the fresh final ACK.
         let proxy = HandshakeDropProxy::spawn_with_server_deduplication(server_addr, true);
         let client_tls = client_config(
             vec![parse_one_cert(CA_CERT_PEM)],
