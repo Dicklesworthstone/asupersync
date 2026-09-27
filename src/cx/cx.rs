@@ -4765,6 +4765,76 @@ where
         })
     }
 
+    /// Spawn a blocking closure with a region-owned retirement wait.
+    ///
+    /// The admitted runtime task stays alive until the blocking pool has
+    /// completed the closure and destroyed its captures. Cancellation before
+    /// the pool claims the closure prevents invocation; cancellation after
+    /// claim is cooperative through the closure's own inherited `Cx`. A
+    /// running closure's returned value is preserved, including a typed
+    /// cancellation result. The returned handle's `join` waits for actual
+    /// retirement even when its caller is cancelled.
+    ///
+    /// Dropping the handle requests cancellation without detaching ownership.
+    /// If it is dropped before result publication, destruction of an unclaimed
+    /// return value also runs on the pool and precedes retirement. Once a result
+    /// is published to a live handle, it belongs to that handle's caller.
+    ///
+    /// This requires an explicitly configured blocking pool. A queued cancelled
+    /// closure stays owned until a worker destroys its captures; if every pool
+    /// worker is blocked, region shutdown can time out while retaining the
+    /// unfinished task. Hard runtime teardown retains its existing semantics.
+    /// The existing [`Self::spawn_blocking`] soft-cancellation API is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SpawnError::RuntimeUnavailable` without a blocking pool or
+    /// runtime spawn authority. Later admission refusal is observed by joining
+    /// the returned handle. No closure is executed inline as a fallback.
+    pub fn spawn_blocking_drained<F, R>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::spawn_blocking::DrainedBlockingHandle<R>, crate::runtime::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let pool = self.blocking_pool_handle()
+            .ok_or(crate::runtime::SpawnError::RuntimeUnavailable)?;
+        let state = crate::runtime::spawn_blocking::DrainedBlockingState::new();
+        let publication = Arc::clone(&state);
+        let task = self.spawn(move |child| {
+            crate::runtime::spawn_blocking::drive_drained_blocking(child, pool, f, publication)
+        })?;
+        Ok(crate::runtime::spawn_blocking::DrainedBlockingHandle::new(task, state))
+    }
+
+    /// Scope-targeting counterpart of [`Self::spawn_blocking_drained`].
+    ///
+    /// Region ownership and budgets come from `scope`; capability inheritance,
+    /// pool selection, cancellation and retirement have the same semantics as
+    /// the own-region method. Closing this scope waits for the actual blocking
+    /// closure and any unclaimed-result destruction.
+    pub fn spawn_blocking_drained_in<F, R, P>(
+        &self,
+        scope: &crate::cx::Scope<'_, P>,
+        f: F,
+    ) -> Result<crate::runtime::spawn_blocking::DrainedBlockingHandle<R>, crate::runtime::SpawnError>
+    where
+        P: crate::types::Policy,
+        F: FnOnce(Cx<Caps>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let pool = self.blocking_pool_handle()
+            .ok_or(crate::runtime::SpawnError::RuntimeUnavailable)?;
+        let state = crate::runtime::spawn_blocking::DrainedBlockingState::new();
+        let publication = Arc::clone(&state);
+        let task = self.spawn_in(scope, move |child| {
+            crate::runtime::spawn_blocking::drive_drained_blocking(child, pool, f, publication)
+        })?;
+        Ok(crate::runtime::spawn_blocking::DrainedBlockingHandle::new(task, state))
+    }
+
     /// Spawns a `!Send` task into **this Cx's own region**, pinned to the
     /// current worker thread (br-asupersync-i9y5wb / A2.2a).
     ///

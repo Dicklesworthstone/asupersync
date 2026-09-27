@@ -4834,6 +4834,27 @@ impl Runtime {
             .map(|pool| pool.spawn_on_cohort(cohort, f))
     }
 
+    /// Spawn blocking work owned by this runtime's root region.
+    ///
+    /// Unlike [`Self::spawn_blocking`], the returned task participates in
+    /// [`Self::shutdown_drained`]: the root stays live until the closure and its
+    /// captures retire. The closure receives its actual task `Cx`, and a
+    /// started closure's exact result survives cancellation. This requires a
+    /// configured blocking pool and never executes the closure inline.
+    ///
+    /// Cancellation cannot interrupt a running synchronous closure. A bounded
+    /// root drain reports timeout and retains unfinished work until it returns.
+    pub fn spawn_blocking_drained<F, T>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::spawn_blocking::DrainedBlockingHandle<T>, SpawnError>
+    where
+        F: FnOnce(crate::cx::Cx) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.request_cx_with_budget(Budget::INFINITE).spawn_blocking_drained(f)
+    }
+
     /// Returns a handle to the blocking pool, if configured.
     #[must_use]
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
@@ -5192,6 +5213,20 @@ impl RuntimeHandle {
     #[must_use]
     pub fn blocking_handle(&self) -> Option<crate::runtime::blocking_pool::BlockingPoolHandle> {
         self.try_inner().ok()?.blocking_handle()
+    }
+
+    /// Root-region-owned counterpart of [`Runtime::spawn_blocking_drained`].
+    /// A stale handle or missing blocking pool returns `RuntimeUnavailable`.
+    /// The work remains part of root drain even when this handle is dropped.
+    pub fn spawn_blocking_drained<F, T>(
+        &self,
+        f: F,
+    ) -> Result<crate::runtime::spawn_blocking::DrainedBlockingHandle<T>, SpawnError>
+    where
+        F: FnOnce(crate::cx::Cx) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.try_request_cx_with_budget(Budget::INFINITE)?.spawn_blocking_drained(f)
     }
 }
 
