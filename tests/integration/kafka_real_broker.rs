@@ -1405,6 +1405,154 @@ fn test_real_broker_transaction_exactly_once() {
     });
 }
 
+#[cfg(feature = "kafka")]
+#[test]
+fn test_real_broker_transaction_offsets_survive_restart_and_abort() {
+    use asupersync::messaging::kafka::{TransactionalConfig, TransactionalProducer};
+    use asupersync::messaging::kafka_consumer::IsolationLevel;
+
+    async fn next_record(cx: &asupersync::Cx, consumer: &KafkaConsumer) -> ConsumerRecord {
+        let start = std::time::Instant::now();
+        loop {
+            assert!(start.elapsed() < Duration::from_secs(30), "missing real broker record");
+            if let Some(record) = consumer.poll(cx, Duration::from_millis(250)).await.unwrap() {
+                return record;
+            }
+        }
+    }
+
+    let Some(config) = require_real_broker() else {
+        return;
+    };
+    let log = KafkaTestLogger::new("real_broker_transaction_offsets");
+    run_test_with_cx(|cx| async move {
+        let input = unique_topic("test-offset-input");
+        let output = unique_topic("test-offset-output");
+        let group = format!("test-offset-group-{}", fastrand::u64(..));
+        let producer = KafkaProducer::new(ProducerConfig::new(config.bootstrap_servers.clone())).unwrap();
+        let transaction_producer = TransactionalProducer::new(
+            TransactionalConfig::new(
+                ProducerConfig::new(config.bootstrap_servers.clone()),
+                format!("test-offset-transaction-{}", fastrand::u64(..)),
+            ).transaction_timeout(Duration::from_secs(30)),
+        ).unwrap();
+        let consumer_config = ConsumerConfig::new(config.bootstrap_servers.clone(), &group)
+            .force_real_kafka(true)
+            .enable_auto_commit(false)
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .isolation_level(IsolationLevel::ReadCommitted);
+
+        log.phase("seed_ordered_input");
+        let mut inputs = Vec::new();
+        for payload in [b"first".as_slice(), b"second", b"restart-witness"] {
+            inputs.push(producer.send(&cx, &input, None, payload, Some(0)).await.unwrap());
+        }
+        let consumer = KafkaConsumer::new(consumer_config.clone()).unwrap();
+        consumer.subscribe(&cx, &[&input]).await.unwrap();
+        let first = next_record(&cx, &consumer).await;
+        assert_eq!(first.offset, inputs[0].offset);
+
+        log.phase("commit_output_with_first_input_offset");
+        let metadata = consumer.group_metadata(&cx).await.unwrap();
+        let transaction = transaction_producer.begin_transaction(&cx).await.unwrap();
+        transaction.send(&cx, &output, Some(b"ordered-output"), b"committed-first")
+            .await.unwrap();
+        transaction.send_offsets_to_transaction(&cx, &[
+            TopicPartitionOffset::new(&input, first.partition, first.offset + 1),
+        ], &metadata).await.unwrap();
+        assert_eq!(consumer.committed_offset(&input, 0), None);
+        transaction.commit(&cx).await.unwrap();
+        assert_eq!(consumer.committed_offset(&input, 0), Some(inputs[0].offset + 1));
+
+        log.phase("abort_output_with_second_input_offset");
+        let second = next_record(&cx, &consumer).await;
+        assert_eq!(second.offset, inputs[1].offset);
+        let metadata = consumer.group_metadata(&cx).await.unwrap();
+        let transaction = transaction_producer.begin_transaction(&cx).await.unwrap();
+        transaction.send(&cx, &output, Some(b"ordered-output"), b"aborted-second")
+            .await.unwrap();
+        transaction.send_offsets_to_transaction(&cx, &[
+            TopicPartitionOffset::new(&input, second.partition, second.offset + 1),
+        ], &metadata).await.unwrap();
+        transaction.abort(&cx).await.unwrap();
+        assert_eq!(consumer.committed_offset(&input, 0), Some(inputs[0].offset + 1));
+        consumer.close(&cx).await.unwrap();
+        drop(consumer);
+
+        log.phase("restart_same_group_replays_aborted_input");
+        // A fresh instance has no wrapper cache. This observes the broker's
+        // committed group offset, proving the first commit survived and the
+        // aborted enrollment did not independently advance the input group.
+        let restarted = KafkaConsumer::new(consumer_config.clone()).unwrap();
+        restarted.subscribe(&cx, &[&input]).await.unwrap();
+        let replay = next_record(&cx, &restarted).await;
+        assert_eq!(replay.offset, inputs[1].offset);
+        assert_eq!(replay.payload, b"second");
+        let metadata = restarted.group_metadata(&cx).await.unwrap();
+        let transaction = transaction_producer.begin_transaction(&cx).await.unwrap();
+        transaction.send(&cx, &output, Some(b"ordered-output"), b"reprocessed-second")
+            .await.unwrap();
+        transaction.send_offsets_to_transaction(&cx, &[
+            TopicPartitionOffset::new(&input, replay.partition, replay.offset + 1),
+        ], &metadata).await.unwrap();
+        transaction.commit(&cx).await.unwrap();
+        restarted.close(&cx).await.unwrap();
+        drop(restarted);
+
+        let restarted = KafkaConsumer::new(consumer_config).unwrap();
+        restarted.subscribe(&cx, &[&input]).await.unwrap();
+        let witness = next_record(&cx, &restarted).await;
+        assert_eq!(witness.offset, inputs[2].offset);
+        assert_eq!(witness.payload, b"restart-witness");
+
+        log.phase("read_committed_output_excludes_aborted_record");
+        // A fixed key routes all three records to one partition. Observing the
+        // later reprocessed record is a positive ordering witness that the
+        // aborted record was skipped, without treating an empty poll as proof.
+        // Read-uncommitted observation establishes the actual partition and
+        // physical offsets first; Transaction::send intentionally returns ().
+        let raw_observer = KafkaConsumer::new(
+            ConsumerConfig::new(config.bootstrap_servers.clone(), format!("{group}-raw-output"))
+                .force_real_kafka(true)
+                .enable_auto_commit(false)
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .isolation_level(IsolationLevel::ReadUncommitted),
+        ).unwrap();
+        raw_observer.subscribe(&cx, &[&output]).await.unwrap();
+        let committed = next_record(&cx, &raw_observer).await;
+        let aborted = next_record(&cx, &raw_observer).await;
+        let reprocessed = next_record(&cx, &raw_observer).await;
+        assert_eq!(committed.payload, b"committed-first");
+        assert_eq!(aborted.payload, b"aborted-second");
+        assert_eq!(reprocessed.payload, b"reprocessed-second");
+        assert_eq!(committed.partition, aborted.partition);
+        assert_eq!(committed.partition, reprocessed.partition);
+        assert!(committed.offset < aborted.offset && aborted.offset < reprocessed.offset);
+        let observer = KafkaConsumer::new(
+            ConsumerConfig::new(config.bootstrap_servers.clone(), format!("{group}-output"))
+                .force_real_kafka(true)
+                .enable_auto_commit(false)
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .isolation_level(IsolationLevel::ReadCommitted),
+        ).unwrap();
+        observer.subscribe(&cx, &[&output]).await.unwrap();
+        let visible_first = next_record(&cx, &observer).await;
+        let visible_second = next_record(&cx, &observer).await;
+        assert_eq!(visible_first.payload, b"committed-first");
+        assert_eq!(visible_first.offset, committed.offset);
+        assert_eq!(visible_second.payload, b"reprocessed-second");
+        assert_eq!(visible_second.offset, reprocessed.offset);
+        assert!(log.assert_match("replayed_input_offset", &json!(inputs[1].offset), &json!(replay.offset)));
+        assert!(log.assert_match("second_restart_offset", &json!(inputs[2].offset), &json!(witness.offset)));
+
+        raw_observer.close(&cx).await.unwrap();
+        observer.close(&cx).await.unwrap();
+        restarted.close(&cx).await.unwrap();
+        producer.close(&cx, Duration::from_secs(5)).await.unwrap();
+        log.test_end("pass");
+    });
+}
+
 #[test]
 fn test_real_broker_consumer_group_rebalancing() {
     let Some(config) = require_real_broker() else {
