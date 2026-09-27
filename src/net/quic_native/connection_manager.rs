@@ -5485,15 +5485,16 @@ mod tests {
             assert!(readiness.fin_received);
             assert_eq!(readiness.reset, None);
             assert_eq!(readiness.receive_stopped, None);
-            // Reads may return one reassembled chunk at a time. Drain both
-            // committed chunks without routing another packet or polling I/O.
+            // Reads return the committed bytes in one or more chunks; small
+            // frames may already be joined (asupersync-4gdidf). Drain all ten
+            // without routing another packet or polling I/O.
             let mut received = Vec::new();
-            for _ in 0..2 {
+            while received.len() < 10 {
                 let bytes = handle
                     .connection
                     .read_stream_bytes(&observer, stream, 32)
                     .unwrap();
-                assert!(!bytes.is_empty());
+                assert!(!bytes.is_empty(), "committed bytes stay readable");
                 received.extend_from_slice(&bytes);
             }
             assert_eq!(received.as_slice(), b"first-last");

@@ -51,6 +51,11 @@ const RETRY_TOKEN_LIFETIME: std::time::Duration = std::time::Duration::from_secs
 const RETRY_TOKEN_VERSION: u8 = 1;
 #[cfg(feature = "tls")]
 const RETRY_TOKEN_MAC_LEN: usize = 16;
+/// Retry is stateless, so one that finds the send batch full is lost until
+/// the client's PTO (1.5 s). Retries get this many queue slots beyond the
+/// batch. Each is smaller than the Initial that caused it.
+#[cfg(feature = "tls")]
+const RETRY_QUEUE_SLACK: usize = 64;
 
 /// When automatic admission answers a client Initial with a stateless Retry
 /// (RFC 9000 section 8.1.2) instead of creating handshake state.
@@ -1255,8 +1260,12 @@ impl ManagedQuicEndpoint {
         Some(bytes)
     }
 
-    /// Answer a tokenless Initial with a Retry, keeping no state for it. A full
-    /// send queue drops the Initial instead; a real client's PTO resends it.
+    /// Answer a tokenless Initial with a Retry, keeping no state for it.
+    ///
+    /// Admission output waits in its pending handshake for queue space, but a
+    /// Retry has nowhere to wait. It may therefore exceed a full send batch by
+    /// [`RETRY_QUEUE_SLACK`]. Past that bound, as under an Initial flood, the
+    /// Initial is dropped and a real client's PTO resends it.
     #[cfg(feature = "tls")]
     fn queue_retry(
         &mut self,
@@ -1266,7 +1275,12 @@ impl ManagedQuicEndpoint {
         peer: SocketAddr,
         now: Instant,
     ) {
-        if self.pending_outgoing.len() >= self.config.packet_batch_size {
+        if self.pending_outgoing.len()
+            >= self
+                .config
+                .packet_batch_size
+                .saturating_add(RETRY_QUEUE_SLACK)
+        {
             return;
         }
         let mut bytes = [0; ConnectionId::MAX_LEN];
@@ -5711,6 +5725,63 @@ mod tests {
                     check(&endpoint, &token, peer, retry, now),
                     None,
                     "another key"
+                );
+            }));
+        }
+
+        /// With `packet_batch_size: 1`, one admission packet fills the batch. A
+        /// Retry dropped there left the client waiting for its PTO. On a
+        /// virtual clock that never advances, the handshake hung. Retries use
+        /// a bounded slack beyond the batch instead.
+        #[test]
+        fn a_full_send_batch_does_not_drop_a_stateless_retry() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
+                let mut endpoint = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        packet_batch_size: 1,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                endpoint.retry_secret = RetrySecret([7; 32]);
+                endpoint.retry_epoch = Some(now);
+                let peer: SocketAddr = "192.0.2.7:4433".parse().unwrap();
+                let client = ConnectionId::new(&[3; 8]).unwrap();
+                let original = ConnectionId::new(&[4; 8]).unwrap();
+                endpoint.pending_outgoing.push_back(RoutedOutgoingPacket {
+                    connection_id: ConnectionId::new(&[5; 8]).unwrap(),
+                    packet: OutgoingPacket {
+                        dst_addr: "192.0.2.9:4433".parse().unwrap(),
+                        data: vec![0; 1200],
+                        send_time: None,
+                    },
+                    final_handshake_flight: false,
+                    ack_eliciting: true,
+                });
+                endpoint.queue_retry(&cx, client, original, peer, now);
+                assert_eq!(endpoint.pending_outgoing.len(), 2, "the Retry is queued");
+                let retry = &endpoint.pending_outgoing[1].packet;
+                assert_eq!(retry.dst_addr, peer);
+                assert!(matches!(
+                    ProtectedHeaderPrefix::decode(&retry.data, 0),
+                    Ok(ProtectedHeaderPrefix::Retry(_))
+                ));
+                for _ in 0..2 * RETRY_QUEUE_SLACK {
+                    endpoint.queue_retry(&cx, client, original, peer, now);
+                }
+                assert_eq!(
+                    endpoint.pending_outgoing.len(),
+                    1 + RETRY_QUEUE_SLACK,
+                    "a flood fills only the bounded Retry slack"
                 );
             }));
         }
