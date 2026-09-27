@@ -67,7 +67,7 @@ where
     };
     let completed = Arc::new(AtomicBool::new(false));
     let done = Arc::clone(&completed);
-    let _result = runtime.block_on(runtime.handle().spawn(async move {
+    runtime.block_on(runtime.handle().spawn(async move {
         let cx = Cx::current().expect("native task context");
         work(cx).await;
         done.store(true, Ordering::Release);

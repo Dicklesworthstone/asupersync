@@ -2112,7 +2112,6 @@ mod tests {
     #[test]
     fn udp_idle_handoff_preserves_deadline_and_send_refresh_budget() {
         block_on(async {
-            let cx = Cx::for_testing();
             let (mut client, _server) = authenticated_udp_pair().await;
             let parameters = TransportParameters {
                 max_idle_timeout: Some(30_000),
@@ -2141,7 +2140,7 @@ mod tests {
             );
             assert!(
                 router
-                    .expired_connections(deadline - Duration::from_micros(1))
+                    .expired_connections(deadline.checked_sub(Duration::from_micros(1)).unwrap())
                     .is_empty()
             );
             router.packet_sent(
@@ -2155,7 +2154,7 @@ mod tests {
                     final_handshake_flight: false,
                     ack_eliciting: true,
                 },
-                Some(deadline - Duration::from_millis(1)),
+                Some(deadline.checked_sub(Duration::from_millis(1)).unwrap()),
             );
             assert_eq!(
                 router.expired_connections(deadline),

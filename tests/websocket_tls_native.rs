@@ -105,7 +105,7 @@ where
         done.store(true, Ordering::Release);
     }).unwrap();
     runtime.block_on(async {
-        let _terminal = asupersync::time::timeout(
+        asupersync::time::timeout(
             asupersync::time::wall_now(), WATCHDOG, &mut task,
         ).await.expect("WSS task exceeded watchdog");
     });
