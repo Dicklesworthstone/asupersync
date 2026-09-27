@@ -268,6 +268,45 @@ pub trait ServiceHandler: Send + Sync {
             format!("registered service has no callable server-streaming handler for '{path}'");
         Box::pin(async move { Err(Status::unimplemented(message)) })
     }
+
+    /// Consume a live request stream and return one response message.
+    ///
+    /// The native duplex listener invokes this hook in the actual request
+    /// child region. Initial request metadata remains on `request`; request
+    /// trailers become available from the stream only after validated EOF.
+    /// Response metadata is **terminal trailing metadata** in this additive
+    /// produced-response lane; initial response headers are transport-owned.
+    /// The default preserves existing service implementations.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    fn call_client_streaming<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        path: &'a str,
+        _request: Request<super::server::RegisteredRequestStream>,
+    ) -> ServiceHandlerFuture<'a> {
+        let message =
+            format!("registered service has no callable client-streaming handler for '{path}'");
+        Box::pin(async move { Err(Status::unimplemented(message)) })
+    }
+
+    /// Create a response stream that may own and incrementally consume the
+    /// request stream, allowing responses before request EOF.
+    ///
+    /// The request and response remain in the same actual child region through
+    /// response completion and descendant drain. Reset, connection loss, and
+    /// deadline cancellation reach both directions. The default preserves
+    /// existing service implementations and refuses this method explicitly.
+    #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+    fn call_bidirectional_streaming<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        path: &'a str,
+        _request: Request<super::server::RegisteredRequestStream>,
+    ) -> ServiceStreamingFuture<'a> {
+        let message =
+            format!("registered service has no callable bidirectional handler for '{path}'");
+        Box::pin(async move { Err(Status::unimplemented(message)) })
+    }
 }
 
 #[cfg(test)]

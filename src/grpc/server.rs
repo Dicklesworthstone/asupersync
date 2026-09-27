@@ -6,6 +6,13 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server_streaming;
 
+/// Registered RPCs with live request and response streams on native HTTP/2.
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub mod duplex;
+
+#[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+pub use duplex::{RegisteredRequestStream, ServerDuplexConfig};
+
 // Re-export the server-streaming config at the `grpc::server` level, where
 // `health_rpc` (and other callers) import it via
 // `crate::grpc::server::ServerStreamingConfig`. The type is already `pub` in
@@ -1771,8 +1778,24 @@ impl Server {
     /// may replace that status.
     pub async fn dispatch_unary<H, F>(
         &self,
+        request: Request<Bytes>,
+        handler: H,
+    ) -> Result<Response<Bytes>, Status>
+    where
+        H: FnOnce(Request<Bytes>) -> F,
+        F: Future<Output = Result<Response<Bytes>, Status>>,
+    {
+        self.dispatch_intercepted(request, handler, false).await
+    }
+
+    /// Share the canonical interceptor pipeline with an already-admitted
+    /// streaming request. That caller owns its absolute timer and actual child
+    /// region; minting another context would discard its spawn authority.
+    async fn dispatch_intercepted<H, F>(
+        &self,
         mut request: Request<Bytes>,
         handler: H,
+        admitted_deadline: bool,
     ) -> Result<Response<Bytes>, Status>
     where
         H: FnOnce(Request<Bytes>) -> F,
@@ -1846,7 +1869,41 @@ impl Server {
         // cancelled and will continue running past the deadline. Service
         // implementations should use async APIs and yield regularly to respect
         // client deadlines and prevent resource exhaustion.
-        let response_result = if call_context.deadline().is_some() {
+        let response_result = if admitted_deadline {
+            #[cfg(all(feature = "http2-streaming", not(target_arch = "wasm32")))]
+            {
+                let cx = Cx::current().ok_or_else(|| {
+                    Status::internal("admitted gRPC dispatch requires its request context")
+                })?;
+                // Interceptors may tighten grpc-timeout. Capture that bound
+                // after the chain, meeting the original absolute deadline in
+                // this actual child Cx; they cannot restart or extend it.
+                let deadline = server_streaming::StreamDeadline::capture(
+                    &cx,
+                    request.metadata(),
+                    &self.config,
+                );
+                {
+                    let mut inner = cx.inner.write();
+                    inner.budget = deadline.budget(inner.budget);
+                }
+                match server_streaming::poll_cancellable(
+                    &cx,
+                    &cx,
+                    async move { handler(request).await },
+                    Some(&deadline),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(status) => Err(status),
+                }
+            }
+            #[cfg(not(all(feature = "http2-streaming", not(target_arch = "wasm32"))))]
+            {
+                return Err(Status::internal("admitted gRPC streaming is unavailable"));
+            }
+        } else if call_context.deadline().is_some() {
             // Sample the runtime clock before the wall clock so translating the
             // wall deadline by its remaining duration cannot shift the runtime
             // deadline later by the sampling overhead.
