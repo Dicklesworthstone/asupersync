@@ -10,6 +10,7 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::TcpStream;
 use asupersync::net::websocket::{CloseReason, Message, WebSocket, WebSocketAcceptor, WebSocketConfig, WsError};
 use asupersync::runtime::{Runtime, RuntimeBuilder};
+use asupersync::util::entropy::{DetEntropy, EntropySource};
 use std::future::{Future, poll_fn};
 use std::io::{Read, Write};
 use std::pin::Pin;
@@ -17,6 +18,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+
+/// Client masking entropy. `Cx::entropy_handle` is crate-private, so the test
+/// passes a public deterministic source.
+fn client_entropy() -> Arc<dyn EntropySource> {
+    Arc::new(DetEntropy::new(0x5753_636f_6d70))
+}
 
 const WATCHDOG: Duration = Duration::from_secs(5);
 const PROFILE: &str = "permessage-deflate; server_no_context_takeover; client_no_context_takeover";
@@ -183,7 +190,7 @@ fn raw_scenario(workers: usize, role: Role, input: Input) {
                 Role::Client | Role::Split => {
                     let config = WebSocketConfig::new().max_message_size(max).ping_interval(None);
                     let mut ws = if matches!(input, Input::Legacy) { WebSocket::from_upgraded(socket, config) }
-                        else { WebSocket::from_upgraded_with_extensions(socket, config, &[PROFILE.to_owned()], cx.entropy_handle()).unwrap() };
+                        else { WebSocket::from_upgraded_with_extensions(socket, config, &[PROFILE.to_owned()], client_entropy()).unwrap() };
                     if matches!(role, Role::Split) {
                         let (mut read, write) = ws.split();
                         exercise_receiver!(read, cx, input);
@@ -368,7 +375,7 @@ fn native_abandoned_receive_preserves_partial_compressed_message_across_split() 
                 let bytes = Arc::new(AtomicUsize::new(0));
                 let socket = ReadWitness { socket: TcpStream::from_std(socket).unwrap(), bytes: Arc::clone(&bytes) };
                 let mut ws = WebSocket::from_upgraded_with_extensions(socket, WebSocketConfig::new().ping_interval(None),
-                    &[PROFILE.to_owned()], cx.entropy_handle()).unwrap();
+                    &[PROFILE.to_owned()], client_entropy()).unwrap();
                 {
                     let mut future = std::pin::pin!(ws.recv(&cx));
                     poll_fn(|task| {
