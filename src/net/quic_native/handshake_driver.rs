@@ -161,6 +161,43 @@ pub(crate) fn is_unauthenticated_handshake_packet_error(error: &QuicTlsError) ->
     )
 }
 
+/// RFC 9001 §5.8 QUIC v1 Retry integrity key and nonce.
+const RETRY_INTEGRITY_KEY: [u8; 16] = [
+    0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
+];
+const RETRY_INTEGRITY_NONCE: [u8; 12] = [
+    0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
+];
+
+/// The RFC 9001 §5.8 pseudo-packet: the original DCID, then the Retry packet
+/// without its integrity tag.
+fn retry_pseudo_packet(original_dcid: ConnectionId, retry_without_tag: &[u8]) -> Option<Vec<u8>> {
+    let mut pseudo_packet = Vec::with_capacity(1 + original_dcid.len() + retry_without_tag.len());
+    pseudo_packet.push(u8::try_from(original_dcid.len()).ok()?);
+    pseudo_packet.extend_from_slice(original_dcid.as_bytes());
+    pseudo_packet.extend_from_slice(retry_without_tag);
+    Some(pseudo_packet)
+}
+
+/// Integrity tag for a Retry the server sends in answer to an Initial that
+/// carried `original_dcid`.
+pub(crate) fn retry_integrity_tag(
+    original_dcid: ConnectionId,
+    retry_without_tag: &[u8],
+) -> Option<[u8; QUIC_AEAD_TAG_LEN]> {
+    use aes_gcm::aead::{AeadInOut, KeyInit};
+    use aes_gcm::{Aes128Gcm, Nonce};
+
+    let pseudo_packet = retry_pseudo_packet(original_dcid, retry_without_tag)?;
+    let cipher = Aes128Gcm::new_from_slice(&RETRY_INTEGRITY_KEY).ok()?;
+    let nonce = Nonce::try_from(RETRY_INTEGRITY_NONCE.as_slice()).ok()?;
+    let mut plaintext = [];
+    let tag = cipher
+        .encrypt_inout_detached(&nonce, &pseudo_packet, plaintext.as_mut_slice().into())
+        .ok()?;
+    tag.as_slice().try_into().ok()
+}
+
 /// Verify the RFC 9001 §5.8 Retry pseudo-packet with the QUIC v1 fixed key.
 /// Verify the bytes as received: the Retry header's unused bits participate in
 /// the integrity tag even though their value has no protocol meaning.
@@ -184,21 +221,11 @@ fn validated_client_retry(
         return None;
     }
 
-    const KEY: [u8; 16] = [
-        0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8,
-        0x4e,
-    ];
-    const NONCE: [u8; 12] = [
-        0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
-    ];
     let tag_offset = datagram.len().checked_sub(QUIC_AEAD_TAG_LEN)?;
-    let mut pseudo_packet = Vec::with_capacity(1 + original_dcid.len() + tag_offset);
-    pseudo_packet.push(u8::try_from(original_dcid.len()).ok()?);
-    pseudo_packet.extend_from_slice(original_dcid.as_bytes());
-    pseudo_packet.extend_from_slice(&datagram[..tag_offset]);
+    let pseudo_packet = retry_pseudo_packet(original_dcid, &datagram[..tag_offset])?;
 
-    let cipher = Aes128Gcm::new_from_slice(&KEY).ok()?;
-    let nonce = Nonce::try_from(NONCE.as_slice()).ok()?;
+    let cipher = Aes128Gcm::new_from_slice(&RETRY_INTEGRITY_KEY).ok()?;
+    let nonce = Nonce::try_from(RETRY_INTEGRITY_NONCE.as_slice()).ok()?;
     let tag = Tag::try_from(header.integrity_tag.as_slice()).ok()?;
     let mut plaintext = [];
     // The AEAD implementation verifies the tag in constant time; do not
@@ -2146,6 +2173,22 @@ pub(crate) mod tests {
             [0, 1],
             "the peer authenticates the PTO copy as a new packet"
         );
+    }
+
+    #[test]
+    fn retry_integrity_tag_matches_rfc_9001_appendix_a4() {
+        // RFC 9001 Appendix A.4: a Retry answering an Initial whose DCID was
+        // 0x8394c8f03e515708, with source CID 0xf067a5502a4262b5 and token "token".
+        let original =
+            ConnectionId::new(&[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]).unwrap();
+        let retry = [
+            0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62,
+            0xb5, 0x74, 0x6f, 0x6b, 0x65, 0x6e, 0x04, 0xa2, 0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82,
+            0x90, 0x58, 0xfb, 0x3f, 0x0f, 0x24, 0x96, 0xba,
+        ];
+        let (body, tag) = retry.split_at(retry.len() - QUIC_AEAD_TAG_LEN);
+        assert_eq!(retry_integrity_tag(original, body).unwrap(), tag);
+        assert!(validated_client_retry(&retry, original, ConnectionId::default()).is_some());
     }
 
     #[test]

@@ -44,6 +44,46 @@ const ACCEPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const ACCEPT_MIN_INITIAL_BYTES: usize = 1200;
 #[cfg(feature = "tls")]
 const ACCEPT_CID_ATTEMPTS: usize = 16;
+/// A Retry token is echoed within one round trip by a real client.
+#[cfg(feature = "tls")]
+const RETRY_TOKEN_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(feature = "tls")]
+const RETRY_TOKEN_VERSION: u8 = 1;
+#[cfg(feature = "tls")]
+const RETRY_TOKEN_MAC_LEN: usize = 16;
+
+/// When automatic admission answers a client Initial with a stateless Retry
+/// (RFC 9000 section 8.1.2) instead of creating handshake state.
+///
+/// A Retry makes the client prove it receives datagrams at its source address
+/// before the server keeps anything for it. Spoofed Initials never return the
+/// token, so they cannot hold admission slots that validated clients need.
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RetryPolicy {
+    /// Retry once pending handshakes fill half of the admission capacity. When
+    /// capacity is full, an address-validated client displaces the oldest
+    /// handshake whose address is not yet validated.
+    #[default]
+    UnderPressure,
+    /// Retry every Initial that does not carry a valid token.
+    Always,
+    /// Never Retry. Spoofed Initials can then hold every admission slot until
+    /// their handshake deadline.
+    Never,
+}
+
+/// Retry token key, never printed.
+#[cfg(feature = "tls")]
+struct RetrySecret([u8; 32]);
+
+#[cfg(feature = "tls")]
+impl std::fmt::Debug for RetrySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetrySecret(..)")
+    }
+}
 
 // A send-side resource shortage parks sends for the HTTP and remote
 // listeners' 2ms base delay, doubling per consecutive failure to a 64ms cap.
@@ -146,6 +186,8 @@ struct PendingAuthenticatedAccept {
     early: Vec<ReceivedPacket>,
     early_bytes: usize,
     final_ack_queued: bool,
+    /// Created by automatic admission, so no owner awaits its receipt.
+    automatic: bool,
 }
 
 #[cfg(feature = "tls")]
@@ -570,6 +612,15 @@ pub struct ManagedQuicEndpoint {
     authenticated_initial_routes: Vec<(ConnectionId, ConnectionId)>,
     #[cfg(feature = "tls")]
     prefer_accept_output: bool,
+    #[cfg(feature = "tls")]
+    retry_policy: RetryPolicy,
+    /// Keys Retry tokens; drawn when automatic admission is configured.
+    #[cfg(feature = "tls")]
+    retry_secret: RetrySecret,
+    /// Origin of the coarse token clock: the first admission decision after
+    /// `retry_secret` was drawn.
+    #[cfg(feature = "tls")]
+    retry_epoch: Option<Instant>,
     /// Alternate ready read/write batches; timers and cancellation always get a turn.
     prefer_send: bool,
     /// A send-side resource shortage parks sends until this deadline, while
@@ -893,6 +944,12 @@ impl ManagedQuicEndpoint {
             authenticated_initial_routes: Vec::new(),
             #[cfg(feature = "tls")]
             prefer_accept_output: true,
+            #[cfg(feature = "tls")]
+            retry_policy: RetryPolicy::default(),
+            #[cfg(feature = "tls")]
+            retry_secret: RetrySecret([0; 32]),
+            #[cfg(feature = "tls")]
+            retry_epoch: None,
             prefer_send: true,
             send_backoff_until: None,
             send_backoff_streak: 0,
@@ -980,15 +1037,17 @@ impl ManagedQuicEndpoint {
     /// required only if its certificate verifier requires it. The supplied
     /// transport-parameter template is validated before changing the endpoint;
     /// original-destination and initial-source CID fields are replaced for each
-    /// admission. Retry, shared stateless-reset tokens and preferred-address
-    /// parameters are unsupported and refused. Server IDs use the driving Cx's
-    /// explicit entropy source with bounded collision retries, never a peer ID.
+    /// admission. Template Retry-source, shared stateless-reset token and
+    /// preferred-address parameters are refused; the endpoint sets the Retry
+    /// source CID itself after a Retry (see [`Self::set_retry_policy`]). Server
+    /// IDs and the Retry token key use the driving Cx's explicit entropy source,
+    /// with bounded collision retries for IDs, never a peer ID.
     ///
     /// Configuration requires no pending admission or unread receipt. An active
     /// endpoint may be reconfigured only if it already has authenticated-only
     /// routing; existing connections retain their negotiated configuration.
     /// Automatic admission does not enable the legacy unauthenticated path,
-    /// Retry, address migration, or acceptance of 0-RTT application data.
+    /// address migration, or acceptance of 0-RTT application data.
     #[cfg(feature = "tls")]
     pub fn configure_authenticated_server(
         &mut self,
@@ -1053,8 +1112,13 @@ impl ManagedQuicEndpoint {
         // Validate rustls QUIC/version/cipher configuration now. No peer input
         // or certificate resolver is invoked by creating this fresh driver.
         QuicHandshakeDriver::server(Arc::clone(&tls), encoded).map_err(accept_error)?;
+        let mut secret = [0; 32];
+        cx.random_bytes(&mut secret);
         cx.checkpoint()
             .map_err(|_| ManagedEndpointError::Cancelled)?;
+        // A new key starts a new token clock at the next admission decision.
+        self.retry_secret = RetrySecret(secret);
+        self.retry_epoch = None;
         self.authenticated_server = Some(AuthenticatedServerPolicy {
             tls,
             transport_parameters: parameters,
@@ -1062,6 +1126,173 @@ impl ManagedQuicEndpoint {
         });
         self.authenticated_only = true;
         Ok(())
+    }
+
+    /// Choose when automatic admission answers an Initial with a stateless
+    /// Retry. The default, [`RetryPolicy::UnderPressure`], leaves an idle
+    /// server at one round trip and keeps spoofed Initials from holding the
+    /// admission slots that validated clients need.
+    #[cfg(feature = "tls")]
+    pub fn set_retry_policy(&mut self, policy: RetryPolicy) {
+        self.retry_policy = policy;
+    }
+
+    #[cfg(feature = "tls")]
+    fn retry_token_mac(
+        &self,
+        peer: SocketAddr,
+        original_dcid: ConnectionId,
+        retry_scid: ConnectionId,
+        issued: u64,
+    ) -> hmac::Hmac<sha2::Sha256> {
+        use hmac::{KeyInit, Mac};
+        let mut mac = <hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(&self.retry_secret.0)
+            .expect("HMAC accepts any key length");
+        mac.update(&[RETRY_TOKEN_VERSION]);
+        match peer.ip() {
+            std::net::IpAddr::V4(ip) => {
+                mac.update(&[4]);
+                mac.update(&ip.octets());
+            }
+            std::net::IpAddr::V6(ip) => {
+                mac.update(&[6]);
+                mac.update(&ip.octets());
+            }
+        }
+        mac.update(&peer.port().to_be_bytes());
+        for cid in [original_dcid, retry_scid] {
+            mac.update(&[cid.len() as u8]);
+            mac.update(cid.as_bytes());
+        }
+        mac.update(&issued.to_be_bytes());
+        mac
+    }
+
+    /// A token bound to the client address, the client's original DCID and the
+    /// Retry source CID the client must use next: version, issue time (seconds
+    /// on the endpoint's token clock), original DCID, truncated HMAC-SHA256.
+    #[cfg(feature = "tls")]
+    fn mint_retry_token(
+        &self,
+        peer: SocketAddr,
+        original_dcid: ConnectionId,
+        retry_scid: ConnectionId,
+        now: Instant,
+    ) -> Option<Vec<u8>> {
+        use hmac::Mac;
+        let issued = now.checked_duration_since(self.retry_epoch?)?.as_secs();
+        let mac = self
+            .retry_token_mac(peer, original_dcid, retry_scid, issued)
+            .finalize()
+            .into_bytes();
+        let mut token = Vec::with_capacity(10 + original_dcid.len() + RETRY_TOKEN_MAC_LEN);
+        token.push(RETRY_TOKEN_VERSION);
+        token.extend_from_slice(&issued.to_be_bytes());
+        token.push(original_dcid.len() as u8);
+        token.extend_from_slice(original_dcid.as_bytes());
+        token.extend_from_slice(&mac[..RETRY_TOKEN_MAC_LEN]);
+        Some(token)
+    }
+
+    /// The client's original DCID when `token` is a live Retry token this
+    /// endpoint issued to `peer` for an Initial now addressed to `retry_scid`.
+    #[cfg(feature = "tls")]
+    fn validate_retry_token(
+        &self,
+        token: &[u8],
+        peer: SocketAddr,
+        retry_scid: ConnectionId,
+        now: Instant,
+    ) -> Option<ConnectionId> {
+        use hmac::Mac;
+        let (&version, rest) = token.split_first()?;
+        if version != RETRY_TOKEN_VERSION || rest.len() < 9 {
+            return None;
+        }
+        let issued = u64::from_be_bytes(rest[..8].try_into().ok()?);
+        let dcid_len = usize::from(rest[8]);
+        let rest = &rest[9..];
+        if rest.len() != dcid_len + RETRY_TOKEN_MAC_LEN {
+            return None;
+        }
+        let original_dcid = ConnectionId::new(&rest[..dcid_len]).ok()?;
+        let age = now
+            .checked_duration_since(self.retry_epoch?)?
+            .as_secs()
+            .checked_sub(issued)?;
+        if age > RETRY_TOKEN_LIFETIME.as_secs() {
+            return None;
+        }
+        // Constant-time comparison of the truncated tag.
+        self.retry_token_mac(peer, original_dcid, retry_scid, issued)
+            .verify_truncated_left(&rest[dcid_len..])
+            .ok()?;
+        Some(original_dcid)
+    }
+
+    /// A stateless Retry (RFC 9000 section 17.2.5) with its RFC 9001 section 5.8
+    /// integrity tag, addressed to the client's source CID.
+    #[cfg(feature = "tls")]
+    fn retry_packet(
+        client_scid: ConnectionId,
+        original_dcid: ConnectionId,
+        retry_scid: ConnectionId,
+        token: Vec<u8>,
+    ) -> Option<Vec<u8>> {
+        let mut bytes = Vec::new();
+        crate::net::quic_core::PacketHeader::Retry(crate::net::quic_core::RetryHeader {
+            version: 1,
+            dst_cid: client_scid,
+            src_cid: retry_scid,
+            token,
+            integrity_tag: [0; 16],
+        })
+        .encode(&mut bytes)
+        .ok()?;
+        let tag_at = bytes.len().checked_sub(16)?;
+        let tag = super::handshake_driver::retry_integrity_tag(original_dcid, &bytes[..tag_at])?;
+        bytes[tag_at..].copy_from_slice(&tag);
+        Some(bytes)
+    }
+
+    /// Answer a tokenless Initial with a Retry, keeping no state for it. A full
+    /// send queue drops the Initial instead; a real client's PTO resends it.
+    #[cfg(feature = "tls")]
+    fn queue_retry(
+        &mut self,
+        cx: &Cx,
+        client_scid: ConnectionId,
+        original_dcid: ConnectionId,
+        peer: SocketAddr,
+        now: Instant,
+    ) {
+        if self.pending_outgoing.len() >= self.config.packet_batch_size {
+            return;
+        }
+        let mut bytes = [0; ConnectionId::MAX_LEN];
+        cx.random_bytes(&mut bytes);
+        let Ok(retry_scid) = ConnectionId::new(&bytes) else {
+            return;
+        };
+        if retry_scid == original_dcid {
+            return;
+        }
+        let Some(data) = self
+            .mint_retry_token(peer, original_dcid, retry_scid, now)
+            .and_then(|token| Self::retry_packet(client_scid, original_dcid, retry_scid, token))
+        else {
+            return;
+        };
+        self.pending_outgoing.push_back(RoutedOutgoingPacket {
+            connection_id: retry_scid,
+            packet: OutgoingPacket {
+                dst_addr: peer,
+                data,
+                send_time: None,
+            },
+            final_handshake_flight: false,
+            ack_eliciting: false,
+        });
     }
 
     /// Permanently stop authenticated admission while established peers drain.
@@ -1189,9 +1420,16 @@ impl ManagedQuicEndpoint {
         let parameters =
             crate::net::quic_core::TransportParameters::decode(driver.local_transport_parameters())
                 .map_err(accept_error)?;
+        // After a Retry (RFC 9000 section 7.3) the admitted route is the Retry
+        // source CID, and the original DCID came from a validated token.
+        let retried = parameters
+            .unknown
+            .iter()
+            .any(|parameter| parameter.id == 0x10);
         for parameter in &parameters.unknown {
             let expected = match parameter.id {
-                0x00 => Some(initial_dcid),
+                0x00 if retried => None,
+                0x00 | 0x10 => Some(initial_dcid),
                 0x0f => Some(local_cid),
                 _ => None,
             };
@@ -1236,6 +1474,7 @@ impl ManagedQuicEndpoint {
             early: Vec::new(),
             early_bytes: 0,
             final_ack_queued: false,
+            automatic: false,
         })
     }
 
@@ -1312,15 +1551,67 @@ impl ManagedQuicEndpoint {
                 .authenticated_initial_routes
                 .iter()
                 .any(|(initial, _)| *initial == header.dst_cid)
-            || self.pending_authenticated_accept.len()
-                >= self
-                    .authenticated_accept_limit
-                    .saturating_sub(self.authenticated_accept_result.len())
-            || self.connection_stats().active_connections
-                >= self
-                    .config
-                    .max_connections
-                    .saturating_sub(self.pending_authenticated_accept.len())
+        {
+            return Ok(true);
+        }
+        let now = self.timer_scheduler.now(cx)?;
+        // Tokens use the same clock as every admission decision.
+        self.retry_epoch.get_or_insert(now);
+        // A Retry token proves the client receives at its source address. An
+        // invalid one is discarded, as RFC 9000 section 8.1.2 permits.
+        let original_dcid = if header.token.is_empty() {
+            None
+        } else {
+            let Some(original_dcid) =
+                self.validate_retry_token(&header.token, packet.src_addr, header.dst_cid, now)
+            else {
+                return Ok(true);
+            };
+            Some(original_dcid)
+        };
+        let capacity = self
+            .authenticated_accept_limit
+            .saturating_sub(self.authenticated_accept_result.len());
+        if original_dcid.is_none() {
+            let retry = match self.retry_policy {
+                RetryPolicy::Always => true,
+                RetryPolicy::Never => false,
+                RetryPolicy::UnderPressure => {
+                    self.pending_authenticated_accept.len().saturating_mul(2) >= capacity
+                }
+            };
+            if retry {
+                self.queue_retry(cx, header.src_cid, header.dst_cid, packet.src_addr, now);
+                return Ok(true);
+            }
+        }
+        if self.pending_authenticated_accept.len() >= capacity {
+            // A validated client displaces the oldest automatic handshake whose
+            // address is still unvalidated; nothing was ever published for it.
+            let displaced = original_dcid.and_then(|_| {
+                self.pending_authenticated_accept
+                    .iter()
+                    .position(|pending| pending.automatic && !pending.address_validated)
+            });
+            let Some(index) = displaced else {
+                return Ok(true);
+            };
+            if let Some(pending) = self.pending_authenticated_accept.remove(index) {
+                self.pending_outgoing
+                    .retain(|queued| queued.connection_id != pending.local_cid);
+                self.pending_incoming
+                    .retain(|queued| !pending.owns_packet(&queued.packet));
+                cx.trace(&format!(
+                    "QUIC admission of {} displaced by an address-validated client",
+                    pending.peer
+                ));
+            }
+        }
+        if self.connection_stats().active_connections
+            >= self
+                .config
+                .max_connections
+                .saturating_sub(self.pending_authenticated_accept.len())
         {
             return Ok(true);
         }
@@ -1351,7 +1642,17 @@ impl ManagedQuicEndpoint {
             .as_ref()
             .expect("configured automatic admission");
         let mut parameters = policy.transport_parameters.clone();
-        for (id, cid) in [(0x00, header.dst_cid), (0x0f, local_cid)] {
+        // RFC 9000 section 7.3: after a Retry, original_destination_connection_id
+        // is the client's first DCID and retry_source_connection_id is the CID
+        // the Retry chose, which the client now addresses.
+        let retry_source = original_dcid.map(|_| (0x10, header.dst_cid));
+        for (id, cid) in [
+            (0x00, original_dcid.unwrap_or(header.dst_cid)),
+            (0x0f, local_cid),
+        ]
+        .into_iter()
+        .chain(retry_source)
+        {
             parameters
                 .unknown
                 .push(crate::net::quic_core::UnknownTransportParameter {
@@ -1372,7 +1673,8 @@ impl ManagedQuicEndpoint {
             local_cid,
             &required_alpn,
         )?;
-        let now = self.timer_scheduler.now(cx)?;
+        pending.automatic = true;
+        pending.address_validated = original_dcid.is_some();
         let result = pending.receive(packet.clone(), self.config.udp_config.max_packet_size, now);
         // Certificate resolution and other TLS hooks can cancel the owner. Do
         // not publish even a successfully authenticated first packet afterward.
@@ -1719,6 +2021,12 @@ impl ManagedQuicEndpoint {
             authenticated_initial_routes: Vec::new(),
             #[cfg(feature = "tls")]
             prefer_accept_output: true,
+            #[cfg(feature = "tls")]
+            retry_policy: RetryPolicy::default(),
+            #[cfg(feature = "tls")]
+            retry_secret: RetrySecret([0; 32]),
+            #[cfg(feature = "tls")]
+            retry_epoch: None,
             prefer_send: true,
             send_backoff_until: None,
             send_backoff_streak: 0,
@@ -5341,6 +5649,194 @@ mod tests {
                 }
                 endpoint.shutdown(&cx).await.unwrap();
                 assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn retry_tokens_bind_the_peer_the_cids_the_key_and_a_lifetime() {
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
+                let mut endpoint = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                endpoint.retry_secret = RetrySecret([7; 32]);
+                endpoint.retry_epoch = Some(now);
+                let peer: SocketAddr = "192.0.2.7:4433".parse().unwrap();
+                let original = ConnectionId::new(&[1; 8]).unwrap();
+                let retry = ConnectionId::new(&[2; 20]).unwrap();
+                let token = endpoint
+                    .mint_retry_token(peer, original, retry, now)
+                    .unwrap();
+                let check = |endpoint: &ManagedQuicEndpoint, token: &[u8], peer, retry, at| {
+                    endpoint.validate_retry_token(token, peer, retry, at)
+                };
+                assert_eq!(check(&endpoint, &token, peer, retry, now), Some(original));
+                let last = now + RETRY_TOKEN_LIFETIME;
+                assert_eq!(check(&endpoint, &token, peer, retry, last), Some(original));
+                let late = last + Duration::from_secs(1);
+                assert_eq!(check(&endpoint, &token, peer, retry, late), None, "expired");
+                for other in ["192.0.2.7:4434", "192.0.2.8:4433", "[2001:db8::7]:4433"] {
+                    let other: SocketAddr = other.parse().unwrap();
+                    assert_eq!(check(&endpoint, &token, other, retry, now), None, "{other}");
+                }
+                assert_eq!(
+                    check(&endpoint, &token, peer, original, now),
+                    None,
+                    "another CID"
+                );
+                for index in 0..token.len() {
+                    let mut forged = token.clone();
+                    forged[index] ^= 1;
+                    assert_eq!(
+                        check(&endpoint, &forged, peer, retry, now),
+                        None,
+                        "byte {index}"
+                    );
+                }
+                let short = &token[..token.len() - 1];
+                assert_eq!(check(&endpoint, short, peer, retry, now), None, "truncated");
+                endpoint.retry_secret = RetrySecret([8; 32]);
+                assert_eq!(
+                    check(&endpoint, &token, peer, retry, now),
+                    None,
+                    "another key"
+                );
+            }));
+        }
+
+        #[test]
+        fn managed_retry_lets_a_validated_client_displace_a_silent_spoofed_admission() {
+            use super::super::super::handshake_driver::{
+                client_config, client_handshake_over_udp, server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let cx = Cx::current().unwrap();
+                // One admission slot, the default, and the default Retry policy.
+                let mut server = ManagedQuicEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    ManagedEndpointConfig {
+                        is_server: true,
+                        ..ManagedEndpointConfig::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let mut parameters = Vec::new();
+                crate::net::quic_core::TransportParameters::default()
+                    .encode(&mut parameters)
+                    .unwrap();
+                let tls = server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![b"atp/1".to_vec()],
+                )
+                .unwrap();
+                server
+                    .configure_authenticated_server(&cx, tls, parameters, b"atp/1")
+                    .unwrap();
+                let server_addr = server.local_addr();
+                let client_driver = || {
+                    QuicHandshakeDriver::client(
+                        client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"atp/1".to_vec()])
+                            .unwrap(),
+                        rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                        Vec::new(),
+                    )
+                    .unwrap()
+                };
+                // A real ClientHello from an address that never answers takes the
+                // only slot first, as a spoofed Initial would.
+                let spoofer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let spoofed_initial = ConnectionId::new(&[0x51; 8]).unwrap();
+                let mut spoofed = client_driver();
+                spoofed
+                    .install_initial_keys(spoofed_initial.as_bytes())
+                    .unwrap();
+                let segments = spoofed.pump_outbound().unwrap();
+                let hello = spoofed
+                    .assemble_handshake_packet(
+                        &segments[0],
+                        spoofed_initial,
+                        ConnectionId::new(&[0x52; 8]).unwrap(),
+                        0,
+                    )
+                    .unwrap();
+                spoofer.send_to(&hello, server_addr).unwrap();
+
+                let mut client_endpoint = QuicUdpEndpoint::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    QuicUdpEndpointConfig::default(),
+                )
+                .await
+                .unwrap();
+                let mut client = client_driver();
+                let (outcome, client_done, receipt) = {
+                    let mut handshake = std::pin::pin!(client_handshake_over_udp(
+                        &cx,
+                        &mut client_endpoint,
+                        server_addr,
+                        &mut client,
+                        ConnectionId::new(&[0x61; 8]).unwrap(),
+                        ConnectionId::new(&[0x62; 8]).unwrap(),
+                    ));
+                    let mut client_done = None;
+                    let mut receipt = None;
+                    let outcome = crate::time::timeout(
+                        cx.now(),
+                        Duration::from_secs(10),
+                        server.run_event_loop_with_application(&cx, |_, endpoint, task_cx| {
+                            if client_done.is_none() {
+                                if let Poll::Ready(result) = handshake.as_mut().poll(task_cx) {
+                                    client_done = Some(result);
+                                }
+                            }
+                            if receipt.is_none() {
+                                receipt = endpoint.take_authenticated_accept_result();
+                            }
+                            if client_done.is_some() && receipt.is_some() {
+                                Poll::Ready(Ok(()))
+                            } else {
+                                Poll::Pending
+                            }
+                        }),
+                    )
+                    .await;
+                    (outcome, client_done, receipt)
+                };
+                assert!(
+                    matches!(outcome, Ok(Ok(()))),
+                    "the validated client must be admitted while the spoofed one holds the slot: {outcome:?}"
+                );
+                assert!(matches!(client_done, Some(Ok(_))), "{client_done:?}");
+                assert!(matches!(receipt, Some(Ok(_))), "{receipt:?}");
+                // The client completed only after checking both Retry parameters
+                // (verify_completed_retry). The server advertised a Retry source.
+                let server_parameters = crate::net::quic_core::TransportParameters::decode(
+                    client.peer_transport_parameters().unwrap(),
+                )
+                .unwrap();
+                assert!(server_parameters.unknown.iter().any(|parameter| parameter.id == 0x10));
+                assert!(server.pending_authenticated_accept.is_empty(), "the spoofed admission was displaced");
+                assert!(server.take_authenticated_accept_result().is_none(), "displacement publishes nothing");
+                server.shutdown(&cx).await.unwrap();
             }));
         }
 
