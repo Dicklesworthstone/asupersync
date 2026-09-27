@@ -3875,7 +3875,9 @@ pub enum RemoteServiceSessionError {
         /// Received renewal sequence number.
         actual: u64,
     },
-    /// A renewal acknowledgement changed the requested lease duration.
+    /// A renewal acknowledgement granted a zero lease, or a longer one than
+    /// the client requested. A shorter grant (for example a server-side cap)
+    /// is accepted and returned in the event.
     RenewalLeaseMismatch {
         /// Duration sent by the client.
         expected: Duration,
@@ -4089,6 +4091,9 @@ where
     ///
     /// A terminal event means completion or expiry won the race before the
     /// renewal was applied. The returned event is always task-correlated.
+    /// The server may grant a shorter lease than requested; a `LeaseRenewed`
+    /// event carries the granted lease, which is what the caller should
+    /// schedule the next renewal from.
     pub async fn renew_lease(
         &mut self,
         cx: &Cx,
@@ -4133,12 +4138,9 @@ where
                     });
                 }
                 let actual = Duration::new(*lease_secs, *lease_subsec_nanos);
-                if actual != lease {
+                if let Err(error) = granted_renewal_lease(lease, actual) {
                     self.framed.take();
-                    return Err(RemoteServiceSessionError::RenewalLeaseMismatch {
-                        expected: lease,
-                        actual,
-                    });
+                    return Err(error);
                 }
                 self.next_renewal_id = renewal_id.checked_add(1);
             }
@@ -4244,6 +4246,24 @@ where
         }
         Ok(())
     }
+}
+
+/// Validates the lease a renewal acknowledgement grants against the one the
+/// client requested (R27c). A server may cap the request, so any non-zero
+/// grant no longer than the request is accepted. A zero or longer grant is a
+/// protocol violation.
+#[cfg(feature = "tls")]
+fn granted_renewal_lease(
+    requested: Duration,
+    actual: Duration,
+) -> Result<Duration, RemoteServiceSessionError> {
+    if actual.is_zero() || actual > requested {
+        return Err(RemoteServiceSessionError::RenewalLeaseMismatch {
+            expected: requested,
+            actual,
+        });
+    }
+    Ok(actual)
 }
 
 #[cfg(feature = "tls")]
@@ -7623,20 +7643,31 @@ async fn drive_native_remote_session(
                     })?;
                     shared.set_control_in_flight(task_id, false);
                     match event {
-                        RemoteServiceSessionEvent::LeaseRenewed { .. } => {
-                            // renew_lease validated the task, sequence and
-                            // exact duration echo. An unacknowledged write
-                            // never extends the prior origin-side deadline.
-                            // Timeout polls the exchange first, so a ready
-                            // acknowledgement observed after a late scheduler
-                            // poll must not resurrect an expired lease.
+                        RemoteServiceSessionEvent::LeaseRenewed {
+                            lease_secs,
+                            lease_subsec_nanos,
+                            ..
+                        } => {
+                            // renew_lease validated the task, the sequence, and
+                            // a granted lease no longer than requested. An
+                            // unacknowledged write never extends the prior
+                            // origin-side deadline. Timeout polls the exchange
+                            // first, so a ready acknowledgement observed after
+                            // a late scheduler poll must not resurrect an
+                            // expired lease.
                             if cx.now() >= expires_at {
                                 cx.trace(trace_events::LEASE_EXPIRED);
                                 return Err(RemoteError::LeaseExpired);
                             }
+                            // Schedule from what the server granted: it may cap
+                            // the request (R27c), never extend it. Automatic
+                            // renewals keep asking for the requested lease, so
+                            // one short grant does not ratchet later requests.
                             lease = remote_service_clamp_lease(requested_lease);
-                            expires_at = renewal_sent_at + lease;
-                            renewal_at = renewal_sent_at + (lease / 2).max(Duration::from_nanos(1));
+                            let granted = Duration::new(lease_secs, lease_subsec_nanos).min(lease);
+                            expires_at = renewal_sent_at + granted;
+                            renewal_at =
+                                renewal_sent_at + (granted / 2).max(Duration::from_nanos(1));
                             cx.trace(trace_events::LEASE_RENEWAL_RECEIVED);
                         }
                         RemoteServiceSessionEvent::Terminal { response } => {
@@ -14075,6 +14106,137 @@ mod tests {
                     "a cancellation racing a renewal still wakes the driver"
                 );
             }
+        }
+    }
+
+    /// A V3 peer that replays scripted event frames and discards the client's
+    /// writes.
+    #[cfg(feature = "tls")]
+    struct ScriptedV3Peer {
+        frames: std::io::Cursor<Vec<u8>>,
+    }
+
+    #[cfg(feature = "tls")]
+    impl ScriptedV3Peer {
+        fn new(events: &[RemoteServiceSessionEvent]) -> Self {
+            let mut frames = Vec::new();
+            for event in events {
+                let body = serde_json::to_vec(event).expect("scripted event should encode");
+                let len = u32::try_from(body.len()).expect("scripted frame length fits u32");
+                frames.extend_from_slice(&len.to_be_bytes());
+                frames.extend_from_slice(&body);
+            }
+            Self {
+                frames: std::io::Cursor::new(frames),
+            }
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    impl AsyncRead for ScriptedV3Peer {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut crate::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.frames).poll_read(cx, buf)
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    impl AsyncWrite for ScriptedV3Peer {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Starts a V3 session against a scripted peer and renews for `requested`;
+    /// the peer acknowledges the renewal with `granted`.
+    #[cfg(feature = "tls")]
+    fn renew_against_a_peer_granting(
+        requested: Duration,
+        granted: Duration,
+    ) -> Result<RemoteServiceSessionEvent, RemoteServiceSessionError> {
+        const TASK: u64 = 0x27c;
+        let hello = RemotePeerAdmissionPolicy::new(
+            RemoteProtocolVersion::V3,
+            ComputationSchemaRegistry::new(),
+        )
+        .hello_for(NodeId::new("r27c-origin"));
+        let cx = Cx::for_testing();
+        let request = RemoteServiceWireRequest::from_spawn_request(
+            hello.clone(),
+            &SpawnRequest {
+                remote_task_id: RemoteTaskId::from_raw(TASK),
+                computation: ComputationName::new("proof.r27c"),
+                input: RemoteInput::new(Vec::new()),
+                lease: requested,
+                idempotency_key: IdempotencyKey::from_raw(0x27c),
+                budget: None,
+                origin_node: hello.peer_node().clone(),
+                origin_region: cx.region_id(),
+                origin_task: cx.task_id(),
+            },
+        )
+        .expect("the request identity should agree with its hello");
+        let peer = ScriptedV3Peer::new(&[
+            RemoteServiceSessionEvent::Accepted {
+                remote_task_id: TASK,
+            },
+            RemoteServiceSessionEvent::LeaseRenewed {
+                remote_task_id: TASK,
+                renewal_id: 1,
+                lease_secs: granted.as_secs(),
+                lease_subsec_nanos: granted.subsec_nanos(),
+            },
+        ]);
+        let start = crate::util::future::block_on(RemoteComputationSession::start(
+            &cx,
+            peer,
+            &request,
+            RemoteServiceWireLimits::default(),
+        ))
+        .expect("the scripted peer accepts the session");
+        let RemoteComputationSessionStart::Running(mut session) = start else {
+            panic!("the scripted peer accepted, so the session is running");
+        };
+        crate::util::future::block_on(session.renew_lease(&cx, requested))
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn renewal_accepts_a_capped_grant_and_rejects_a_zero_or_longer_one() {
+        // R27c: a server may cap a renewal (its enforced cap is 24 h), so the
+        // client accepts any non-zero grant no longer than it asked for and
+        // returns it. A zero or a longer grant is a protocol violation.
+        let requested = Duration::from_secs(48 * 3600);
+        for granted in [requested, Duration::from_secs(86_400)] {
+            let event = renew_against_a_peer_granting(requested, granted)
+                .expect("an equal or capped grant is accepted");
+            assert!(matches!(
+                event,
+                RemoteServiceSessionEvent::LeaseRenewed { lease_secs, lease_subsec_nanos, .. }
+                    if Duration::new(lease_secs, lease_subsec_nanos) == granted
+            ));
+        }
+        for granted in [Duration::ZERO, requested + Duration::from_nanos(1)] {
+            assert!(matches!(
+                renew_against_a_peer_granting(requested, granted),
+                Err(RemoteServiceSessionError::RenewalLeaseMismatch { expected, actual })
+                    if expected == requested && actual == granted
+            ));
         }
     }
 }

@@ -387,6 +387,7 @@ enum SilentPeerControl {
     None,
     Cancel,
     Renewal { acknowledge: bool },
+    CappedRenewal { grant: Duration },
 }
 
 struct SilentNativePeer {
@@ -520,6 +521,32 @@ async fn silent_native_peer(
                                 .unwrap();
                             poll_fn(|task| framed.poll_flush(task)).await.unwrap();
                         }
+                        seen.renewed.store(true, Ordering::Release);
+                    }
+                    (
+                        SilentPeerControl::CappedRenewal { grant },
+                        RemoteServiceSessionCommand::RenewLease {
+                            remote_task_id,
+                            renewal_id,
+                            lease_secs,
+                            lease_subsec_nanos,
+                        },
+                    ) => {
+                        // Acknowledge with a grant shorter than requested (R27c).
+                        assert_eq!(remote_task_id, task_id.raw());
+                        assert_eq!(renewal_id, 1);
+                        assert!(grant < Duration::new(lease_secs, lease_subsec_nanos));
+                        let event = serde_json::to_vec(&RemoteServiceSessionEvent::LeaseRenewed {
+                            remote_task_id,
+                            renewal_id,
+                            lease_secs: grant.as_secs(),
+                            lease_subsec_nanos: grant.subsec_nanos(),
+                        })
+                        .unwrap();
+                        framed
+                            .send(asupersync::bytes::BytesMut::from(event.as_slice()))
+                            .unwrap();
+                        poll_fn(|task| framed.poll_flush(task)).await.unwrap();
                         seen.renewed.store(true, Ordering::Release);
                     }
                     (_, other) => panic!("expected {control:?}, received {other:?}"),
@@ -833,6 +860,103 @@ fn native_silent_peer_renewal_extends_deadline_only_after_acknowledgement() {
             });
             assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
         }
+    }
+}
+
+#[test]
+fn native_origin_schedules_a_capped_renewal_from_the_granted_lease() {
+    // R27c (z8vd8c): a server may acknowledge a renewal with a shorter lease
+    // than requested. The origin accepts the grant and expires at the granted
+    // deadline, not at the requested one.
+    for workers in [1, 2] {
+        let runtime = if workers == 1 {
+            RuntimeBuilder::current_thread().build().unwrap()
+        } else {
+            RuntimeBuilder::multi_thread()
+                .worker_threads(workers)
+                .build()
+                .unwrap()
+        };
+        runtime.block_on(async {
+            let base = Cx::current().unwrap();
+            let lease = Duration::from_secs(1);
+            let requested = Duration::from_secs(10);
+            let grant = Duration::from_secs(2);
+            let mut peer = silent_native_peer(
+                &base,
+                runtime.handle(),
+                lease,
+                Duration::from_millis(400),
+                SilentPeerControl::CappedRenewal { grant },
+                false,
+            )
+            .await;
+            let mut handle = spawn_remote(
+                &peer.cx,
+                NodeId::new("silent-worker"),
+                ComputationName::new("silent"),
+                RemoteInput::empty(),
+            )
+            .unwrap();
+            let (task_id, _, _) = wait_for_silent_native_running(&peer).await;
+            let triggered = Instant::now();
+            peer.remote
+                .send_message(
+                    &NodeId::new("silent-worker"),
+                    MessageEnvelope::new(
+                        NodeId::new("silent-origin"),
+                        peer.cx.logical_tick(),
+                        RemoteMessage::LeaseRenewal(LeaseRenewal {
+                            remote_task_id: task_id,
+                            new_lease: requested,
+                            current_state: RemoteTaskState::Running,
+                            node: NodeId::new("silent-origin"),
+                        }),
+                    ),
+                )
+                .unwrap();
+            asupersync::time::timeout(
+                peer.cx.now(),
+                Duration::from_secs(2),
+                peer.witness
+                    .changed
+                    .wait_until(|| peer.witness.renewed.load(Ordering::Acquire)),
+            )
+            .await
+            .expect("peer acknowledged the explicit renewal with a capped grant");
+            asupersync::time::sleep(peer.cx.now(), lease + Duration::from_millis(100)).await;
+            assert!(
+                handle.try_join().unwrap().is_none(),
+                "the capped grant still outlives the original lease"
+            );
+            assert_eq!(handle.state(), RemoteTaskState::Running);
+            let result = asupersync::time::timeout(
+                peer.cx.now(),
+                Duration::from_secs(3),
+                handle.join(&peer.cx),
+            )
+            .await
+            .expect("the origin expires at the granted deadline, not the requested one");
+            assert!(
+                matches!(result, Outcome::Err(RemoteError::LeaseExpired)),
+                "{result:?}"
+            );
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "bead": "asupersync-z8vd8c",
+                    "scenario": "capped_renewal_grant_bounds_the_origin_deadline",
+                    "workers": workers,
+                    "remote_task_id": task_id.raw(),
+                    "original_lease_ms": lease.as_millis(),
+                    "requested_ms": requested.as_millis(),
+                    "granted_ms": grant.as_millis(),
+                    "expired_after_renewal_ms": triggered.elapsed().as_millis(),
+                })
+            );
+            finish_silent_native_peer(&mut peer).await;
+        });
+        assert!(runtime.shutdown_timeout(Duration::from_secs(3)));
     }
 }
 
