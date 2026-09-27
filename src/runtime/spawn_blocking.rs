@@ -752,7 +752,7 @@ mod tests {
         impl Drop for Panics {
             fn drop(&mut self) { panic!("drained capture retirement sentinel"); }
         }
-        let state = DrainedBlockingState::new();
+        let state = DrainedBlockingState::<u8>::new();
         let capture = Panics;
         let envelope = DrainedPoolWork {
             work: Some(move || { drop(capture); 1_u8 }),
