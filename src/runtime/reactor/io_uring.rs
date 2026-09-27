@@ -2792,9 +2792,11 @@ mod imp {
                 .register(&RawFdSource(stale_fd), key, Interest::READABLE)
                 .expect("register should succeed");
 
-            // SAFETY: `stale_fd` is owned by this test; closing it and mapping
-            // another open socket onto the same number reproduces fd reuse.
-            assert_eq!(unsafe { libc::close(stale_fd) }, 0, "close stale fd");
+            // SAFETY: `stale_fd` is owned by this test. dup2 atomically closes
+            // it and maps another open socket onto the same number, which
+            // reproduces fd reuse without an explicit close. A separate close
+            // would leave a window in which a concurrent test could be handed
+            // the freed number, and dup2 would then silently close that fd.
             assert_eq!(
                 unsafe { libc::dup2(new_sock.as_raw_fd(), stale_fd) },
                 stale_fd,
