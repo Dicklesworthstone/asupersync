@@ -4,8 +4,8 @@ use super::server_streaming::{
     StreamDeadline, bounded_terminal_trailers, forward_messages, poll_cancellable,
 };
 use super::{
-    CompressionEncoding, Cx, GrpcError, HostPolicy, HttpResponse, Metadata, Request, Response,
-    RuntimeHandle, Server, ServerStreamingConfig, ServiceHandler, ShutdownStats, Status,
+    CompressionEncoding, Cx, HostPolicy, HttpResponse, Metadata, Request, Response, RuntimeHandle,
+    Server, ServerStreamingConfig, ServiceHandler, ShutdownStats, Status,
     enforce_http2_metadata_blocks, grpc_content_type_is_allowed,
     grpc_request_trailer_key_is_reserved, insert_http2_metadata_entry,
 };

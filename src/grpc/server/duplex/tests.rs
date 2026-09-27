@@ -227,7 +227,7 @@ impl Streaming for Echo {
 struct Stop(ShutdownSignal);
 impl Drop for Stop {
     fn drop(&mut self) {
-        self.0.begin_force_close();
+        let _ = self.0.begin_force_close();
     }
 }
 
