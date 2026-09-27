@@ -535,19 +535,32 @@ impl Http1Upgrade {
             .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-protocol"))
             .map(|(_, value)| value.as_str())
             .collect::<Vec<_>>();
-        let has_extensions = response
+        // The 101 must advertise exactly the extensions the callback's codec
+        // was configured with (permessage-deflate is implemented), in order,
+        // and none when it negotiated none.
+        let extensions = response
             .headers
             .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-extensions"));
+            .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-extensions"))
+            .flat_map(|(_, value)| value.split(','))
+            .map(str::trim)
+            .collect::<Vec<_>>();
 
         protocols.len() <= 1
             && protocols.first().copied() == self.expected_protocol.as_deref()
-            && !has_extensions
-            && self.expected_extensions.is_empty()
+            && extensions.len() == self.expected_extensions.len()
+            && extensions
+                .iter()
+                .zip(&self.expected_extensions)
+                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected.trim()))
     }
 
     pub(crate) fn expected_protocol(&self) -> Option<&str> {
         self.expected_protocol.as_deref()
+    }
+
+    pub(crate) fn expected_extensions(&self) -> &[String] {
+        &self.expected_extensions
     }
 }
 
@@ -3240,6 +3253,20 @@ fn headers_have_exact_token(headers: &[(String, String)], name: &str, expected: 
         .any(|token| token == expected)
 }
 
+/// Whether the client offered the extension a handoff negotiated. Offers carry
+/// parameters (`permessage-deflate; client_max_window_bits`), so only the
+/// extension token is compared; the negotiated parameters were validated against
+/// the offer when the response was built.
+fn request_offers_websocket_extension(headers: &[(String, String)], negotiated: &str) -> bool {
+    let token = negotiated.split(';').next().unwrap_or("").trim();
+    headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-extensions"))
+        .flat_map(|(_, value)| value.split(','))
+        .filter_map(|offer| offer.split(';').next())
+        .any(|offer| offer.trim().eq_ignore_ascii_case(token))
+}
+
 fn single_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     let mut values = headers
         .iter()
@@ -3306,9 +3333,13 @@ fn validate_upgrade_handoff(
         || upgrade.expected_protocol().is_some_and(|protocol| {
             !headers_have_exact_token(&request.headers, "sec-websocket-protocol", protocol)
         })
+        || upgrade
+            .expected_extensions()
+            .iter()
+            .any(|extension| !request_offers_websocket_extension(&request.headers, extension))
     {
         return Err(invalid_upgrade_error(
-            "WebSocket handoff response protocol does not match the negotiated protocol",
+            "WebSocket handoff response protocol or extensions do not match the negotiation",
         ));
     }
     let response_has_framing = response.headers.iter().any(|(name, _)| {
@@ -7653,6 +7684,80 @@ mod tests {
             matches!(error, HttpError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData)
         );
         assert!(written.lock().unwrap().is_empty());
+    }
+
+    fn deflate_handoff(offer: Option<&str>) -> Result<Http1ServeOutcome<TestIo>, HttpError> {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut input = String::from(
+            "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n",
+        );
+        if let Some(offer) = offer {
+            input.push_str(&format!("Sec-WebSocket-Extensions: {offer}\r\n"));
+        }
+        input.push_str("\r\n");
+        let io = TestIo::new(input.into_bytes(), Arc::clone(&written));
+        let server = Http1Server::with_config_upgradeable(
+            |_request| async move {
+                let response = Response::new(101, "Switching Protocols", Vec::new())
+                    .with_header("connection", "Upgrade")
+                    .with_header("upgrade", "websocket")
+                    .with_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+                    .with_header("sec-websocket-extensions", "permessage-deflate");
+                Http1Response::new(response).with_upgrade(
+                    Http1Upgrade::new(|_cx, _io, _read_ahead| async {})
+                        .with_websocket_negotiation(None, vec!["permessage-deflate".to_owned()]),
+                )
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        runtime.block_on(async { server.serve_upgradeable_with_peer_addr(io, None).await })
+    }
+
+    #[test]
+    fn upgradeable_server_hands_off_a_negotiated_extension_the_client_offered() {
+        let outcome = deflate_handoff(Some("permessage-deflate; client_max_window_bits"))
+            .expect("negotiated permessage-deflate handoff");
+        assert!(matches!(outcome, Http1ServeOutcome::Upgraded { .. }));
+    }
+
+    #[test]
+    fn upgradeable_server_refuses_an_extension_the_client_never_offered() {
+        let error = match deflate_handoff(None) {
+            Err(error) => error,
+            Ok(_) => panic!("an unoffered extension must refuse handoff"),
+        };
+        assert!(
+            matches!(error, HttpError::Io(ref error) if error.kind() == io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[test]
+    fn websocket_negotiation_requires_the_exact_negotiated_extensions() {
+        let response = |extensions: Option<&str>| {
+            let response = Response::new(101, "Switching Protocols", Vec::new());
+            match extensions {
+                Some(value) => response.with_header("sec-websocket-extensions", value),
+                None => response,
+            }
+        };
+        let deflate = Http1Upgrade::new(|_cx, _io, _read_ahead| async {})
+            .with_websocket_negotiation(None, vec!["permessage-deflate".to_owned()]);
+        let plain = Http1Upgrade::new(|_cx, _io, _read_ahead| async {});
+        assert!(deflate.websocket_negotiation_matches(&response(Some("permessage-deflate"))));
+        assert!(deflate.websocket_negotiation_matches(&response(Some("Permessage-Deflate"))));
+        assert!(!deflate.websocket_negotiation_matches(&response(None)));
+        assert!(!deflate.websocket_negotiation_matches(&response(Some(
+            "permessage-deflate; server_no_context_takeover"
+        ))));
+        assert!(
+            !deflate.websocket_negotiation_matches(&response(Some("permessage-deflate, x-other")))
+        );
+        assert!(plain.websocket_negotiation_matches(&response(None)));
+        assert!(!plain.websocket_negotiation_matches(&response(Some("permessage-deflate"))));
     }
 
     #[test]
