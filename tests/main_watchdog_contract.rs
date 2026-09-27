@@ -353,6 +353,35 @@ fn compiler_killed(before: &str) -> String {
 }
 
 #[test]
+fn a_dependency_preflight_refusal_is_no_evidence_not_a_retry() {
+    // rch 2.1.0 refuses a base whose own Cargo manifests fail its preflight (RCH-E413),
+    // on every attempt. Deferring it would retry a lane that can never run.
+    let head = sha(9);
+    let refusal = "  WARN rch::hook: Dependency preflight blocked remote execution [RCH-E413]: Clean-overlay requires selected Cargo inputs.\n[RCH] remote required; refusing local fallback (dependency preflight failed: policy_violation selected_cargo_sources)\n";
+    let admission = "[RCH] remote required; refusing local fallback ([RCH-I001] requested worker set refused (selection error: queue_timeout))\n";
+    let lane = |id: &str| json!({"id": id, "kind": "build", "argv": ["cargo"], "expected_targets": []});
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [lane("preflight-refused"), lane("admission-refused")],
+        },
+        "lane_logs": {
+            "preflight-refused": {head.clone(): {"log": refusal, "client_exit": 103}},
+            "admission-refused": {head.clone(): {"log": admission, "client_exit": 103}},
+        },
+    });
+    let result = evaluate(&scenario);
+    let refused = receipt(&result, "preflight-refused");
+    assert_eq!(refused["verdict"], "no-evidence", "{result:#}");
+    assert!(
+        refused["reason"].as_str().expect("reason").contains("RCH-E413"),
+        "{refused:#}"
+    );
+    // An ordinary admission refusal is still deferred for a later run.
+    assert_eq!(receipt(&result, "admission-refused")["verdict"], "deferred", "{result:#}");
+}
+
+#[test]
 fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_beside_it() {
     let head = sha(9);
     let one = |id: &str, kind: &str| json!({"id": id, "kind": kind, "argv": ["cargo"], "expected_targets": []});

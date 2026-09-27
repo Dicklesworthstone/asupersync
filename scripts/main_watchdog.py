@@ -114,6 +114,10 @@ PATH_ATTR_RE = re.compile(r'^path\s*=\s*"([^"]+)"$')
 TRUE: frozenset[frozenset[str]] = frozenset({frozenset()})
 NEVER: frozenset[frozenset[str]] = frozenset()
 REMOTE_EXIT_RE = re.compile(r"Remote command finished: exit=(\d+)")
+# rch refuses the base commit's own Cargo manifests (for example a nested workspace
+# fixture with a missing member). That is a property of the commit, so it is
+# refused again on every retry: nothing ran, and nothing will.
+DEPENDENCY_PREFLIGHT_RE = re.compile(r"\bRCH-E413\b")
 WORKER_RE = re.compile(r"Selected worker: (\S+)")
 EXECUTED_TEST_RE = re.compile(r"^test (\S+) \.\.\. (?:ok|FAILED)$")
 TEST_RESULT_RE = re.compile(
@@ -479,6 +483,9 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         "targets_executed": [],
         "env_gated_targets": list(lane.get("env_gated_targets", [])),
     }
+    if remote_exit is None and DEPENDENCY_PREFLIGHT_RE.search(clean):
+        result["reason"] = "rch dependency preflight refused this commit's tree (RCH-E413): nothing ran"
+        return result
     if remote_exit is None and client_exit == 103:
         result.update(verdict=VERDICT_DEFERRED, reason="admission refused (exit 103)")
         return result
@@ -1319,7 +1326,7 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
         for _ in range(admission_attempts):
             proc = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
             text, code = proc.stdout + proc.stderr, proc.returncode
-            if not (code == 103 and not REMOTE_EXIT_RE.search(text)):
+            if not (code == 103 and not REMOTE_EXIT_RE.search(text)) or DEPENDENCY_PREFLIGHT_RE.search(text):
                 break
             subprocess.run(["sleep", str(admission_sleep)], check=False)
         log_dir.mkdir(parents=True, exist_ok=True)
