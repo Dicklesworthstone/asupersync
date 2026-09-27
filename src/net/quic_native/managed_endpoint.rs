@@ -131,6 +131,10 @@ struct PendingAuthenticatedAccept {
     next_pto: Instant,
     expires: Instant,
     last_flight: Vec<OutgoingPacket>,
+    /// What each `last_flight` packet carries, so a PTO rebuilds it under a
+    /// new packet number instead of resending the protected bytes.
+    last_flight_plan: Vec<AdmissionFlightPacket>,
+    last_flight_dst_cid: ConnectionId,
     outbound: VecDeque<OutgoingPacket>,
     outstanding_packets: usize,
     outstanding_bytes: usize,
@@ -142,6 +146,15 @@ struct PendingAuthenticatedAccept {
     early: Vec<ReceivedPacket>,
     early_bytes: usize,
     final_ack_queued: bool,
+}
+
+#[cfg(feature = "tls")]
+enum AdmissionFlightPacket {
+    Crypto {
+        segment: super::handshake_driver::HandshakeSegment,
+        offset: u64,
+    },
+    FinalAck,
 }
 
 #[cfg(feature = "tls")]
@@ -230,11 +243,44 @@ impl PendingAuthenticatedAccept {
         Ok(())
     }
 
+    /// Resend the flight's CRYPTO offsets and bytes in new packets. RFC 9000
+    /// section 12.3 forbids reusing a packet number, and a peer that already
+    /// processed the first copy suppresses an exact duplicate.
     fn retransmit(&mut self) -> Result<(), ManagedEndpointError> {
-        let bytes = self.check_flight(&self.last_flight)?;
-        self.outstanding_packets += self.last_flight.len();
+        let mut packets = Vec::with_capacity(self.last_flight_plan.len());
+        for planned in &self.last_flight_plan {
+            let data = match planned {
+                AdmissionFlightPacket::Crypto { segment, offset } => {
+                    self.driver.assemble_handshake_packet_at(
+                        segment,
+                        *offset,
+                        self.last_flight_dst_cid,
+                        self.local_cid,
+                        self.packet_number,
+                    )
+                }
+                AdmissionFlightPacket::FinalAck => self.driver.assemble_final_handshake_ack(
+                    self.last_flight_dst_cid,
+                    self.local_cid,
+                    self.packet_number,
+                ),
+            }
+            .map_err(accept_error)?;
+            self.packet_number = self
+                .packet_number
+                .checked_add(1)
+                .ok_or_else(|| accept_error("packet number exhausted"))?;
+            packets.push(OutgoingPacket {
+                dst_addr: self.peer,
+                data,
+                send_time: None,
+            });
+        }
+        let bytes = self.check_flight(&packets)?;
+        self.outstanding_packets += packets.len();
         self.outstanding_bytes += bytes;
-        self.outbound.extend(self.last_flight.iter().cloned());
+        self.outbound.extend(packets.iter().cloned());
+        self.last_flight = packets;
         Ok(())
     }
 
@@ -399,6 +445,7 @@ impl PendingAuthenticatedAccept {
             .filter(|size| *size != 0)
             .ok_or_else(|| accept_error("datagram bound cannot encode a TLS flight"))?;
         let mut packets = Vec::new();
+        let mut plan = Vec::new();
         let mut bytes = 0usize;
         for segment in segments {
             if segment.level == HandshakeLevel::OneRtt {
@@ -412,6 +459,7 @@ impl PendingAuthenticatedAccept {
                     level: segment.level,
                     data: chunk.to_vec(),
                 };
+                let offset = self.driver.next_crypto_offset(segment.level);
                 let data = self
                     .driver
                     .assemble_handshake_packet(
@@ -436,6 +484,7 @@ impl PendingAuthenticatedAccept {
                     data,
                     send_time: None,
                 });
+                plan.push(AdmissionFlightPacket::Crypto { segment, offset });
             }
         }
         let final_ack = self.driver.is_complete() && !self.final_ack_queued;
@@ -462,6 +511,7 @@ impl PendingAuthenticatedAccept {
                 data,
                 send_time: None,
             });
+            plan.push(AdmissionFlightPacket::FinalAck);
         }
         if !packets.is_empty() {
             self.flights += 1;
@@ -471,6 +521,8 @@ impl PendingAuthenticatedAccept {
             self.queue_flight(&packets)?;
             self.final_ack_queued |= final_ack;
             self.last_flight = packets;
+            self.last_flight_plan = plan;
+            self.last_flight_dst_cid = peer_cid;
             self.next_pto = now
                 .checked_add(ACCEPT_PTO)
                 .ok_or_else(|| accept_error("PTO overflow"))?;
@@ -1171,6 +1223,8 @@ impl ManagedQuicEndpoint {
             next_pto,
             expires,
             last_flight: Vec::new(),
+            last_flight_plan: Vec::new(),
+            last_flight_dst_cid: ConnectionId::default(),
             outbound: VecDeque::new(),
             outstanding_packets: 0,
             outstanding_bytes: 0,
@@ -5151,6 +5205,140 @@ mod tests {
                 assert!(
                     pending.socket_pending_bytes as u64 <= pending.authenticated_received_bytes * 3
                 );
+                endpoint.shutdown(&cx).await.unwrap();
+                assert_eq!(timer.pending_count(), 0);
+            }));
+        }
+
+        #[test]
+        fn managed_accept_pto_resends_the_flight_under_new_packet_numbers() {
+            use super::super::super::handshake_driver::{
+                client_config, server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, timer, mut endpoint, peer, existing) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                endpoint.remove_connection(&cx, existing).unwrap();
+                endpoint.config.is_server = true;
+                endpoint.config.udp_config.max_packet_size = 1500;
+                endpoint.config.packet_batch_size = 1024;
+                let mut parameters = Vec::new();
+                crate::net::quic_core::TransportParameters::default()
+                    .encode(&mut parameters)
+                    .unwrap();
+                let tls = server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![b"atp/1".to_vec()],
+                )
+                .unwrap();
+                endpoint
+                    .configure_authenticated_server(&cx, tls, parameters, b"atp/1")
+                    .unwrap();
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                let mut client = QuicHandshakeDriver::client(
+                    client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"atp/1".to_vec()])
+                        .unwrap(),
+                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                    Vec::new(),
+                )
+                .unwrap();
+                let initial_cid = ConnectionId::new(&[0xd6; 8]).unwrap();
+                let client_cid = ConnectionId::new(&[0xd7; 8]).unwrap();
+                client.install_initial_keys(initial_cid.as_bytes()).unwrap();
+                let segments = client.pump_outbound().unwrap();
+                let packet = ReceivedPacket {
+                    src_addr: peer.local_addr().unwrap(),
+                    data: client
+                        .assemble_handshake_packet(&segments[0], initial_cid, client_cid, 0)
+                        .unwrap(),
+                    receive_time: now,
+                    transmit_time: None,
+                };
+                assert!(
+                    endpoint
+                        .try_automatic_authenticated_accept(&cx, &packet)
+                        .unwrap()
+                );
+                let first: Vec<Vec<u8>> = endpoint
+                    .pending_authenticated_accept
+                    .front()
+                    .unwrap()
+                    .last_flight
+                    .iter()
+                    .map(|packet| packet.data.clone())
+                    .collect();
+                assert!(!first.is_empty(), "actual TLS server flight");
+                // The client processes the whole first flight, so only its
+                // acknowledgment is missing when the server's PTO fires.
+                for data in &first {
+                    client.recv_handshake_packet(data).unwrap();
+                    let _ = client.pump_outbound().unwrap();
+                }
+                assert!(client.is_complete());
+                let levels = [HandshakeLevel::Initial, HandshakeLevel::Handshake];
+                let seen = levels.map(|level| client.received_handshake_packet_numbers(level));
+                // Byte credit is not under test: a validated address lets the
+                // whole first flight reach the socket queue before the PTO.
+                endpoint
+                    .pending_authenticated_accept
+                    .front_mut()
+                    .unwrap()
+                    .address_validated = true;
+                for _ in 0..first.len() {
+                    endpoint.queue_accept_output();
+                    for packet in endpoint.pending_outgoing.drain(..) {
+                        endpoint
+                            .pending_authenticated_accept
+                            .front_mut()
+                            .unwrap()
+                            .sent(packet.packet.data.len());
+                    }
+                }
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                assert!(pending.outbound.is_empty());
+                assert_eq!(pending.outstanding_packets, 0);
+                let due = pending.next_pto;
+                assert!(!endpoint.advance_authenticated_accept(&cx, due));
+                let pending = endpoint.pending_authenticated_accept.front().unwrap();
+                assert_eq!(pending.flights, 2);
+                let second: Vec<Vec<u8>> = pending
+                    .outbound
+                    .iter()
+                    .map(|packet| packet.data.clone())
+                    .collect();
+                assert_eq!(second.len(), first.len());
+                for (old, new) in first.iter().zip(&second) {
+                    assert_eq!(old.len(), new.len(), "the same CRYPTO bytes");
+                    assert_ne!(old, new, "a retransmission never reuses a packet number");
+                }
+                for data in &second {
+                    client.recv_handshake_packet(data).unwrap();
+                }
+                for (level, before) in levels.into_iter().zip(seen) {
+                    let after = client.received_handshake_packet_numbers(level);
+                    let fresh: Vec<u64> = after
+                        .iter()
+                        .copied()
+                        .filter(|number| !before.contains(number))
+                        .collect();
+                    assert_eq!(
+                        fresh.len(),
+                        before.len(),
+                        "{level:?}: every resent packet is new to the peer"
+                    );
+                    assert!(
+                        fresh
+                            .iter()
+                            .all(|number| before.iter().all(|old| number > old)),
+                        "{level:?}: resent packet numbers only grow"
+                    );
+                }
                 endpoint.shutdown(&cx).await.unwrap();
                 assert_eq!(timer.pending_count(), 0);
             }));

@@ -814,13 +814,44 @@ impl QuicHandshakeDriver {
         src_cid: ConnectionId,
         packet_number: u64,
     ) -> Result<Vec<u8>, QuicTlsError> {
+        let offset = self.next_crypto_offset(segment.level);
+        let packet =
+            self.assemble_handshake_packet_at(segment, offset, dst_cid, src_cid, packet_number)?;
+        self.crypto_send_offset[level_index(segment.level)] += segment.data.len() as u64;
+        Ok(packet)
+    }
+
+    /// The CRYPTO offset the next `level` segment is sent at.
+    pub(crate) fn next_crypto_offset(&self, level: HandshakeLevel) -> u64 {
+        self.crypto_send_offset[level_index(level)]
+    }
+
+    /// Packet numbers authenticated so far in an Initial or Handshake space.
+    #[cfg(test)]
+    pub(crate) fn received_handshake_packet_numbers(&self, level: HandshakeLevel) -> Vec<u64> {
+        self.handshake_recv_packet_numbers
+            .get(level_index(level))
+            .map(|numbers| numbers.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Protect CRYPTO bytes already sent at `offset` again, under a new packet
+    /// number. A PTO retransmission resends the same data, but RFC 9000 section
+    /// 12.3 forbids reusing a packet number within its space.
+    pub(crate) fn assemble_handshake_packet_at(
+        &mut self,
+        segment: &HandshakeSegment,
+        offset: u64,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+    ) -> Result<Vec<u8>, QuicTlsError> {
         let packet_type = match segment.level {
             HandshakeLevel::Initial => LongPacketType::Initial,
             HandshakeLevel::Handshake => LongPacketType::Handshake,
             HandshakeLevel::OneRtt => return Err(handshake_failure("onertt_is_not_long_header")),
         };
         let space = level_protection_space(segment.level);
-        let offset = self.crypto_send_offset[level_index(segment.level)];
 
         let mut payload = BytesMut::new();
         QuicFrame::Crypto {
@@ -893,11 +924,7 @@ impl QuicHandshakeDriver {
             header_bytes.insert(length_at, 0x40);
         }
 
-        let packet =
-            self.protect_long_header_packet(space, &header_bytes, packet_number, &plaintext)?;
-
-        self.crypto_send_offset[level_index(segment.level)] += segment.data.len() as u64;
-        Ok(packet)
+        self.protect_long_header_packet(space, &header_bytes, packet_number, &plaintext)
     }
 
     /// Protect one long-header packet exactly as RFC 9001 §5 describes.
