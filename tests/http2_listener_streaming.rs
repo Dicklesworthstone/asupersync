@@ -15,14 +15,17 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use asupersync::bytes::{Buf, Bytes};
-use asupersync::channel::oneshot;
+use asupersync::channel::{mpsc, oneshot};
 use asupersync::codec::Framed;
 use asupersync::cx::Cx;
 use asupersync::http::body::{Body, Frame as BodyFrame};
 use asupersync::http::h1::server::HostPolicy;
-use asupersync::http::h1::stream::IncomingBodyError;
+use asupersync::http::h1::stream::{IncomingBodyError, StreamingServerRequest};
+use asupersync::http::h1::types::Response as H1Response;
 use asupersync::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
-use asupersync::http::h2::listener::{Http2Listener, Http2StreamingListenerConfig};
+use asupersync::http::h2::listener::{
+    Http2Listener, Http2ProducedResponse, Http2StreamingListenerConfig,
+};
 use asupersync::http::h2::{
     Connection, ConnectionState, ErrorCode, Frame, FrameCodec, Header, Settings,
 };
@@ -283,6 +286,41 @@ async fn exercise_with_client_settings<F, Fut>(
     assert_eq!(manager.active_count(), 0);
 }
 
+async fn exercise_produced<H, HFut, F, Fut>(
+    handler: H,
+    client_settings: Settings,
+    workflow: F,
+) where
+    H: Fn(StreamingServerRequest) -> HFut + Send + Sync + 'static,
+    HFut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    F: FnOnce(Client, Arc<AtomicUsize>) -> Fut,
+    Fut: Future<Output = Client>,
+{
+    let runtime = Runtime::current_handle().expect("native runtime handle");
+    let listener = Http2Listener::bind_streaming_produced_with_config(
+        "127.0.0.1:0",
+        handler,
+        config(),
+    )
+    .await
+    .expect("bind live-input produced-response listener");
+    let address = listener.local_addr().unwrap();
+    let manager = listener.connection_manager().clone();
+    let in_flight = listener.in_flight_requests();
+    let client_in_flight = Arc::clone(&in_flight);
+    let serving = listener.run_streaming_produced(&runtime);
+    let client = async {
+        let client = Client::connect(address, client_settings).await;
+        drop(workflow(client, client_in_flight).await);
+        assert!(manager.begin_drain(Duration::from_secs(2)));
+    };
+    let (stats, ()) = zip(serving, client).await;
+    let report = stats.unwrap().drain_report.expect("request drain report");
+    assert!(report.reached_quiescence, "{report}");
+    assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+    assert_eq!(manager.active_count(), 0);
+}
+
 fn with_survivor(router: Router) -> Router {
     router.route(
         "/survivor",
@@ -352,6 +390,333 @@ async fn wait_requests_drained(in_flight: &AtomicUsize) {
         }
     })
     .await;
+}
+
+#[test]
+fn h2_live_produced_echoes_before_upload_eof_in_the_same_request_region() {
+    for workers in [1, 2] {
+        run(workers, async {
+            let cx = Cx::current().unwrap();
+            let (entered_tx, mut entered_rx) = oneshot::channel();
+            let entered = Arc::new(Mutex::new(Some(entered_tx)));
+            let handler = move |request: StreamingServerRequest| {
+                let entered = Arc::clone(&entered);
+                async move {
+                    if request.head.uri == "/survivor" {
+                        return Http2ProducedResponse::buffered(H1Response::new(
+                            200,
+                            "OK",
+                            b"survived".to_vec(),
+                        ));
+                    }
+                    let handler_cx = Cx::current().unwrap();
+                    entered
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send_blocking(handler_cx.clone())
+                        .unwrap();
+                    Http2ProducedResponse::streaming(
+                        H1Response::new(200, "OK", Vec::new()),
+                        NonZeroUsize::new(1).unwrap(),
+                        NonZeroUsize::new(INITIAL_WINDOW).unwrap(),
+                        move |producer_cx, mut sender| async move {
+                            assert_eq!(producer_cx.region_id(), handler_cx.region_id());
+                            assert_eq!(producer_cx.task_id(), handler_cx.task_id());
+                            assert_eq!(Cx::current().unwrap().task_id(), handler_cx.task_id());
+                            let mut body = request.body;
+                            while let Some(frame) =
+                                poll_fn(|poll_cx| Pin::new(&mut body).poll_frame(poll_cx)).await
+                            {
+                                match frame.unwrap() {
+                                    BodyFrame::Data(data) => {
+                                        sender.send_chunk(&producer_cx, data.chunk()).await?;
+                                    }
+                                    BodyFrame::Trailers(_) => panic!("unexpected request trailers"),
+                                }
+                            }
+                            sender.finish(&producer_cx)?;
+                            Ok(sender)
+                        },
+                    )
+                }
+            };
+            exercise_produced(handler, Settings::client(), move |mut client, in_flight| async move {
+                let stream = client.open("POST", "/duplex", Some(11), false).await;
+                let request_cx = entered_rx.recv(&cx).await.unwrap();
+                assert_ne!(request_cx.region_id(), cx.region_id());
+                client.data(stream, Bytes::from_static(b"prefix-"), false).await;
+                let mut head_seen = false;
+                let mut prefix = Vec::new();
+                while prefix.len() < 7 {
+                    match client.receive().await.0 {
+                        Some(ReceivedFrame::Headers { stream_id, headers, end_stream }) => {
+                            assert_eq!(stream_id, stream);
+                            assert!(!head_seen && !end_stream);
+                            assert!(headers.iter().any(|header| {
+                                header.name == ":status" && header.value == "200"
+                            }));
+                            head_seen = true;
+                        }
+                        Some(ReceivedFrame::Data { stream_id, data, end_stream }) => {
+                            assert_eq!(stream_id, stream);
+                            assert!(head_seen && !end_stream);
+                            prefix.extend_from_slice(&data);
+                        }
+                        None => {}
+                        event => panic!("response must progress before upload EOF: {event:?}"),
+                    }
+                }
+                assert_eq!(prefix, b"prefix-");
+                assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+                assert!(!request_cx.is_cancel_requested());
+                client.data(stream, Bytes::from_static(b"tail"), true).await;
+                let mut tail = Vec::new();
+                loop {
+                    match client.receive().await.0 {
+                        Some(ReceivedFrame::Data { stream_id, data, end_stream }) => {
+                            assert_eq!(stream_id, stream);
+                            tail.extend_from_slice(&data);
+                            if end_stream {
+                                break;
+                            }
+                        }
+                        None => {}
+                        event => panic!("duplex response must finish cleanly: {event:?}"),
+                    }
+                }
+                assert_eq!(tail, b"tail");
+                wait_region_closed(&request_cx).await;
+                wait_requests_drained(&in_flight).await;
+                client.survivor().await;
+                client
+            }).await;
+        });
+    }
+}
+
+#[test]
+fn h2_live_produced_waits_for_descendant_drain_and_flush_before_unread_input_reset() {
+    for workers in [1, 2] {
+        for blocked_response in [false, true] {
+            live_produced_descendant_drain_case(workers, blocked_response);
+        }
+    }
+}
+
+fn live_produced_descendant_drain_case(workers: usize, blocked_response: bool) {
+    run(workers, async move {
+            const RESPONSE: &[u8] = b"produced response survived owned close";
+            let cx = Cx::current().unwrap();
+            let (cleanup_tx, mut cleanup_rx) = oneshot::channel();
+            let cleanup = Arc::new(Mutex::new(Some(cleanup_tx)));
+            let (release_tx, release_rx) = oneshot::channel();
+            let release = Arc::new(Mutex::new(Some(release_rx)));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let handler_retired = Arc::clone(&retired);
+            let cleanup_wait_cx = cx.clone();
+            let handler = move |request: StreamingServerRequest| {
+                let cleanup = Arc::clone(&cleanup);
+                let release = Arc::clone(&release);
+                let retired = Arc::clone(&handler_retired);
+                let cleanup_wait_cx = cleanup_wait_cx.clone();
+                async move {
+                    if request.head.uri == "/probe" {
+                        return Http2ProducedResponse::buffered(H1Response::new(
+                            200, "OK", Vec::new(),
+                        ));
+                    }
+                    drop(request.body);
+                    let cleanup = cleanup.lock().unwrap().take().unwrap();
+                    let mut release = release.lock().unwrap().take().unwrap();
+                    Http2ProducedResponse::streaming(
+                        H1Response::new(200, "OK", Vec::new()),
+                        NonZeroUsize::new(1).unwrap(),
+                        NonZeroUsize::new(INITIAL_WINDOW).unwrap(),
+                        move |producer_cx, mut sender| async move {
+                            let owner_cx = producer_cx.clone();
+                            let (parked_tx, mut parked_rx) = oneshot::channel();
+                            let _descendant = producer_cx.spawn(move |child_cx| async move {
+                                let _retired = Retired(retired);
+                                let (_sender, mut receiver) = mpsc::channel::<()>(1);
+                                let mut waiting = std::pin::pin!(receiver.recv(&child_cx));
+                                let mut parked = Some(parked_tx);
+                                let result = poll_fn(|poll_cx| {
+                                    let result = waiting.as_mut().poll(poll_cx);
+                                    if result.is_pending()
+                                        && let Some(parked) = parked.take()
+                                    {
+                                        parked.send_blocking(()).unwrap();
+                                    }
+                                    result
+                                }).await;
+                                assert_eq!(result, Err(mpsc::RecvError::Cancelled));
+                                assert!(parked.is_none(), "descendant must park before close");
+                                let mut cleanup = Some(cleanup);
+                                // Observe the cleanup latch through the live
+                                // test owner, after this descendant has
+                                // acknowledged its own cancellation.
+                                let mut release = std::pin::pin!(release.recv(&cleanup_wait_cx));
+                                poll_fn(|poll_cx| {
+                                    let result = release.as_mut().poll(poll_cx);
+                                    if result.is_pending()
+                                        && let Some(cleanup) = cleanup.take()
+                                    {
+                                        cleanup.send_blocking(owner_cx.clone()).unwrap();
+                                    }
+                                    result
+                                }).await.unwrap();
+                            }).unwrap();
+                            parked_rx.recv(&producer_cx).await.unwrap();
+                            sender.send_chunk(&producer_cx, RESPONSE).await?;
+                            sender.finish(&producer_cx)?;
+                            Ok(sender)
+                        },
+                    )
+                }
+            };
+            let mut settings = Settings::client();
+            if blocked_response {
+                settings.initial_window_size = 0;
+            }
+            exercise_produced(handler, settings, move |mut client, in_flight| async move {
+                let stream = client.open("POST", "/early-produced", None, false).await;
+                loop {
+                    match client.receive().await.0 {
+                        Some(ReceivedFrame::Headers { stream_id, end_stream, .. }) => {
+                            assert_eq!(stream_id, stream);
+                            assert!(!end_stream);
+                            break;
+                        }
+                        None => {}
+                        event => panic!("produced HEADERS must precede DATA credit: {event:?}"),
+                    }
+                }
+                let request_cx = cleanup_rx.recv(&cx).await.unwrap();
+                assert_eq!(retired.load(Ordering::SeqCst), 0);
+                assert_eq!(in_flight.load(Ordering::SeqCst), 1);
+                let diagnostics = Runtime::current_handle().unwrap().diagnostics().unwrap();
+                assert!(diagnostics.explain_region_open(request_cx.region_id()).region_state.is_some());
+                let mut body = Vec::new();
+                if !blocked_response {
+                    while body.len() < RESPONSE.len() {
+                        match client.receive().await.0 {
+                            Some(ReceivedFrame::Data { stream_id, data, end_stream }) => {
+                                assert_eq!(stream_id, stream);
+                                assert!(!end_stream, "EOF must wait for descendant cleanup");
+                                body.extend_from_slice(&data);
+                            }
+                            None => {}
+                            event => panic!("response DATA must precede owned close: {event:?}"),
+                        }
+                    }
+                    assert_eq!(body, RESPONSE);
+                }
+                // Actual descendant cleanup is parked. An unrelated request
+                // proves the connection driver can still run without emitting
+                // premature response EOF or resetting the unread upload.
+                let probe = client.open("GET", "/probe", None, true).await;
+                client.response(probe, "200", b"").await;
+                release_tx.send(&cx, ()).unwrap();
+                wait_region_closed(&request_cx).await;
+                assert_eq!(retired.load(Ordering::SeqCst), 1);
+                if blocked_response {
+                    // Even after close, produced DATA remains blocked on
+                    // credit. A sibling forces another flush of that state.
+                    let probe = client.open("GET", "/probe", None, true).await;
+                    client.response(probe, "200", b"").await;
+                    assert!(in_flight.load(Ordering::SeqCst) >= 1);
+                    client.connection.send_stream_window_update(
+                        stream, u32::try_from(RESPONSE.len()).unwrap(),
+                    ).unwrap();
+                    client.flush().await;
+                }
+                loop {
+                    match client.receive().await.0 {
+                        Some(ReceivedFrame::Data { stream_id, data, end_stream }) => {
+                            assert_eq!(stream_id, stream);
+                            body.extend_from_slice(&data);
+                            if end_stream {
+                                break;
+                            }
+                        }
+                        None => {}
+                        event => panic!("response must flush before unread-input reset: {event:?}"),
+                    }
+                }
+                assert_eq!(body, RESPONSE);
+                client.reset(stream, ErrorCode::NoError).await;
+                wait_requests_drained(&in_flight).await;
+                client
+            }).await;
+    });
+}
+
+#[test]
+fn h2_live_produced_peer_reset_retires_a_never_waking_producer_and_reuses_admission() {
+    for workers in [1, 2] {
+        run(workers, async {
+            let cx = Cx::current().unwrap();
+            let (parked_tx, mut parked_rx) = oneshot::channel();
+            let parked = Arc::new(Mutex::new(Some(parked_tx)));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let handler_retired = Arc::clone(&retired);
+            let handler = move |request: StreamingServerRequest| {
+                let parked = Arc::clone(&parked);
+                let retired = Arc::clone(&handler_retired);
+                async move {
+                    if request.head.uri == "/survivor" {
+                        return Http2ProducedResponse::buffered(H1Response::new(
+                            200, "OK", b"survived".to_vec(),
+                        ));
+                    }
+                    let parked = parked.lock().unwrap().take().unwrap();
+                    Http2ProducedResponse::streaming(
+                        H1Response::new(200, "OK", Vec::new()),
+                        NonZeroUsize::new(1).unwrap(),
+                        NonZeroUsize::new(INITIAL_WINDOW).unwrap(),
+                        move |producer_cx, sender| async move {
+                            let _body = request.body;
+                            let _sender = sender;
+                            let _retired = Retired(retired);
+                            let mut parked = Some(parked);
+                            poll_fn(|_| {
+                                if let Some(parked) = parked.take() {
+                                    parked.send_blocking(producer_cx.clone()).unwrap();
+                                }
+                                Poll::Pending
+                            }).await
+                        },
+                    )
+                }
+            };
+            exercise_produced(handler, Settings::client(), move |mut client, in_flight| async move {
+                let stream = client.open("POST", "/parked", None, false).await;
+                let request_cx = parked_rx.recv(&cx).await.unwrap();
+                loop {
+                    match client.receive().await.0 {
+                        Some(ReceivedFrame::Headers { stream_id, end_stream, .. }) => {
+                            assert_eq!(stream_id, stream);
+                            assert!(!end_stream);
+                            break;
+                        }
+                        None => {}
+                        event => panic!("producer must start before reset: {event:?}"),
+                    }
+                }
+                assert_eq!(retired.load(Ordering::SeqCst), 0);
+                client.connection.reset_stream(stream, ErrorCode::Cancel);
+                client.flush().await;
+                wait_region_closed(&request_cx).await;
+                wait_requests_drained(&in_flight).await;
+                assert!(request_cx.is_cancel_requested());
+                assert_eq!(retired.load(Ordering::SeqCst), 1);
+                client.survivor().await;
+                client
+            }).await;
+        });
+    }
 }
 
 #[test]

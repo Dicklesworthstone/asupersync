@@ -17,10 +17,17 @@ const INITIAL_STREAM_CREDIT: usize = 65_535;
 type RequestBodyPolicy =
     Arc<dyn Fn(&RequestHead) -> Result<Option<u64>, Response> + Send + Sync + 'static>;
 type StreamingHandler = Arc<
-    dyn Fn(StreamingServerRequest) -> Pin<Box<dyn Future<Output = Http2Response> + Send>>
+    dyn Fn(StreamingServerRequest) -> Pin<Box<dyn Future<Output = H2DispatchResponse> + Send>>
         + Send
         + Sync,
 >;
+
+/// A produced response has already published its head, but its terminal
+/// outcome cannot leave the request owner until that owner's region closes.
+enum StreamingHopResponse {
+    Buffered(Http2Response),
+    Produced(Http2ProducerOutcome),
+}
 
 /// Opt-in live request-body configuration for [`Http2Listener`].
 ///
@@ -483,6 +490,7 @@ impl StreamingRequests {
             conn.reset_stream(stream_id, ErrorCode::RefusedStream);
             return false;
         };
+        let guard = Arc::new(guard);
         let coordinator = runtime.try_spawn(async move {
             let Some(cx) = Cx::current() else {
                 return;
@@ -495,6 +503,10 @@ impl StreamingRequests {
                 parse_request_timeout_header(&head.headers),
                 timeout_cap,
             );
+            let produced_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let started_by_body = Arc::clone(&produced_started);
+            let body_response_sender = response_sender.clone();
+            let body_guard = Arc::clone(&guard);
             let completion = run_owned_h2_hop_with_cx(
                 &cx,
                 &signal,
@@ -517,59 +529,135 @@ impl StreamingRequests {
                         .max_trailers_size(REQUEST_CHUNK_BYTES);
                     if publisher
                         .send_blocking(BodySource {
-                            cx: request_cx,
+                            cx: request_cx.clone(),
                             writer,
                             cancel_on_drop: true,
                             failure: source_failure,
                         })
                         .is_err()
                     {
-                        return H2DispatchResponse::Buffered(invalid_h2_response_fallback());
+                        return StreamingHopResponse::Buffered(invalid_h2_response_fallback());
                     }
-                    H2DispatchResponse::Buffered(
-                        handler(StreamingServerRequest {
-                            head,
-                            peer_addr,
-                            body,
-                        })
-                        .await,
-                    )
+                    match handler(StreamingServerRequest {
+                        head,
+                        peer_addr,
+                        body,
+                    })
+                    .await
+                    {
+                        H2DispatchResponse::Buffered(response) => {
+                            StreamingHopResponse::Buffered(response)
+                        }
+                        H2DispatchResponse::Produced(plan) => {
+                            let validation = if suppress_response_body {
+                                validate_h2_produced_head_for_queue(&plan.response)
+                            } else {
+                                validate_h2_produced_response_for_queue(&plan.response)
+                            };
+                            if validation.is_err() {
+                                return StreamingHopResponse::Buffered(
+                                    invalid_h2_response_fallback(),
+                                );
+                            }
+                            if suppress_response_body {
+                                return StreamingHopResponse::Buffered(
+                                    plan.response.into_h2_response(),
+                                );
+                            }
+
+                            // The producer and incoming body share this actual
+                            // admitted child Cx. Returning a plan never closes
+                            // the child or transfers production to an orphan.
+                            let (response, body, sender, producer) =
+                                plan.into_parts(&request_cx);
+                            let Ok(permit) = body_response_sender.reserve(&request_cx).await else {
+                                return StreamingHopResponse::Produced(
+                                    Http2ProducerOutcome::Cancelled,
+                                );
+                            };
+                            if permit
+                                .try_send(FunnelItem::ProducedStart {
+                                    stream_id,
+                                    response,
+                                    body,
+                                    cancellation: ProducedCancellationGuard::new(request_cx.clone()),
+                                    guard: body_guard,
+                                })
+                                .is_err()
+                            {
+                                return StreamingHopResponse::Produced(
+                                    Http2ProducerOutcome::Cancelled,
+                                );
+                            }
+                            started_by_body.store(true, Ordering::Release);
+                            let result = producer(request_cx.clone(), sender).await;
+                            StreamingHopResponse::Produced(classify_h2_producer_hop(
+                                Some(ServerHopOutcome::Ok(result)),
+                                &request_cx,
+                            ))
+                        }
+                    }
                 },
             )
             .await;
-            let response = match completion {
-                Ok(OwnedH2HopCompletion {
-                    hop: ServerHopOutcome::Ok(H2DispatchResponse::Buffered(response)),
-                    ..
-                }) => Some(response),
-                Ok(OwnedH2HopCompletion {
-                    hop: ServerHopOutcome::DeadlineExceeded,
-                    ..
-                }) => Some(
-                    Response::new(
-                        503,
-                        "Service Unavailable",
-                        HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
-                    )
-                    .into_h2_response(),
-                ),
-                Ok(OwnedH2HopCompletion {
-                    hop: ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost,
-                    ..
-                }) => None,
-                _ => Some(invalid_h2_response_fallback()),
+            let item = if produced_started.load(Ordering::Acquire) {
+                let outcome = match completion {
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::Ok(StreamingHopResponse::Produced(outcome)),
+                        ..
+                    }) => outcome,
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::DeadlineExceeded,
+                        ..
+                    }) => Http2ProducerOutcome::DeadlineExceeded,
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::Cancelled,
+                        ..
+                    }) => Http2ProducerOutcome::Cancelled,
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::ConnectionLost,
+                        ..
+                    }) => Http2ProducerOutcome::ConnectionLost,
+                    _ => Http2ProducerOutcome::Failed,
+                };
+                FunnelItem::ProducedDone { stream_id, outcome }
+            } else {
+                let response = match completion {
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::Ok(StreamingHopResponse::Buffered(response)),
+                        ..
+                    }) => Some(response),
+                    Ok(OwnedH2HopCompletion {
+                        hop: ServerHopOutcome::DeadlineExceeded,
+                        ..
+                    }) => Some(
+                        Response::new(
+                            503,
+                            "Service Unavailable",
+                            HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC.as_bytes().to_vec(),
+                        )
+                        .into_h2_response(),
+                    ),
+                    Ok(OwnedH2HopCompletion {
+                        hop:
+                            ServerHopOutcome::Cancelled
+                            | ServerHopOutcome::ConnectionLost
+                            | ServerHopOutcome::Ok(StreamingHopResponse::Produced(_)),
+                        ..
+                    }) => None,
+                    _ => Some(invalid_h2_response_fallback()),
+                };
+                FunnelItem::StreamingDone {
+                    stream_id,
+                    response,
+                    guard: Arc::clone(&guard),
+                    suppress_response_body,
+                }
             };
             // Cleanup publication uses the coordinator Cx; the cancelled request
             // Cx must not prevent its owner from reporting that close completed.
             if let Ok(permit) = response_sender.reserve(&cx).await {
-                let posted = permit
-                    .try_send(FunnelItem::StreamingDone {
-                        stream_id,
-                        response,
-                        guard,
-                        suppress_response_body,
-                    })
-                    .is_ok();
+                let posted = permit.try_send(item).is_ok();
                 posted_by_coordinator.store(posted, Ordering::Release);
             }
         });
@@ -788,6 +876,7 @@ impl StreamingRequests {
         &mut self,
         conn: &mut Connection,
         response_guards: &HashMap<u32, Arc<InFlightRequestGuard>>,
+        produced_bodies: &BTreeMap<u32, ActiveProducedBody>,
     ) -> bool {
         let reservation = self
             .dispatch
@@ -804,7 +893,7 @@ impl StreamingRequests {
         });
         let mut reset_queued = false;
         self.early_response_stops.retain(|stream_id| {
-            if response_guards.contains_key(stream_id) {
+            if response_guards.contains_key(stream_id) || produced_bodies.contains_key(stream_id) {
                 return true;
             }
             conn.reset_stream(*stream_id, ErrorCode::NoError);

@@ -1294,9 +1294,9 @@ struct OwnedH2HopConfig {
     idle_timeout: Option<Duration>,
 }
 
-struct OwnedH2HopCompletion {
+struct OwnedH2HopCompletion<T = H2DispatchResponse> {
     /// The actual protocol return is distinct from task-level cancellation.
-    hop: ServerHopOutcome<H2DispatchResponse>,
+    hop: ServerHopOutcome<T>,
     task_outcome: Option<Result<(), JoinError>>,
     idle_expired: bool,
 }
@@ -1455,15 +1455,15 @@ impl OwnedH2Request {
     }
 }
 
-async fn execute_owned_h2_body<F, Fut>(
+async fn execute_owned_h2_body<F, Fut, T>(
     body_cx: Cx,
     config: OwnedH2HopConfig,
     signal: ShutdownSignal,
     factory: F,
-) -> ServerHopOutcome<H2DispatchResponse>
+) -> ServerHopOutcome<T>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = H2DispatchResponse>,
+    Fut: Future<Output = T>,
 {
     let region = ServerRequestRegion::from_body_cx("h2", body_cx.clone(), config.started_at);
     // A shutdown may win after the spawn post but before its first poll. Do
@@ -1497,15 +1497,16 @@ where
 }
 
 #[cfg(feature = "http2-streaming")]
-async fn run_owned_h2_hop_with_cx<F, Fut>(
+async fn run_owned_h2_hop_with_cx<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
     factory: F,
-) -> Result<OwnedH2HopCompletion, String>
+) -> Result<OwnedH2HopCompletion<T>, String>
 where
     F: FnOnce(Cx) -> Fut + Send + 'static,
-    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
 {
     run_owned_h2_hop(cx, signal, config, move || {
         // This factory is invoked by execute_owned_h2_body inside the actual
@@ -1515,15 +1516,16 @@ where
     .await
 }
 
-async fn run_owned_h2_hop<F, Fut>(
+async fn run_owned_h2_hop<F, Fut, T>(
     cx: &Cx,
     signal: &ShutdownSignal,
     config: OwnedH2HopConfig,
     factory: F,
-) -> Result<OwnedH2HopCompletion, String>
+) -> Result<OwnedH2HopCompletion<T>, String>
 where
     F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = H2DispatchResponse> + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
 {
     let timer = cx
         .timer_driver()
@@ -1621,7 +1623,7 @@ enum FunnelItem {
     StreamingDone {
         stream_id: u32,
         response: Option<Http2Response>,
-        guard: InFlightRequestGuard,
+        guard: Arc<InFlightRequestGuard>,
         suppress_response_body: bool,
     },
     /// A completed response. The guard is retained until its queued frames
@@ -1974,6 +1976,24 @@ fn queue_h2_response(
     suppress_response_body: bool,
     response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
 ) -> Vec<Http2PushOutcome> {
+    queue_h2_response_with_shared_guard(
+        conn,
+        stream_id,
+        response,
+        Arc::new(guard),
+        suppress_response_body,
+        response_guards,
+    )
+}
+
+fn queue_h2_response_with_shared_guard(
+    conn: &mut Connection,
+    stream_id: u32,
+    response: impl IntoHttp2Response,
+    guard: Arc<InFlightRequestGuard>,
+    suppress_response_body: bool,
+    response_guards: &mut HashMap<u32, Arc<InFlightRequestGuard>>,
+) -> Vec<Http2PushOutcome> {
     let mut response = response.into_h2_response();
     if suppress_response_body {
         suppress_response_body_for_head(&mut response.response);
@@ -2009,7 +2029,7 @@ fn queue_h2_response(
     }
 
     if queued_response && conn.has_pending_frames_for_stream(stream_id) {
-        let previous = response_guards.insert(stream_id, Arc::new(guard));
+        let previous = response_guards.insert(stream_id, guard);
         debug_assert!(
             previous.is_none(),
             "one response guard should be active per h2 stream"
@@ -3245,7 +3265,8 @@ where
             release_flushed_response_guards(&conn, &mut response_guards);
             #[cfg(feature = "http2-streaming")]
             if let Some(incoming) = &mut incoming {
-                let reset_queued = incoming.after_flush(&mut conn, &response_guards);
+                let reset_queued =
+                    incoming.after_flush(&mut conn, &response_guards, &produced_bodies);
                 pending_stream_idle_deadlines.retain(|stream_id, _| incoming.is_active(*stream_id));
                 if reset_queued {
                     continue;
@@ -4021,7 +4042,7 @@ where
                         .await;
                         if accepted && !peer_reset {
                             if let Some(response) = response {
-                                let outcomes = queue_h2_response(
+                                let outcomes = queue_h2_response_with_shared_guard(
                                     &mut conn,
                                     stream_id,
                                     response,
@@ -4116,6 +4137,29 @@ where
                         debug_assert!(previous.is_none());
                     }
                     FunnelItem::ProducedDone { stream_id, outcome } => {
+                        #[cfg(feature = "http2-streaming")]
+                        if let Some(incoming) = &mut incoming
+                            && incoming.contains(stream_id)
+                        {
+                            // The live-body coordinator publishes this only
+                            // after its admitted child, descendants, and
+                            // finalizers have actually closed. Retain ingress
+                            // reservation until that terminal publication.
+                            dispatched_streams.remove(&stream_id);
+                            pending_stream_idle_deadlines.remove(&stream_id);
+                            let peer_reset = peer_reset_before_response.remove(&stream_id);
+                            let accepted = std::future::poll_fn(|poll_cx| {
+                                Poll::Ready(incoming.complete(stream_id, &mut conn, poll_cx))
+                            })
+                            .await;
+                            if !accepted || peer_reset {
+                                cancel_produced_body(
+                                    &mut produced_bodies,
+                                    stream_id,
+                                    "HTTP/2 live request retired before produced completion",
+                                );
+                            }
+                        }
                         if let Some(state) = produced_bodies.get_mut(&stream_id) {
                             if let Some((code, cause)) = h2_producer_outcome_diagnostic(outcome) {
                                 record_h2_body_diagnostic_code(stream_id, code, cause);
@@ -4603,11 +4647,85 @@ impl<F> Http2Listener<F> {
             config,
             handler: Arc::new(move |request| {
                 let handler = Arc::clone(&handler);
-                Box::pin(async move { handler(request).await.into_h2_response() })
+                Box::pin(async move {
+                    H2DispatchResponse::Buffered(handler(request).await.into_h2_response())
+                })
             }),
         };
         self.run_mapped(runtime, true, Some(dispatch), |_, _| async {
             // The streaming driver consumes every request HEADERS event.
+            H2DispatchResponse::Buffered(invalid_h2_response_fallback())
+        })
+        .await
+    }
+
+    /// Bind a native HTTP/2 listener with live request bodies and deferred
+    /// response producers. Request DATA and response DATA may progress
+    /// concurrently, with independent bounded queues and HTTP/2 flow control.
+    #[cfg(feature = "http2-streaming")]
+    pub async fn bind_streaming_produced_with_config<A, Fut>(
+        addr: A,
+        handler: F,
+        config: Http2StreamingListenerConfig,
+    ) -> io::Result<Self>
+    where
+        A: ToSocketAddrs + Send + 'static,
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        config.validate()?;
+        let tcp_listener = TcpListener::bind(addr).await?;
+        Ok(Self::from_listener_streaming_produced(tcp_listener, handler, config))
+    }
+
+    /// Create a live-input, produced-response listener from an existing TCP
+    /// listener. Configuration is checked by [`Self::run_streaming_produced`].
+    #[must_use]
+    #[cfg(feature = "http2-streaming")]
+    pub fn from_listener_streaming_produced<Fut>(
+        tcp_listener: TcpListener,
+        handler: F,
+        config: Http2StreamingListenerConfig,
+    ) -> Self
+    where
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        let mut listener = Self::from_parts(tcp_listener, handler, config.listener.clone());
+        listener.streaming_config = Some(config);
+        listener
+    }
+
+    /// Run live request ingress and produced response egress in the same
+    /// admitted request child region. The producer may retain and consume the
+    /// incoming body after the handler returns. Cancellation, peer reset, and
+    /// output rejection cancel that owner; terminal response frames wait for
+    /// the producer and all of its descendants and finalizers to retire.
+    #[cfg(feature = "http2-streaming")]
+    pub async fn run_streaming_produced<Fut>(
+        self,
+        runtime: &RuntimeHandle,
+    ) -> io::Result<ShutdownStats>
+    where
+        F: Fn(crate::http::h1::stream::StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    {
+        let config = self.streaming_config.clone().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "run_streaming_produced requires a streaming listener constructor",
+            )
+        })?;
+        config.validate()?;
+        let handler = Arc::clone(&self.handler);
+        let dispatch = StreamingDispatch {
+            config,
+            handler: Arc::new(move |request| {
+                let handler = Arc::clone(&handler);
+                Box::pin(async move { handler(request).await.into_driver_response() })
+            }),
+        };
+        self.run_mapped(runtime, true, Some(dispatch), |_, _| async {
             H2DispatchResponse::Buffered(invalid_h2_response_fallback())
         })
         .await
