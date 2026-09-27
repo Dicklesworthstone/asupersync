@@ -233,6 +233,45 @@ impl RemoteSymbolTransport {
         replicas: &[ReplicaInfo], security: &SecurityContext,
         authority: CheckpointAuthority<'_>, config: CheckpointConfig,
     ) -> Result<ReplicatedCheckpoint, CheckpointError> {
+        self.replicate_striped_checkpoint_inner(distributor, encoded, replicas, security, authority, config, false).await
+    }
+
+    /// Publish stripes until a fixed write quorum actually reconstructs the snapshot.
+    ///
+    /// A fast receipt quorum with insufficient equations keeps admitting useful
+    /// replicas. Success requires independent snapshot authentication and exact
+    /// equality with the prevalidated source, as well as the original distinct
+    /// replica threshold. Once both conditions hold, remaining local sends and
+    /// timers are destroyed before the signed manifest is returned.
+    ///
+    /// The distributor's concurrency ceiling and acknowledgement deadlines apply.
+    /// With hedging enabled, spare attempts follow its hedge delay; after receipt
+    /// quorum without coverage, at least one further attempt is ordinary required
+    /// work. Without hedging, all available slots are filled and early completion
+    /// still retires unnecessary local work. Existing publication APIs keep their
+    /// established completion policies.
+    ///
+    /// Decoding runs only after each block has enough distinct equations and the
+    /// replica floor is met. Another attempt requires newly acknowledged equations;
+    /// the number of attempts is bounded by successful replica replies. Synchronous
+    /// decoding obeys the admitted dimensions but is not preempted inside a poll.
+    /// Cancellation and the total deadline are checked again after it. Closing a
+    /// local socket neither rolls back remote storage nor proves remote quiescence.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn replicate_striped_checkpoint_on_quorum(
+        &self, distributor: &mut SymbolDistributor, encoded: &EncodedState,
+        replicas: &[ReplicaInfo], security: &SecurityContext,
+        authority: CheckpointAuthority<'_>, config: CheckpointConfig,
+    ) -> Result<ReplicatedCheckpoint, CheckpointError> {
+        self.replicate_striped_checkpoint_inner(distributor, encoded, replicas, security, authority, config, true).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn replicate_striped_checkpoint_inner(
+        &self, distributor: &mut SymbolDistributor, encoded: &EncodedState,
+        replicas: &[ReplicaInfo], security: &SecurityContext,
+        authority: CheckpointAuthority<'_>, config: CheckpointConfig, on_quorum: bool,
+    ) -> Result<ReplicatedCheckpoint, CheckpointError> {
         if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
         if config.timeout.is_zero() || self.max_in_flight() == 0 { return Err(CheckpointError::Configuration); }
         let timer = self.cx.timer_driver().ok_or(CheckpointError::NoTimer)?;
@@ -251,10 +290,41 @@ impl RemoteSymbolTransport {
         if timer.now() >= deadline { return Err(CheckpointError::Deadline); }
         let checked = CheckedStripedTransport { inner: self, stripes: &stripes };
         let assignments = stripes.iter().map(|stripe| stripe.assignment.clone()).collect();
-        let distribution = before_deadline(&self.cx, timer.clone(), deadline,
-            distributor.distribute_assignments(&self.cx, encoded, assignments, &checked, security)).await?;
-        let result = seal_striped(self, draft, distribution, &stripes, encoded, required,
-            source_digest, &authority, config.manifest)?;
+        let result = if on_quorum {
+            let mut indices = BTreeSet::new();
+            let mut confirmed = BTreeSet::new();
+            let mut verified = false;
+            let mut attempted_equations = 0;
+            let distribution = {
+                let mut complete = |ack: &ReplicaAck| {
+                    let Some(stripe) = stripes.iter().find(|stripe| stripe.assignment.replica_id == ack.replica_id)
+                        else { return false; };
+                    if ack.symbols_received != stripe.count || !confirmed.insert(ack.replica_id.clone()) {
+                        return false;
+                    }
+                    indices.extend(stripe.assignment.symbol_indices.iter().copied());
+                    if confirmed.len() >= required && indices.len() != attempted_equations {
+                        attempted_equations = indices.len();
+                        verified = stripe_union_matches(self, encoded, &indices, source_digest, &authority);
+                    }
+                    verified
+                };
+                before_deadline(&self.cx, timer.clone(), deadline,
+                    distributor.distribute_assignments_with_completion(
+                        &self.cx, encoded, assignments, &checked, security, Some(&mut complete),
+                    )).await?
+            };
+            // Reuse the exact successful decode, but still validate every final
+            // receipt and compare the final equation set before sealing. Neither
+            // an extra decode without new equations nor a count-only proof enters.
+            seal_striped_with_coverage(draft, distribution, &stripes, required,
+                authority.manifest_key, config.manifest, |actual| verified && *actual == indices)?
+        } else {
+            let distribution = before_deadline(&self.cx, timer.clone(), deadline,
+                distributor.distribute_assignments(&self.cx, encoded, assignments, &checked, security)).await?;
+            seal_striped(self, draft, distribution, &stripes, encoded, required,
+                source_digest, &authority, config.manifest)?
+        };
         if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
         if timer.now() >= deadline { return Err(CheckpointError::Deadline); }
         Ok(result)
@@ -387,10 +457,19 @@ fn prepare_stripes(
 
 #[allow(clippy::too_many_arguments)]
 fn seal_striped(
-    transport: &RemoteSymbolTransport, mut draft: RecoveryManifest,
+    transport: &RemoteSymbolTransport, draft: RecoveryManifest,
     distribution: DistributionResult, stripes: &[Stripe], encoded: &EncodedState,
     required: usize, source_digest: [u8; 32], authority: &CheckpointAuthority<'_>,
     limits: ManifestLimits,
+) -> Result<ReplicatedCheckpoint, CheckpointError> {
+    seal_striped_with_coverage(draft, distribution, stripes, required, authority.manifest_key, limits,
+        |indices| stripe_union_matches(transport, encoded, indices, source_digest, authority))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seal_striped_with_coverage(
+    mut draft: RecoveryManifest, distribution: DistributionResult, stripes: &[Stripe], required: usize,
+    manifest_key: &AuthKey, limits: ManifestLimits, verify: impl FnOnce(&BTreeSet<usize>) -> bool,
 ) -> Result<ReplicatedCheckpoint, CheckpointError> {
     if !distribution.quorum_achieved || distribution.acks.len() < required
         || distribution.acks.len() < draft.minimum_replicas
@@ -406,28 +485,49 @@ fn seal_striped(
         }
         indices.extend(stripe.assignment.symbol_indices.iter().copied());
     }
-    // Source admission already rejected repeated (object, block, ESI) identities
-    // across the entire encoding. Deduplicate indices too, so overlapping plans
-    // never inflate the union. Decode actual equations rather than trusting K.
+    if !verify(&indices) { return Err(CheckpointError::InsufficientCoverage { distribution }); }
+    draft.replicas.retain(|replica| confirmed.contains(replica.replica_id.as_str()));
+    drop(confirmed);
+    let encoded = draft.to_canonical_bytes(manifest_key, limits.max_encoded_bytes)?;
+    Ok(ReplicatedCheckpoint { manifest: draft, encoded, distribution })
+}
+
+fn stripe_union_matches(
+    transport: &RemoteSymbolTransport, encoded: &EncodedState, indices: &BTreeSet<usize>,
+    source_digest: [u8; 32], authority: &CheckpointAuthority<'_>,
+) -> bool {
+    // Source admission has rejected duplicate identities and bounded dimensions.
+    // Count coverage per block before constructing the decoder; an aggregate K
+    // threshold cannot compensate for equations missing from one source block.
+    let params = encoded.params;
+    let mut received = [0usize; 256];
+    for &index in indices {
+        let Some(symbol) = encoded.symbols.get(index) else { return false; };
+        let block = usize::from(symbol.sbn());
+        if block < usize::from(params.source_blocks) && symbol.data().len() == usize::from(params.symbol_size) {
+            received[block] += 1;
+        }
+    }
+    let block_bytes = u64::from(params.symbol_size) * u64::from(params.symbols_per_block);
+    if !(0..params.source_blocks).all(|block| {
+        let bytes = (params.object_size - u64::from(block) * block_bytes).min(block_bytes);
+        received[usize::from(block)] as u64 >= bytes.div_ceil(u64::from(params.symbol_size))
+    }) { return false; }
     let signing = SecurityContext::new(transport.auth_key.as_ref().clone());
     let mut decoder = StateDecoder::new(RecoveryDecodingConfig {
         verify_integrity: true, auth_context: Some(SecurityContext::new(transport.auth_key.as_ref().clone())),
         snapshot_auth_key: Some(authority.snapshot_key.clone()), max_decode_attempts: 1, allow_partial_decode: false,
     });
-    for index in indices {
+    for &index in indices {
         if decoder.add_symbol(&signing.sign_symbol(&encoded.symbols[index])).is_err() {
-            return Err(CheckpointError::InsufficientCoverage { distribution });
+            return false;
         }
     }
-    let matches_source = decoder.decode_snapshot(&encoded.params).is_ok_and(|snapshot| {
+    decoder.decode_snapshot(&params).is_ok_and(|snapshot| {
         let digest: [u8; 32] = Sha256::digest(snapshot.to_bytes()).into();
-        digest == source_digest
-    });
-    if !matches_source { return Err(CheckpointError::InsufficientCoverage { distribution }); }
-    draft.replicas.retain(|replica| confirmed.contains(replica.replica_id.as_str()));
-    drop(confirmed);
-    let encoded = draft.to_canonical_bytes(authority.manifest_key, limits.max_encoded_bytes)?;
-    Ok(ReplicatedCheckpoint { manifest: draft, encoded, distribution })
+        digest == source_digest && (snapshot.region_id, snapshot.origin_id, snapshot.epoch, snapshot.sequence)
+            == (authority.expected.region_id, authority.expected.origin_id, authority.expected.epoch, authority.expected.sequence)
+    })
 }
 
 fn seal(

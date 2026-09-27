@@ -121,14 +121,28 @@ pub(super) async fn run<T: DistributorTransport>(
     auth_context: &SecurityContext,
     timer: Option<TimerDriverHandle>,
 ) -> FanoutResult {
+    run_with_completion(config, cx, encoded, assignments, transport, auth_context, timer, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_with_completion<T: DistributorTransport>(
+    config: &DistributionConfig,
+    cx: &Cx,
+    encoded: &EncodedState,
+    assignments: Vec<ReplicaAssignment>,
+    transport: &T,
+    auth_context: &SecurityContext,
+    timer: Option<TimerDriverHandle>,
+    completion: Option<&mut (dyn FnMut(&ReplicaAck) -> bool + Send)>,
+) -> FanoutResult {
     // One vote per eligible identity, even if the caller repeats a replica.
     // Retain first-occurrence order so completion timing cannot reorder reports.
     let mut seen = BTreeSet::new();
     let assignments: Vec<_> = assignments.into_iter().filter(|assignment| {
         !assignment.symbol_indices.is_empty() && seen.insert(assignment.replica_id.clone())
     }).collect();
-    if config.hedge_enabled {
-        return hedge::run(config, cx, encoded, assignments, transport, auth_context, timer).await;
+    if config.hedge_enabled || completion.is_some() {
+        return hedge::run(config, cx, encoded, assignments, transport, auth_context, timer, completion).await;
     }
     let count = assignments.len();
     let mut outcomes: Vec<Option<Outcome<ReplicaAck, ReplicaFailure>>> =

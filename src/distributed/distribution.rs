@@ -257,11 +257,32 @@ impl SymbolDistributor {
         transport: &T,
         auth_context: &SecurityContext,
     ) -> DistributionResult {
+        self.distribute_assignments_with_completion(
+            cx, encoded, assignments, transport, auth_context, None,
+        ).await
+    }
+
+    // A checkpoint can require both receipt quorum and authenticated coverage.
+    // Only verified, distinct assignment acknowledgements reach this callback.
+    // Keeping it private preserves the established public fanout semantics.
+    pub(crate) async fn distribute_assignments_with_completion<T: DistributorTransport>(
+        &mut self,
+        cx: &Cx,
+        encoded: &EncodedState,
+        assignments: Vec<super::assignment::ReplicaAssignment>,
+        transport: &T,
+        auth_context: &SecurityContext,
+        completion: Option<&mut (dyn FnMut(&ReplicaAck) -> bool + Send)>,
+    ) -> DistributionResult {
         let timer = cx.timer_driver();
         let start = driver::now(timer.as_ref());
-        let fanout = driver::run(
-            &self.config, cx, encoded, assignments, transport, auth_context, timer.clone(),
-        ).await;
+        let fanout = if completion.is_some() {
+            driver::run_with_completion(
+                &self.config, cx, encoded, assignments, transport, auth_context, timer.clone(), completion,
+            ).await
+        } else {
+            driver::run(&self.config, cx, encoded, assignments, transport, auth_context, timer.clone()).await
+        };
         let duration = Duration::from_nanos(driver::now(timer.as_ref()).duration_since(start));
 
         // Fix the denominator before admission. Cancellation, limits, timeouts,

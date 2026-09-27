@@ -80,6 +80,7 @@ fn admit<'a, T: DistributorTransport>(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run<T: DistributorTransport>(
     config: &DistributionConfig,
     cx: &Cx,
@@ -88,6 +89,7 @@ pub(super) async fn run<T: DistributorTransport>(
     transport: &T,
     auth: &SecurityContext,
     timer: Option<TimerDriverHandle>,
+    mut completion: Option<&mut (dyn FnMut(&super::ReplicaAck) -> bool + Send)>,
 ) -> FanoutResult {
     // The caller already filtered empty/unauthorized assignments and duplicate
     // identities. Keep this denominator fixed even for unstarted backups.
@@ -102,17 +104,23 @@ pub(super) async fn run<T: DistributorTransport>(
     let mut hedge_sleep: Option<Pin<Box<Sleep>>> = None;
     let (mut next, mut finished, mut successes) = (0, 0, 0);
     let mut symbols_attempted = 0_u64;
+    let mut coverage_ready = completion.is_none();
 
     let stop = poll_fn(|task| {
         if cancelled.as_mut().poll(task).is_ready() { return Poll::Ready(Stop::Cancelled); }
-        if successes >= required { return Poll::Ready(Stop::Quorum); }
-        if required - successes > count - finished { return Poll::Ready(Stop::Impossible); }
+        if successes >= required && coverage_ready { return Poll::Ready(Stop::Quorum); }
+        if required.saturating_sub(successes) > count - finished || finished == count {
+            return Poll::Ready(Stop::Impossible);
+        }
         if capacity == 0 { return Poll::Ready(Stop::Denied); }
 
         // Maintain enough live attempts to reach quorum without speculating.
         // Failed attempts free their credit before replacement on a fresh poll.
         let mut active = slots.iter().filter(|slot| slot.is_some()).count();
-        let needed = required - successes;
+        // Receipt quorum without usable coverage is still unfinished work.
+        // Admit another equation-bearing stripe immediately instead of waiting
+        // forever with zero demand. Without hedging, fill the normal cap.
+        let needed = if config.hedge_enabled { required.saturating_sub(successes).max(1) } else { capacity };
         for slot in &mut slots {
             if active >= needed || next == count { break; }
             if slot.is_some() { continue; }
@@ -128,7 +136,7 @@ pub(super) async fn run<T: DistributorTransport>(
                 Err(error) => {
                     outcomes[index] = Some(Outcome::Err(error));
                     finished += 1;
-                    if required - successes > count - finished { return Poll::Ready(Stop::Impossible); }
+                    if required.saturating_sub(successes) > count - finished { return Poll::Ready(Stop::Impossible); }
                 }
             }
         }
@@ -147,18 +155,26 @@ pub(super) async fn run<T: DistributorTransport>(
                 let index = attempt.index;
                 drop(slot.take());
                 outcomes[index] = Some(match result {
-                    Ok(ack) => { successes += 1; Outcome::Ok(ack) }
+                    Ok(ack) => {
+                        successes += 1;
+                        if let Some(complete) = &mut completion { coverage_ready = complete(&ack); }
+                        Outcome::Ok(ack)
+                    }
                     Err(error) => Outcome::Err(error),
                 });
                 finished += 1;
-                if successes >= required { return Poll::Ready(Stop::Quorum); }
-                if required - successes > count - finished { return Poll::Ready(Stop::Impossible); }
+                if cx.is_cancel_requested() { return Poll::Ready(Stop::Cancelled); }
+                if successes >= required && coverage_ready { return Poll::Ready(Stop::Quorum); }
+                if required.saturating_sub(successes) > count - finished || finished == count {
+                    return Poll::Ready(Stop::Impossible);
+                }
             }
         }
         if cx.is_cancel_requested() { return Poll::Ready(Stop::Cancelled); }
         active = slots.iter().filter(|slot| slot.is_some()).count();
         let spare = active < capacity && next < count;
-        if spare && active < required - successes {
+        let needed = if config.hedge_enabled { required.saturating_sub(successes).max(1) } else { capacity };
+        if spare && active < needed {
             // Immediate replacement is NOT delayed behind speculative hedging.
             task.waker().wake_by_ref();
             return Poll::Pending;
@@ -190,7 +206,7 @@ pub(super) async fn run<T: DistributorTransport>(
                 Err(error) => {
                     outcomes[index] = Some(Outcome::Err(error));
                     finished += 1;
-                    if required - successes > count - finished { return Poll::Ready(Stop::Impossible); }
+                    if required.saturating_sub(successes) > count - finished { return Poll::Ready(Stop::Impossible); }
                 }
             }
             // At most ONE extra replica per interval, even after a late wake.
