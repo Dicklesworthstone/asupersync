@@ -621,7 +621,7 @@ mod keepalive {
                                     match outcome {
                                         Poll::Pending => { parked = true; break; }
                                         Poll::Ready(Ok(Some(NativeDuplexEvent::RequestFlushed))) => {}
-                                        other => panic!("unexpected call progress before cancellation: {other:?}"),
+                                        other @ Poll::Ready(_) => panic!("unexpected call progress before cancellation: {other:?}"),
                                     }
                                 }
                                 assert!(parked, "one queued send boundary precedes the actual read wait");

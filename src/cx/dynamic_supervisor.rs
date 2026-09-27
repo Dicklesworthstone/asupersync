@@ -828,6 +828,9 @@ mod shared_restart_tests {
             SharedRestartConfig::new(3, Duration::from_secs(1)),
         ));
         let barrier = Arc::new(std::sync::Barrier::new(16));
+        // Every thread must be spawned before any join: the barrier waits for
+        // all 16, so joining from a lazy iterator would deadlock.
+        #[allow(clippy::needless_collect)]
         let threads: Vec<_> = (0..16).map(|_| {
             let domain = Arc::clone(&domain);
             let barrier = Arc::clone(&barrier);
