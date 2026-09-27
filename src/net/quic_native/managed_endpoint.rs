@@ -45,6 +45,58 @@ const ACCEPT_MIN_INITIAL_BYTES: usize = 1200;
 #[cfg(feature = "tls")]
 const ACCEPT_CID_ATTEMPTS: usize = 16;
 
+// A send-side resource shortage parks sends for the HTTP and remote
+// listeners' 2ms base delay, doubling per consecutive failure to a 64ms cap.
+const SEND_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_millis(2);
+const SEND_BACKOFF_MAX_SHIFT: u32 = 5;
+
+/// Kernel resource shortages that recover while the socket stays open.
+///
+/// Inspect native codes because ENOBUFS has no stable `ErrorKind`. The loop
+/// delays the retry, so a persistent shortage cannot busy-spin.
+fn send_error_is_resource_shortage(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::OutOfMemory
+    ) {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::ENOBUFS | libc::ENOMEM | libc::EMFILE | libc::ENFILE)
+        )
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Networking::WinSock::{WSAEMFILE, WSAENOBUFS};
+        matches!(error.raw_os_error(), Some(WSAEMFILE | WSAENOBUFS))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
+/// Only an error the OS reported for a send can blame its destination.
+/// Errors the endpoint synthesizes from local validation never retire a peer.
+fn send_error_blames_destination(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    error.raw_os_error().is_some()
+        && matches!(
+            error.kind(),
+            ErrorKind::ConnectionRefused
+                | ErrorKind::ConnectionReset
+                | ErrorKind::AddrNotAvailable
+                | ErrorKind::InvalidInput
+                | ErrorKind::HostUnreachable
+                | ErrorKind::NetworkUnreachable
+                | ErrorKind::PermissionDenied
+        )
+}
+
 #[cfg(feature = "tls")]
 fn accept_error(reason: impl std::fmt::Display) -> ManagedEndpointError {
     ManagedEndpointError::InvalidConfig(format!("authenticated accept: {reason}"))
@@ -468,6 +520,11 @@ pub struct ManagedQuicEndpoint {
     prefer_accept_output: bool,
     /// Alternate ready read/write batches; timers and cancellation always get a turn.
     prefer_send: bool,
+    /// A send-side resource shortage parks sends until this deadline, while
+    /// receives, timers and the application keep running.
+    send_backoff_until: Option<Instant>,
+    /// Consecutive resource-shortage send failures, for the capped delay.
+    send_backoff_streak: u32,
 }
 
 enum EndpointEvent<T> {
@@ -785,6 +842,8 @@ impl ManagedQuicEndpoint {
             #[cfg(feature = "tls")]
             prefer_accept_output: true,
             prefer_send: true,
+            send_backoff_until: None,
+            send_backoff_streak: 0,
         })
     }
 
@@ -1607,6 +1666,8 @@ impl ManagedQuicEndpoint {
             #[cfg(feature = "tls")]
             prefer_accept_output: true,
             prefer_send: true,
+            send_backoff_until: None,
+            send_backoff_streak: 0,
         })
     }
 
@@ -1908,6 +1969,7 @@ impl ManagedQuicEndpoint {
             }
             #[cfg(feature = "tls")]
             self.queue_accept_output();
+            self.drop_oversized_outgoing(cx)?;
             self.refresh_timer(cx).await?;
             let event = poll_fn(|task_cx| {
                 let _current = Cx::set_current(Some(cx.clone()));
@@ -1929,7 +1991,7 @@ impl ManagedQuicEndpoint {
                 }
                 for send in [self.prefer_send, !self.prefer_send] {
                     if send {
-                        if !self.pending_outgoing.is_empty() {
+                        if !self.pending_outgoing.is_empty() && self.send_backoff_until.is_none() {
                             let pending = self
                                 .pending_outgoing
                                 .iter()
@@ -1990,22 +2052,31 @@ impl ManagedQuicEndpoint {
                 EndpointEvent::ApplicationTurn => {}
                 EndpointEvent::Packets(packets) => self.process_packet_batch(cx, packets).await?,
                 EndpointEvent::RetainedPackets => self.process_packet_batch(cx, Vec::new()).await?,
-                EndpointEvent::Timer(deadline) => self.process_timer_events(cx, deadline).await?,
+                EndpointEvent::Timer(deadline) => {
+                    if self
+                        .send_backoff_until
+                        .is_some_and(|retry_at| retry_at <= deadline)
+                    {
+                        self.send_backoff_until = None;
+                    }
+                    self.process_timer_events(cx, deadline).await?;
+                }
                 EndpointEvent::Sent(Err(error)) => {
-                    use std::io::ErrorKind;
-                    if error.kind() == ErrorKind::Interrupted {
+                    if error.kind() == std::io::ErrorKind::Interrupted {
                         return Err(ManagedEndpointError::Cancelled);
                     }
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::ConnectionRefused
-                            | ErrorKind::ConnectionReset
-                            | ErrorKind::AddrNotAvailable
-                            | ErrorKind::InvalidInput
-                            | ErrorKind::HostUnreachable
-                            | ErrorKind::NetworkUnreachable
-                            | ErrorKind::PermissionDenied
-                    ) {
+                    if send_error_is_resource_shortage(&error) {
+                        // The queue stays intact and receives keep running;
+                        // the bound timer wakes the loop for the retry.
+                        let shift = self.send_backoff_streak.min(SEND_BACKOFF_MAX_SHIFT);
+                        let delay = SEND_BACKOFF_BASE * (1_u32 << shift);
+                        self.send_backoff_streak = self.send_backoff_streak.saturating_add(1);
+                        self.send_backoff_until = Some(self.timer_scheduler.now(cx)? + delay);
+                        cx.trace(&format!(
+                            "QUIC send resource shortage ({error}); retrying {} queued packets in {delay:?}",
+                            self.pending_outgoing.len()
+                        ));
+                    } else if send_error_blames_destination(&error) {
                         if let Some(packet) = self.pending_outgoing.front() {
                             let peer = packet.packet.dst_addr;
                             #[cfg(feature = "tls")]
@@ -2041,6 +2112,7 @@ impl ManagedQuicEndpoint {
                             "UDP send made invalid progress".to_string(),
                         ));
                     }
+                    self.send_backoff_streak = 0;
                     let sent_at = self.timer_scheduler.now(cx);
                     for packet in self.pending_outgoing.drain(..result.packets_processed) {
                         #[cfg(feature = "tls")]
@@ -2058,8 +2130,13 @@ impl ManagedQuicEndpoint {
                     }
                     sent_at?;
                     if let Some(error) = result.error {
-                        // The unsent suffix remains available if the owner retries this loop.
-                        return Err(ManagedEndpointError::UdpEndpoint(error));
+                        // Only a committed prefix reports a stringified error.
+                        // Retrying the unchanged tail surfaces the concrete
+                        // error kind, which the classification above handles.
+                        cx.trace(&format!(
+                            "QUIC send stopped after {} packets ({error}); retrying the unsent tail",
+                            result.packets_processed
+                        ));
                     }
                 }
             }
@@ -2315,9 +2392,51 @@ impl ManagedQuicEndpoint {
             }));
     }
 
+    /// A datagram above the socket limit is a local packetization fault. It
+    /// fails only the connection that built it; its peer address stays usable.
+    fn drop_oversized_outgoing(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
+        let limit = self.udp_endpoint.config().max_packet_size;
+        while let Some(index) = self
+            .pending_outgoing
+            .iter()
+            .position(|packet| packet.packet.data.len() > limit)
+        {
+            let Some(packet) = self.pending_outgoing.remove(index) else {
+                break;
+            };
+            let connection_id = packet.connection_id;
+            let reason = format!(
+                "connection {connection_id:?} built a {} byte datagram above the {limit} byte endpoint limit",
+                packet.packet.data.len()
+            );
+            cx.trace(&format!(
+                "QUIC {reason}; dropped it and failed only that connection"
+            ));
+            #[cfg(feature = "tls")]
+            if let Some(index) = self
+                .pending_authenticated_accept
+                .iter()
+                .position(|pending| pending.local_cid == connection_id)
+            {
+                self.fail_authenticated_accept_at(index, ManagedEndpointError::UdpEndpoint(reason));
+                continue;
+            }
+            match self.remove_connection(cx, connection_id) {
+                Ok(())
+                | Err(ManagedEndpointError::ConnectionRouter(
+                    ConnectionRouterError::ConnectionNotFound(_),
+                )) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     /// Process timer events for all connections.
     async fn refresh_timer(&mut self, cx: &Cx) -> Result<(), ManagedEndpointError> {
         let next = self.connection_router.next_timer_deadline();
+        // A send backoff wakes the loop through the same bound timer.
+        let next = next.into_iter().chain(self.send_backoff_until).min();
         #[cfg(feature = "tls")]
         let next = self
             .pending_authenticated_accept
@@ -3288,6 +3407,217 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(result.unwrap(), Err(ManagedEndpointError::Cancelled));
+        }));
+    }
+
+    #[test]
+    fn send_errors_blame_a_destination_only_when_the_os_reported_them() {
+        use std::io::{Error, ErrorKind};
+        // The endpoint's own size check shares the kind of the OS's EINVAL for
+        // sending to port 0, but only the latter is the destination's fault.
+        #[cfg(unix)]
+        assert!(send_error_blames_destination(&Error::from_raw_os_error(
+            libc::EINVAL
+        )));
+        assert!(!send_error_blames_destination(&Error::new(
+            ErrorKind::InvalidInput,
+            "packet size 5 exceeds endpoint limit 4"
+        )));
+        assert!(send_error_is_resource_shortage(&Error::from(
+            ErrorKind::OutOfMemory
+        )));
+        #[cfg(unix)]
+        {
+            let shortage = Error::from_raw_os_error(libc::ENOBUFS);
+            assert!(send_error_is_resource_shortage(&shortage));
+            assert!(!send_error_blames_destination(&shortage));
+            let fatal = Error::from_raw_os_error(libc::EBADF);
+            assert!(!send_error_is_resource_shortage(&fatal));
+            assert!(!send_error_blames_destination(&fatal));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_loop_backs_off_from_send_buffer_shortage_and_delivers_every_packet() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native worker context");
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_nonblocking(true).unwrap();
+            let peer_addr = peer.local_addr().unwrap();
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let started = Instant::now();
+            let mut child = cx
+                .spawn(move |child_cx| async move {
+                    let mut endpoint = ManagedQuicEndpoint::bind(
+                        &child_cx,
+                        "127.0.0.1:0".parse().unwrap(),
+                        ManagedEndpointConfig::default(),
+                    )
+                    .await
+                    .unwrap();
+                    for index in 0..8u8 {
+                        endpoint.queue_connection_packets(
+                            ConnectionId::default(),
+                            [OutgoingPacket {
+                                dst_addr: peer_addr,
+                                data: vec![index],
+                                send_time: None,
+                            }],
+                        );
+                    }
+                    // Five consecutive shortages wait 2 + 4 + 8 + 16 + 32 ms.
+                    endpoint.udp_endpoint.inject_send_errors([
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                        std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                        std::io::Error::from_raw_os_error(libc::ENOBUFS),
+                    ]);
+                    ready_tx.send(endpoint.udp_endpoint.metrics()).unwrap();
+                    let mut polls = 0_usize;
+                    let result = {
+                        let mut run = std::pin::pin!(endpoint.run_event_loop(&child_cx));
+                        poll_fn(|task_cx| {
+                            polls += 1;
+                            run.as_mut().poll(task_cx)
+                        })
+                        .await
+                    };
+                    assert!(endpoint.pending_outgoing.is_empty());
+                    assert_eq!(endpoint.send_backoff_until, None);
+                    assert_eq!(endpoint.send_backoff_streak, 0);
+                    (result, polls)
+                })
+                .unwrap();
+            let mut metrics = None;
+            for _ in 0..512 {
+                if let Ok(value) = ready_rx.try_recv() {
+                    metrics = Some(value);
+                    break;
+                }
+                crate::runtime::yield_now().await;
+            }
+            let metrics = metrics.expect("endpoint started on native worker");
+            let mut observed = Vec::new();
+            let mut buffer = [0u8; 16];
+            for _ in 0..5_000 {
+                loop {
+                    match peer.recv_from(&mut buffer) {
+                        Ok((length, _)) => {
+                            assert_eq!(length, 1);
+                            observed.push(buffer[0]);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(error) => panic!("native receive failed: {error}"),
+                    }
+                }
+                if observed.len() == 8 {
+                    break;
+                }
+                crate::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            }
+            let elapsed = started.elapsed();
+            assert_eq!(observed, (0..8u8).collect::<Vec<_>>());
+            assert_eq!(metrics.send_errors.load(Ordering::Relaxed), 5);
+            assert_eq!(metrics.packets_sent.load(Ordering::Relaxed), 8);
+            assert!(
+                elapsed >= Duration::from_millis(40),
+                "five shortages must wait out a capped backoff, not retry at once: {elapsed:?}"
+            );
+            child.abort();
+            let joined = crate::time::timeout(cx.now(), Duration::from_secs(5), child.join(&cx))
+                .await
+                .unwrap();
+            let (result, polls) = joined.unwrap();
+            assert_eq!(result, Err(ManagedEndpointError::Cancelled));
+            assert!(
+                polls <= 64,
+                "a backoff must park the loop, not spin: {polls} polls"
+            );
+        }));
+    }
+
+    #[test]
+    fn native_loop_drops_only_an_oversized_datagram_and_keeps_its_peer() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(runtime.handle().spawn(async {
+            let cx = Cx::current().expect("native worker context");
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_nonblocking(true).unwrap();
+            let peer_addr = peer.local_addr().unwrap();
+            let mut endpoint = ManagedQuicEndpoint::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                ManagedEndpointConfig {
+                    udp_config: QuicUdpEndpointConfig {
+                        max_packet_size: 4,
+                        ..QuicUdpEndpointConfig::default()
+                    },
+                    ..ManagedEndpointConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+            let ids = [
+                ConnectionId::new(&[1]).unwrap(),
+                ConnectionId::new(&[2]).unwrap(),
+            ];
+            for id in ids {
+                endpoint
+                    .create_connection_for_testing(&cx, id, peer_addr)
+                    .await
+                    .unwrap();
+            }
+            // Both connections share one peer address. Only the first built a
+            // datagram above the socket limit.
+            endpoint.queue_connection_packets(
+                ids[0],
+                [OutgoingPacket {
+                    dst_addr: peer_addr,
+                    data: vec![0; 5],
+                    send_time: None,
+                }],
+            );
+            endpoint.queue_connection_packets(
+                ids[1],
+                [OutgoingPacket {
+                    dst_addr: peer_addr,
+                    data: vec![7],
+                    send_time: None,
+                }],
+            );
+            {
+                let mut task_cx = std::task::Context::from_waker(std::task::Waker::noop());
+                let mut drive = std::pin::pin!(endpoint.run_event_loop(&cx));
+                assert!(drive.as_mut().poll(&mut task_cx).is_pending());
+            }
+            assert!(endpoint.pending_outgoing.is_empty());
+            let mut buffer = [0u8; 16];
+            let (length, source) = peer.recv_from(&mut buffer).unwrap();
+            assert_eq!(source, endpoint.local_addr());
+            assert_eq!(&buffer[..length], &[7]);
+            assert_eq!(
+                peer.recv_from(&mut buffer).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            assert_eq!(endpoint.connection_stats().active_connections, 1);
+            assert!(matches!(
+                endpoint.take_connection(&cx, ids[0]),
+                Err(ManagedEndpointError::ConnectionRouter(
+                    ConnectionRouterError::ConnectionNotFound(id)
+                )) if id == ids[0]
+            ));
+            assert_eq!(
+                endpoint.take_connection(&cx, ids[1]).unwrap().connection_id,
+                ids[1]
+            );
+            endpoint.shutdown(&cx).await.unwrap();
         }));
     }
 

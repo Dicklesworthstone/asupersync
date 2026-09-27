@@ -204,6 +204,9 @@ pub struct QuicUdpEndpoint {
     /// Reusable receive scratch buffers, so batch receives do not pay a
     /// `max_packet_size` allocation + zero fill per batch.
     recv_payload_pool: Vec<Vec<u8>>,
+    /// Errors the next managed sends report as if the socket returned them.
+    #[cfg(test)]
+    injected_send_errors: std::collections::VecDeque<io::Error>,
 }
 
 /// Endpoint metrics for observability.
@@ -345,6 +348,8 @@ impl QuicUdpEndpoint {
             endpoint_id,
             metrics: Arc::new(EndpointMetrics::default()),
             recv_payload_pool: Vec::new(),
+            #[cfg(test)]
+            injected_send_errors: std::collections::VecDeque::new(),
         })
     }
 
@@ -354,10 +359,16 @@ impl QuicUdpEndpoint {
         self.local_addr
     }
 
-    /// Preserve the bound socket's configuration when adopting its owner.
-    #[cfg(feature = "tls")]
+    /// The bound socket's configuration: adopting owners preserve it, and the
+    /// managed loop reads its send size limit.
     pub(crate) fn config(&self) -> &QuicUdpEndpointConfig {
         &self.config
+    }
+
+    /// Make the next managed sends fail with these errors before the socket.
+    #[cfg(test)]
+    pub(crate) fn inject_send_errors(&mut self, errors: impl IntoIterator<Item = io::Error>) {
+        self.injected_send_errors.extend(errors);
     }
 
     /// Get the endpoint ID for logging and tracing.
@@ -602,6 +613,11 @@ impl QuicUdpEndpoint {
                 dst_addr: packet.dst_addr,
                 payload: &packet.data,
             });
+        }
+        #[cfg(test)]
+        if let Some(error) = self.injected_send_errors.pop_front() {
+            self.metrics.send_errors.fetch_add(1, Ordering::Relaxed);
+            return Poll::Ready(Err(error));
         }
         if self.managed_send_socket.is_none() {
             self.managed_send_socket = Some(self.socket.try_clone()?);
