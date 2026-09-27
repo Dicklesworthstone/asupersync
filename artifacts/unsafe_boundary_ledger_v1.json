@@ -344,10 +344,10 @@
   },
   "summary": {
     "boundary_rows": 100,
-    "operation_count": 892,
+    "operation_count": 894,
     "operation_kind_counts": {
       "allow_unsafe_code": 106,
-      "unsafe_block": 664,
+      "unsafe_block": 666,
       "unsafe_fn": 102,
       "unsafe_impl": 20,
       "unsafe_trait": 0
@@ -2573,8 +2573,8 @@
       "scope": "file-or-item-boundary",
       "feature_or_platform_gate": "Unix process lifecycle operations plus cfg(windows) exact-image CreateProcessW, inherited-pipe, attribute-list, and Job Object operations",
       "why_safe_rust_is_insufficient": "Safe std does not expose every Unix process/signal operation used by the general process wrapper and cannot atomically create a Windows process inside a kill-on-close Job Object with an explicit inherited-handle allowlist. The exact-image Windows path therefore owns narrow raw Win32 calls and immediately transfers returned handles into OwnedHandle.",
-      "safety_invariant": "PIDs and process groups must identify owned children at each signal/wait boundary. Every successful Win32 handle creation must acquire exactly one OwnedHandle owner, parent pipe handles must be non-inheritable, child inheritance must be restricted to the three stdio handles, attribute storage must outlive CreateProcessW, and Job membership must be atomic with creation before the child can execute.",
-      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md: process lifecycle tests for exact argv/environment/stdio, no-interpreter fallback, process-group isolation, tree kill, and cleanup; Windows cross-target check plus a native Windows exact-image lifecycle lane before claiming the Win32 path executed.",
+      "safety_invariant": "PIDs and process groups must identify owned children at each signal/wait boundary. Every successful Win32 handle creation must acquire exactly one OwnedHandle owner, parent pipe handles must be non-inheritable, child inheritance must be restricted to the three stdio handles, attribute storage must outlive CreateProcessW, and Job membership must be atomic with creation before the child can execute. The Linux parent-death setup runs in the forked child before exec and makes only async-signal-safe calls: prctl(PR_SET_PDEATHSIG), getppid against the parent pid captured before fork, and _exit(127) when the parent already died.",
+      "expected_evidence": "Category-specific evidence is defined in docs/unsafe_boundary_ledger.md: process lifecycle tests for exact argv/environment/stdio, no-interpreter fallback, process-group isolation, tree kill, and cleanup; Windows cross-target check plus a native Windows exact-image lifecycle lane before claiming the Win32 path executed. Parent-death signal: src/process/parent_death_tests.rs (guarded child dies after its parent is SIGKILLed; unguarded control survives).",
       "explicit_no_claims": [
         "Linux or macOS process tests do not execute the Windows handle, attribute-list, CreateProcessW, or Job Object path.",
         "A Windows cross-target check proves type and cfg integrity only, not native process lifecycle behavior.",
@@ -2588,177 +2588,187 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 65,
+          "line": 75,
           "pattern": "let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 69,
+          "line": 79,
           "pattern": "let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 252,
+          "line": 288,
           "pattern": "if unsafe { libc::setpgid(0, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 259,
+          "line": 295,
           "pattern": "if unsafe { libc::setsid() } >= 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 318,
+          "line": 310,
+          "pattern": "if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal) } != 0 {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 315,
+          "pattern": "if unsafe { libc::getppid() } != parent {"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 316,
+          "pattern": "unsafe { libc::_exit(127) };"
+        },
+        {
+          "kind": "unsafe_block",
+          "line": 371,
           "pattern": "let ret = unsafe { libc::kill(target, sig) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 469,
+          "line": 532,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1204,
+          "line": 1267,
           "pattern": "if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1225,
+          "line": 1288,
           "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1236,
+          "line": 1299,
           "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1249,
+          "line": 1312,
           "pattern": "if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1272,
+          "line": 1335,
           "pattern": "let _ = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1284,
+          "line": 1347,
           "pattern": "if unsafe { InitializeProcThreadAttributeList(pointer, attribute_count, 0, &mut bytes) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1305,
+          "line": 1368,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1332,
+          "line": 1395,
           "pattern": "unsafe { DeleteProcThreadAttributeList(self.pointer) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1343,
+          "line": 1406,
           "pattern": "let _ = unsafe { CloseHandle(handle) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1361,
+          "line": 1424,
           "pattern": "Ok(unsafe { OwnedHandle::from_raw_handle(handle) })"
         },
         {
           "kind": "unsafe_block",
-          "line": 1380,
+          "line": 1443,
           "pattern": "if unsafe { CreatePipe(&mut read, &mut write, &mut security, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1396,
+          "line": 1459,
           "pattern": "if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1415,
+          "line": 1478,
           "pattern": "let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1419,
+          "line": 1482,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1619,
+          "line": 1682,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2035,
+          "line": 2173,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 3090,
-          "pattern": "let _ = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };"
-        },
-        {
-          "kind": "unsafe_block",
-          "line": 4070,
+          "line": 4182,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4110,
+          "line": 4222,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4297,
+          "line": 4409,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4340,
+          "line": 4452,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4766,
+          "line": 4898,
           "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4778,
+          "line": 4910,
           "pattern": "let still_alive = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 4789,
+          "line": 4921,
           "pattern": "let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4859,
+          "line": 4991,
           "pattern": "let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }"
         },
         {
           "kind": "unsafe_block",
-          "line": 4935,
+          "line": 5067,
           "pattern": "let our_pgid = unsafe { libc::getpgid(0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4940,
+          "line": 5072,
           "pattern": "let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4994,
+          "line": 5126,
           "pattern": "let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5058,
+          "line": 5190,
           "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
         }
       ]

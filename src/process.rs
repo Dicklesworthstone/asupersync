@@ -51,6 +51,8 @@ use std::task::{Context, Poll};
 mod cancel_drain_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod drop_reap_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod parent_death_tests;
 #[cfg(unix)]
 mod reaper;
 
@@ -297,6 +299,23 @@ fn configure_unix_process_group(mode: ProcessGroupMode) -> io::Result<()> {
             }
         }
     }
+}
+
+// Runs in the forked child before exec, so it only makes async-signal-safe
+// calls. `parent` is the spawning process's pid, read before the fork.
+#[cfg(target_os = "linux")]
+fn configure_linux_parent_death_signal(signal: i32, parent: libc::pid_t) -> io::Result<()> {
+    let signal =
+        libc::c_ulong::try_from(signal).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A parent that died between fork and prctl never delivers the signal, and
+    // the child has already been reparented, so exit before running anything.
+    if unsafe { libc::getppid() } != parent {
+        unsafe { libc::_exit(127) };
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1738,9 +1757,27 @@ pub struct Command {
     kill_on_drop: bool,
     process_group_mode: ProcessGroupMode,
     signal_target: ProcessSignalTarget,
+    parent_death_signal: Option<i32>,
 }
 
 impl Command {
+    fn validate_parent_death_signal(&self) -> Result<(), ProcessError> {
+        let Some(signal) = self.parent_death_signal else {
+            return Ok(());
+        };
+        if cfg!(not(target_os = "linux")) {
+            return Err(ProcessError::Unsupported(
+                "parent-death signals are only supported on Linux".to_owned(),
+            ));
+        }
+        if signal <= 0 {
+            return Err(ProcessError::InvalidConfiguration(format!(
+                "parent-death signal must be a positive signal number, got {signal}"
+            )));
+        }
+        Ok(())
+    }
+
     fn validate_process_group_configuration(&self) -> Result<(), ProcessError> {
         #[cfg(not(unix))]
         {
@@ -1800,6 +1837,7 @@ impl Command {
             kill_on_drop: false,
             process_group_mode: ProcessGroupMode::default(),
             signal_target: ProcessSignalTarget::default(),
+            parent_death_signal: None,
         }
     }
 
@@ -2025,6 +2063,41 @@ impl Command {
         self
     }
 
+    /// Asks the kernel to send `signal` to the child when its parent dies.
+    ///
+    /// This covers what [`kill_on_drop`](Self::kill_on_drop) cannot: a parent
+    /// that is killed (`SIGKILL`, OOM kill, harness timeout) never runs `Drop`.
+    /// It also reaches a child in its own process group, which group kills of
+    /// the parent's group miss. `None`, the default, sets nothing.
+    ///
+    /// Linux only (`PR_SET_PDEATHSIG`). Its semantics:
+    /// - The signal is sent when the *thread* that called
+    ///   [`spawn`](Self::spawn) exits, not only when the whole process does.
+    ///   Spawn from a thread that lives as long as the child should, not from
+    ///   a short-lived thread such as an idle blocking-pool worker.
+    /// - The kernel clears the setting when the child executes a set-user-ID,
+    ///   set-group-ID or file-capability program.
+    /// - If the parent dies between the fork and the setting taking effect,
+    ///   the child exits with status 127 before executing the program.
+    ///
+    /// On other platforms, [`spawn`](Self::spawn) returns
+    /// [`ProcessError::Unsupported`] when this is set. A signal number that is
+    /// not positive returns [`ProcessError::InvalidConfiguration`], and the
+    /// kernel rejects an out-of-range signal with an I/O error from `spawn`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let child = Command::new("worker")
+    ///     .kill_on_drop(true)
+    ///     .parent_death_signal(Some(libc::SIGKILL))
+    ///     .spawn()?;
+    /// ```
+    pub fn parent_death_signal(&mut self, signal: Option<i32>) -> &mut Self {
+        self.parent_death_signal = signal;
+        self
+    }
+
     /// Spawns the command as a child process.
     ///
     /// Returns a `Child` handle that can be used to interact with the process.
@@ -2048,6 +2121,7 @@ impl Command {
     /// ```
     pub fn spawn(&mut self) -> Result<Child, ProcessError> {
         self.validate_process_group_configuration()?;
+        self.validate_parent_death_signal()?;
 
         // Admit cleanup before creating a process: failure to start the shared
         // reaper must not leave an already-running child without a wait owner.
@@ -2081,9 +2155,30 @@ impl Command {
         #[cfg(unix)]
         {
             let mode = self.process_group_mode;
-            if mode != ProcessGroupMode::Inherit {
+            #[cfg(target_os = "linux")]
+            let parent_death = match self.parent_death_signal {
+                Some(signal) => Some((
+                    signal,
+                    libc::pid_t::try_from(std_process::id()).map_err(|_| {
+                        ProcessError::InvalidConfiguration(
+                            "spawning process id does not fit pid_t".to_owned(),
+                        )
+                    })?,
+                )),
+                None => None,
+            };
+            #[cfg(not(target_os = "linux"))]
+            let parent_death: Option<(i32, libc::pid_t)> = None;
+            if mode != ProcessGroupMode::Inherit || parent_death.is_some() {
                 unsafe {
-                    cmd.pre_exec(move || configure_unix_process_group(mode));
+                    cmd.pre_exec(move || {
+                        configure_unix_process_group(mode)?;
+                        #[cfg(target_os = "linux")]
+                        if let Some((signal, parent)) = parent_death {
+                            configure_linux_parent_death_signal(signal, parent)?;
+                        }
+                        Ok(())
+                    });
                 }
             }
         }
