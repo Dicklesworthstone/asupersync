@@ -158,6 +158,8 @@ pub(super) fn validate_receipt(
 #[cfg(test)]
 mod tests;
 
+pub(super) mod chunked;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod durable;
 #[cfg(not(target_arch = "wasm32"))]

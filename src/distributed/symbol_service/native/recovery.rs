@@ -379,6 +379,7 @@ fn failure_kind(error: &RemoteSymbolError) -> ReplicaFetchFailureKind {
         RemoteSymbolError::Refused => ReplicaFetchFailureKind::Refused,
         RemoteSymbolError::Cancelled => ReplicaFetchFailureKind::Cancelled,
         RemoteSymbolError::Client(_) => ReplicaFetchFailureKind::Transport,
+        RemoteSymbolError::Deadline => ReplicaFetchFailureKind::Deadline,
         RemoteSymbolError::Configuration | RemoteSymbolError::UnknownReplica => ReplicaFetchFailureKind::Configuration,
     }
 }
