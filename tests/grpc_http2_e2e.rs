@@ -1515,6 +1515,9 @@ fn public_owned_server_streaming_round_trip(workers: usize, tls: bool) {
             }),
         );
     }));
+    // A strong RuntimeHandle keeps teardown waiting: shutdown_timeout can only
+    // complete once every clone is released (br-asupersync-bi2462.147.15).
+    drop(handle);
     assert!(runtime.shutdown_timeout(OWNED_STREAM_LIMIT));
 }
 
