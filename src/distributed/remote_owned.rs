@@ -357,10 +357,14 @@ async fn run_admitted(
         region_id, outcome: receipt.outcome, cleanup_outcome: receipt.cleanup_outcome,
     });
     if result.is_none() {
-        result = Some(match handle.as_mut().expect("retained proxy").try_join() {
-            Ok(Some(value)) => value,
+        // Closed means the proxy is terminal, but its join result becomes
+        // visible only when the scheduler opens its retirement barrier, after
+        // the lock that closed the region. On another worker this closer can
+        // get here first, where try_join would still report Ok(None).
+        let proxy = handle.as_mut().expect("retained proxy");
+        result = Some(match poll_fn(|task| proxy.poll_join(task)).await {
+            Ok(value) => value,
             Err(error) => Err(RemoteRunTaskError::Join(error)),
-            Ok(None) => Err(RemoteRunTaskError::MissingResult),
         });
     }
     // A result already collected must not bypass a caller deadline/cancellation

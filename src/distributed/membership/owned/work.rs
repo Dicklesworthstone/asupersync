@@ -241,10 +241,15 @@ impl OwnedMembershipController {
             region_id, outcome: receipt.outcome, cleanup_outcome: receipt.cleanup_outcome,
         });
         if result.is_none() {
-            result = Some(match handle.as_mut().map(|task| task.try_join()) {
-                Some(Ok(Some(value))) => value,
-                Some(Err(error)) => Err(MembershipWorkTaskError::Join(error)),
-                Some(Ok(None)) => Err(MembershipWorkTaskError::MissingResult),
+            // Closed means the task is terminal, but its join result becomes
+            // visible only when the scheduler opens its retirement barrier,
+            // after the lock that closed the region. On another worker this
+            // closer can get here first, where try_join would report Ok(None).
+            result = Some(match handle.as_mut() {
+                Some(task) => match poll_fn(|poll_cx| task.poll_join(poll_cx)).await {
+                    Ok(value) => value,
+                    Err(error) => Err(MembershipWorkTaskError::Join(error)),
+                },
                 None => Err(MembershipWorkTaskError::NotStarted),
             });
         }
