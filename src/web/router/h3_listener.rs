@@ -4,6 +4,9 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+// This split implementation shares its parent router's private H3 dispatch
+// machinery as one cohesive unit (as remote/admission.rs does).
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::bytes::BytesCursor;
 use crate::channel::oneshot;

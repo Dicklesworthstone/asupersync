@@ -1328,7 +1328,7 @@ impl NativeQuicUdpConnection {
         cx: &Cx,
         now: Instant,
     ) -> Result<bool, NativeQuicUdpConnectionError> {
-        if !self.idle_deadline().is_some_and(|deadline| deadline <= now) {
+        if self.idle_deadline().is_none_or(|deadline| deadline > now) {
             return Ok(false);
         }
         // RFC 9000 section 10.1: idle expiry discards connection state without

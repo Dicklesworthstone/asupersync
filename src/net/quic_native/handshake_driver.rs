@@ -1558,7 +1558,7 @@ pub async fn client_handshake_over_udp(
     // Retry changes packet protection, not the TLS handshake message. Keep the
     // first flight's plaintext until the server's Initial rules out Retry.
     let initial_segments = driver.pump_outbound()?;
-    driver.staged_segments = initial_segments.clone();
+    driver.staged_segments.clone_from(&initial_segments);
     let mut packet_number = 0u64;
     let mut last_flight = driver
         .send_pending_flight(
