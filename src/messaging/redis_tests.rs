@@ -142,6 +142,12 @@ mod tests {
             // The controller opens this gate only after it has captured the
             // cancellation result, so draining cannot supply a spurious wake.
             let _ = release_rx.recv_timeout(Duration::from_secs(8));
+            // Probe with one byte. A client that closed its socket answers with
+            // RST (data after close), so shutdown is observed without draining
+            // the multi-megabyte backlog the parked write queued behind this
+            // peer's small receive window, which took 25 s at zero-window pace.
+            // A client that is still open just buffers the byte.
+            let _ = stream.write_all(&[0]);
             let mut received = 0usize;
             let mut bytes = [0; 64 * 1024];
             let closed = loop {
