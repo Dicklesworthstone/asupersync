@@ -97,7 +97,7 @@ pub use dynamic_service::{
 pub use dynamic_supervisor::{
     DynamicChildCompletion, DynamicChildId, DynamicChildInfo, DynamicChildResult, DynamicChildState,
     DynamicRegionOutcome, DynamicSupervisor, DynamicSupervisorConfig, DynamicSupervisorError,
-    DynamicSupervisorReport, DynamicWorkerConfig,
+    DynamicSupervisorReport, DynamicWorkerConfig, SharedRestartConfig, SharedRestartStatus,
 };
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,

@@ -1965,6 +1965,14 @@ mod managed {
             child: ChildName,
             refusal: BudgetRefusal,
         },
+        /// The dynamic owner's shared allowance refused this tree's batch.
+        /// Every tree under that same dynamic root is cancelled and drained.
+        SharedRestartLimit {
+            /// Static child whose automatic restart requested the shared slot.
+            child: ChildName,
+            /// Exact shared policy refusal, retained independently of cancellation.
+            refusal: BudgetRefusal,
+        },
         /// No representable successor generation remains.
         GenerationExhausted(ChildName),
         /// The old generation reached quiescence with unsuccessful cleanup.
@@ -2049,6 +2057,7 @@ mod managed {
         bindings: Vec<ManagedChildBinding<E>>,
         config: SupervisionConfig,
         registry: Option<Arc<Mutex<NameRegistry>>>,
+        shared_restarts: Option<Arc<crate::cx::dynamic_supervisor::SharedRestartDomain>>,
     }
 
     impl<E> std::fmt::Debug for ManagedSupervisor<E> {
@@ -2169,6 +2178,7 @@ mod managed {
                 bindings: factories,
                 config,
                 registry,
+                shared_restarts: None,
             })
         }
     }
@@ -3003,7 +3013,7 @@ mod managed {
                     self.tracker.reset();
                     verdict = self.tracker.evaluate_with_budget(now, &self.cx.budget());
                 }
-                let delay = match verdict {
+                let mut delay = match verdict {
                     RestartVerdict::Allowed { delay, .. } => delay,
                     RestartVerdict::Denied { refusal } => {
                         if self.supervisor.config.escalation == EscalationPolicy::Stop {
@@ -3023,6 +3033,39 @@ mod managed {
                         return;
                     }
                 };
+                if let Some(domain) = &self.supervisor.shared_restarts {
+                    match domain.admit() {
+                        RestartVerdict::Allowed { delay: shared_delay, .. } => {
+                            delay = delay.max(shared_delay);
+                        }
+                        RestartVerdict::Denied { refusal } => {
+                            let identity = self.latest[failed]
+                                .as_ref().expect("joined terminal").generation;
+                            self.report.outcome = Outcome::Err(
+                                ManagedSupervisorError::SharedRestartLimit {
+                                    child: self.supervisor.children[failed].name.clone(),
+                                    refusal,
+                                },
+                            );
+                            let reason = CancelReason::with_origin(
+                                crate::types::CancelKind::FailFast,
+                                identity.region,
+                                self.cx.now(),
+                            )
+                            .with_task(identity.task)
+                            .with_message("dynamic supervisor shared restart allowance exhausted");
+                            match domain.cancel_root(reason) {
+                                Ok(true) => self.report.escalations = 1,
+                                Ok(false) => {}
+                                Err(error) => self.record_error(
+                                    ManagedSupervisorError::Escalation(error),
+                                ),
+                            }
+                            self.trace("shared_restart_limit", failed, identity);
+                            return;
+                        }
+                    }
+                }
                 let affected: Vec<_> = (0..self.running.len())
                     .filter(|&index| {
                         self.running[index].is_some()
@@ -3210,6 +3253,15 @@ mod managed {
     impl<E> Drop for ManagedSupervisorHandle<E> {
         fn drop(&mut self) {
             self.task.abort();
+        }
+    }
+
+    impl<E> ManagedSupervisor<E> {
+        pub(crate) fn set_shared_restarts(
+            &mut self,
+            domain: Arc<crate::cx::dynamic_supervisor::SharedRestartDomain>,
+        ) {
+            self.shared_restarts = Some(domain);
         }
     }
 
