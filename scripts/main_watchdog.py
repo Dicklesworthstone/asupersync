@@ -118,6 +118,7 @@ REMOTE_EXIT_RE = re.compile(r"Remote command finished: exit=(\d+)")
 # fixture with a missing member). That is a property of the commit, so it is
 # refused again on every retry: nothing ran, and nothing will.
 DEPENDENCY_PREFLIGHT_RE = re.compile(r"\bRCH-E413\b")
+DEPENDENCY_PREFLIGHT_REASON = "rch dependency preflight refused this commit's tree (RCH-E413): nothing ran"
 WORKER_RE = re.compile(r"Selected worker: (\S+)")
 EXECUTED_TEST_RE = re.compile(r"^test (\S+) \.\.\. (?:ok|FAILED)$")
 TEST_RESULT_RE = re.compile(
@@ -484,7 +485,7 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         "env_gated_targets": list(lane.get("env_gated_targets", [])),
     }
     if remote_exit is None and DEPENDENCY_PREFLIGHT_RE.search(clean):
-        result["reason"] = "rch dependency preflight refused this commit's tree (RCH-E413): nothing ran"
+        result["reason"] = DEPENDENCY_PREFLIGHT_REASON
         return result
     if remote_exit is None and client_exit == 103:
         result.update(verdict=VERDICT_DEFERRED, reason="admission refused (exit 103)")
@@ -952,6 +953,12 @@ def run_engine(
         state["last_green"] = head
     if all(r["verdict"] in (VERDICT_GREEN, VERDICT_RED) for r in receipts):
         state["last_covered"] = head  # decisive for every lane (green or attributed red)
+    # A preflight refusal is a property of this head's tree, so the next plan must
+    # move the head (select_batch); any other outcome releases that.
+    if any(r.get("reason") == DEPENDENCY_PREFLIGHT_REASON for r in receipts):
+        state["preflight_refused_head"] = head
+    else:
+        state.pop("preflight_refused_head", None)
     return {"receipts": receipts, "bead_payloads": payloads, "bead_heals": heals, "notes": notes, "state": state}
 
 
@@ -1268,6 +1275,19 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
     return lanes, unmapped
 
 
+def select_batch(shas: list[str], max_batch: int, state: dict[str, Any]) -> list[str]:
+    """The next batch of uncovered commits, oldest first.
+
+    RCH refuses a head whose own tree fails its dependency preflight (RCH-E413)
+    before running anything, on every attempt, so that head can never be covered
+    and `last_covered` would stay put forever. After such a refusal the head moves a
+    full batch further, and a later tree carries the refused commits.
+    """
+    refused = state.get("preflight_refused_head")
+    end = shas.index(refused) + 1 + max_batch if refused in shas else max_batch
+    return shas[:end]
+
+
 def make_plan(since: str | None, until: str, max_batch: int, jobs: int, with_all_features: bool, state: dict[str, Any]) -> dict[str, Any]:
     start = since or state.get("last_covered")
     if not start:
@@ -1275,7 +1295,7 @@ def make_plan(since: str | None, until: str, max_batch: int, jobs: int, with_all
     shas = git("rev-list", "--reverse", "--first-parent", f"{start}..{until}").split()
     if not shas:
         return {"schema": SCHEMA_VERSION, "commits": [], "lanes": [], "since": start, "until": until}
-    batch = shas[:max_batch]
+    batch = select_batch(shas, max_batch, state)
     commits = [commit_record(s) for s in batch]
     paths = sorted({p for c in commits for p in c["paths"]})
     lanes, unmapped = build_lanes(batch[-1], paths, jobs, with_all_features)
@@ -2047,6 +2067,9 @@ def main(argv: list[str]) -> int:
                 existing_bead_for(case["new_targets"], case["open_issues"]) for case in probes.get("existing_bead_for", [])
             ],
             "file_or_queue": [file_or_queue_rounds(case) for case in probes.get("file_or_queue", [])],
+            "select_batch": [
+                select_batch(case["shas"], case["max_batch"], case["state"]) for case in probes.get("select_batch", [])
+            ],
         }
         json.dump(result, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")

@@ -382,6 +382,49 @@ fn a_dependency_preflight_refusal_is_no_evidence_not_a_retry() {
 }
 
 #[test]
+fn a_preflight_refused_head_moves_the_next_batch_past_it() {
+    // The refusal repeats on every attempt, so a batch that keeps the same head never
+    // covers anything again (09-27: stuck on 1d9799819 for a day).
+    let head = sha(9);
+    let refusal = "  WARN rch::hook: Dependency preflight blocked remote execution [RCH-E413]: Clean-overlay requires selected Cargo inputs.\n";
+    let lane = json!({"id": "check-default", "kind": "build", "argv": ["cargo"], "expected_targets": []});
+    let refused = evaluate(&json!({
+        "plan": {"commits": [commit(9, "dev@example.com", "nine")], "lanes": [lane.clone()]},
+        "lane_logs": {"check-default": {head.clone(): {"log": refusal, "client_exit": 103}}},
+        "state": {"known_reds": {}, "last_covered": sha(8)},
+    }));
+    assert_eq!(refused["state"]["preflight_refused_head"], head, "{refused:#}");
+    assert_eq!(refused["state"]["last_covered"], sha(8), "nothing was covered: {refused:#}");
+
+    // The next batch runs a full batch past the refused head; without a refusal, or
+    // once the refused head is already covered, it is the ordinary batch.
+    let shas: Vec<String> = (1..=50).map(sha).collect();
+    let refused_state = json!({"preflight_refused_head": sha(20)});
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"select_batch": [
+            {"shas": shas, "max_batch": 20, "state": refused_state},
+            {"shas": shas, "max_batch": 20, "state": {}},
+            {"shas": shas[25..].to_vec(), "max_batch": 20, "state": refused_state},
+        ]},
+    }));
+    let batches = probed["probe_results"]["select_batch"].as_array().expect("batches");
+    assert_eq!(batches[0], json!(shas[..40]), "{probed:#}");
+    assert_eq!(batches[1], json!(shas[..20]), "{probed:#}");
+    assert_eq!(batches[2], json!(shas[25..45]), "{probed:#}");
+
+    // A decisive head releases the refusal.
+    let released = evaluate(&json!({
+        "plan": {"commits": [commit(9, "dev@example.com", "nine")], "lanes": [lane]},
+        "lane_logs": {"check-default": {head.clone(): {"log": build_green()}}},
+        "state": {"known_reds": {}, "preflight_refused_head": sha(7)},
+    }));
+    assert!(released["state"].get("preflight_refused_head").is_none(), "{released:#}");
+    assert_eq!(released["state"]["last_covered"], head, "{released:#}");
+}
+
+#[test]
 fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_beside_it() {
     let head = sha(9);
     let one = |id: &str, kind: &str| json!({"id": id, "kind": kind, "argv": ["cargo"], "expected_targets": []});
