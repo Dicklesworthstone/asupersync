@@ -10159,7 +10159,8 @@ fn adaptive_policy_trace_for_cancel_flood(epoch_steps: u32) -> AdaptivePolicyTra
 /// as `None`, so its `unwrap()` panicked. It now enables the policy
 /// explicitly with a short epoch so several epochs close within 100
 /// dispatches, and it carries a planted negative so bit-equality is not
-/// vacuous.
+/// vacuous. A frozen trace for an alternating reward stream makes it fail when
+/// the selector itself changes (br-asupersync-bi2462.93).
 ///
 /// No-claim: `LabRuntime` does not run this selector (it uses a fixed
 /// `DEFAULT_LAB_CANCEL_STREAK_LIMIT`), so this proves the production policy
@@ -10196,6 +10197,18 @@ fn golden_test_lab_runtime_replay_determinism() {
     assert_ne!(
         trace_a, trace_c,
         "a different epoch length must change the recorded policy state"
+    );
+
+    // Replaying twice cannot notice a changed selector: both runs change
+    // together. Pin one alternating-reward stream to the reviewed trace (the
+    // `limit_trace_seed_0001_epochs_16` entry of
+    // `three_lane_adaptive_replay_traces_scrubbed`), so a change to the UCB
+    // discount, confidence or arm order fails here too.
+    let frozen = replay_adaptive_limit_trace(0xC0DE_CAFE_BEEF_0001, 16);
+    assert_eq!(
+        frozen,
+        [4, 8, 32, 64, 16, 8, 64, 4, 32, 8, 16, 4, 64, 8, 32, 4],
+        "the UCB selector no longer reproduces the reviewed limit trace"
     );
 }
 
