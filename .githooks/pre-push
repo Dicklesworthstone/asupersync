@@ -14,7 +14,9 @@
 #
 # Scope: only guards pushes that update `main` (or `master`). Runs the DEFAULT
 # feature set — the fleet-critical build — not the full --all-features/clippy gate
-# (too slow to block every push); CI's lint-build job still covers that post-hoc.
+# (too slow to block every push). GitHub Actions is disabled for this repo (AGENTS.md
+# "Validation Path"), so run --all-features checks yourself through RCH when you touch
+# feature-gated code.
 set -euo pipefail
 
 remote="${1:-}"

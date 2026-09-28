@@ -583,3 +583,5 @@ opencode.json
 # Skill-loop progress scratch
 .skill-loop-progress.md
 .skill-loop-progress-*.md
+# br doctor per-run artifacts
+.doctor/

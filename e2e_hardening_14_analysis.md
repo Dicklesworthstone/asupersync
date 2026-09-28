@@ -1,5 +1,13 @@
 # E2E Hardening-14 Analysis: Missing Observability
 
+> **Status (2026-09-23, `asupersync-bi2462.141`).** 33 of the 34 `src/real_*.rs` files named across
+> the `e2e_hardening_*` reports are declared as a module nowhere, so Cargo never compiles or runs
+> them. The 34th, `real_obligation_leak_check_e2e_tests.rs`, compiles only with the
+> `obligation-cleanup-e2e` feature. A ✅ for one of those 33 files records a reading of its source
+> text; it cannot mean a test passed, and fixes described as implemented there have never been
+> built. `tests/dormant_e2e_inventory_contract.rs` (`top_level_source_orphans_never_increase`) fails
+> if the number of orphan top-level source files rises.
+
 ## 🔍 COMPREHENSIVE OBSERVABILITY SCAN
 
 ### **SUMMARY**: Critical observability gaps in E2E test failure diagnostics
