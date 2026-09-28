@@ -10,6 +10,162 @@ use std::time::Duration;
 
 use asupersync::signal::{ShutdownController, SignalKind};
 
+#[cfg(unix)]
+fn parked_signal_child(kind: SignalKind, scenario: &'static str) {
+    use std::future::{Future, poll_fn};
+    use std::io::Write;
+
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("signal child runtime");
+    runtime.block_on(async move {
+        let mut wait = Box::pin(async move {
+            if kind == SignalKind::interrupt() {
+                assert!(asupersync::signal::is_available());
+                asupersync::signal::ctrl_c().await.expect("Ctrl-C listener");
+            } else {
+                assert!(asupersync::signal::is_available());
+                let mut stream = asupersync::signal::signal(kind).expect("SIGTERM listener");
+                assert_eq!(stream.recv().await, Some(()));
+            }
+        });
+        let mut parked = false;
+        poll_fn(|cx| {
+            let result = wait.as_mut().poll(cx);
+            if result.is_pending() && !parked {
+                parked = true;
+                println!("SIGNAL_PARKED scenario={scenario} kind={kind:?}");
+                std::io::stdout().flush().expect("flush parked witness");
+            }
+            result
+        })
+        .await;
+        println!("SIGNAL_DELIVERED scenario={scenario} kind={kind:?}");
+        std::io::stdout().flush().expect("flush delivery witness");
+    });
+}
+
+#[cfg(unix)]
+fn run_signal_subprocess(test_name: &str, scenario: &str, expect_default_term: bool) {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    struct ChildGuard(Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if matches!(self.0.try_wait(), Ok(None)) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    let mut child = ChildGuard(
+        Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env("ASUPERSYNC_SIGNAL_TEST_CHILD", scenario)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn isolated signal child"),
+    );
+    let stdout = child.0.stdout.take().expect("child stdout");
+    let (send_line, receive_line) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            send_line
+                .send(line.expect("child stdout line"))
+                .expect("parent reader");
+        }
+    });
+    let started = Instant::now();
+    let mut lines = Vec::new();
+    loop {
+        let remaining = Duration::from_secs(10).saturating_sub(started.elapsed());
+        let line = receive_line
+            .recv_timeout(remaining)
+            .expect("child never reported a parked signal waiter");
+        let parked = line.contains(&format!("SIGNAL_PARKED scenario={scenario}"));
+        lines.push(line);
+        if parked {
+            break;
+        }
+    }
+    eprintln!(
+        "scenario={scenario} stage=parked elapsed={:?}",
+        started.elapsed()
+    );
+    let pid = Pid::from_raw(child.0.id().try_into().expect("PID fits i32"));
+    kill(pid, Signal::SIGTERM).expect("send SIGTERM after parked witness");
+    let triggered = Instant::now();
+    eprintln!(
+        "scenario={scenario} stage=sigterm_sent elapsed={:?}",
+        started.elapsed()
+    );
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("wait for signal child") {
+            break status;
+        }
+        assert!(
+            triggered.elapsed() < Duration::from_secs(1),
+            "signal child did not exit within one second of SIGTERM: {lines:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    reader.join().expect("read child output");
+    lines.extend(receive_line.try_iter());
+    eprintln!(
+        "scenario={scenario} stage=child_exited status={status:?} elapsed={:?} output={lines:?}",
+        started.elapsed()
+    );
+    if expect_default_term {
+        assert_eq!(status.signal(), Some(libc::SIGTERM), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("SIGNAL_DELIVERED")));
+    } else {
+        assert!(status.success(), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("SIGNAL_DELIVERED scenario={scenario}"))),
+            "SIGTERM was not delivered to the requested stream: {lines:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_ctrl_c_only_preserves_default_sigterm() {
+    if std::env::var("ASUPERSYNC_SIGNAL_TEST_CHILD").as_deref() == Ok("ctrl-c-only") {
+        parked_signal_child(SignalKind::interrupt(), "ctrl-c-only");
+        return;
+    }
+    run_signal_subprocess(
+        "e2e_ctrl_c_only_preserves_default_sigterm",
+        "ctrl-c-only",
+        true,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_requested_sigterm_reaches_parked_listener() {
+    if std::env::var("ASUPERSYNC_SIGNAL_TEST_CHILD").as_deref() == Ok("requested-sigterm") {
+        parked_signal_child(SignalKind::terminate(), "requested-sigterm");
+        return;
+    }
+    run_signal_subprocess(
+        "e2e_requested_sigterm_reaches_parked_listener",
+        "requested-sigterm",
+        false,
+    );
+}
+
 // =========================================================================
 // Phase 1: Graceful shutdown with in-flight work
 // =========================================================================

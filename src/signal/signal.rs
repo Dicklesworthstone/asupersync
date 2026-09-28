@@ -7,8 +7,10 @@
 //! # Design
 //!
 //! On Unix and Windows, a global dispatcher thread is installed once and receives
-//! process signals via `signal-hook`. Delivered signals are fanned out to
-//! per-kind async waiters using `Notify` + monotone delivery counters.
+//! process signals via `signal-hook`. Unix handlers are registered only for
+//! requested kinds; once registered, a handler remains installed even if its
+//! last stream is dropped. Delivered signals are fanned out to per-kind async
+//! waiters using `Notify` + monotone delivery counters.
 
 use std::io;
 
@@ -205,18 +207,16 @@ impl Drop for SignalDispatcher {
 
 #[cfg(unix)]
 impl SignalDispatcher {
-    fn start() -> io::Result<Self> {
+    fn start(kind: SignalKind) -> io::Result<Self> {
         let mut slots = HashMap::with_capacity(8);
         for kind in all_signal_kinds() {
             slots.insert(kind, Arc::new(SignalSlot::new()));
         }
 
-        let raw_signals: Vec<i32> = all_signal_kinds()
-            .iter()
-            .copied()
-            .map(raw_signal_for_kind)
-            .collect();
-        let mut signals = signal_hook::iterator::Signals::new(raw_signals)?;
+        // Register only the requested kind. Installing every supported handler
+        // here would replace the process's default SIGTERM disposition when a
+        // caller merely asks to wait for Ctrl-C.
+        let mut signals = signal_hook::iterator::Signals::new([raw_signal_for_kind(kind)])?;
         let handle = signals.handle();
 
         let thread_slots = slots.clone();
@@ -241,6 +241,13 @@ impl SignalDispatcher {
 
     fn slot(&self, kind: SignalKind) -> Option<Arc<SignalSlot>> {
         self.slots.get(&kind).cloned()
+    }
+
+    fn register(&self, kind: SignalKind) -> io::Result<()> {
+        // Handle::add_signal deduplicates registrations under its own lock.
+        // A requested handler stays installed for the process lifetime, even
+        // after every stream for that kind has been dropped.
+        self._handle.add_signal(raw_signal_for_kind(kind))
     }
 
     #[cfg(test)]
@@ -495,9 +502,18 @@ static SIGNAL_DISPATCHER: OnceLock<io::Result<SignalDispatcher>> = OnceLock::new
 
 #[cfg(any(unix, windows))]
 fn dispatcher_for(kind: SignalKind) -> Result<&'static SignalDispatcher, SignalError> {
+    #[cfg(unix)]
+    let result = SIGNAL_DISPATCHER.get_or_init(|| SignalDispatcher::start(kind));
+    #[cfg(windows)]
     let result = SIGNAL_DISPATCHER.get_or_init(SignalDispatcher::start);
     match result {
-        Ok(dispatcher) => Ok(dispatcher),
+        Ok(dispatcher) => {
+            #[cfg(unix)]
+            dispatcher.register(kind).map_err(|err| {
+                SignalError::unsupported(kind, format!("failed to register signal handler: {err}"))
+            })?;
+            Ok(dispatcher)
+        }
         Err(err) => Err(SignalError::unsupported(
             kind,
             format!("failed to initialize signal dispatcher: {err}"),
@@ -610,6 +626,10 @@ impl Signal {
 }
 
 /// Creates a new stream that receives signals of the given kind.
+///
+/// On Unix, this installs a process-wide handler only for `kind`. The handler
+/// remains installed after the stream is dropped. Asupersync leaves the
+/// dispositions of kinds never requested through this API unchanged.
 ///
 /// # Errors
 ///

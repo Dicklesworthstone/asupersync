@@ -69,9 +69,9 @@ pub struct PbftConfig {
 impl PbftConfig {
     /// Create configuration for n replicas with f Byzantine faults.
     pub fn new(replica_count: usize, fault_tolerance: usize) -> Result<Self> {
-        if !fault_tolerance
+        if fault_tolerance
             .checked_mul(3)
-            .is_some_and(|minimum| replica_count > minimum)
+            .is_none_or(|minimum| replica_count <= minimum)
         {
             return Err(Error::new(ErrorKind::InvalidInput));
         }
