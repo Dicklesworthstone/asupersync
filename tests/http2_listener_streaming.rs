@@ -20,6 +20,7 @@ use asupersync::codec::Framed;
 use asupersync::cx::Cx;
 use asupersync::http::body::{Body, Frame as BodyFrame};
 use asupersync::http::h1::server::HostPolicy;
+use asupersync::http::h1::codec::HttpError;
 use asupersync::http::h1::stream::{IncomingBodyError, StreamingServerRequest};
 use asupersync::http::h1::types::Response as H1Response;
 use asupersync::http::h2::connection::{CLIENT_PREFACE, ReceivedFrame};
@@ -296,11 +297,25 @@ async fn exercise_produced<H, HFut, F, Fut>(
     F: FnOnce(Client, Arc<AtomicUsize>) -> Fut,
     Fut: Future<Output = Client>,
 {
+    exercise_produced_with_config(handler, config(), client_settings, workflow).await;
+}
+
+async fn exercise_produced_with_config<H, HFut, F, Fut>(
+    handler: H,
+    config: Http2StreamingListenerConfig,
+    client_settings: Settings,
+    workflow: F,
+) where
+    H: Fn(StreamingServerRequest) -> HFut + Send + Sync + 'static,
+    HFut: Future<Output = Http2ProducedResponse> + Send + 'static,
+    F: FnOnce(Client, Arc<AtomicUsize>) -> Fut,
+    Fut: Future<Output = Client>,
+{
     let runtime = Runtime::current_handle().expect("native runtime handle");
     let listener = Http2Listener::bind_streaming_produced_with_config(
         "127.0.0.1:0",
         handler,
-        config(),
+        config,
     )
     .await
     .expect("bind live-input produced-response listener");
@@ -492,6 +507,154 @@ fn h2_live_produced_echoes_before_upload_eof_in_the_same_request_region() {
                 client.survivor().await;
                 client
             }).await;
+        });
+    }
+}
+
+/// The opt-in stream idle timeout bounds a stalled request upload. A produced
+/// response that keeps streaming after its request ended (END_STREAM on
+/// HEADERS), or after the handler dropped the unread body, must complete
+/// instead of being reset with CANCEL (br-asupersync-yw6j42).
+#[test]
+fn h2_live_produced_response_outlives_stream_idle_timeout_after_request_input_ends() {
+    const IDLE: Duration = Duration::from_millis(300);
+    for workers in [1, 2] {
+        for drop_unread_body in [false, true] {
+            run(workers, async move {
+                let handler = move |request: StreamingServerRequest| async move {
+                    if request.head.uri == "/survivor" {
+                        return Http2ProducedResponse::buffered(H1Response::new(
+                            200,
+                            "OK",
+                            b"survived".to_vec(),
+                        ));
+                    }
+                    // Either keep the (already ended) body for the whole
+                    // response, or abandon an unfinished upload up front.
+                    let body = (!drop_unread_body).then_some(request.body);
+                    Http2ProducedResponse::streaming(
+                        H1Response::new(200, "OK", Vec::new()),
+                        NonZeroUsize::new(1).unwrap(),
+                        NonZeroUsize::new(INITIAL_WINDOW).unwrap(),
+                        move |producer_cx, mut sender| async move {
+                            let _body = body;
+                            sender.send_chunk(&producer_cx, b"first").await?;
+                            asupersync::time::sleep(producer_cx.now(), IDLE * 3).await;
+                            sender.send_chunk(&producer_cx, b"-second").await?;
+                            sender.finish(&producer_cx)?;
+                            Ok(sender)
+                        },
+                    )
+                };
+                let mut config = config();
+                config.listener = config.listener.stream_idle_timeout(Some(IDLE));
+                exercise_produced_with_config(
+                    handler,
+                    config,
+                    Settings::client(),
+                    move |mut client, in_flight| async move {
+                        let started = Instant::now();
+                        let stream = if drop_unread_body {
+                            client.open("POST", "/slow", None, false).await
+                        } else {
+                            client.open("GET", "/slow", None, true).await
+                        };
+                        client.response(stream, "200", b"first-second").await;
+                        let elapsed = started.elapsed();
+                        if drop_unread_body {
+                            // The abandoned upload is stopped only after the
+                            // complete response, with NO_ERROR.
+                            client.reset(stream, ErrorCode::NoError).await;
+                        }
+                        eprintln!(
+                            "{{\"bead\":\"asupersync-yw6j42\",\"workers\":{workers},\"drop_unread_body\":{drop_unread_body},\"idle_ms\":{},\"response_ms\":{}}}",
+                            IDLE.as_millis(),
+                            elapsed.as_millis()
+                        );
+                        assert!(
+                            elapsed >= IDLE * 2,
+                            "the response must have outlived the idle timeout: {elapsed:?}"
+                        );
+                        wait_requests_drained(&in_flight).await;
+                        client.survivor().await;
+                        client
+                    },
+                )
+                .await;
+            });
+        }
+    }
+}
+
+/// A producer that fails while its request upload is unfinished resets the
+/// stream exactly once. The early-stop NO_ERROR reset for an unfinished upload
+/// must not follow the failure's reset (br-asupersync-jz8jfr).
+#[test]
+fn h2_live_produced_failure_during_unfinished_upload_resets_the_stream_once() {
+    for workers in [1, 2] {
+        run(workers, async move {
+            let handler = |request: StreamingServerRequest| async move {
+                if request.head.uri == "/survivor" {
+                    return Http2ProducedResponse::buffered(H1Response::new(
+                        200,
+                        "OK",
+                        b"survived".to_vec(),
+                    ));
+                }
+                let body = request.body;
+                Http2ProducedResponse::streaming(
+                    H1Response::new(200, "OK", Vec::new()),
+                    NonZeroUsize::new(1).unwrap(),
+                    NonZeroUsize::new(INITIAL_WINDOW).unwrap(),
+                    move |producer_cx, mut sender| async move {
+                        let _body = body;
+                        sender.send_chunk(&producer_cx, b"partial").await?;
+                        Err(HttpError::Io(std::io::Error::other(
+                            "producer failed after response HEADERS",
+                        )))
+                    },
+                )
+            };
+            exercise_produced(
+                handler,
+                Settings::client(),
+                move |mut client, in_flight| async move {
+                    let stream = client.open("POST", "/fail", None, false).await;
+                    client
+                        .data(stream, Bytes::from_static(b"unfinished"), false)
+                        .await;
+                    let reset = loop {
+                        match client.receive().await.0 {
+                            Some(ReceivedFrame::Reset {
+                                stream_id,
+                                error_code,
+                            }) => {
+                                assert_eq!(stream_id, stream);
+                                break error_code;
+                            }
+                            Some(
+                                ReceivedFrame::Headers { stream_id, .. }
+                                | ReceivedFrame::Data { stream_id, .. },
+                            ) => assert_eq!(stream_id, stream),
+                            None => {}
+                            event => panic!("failed producer must reset: {event:?}"),
+                        }
+                    };
+                    eprintln!(
+                        "{{\"bead\":\"asupersync-jz8jfr\",\"workers\":{workers},\"first_reset\":\"{reset:?}\"}}"
+                    );
+                    assert!(
+                        matches!(reset, ErrorCode::InternalError | ErrorCode::Cancel),
+                        "a failed producer is not a clean early stop: {reset:?}"
+                    );
+                    wait_requests_drained(&in_flight).await;
+                    // A second RST_STREAM for the failed stream surfaces here as
+                    // an unexpected event before the sibling's response.
+                    client.survivor().await;
+                    client
+                },
+            )
+            .await;
         });
     }
 }

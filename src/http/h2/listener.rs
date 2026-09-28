@@ -3085,6 +3085,28 @@ where
 /// protocol default (16 KiB), which would reject conformant peer frames sized
 /// within a larger advertised limit. `max_frame_size` must be the LOCAL
 /// advertised value, never the peer's (br-asupersync-i1r9cw).
+/// After peer input on a live request, re-arm its idle deadline while the body
+/// can still receive input, and drop it once the request has ended, failed or
+/// been abandoned. The timeout bounds a stalled upload; it must not cut a
+/// produced response that outlives its request (br-asupersync-yw6j42).
+#[cfg(feature = "http2-streaming")]
+fn refresh_live_request_idle(
+    deadlines: &mut HashMap<u32, Time>,
+    incoming: &StreamingRequests,
+    stream_id: u32,
+    timeout: Option<Duration>,
+    time_getter: fn() -> Time,
+) {
+    match timeout {
+        Some(timeout) if incoming.awaits_input(stream_id) => {
+            deadlines.insert(stream_id, time_getter() + timeout);
+        }
+        _ => {
+            deadlines.remove(&stream_id);
+        }
+    }
+}
+
 fn frame_codec_for(max_frame_size: u32) -> ListenerFrameCodec {
     let mut codec = ListenerFrameCodec::new();
     codec.set_max_frame_size(max_frame_size);
@@ -3267,7 +3289,8 @@ where
             if let Some(incoming) = &mut incoming {
                 let reset_queued =
                     incoming.after_flush(&mut conn, &response_guards, &produced_bodies);
-                pending_stream_idle_deadlines.retain(|stream_id, _| incoming.is_active(*stream_id));
+                pending_stream_idle_deadlines
+                    .retain(|stream_id, _| incoming.awaits_input(*stream_id));
                 if reset_queued {
                     continue;
                 }
@@ -3677,10 +3700,13 @@ where
                         if let Some(incoming) = &mut incoming {
                             if incoming.contains(stream_id) {
                                 incoming.trailers(stream_id, headers, end_stream, &mut conn);
-                                if let Some(timeout) = stream_idle_timeout {
-                                    pending_stream_idle_deadlines
-                                        .insert(stream_id, (time_getter)() + timeout);
-                                }
+                                refresh_live_request_idle(
+                                    &mut pending_stream_idle_deadlines,
+                                    incoming,
+                                    stream_id,
+                                    stream_idle_timeout,
+                                    time_getter,
+                                );
                             } else if incoming.admit(
                                 &mut conn,
                                 stream_id,
@@ -3696,10 +3722,13 @@ where
                             ) {
                                 dispatched_streams.insert(stream_id);
                                 requests_dispatched = requests_dispatched.saturating_add(1);
-                                if let Some(timeout) = stream_idle_timeout {
-                                    pending_stream_idle_deadlines
-                                        .insert(stream_id, (time_getter)() + timeout);
-                                }
+                                refresh_live_request_idle(
+                                    &mut pending_stream_idle_deadlines,
+                                    incoming,
+                                    stream_id,
+                                    stream_idle_timeout,
+                                    time_getter,
+                                );
                             }
                             if !conn.goaway_sent()
                                 && max_requests_per_connection
@@ -3791,10 +3820,13 @@ where
                         #[cfg(feature = "http2-streaming")]
                         if let Some(incoming) = &mut incoming {
                             incoming.data(stream_id, data, end_stream, &mut conn);
-                            if let Some(timeout) = stream_idle_timeout {
-                                pending_stream_idle_deadlines
-                                    .insert(stream_id, (time_getter)() + timeout);
-                            }
+                            refresh_live_request_idle(
+                                &mut pending_stream_idle_deadlines,
+                                incoming,
+                                stream_id,
+                                stream_idle_timeout,
+                                time_getter,
+                            );
                             continue;
                         }
                         // Bytes buffered for every partially received request on

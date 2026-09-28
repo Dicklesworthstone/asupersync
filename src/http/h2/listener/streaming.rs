@@ -347,10 +347,15 @@ impl StreamingRequests {
         self.entries.contains_key(&stream_id) || self.early_response_stops.contains(&stream_id)
     }
 
-    pub(super) fn is_active(&self, stream_id: u32) -> bool {
-        self.entries
-            .get(&stream_id)
-            .is_some_and(|entry| !entry.failed && !entry.completion_seen)
+    /// Whether the stream's request body can still receive peer input.
+    ///
+    /// The per-stream idle timeout bounds a stalled upload only. Once the
+    /// request has ended, failed or been abandoned by its consumer, a
+    /// produced response may keep streaming under its own deadlines.
+    pub(super) fn awaits_input(&self, stream_id: u32) -> bool {
+        self.entries.get(&stream_id).is_some_and(|entry| {
+            !entry.failed && !entry.abandoned && !entry.completion_seen && !entry.end_stream
+        })
     }
 
     pub(super) fn fail(&mut self, stream_id: u32, error: IncomingBodyError) {
@@ -895,6 +900,15 @@ impl StreamingRequests {
         self.early_response_stops.retain(|stream_id| {
             if response_guards.contains_key(stream_id) || produced_bodies.contains_key(stream_id) {
                 return true;
+            }
+            // A failed producer or a drain timeout may already have reset the
+            // stream. A second RST_STREAM would land on a closed stream
+            // (br-asupersync-jz8jfr).
+            if conn
+                .stream(*stream_id)
+                .is_none_or(|stream| stream.state().is_closed())
+            {
+                return false;
             }
             conn.reset_stream(*stream_id, ErrorCode::NoError);
             reset_queued = true;
