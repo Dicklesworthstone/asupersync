@@ -1854,3 +1854,44 @@ fn native_obligation_cost_legacy_checked_two_worker_sharded() {
         "native_obligation_cost_legacy_checked_two_worker_sharded",
     );
 }
+
+// =============================================================================
+// Metrics hot path (asupersync-bi2462.117)
+// =============================================================================
+
+/// README: Counter, Gauge and Histogram have a zero-allocation hot path. Handles
+/// come from the registry (which allocates their names once); updates through a
+/// held handle must not allocate. Registry lookup by name is not the hot path.
+#[test]
+fn metrics_counter_gauge_and_histogram_updates_do_not_allocate() {
+    let _guard = ALLOC_TEST_GUARD.lock();
+    init_test("metrics_counter_gauge_and_histogram_updates_do_not_allocate");
+    let mut metrics = asupersync::observability::Metrics::new();
+    let counter = metrics.counter("alloc_audit_requests_total");
+    let gauge = metrics.gauge("alloc_audit_in_flight");
+    let histogram = metrics.histogram("alloc_audit_latency_seconds", vec![0.001, 0.01, 0.1, 1.0]);
+    // Warm up outside the measured window (first histogram lock, lazy statics).
+    counter.increment();
+    gauge.set(1);
+    histogram.observe(0.005);
+
+    let before = AllocSnapshot::take();
+    for i in 0..10_000_u64 {
+        counter.increment();
+        counter.add(i & 7);
+        gauge.set(i64::try_from(i).expect("small"));
+        gauge.increment();
+        gauge.add(-1);
+        histogram.observe(u64_to_f64(i % 2_000) / 1_000.0);
+    }
+    let after = AllocSnapshot::take();
+
+    assert_eq!(
+        after.allocs_since(&before),
+        0,
+        "metrics hot path allocated {} bytes over 10,000 update rounds",
+        after.bytes_since(&before)
+    );
+    let expected: u64 = 1 + 10_000 + (0..10_000_u64).map(|i| i & 7).sum::<u64>();
+    assert_eq!(counter.get(), expected, "every counter update was applied");
+}
