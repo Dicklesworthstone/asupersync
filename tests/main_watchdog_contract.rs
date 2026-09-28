@@ -781,6 +781,29 @@ fn a_lib_filter_that_ran_no_test_is_reported_not_hidden() {
     assert_eq!(lib["unexercised_filters"], json!(["database::postgres"]));
 }
 
+/// A batch that touches Cargo.toml or a top-level integration test runs the test
+/// registration contract (bi2462.87): a commit that never ran `cargo test` can
+/// still add a feature-gated test without its `[[test]]` required-features.
+#[test]
+fn manifest_or_top_level_test_changes_run_the_registration_contract() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"touches_test_registration": [
+            ["Cargo.toml"],
+            ["tests/new_native.rs"],
+            ["src/lib.rs", "tests/atp/helper.rs"],
+            ["src/lib.rs", "docs/x.md"],
+            ["fuzz/Cargo.toml", "tests/fixtures/x.rs"],
+        ]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["touches_test_registration"],
+        json!([true, true, false, false, false]),
+        "{probed:#}"
+    );
+}
+
 fn hedge_log(with_newer: bool) -> String {
     let mut log = String::from(
         "     Running tests/hedge_native.rs (x)\nrunning 2 tests\ntest cancel_test ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s\n",

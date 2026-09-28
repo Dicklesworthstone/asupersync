@@ -1174,6 +1174,16 @@ def workspace_members(head: str, manifest: dict[str, Any]) -> dict[str, str]:
     return members
 
 
+REGISTRATION_CONTRACT = "test_target_registration_contract"
+
+
+def touches_test_registration(paths: list[str]) -> bool:
+    """A change to Cargo.toml or a top-level integration test can leave a feature-gated
+    test without its `[[test]]` required-features entry (bi2462.87). Commits that never
+    ran `cargo test` must still get the registration contract, so the batch runs it."""
+    return any(path == "Cargo.toml" or re.fullmatch(r"tests/[^/]+\.rs", path) for path in paths)
+
+
 def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
     """Map changed paths to integration targets grouped by feature set, lib filters, unmapped
     paths, the features gating the touched `src/` modules, and touched workspace member crates."""
@@ -1251,6 +1261,8 @@ def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
             root = next((p for p, e in registry.items() if e["name"] == name), f"tests/{name}.rs")
             if ENV_GATE_RE.search(git("show", f"{head}:{root}", check=False)):
                 env_gated.add(name)
+    if touches_test_registration(paths) and f"tests/{REGISTRATION_CONTRACT}.rs" in existing:
+        groups.setdefault("", set()).add(REGISTRATION_CONTRACT)
     return {
         "groups": {k: sorted(v) for k, v in groups.items()},
         "lib_filters": compress_lib_filters(lib_filters),
@@ -2178,6 +2190,9 @@ def main(argv: list[str]) -> int:
                 ).items()
             },
             "lib_filter_for": [lib_filter_for(p) for p in probes.get("lib_filter_for", [])],
+            "touches_test_registration": [
+                touches_test_registration(paths) for paths in probes.get("touches_test_registration", [])
+            ],
             "receipt_ledger": [
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
