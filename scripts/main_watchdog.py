@@ -367,6 +367,49 @@ def file_cfg_features(source: str, defaults: frozenset[str] = frozenset()) -> tu
     return (sorted(chosen), True) if chosen is not None else ([], False)
 
 
+def test_registration_census(root: Path) -> dict[str, Any]:
+    """Top-level integration tests gated on non-default features, checked against Cargo.toml.
+
+    A gated file with no `[[test]]` entry compiles to an empty crate under default features,
+    and `cargo test` reports it as passing (bi2462.87). `required-features` makes cargo skip
+    it explicitly and refuse `--test <name>` without them. An entry must list every feature
+    the gate needs; a missing one builds the empty crate again. An `any(...)` gate cannot be
+    written as `required-features`, so it is reported as exempt, as is a cfg that never holds
+    on the Linux fleet or is not understood.
+    """
+    manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    defaults = frozenset(manifest.get("features", {}).get("default", []))
+    registered = {
+        entry.get("path", f"tests/{entry['name']}.rs"): set(entry.get("required-features", []))
+        for entry in manifest.get("test", [])
+    }
+    unregistered: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    exempt: list[dict[str, str]] = []
+    for file in sorted((root / "tests").glob("*.rs")):
+        path = f"tests/{file.name}"
+        req = inner_cfg_requirement(file.read_text(encoding="utf-8", errors="replace"), defaults)
+        if req == TRUE:
+            continue
+        if req is None:
+            exempt.append({"path": path, "reason": "crate cfg not understood"})
+            continue
+        if not req:
+            exempt.append({"path": path, "reason": "cfg never holds on the Linux fleet"})
+            continue
+        if len(req) != 1:
+            exempt.append({"path": path, "reason": "alternative feature sets (any): not expressible"})
+            continue
+        needed = set(next(iter(req)))
+        if not needed:
+            continue
+        if path not in registered:
+            unregistered.append({"path": path, "features": sorted(needed)})
+        elif not needed <= registered[path]:
+            missing.append({"path": path, "features": sorted(needed - registered[path])})
+    return {"unregistered": unregistered, "missing_features": missing, "exempt": exempt}
+
+
 def _attrs_before(text: str, pos: int) -> list[str]:
     """Bodies of the outer attributes stacked directly above `pos` (comments skipped)."""
     attrs: list[str] = []
@@ -2078,6 +2121,8 @@ def main(argv: list[str]) -> int:
     s.add_argument("--until", default="origin/main")
     s.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
     s.add_argument("--issues", type=Path, default=Path(".beads/issues.jsonl"))
+    r = sub.add_parser("registration", help="feature-gated test files without matching [[test]] required-features")
+    r.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
@@ -2167,6 +2212,11 @@ def main(argv: list[str]) -> int:
     if args.mode == "summary":
         report = summary(args.state_dir / "receipts.jsonl", args.since, args.until, args.issues, now)
         json.dump(report, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+
+    if args.mode == "registration":
+        json.dump(test_registration_census(args.root), sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
 

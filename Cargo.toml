@@ -748,6 +748,778 @@ name = "atp_quic_bounded_memory"
 path = "tests/atp_quic_bounded_memory.rs"
 required-features = ["tls", "test-internals"]
 
+# Every other top-level integration test whose crate-level `#![cfg]` needs
+# non-default features, registered with them (br-asupersync-bi2462.87).
+# Without an entry, default `cargo test` compiles each to an empty crate and
+# reports it as passing; with one, cargo skips it explicitly and refuses
+# `--test <name>` without the features. An `any(...)` gate cannot be written
+# as required-features and stays unregistered.
+# tests/test_target_registration_contract.rs keeps this list complete.
+[[test]]
+name = "adaptive_batch_sizing_contract"
+path = "tests/adaptive_batch_sizing_contract.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "adaptive_block_layout_proof"
+path = "tests/adaptive_block_layout_proof.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "atp_benchmark_integration"
+path = "tests/atp_benchmark_integration.rs"
+required-features = ["benchmark-adapters"]
+
+[[test]]
+name = "atp_checkpoint_recovery"
+path = "tests/atp_checkpoint_recovery.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_cli_dry_run"
+path = "tests/atp_cli_dry_run.rs"
+required-features = ["atp-cli"]
+
+[[test]]
+name = "atp_cli_quic_loopback"
+path = "tests/atp_cli_quic_loopback.rs"
+required-features = ["atp-cli", "tls"]
+
+[[test]]
+name = "atp_dogfood_integration"
+path = "tests/atp_dogfood_integration.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "atp_j5_workflows"
+path = "tests/atp_j5_workflows.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "atp_live_commit"
+path = "tests/atp_live_commit.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_live_resume"
+path = "tests/atp_live_resume.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_live_resume_file"
+path = "tests/atp_live_resume_file.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_live_service"
+path = "tests/atp_live_service.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_live_stream"
+path = "tests/atp_live_stream.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_native_auth"
+path = "tests/atp_native_auth.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_native_sdk_transfer"
+path = "tests/atp_native_sdk_transfer.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_quic_real_udp_transfer_e2e"
+path = "tests/atp_quic_real_udp_transfer_e2e.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_receiver_journal"
+path = "tests/atp_receiver_journal.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_resume_revocation"
+path = "tests/atp_resume_revocation.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_resume_service"
+path = "tests/atp_resume_service.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_sender_final_proof"
+path = "tests/atp_sender_final_proof.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_shared_journal_observation"
+path = "tests/atp_shared_journal_observation.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atp_shared_receiver_journal"
+path = "tests/atp_shared_receiver_journal.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "atpd_live_cli"
+path = "tests/atpd_live_cli.rs"
+required-features = ["atp-cli", "tls"]
+
+[[test]]
+name = "atpd_receiver_journal"
+path = "tests/atpd_receiver_journal.rs"
+required-features = ["atp-cli", "tls"]
+
+[[test]]
+name = "atpd_sender_checkpoint"
+path = "tests/atpd_sender_checkpoint.rs"
+required-features = ["atp-cli", "tls"]
+
+[[test]]
+name = "atpd_sender_journal"
+path = "tests/atpd_sender_journal.rs"
+required-features = ["atp-cli", "tls"]
+
+[[test]]
+name = "cancel_lane_fairness_bounds"
+path = "tests/cancel_lane_fairness_bounds.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "cli_output_golden"
+path = "tests/cli_output_golden.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "conformance_mysql_ssl_negotiation"
+path = "tests/conformance_mysql_ssl_negotiation.rs"
+required-features = ["mysql"]
+
+[[test]]
+name = "database_mysql_prepared_cache_benefit"
+path = "tests/database_mysql_prepared_cache_benefit.rs"
+required-features = ["mysql", "test-internals"]
+
+[[test]]
+name = "database_wire_frame_goldens"
+path = "tests/database_wire_frame_goldens.rs"
+required-features = ["mysql", "postgres"]
+
+[[test]]
+name = "desktop_runtime_profile"
+path = "tests/desktop_runtime_profile.rs"
+required-features = ["desktop-runtime-profile"]
+
+[[test]]
+name = "desktop_runtime_samples"
+path = "tests/desktop_runtime_samples.rs"
+required-features = ["desktop-runtime-profile"]
+
+[[test]]
+name = "distributed_hash_snapshot_recovery_e2e"
+path = "tests/distributed_hash_snapshot_recovery_e2e.rs"
+required-features = ["distributed-hash-snapshot-recovery-e2e"]
+
+[[test]]
+name = "distribution_hedge_process"
+path = "tests/distribution_hedge_process.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "distribution_native_fanout"
+path = "tests/distribution_native_fanout.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "doctor_advanced_provenance_contract"
+path = "tests/doctor_advanced_provenance_contract.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_analyzer_fixture_harness"
+path = "tests/doctor_analyzer_fixture_harness.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_full_stack_reference_project_matrix"
+path = "tests/doctor_full_stack_reference_project_matrix.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_health_report_format_golden"
+path = "tests/doctor_health_report_format_golden.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_logging_quality_validators"
+path = "tests/doctor_logging_quality_validators.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_performance_budget_gates"
+path = "tests/doctor_performance_budget_gates.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_remediation_unit_harness"
+path = "tests/doctor_remediation_unit_harness.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_remediation_visual_regression"
+path = "tests/doctor_remediation_visual_regression.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_stress_soak_diagnostics"
+path = "tests/doctor_stress_soak_diagnostics.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "doctor_visual_regression_harness"
+path = "tests/doctor_visual_regression_harness.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "e2e_actor"
+path = "tests/e2e_actor.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "e2e_database_migration"
+path = "tests/e2e_database_migration.rs"
+required-features = ["sqlite"]
+
+[[test]]
+name = "e2e_deadline_db_wire_cancel_showcase"
+path = "tests/e2e_deadline_db_wire_cancel_showcase.rs"
+required-features = ["postgres", "test-internals"]
+
+[[test]]
+name = "e2e_h1_graceful_drain"
+path = "tests/e2e_h1_graceful_drain.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "e2e_h2_graceful_drain"
+path = "tests/e2e_h2_graceful_drain.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "early_data_replay_failclosed"
+path = "tests/early_data_replay_failclosed.rs"
+required-features = ["tls"]
+
+[[test]]
+name = "ecosystem_console_cli_viewer"
+path = "tests/ecosystem_console_cli_viewer.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "entropy_capture_replay"
+path = "tests/entropy_capture_replay.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "fabric_e2e"
+path = "tests/fabric_e2e.rs"
+required-features = ["messaging-fabric"]
+
+[[test]]
+name = "fabric_lab_integration"
+path = "tests/fabric_lab_integration.rs"
+required-features = ["messaging-fabric"]
+
+[[test]]
+name = "fabric_properties"
+path = "tests/fabric_properties.rs"
+required-features = ["messaging-fabric"]
+
+[[test]]
+name = "fabric_replay_scenarios"
+path = "tests/fabric_replay_scenarios.rs"
+required-features = ["messaging-fabric"]
+
+[[test]]
+name = "fabric_stream_lab_integration"
+path = "tests/fabric_stream_lab_integration.rs"
+required-features = ["messaging-fabric"]
+
+[[test]]
+name = "golden_cli_output_formats"
+path = "tests/golden_cli_output_formats.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "golden_doctor_health_report"
+path = "tests/golden_doctor_health_report.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "grpc_codec_gzip_prost_conformance"
+path = "tests/grpc_codec_gzip_prost_conformance.rs"
+required-features = ["compression"]
+
+[[test]]
+name = "h2_connection_idle_timeout"
+path = "tests/h2_connection_idle_timeout.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "h2_continuation_timeout"
+path = "tests/h2_continuation_timeout.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "h2_max_requests_per_connection"
+path = "tests/h2_max_requests_per_connection.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "http1_listener_shutdown"
+path = "tests/http1_listener_shutdown.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "http2_client_native"
+path = "tests/http2_client_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "http2_listener_streaming"
+path = "tests/http2_listener_streaming.rs"
+required-features = ["http2-streaming"]
+
+[[test]]
+name = "http_client_https_e2e"
+path = "tests/http_client_https_e2e.rs"
+required-features = ["tls"]
+
+[[test]]
+name = "initialized_startup_native"
+path = "tests/initialized_startup_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "initialized_supervisor_native"
+path = "tests/initialized_supervisor_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "io_capture_replay"
+path = "tests/io_capture_replay.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "io_uring_reactor"
+path = "tests/io_uring_reactor.rs"
+required-features = ["io-uring"]
+
+[[test]]
+name = "io_uring_stress"
+path = "tests/io_uring_stress.rs"
+required-features = ["io-uring"]
+
+[[test]]
+name = "jetstream_deliver_by_start_time_audit"
+path = "tests/jetstream_deliver_by_start_time_audit.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "lz4_owned_codec_corpus_contract"
+path = "tests/lz4_owned_codec_corpus_contract.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "lz4_trace_integration_e2e"
+path = "tests/lz4_trace_integration_e2e.rs"
+required-features = ["cli", "test-internals", "trace-compression"]
+
+[[test]]
+name = "membership_authority_native"
+path = "tests/membership_authority_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "membership_owned_native"
+path = "tests/membership_owned_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "membership_persistent_native"
+path = "tests/membership_persistent_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "membership_remote_native"
+path = "tests/membership_remote_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "membership_scoped_native"
+path = "tests/membership_scoped_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "mysql_binary_protocol_sqlx_conformance"
+path = "tests/mysql_binary_protocol_sqlx_conformance.rs"
+required-features = ["mysql", "test-internals"]
+
+[[test]]
+name = "mysql_cancel_kill_query_audit"
+path = "tests/mysql_cancel_kill_query_audit.rs"
+required-features = ["mysql", "test-internals"]
+
+[[test]]
+name = "mysql_make_test_connection_migration"
+path = "tests/mysql_make_test_connection_migration.rs"
+required-features = ["mysql"]
+
+[[test]]
+name = "mysql_native_password_optin"
+path = "tests/mysql_native_password_optin.rs"
+required-features = ["mysql"]
+
+[[test]]
+name = "nats_jwt_empty_issuer_rejected"
+path = "tests/nats_jwt_empty_issuer_rejected.rs"
+required-features = ["messaging-fabric", "test-internals"]
+
+[[test]]
+name = "net_driverless_idle_cpu"
+path = "tests/net_driverless_idle_cpu.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "net_quic"
+path = "tests/net_quic.rs"
+required-features = ["quic"]
+
+[[test]]
+name = "obligation_lifecycle_e2e"
+path = "tests/obligation_lifecycle_e2e.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "obligation_query_api_contract"
+path = "tests/obligation_query_api_contract.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "operator_swarm_status_contract"
+path = "tests/operator_swarm_status_contract.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "ordered_replay_native_http"
+path = "tests/ordered_replay_native_http.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "otlp_async_fanout_native"
+path = "tests/otlp_async_fanout_native.rs"
+required-features = ["metrics", "test-internals"]
+
+[[test]]
+name = "otlp_queued_native"
+path = "tests/otlp_queued_native.rs"
+required-features = ["metrics", "test-internals"]
+
+[[test]]
+name = "plan_capture_execute"
+path = "tests/plan_capture_execute.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "plan_capture_optimized_equivalence_contract"
+path = "tests/plan_capture_optimized_equivalence_contract.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "plan_capture_optimized_policy_invariance_contract"
+path = "tests/plan_capture_optimized_policy_invariance_contract.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "plan_capture_optimized_rewrite_savings_contract"
+path = "tests/plan_capture_optimized_rewrite_savings_contract.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "poll_aware_replay_native"
+path = "tests/poll_aware_replay_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "polled_replay_native_tcp"
+path = "tests/polled_replay_native_tcp.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "pool_timeout_test"
+path = "tests/pool_timeout_test.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "postgres_make_test_connection_migration"
+path = "tests/postgres_make_test_connection_migration.rs"
+required-features = ["postgres"]
+
+[[test]]
+name = "postgres_prepared_statement_cache_audit"
+path = "tests/postgres_prepared_statement_cache_audit.rs"
+required-features = ["postgres"]
+
+[[test]]
+name = "postgres_prepared_statement_metamorphic"
+path = "tests/postgres_prepared_statement_metamorphic.rs"
+required-features = ["postgres"]
+
+[[test]]
+name = "postgres_query_execution_golden"
+path = "tests/postgres_query_execution_golden.rs"
+required-features = ["postgres"]
+
+[[test]]
+name = "postgres_real_server"
+path = "tests/postgres_real_server.rs"
+required-features = ["postgres"]
+
+[[test]]
+name = "postgres_tls_native"
+path = "tests/postgres_tls_native.rs"
+required-features = ["postgres", "test-internals", "tls"]
+
+[[test]]
+name = "quic_application_data_udp_loopback"
+path = "tests/quic_application_data_udp_loopback.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "quic_h3_listener_streaming"
+path = "tests/quic_h3_listener_streaming.rs"
+required-features = ["http3", "tls"]
+
+[[test]]
+name = "quic_h3_live_udp"
+path = "tests/quic_h3_live_udp.rs"
+required-features = ["http3", "tls"]
+
+[[test]]
+name = "quic_h3_streaming_receive"
+path = "tests/quic_h3_streaming_receive.rs"
+required-features = ["http3"]
+
+[[test]]
+name = "quic_native_delayed_path_loss"
+path = "tests/quic_native_delayed_path_loss.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "quic_native_handshake_udp_loopback"
+path = "tests/quic_native_handshake_udp_loopback.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "quic_native_idle_cpu"
+path = "tests/quic_native_idle_cpu.rs"
+required-features = ["quic", "test-internals", "tls"]
+
+[[test]]
+name = "quic_native_x509_verification"
+path = "tests/quic_native_x509_verification.rs"
+required-features = ["tls"]
+
+[[test]]
+name = "quic_stream_data_roundtrip"
+path = "tests/quic_stream_data_roundtrip.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "regex_built_in_detector_corpus_contract"
+path = "tests/regex_built_in_detector_corpus_contract.rs"
+required-features = ["metrics"]
+
+[[test]]
+name = "regex_fixed_detector_terminal_receipt_contract"
+path = "tests/regex_fixed_detector_terminal_receipt_contract.rs"
+required-features = ["metrics"]
+
+[[test]]
+name = "remote_native_admission"
+path = "tests/remote_native_admission.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "remote_owned_native"
+path = "tests/remote_owned_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "remote_priority_native"
+path = "tests/remote_priority_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "remote_queue_native"
+path = "tests/remote_queue_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "remote_service_admission_native"
+path = "tests/remote_service_admission_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "remote_transport_lifecycle_contract"
+path = "tests/remote_transport_lifecycle_contract.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "repro_spawn_hang"
+path = "tests/repro_spawn_hang.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "repro_spawn_panic"
+path = "tests/repro_spawn_panic.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "rr849p_request_cx_read_localization"
+path = "tests/rr849p_request_cx_read_localization.rs"
+required-features = ["postgres", "test-internals"]
+
+[[test]]
+name = "rwlock_test"
+path = "tests/rwlock_test.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "scheduler_loom"
+path = "tests/scheduler_loom.rs"
+required-features = ["loom-tests"]
+
+[[test]]
+name = "scope_panic_orphan_reap_e2e"
+path = "tests/scope_panic_orphan_reap_e2e.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "sqlite_busy_timeout_audit"
+path = "tests/sqlite_busy_timeout_audit.rs"
+required-features = ["sqlite"]
+
+[[test]]
+name = "sqlite_prepared_statements_standalone"
+path = "tests/sqlite_prepared_statements_standalone.rs"
+required-features = ["sqlite"]
+
+[[test]]
+name = "sqlite_real_disk_cancel_rollback"
+path = "tests/sqlite_real_disk_cancel_rollback.rs"
+required-features = ["sqlite"]
+
+[[test]]
+name = "sqlite_savepoint_nesting_3deep"
+path = "tests/sqlite_savepoint_nesting_3deep.rs"
+required-features = ["sqlite"]
+
+[[test]]
+name = "sqlite_wal_checkpoint_audit"
+path = "tests/sqlite_wal_checkpoint_audit.rs"
+required-features = ["sqlite"]
+
+[[test]]
+name = "symbol_checkpoint_striped_native"
+path = "tests/symbol_checkpoint_striped_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "symbol_durable_process"
+path = "tests/symbol_durable_process.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "symbol_recovery_native"
+path = "tests/symbol_recovery_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "symbol_recovery_quorum_native"
+path = "tests/symbol_recovery_quorum_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "symbol_service_native"
+path = "tests/symbol_service_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "test_evidence_harness_demo"
+path = "tests/test_evidence_harness_demo.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "time_utc_rfc3339_foundation_contract"
+path = "tests/time_utc_rfc3339_foundation_contract.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "tls_pin_mismatch_e2e"
+path = "tests/tls_pin_mismatch_e2e.rs"
+required-features = ["tls"]
+
+[[test]]
+name = "trace_golden_artifacts"
+path = "tests/trace_golden_artifacts.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "typed_format_cross_version_e2e"
+path = "tests/typed_format_cross_version_e2e.rs"
+required-features = ["cli", "test-internals", "trace-compression"]
+
+[[test]]
+name = "websocket_compression_native"
+path = "tests/websocket_compression_native.rs"
+required-features = ["compression", "test-internals"]
+
+[[test]]
+name = "websocket_heartbeat_native"
+path = "tests/websocket_heartbeat_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "websocket_tls_native"
+path = "tests/websocket_tls_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
+name = "worker_dependencies_native"
+path = "tests/worker_dependencies_native.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "x509_adversarial_corpus_contract"
+path = "tests/x509_adversarial_corpus_contract.rs"
+required-features = ["tls"]
+
+[[test]]
+name = "x509_der_residue_spec_contract"
+path = "tests/x509_der_residue_spec_contract.rs"
+required-features = ["tls"]
+
+[[test]]
+name = "x509_standard_verifier_delegation_contract"
+path = "tests/x509_standard_verifier_delegation_contract.rs"
+required-features = ["tls"]
+
 [[bench]]
 name = "phase0_baseline"
 harness = false
