@@ -408,3 +408,180 @@ fn malformed_inventory_fails_closed() {
             .any(|error| error.contains("no repair owner"))
     );
 }
+
+/// Top-level `src/*.rs` files that no module declaration, `#[path]` attribute or
+/// `include!` reaches are never compiled. They cannot fail, so they prove nothing
+/// (asupersync-bi2462.141). Ratchet: this number may only go down. When
+/// orphans are wired in or archived, lower it in the same commit. Never raise it.
+const MAX_TOP_LEVEL_SOURCE_ORPHANS: usize = 230;
+
+/// Module names declared as `mod NAME;` (optionally `pub`/`pub(..)` and with
+/// leading attributes on the same line) in a crate-root source file.
+fn declared_file_modules(root_source: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for line in root_source.lines() {
+        let mut rest = line.trim();
+        if rest.starts_with("//") {
+            continue;
+        }
+        while let Some(stripped) = rest.strip_prefix("#[") {
+            let Some(end) = stripped.find(']') else { break };
+            rest = stripped[end + 1..].trim_start();
+        }
+        if let Some(stripped) = rest.strip_prefix("pub") {
+            rest = stripped.trim_start();
+            if rest.starts_with('(') {
+                let Some(end) = rest.find(')') else { continue };
+                rest = rest[end + 1..].trim_start();
+            }
+        }
+        let Some(stripped) = rest.strip_prefix("mod ") else {
+            continue;
+        };
+        let name: String = stripped
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let after = stripped.trim_start()[name.len()..].trim_start();
+        if !name.is_empty() && after.starts_with(';') {
+            names.insert(name);
+        }
+    }
+    names
+}
+
+/// Normalizes `a/b/../c` style relative paths without touching the filesystem.
+fn normalize_relative(path: &std::path::Path) -> PathBuf {
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => parts.push(other.as_os_str().to_owned()),
+        }
+    }
+    parts.iter().collect()
+}
+
+/// Top-level `src/*.rs` file names reached through `#[path = "..."]` or
+/// `include!("...rs")` from any Rust file under the given repository-relative
+/// directories.
+fn path_referenced_top_level_sources(dirs: &[&str]) -> BTreeSet<String> {
+    fn walk(root: &std::path::Path, relative: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root.join(relative)) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let rel = relative.join(entry.file_name());
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                walk(root, &rel, out);
+            } else if rel.extension().is_some_and(|ext| ext == "rs") {
+                out.push(rel);
+            }
+        }
+    }
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in dirs {
+        walk(&root, std::path::Path::new(dir), &mut files);
+    }
+    let mut referenced = BTreeSet::new();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(root.join(&file)) else {
+            continue;
+        };
+        let base = file.parent().unwrap_or_else(|| std::path::Path::new(""));
+        let mut targets = Vec::new();
+        for (marker, terminator) in [("#[path = \"", '"'), ("include!(\"", '"')] {
+            let mut cursor = text.as_str();
+            while let Some(start) = cursor.find(marker) {
+                let tail = &cursor[start + marker.len()..];
+                if let Some(end) = tail.find(terminator) {
+                    targets.push(tail[..end].to_owned());
+                }
+                cursor = tail;
+            }
+        }
+        for target in targets {
+            let resolved = normalize_relative(&base.join(&target));
+            let mut components = resolved.components();
+            if let (Some(first), Some(second), None) =
+                (components.next(), components.next(), components.next())
+            {
+                if first.as_os_str() == "src" {
+                    referenced.insert(second.as_os_str().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    referenced
+}
+
+fn top_level_source_orphans() -> BTreeSet<String> {
+    let declared = declared_file_modules(&read_repo_file(LIB_PATH));
+    let referenced = path_referenced_top_level_sources(&["src", "tests", "benches", "examples"]);
+    let entries = std::fs::read_dir(repo_root().join("src")).expect("src/ must be readable");
+    let mut orphans = BTreeSet::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        let Some(stem) = name.strip_suffix(".rs") else {
+            continue;
+        };
+        if !is_file || name == "lib.rs" || name == "main.rs" {
+            continue;
+        }
+        if declared.contains(stem) || referenced.contains(&name) {
+            continue;
+        }
+        orphans.insert(name);
+    }
+    orphans
+}
+
+#[test]
+fn source_orphan_census_parser_fails_closed_on_planted_cases() {
+    let planted = "pub mod live_a;\n#[cfg(feature = \"x\")] pub(crate) mod live_b;\n\
+                   // mod commented_out;\nmod inline_block { }\nmod live_c ;\n";
+    let declared = declared_file_modules(planted);
+    assert_eq!(
+        declared,
+        ["live_a", "live_b", "live_c"]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>(),
+        "only `mod NAME;` declarations count as file modules"
+    );
+    assert_eq!(
+        normalize_relative(std::path::Path::new("src/util/../future.rs")),
+        PathBuf::from("src/future.rs")
+    );
+}
+
+#[test]
+fn top_level_source_orphans_never_increase() {
+    let orphans = top_level_source_orphans();
+    eprintln!(
+        "top-level source orphans: {} (ratchet max {MAX_TOP_LEVEL_SOURCE_ORPHANS})",
+        orphans.len()
+    );
+    assert!(
+        orphans.len() <= MAX_TOP_LEVEL_SOURCE_ORPHANS,
+        "{} top-level src/*.rs files are never compiled (ratchet max {MAX_TOP_LEVEL_SOURCE_ORPHANS}). \
+         A new source file must be declared in src/lib.rs or reached by #[path]/include!, or it \
+         proves nothing. Orphans: {orphans:?}",
+        orphans.len()
+    );
+    // A known orphan must be detected, so the census cannot silently pass by
+    // failing to see anything (asupersync-bi2462.141).
+    assert!(
+        orphans.contains("real_distributed_e2e_tests.rs"),
+        "census must detect the pinned dormant module; found {orphans:?}"
+    );
+}

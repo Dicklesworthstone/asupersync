@@ -62,11 +62,25 @@ fn default_features_do_not_enable_test_internals_for_downstream_consumers() {
     let features = feature_arrays(&manifest);
     let default = features.get("default").expect("default feature row");
 
+    // `runtime-core` and `native-runtime` are empty compatibility markers for the
+    // planned runtime module split (0967799e0). They are default so that default
+    // builds keep those modules once the split gates them (asupersync-bi2462.138).
     assert_eq!(
         default,
-        &vec!["proc-macros".to_string(), "nightly-outcome-try".to_string()],
+        &vec![
+            "proc-macros".to_string(),
+            "nightly-outcome-try".to_string(),
+            "runtime-core".to_string(),
+            "native-runtime".to_string(),
+        ],
         "default features must stay production-safe; test-internals is opt-in"
     );
+    for marker in ["runtime-core", "native-runtime"] {
+        assert!(
+            features.get(marker).is_some_and(Vec::is_empty),
+            "default compatibility marker `{marker}` must stay empty until its module gate exists"
+        );
+    }
     assert!(
         !default.iter().any(|feature| feature == "test-internals"),
         "test-internals must never be in the default feature set"
@@ -93,11 +107,14 @@ fn docs_match_default_feature_policy() {
     );
     assert!(
         readme.contains("default production\nfeature set is intentionally limited")
-            && readme.contains("`proc-macros` plus\n`nightly-outcome-try`"),
+            && readme.contains("`proc-macros` plus\n`nightly-outcome-try`")
+            && readme.contains("`runtime-core` and\n`native-runtime`"),
         "README must explain the production default feature boundary"
     );
     assert!(
-        agents.contains("default = [\"proc-macros\", \"nightly-outcome-try\"]"),
-        "AGENTS feature summary must not put test-internals in default"
+        agents.contains(
+            "default = [\"proc-macros\", \"nightly-outcome-try\", \"runtime-core\", \"native-runtime\"]"
+        ),
+        "AGENTS feature summary must match the manifest default and not put test-internals in default"
     );
 }
