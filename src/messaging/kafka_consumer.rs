@@ -562,6 +562,23 @@ impl ConsumerGroupMetadata {
         self.inner.generation
     }
 
+    /// Whether this snapshot still describes its consumer's live membership.
+    ///
+    /// A closed or dropped consumer, a new rebalance generation or a changed
+    /// assignment never becomes current again, so a failure here is final
+    /// for the snapshot.
+    #[cfg(feature = "kafka")]
+    pub(crate) fn check_membership(&self) -> Result<(), KafkaError> {
+        let state = self.inner.state.upgrade().ok_or_else(|| {
+            KafkaError::Config("consumer group metadata owner has been dropped".into())
+        })?;
+        let closed = self.inner.closed.upgrade().ok_or_else(|| {
+            KafkaError::Config("consumer group metadata owner has been dropped".into())
+        })?;
+        let state = state.lock();
+        self.validate_membership(&state, &closed)
+    }
+
     #[cfg(any(feature = "kafka", test))]
     pub(crate) fn prepare_offsets(
         &self,

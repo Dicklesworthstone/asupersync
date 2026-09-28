@@ -2675,7 +2675,10 @@ impl Transaction<'_> {
     /// An enrollment error also requires abort recovery. Drop this transaction
     /// and use [`TransactionalProducer::begin_transaction`] to perform that
     /// recovery; a fatal/fenced producer must be recreated if recovery fails.
-    /// Local validation errors before enrollment leave the transaction usable.
+    /// Input validation errors before enrollment (an empty, duplicate,
+    /// regressing or unassigned offset) leave the transaction usable. A
+    /// snapshot whose consumer was closed, dropped or rebalanced requires abort
+    /// recovery, because this transaction can never enroll its offsets.
     ///
     /// Without the `kafka` feature this operation always returns
     /// [`KafkaError::FeatureDisabled`], including deterministic broker harnesses.
@@ -2692,7 +2695,21 @@ impl Transaction<'_> {
         #[cfg(feature = "kafka")]
         {
             metadata.native()?;
-            let offsets = metadata.prepare_offsets(offsets)?;
+            let offsets = match metadata.prepare_offsets(offsets) {
+                Ok(offsets) => offsets,
+                Err(error) => {
+                    // A stale, closed or dropped consumer can never enroll
+                    // offsets in this transaction. Committing it without them
+                    // would publish the output while the input is re-read
+                    // after a restart, so it now requires abort recovery, as
+                    // the in-worker membership check already does
+                    // (br-asupersync-csyp1h). Input-shape errors stay local.
+                    if metadata.check_membership().is_err() {
+                        self.producer.mark_transaction_dropped(self.generation);
+                    }
+                    return Err(error);
+                }
+            };
             let operation = TransactionOperationGuard::claim_offsets(
                 &self.producer.state,
                 self.generation,
@@ -4239,7 +4256,7 @@ mod tests {
             let metadata = consumer.group_metadata(&cx).await.unwrap();
             assert_eq!(metadata.group_id(), "transaction-offset-group");
             let producer = TransactionalProducer::new(
-                TransactionalConfig::new(ProducerConfig::new(brokers), "offset-protocol-test".into())
+                TransactionalConfig::new(ProducerConfig::new(brokers.clone()), "offset-protocol-test".into())
                     .transaction_timeout(Duration::from_secs(10)),
             ).unwrap();
             let offsets = |next| [TopicPartitionOffset::new(input, 0, next)];
@@ -4293,6 +4310,22 @@ mod tests {
             assert_eq!(consumer.committed_offset(input, 0), Some(2));
             assert!(producer.begin_transaction(&cx).await.is_err(), "fatal producer must remain fenced");
             consumer.close(&cx).await.unwrap();
+
+            // A snapshot whose consumer has closed can never enroll offsets.
+            // The transaction must not stay committable without them, or its
+            // output commits while the input is re-read (br-asupersync-csyp1h).
+            let producer = TransactionalProducer::new(
+                TransactionalConfig::new(ProducerConfig::new(brokers), "offset-stale-snapshot-test".into())
+                    .transaction_timeout(Duration::from_secs(10)),
+            ).unwrap();
+            let transaction = producer.begin_transaction(&cx).await.unwrap();
+            transaction.send(&cx, output, Some(b"same-partition"), b"orphaned").await.unwrap();
+            let error = transaction.send_offsets_to_transaction(&cx, &offsets(3), &metadata)
+                .await.unwrap_err();
+            assert!(error.to_string().contains("closed"), "{error}");
+            assert_eq!(producer.state.lock().phase, TransactionPhase::NeedsAbortRecovery);
+            assert!(producer.state.lock().pending_offsets.is_none());
+            assert!(transaction.commit(&cx).await.is_err(), "output must not commit without its offsets");
             seed.close(&cx, Duration::from_secs(5)).await.unwrap();
             eprintln!("KAFKA_OFFSET_PROTOCOL source=incumbent-mock committed_next=2 abort_next=3 cache_after_abort=2 abort_required=true fatal=true broker_atomicity=unproven");
         });
