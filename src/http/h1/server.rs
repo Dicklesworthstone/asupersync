@@ -8,7 +8,7 @@
 use crate::bytes::{Buf, BytesMut};
 use crate::codec::{Encoder, Framed};
 use crate::cx::Cx;
-use crate::http::body::{Body, Frame};
+use crate::http::body::Frame;
 use crate::http::h1::codec::{
     Http1Codec, HttpError, decode_streaming_request_head, for_each_header_value_token,
     preview_request_head, require_transfer_encoding_chunked, trim_ows, trim_ows_bytes,
@@ -2444,7 +2444,10 @@ where
                     {
                         producer_result = Some(normalize_producer_result(result, &response.body));
                     }
-                    Pin::new(&mut response.body).poll_frame(task_cx)
+                    // Frames the producer committed, including terminal
+                    // trailers, precede a later cancellation of its context
+                    // (br-asupersync-fy5kwg).
+                    response.body.poll_committed_frame(task_cx)
                 })
                 .await)
             })
@@ -5421,6 +5424,60 @@ mod tests {
             response_body_bytes(&written),
             ChunkedEncoder::encode_chunk(b"committed").as_ref()
         );
+    }
+
+    /// A producer commits DATA and its terminal trailers, then its own
+    /// context is cancelled before the writer drains them. The committed
+    /// frames, trailers included, are still written as a complete chunked
+    /// response instead of being discarded behind the cancellation
+    /// (br-asupersync-fy5kwg).
+    #[test]
+    fn produced_chunked_response_delivers_committed_trailers_after_producer_cancellation() {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let io = TestIo::new(
+            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_vec(),
+            Arc::clone(&written),
+        );
+        let server = Http1StreamingServer::with_config_produced(
+            |_cx, _request| async move {
+                Http1ProducedResponse::chunked(
+                    NonZeroUsize::new(2).unwrap(),
+                    200,
+                    "OK",
+                    |producer_cx, mut sender| async move {
+                        sender.send_chunk(&producer_cx, b"payload").await?;
+                        let mut trailers = HeaderMap::new();
+                        trailers.append(
+                            HeaderName::from_static("x-checksum"),
+                            HeaderValue::from_static("verified"),
+                        );
+                        sender.send_trailers(&producer_cx, trailers).await?;
+                        producer_cx.cancel_with(
+                            CancelKind::User,
+                            Some("producer cancelled after committing its trailers"),
+                        );
+                        Ok(sender)
+                    },
+                )
+                .with_header("Trailer", "x-checksum")
+            },
+            localhost_server_config(),
+        );
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("runtime connection context");
+                server.serve_produced(&cx, io).await
+            })
+            .expect("committed trailers complete the response");
+
+        let written = written.lock().unwrap().clone();
+        let mut expected = ChunkedEncoder::encode_chunk(b"payload").into_vec();
+        expected.extend_from_slice(b"0\r\nx-checksum: verified\r\n\r\n");
+        assert_eq!(response_body_bytes(&written), expected);
     }
 
     #[test]
