@@ -1538,7 +1538,19 @@ fn test_function() {
     // under src/. Fewer clock reads in epoch_tracking, priority_inversion_oracle
     // and invariant_monitor offset part of it. Every row was reviewed with the
     // grouped snapshot; no scanner exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 769;
+    // 769 -> 809 (br-asupersync-bi2462.147.4, reviewed at f4fd8552e): the
+    // 09-24..09-28 landings. Production: the gRPC client and native-stream
+    // connects split into hostname and address forms (1 -> 2 each), the
+    // native H2 client and the WSS client connect the same way, one more
+    // H2 listener bind variant (1185e0de8), QUIC udp_connection idle-expiry
+    // clock reads (7 -> 14) and the handshake driver's resend stamp
+    // (o7stss). Every one is a connect, bind or clock read inside its own
+    // transport or listener. NATS now wraps its connect in nats_io(cx, ..),
+    // which only changes an occurrence excerpt. The rest are test harnesses
+    // under src/: grpc native_stream and server duplex tests.rs, plus the
+    // QUIC handshake-driver tests (UDP peers, threads, eprintln). No scanner
+    // exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 809;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
