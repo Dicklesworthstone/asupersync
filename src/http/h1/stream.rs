@@ -2596,6 +2596,47 @@ impl Body for OutgoingBody {
     }
 }
 
+impl OutgoingBody {
+    /// Polls the next frame, delivering frames the producer already committed
+    /// before observing cancellation of the producer's context.
+    ///
+    /// A cancelled producer may still commit terminal protocol frames under a
+    /// mask, such as gRPC status trailers. Cancellation stops production; it
+    /// must not discard output that is already queued. Once nothing committed
+    /// remains, this behaves exactly like [`Body::poll_frame`], including
+    /// reporting a cancelled context as [`HttpError::BodyCancelled`].
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn poll_committed_frame(
+        &mut self,
+        poll_cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<BytesCursor>, HttpError>>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+        if let Some(frame) = self.take_committed_frame() {
+            return Poll::Ready(Some(frame));
+        }
+        match Pin::new(&mut *self).poll_frame(poll_cx) {
+            // A frame committed between the drain above and the cancelled
+            // receive still precedes the cancellation.
+            Poll::Ready(Some(Err(HttpError::BodyCancelled))) => Poll::Ready(Some(
+                self.take_committed_frame()
+                    .unwrap_or(Err(HttpError::BodyCancelled)),
+            )),
+            other => other,
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn take_committed_frame(&mut self) -> Option<Result<Frame<BytesCursor>, HttpError>> {
+        let frame = self.receiver.try_recv().ok()?;
+        // Trailers are terminal for chunked bodies; any other frame leaves the
+        // body open even if a cancelled receive already marked it done.
+        self.done = matches!(&frame, Ok(frame) if frame.is_trailers());
+        Some(frame)
+    }
+}
+
 /// Sender for outgoing bodies.
 #[derive(Debug)]
 pub struct OutgoingBodySender {
@@ -4620,6 +4661,55 @@ mod tests {
         assert!(!sender.is_finished());
         block_on(sender.send_bytes(&cx, Bytes::from_static(b"still-open")))
             .expect("rejected trailers must leave sender usable");
+    }
+
+    /// A producer can commit DATA and terminal trailers and then have its
+    /// context cancelled before the transport drains them. The public
+    /// `Body::poll_frame` view still reports the cancellation, while the HTTP/2
+    /// drain delivers the committed frames in order and then ends
+    /// (br-asupersync-bi2462.105).
+    #[test]
+    fn committed_frames_precede_producer_cancellation_in_the_transport_drain() {
+        let mut task = Context::from_waker(Waker::noop());
+        let commit = |cx: &Cx| {
+            let (mut sender, body) = OutgoingBody::channel(cx, BodyKind::Chunked);
+            block_on(sender.send_bytes(cx, Bytes::from_static(b"committed"))).expect("data");
+            block_on(sender.send_trailers(cx, HeaderMap::new())).expect("trailers");
+            body
+        };
+
+        let public_cx: Cx = Cx::for_testing();
+        let mut public = commit(&public_cx);
+        public_cx.cancel_fast(CancelKind::User);
+        assert!(matches!(
+            Pin::new(&mut public).poll_frame(&mut task),
+            Poll::Ready(Some(Err(HttpError::BodyCancelled)))
+        ));
+
+        let drain_cx: Cx = Cx::for_testing();
+        let mut drained = commit(&drain_cx);
+        drain_cx.cancel_fast(CancelKind::User);
+        match drained.poll_committed_frame(&mut task) {
+            Poll::Ready(Some(Ok(frame))) => {
+                let data = frame.into_data().expect("committed DATA first");
+                assert_eq!(data.chunk(), b"committed");
+            }
+            other => panic!("committed DATA must precede cancellation: {other:?}"),
+        }
+        assert!(matches!(
+            drained.poll_committed_frame(&mut task),
+            Poll::Ready(Some(Ok(frame))) if frame.is_trailers()
+        ));
+        assert!(matches!(drained.poll_committed_frame(&mut task), Poll::Ready(None)));
+
+        // With nothing committed, the drain reports the cancellation as before.
+        let empty_cx: Cx = Cx::for_testing();
+        let (_sender, mut empty) = OutgoingBody::channel(&empty_cx, BodyKind::Chunked);
+        empty_cx.cancel_fast(CancelKind::User);
+        assert!(matches!(
+            empty.poll_committed_frame(&mut task),
+            Poll::Ready(Some(Err(HttpError::BodyCancelled)))
+        ));
     }
 
     #[test]

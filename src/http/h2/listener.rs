@@ -18,7 +18,7 @@ use crate::channel::mpsc;
 use crate::codec::Framed;
 use crate::cx::Cx;
 use crate::cx::child_region::{ChildRegion, ChildRegionSpec};
-use crate::http::body::{Body as _, Frame as BodyFrame, HeaderMap};
+use crate::http::body::{Frame as BodyFrame, HeaderMap};
 use crate::http::h1::HttpError;
 use crate::http::h1::server::{HostPolicy, parse_request_timeout_header, validate_host_header};
 use crate::http::h1::stream::{BodyKind, OutgoingBody, OutgoingBodySender};
@@ -2283,7 +2283,11 @@ fn poll_produced_body_event(
             return Poll::Pending;
         }
 
-        match Pin::new(&mut state.body).poll_frame(task_cx) {
+        // A producer whose context was cancelled can still have committed its
+        // terminal trailers under a mask. Drain committed frames before the
+        // cancellation, or the stream waits forever for trailers it discarded
+        // (br-asupersync-bi2462.105).
+        match state.body.poll_committed_frame(task_cx) {
             Poll::Ready(Some(frame)) => {
                 Poll::Ready(Some(ProducedBodyEvent::Frame { stream_id, frame }))
             }
@@ -5261,6 +5265,7 @@ impl<F: Future> Future for CatchUnwind<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::body::Body as _;
 
     #[test]
     fn accept_resource_exhaustion_retries_out_of_memory() {
