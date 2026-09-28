@@ -4112,10 +4112,34 @@ impl<Caps> Cx<Caps> {
     /// The derived context preserves this context's runtime capability mask.
     /// Scheduler and capability budgets meet both this context's limits and
     /// the owning region's limits, even when the request supplies an override.
+    ///
+    /// The child's principal context also keeps this context's compile-time
+    /// capability set, so a restricted context cannot regain gated APIs
+    /// through a child region (asupersync-cwxavr):
+    ///
+    /// ```compile_fail
+    /// use asupersync::{Cx, cx::{cap, ChildRegionSpec}};
+    ///
+    /// async fn escalate(cx: &Cx<cap::None>) {
+    ///     let child = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    ///     let _ = child.cx().blocking_pool_handle();
+    /// }
+    /// ```
+    ///
+    /// The same code compiles for a context that holds the capability:
+    ///
+    /// ```no_run
+    /// use asupersync::{Cx, cx::{cap, ChildRegionSpec}};
+    ///
+    /// async fn inherit(cx: &Cx<cap::All>) {
+    ///     let child = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+    ///     let _ = child.cx().blocking_pool_handle();
+    /// }
+    /// ```
     pub fn open_child_region(
         &self,
         spec: crate::cx::child_region::ChildRegionSpec,
-    ) -> crate::cx::child_region::ChildRegionOpening {
+    ) -> crate::cx::child_region::ChildRegionOpening<Caps> {
         use crate::cx::child_region::{ChildRegionError, ChildRegionOpening};
         let Some(gateway) = self.handles.spawn_gateway.clone() else {
             return ChildRegionOpening::failed(ChildRegionError::NoRuntimeGateway);
