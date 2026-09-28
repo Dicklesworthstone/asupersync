@@ -3566,6 +3566,8 @@ mod tests {
                 shared: Arc<IncomingBodyShared>,
                 drops: Arc<AtomicUsize>,
             }
+            // A probe, not a no-op: its Drop observes where the waker is released.
+            #[allow(clippy::manual_noop_waker)]
             impl std::task::Wake for DropProbe {
                 fn wake(self: Arc<Self>) {}
             }
@@ -3887,6 +3889,8 @@ mod tests {
                 shared: Arc<IncomingBodyShared>,
                 drops: Arc<AtomicUsize>,
             }
+            // A probe, not a no-op: its Drop observes where the waker is released.
+            #[allow(clippy::manual_noop_waker)]
             impl std::task::Wake for DropProbe {
                 fn wake(self: Arc<Self>) {}
             }

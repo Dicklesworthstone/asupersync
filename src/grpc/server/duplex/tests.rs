@@ -227,6 +227,9 @@ impl Streaming for Echo {
 struct Stop(ShutdownSignal);
 impl Drop for Stop {
     fn drop(&mut self) {
+        // Force-close is only reachable from Draining. From Running it is
+        // refused, and the listener would keep serving until the watchdog.
+        let _ = self.0.begin_drain(Duration::ZERO);
         let _ = self.0.begin_force_close();
     }
 }
@@ -914,7 +917,7 @@ fn native_registered_duplex_validates_request_trailers_and_refuses_swallowed_inp
                 move |address, _starts, _probe, _count| {
                     let mut peer = RawPeer::new(address, 65535);
                     peer.request(1, "/native.Duplex/Ignore", None);
-                    peer.send(0, if trailer.is_some() { 0 } else { 1 }, 1, &wire);
+                    peer.send(0, u8::from(trailer.is_none()), 1, &wire);
                     if let Some((name, value)) = trailer {
                         let mut block = Vec::new();
                         literal(&mut block, name, value);

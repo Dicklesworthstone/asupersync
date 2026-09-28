@@ -45,7 +45,9 @@ pub struct ServerDuplexConfig {
     pub response: ServerStreamingConfig,
     /// Maximum cumulative HTTP/2 request DATA bytes, including gRPC framing.
     pub max_request_wire_bytes: usize,
-    /// Resident request-body queue bytes. Must cover initial HTTP/2 credit.
+    /// Resident request-body queue bytes, at least HTTP/2's 65,535-byte
+    /// default window. The duplex listener advertises an initial stream window
+    /// no larger than this queue, so the credit a peer may use always fits.
     pub request_body_buffer_bytes: NonZeroUsize,
     /// Aggregate input reservation available on one connection.
     pub connection_request_body_buffer_bytes: NonZeroUsize,
@@ -330,6 +332,12 @@ impl Server {
         input.listener = self
             .http2_listener_config(host_policy)
             .max_body_size(config.max_request_wire_bytes);
+        // Live request bodies are queued, so advertise no more stream credit
+        // than the queue can hold. The server's default 1 MiB window would
+        // otherwise exceed the default 65,535-byte queue and refuse the bind.
+        let queue = u32::try_from(config.request_body_buffer_bytes.get()).unwrap_or(u32::MAX);
+        input.listener.settings.initial_window_size =
+            input.listener.settings.initial_window_size.min(queue);
         input.request_body_buffer_bytes = config.request_body_buffer_bytes;
         input.connection_request_body_buffer_bytes = config.connection_request_body_buffer_bytes;
         let server = Arc::clone(self);
@@ -614,7 +622,7 @@ impl Server {
             true,
         );
         let operation = super::poll_with_current_cx(cx.clone(), dispatch);
-        let mut result = match crate::util::future::catch_unwind(std::panic::AssertUnwindSafe(
+        let outcome = match crate::util::future::catch_unwind(std::panic::AssertUnwindSafe(
             operation,
         ))
         .await
@@ -622,9 +630,10 @@ impl Server {
             Ok(result) => result,
             Err(_) => Err(Status::internal("gRPC duplex handler or stream panicked")),
         };
-        if let Some(status) = terminal.lock().failure.clone() {
-            result = Err(status);
-        }
+        // Read the ingress failure only after the operation that records it
+        // has finished; an observed input error outranks the handler result.
+        let observed_failure = terminal.lock().failure.clone();
+        let mut result = observed_failure.map_or(outcome, Err);
         if result.is_ok() && deadline.expired() {
             cx.cancel_with(CancelKind::Timeout, Some("gRPC duplex deadline exceeded"));
             result = Err(Status::deadline_exceeded("gRPC duplex deadline exceeded"));
