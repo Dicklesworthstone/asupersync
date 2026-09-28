@@ -368,7 +368,7 @@ impl PublicationGate {
 }
 #[derive(Default)]
 struct PublicationWitness {
-    requested: AtomicBool, closed: AtomicBool, replied: AtomicUsize, changed: Notify,
+    requested: AtomicBool, closed: AtomicBool, accepted: AtomicUsize, replied: AtomicUsize, changed: Notify,
 }
 struct PublicationPeer {
     id: &'static str, address: SocketAddr, task: TaskHandle<()>,
@@ -414,6 +414,7 @@ async fn publication_peer(
             } else {
                 for _ in 0..requests {
                     let (stream, _) = listener.accept().await.unwrap(); let mut stream = acceptor.accept(stream).await.unwrap();
+                    observed.accepted.fetch_add(1, Ordering::AcqRel); observed.changed.notify_waiters();
                     gate.wait().await;
                     let response = serve_tls_computation_once(&cx, &mut stream, &policy, &registry,
                         RemoteServiceWireLimits::new(4 * MIB)).await.unwrap();
@@ -426,6 +427,9 @@ async fn publication_peer(
     PublicationPeer { id, address, task, store, witness }
 }
 fn publication_transport(cx: &Cx, peers: &[PublicationPeer]) -> RemoteSymbolTransport {
+    publication_transport_bounded(cx, peers, 4)
+}
+fn publication_transport_bounded(cx: &Cx, peers: &[PublicationPeer], max_in_flight: usize) -> RemoteSymbolTransport {
     let (_, policy) = publication_policy(Arc::clone(&peers[0].store)); let connector = tls().1;
     let routes = peers.iter().map(|peer| {
         let client = RemoteComputationClient::new(peer.address, "localhost", connector.clone(),
@@ -435,7 +439,7 @@ fn publication_transport(cx: &Cx, peers: &[PublicationPeer]) -> RemoteSymbolTran
         (peer.id.to_owned(), client)
     });
     RemoteSymbolTransport::new_bounded(cx.clone(), policy.hello_for(NodeId::new("stripe-origin")), routes,
-        Arc::new(AuthKey::from_seed(42)), batch_limits(), 4).unwrap()
+        Arc::new(AuthKey::from_seed(42)), batch_limits(), max_in_flight).unwrap()
 }
 fn held_stripe(encoded: &EncodedState, replicas: &[ReplicaInfo], security: &SecurityContext) -> Vec<u8> {
     let assignments = SymbolDistributor::compute_assignments_with_strategy(encoded, replicas, security, None, AssignmentStrategy::Striped);
@@ -612,4 +616,72 @@ fn recoverable_striped_publication_rejects_wrong_snapshot_authority_before_nativ
     });
     assert_runtime_drained(runtime);
     for peer in &mut peers { peer.stop(); }
+}
+
+/// Slow peers under a narrower transport (bi2462.10 acceptance): while every
+/// reply is held, publication never has more sends in flight than the transport
+/// admits (2), and no third peer is reached. Once replies flow, the replicas
+/// beyond the limit get their slot instead of counting as failures, so an
+/// All-consistency publication over four healthy replicas succeeds.
+#[test]
+fn slow_peers_never_see_more_concurrent_sends_than_the_transport_admits() {
+    let runtime = runtime(2);
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let (_, encoded, expected, security, mut replicas) = source(64 * 1024, 0);
+        security.authorize_replica("stripe-d", None).unwrap();
+        replicas.push(ReplicaInfo::new("stripe-d", "not a route"));
+        let gate = Arc::new(PublicationGate::default());
+        let mut peers = Vec::new();
+        for id in [IDS[0], IDS[1], IDS[2], "stripe-d"] {
+            peers.push(publication_peer(&cx, id, Arc::clone(&gate), 1, None).await);
+        }
+        let transport = publication_transport_bounded(&cx, &peers, 2);
+        let mut distributor = SymbolDistributor::new(DistributionConfig {
+            consistency: ConsistencyLevel::All, max_concurrent: 4,
+            ack_timeout: Duration::from_secs(30), ..Default::default()
+        });
+        let mut config = checkpoint_config(); config.manifest.max_replicas = 4; config.timeout = Duration::from_secs(30);
+        let snapshot_key = AuthKey::from_seed(88); let manifest_key = AuthKey::from_seed(99);
+        let reached = |peers: &[PublicationPeer]| {
+            peers.iter().map(|peer| peer.witness.accepted.load(Ordering::Acquire)).sum::<usize>()
+        };
+        let result = {
+            let mut publication = std::pin::pin!(transport.replicate_checkpoint(
+                &mut distributor, &encoded, &replicas, &security,
+                CheckpointAuthority { expected, snapshot_key: &snapshot_key, manifest_key: &manifest_key }, config));
+            let started = std::time::Instant::now();
+            let mut peak = 0;
+            let mut held_since = None;
+            loop {
+                poll_fn(|task| {
+                    assert!(publication.as_mut().poll(task).is_pending(), "publication cannot finish while replies are held");
+                    std::task::Poll::Ready(())
+                }).await;
+                peak = peak.max(transport.in_flight());
+                let accepted = reached(&peers);
+                assert!(accepted <= 2, "a send beyond the transport's two slots reached a peer: {accepted}");
+                if accepted == 2 {
+                    let since = *held_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= Duration::from_millis(300) { break; }
+                }
+                assert!(started.elapsed() < Duration::from_secs(10), "the two admitted sends reach their peers");
+                asupersync::time::sleep(cx.now(), Duration::from_millis(5)).await;
+            }
+            assert_eq!(peak, 2, "exactly the transport's two slots are in use while replies are held");
+            gate.release();
+            asupersync::time::timeout(cx.now(), Duration::from_secs(20), publication.as_mut()).await
+                .expect("publication finishes once replies flow")
+                .expect("every healthy replica gets a slot and is acknowledged")
+        };
+        assert_eq!(result.distribution().acks.len(), 4);
+        assert!(result.distribution().failures.is_empty());
+        assert!(peers.iter().all(|peer| peer.store.stats().batches == 1));
+        assert_eq!(transport.in_flight(), 0);
+        for peer in &mut peers {
+            asupersync::time::timeout(cx.now(), Duration::from_secs(3), peer.task.join(&cx)).await
+                .expect("peer join bound").expect("peer finishes without panic");
+        }
+    });
+    assert_runtime_drained(runtime);
 }
