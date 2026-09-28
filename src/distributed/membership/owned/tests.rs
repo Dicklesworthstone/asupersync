@@ -275,3 +275,44 @@ fn invalidation_publishes_checked_terminal_before_holder_can_finish() {
     drop(lease); f.drain();
     assert_eq!(f.mailbox.stats().aborted, 1); assert_eq!(f.mailbox.stats().leaked, 0);
 }
+
+/// A release waiting for the lock must not lose to a later reading taken by the
+/// holder (asupersync-5o8bqh). A clock read before the lock failed `observe` with
+/// Clock and aborted a lease whose work had committed; in the expiry driver the
+/// same race closed the whole controller.
+#[test]
+fn a_release_waiting_for_the_lock_observes_time_in_lock_order() {
+    let mut f = Fixture::new(8, 8); let lease = f.grant(1_000); f.drain();
+    let shared = Arc::clone(&f.controller.shared);
+    let released = std::thread::scope(|scope| {
+        let mut state = shared.state.lock();
+        let release = scope.spawn(move || lease.release());
+        // The releasing thread is now blocked on the lock.
+        std::thread::sleep(Duration::from_millis(100));
+        f.clock.advance(5_000_000);
+        observe(&mut state, shared.clock.now()).expect("a later reading");
+        drop(state);
+        release.join().expect("release thread")
+    });
+    assert!(released.is_ok(), "{released:?}");
+    f.drain(); assert_eq!(f.mailbox.stats().committed, 1); assert_eq!(f.controller.live_leases(), 0);
+}
+
+/// A revocation waits for a busy lock instead of being refused as Busy, which
+/// left a dead member's leases live (asupersync-5o8bqh).
+#[test]
+fn authority_revocation_waits_for_a_busy_lock() {
+    let mut f = Fixture::new(8, 8); let lease = f.grant(1_000); f.drain();
+    let controller = &f.controller;
+    let applied = std::thread::scope(|scope| {
+        let state = controller.shared.state.lock();
+        let revoke = scope.spawn(|| controller.apply_authenticated(&NodeId::new("authority"),
+            &update(1, 2, MembershipKind::Dead)));
+        std::thread::sleep(Duration::from_millis(50));
+        drop(state);
+        revoke.join().expect("revocation thread")
+    });
+    assert_eq!(applied.expect("the revocation is applied"), MembershipApplied::Applied { revoked: 1 });
+    assert!(matches!(lease.release(), Err(OwnedMembershipError::Ended(OwnedLeaseStatus::Revoked))));
+    f.drain(); assert_eq!(f.mailbox.stats().aborted, 1); assert_eq!(f.controller.live_leases(), 0);
+}

@@ -180,8 +180,35 @@ fn deflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
     }
 }
 
+/// Largest DEFLATE back-reference distance (RFC 1951).
+#[cfg(feature = "compression")]
+const WINDOW: usize = 32 * 1024;
+
+/// Decode one message and fail closed on references before its first byte.
+///
+/// No context takeover gives every message an empty window, so a reference
+/// before the message start is invalid (RFC 7692 section 7.2.3.2). zlib
+/// rejects it, but the pure-Rust backend reads its zeroed window instead.
+/// Every section is therefore decoded over an explicit fill. With a 0x00 fill,
+/// such a reference can only produce NUL bytes, so NUL-free output is proof
+/// that none occurred. Otherwise the message is decoded again over a 0xFF fill,
+/// and the two results differ exactly when a reference reached the fill.
 #[cfg(feature = "compression")]
 fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
+    let zero_filled = inflate_over(payload, max, 0x00)?;
+    if !zero_filled.contains(&0) {
+        return Ok(zero_filled);
+    }
+    if inflate_over(payload, max, 0xff)? != zero_filled {
+        return Err(WsError::ProtocolViolation(
+            "WebSocket DEFLATE references data before the message",
+        ));
+    }
+    Ok(zero_filled)
+}
+
+#[cfg(feature = "compression")]
+fn inflate_over(payload: &[u8], max: usize, fill: u8) -> Result<Bytes, WsError> {
     use flate2::{Decompress, FlushDecompress, Status};
     // Complete the removed sync-flush block, then append a final empty block.
     // Requiring StreamEnd at this exact boundary rejects truncated streams;
@@ -193,6 +220,7 @@ fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
     input.extend_from_slice(payload);
     input.extend_from_slice(&SUFFIX);
     let mut decoder = Decompress::new(false);
+    prime_dictionary(&mut decoder, fill, &[])?;
     let mut output = Vec::new();
     let mut offset = 0;
     let mut section_start = 0;
@@ -210,14 +238,14 @@ fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
         if status == Status::StreamEnd {
             sections += 1;
             // Includes the synthetic final section. This explicit resource cap
-            // bounds dictionary priming to less than 8 MiB per message.
+            // bounds window priming to about 8 MiB per decode.
             if sections > 256 { return Err(WsError::PayloadTooLarge { size: sections, max: 256 }); }
             if offset == section_start { return Err(WsError::ProtocolViolation("empty WebSocket DEFLATE progress")); }
             if offset == input.len() { return Ok(Bytes::from(output)); }
             // RFC 7692 section 7.2.1 permits byte-aligned BFINAL sections in
             // one message. reset alone would lose that message's history.
             decoder.reset(false);
-            prime_dictionary(&mut decoder, &output[output.len().saturating_sub(32768)..])?;
+            prime_dictionary(&mut decoder, fill, &output)?;
             section_start = offset;
             continue;
         }
@@ -228,16 +256,19 @@ fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
 }
 
 #[cfg(feature = "compression")]
-fn prime_dictionary(decoder: &mut flate2::Decompress, dictionary: &[u8]) -> Result<(), WsError> {
+fn prime_dictionary(decoder: &mut flate2::Decompress, fill: u8, history: &[u8]) -> Result<(), WsError> {
     // The pure-Rust flate2 backend has no public set_dictionary. A non-final
-    // stored block loads the same history through its normal validated path.
+    // stored block loads a full window through its normal validated path: the
+    // message's last 32 KiB of history, preceded by `fill` where there is less.
     // Its output is discarded and never charged as application output.
-    let len = dictionary.len() as u16;
-    let mut primer = Vec::with_capacity(dictionary.len() + 5);
+    let history = &history[history.len().saturating_sub(WINDOW)..];
+    let len = WINDOW as u16;
+    let mut primer = Vec::with_capacity(WINDOW + 5);
     primer.push(0);
     primer.extend_from_slice(&len.to_le_bytes());
     primer.extend_from_slice(&(!len).to_le_bytes());
-    primer.extend_from_slice(dictionary);
+    primer.resize(5 + WINDOW - history.len(), fill);
+    primer.extend_from_slice(history);
     let mut offset = 0;
     loop {
         let mut discard = [0; 4096];
@@ -248,7 +279,7 @@ fn prime_dictionary(decoder: &mut flate2::Decompress, dictionary: &[u8]) -> Resu
         let read = (decoder.total_in() - before_in) as usize;
         let written = (decoder.total_out() - before_out) as usize;
         offset += read;
-        if offset == primer.len() && decoder.total_out() == dictionary.len() as u64 { return Ok(()); }
+        if offset == primer.len() && decoder.total_out() == WINDOW as u64 { return Ok(()); }
         if status == flate2::Status::StreamEnd || (read == 0 && written == 0) {
             return Err(WsError::ProtocolViolation("WebSocket DEFLATE dictionary made no progress"));
         }
@@ -317,6 +348,10 @@ mod tests {
         assert_eq!(inflate(&first, input.len()).unwrap().as_ref(), input);
         assert!(matches!(inflate(&first, 1024), Err(WsError::PayloadTooLarge { .. })));
         assert!(deflate(&input, 2).is_err());
+        // NUL output takes the second, 0xFF-filled decode; valid data decodes the same.
+        let zeros = vec![0_u8; 4096];
+        let packed = deflate(&zeros, zeros.len()).unwrap();
+        assert_eq!(inflate(&packed, zeros.len()).unwrap().as_ref(), zeros.as_slice());
     }
 
     #[test]

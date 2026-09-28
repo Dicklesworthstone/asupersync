@@ -132,6 +132,14 @@ FAILED_TEST_RE = re.compile(r"^test (\S+) \.\.\. FAILED$")
 NO_TARGET_RE = re.compile(r"error: no (?:test|bin|example|bench) target named `([^`]+)`")
 # rustc itself was killed (the worker ran out of memory): it never reached a verdict.
 COMPILER_KILLED_RE = re.compile(r"process didn't exit successfully: `(?:[^`\s]*/)?rustc [^`]*` \(signal: 9, SIGKILL: kill\)")
+# The worker lost files a dependency build needed (a registry cache pruned mid-build,
+# a rustc it could not start, a failed download). No commit here can cause these.
+WORKER_FAULT_RE = re.compile(
+    r"could not execute process `[^`]*rustc"
+    r"|could not parse/generate dep info"
+    r"|failed to download `"
+    r"|couldn't read `[^`]*/registry/src/[^`]*`: No such file or directory"
+)
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -513,10 +521,23 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     # to an innocent commit (lib test, vmi workers, 2026-09-25).
     compiler_killed = bool(COMPILER_KILLED_RE.search(clean)) and not first_error
     killed_reason = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
+    # Likewise a worker fault while only third-party crates failed: such reds were
+    # bisected across innocent commits on hz4 (2026-09-28). A workspace crate that
+    # failed beside it is still red.
+    failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
+    worker_fault = (
+        bool(WORKER_FAULT_RE.search(clean))
+        and bool(failing_crates)
+        and not any(name.startswith("asupersync") for name in failing_crates)
+    )
+    fault_reason = (
+        "the worker could not build a third-party dependency (missing registry files, "
+        "an unexecutable rustc, or a failed download): nothing of this repository was compiled or tested"
+    )
 
     if lane["kind"] == "build":
-        if compiler_killed:
-            result["reason"] = killed_reason
+        if compiler_killed or worker_fault:
+            result["reason"] = killed_reason if compiler_killed else fault_reason
             return result
         if failing or remote_exit != 0:
             result.update(
@@ -566,8 +587,8 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     # Informational: a changed module whose filter selected no executed test has no unit
     # test here; the lane still vouches only for what it ran.
     result["unexercised_filters"] = [f for f in lane.get("lib_filters", []) if not any(f in name for name in lib_tests)]
-    if compiler_killed and not failed_tests and not counts["failed"]:
-        result["reason"] = killed_reason
+    if (compiler_killed or worker_fault) and not failed_tests and not counts["failed"]:
+        result["reason"] = killed_reason if compiler_killed else fault_reason
         return result
     if failing or counts["failed"] or failed_tests or remote_exit != 0:
         result.update(

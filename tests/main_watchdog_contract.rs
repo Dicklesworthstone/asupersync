@@ -491,6 +491,77 @@ fn a_compiler_killed_on_the_worker_is_undecided_unless_a_real_failure_sits_besid
     );
 }
 
+/// A dependency build that failed because the worker lost its files (hz4, 2026-09-28:
+/// the registry cache was pruned under running builds); `extra` is appended as is.
+fn dependency_fault(extra: &str) -> String {
+    format!(
+        "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\n   Compiling proptest v1.11.0\nerror: could not compile `proptest` (lib)\n\nCaused by:\n  could not execute process `rustc --crate-name proptest --edition=2021 /data/tmp/rch-cargo-cache-hz4/registry/src/index.crates.io-1949cf8c6b5b557f/proptest-1.11.0/src/lib.rs` (never executed)\n\nCaused by:\n  No such file or directory (os error 2)\n{extra}  Remote command finished: exit=101 in 182237ms\n"
+    )
+}
+
+#[test]
+fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate_fails() {
+    let head = sha(9);
+    let one = |id: &str, kind: &str| json!({"id": id, "kind": kind, "argv": ["cargo"], "expected_targets": []});
+    let missing_source = "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\nerror[E0583]: file not found for module `scalar`\nerror: couldn't read `/data/tmp/rch-cargo-cache-hz4/registry/src/index.crates.io-1949cf8c6b5b557f/curve25519-dalek-4.1.3/src/../README.md`: No such file or directory (os error 2)\nerror: could not compile `curve25519-dalek` (lib) due to 10 previous errors\n  Remote command finished: exit=101 in 71717ms\n";
+    // A dependency that fails on its own diagnostics can be caused by a manifest or
+    // lockfile change in the commit under test.
+    let dependency_error = "  INFO rch::hook: Selected worker: hz3 at ubuntu@host\nerror[E0277]: the trait bound `T: Send` is not satisfied\nerror: could not compile `serde` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 1000ms\n";
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [
+                one("fault-build", "build"),
+                one("fault-test", "test"),
+                one("fault-missing-source", "build"),
+                one("fault-beside-workspace-error", "build"),
+                one("dependency-error", "build"),
+            ],
+        },
+        "lane_logs": {
+            "fault-build": {head.clone(): {"log": dependency_fault("")}},
+            "fault-test": {head.clone(): {"log": dependency_fault("")}},
+            "fault-missing-source": {head.clone(): {"log": missing_source}},
+            "fault-beside-workspace-error": {head.clone(): {"log": dependency_fault(
+                "src/lib.rs:10:5: error[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib) due to 1 previous error\n"
+            )}},
+            "dependency-error": {head.clone(): {"log": dependency_error}},
+        },
+    });
+    let result = evaluate(&scenario);
+    for lane in ["fault-build", "fault-test", "fault-missing-source"] {
+        let outcome = receipt(&result, lane);
+        assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
+        assert!(
+            outcome["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("third-party dependency"),
+            "{lane}: {outcome:#}"
+        );
+    }
+    for lane in ["fault-beside-workspace-error", "dependency-error"] {
+        assert_eq!(
+            receipt(&result, lane)["verdict"],
+            "red",
+            "{lane}: {result:#}"
+        );
+    }
+    let filed: Vec<&str> = result["bead_payloads"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter_map(|payload| payload["lane"].as_str())
+        .collect();
+    for lane in ["fault-build", "fault-test", "fault-missing-source"] {
+        assert!(!filed.contains(&lane), "a worker fault must never file a bead: {filed:?}");
+    }
+    assert!(
+        result["state"].get("last_covered").is_none(),
+        "an undecided lane does not cover the batch"
+    );
+}
+
 fn test_red(target: &str, test: &str) -> String {
     format!(
         "     Running tests/{target}.rs (target/debug/deps/{target}-abc)\nrunning 1 test\ntest {test} ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n  Remote command finished: exit=101 in 1000ms\n"

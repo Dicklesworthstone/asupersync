@@ -233,7 +233,10 @@ impl OwnedMembershipController {
     /// This requires both authority identity and statement MAC. Retired local
     /// tokens post abort before return; arena projection and remote drain may lag.
     pub fn apply_authenticated(&self, peer: &NodeId, bytes: &[u8]) -> Result<MembershipApplied, OwnedMembershipError> {
-        let mut state = self.shared.state.try_lock().ok_or(OwnedMembershipError::Busy)?;
+        // Wait for the lock like every other operation: the critical sections are
+        // short and run no callbacks. A try_lock refused a revocation merely
+        // because a grant or release held the lock, keeping a dead member live.
+        let mut state = self.shared.state.lock();
         if state.closed { return Err(OwnedMembershipError::Closed); }
         if peer != state.policy.authority() { return Err(MembershipControlError::Authority.into()); }
         // Allocate before changing the policy or detaching any owned tokens.
@@ -260,10 +263,13 @@ impl OwnedMembershipController {
     /// refuses without returning a guard. The runtime callback runs outside locks.
     pub fn try_grant(&self, cx: &Cx, node: &NodeId, incarnation: u64, duration: Duration) -> Result<OwnedMembershipLease, OwnedMembershipError> {
         if cx.is_cancel_requested() { return Err(OwnedMembershipError::Cancelled); }
+        // Every clock read happens under the state lock, so holders observe time
+        // in lock order. A read taken before waiting for the lock can lose the
+        // race to a later reading and fail `observe` without any real regression.
+        let mut state = self.shared.state.lock();
         let now = self.shared.clock.now();
         let deadline = now + duration;
         if duration.is_zero() || deadline <= now { return Err(MembershipControlError::GrantDenied.into()); }
-        let mut state = self.shared.state.lock();
         observe(&mut state, now)?;
         if state.closed { return Err(OwnedMembershipError::Closed); }
         if !alive(&state, node, incarnation) { return Err(MembershipControlError::GrantDenied.into()); }
@@ -276,9 +282,9 @@ impl OwnedMembershipController {
         let mut registration = Registration { shared: Arc::clone(&self.shared), pending: true, token: None };
         registration.token = Some(cx.try_register_obligation_checked(ObligationKind::Lease, cx.task_id())?
             .ok_or(OwnedMembershipError::NoRuntime)?);
-        let now = self.shared.clock.now();
         let signal = Arc::new(Signal { status: AtomicU8::new(0), changed: Notify::new() });
         let mut state = self.shared.state.lock();
+        let now = self.shared.clock.now();
         observe(&mut state, now)?;
         if state.closed { return Err(OwnedMembershipError::Closed); }
         if cx.is_cancel_requested() { return Err(OwnedMembershipError::Cancelled); }
@@ -296,8 +302,8 @@ impl OwnedMembershipController {
     /// Abort all locally due tokens. Return the number of guards retired, not a
     /// synchronous arena-drain count. Deadline ties expire rather than renew.
     pub fn expire(&self) -> Result<usize, OwnedMembershipError> {
-        let now = self.shared.clock.now();
-        let mut state = self.shared.state.lock(); observe(&mut state, now)?;
+        let mut state = self.shared.state.lock();
+        let now = self.shared.clock.now(); observe(&mut state, now)?;
         let ids: Vec<_> = state.entries.iter().filter(|(_, entry)| now >= entry.deadline).map(|(&id, _)| id).collect();
         let mut retired = Vec::with_capacity(ids.len());
         for id in ids { retired.push(remove(&mut state, id, OwnedLeaseStatus::Expired).expect("due lease")); }
@@ -372,8 +378,8 @@ impl OwnedMembershipLease {
     }
     /// Renew this exact guard while unexpired. Suspicion only pauses new grants.
     pub fn renew(&self, duration: Duration) -> Result<(), OwnedMembershipError> {
-        let now = self.shared.clock.now();
-        let mut state = self.shared.state.lock(); observe(&mut state, now)?;
+        let mut state = self.shared.state.lock();
+        let now = self.shared.clock.now(); observe(&mut state, now)?;
         let Some(entry) = state.entries.get_mut(&self.id) else { return Err(OwnedMembershipError::Ended(self.status())); };
         if now >= entry.deadline {
             let retired = vec![remove(&mut state, self.id, OwnedLeaseStatus::Expired).expect("expired")];
@@ -387,8 +393,8 @@ impl OwnedMembershipLease {
     /// Release consumes the guard and requires the real checked commit to win.
     /// A due/revoked guard cannot be turned back into a successful release.
     pub fn release(self) -> Result<(), OwnedMembershipError> {
-        let now = self.shared.clock.now();
-        let mut state = self.shared.state.lock(); observe(&mut state, now)?;
+        let mut state = self.shared.state.lock();
+        let now = self.shared.clock.now(); observe(&mut state, now)?;
         let Some(entry) = state.entries.get(&self.id) else { return Err(OwnedMembershipError::Ended(self.status())); };
         let expired = now >= entry.deadline;
         let status = if expired { OwnedLeaseStatus::Expired } else { OwnedLeaseStatus::Released };

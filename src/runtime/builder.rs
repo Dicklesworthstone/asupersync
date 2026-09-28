@@ -4172,7 +4172,11 @@ impl Runtime {
         let _caller_cx_guard = registration
             .as_ref()
             .map(|registration| crate::cx::Cx::set_current(Some(registration.cx.clone())));
-        run_future_with_budget(future, self.inner.config.poll_budget)
+        run_future_with_budget(
+            future,
+            self.inner.config.poll_budget,
+            registration.as_ref().map(|registration| &registration.cx),
+        )
     }
 
     /// Run a future to completion with an ambient [`Cx`](crate::cx::Cx).
@@ -4193,7 +4197,7 @@ impl Runtime {
     ) -> F::Output {
         let _runtime_guard = ScopedRuntimeHandle::new(self.handle());
         let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
-        run_future_with_budget(future, self.inner.config.poll_budget)
+        run_future_with_budget(future, self.inner.config.poll_budget, None)
     }
 
     /// Run a future to completion using the currently installed runtime handle
@@ -4212,7 +4216,7 @@ impl Runtime {
         let handle = Self::current_handle()?;
         let inner = handle.try_inner().ok()?;
         let _cx_guard = crate::cx::Cx::set_current(Some(request_cx));
-        Some(run_future_with_budget(future, inner.config.poll_budget))
+        Some(run_future_with_budget(future, inner.config.poll_budget, None))
     }
 
     /// Create a request-scoped [`Cx`](crate::cx::Cx) backed by this runtime's
@@ -6958,13 +6962,45 @@ fn current_runtime_has_live_tasks() -> bool {
         })
 }
 
-fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
+/// Cancellation wakeup for a registered `block_on` caller.
+///
+/// A worker installs a cancellation waker for every task it polls; this thread
+/// is the caller's only executor, so it registers its own. Otherwise root
+/// cancellation cannot unpark a caller that waits on a primitive with no
+/// cancellation waker of its own (an mpsc receive, a semaphore acquire), and a
+/// root drain waits out its full timeout (asupersync-h64i97).
+struct CallerCancelWake {
+    cx: crate::cx::Cx,
+    token: crate::cx::CancelWakerToken,
+}
+
+impl CallerCancelWake {
+    fn new(cx: &crate::cx::Cx, waker: &Waker) -> Self {
+        Self {
+            cx: cx.clone(),
+            token: cx.refresh_cancel_waker(None, waker),
+        }
+    }
+}
+
+impl Drop for CallerCancelWake {
+    fn drop(&mut self) {
+        self.cx.clear_cancel_waker(self.token);
+    }
+}
+
+fn run_future_with_budget<F: Future>(
+    future: F,
+    poll_budget: u32,
+    cancel_owner: Option<&crate::cx::Cx>,
+) -> F::Output {
     let thread = std::thread::current();
     let thread_waker = Arc::new(ThreadWaker {
         thread,
         woken: std::sync::atomic::AtomicBool::new(false),
     });
     let waker = Waker::from(Arc::clone(&thread_waker));
+    let _cancel_wake = cancel_owner.map(|cx| CallerCancelWake::new(cx, &waker));
     let mut cx = Context::from_waker(&waker);
     let mut future = std::pin::pin!(future);
     let mut polls = 0u32;

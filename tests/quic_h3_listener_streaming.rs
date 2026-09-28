@@ -671,6 +671,98 @@ mod native_h3_listener_live {
             });
         }
 
+        /// The drain deadline is the listener's only bound on a handler that
+        /// never finishes on its own. It must cancel the request, reset its
+        /// stream, close the region and return a timed-out report; it must not
+        /// return early or keep serving the parked request.
+        #[test]
+        fn authenticated_listener_drain_deadline_cancels_a_parked_request() {
+            const DRAIN: Duration = Duration::from_millis(300);
+            for workers in [1, 2] {
+                run(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let (parked_tx, mut parked_rx) = asupersync::channel::oneshot::channel();
+                    let parked_slot = Arc::new(Mutex::new(Some(parked_tx)));
+                    let wait_result = Arc::new(Mutex::new(None));
+                    let handler_result = Arc::clone(&wait_result);
+                    let router = Router::new().route(
+                        "/park",
+                        post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                            move |request_cx: Cx, body: StreamingRawBody| {
+                                let parked = parked_slot.lock().unwrap().take();
+                                let handler_result = Arc::clone(&handler_result);
+                                async move {
+                                    let _open_upload = body;
+                                    // Nothing ever sends on `release`: only
+                                    // cancellation can end this wait.
+                                    let (release, mut released) =
+                                        asupersync::channel::oneshot::channel::<()>();
+                                    if let Some(signal) = parked {
+                                        signal.send(&request_cx, request_cx.clone()).unwrap();
+                                    }
+                                    let result = released.recv(&request_cx).await;
+                                    *handler_result.lock().unwrap() = Some(result);
+                                    drop(release);
+                                    Response::new(StatusCode::OK, "must not be emitted")
+                                }
+                            },
+                        )),
+                    );
+                    let mut listener_config = config(8);
+                    listener_config.drain_timeout = DRAIN;
+                    let listener = bind(&cx, router, listener_config).await;
+                    let address = listener.local_addr();
+                    let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                    let serving = listener.serve_with_shutdown(&cx, async {
+                        shutdown_rx.recv(&cx).await.unwrap();
+                    });
+                    let client = async {
+                        let (mut owner, mut session) = connect(&cx, address, 70).await;
+                        let stream = open_upload(&cx, &mut owner, "/park", None).await;
+                        let request_cx: Cx = parked_rx.recv(&cx).await.unwrap();
+                        assert!(!request_cx.is_cancel_requested());
+                        let shutdown_at = Instant::now();
+                        shutdown_tx.send(&cx, ()).unwrap();
+                        acknowledge_shutdown_goaway(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            stream.0 + 4,
+                            Some(stream),
+                        )
+                        .await;
+                        wait_region_closed(&request_cx).await;
+                        assert!(request_cx.is_cancel_requested());
+                        shutdown_at
+                    };
+                    let (report, shutdown_at) = zip(serving, client).await;
+                    let waited = shutdown_at.elapsed();
+                    let report = report.unwrap();
+                    eprintln!(
+                        "event=h3_drain_deadline workers={workers} waited_ms={} completed={} cancelled={} timed_out={}",
+                        waited.as_millis(),
+                        report.completed_requests,
+                        report.cancelled_requests,
+                        report.drain_timed_out,
+                    );
+                    assert!(
+                        matches!(
+                            *wait_result.lock().unwrap(),
+                            Some(Err(asupersync::channel::oneshot::RecvError::Cancelled))
+                        ),
+                        "only the drain deadline's cancellation may end the parked handler",
+                    );
+                    assert!(waited >= DRAIN, "drain returned before its deadline: {waited:?}");
+                    assert_eq!(report.accepted_connections, 1);
+                    assert_eq!(report.completed_requests, 0);
+                    assert_eq!(report.cancelled_requests, 1);
+                    assert_eq!(report.refused_requests, 0);
+                    assert_eq!(report.failed_connections, 0);
+                    assert!(report.drain_timed_out);
+                });
+            }
+        }
+
         #[test]
         fn authenticated_listener_streaming_backpressure_preserves_sibling_and_buffered_resume() {
             run(2, async {

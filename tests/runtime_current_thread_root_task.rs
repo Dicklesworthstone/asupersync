@@ -500,6 +500,74 @@ fn block_on_registered_root_cancellation_drains_parked_checked_work() {
     }
 }
 
+/// The oneshot receive above registers its own cancellation waker, so it could
+/// not show whether the runtime wakes the caller. An mpsc receive registers
+/// none: only the caller's own registration can end this park
+/// (asupersync-h64i97).
+#[test]
+fn block_on_root_cancellation_wakes_a_caller_parked_without_its_own_cancel_waker() {
+    use asupersync::channel::mpsc as async_mpsc;
+    use std::future::Future;
+
+    for sharded in [false, true] {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .with_sharded_state(sharded)
+            .build()
+            .expect("build cancellable root runtime");
+        let caller_runtime = runtime.clone();
+        let (sender, mut receiver) = async_mpsc::channel::<()>(1);
+        let (parked, parked_rx) = mpsc::channel();
+        let (finished, finished_rx) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                caller_runtime.block_on(async {
+                    let cx = Cx::current().expect("root context");
+                    let mut receive = std::pin::pin!(receiver.recv(&cx));
+                    let mut witnessed = false;
+                    let result = poll_fn(|ctx| {
+                        let result = receive.as_mut().poll(ctx);
+                        if result.is_pending() && !witnessed {
+                            witnessed = true;
+                            parked.send(cx.task_id()).expect("publish parked witness");
+                        }
+                        result
+                    })
+                    .await;
+                    assert!(
+                        matches!(result, Err(async_mpsc::RecvError::Cancelled)),
+                        "{result:?}"
+                    );
+                    cx.task_id()
+                })
+            }));
+            finished.send(outcome).expect("publish caller completion");
+        });
+        let holder = parked_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("caller root parked in its receive");
+        let started = Instant::now();
+        let drained = runtime.drain_root_region(Duration::from_secs(5));
+        let elapsed = started.elapsed();
+        // A broken wakeup is still released by closing the channel, so the
+        // negative control fails on its assertions instead of hanging.
+        drop(sender);
+        let result = finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("caller leaves its parked receive");
+        caller.join().expect("caller helper returns");
+        eprintln!(
+            "scenario=caller_cancel_without_primitive_waker sharded={sharded} \
+             holder={holder:?} drain={drained:?} elapsed_ms={}",
+            elapsed.as_millis()
+        );
+        assert_eq!(result.expect("caller cancellation journey"), holder);
+        assert_eq!(drained, RootDrainOutcome::Quiescent);
+        assert!(elapsed < Duration::from_secs(2), "drain waited {elapsed:?}");
+        assert!(runtime.is_quiescent(), "caller retired");
+    }
+}
+
 /// Synchronous registration must work even when the only worker is occupied
 /// by the caller. Waiting for a separately spawned accounting task deadlocks.
 #[test]
