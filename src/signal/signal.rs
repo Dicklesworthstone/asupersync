@@ -542,6 +542,10 @@ impl Signal {
             let slot = dispatcher.slot(kind).ok_or_else(|| {
                 SignalError::unsupported(kind, "signal kind is not supported by dispatcher")
             })?;
+            // Take the cursor before registering. Once add_signal returns, the
+            // default disposition is gone, so a delivery recorded in between
+            // must belong to this stream rather than count as already seen.
+            let seen_deliveries = slot.deliveries.load(Ordering::Acquire);
             #[cfg(unix)]
             dispatcher
                 .handle
@@ -549,7 +553,6 @@ impl Signal {
                 .map_err(|err| {
                     SignalError::unsupported(kind, format!("failed to register signal: {err}"))
                 })?;
-            let seen_deliveries = slot.deliveries.load(Ordering::Acquire);
             Ok(Self {
                 kind,
                 slot,
