@@ -94,6 +94,17 @@ The September 27 reconciliation (`asupersync-31jdkv`) runs against
 The inventory is now 99 rows and 895 operations. The categories, other safety
 invariants, category evidence and platform coverage limits are unchanged.
 
+On September 28, 2026 (`asupersync-bi2462.113`) one `test-or-lab-harness` row
+was added for `tests/signal_subscription_isolation.rs`: one `allow(unsafe_code)`
+scope and one `unsafe` block that restore `SIG_DFL` for the single signal a
+re-executed child raises, before any asupersync registration. A nohup-style
+launcher (RCH workers included) starts the test with `SIGHUP` ignored, and
+`std::process::Command` cannot reset inherited dispositions. The inventory is
+now 100 rows and 897 operations. The same change re-locates four
+`src/runtime/builder.rs` locators that `d2322f15a` shifted by 36 lines
+(`allow(unsafe_code)` and three test env-var mutations); their text and
+reasoning are unchanged.
+
 ## Row Schema
 
 Each `sites[]` row must include:

@@ -135,11 +135,30 @@ fn raw_signal(name: &str) -> i32 {
     }
 }
 
+/// A launcher such as nohup (RCH workers included) can start this process
+/// with the signal under test ignored or blocked, and every child inherits
+/// that. Restore the default disposition and unmasked delivery BEFORE any
+/// asupersync call, so a case measures asupersync's registrations rather than
+/// the launcher. Resetting after a subscription would erase an eagerly
+/// installed handler and hide the very defect this test guards.
+#[allow(unsafe_code)]
+fn restore_default_delivery(raw: i32) {
+    use nix::sys::signal::{SigHandler, SigSet, SigmaskHow, Signal, signal, sigprocmask};
+    let kind = Signal::try_from(raw).expect("known signal number");
+    // SAFETY: SIG_DFL installs no handler code, and this fresh child has not
+    // registered any handler yet.
+    unsafe { signal(kind, SigHandler::SigDfl) }.expect("restore the default disposition");
+    let mut unblocked = SigSet::empty();
+    unblocked.add(kind);
+    sigprocmask(SigmaskHow::SIG_UNBLOCK, Some(&unblocked), None).expect("unmask the signal");
+}
+
 #[test]
 fn ctrl_c_leaves_unrequested_termination_signals_alone() {
     if let Ok(case) = std::env::var(CASE) {
         let (mode, name) = case.split_once(':').expect("child mode and signal");
         let raw = raw_signal(name);
+        restore_default_delivery(raw);
         // Keep the actual Ctrl-C future alive across the unrelated signal.
         let mut wait = std::pin::pin!(ctrl_c());
         match mode {
