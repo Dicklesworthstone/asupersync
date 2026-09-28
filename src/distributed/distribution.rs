@@ -244,7 +244,7 @@ impl SymbolDistributor {
         let assignments = Self::compute_assignments_with_strategy(
             encoded, replicas, auth_context, None, strategy,
         );
-        self.distribute_assignments(cx, encoded, assignments, transport, auth_context).await
+        self.distribute_assignments(cx, encoded, assignments, transport, auth_context, usize::MAX).await
     }
 
     // Checkpoint preparation retains the exact plan it authenticated. Do not
@@ -256,15 +256,22 @@ impl SymbolDistributor {
         assignments: Vec<super::assignment::ReplicaAssignment>,
         transport: &T,
         auth_context: &SecurityContext,
+        in_flight_ceiling: usize,
     ) -> DistributionResult {
         self.distribute_assignments_with_completion(
-            cx, encoded, assignments, transport, auth_context, None,
+            cx, encoded, assignments, transport, auth_context, in_flight_ceiling, None,
         ).await
     }
 
     // A checkpoint can require both receipt quorum and authenticated coverage.
     // Only verified, distinct assignment acknowledgements reach this callback.
     // Keeping it private preserves the established public fanout semantics.
+    //
+    // A bounded transport refuses a send beyond its in-flight limit instead of
+    // queueing it, so a wider fanout would count healthy replicas as failed.
+    // `in_flight_ceiling` lowers `max_concurrent` for this call only; later
+    // replicas start as earlier sends finish.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn distribute_assignments_with_completion<T: DistributorTransport>(
         &mut self,
         cx: &Cx,
@@ -272,16 +279,24 @@ impl SymbolDistributor {
         assignments: Vec<super::assignment::ReplicaAssignment>,
         transport: &T,
         auth_context: &SecurityContext,
+        in_flight_ceiling: usize,
         completion: Option<&mut (dyn FnMut(&ReplicaAck) -> bool + Send)>,
     ) -> DistributionResult {
+        let capped;
+        let config = if self.config.max_concurrent > in_flight_ceiling {
+            capped = DistributionConfig { max_concurrent: in_flight_ceiling, ..self.config.clone() };
+            &capped
+        } else {
+            &self.config
+        };
         let timer = cx.timer_driver();
         let start = driver::now(timer.as_ref());
         let fanout = if completion.is_some() {
             driver::run_with_completion(
-                &self.config, cx, encoded, assignments, transport, auth_context, timer.clone(), completion,
+                config, cx, encoded, assignments, transport, auth_context, timer.clone(), completion,
             ).await
         } else {
-            driver::run(&self.config, cx, encoded, assignments, transport, auth_context, timer.clone()).await
+            driver::run(config, cx, encoded, assignments, transport, auth_context, timer.clone()).await
         };
         let duration = Duration::from_nanos(driver::now(timer.as_ref()).duration_since(start));
 

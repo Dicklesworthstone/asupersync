@@ -1493,6 +1493,16 @@ def file_or_queue(
     state["pending_beads"] = still_pending
 
 
+def receipt_closure_probe(case: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Evaluate helper: `close_covered_escalations` with its `br` commands recorded."""
+    commands: list[list[str]] = []
+    filed = dict(case.get("filed", {}))
+    reported = close_covered_escalations(
+        filed, rows, case.get("open_issues", []), run=lambda command, **_: commands.append(command)
+    )
+    return {"reported": reported, "commands": commands, "filed": filed}
+
+
 def file_or_queue_rounds(case: dict[str, Any]) -> list[dict[str, Any]]:
     """Evaluate helper: successive `file_or_queue` runs sharing one state.
 
@@ -1599,8 +1609,23 @@ def owes_receipt(commit: dict[str, Any]) -> bool:
     return no_compile_path and not commit.get("is_merge") and any(is_code_path(p) for p in commit["paths"])
 
 
+def receipt_covers(receipt: dict[str, Any]) -> bool:
+    """A lane that proves its head: green, or red only through known reds.
+
+    Known reds (`still_red`) already have their own beads. Without this, one chronic
+    red keeps every later commit from ever getting a receipt. A new red, a red already
+    present at the batch base and a lane without evidence prove nothing.
+    """
+    if receipt["verdict"] == VERDICT_GREEN:
+        return True
+    return receipt["verdict"] == VERDICT_RED and not receipt.get("new_red") and bool(receipt.get("still_red"))
+
+
 def watchdog_runs(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Lane receipts grouped into runs (one head checked at one time), oldest first."""
+    """Lane receipts grouped into runs (one head checked at one time), oldest first.
+
+    A run is `green` when every lane covers its head (see `receipt_covers`).
+    """
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for receipt in receipts:
         grouped.setdefault((receipt["recorded_at"], receipt["sha"]), []).append(receipt)
@@ -1608,7 +1633,7 @@ def watchdog_runs(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "head": head,
             "recorded_at": recorded,
-            "green": all(r["verdict"] == VERDICT_GREEN for r in rs),
+            "green": all(receipt_covers(r) for r in rs),
             "red": any(r["verdict"] == VERDICT_RED for r in rs),
             "culprits": sorted({r["culprit"] for r in rs if r.get("culprit")}),
         }
@@ -1620,7 +1645,8 @@ def receipt_ledger(commits: list[dict[str, Any]], receipts: list[dict[str, Any]]
     """Heal latency for every commit that owes a rule-3 receipt; `commits` oldest first.
 
     A run covers a commit when its head is that commit or a later one. A commit is green
-    at the first all-green covering run, and red when a run names it as the culprit. It
+    at the first green covering run (red lanes only through known reds count), and red
+    when a run names it as the culprit. It
     is blocked while its latest covering run is red for another commit, because that red
     has its own P0. Otherwise it is pending until 2 h, overdue until 6 h, and escalated
     after that.
@@ -1643,7 +1669,8 @@ def receipt_ledger(commits: list[dict[str, Any]], receipts: list[dict[str, Any]]
             "age_h": _hours(now - landed),
         }
         if green:
-            row.update(status="green", receipt_at=green["recorded_at"], latency_h=_hours(dt.datetime.fromisoformat(green["recorded_at"]) - landed))
+            row.update(status="green", receipt_at=green["recorded_at"], receipt_head=green["head"],
+                       latency_h=_hours(dt.datetime.fromisoformat(green["recorded_at"]) - landed))
         elif any(commit["sha"] in run["culprits"] for run in covering):
             row["status"] = "red"
         elif covering and covering[-1]["red"]:
@@ -1904,6 +1931,8 @@ def escalate_overdue_receipts(state: dict[str, Any], receipts_path: Path, now: d
     ledger = receipt_ledger(ledger_commits(since, "origin/main"), receipts, now)
     filed = state.setdefault("receipt_escalations", {})
     open_issues = open_tracker_issues()
+    if file_beads:
+        close_covered_escalations(filed, ledger["rows"], open_issues)
     payloads = []
     for row in ledger["rows"]:
         if row["status"] != "escalate" or row["sha"] in filed:
@@ -1919,6 +1948,44 @@ def escalate_overdue_receipts(state: dict[str, Any], receipts_path: Path, now: d
             payload["filed_bead"] = filed[row["sha"]] = bead
         payloads.append(payload)
     return payloads
+
+
+def close_covered_escalations(
+    filed: dict[str, str],
+    rows: list[dict[str, Any]],
+    open_issues: list[dict[str, Any]],
+    run: Callable[..., Any] = subprocess.run,
+) -> list[dict[str, Any]]:
+    """Report the receipt on each escalated commit that a later run now covers.
+
+    As with heals, only an open, unassigned bead is closed; an owner keeps that
+    decision and just gets the receipt. Each commit is reported once: it leaves
+    `filed`, and a covered commit never escalates again.
+    """
+    by_id = {issue.get("id"): issue for issue in open_issues}
+    reported = []
+    for row in rows:
+        bead = filed.get(row["sha"])
+        if row["status"] != "green" or bead is None:
+            continue
+        del filed[row["sha"]]
+        issue = by_id.get(bead)
+        if issue is None:
+            continue
+        note = (
+            f"main-watchdog: `{row['sha'][:9]}` is covered by the run at `{row['receipt_head'][:9]}` recorded "
+            f"{row['receipt_at']}: every lane was green or red only through known reds that have their own beads."
+        )
+        run(["br", "comments", "add", bead, "-m", note, "--author", "main-watchdog"], capture_output=True, check=False)
+        closed = issue.get("status") == "open" and not issue.get("assignee")
+        if closed:
+            run(
+                ["br", "close", bead, "--reason", f"covered at {row['receipt_head'][:9]} (main watchdog)", "--actor", "main-watchdog"],
+                capture_output=True,
+                check=False,
+            )
+        reported.append({"bead": bead, "sha": row["sha"], "closed": closed})
+    return reported
 
 
 def summary(receipts_path: Path, since: str, until: str, issues_path: Path, now: dt.datetime) -> dict[str, Any]:
@@ -2070,6 +2137,7 @@ def main(argv: list[str]) -> int:
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
                     "payloads": [receipt_escalation_payload(row) for row in ledger["rows"] if row["status"] == "escalate"],
+                    "closures": receipt_closure_probe(case, ledger["rows"]),
                 }
                 for case in probes.get("receipt_ledger", [])
             ],

@@ -1041,6 +1041,11 @@ fn run_receipt(head: u8, at: &str, verdict: &str, culprit: Option<u8>) -> Value 
 }
 
 fn ledger_probe(receipts: Vec<Value>) -> Value {
+    ledger_probe_with(receipts, json!({}), json!([]))
+}
+
+/// `filed` maps escalated commits to their beads; `open_issues` is the tracker.
+fn ledger_probe_with(receipts: Vec<Value>, filed: Value, open_issues: Value) -> Value {
     let commits = vec![
         ledger_commit(1, WEB_API, "00:00", "one", "src/a.rs"),
         ledger_commit(2, "dev@example.com", "00:30", "two", "src/a.rs"),
@@ -1062,6 +1067,7 @@ fn ledger_probe(receipts: Vec<Value>) -> Value {
         "lane_logs": {},
         "probes": {"receipt_ledger": [{
             "commits": commits, "receipts": receipts, "now": "2026-09-24T12:00:00+00:00",
+            "filed": filed, "open_issues": open_issues,
         }]},
     });
     evaluate(&scenario)["probe_results"]["receipt_ledger"][0].clone()
@@ -1140,6 +1146,96 @@ fn rule3_ledger_lists_overdue_commits_and_escalates_after_six_hours() {
             .all(|r| r["status"] == "green"),
         "{healed:#}"
     );
+}
+
+/// One chronic known red must not keep every later commit escalated forever: a run
+/// whose red lanes fail only through known reds (each with its own bead) covers its
+/// commits. A new red or a lane without evidence does not. A covered escalation gets
+/// its receipt once, and only an open, unassigned bead is closed.
+#[test]
+fn a_run_red_only_through_known_reds_covers_and_closes_its_escalations() {
+    let known_red_only = || {
+        let mut lane = run_receipt(8, "11:45", "red", None);
+        lane["lane"] = json!("targeted-lib");
+        lane["still_red"] = json!({"asupersync (lib test)": "asupersync-bi2462.147.4"});
+        lane
+    };
+    // .92 is already closed, so it is not among the open issues.
+    let mut filed = json!({});
+    filed[sha(3)] = json!("asupersync-bi2462.147.91");
+    filed[sha(5)] = json!("asupersync-bi2462.147.90");
+    filed[sha(7)] = json!("asupersync-bi2462.147.92");
+    let open_issues = json!([
+        {"id": "asupersync-bi2462.147.90", "status": "open"},
+        {"id": "asupersync-bi2462.147.91", "status": "in_progress", "assignee": "SomeAgent"},
+    ]);
+    let probe = |extra: Option<Value>| {
+        let mut receipts = vec![
+            run_receipt(2, "01:00", "green", None),
+            run_receipt(4, "09:00", "red", Some(4)),
+            run_receipt(8, "11:45", "green", None),
+            known_red_only(),
+        ];
+        receipts.extend(extra);
+        ledger_probe_with(receipts, filed.clone(), open_issues.clone())
+    };
+    let greens = |probe: &Value| {
+        probe["ledger"]["rows"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter(|r| r["status"] == "green")
+            .count()
+    };
+
+    let covered = probe(None);
+    assert_eq!(greens(&covered), 6, "{covered:#}");
+    assert_eq!(covered["ledger"]["rows"][3]["receipt_head"], json!(sha(8)));
+    let closures = &covered["closures"];
+    assert_eq!(
+        closures["reported"],
+        json!([
+            {"bead": "asupersync-bi2462.147.91", "sha": sha(3), "closed": false},
+            {"bead": "asupersync-bi2462.147.90", "sha": sha(5), "closed": true},
+        ]),
+        "{closures:#}"
+    );
+    let commands = closures["commands"].as_array().expect("commands");
+    let verbs: Vec<(&str, &str)> = commands
+        .iter()
+        .map(|c| (c[1].as_str().expect("verb"), c[2].as_str().expect("id")))
+        .collect();
+    assert_eq!(
+        verbs,
+        [
+            ("comments", "add"),
+            ("comments", "add"),
+            ("close", "asupersync-bi2462.147.90"),
+        ],
+        "{closures:#}"
+    );
+    assert_eq!(commands[0][3], "asupersync-bi2462.147.91");
+    assert_eq!(
+        commands[2][4],
+        json!(format!("covered at {} (main watchdog)", &sha(8)[..9]))
+    );
+    assert_eq!(
+        closures["filed"],
+        json!({}),
+        "covered commits are reported once; an already closed bead is only forgotten"
+    );
+
+    let mut new_red = run_receipt(8, "11:45", "red", Some(7));
+    new_red["new_red"] = json!(["asupersync (test \"alpha_native\")"]);
+    let mut no_evidence = run_receipt(8, "11:45", "no-evidence", None);
+    no_evidence["lane"] = json!("clippy-default");
+    for (name, extra) in [("new red", new_red), ("no evidence", no_evidence)] {
+        let uncovered = probe(Some(extra));
+        assert_eq!(greens(&uncovered), 1, "{name}: {uncovered:#}");
+        assert_eq!(uncovered["closures"]["reported"], json!([]), "{name}");
+        assert_eq!(uncovered["closures"]["commands"], json!([]), "{name}");
+        assert_eq!(uncovered["closures"]["filed"], filed, "{name}");
+    }
 }
 
 #[test]

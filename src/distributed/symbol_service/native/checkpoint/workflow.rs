@@ -175,7 +175,10 @@ impl DistributorTransport for CheckedStripedTransport<'_> {
 impl RemoteSymbolTransport {
     /// Authenticate a supplied encoding, distribute full copies, and seal only
     /// confirmed replica keys. Reuses the caller's distributor and its metrics,
-    /// including opt-in hedging. Unknown, duplicate, unavailable or unauthorized
+    /// including opt-in hedging. Its fanout is lowered to this transport's
+    /// [`Self::max_in_flight`] for the call, as recovery's is, so a wider
+    /// distributor does not turn admission refusals into replica failures.
+    /// Admission stays shared with clones. Unknown, duplicate, unavailable or unauthorized
     /// input targets refuse before dispatch instead of reducing the denominator.
     ///
     /// Source/count/byte/decode/manifest limits are checked before network work.
@@ -199,8 +202,12 @@ impl RemoteSymbolTransport {
         if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
         if timer.now() >= deadline { return Err(CheckpointError::Deadline); }
         let checked = CheckedTransport { inner: self, key: draft.replicas[0].key };
+        // SymbolDistributor::distribute's plan, with fanout bounded by this transport's admission.
+        let assignments = SymbolDistributor::compute_assignments_with_strategy(
+            encoded, replicas, security, None, AssignmentStrategy::Full);
         let distribution = before_deadline(&self.cx, timer.clone(), deadline,
-            distributor.distribute(&self.cx, encoded, replicas, &checked, security)).await?;
+            distributor.distribute_assignments(&self.cx, encoded, assignments, &checked, security,
+                self.max_in_flight())).await?;
         // before_deadline destroys the complete distributor future before sealing.
         let result = seal(draft, distribution, count, required, authority.manifest_key, config.manifest)?;
         if self.cx.is_cancel_requested() { return Err(CheckpointError::Cancelled); }
@@ -244,7 +251,8 @@ impl RemoteSymbolTransport {
     /// replica threshold. Once both conditions hold, remaining local sends and
     /// timers are destroyed before the signed manifest is returned.
     ///
-    /// The distributor's concurrency ceiling and acknowledgement deadlines apply.
+    /// The distributor's concurrency ceiling (at most [`Self::max_in_flight`])
+    /// and acknowledgement deadlines apply.
     /// With hedging enabled, spare attempts follow its hedge delay; after receipt
     /// quorum without coverage, at least one further attempt is ordinary required
     /// work. Without hedging, all available slots are filled and early completion
@@ -311,7 +319,8 @@ impl RemoteSymbolTransport {
                 };
                 before_deadline(&self.cx, timer.clone(), deadline,
                     distributor.distribute_assignments_with_completion(
-                        &self.cx, encoded, assignments, &checked, security, Some(&mut complete),
+                        &self.cx, encoded, assignments, &checked, security, self.max_in_flight(),
+                        Some(&mut complete),
                     )).await?
             };
             // Reuse the exact successful decode, but still validate every final
@@ -321,7 +330,8 @@ impl RemoteSymbolTransport {
                 authority.manifest_key, config.manifest, |actual| verified && *actual == indices)?
         } else {
             let distribution = before_deadline(&self.cx, timer.clone(), deadline,
-                distributor.distribute_assignments(&self.cx, encoded, assignments, &checked, security)).await?;
+                distributor.distribute_assignments(&self.cx, encoded, assignments, &checked, security,
+                    self.max_in_flight())).await?;
             seal_striped(self, draft, distribution, &stripes, encoded, required,
                 source_digest, &authority, config.manifest)?
         };

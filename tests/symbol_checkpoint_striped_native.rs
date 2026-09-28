@@ -326,6 +326,40 @@ fn full_checkpoint_native_keeps_full_copy_keys_and_single_donor_recovery() {
     for peer in &mut peers { peer.stop(); }
 }
 
+// The transport refuses a send beyond its in-flight limit rather than queueing
+// it. A distributor wider than that limit must wait for a slot, not count a
+// healthy replica as failed: All needs all three, and the transport admits two.
+#[test]
+fn checkpoint_fanout_wider_than_transport_admission_still_reaches_every_healthy_replica() {
+    for mode in ["full", "striped", "striped-on-quorum"] {
+        let mut peers = IDS.map(Replica::start);
+        let client = runtime(1);
+        client.block_on(async {
+            let cx = Cx::current().unwrap(); let transport = transport(&cx, &peers);
+            assert_eq!(transport.max_in_flight(), 2);
+            let (_, encoded, expected, security, replicas) = source(64 * 1024, 0);
+            let mut wide = SymbolDistributor::new(DistributionConfig { consistency: ConsistencyLevel::All,
+                max_concurrent: 3, ack_timeout: Duration::from_secs(25), ..Default::default() });
+            let authority = CheckpointAuthority { expected, snapshot_key: &AuthKey::from_seed(88), manifest_key: &AuthKey::from_seed(99) };
+            let published = match mode {
+                "full" => transport.replicate_checkpoint(&mut wide, &encoded, &replicas, &security,
+                    authority, checkpoint_config()).await,
+                "striped" => transport.replicate_striped_checkpoint(&mut wide, &encoded, &replicas, &security,
+                    authority, checkpoint_config()).await,
+                _ => transport.replicate_striped_checkpoint_on_quorum(&mut wide, &encoded, &replicas, &security,
+                    authority, checkpoint_config()).await,
+            };
+            let result = published.unwrap_or_else(|error| panic!("{mode}: a replica beyond the admission limit must wait for a slot: {error}"));
+            assert_eq!(result.distribution().acks.len(), 3, "{mode}");
+            assert!(result.distribution().failures.is_empty(), "{mode}");
+            assert!(peers.iter().all(|peer| peer.store.stats().batches == 1), "{mode}");
+            assert_eq!(transport.in_flight(), 0);
+        });
+        assert_runtime_drained(client);
+        for peer in &mut peers { peer.stop(); }
+    }
+}
+
 #[derive(Default)]
 struct PublicationGate { open: AtomicBool, changed: Notify }
 impl PublicationGate {

@@ -572,8 +572,12 @@ fn allowed_unranked_reason(name: &str) -> Option<&'static str> {
 }
 
 // The atlas remains thread-local because it is a diagnostic observation log.
-// Held-lock state is task-owned (or thread-owned outside a runtime) below so a
-// Send future can migrate without corrupting the deadlock detector.
+// Movable (Send) guard state is task-owned (or thread-owned outside a runtime)
+// below so a Send future can migrate without corrupting the deadlock detector.
+// Name-tracked guards (`record_acquire*`, ContendedMutex) cannot leave their
+// thread, so they are thread-owned: one Cx may be current on several threads at
+// once (ambient binding), and a lock held by one of them must not appear held
+// by another.
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 thread_local! {
     static ORDER_EDGES: RefCell<BTreeSet<LockOrderEdge>> = const { RefCell::new(BTreeSet::new()) };
@@ -585,8 +589,13 @@ fn current_owner() -> LockOrderOwner {
     if let Some(inner) = crate::cx::Cx::with_current(|cx| Arc::clone(&cx.inner)) {
         LockOrderOwner::Task(inner)
     } else {
-        LockOrderOwner::Thread(std::thread::current().id())
+        thread_owner()
     }
+}
+
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
+fn thread_owner() -> LockOrderOwner {
+    LockOrderOwner::Thread(std::thread::current().id())
 }
 
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
@@ -596,24 +605,28 @@ fn held_locks_by_owner() -> StdMutexGuard<'static, HeldLocksByOwner> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Locks held by this thread plus movable guards held by the current task.
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn current_held_snapshot() -> (BTreeSet<LockRank>, BTreeMap<LockRank, Vec<LockInfo>>) {
-    let owner = current_owner();
+    let thread = thread_owner();
+    let task = current_owner();
     let tracker = held_locks_by_owner();
-    let Some(state) = tracker.get(&owner) else {
-        return (BTreeSet::new(), BTreeMap::new());
-    };
-    let locks = state
-        .locks
-        .iter()
-        .map(|(rank, entries)| {
-            (
-                *rank,
-                entries.iter().map(|entry| entry.info.clone()).collect(),
-            )
-        })
-        .collect();
-    (state.ranks.clone(), locks)
+    let mut ranks = BTreeSet::new();
+    let mut locks: BTreeMap<LockRank, Vec<LockInfo>> = BTreeMap::new();
+    let owners = if task == thread { vec![thread] } else { vec![thread, task] };
+    for owner in owners {
+        let Some(state) = tracker.get(&owner) else {
+            continue;
+        };
+        ranks.extend(state.ranks.iter().copied());
+        for (rank, entries) in &state.locks {
+            locks
+                .entry(*rank)
+                .or_default()
+                .extend(entries.iter().map(|entry| entry.info.clone()));
+        }
+    }
+    (ranks, locks)
 }
 
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
@@ -624,8 +637,12 @@ fn next_acquisition_id() -> u64 {
 }
 
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
-fn insert_tracked_lock(lock_name: &str, rank: LockRank, module: LockModule) -> LockOrderToken {
-    let owner = current_owner();
+fn insert_tracked_lock(
+    owner: LockOrderOwner,
+    lock_name: &str,
+    rank: LockRank,
+    module: LockModule,
+) -> LockOrderToken {
     let acquisition_id = next_acquisition_id();
     let mut tracker = held_locks_by_owner();
     let state = tracker.entry(owner.clone()).or_default();
@@ -676,7 +693,7 @@ fn remove_tracked_lock(token: LockOrderToken) {
 
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn remove_current_matching_lock(lock_name: &str, rank: LockRank, module: LockModule) {
-    let owner = current_owner();
+    let owner = thread_owner();
     let mut tracker = held_locks_by_owner();
     let remove_owner = if let Some(state) = tracker.get_mut(&owner) {
         if let Some(entries) = state.locks.get_mut(&rank) {
@@ -908,7 +925,8 @@ fn emit_lock_order_violation(
 pub fn record_acquire(lock_name: &str, rank: LockRank) {
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
-        let _ = insert_tracked_lock(lock_name, rank, LockModule::from_name(lock_name));
+        let module = LockModule::from_name(lock_name);
+        let _ = insert_tracked_lock(thread_owner(), lock_name, rank, module);
     }
 
     #[cfg(not(debug_assertions))]
@@ -923,7 +941,7 @@ pub fn record_acquire(lock_name: &str, rank: LockRank) {
 pub fn record_acquire_with_module(lock_name: &str, rank: LockRank, module: LockModule) {
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
-        let _ = insert_tracked_lock(lock_name, rank, module);
+        let _ = insert_tracked_lock(thread_owner(), lock_name, rank, module);
     }
 
     #[cfg(not(debug_assertions))]
@@ -971,7 +989,9 @@ pub fn record_release_with_module(lock_name: &str, rank: LockRank, module: LockM
 pub(crate) fn record_guard_acquire(lock_name: &str, rank: Option<LockRank>) -> GuardLockOrder {
     #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
-        rank.map(|rank| insert_tracked_lock(lock_name, rank, LockModule::from_name(lock_name)))
+        rank.map(|rank| {
+            insert_tracked_lock(current_owner(), lock_name, rank, LockModule::from_name(lock_name))
+        })
     }
 
     #[cfg(not(any(debug_assertions, feature = "lock-metrics")))]
@@ -1023,7 +1043,10 @@ pub fn current_held_locks() -> BTreeMap<LockRank, Vec<LockInfo>> {
 #[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[allow(dead_code)]
 pub fn clear_held_locks() {
-    held_locks_by_owner().remove(&current_owner());
+    let mut tracker = held_locks_by_owner();
+    tracker.remove(&thread_owner());
+    tracker.remove(&current_owner());
+    drop(tracker);
     clear_lock_order_atlas();
 }
 
@@ -1663,6 +1686,65 @@ mod tests {
             clear_held_locks();
         });
         worker.join().expect("migration worker should complete");
+    }
+
+    /// One Cx can be current on two threads at once (a borrowed future polled
+    /// under its owner's Cx elsewhere). A ContendedMutex guard never leaves its
+    /// thread, so a lock held on one of them is not held on the other.
+    /// ThreeLaneWorker::execute stores a polled task back with its Cx still
+    /// current; this was a false ASUP-E205 "tasks while holding Obligations"
+    /// on a runtime worker.
+    #[test]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
+    fn a_thread_bound_lock_is_not_held_by_another_thread_sharing_the_cx() {
+        let cx = crate::Cx::for_testing();
+        let obligations = Arc::new(crate::sync::ContendedMutex::new("obligations", ()));
+        let tasks = crate::sync::ContendedMutex::new("tasks", ());
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let cx = cx.clone();
+            let obligations = Arc::clone(&obligations);
+            std::thread::spawn(move || {
+                let _current = crate::Cx::set_current(Some(cx));
+                let guard = obligations.lock().expect("obligations lock");
+                held_tx.send(()).expect("signal held");
+                done_rx.recv().expect("await the other thread");
+                assert_eq!(
+                    current_held_ranks(),
+                    vec![LockRank::Obligations],
+                    "the holding thread keeps its own view"
+                );
+                drop(guard);
+                assert!(current_held_ranks().is_empty());
+            })
+        };
+        held_rx.recv().expect("holder acquired obligations");
+        let acquired = {
+            let _current = crate::Cx::set_current(Some(cx));
+            let empty = current_held_ranks().is_empty();
+            let lock = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(tasks.lock().expect("tasks lock"));
+            }));
+            (empty, lock.is_ok())
+        };
+        done_tx.send(()).expect("release the holder");
+        holder.join().expect("holder thread");
+        assert_eq!(
+            acquired,
+            (true, true),
+            "another thread's lock is not held here, so acquiring tasks is no inversion"
+        );
+
+        // A real inversion on one thread still panics, with or without a Cx.
+        let _current = crate::Cx::set_current(Some(crate::Cx::for_testing()));
+        let guard = obligations.lock().expect("obligations lock");
+        let inversion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(tasks.lock().expect("tasks lock"));
+        }));
+        drop(guard);
+        assert!(inversion.is_err(), "tasks after obligations on one thread is an inversion");
+        assert!(current_held_ranks().is_empty());
     }
 
     #[test]
