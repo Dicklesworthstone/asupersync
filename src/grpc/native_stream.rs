@@ -259,6 +259,11 @@ impl Keepalive {
         }
     }
 
+    /// A PING is on the wire and its acknowledgement has not been read yet.
+    fn awaiting_ack(&self) -> bool {
+        matches!(self.state, ProbeState::AwaitingAck(_))
+    }
+
     fn take_probe(&mut self) -> Option<Frame> {
         if let ProbeState::Queued(data) = self.state {
             self.state = ProbeState::AwaitingAck(data);

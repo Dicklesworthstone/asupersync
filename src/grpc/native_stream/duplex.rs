@@ -321,6 +321,16 @@ where
                             .expect("live duplex connection")
                             .has_pending_frames_for_stream(inner.stream_id)
                         {
+                            // A keepalive ACK arrives on the read side only. While an
+                            // upload keeps flushing within its window, read what is
+                            // already available before publishing the send boundary,
+                            // or a healthy peer's ACK stays unread until the probe
+                            // deadline fails the call (br-asupersync-ymueix).
+                            if inner.keepalive.as_ref().is_some_and(Keepalive::awaiting_ack)
+                                && let Poll::Ready(Err(error)) = inner.poll_received(task)
+                            {
+                                return Poll::Ready(Some(Err(inner.finish(error))));
+                            }
                             self.request_pending = false;
                             inner.ready_messages += 1;
                             return Poll::Ready(Some(Ok(NativeDuplexEvent::RequestFlushed)));

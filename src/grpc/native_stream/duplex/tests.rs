@@ -433,7 +433,7 @@ mod keepalive {
     use crate::runtime::RootDrainOutcome;
 
     #[derive(Clone, Copy, Debug)]
-    enum Mode { Ack, Silent, WrongAck, Cancel }
+    enum Mode { Ack, Silent, WrongAck, Cancel, SlowUpload }
 
     fn write_ping(socket: &mut std::net::TcpStream, ping: PingFrame) {
         let mut encoded = BytesMut::new();
@@ -451,7 +451,7 @@ mod keepalive {
         mode: Mode,
         watch: bool,
         witnessed: mpsc::Receiver<Cx>,
-    ) -> (SocketAddr, std::thread::JoinHandle<(usize, usize)>) {
+    ) -> (SocketAddr, std::thread::JoinHandle<(usize, usize, usize)>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -482,13 +482,14 @@ mod keepalive {
             let mut received_data = false;
             let mut probes = 0;
             let mut peer_acks = 0;
+            let mut uploads = 0;
             let mut previous_probe = None;
             loop {
                 let mut bytes = [0; FRAME_BYTES];
                 let read = socket.read(&mut bytes).expect("keepalive peer read or retirement EOF");
                 if read == 0 {
                     assert!(received_data && body.is_empty());
-                    return (probes, peer_acks);
+                    return (probes, peer_acks, uploads);
                 }
                 input.extend_from_slice(&bytes[..read]);
                 while let Some(frame) = frames.decode(&mut input).unwrap() {
@@ -520,6 +521,9 @@ mod keepalive {
                                     reply(&mut connection, &mut codec, b"noise");
                                 }
                                 Mode::Silent => {}
+                                Mode::SlowUpload => {
+                                    write_ping(&mut socket, PingFrame::ack(ping.opaque_data));
+                                }
                                 Mode::Cancel => {
                                     let owner = witnessed.recv_timeout(LIMIT)
                                         .expect("actual parked native owner witness");
@@ -540,14 +544,23 @@ mod keepalive {
                         Some(ReceivedFrame::Data { data, end_stream, .. }) => {
                             body.extend_from_slice(&data);
                             while let Some(message) = codec.decode_message(&mut body).unwrap() {
-                                assert!(!received_data, "request message is sent exactly once");
                                 assert_eq!(message.as_ref(), b"upload");
+                                if matches!(mode, Mode::SlowUpload) {
+                                    // Count only: no response DATA gives the
+                                    // client a reason to read.
+                                    uploads += 1;
+                                    received_data = true;
+                                    continue;
+                                }
+                                assert!(!received_data, "request message is sent exactly once");
                                 received_data = true;
                                 reply(&mut connection, &mut codec, b"echo");
                             }
                             if end_stream && !watch {
-                                assert!(matches!(mode, Mode::Ack));
-                                assert_eq!(probes, 2);
+                                if !matches!(mode, Mode::SlowUpload) {
+                                    assert!(matches!(mode, Mode::Ack));
+                                    assert_eq!(probes, 2);
+                                }
                                 terminal(&mut connection);
                             }
                         }
@@ -663,8 +676,9 @@ mod keepalive {
                 assert!(status.message().contains("keepalive"));
             }
             Mode::Cancel => assert_eq!(result.unwrap_err().code(), Code::Cancelled),
+            Mode::SlowUpload => unreachable!("slow uploads run through slow_upload"),
         }
-        let (probes, peer_acks) = peer.join().expect("peer observed transport retirement EOF");
+        let (probes, peer_acks, _) = peer.join().expect("peer observed transport retirement EOF");
         assert_eq!(probes, if matches!(mode, Mode::Ack) { 2 } else { 1 });
         assert_eq!(peer_acks, usize::from(matches!(mode, Mode::Ack | Mode::WrongAck)));
         let report = runtime.shutdown_drained(LIMIT);
@@ -675,10 +689,72 @@ mod keepalive {
         assert!(runtime.shutdown_timeout(LIMIT));
     }
 
+    /// A healthy peer acknowledges every probe, but a slow upload keeps
+    /// flushing far inside its send window, so the owner only ever published
+    /// send boundaries and never read the acknowledgement. The call must
+    /// outlive several interval + timeout periods instead of failing with a
+    /// false keepalive UNAVAILABLE (br-asupersync-ymueix).
+    fn slow_upload(workers: usize) {
+        const UPLOADS: usize = 40;
+        let (_witness, witnessed) = mpsc::channel();
+        let (address, peer) = heartbeat_peer(Mode::SlowUpload, false, witnessed);
+        let runtime = if workers == 1 { RuntimeBuilder::current_thread() }
+            else { RuntimeBuilder::new().worker_threads(workers) }.build().unwrap();
+        let (result, sent) = runtime.block_on(runtime.handle().spawn_checked(async move {
+            let cx = Cx::current().unwrap();
+            let channel = Channel::builder(format!("http://{address}"))
+                .keepalive_interval(Duration::from_millis(100))
+                .keepalive_timeout(Duration::from_millis(300))
+                .connect_timeout(LIMIT)
+                .connect().await.unwrap();
+            let mut stream = GrpcClient::new(channel).into_native_duplex(
+                &cx, "/svc/Upload", Request::new(()),
+            ).await.unwrap();
+            let mut sent = 0;
+            let mut closed = false;
+            let result = loop {
+                match stream.next_event().await {
+                    Ok(Some(NativeDuplexEvent::RequestFlushed)) if sent < UPLOADS => {
+                        if sent > 0 {
+                            crate::time::sleep(cx.now(), Duration::from_millis(25)).await;
+                        }
+                        stream.queue_message(&Bytes::from_static(b"upload")).unwrap();
+                        sent += 1;
+                    }
+                    Ok(Some(NativeDuplexEvent::RequestFlushed)) => {
+                        if !closed {
+                            stream.close_requests().unwrap();
+                            closed = true;
+                        }
+                    }
+                    Ok(Some(NativeDuplexEvent::Message(message))) => {
+                        panic!("the slow-upload peer sends no messages: {message:?}");
+                    }
+                    Ok(None) => break Ok(()),
+                    Err(status) => break Err(status),
+                }
+            };
+            (result, sent)
+        })).expect("slow upload owner completes");
+        let (probes, _, uploads) = peer.join().expect("slow-upload peer observed retirement EOF");
+        let outcome = format!("workers={workers} sent={sent} uploads={uploads} probes={probes} result={:?}",
+            result.as_ref().map_err(Status::code));
+        assert!(result.is_ok(), "a healthy acknowledging peer must not fail the upload: {outcome}");
+        assert_eq!((sent, uploads), (UPLOADS, UPLOADS), "{outcome}");
+        assert!(probes >= 2, "the upload outlived several acknowledged probes: {outcome}");
+        let report = runtime.shutdown_drained(LIMIT);
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+        assert!(runtime.shutdown_timeout(LIMIT));
+    }
+
     fn checked(workers: usize, mode: Mode, watch: bool) {
         let (done, finished) = mpsc::channel();
         let thread = std::thread::spawn(move || {
-            scenario(workers, mode, watch);
+            if matches!(mode, Mode::SlowUpload) {
+                slow_upload(workers);
+            } else {
+                scenario(workers, mode, watch);
+            }
             done.send(()).unwrap();
         });
         finished.recv_timeout(Duration::from_secs(20)).expect("keepalive native wall watchdog");
@@ -698,6 +774,13 @@ mod keepalive {
             for mode in [Mode::Silent, Mode::WrongAck, Mode::Cancel] {
                 checked(workers, mode, false);
             }
+        }
+    }
+
+    #[test]
+    fn native_channel_keepalive_reads_acks_while_a_slow_upload_keeps_flushing() {
+        for workers in [1, 2] {
+            checked(workers, Mode::SlowUpload, false);
         }
     }
 }
