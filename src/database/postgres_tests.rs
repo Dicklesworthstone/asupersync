@@ -2425,7 +2425,7 @@ mod tests {
 
         run_copy_out_test(async {
             for stage in ["startup", "startup_error", "stream", "stream_error"] {
-                for message_type in [b'H', b'd', b'N', b'S', b'A', b'E', b'C', b'Z'] {
+                for message_type in *b"HdNSAECZ" {
                     let (mut conn, mut peer) = make_test_connection_with_peer();
                     let cx = Cx::for_testing();
                     let limit = 64usize;
