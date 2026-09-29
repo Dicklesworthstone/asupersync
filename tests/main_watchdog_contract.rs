@@ -804,6 +804,105 @@ fn manifest_or_top_level_test_changes_run_the_registration_contract() {
     );
 }
 
+/// The rotation (execution debt, br-asupersync-kh02d2) walks every default-feature
+/// integration target in turn, gated and non-test entries aside. A decisive run
+/// advances the cursor and an admission refusal does not. A new red is filed once,
+/// a failed filing is retried by later runs, a red that persists gets no second
+/// bead, and a later green run heals it.
+#[test]
+fn rotation_walks_default_targets_and_files_each_new_red_once() {
+    let ok = |t: &str| {
+        format!(
+            "     Running tests/{t}.rs (x)\nrunning 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        )
+    };
+    let red = |t: &str| {
+        format!(
+            "     Running tests/{t}.rs (x)\nrunning 1 test\ntest pins ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        )
+    };
+    let fin = |code: u32| format!("  Remote command finished: exit={code} in 1ms\n");
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"rotation": [{
+            "root_paths": [
+                "tests/alpha.rs", "tests/beta.rs", "tests/gamma.rs", "tests/gated.rs",
+                "tests/common", "tests/renamed_file.rs",
+            ],
+            "registry": {
+                "tests/gated.rs": {"name": "gated", "features": ["cli"]},
+                "tests/renamed_file.rs": {"name": "delta", "features": []},
+            },
+            "count": 2,
+            "runs": [
+                {"sha": "a1", "log": ok("alpha") + &red("beta") + &fin(101), "client_exit": 101, "file_as": null},
+                {"sha": "a2", "log": "", "client_exit": 103},
+                {"sha": "a3", "log": ok("delta") + &ok("gamma") + &fin(0), "file_as": "asupersync-rot1"},
+                {"sha": "a4", "log": ok("alpha") + &red("beta") + &fin(101), "client_exit": 101, "file_as": "asupersync-dup"},
+                {"sha": "a5", "log": ok("delta") + &ok("gamma") + &fin(0)},
+                {"sha": "a6", "log": ok("alpha") + &ok("beta") + &fin(0)},
+            ],
+        }]},
+    }));
+    let rotation = &probed["probe_results"]["rotation"][0];
+    assert_eq!(
+        rotation["names"],
+        json!(["alpha", "beta", "delta", "gamma"]),
+        "{probed:#}"
+    );
+    let rounds = rotation["rounds"].as_array().expect("rounds");
+    let summary: Vec<Value> = rounds
+        .iter()
+        .map(|r| {
+            json!([
+                r["picked"],
+                r["verdict"],
+                r["cursor"],
+                r["new_red"],
+                r["healed"],
+                r["filed"],
+                r["pending"]
+            ])
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            json!([["alpha", "beta"], "red", 2, ["beta"], [], [], 1]),
+            json!([["delta", "gamma"], "deferred", 2, [], [], [], 1]),
+            json!([
+                ["delta", "gamma"],
+                "green",
+                0,
+                [],
+                [],
+                ["asupersync-rot1"],
+                0
+            ]),
+            json!([["alpha", "beta"], "red", 2, [], [], [], 0]),
+            json!([["delta", "gamma"], "green", 0, [], [], [], 0]),
+            json!([["alpha", "beta"], "green", 2, [], ["beta"], [], 0]),
+        ],
+        "{probed:#}"
+    );
+    assert_eq!(
+        rounds[3]["results"]["beta"],
+        json!(["red", "asupersync-rot1"])
+    );
+    let filings = rotation["filings"].as_array().expect("filings");
+    assert_eq!(
+        filings.len(),
+        3,
+        "one payload, two failed attempts, then filed: {probed:#}"
+    );
+    for filing in filings {
+        assert_eq!(filing["title"], "[main-watchdog] ROTATION RED at a1: beta");
+        assert_eq!(filing["priority"], 1);
+        assert_eq!(filing["new_targets"], json!(["beta::pins"]));
+    }
+}
+
 fn hedge_log(with_newer: bool) -> String {
     let mut log = String::from(
         "     Running tests/hedge_native.rs (x)\nrunning 2 tests\ntest cancel_test ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s\n",

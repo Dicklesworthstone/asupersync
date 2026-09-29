@@ -301,6 +301,30 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 | `src/net/atp/sdk/bonded.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/transport_common/delta.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/transport_rq/transport_rq_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native/checkpoint.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native/upload.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native/writer.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_auth.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/commit.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/commit/file.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/reader.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/finalization.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/finalization/file.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/journal.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/journal/file.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/receiver_journal.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/receiver_journal/file.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/receiver_journal/shared.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/restoration.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/restoration_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/revocation.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/service.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/resume/service_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/service.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/sdk/native_live/writer.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 
 ## CLI Integration
 
@@ -331,10 +355,10 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 
 ### Compliance Tracking
 
-Total Modules: 227
+Total Modules: 255
 - TESTED: 0 (0%)
 - PARTIAL: 0 (0%) 
-- PLANNED: 227 (100%)
+- PLANNED: 255 (100%)
 - MISSING: 0 (0%)
 
 **Critical Path Modules** (must be TESTED before any release):

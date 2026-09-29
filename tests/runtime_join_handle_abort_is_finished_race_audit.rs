@@ -256,7 +256,10 @@ fn task_handle_abort_defers_wakers_until_runtime_cancel_lane_publication() {
 fn is_finished_checks_terminal_consumed_or_receiver_ready_or_closed() {
     // Pin (link 2): is_finished checks three conditions
     // — terminal_consumed, receiver.is_ready(),
-    // receiver.is_closed(). All three are needed.
+    // receiver.is_closed(). All three are needed. Since
+    // 929295c1f a buffered terminal also waits for the
+    // record's retirement barrier, so a caller cannot act on
+    // completion before retirement.
     let source = read("src/runtime/task_handle.rs");
 
     let fn_marker = "pub fn is_finished(&self) -> bool {";
@@ -265,10 +268,15 @@ fn is_finished_checks_terminal_consumed_or_receiver_ready_or_closed() {
         .find("\n    }\n")
         .expect("is_finished close");
     let body = &source[start..start + body_end];
+    let compact: String = body
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .flat_map(str::split_whitespace)
+        .collect();
 
     assert!(
-        body.contains(
-            "self.terminal_consumed || self.receiver.is_ready() || self.receiver.is_closed()"
+        compact.contains(
+            "self.terminal_consumed||(self.barrier.is_open()&&(self.receiver.is_ready()||self.receiver.is_closed()))"
         ),
         "REGRESSION: is_finished body changed. Either it \
          now over-reports finished (e.g., returns true on \

@@ -1144,7 +1144,7 @@ fn grpc_verify_036_channel_builder() {
                 );
                 assert_eq!(
                     message,
-                    "gRPC TLS is available only on the native localhost transport; \
+                    "gRPC TLS is available only on the native transport; \
                      deterministic loopback channels do not negotiate TLS"
                 );
             }
