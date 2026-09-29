@@ -325,11 +325,23 @@ where
                             // upload keeps flushing within its window, read what is
                             // already available before publishing the send boundary,
                             // or a healthy peer's ACK stays unread until the probe
-                            // deadline fails the call (br-asupersync-ymueix).
-                            if inner.keepalive.as_ref().is_some_and(Keepalive::awaiting_ack)
-                                && let Poll::Ready(Err(error)) = inner.poll_received(task)
-                            {
-                                return Poll::Ready(Some(Err(inner.finish(error))));
+                            // deadline fails the call (br-asupersync-ymueix). Drain it
+                            // on every flush, not one frame per probe: response frames
+                            // queued between probes would otherwise hold the next
+                            // ACK past its deadline (br-asupersync-sm29gx).
+                            if inner.keepalive.is_some() {
+                                for _ in 0..POLL_STEPS {
+                                    if inner.response.ended {
+                                        break;
+                                    }
+                                    match inner.poll_received(task) {
+                                        Poll::Ready(Ok(())) => {}
+                                        Poll::Ready(Err(error)) => {
+                                            return Poll::Ready(Some(Err(inner.finish(error))));
+                                        }
+                                        Poll::Pending => break,
+                                    }
+                                }
                             }
                             self.request_pending = false;
                             inner.ready_messages += 1;
