@@ -6585,6 +6585,10 @@ async fn accept(
     let accept_started = Instant::now();
     let mut flights = 0usize;
     let mut last_early_data_resend: Option<Instant> = None;
+    // A stale-key long-header packet is unauthenticated: it re-offers the
+    // flight at most once per recovery PTO, so a spoofer cannot amplify every
+    // datagram or burn the flight budget.
+    let mut stale_resend_at = None;
 
     while flights < HANDSHAKE_MAX_FLIGHTS {
         if driver.is_complete() {
@@ -6626,7 +6630,9 @@ async fn accept(
                 let client_cid = match driver.recv_handshake_packet(&packet.data) {
                     Ok(client_cid) => client_cid,
                     Err(err) if is_stale_handshake_packet_error(&err) => {
-                        if !last_flight.is_empty() {
+                        let now = cx.now();
+                        if !last_flight.is_empty() && stale_resend_at.is_none_or(|at| now >= at) {
+                            stale_resend_at = Some(now + HANDSHAKE_RECOVERY_RESEND_PTO);
                             flights = flights.saturating_add(1);
                             endpoint
                                 .send_batch(cx, &last_flight)

@@ -892,6 +892,87 @@ fn real_tls13_handshake_survives_dropped_initial_flights() {
     });
 }
 
+/// A spoofer of the server address sends Handshake-type packets before the
+/// client has Handshake keys. They cannot be authenticated, so together they
+/// may prompt at most one extra flight per PTO, not one per datagram
+/// (asupersync-18hhdp).
+#[test]
+fn spoofed_stale_key_datagrams_do_not_amplify_client_flights() {
+    let client_scid_bytes = [0x11, 0x22, 0x33, 0x44];
+    let raw = UdpSocket::bind("127.0.0.1:0").expect("bind raw server");
+    raw.set_read_timeout(Some(Duration::from_millis(50)))
+        .expect("raw server read timeout");
+    let server_addr = raw.local_addr().expect("raw server addr");
+    let spoofer = thread::spawn(move || {
+        let mut buffer = [0u8; 16_384];
+        let started = Instant::now();
+        let client_addr = loop {
+            match raw.recv_from(&mut buffer) {
+                Ok((_, addr)) => break addr,
+                Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    assert!(started.elapsed() < Duration::from_secs(5), "no ClientHello");
+                }
+                Err(error) => panic!("raw server receive failed: {error}"),
+            }
+        };
+        // Long header, Handshake type, version 1, DCID = client SCID, empty
+        // SCID, Length 0: 16 bytes for which the client has no keys yet.
+        let mut stale = vec![0xe0, 0, 0, 0, 1, client_scid_bytes.len() as u8];
+        stale.extend_from_slice(&client_scid_bytes);
+        stale.extend_from_slice(&[0, 0]);
+        for _ in 0..64 {
+            raw.send_to(&stale, client_addr).expect("send spoofed datagram");
+        }
+        // Count client datagrams well inside one 1.5 s handshake PTO.
+        let burst_sent = Instant::now();
+        let mut replies = 0usize;
+        while burst_sent.elapsed() < Duration::from_millis(800) {
+            match raw.recv_from(&mut buffer) {
+                Ok(_) => replies += 1,
+                Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(error) => panic!("raw server receive failed: {error}"),
+            }
+        }
+        replies
+    });
+    block_on(async {
+        let cx = Cx::for_testing();
+        let udp_config = QuicUdpEndpointConfig {
+            max_packet_size: 16384,
+            ..QuicUdpEndpointConfig::default()
+        };
+        let mut client_ep = QuicUdpEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), udp_config)
+            .await
+            .expect("bind client UDP");
+        let client_cfg = client_config(
+            vec![parse_one_cert(CA_CERT_PEM)],
+            vec![ATP_QUIC_ALPN.to_vec()],
+        )
+        .expect("client config");
+        let mut client = QuicHandshakeDriver::client(
+            client_cfg,
+            ServerName::try_from("localhost").expect("server name"),
+            b"client-transport-params".to_vec(),
+        )
+        .expect("client driver");
+        let dcid =
+            ConnectionId::new(&[0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18]).expect("dcid");
+        let client_scid = ConnectionId::new(&client_scid_bytes).expect("client scid");
+        let handshake = timeout(
+            wall_now(),
+            Duration::from_millis(1200),
+            client_handshake_over_udp(&cx, &mut client_ep, server_addr, &mut client, dcid, client_scid),
+        )
+        .await;
+        assert!(handshake.is_err(), "no server ever answers this client");
+    });
+    let replies = spoofer.join().expect("spoofer thread");
+    assert!(
+        replies <= 2,
+        "64 spoofed stale-key datagrams drew {replies} client datagrams inside one PTO"
+    );
+}
+
 /// Advance a freshly-created connection's TLS level machine to the
 /// application-data (Established) state. The actual AEAD keys live in the
 /// installed `AtpPacketProtection`; this only moves the level/key-phase state.
