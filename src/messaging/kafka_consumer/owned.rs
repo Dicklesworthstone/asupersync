@@ -446,7 +446,13 @@ async fn acquire_on_lifetime(
         let mut state = lifetime.state.lock();
         if acquisition.cancelled {
             if state.phase == Phase::Finished {
-                return Poll::Ready(Err(KafkaError::Cancelled));
+                // After construction, the worker's cleanup result is this
+                // acquisition's only receipt: a failure there outranks the
+                // cancellation that requested it.
+                return Poll::Ready(match state.finished.take() {
+                    Some(Err(error)) => Err(error),
+                    _ => Err(KafkaError::Cancelled),
+                });
             }
         } else if let Some(result) = state.acquired.take() {
             return Poll::Ready(result.map(|consumer| {
@@ -687,7 +693,7 @@ mod tests {
 
     #[test]
     fn scoped_kafka_cancelled_unclaimed_publication_waits_for_native_destruction() {
-        for multithread in [false, true] {
+        for (multithread, fail_cleanup) in [(false, false), (true, false), (false, true), (true, true)] {
             bounded(move || {
                 let builder = if multithread {
                     RuntimeBuilder::new().worker_threads(2)
@@ -728,8 +734,19 @@ mod tests {
                     assert!(counters.native_drop_thread.lock().is_none());
                     let mut sibling = control.spawn(|_| async { 41 }).unwrap();
                     assert_eq!(sibling.join(&control).await.unwrap(), 41);
-                    allow_cleanup.send(()).unwrap();
-                    assert!(matches!(acquiring.await, Err(KafkaError::Cancelled)));
+                    let result = if fail_cleanup {
+                        // The worker's cleanup then panics: that failure, not
+                        // the cancellation, is the acquisition's receipt.
+                        drop(allow_cleanup);
+                        let result = acquiring.await;
+                        assert!(matches!(&result, Err(KafkaError::Config(message)) if message.contains("panicked")),
+                            "cleanup failure must not read as a plain cancellation: {result:?}");
+                        result
+                    } else {
+                        allow_cleanup.send(()).unwrap();
+                        acquiring.await
+                    };
+                    assert!(fail_cleanup || matches!(result, Err(KafkaError::Cancelled)));
                     assert!(caller.inner.read().cancel_waker_registrations.is_empty());
                     assert!(native.upgrade().is_none());
                     let destruction = counters.native_drop_thread.lock().clone().unwrap();
