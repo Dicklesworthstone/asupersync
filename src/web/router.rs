@@ -1961,6 +1961,25 @@ impl NativeH3Router {
         self.cancel_dispatch_with_optional_reason(cx, session, connection, token, None)
     }
 
+    /// Refuses an admitted dispatch before any handler has run, resetting its
+    /// stream with the code for `reason`. Load and lifecycle reasons such as
+    /// [`NativeH3RouterRefusal::TooManyConcurrentRequests`] and
+    /// [`NativeH3RouterRefusal::Draining`] reset with H3_REQUEST_REJECTED, which
+    /// tells the client a retry is safe (RFC 9114 section 4.1.1). Ownership
+    /// checks and stream cleanup are identical to [`Self::cancel_dispatch_with_cx`];
+    /// a dispatch that already produced a response is cancelled as that method
+    /// would cancel it, since its handler has run.
+    pub fn refuse_dispatch_with_cx(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        token: &NativeH3RouterDispatchToken,
+        reason: NativeH3RouterRefusal,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        self.terminate_dispatch(cx, session, connection, token, None, reason)
+    }
+
     /// Cancels a dispatch while retaining the request owner's cancellation cause.
     ///
     /// Produced responses observe `ParentCancelled` with `cause` attached, so a
@@ -1986,6 +2005,27 @@ impl NativeH3Router {
         connection: &mut QuicConnection,
         token: &NativeH3RouterDispatchToken,
         cause: Option<CancelReason>,
+    ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
+        self.terminate_dispatch(
+            cx,
+            session,
+            connection,
+            token,
+            cause,
+            NativeH3RouterRefusal::DispatchCancelled,
+        )
+    }
+
+    /// Terminates an in-flight dispatch. `refusal` is the reason, and so the
+    /// reset code, used when no response has been produced yet.
+    fn terminate_dispatch(
+        &mut self,
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+        token: &NativeH3RouterDispatchToken,
+        cause: Option<CancelReason>,
+        refusal: NativeH3RouterRefusal,
     ) -> Result<NativeH3RouterEvent, crate::http::h3::NativeH3SessionError> {
         if !Arc::ptr_eq(&self.identity, &token.bridge_identity) {
             return Err(crate::http::h3::NativeH3SessionError::InvalidState(
@@ -2021,7 +2061,7 @@ impl NativeH3Router {
             self.release_in_flight(stream_id);
             return Ok(NativeH3RouterEvent::RequestRefused {
                 stream_id,
-                reason: NativeH3RouterRefusal::DispatchCancelled,
+                reason: refusal,
             });
         }
         if let Some(state) = self.produced.get_mut(&stream_id) {
@@ -2038,14 +2078,7 @@ impl NativeH3Router {
                 reason: NativeH3RouterRefusal::DispatchCancelled,
             });
         }
-        let event = self.refuse_request(
-            cx,
-            session,
-            connection,
-            stream_id,
-            NativeH3RouterRefusal::DispatchCancelled,
-            false,
-        )?;
+        let event = self.refuse_request(cx, session, connection, stream_id, refusal, false)?;
         self.release_in_flight(stream_id);
         Ok(event)
     }

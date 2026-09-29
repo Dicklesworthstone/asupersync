@@ -763,6 +763,96 @@ mod native_h3_listener_live {
             }
         }
 
+        /// A request that arrives while `max_concurrent_requests` handlers run
+        /// never reaches a handler, so its stream is reset with
+        /// H3_REQUEST_REJECTED and the client knows a retry is safe (RFC 9114
+        /// section 4.1.1). The running request is not disturbed.
+        #[test]
+        fn authenticated_listener_concurrency_cap_rejects_the_excess_request() {
+            for workers in [1, 2] {
+                run(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let (parked_tx, mut parked_rx) = asupersync::channel::oneshot::channel();
+                    let parked_slot = Arc::new(Mutex::new(Some(parked_tx)));
+                    let (release_tx, release_rx) = asupersync::channel::oneshot::channel::<()>();
+                    let release_slot = Arc::new(Mutex::new(Some(release_rx)));
+                    let router = Router::new().route(
+                        "/park",
+                        post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                            move |request_cx: Cx, body: StreamingRawBody| {
+                                let parked = parked_slot.lock().unwrap().take();
+                                let release = release_slot.lock().unwrap().take();
+                                async move {
+                                    let _open_upload = body;
+                                    if let Some(signal) = parked {
+                                        signal.send(&request_cx, request_cx.clone()).unwrap();
+                                    }
+                                    if let Some(mut release) = release {
+                                        release.recv(&request_cx).await.unwrap();
+                                    }
+                                    Response::new(StatusCode::OK, "parked request completed")
+                                }
+                            },
+                        )),
+                    );
+                    let mut listener_config = config(8);
+                    listener_config.max_concurrent_requests = 1;
+                    let listener = bind(&cx, router, listener_config).await;
+                    let address = listener.local_addr();
+                    let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                    let serving = listener.serve_with_shutdown(&cx, async {
+                        shutdown_rx.recv(&cx).await.unwrap();
+                    });
+                    let client = async {
+                        let (mut owner, mut session) = connect(&cx, address, 74).await;
+                        let parked = open_upload(&cx, &mut owner, "/park", None).await;
+                        let request_cx: Cx = parked_rx.recv(&cx).await.unwrap();
+                        let excess = open_upload(&cx, &mut owner, "/park", None).await;
+                        receive_cancelled(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            excess,
+                            asupersync::http::h3_quic::H3_REQUEST_REJECTED,
+                        )
+                        .await;
+                        assert!(!request_cx.is_cancel_requested());
+                        owner
+                            .connection_mut()
+                            .write_stream(&cx, parked, Bytes::new(), true)
+                            .unwrap();
+                        owner.flush(&cx).await.unwrap();
+                        release_tx.send(&cx, ()).unwrap();
+                        receive_response(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            parked,
+                            &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                            b"parked request completed",
+                        )
+                        .await;
+                        shutdown_tx.send(&cx, ()).unwrap();
+                        acknowledge_shutdown_goaway(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            excess.0 + 4,
+                            None,
+                        )
+                        .await;
+                    };
+                    let (report, ()) = zip(serving, client).await;
+                    let report = report.unwrap();
+                    assert_eq!(report.accepted_connections, 1);
+                    assert_eq!(report.completed_requests, 1);
+                    assert_eq!(report.cancelled_requests, 0);
+                    assert_eq!(report.refused_requests, 1);
+                    assert_eq!(report.failed_connections, 0);
+                });
+            }
+        }
+
         #[test]
         fn authenticated_listener_streaming_backpressure_preserves_sibling_and_buffered_resume() {
             run(2, async {

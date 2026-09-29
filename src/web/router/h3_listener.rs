@@ -1928,11 +1928,21 @@ impl ListenerConnection {
                         .remove(&dispatch.stream_id())
                         .map(|(deadline, _)| deadline);
                     if draining || *active >= config.max_concurrent_requests {
-                        self.bridge.cancel_dispatch_with_cx(
+                        // No handler has seen the request, so the client may
+                        // retry it: H3_REQUEST_REJECTED (RFC 9114 section 4.1.1).
+                        let reason = if draining {
+                            NativeH3RouterRefusal::Draining
+                        } else {
+                            NativeH3RouterRefusal::TooManyConcurrentRequests {
+                                limit: config.max_concurrent_requests,
+                            }
+                        };
+                        self.bridge.refuse_dispatch_with_cx(
                             cx,
                             &mut self.session,
                             connection,
                             &dispatch.cancellation_token(),
+                            reason,
                         )?;
                         if config.streaming_request_body_buffer_bytes.is_some() {
                             // HEADERS reserved credit, but the global owner
