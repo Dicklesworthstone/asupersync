@@ -3320,18 +3320,36 @@ impl RedisClient {
     /// NOT updated — the migration is transient). Caps the redirect
     /// chain at `MAX_REDIRECTS = 5` to bound an adversarial cluster's
     /// ability to trap a caller in a loop. (br-asupersync-hzgugy)
+    ///
+    /// The pooled connection is shared with later calls. Commands that open
+    /// connection-scoped protocol state (`MULTI`, `WATCH`, the `SUBSCRIBE`
+    /// family, `MONITOR`, `SYNC`/`PSYNC`, `QUIT`, `CLIENT REPLY`) are refused
+    /// with [`RedisError::Protocol`] before a connection is acquired; use
+    /// [`Self::transaction`], [`Self::session`] or [`Self::pubsub`]. After any
+    /// other state-changing command (`SELECT`, `AUTH`, `HELLO`, `RESET`,
+    /// `READONLY`/`READWRITE`, `ASKING` or a `CLIENT` attribute change) the
+    /// connection is closed instead of being reused.
     pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
+        if opens_connection_protocol_state(args) {
+            return Err(RedisError::Protocol(POOLED_PROTOCOL_STATE_REFUSAL.to_string()));
+        }
+        // A later borrower must never inherit this command's connection state.
+        let reusable = !changes_connection_state(args);
         // First attempt against the pooled conn for the configured node.
         let initial_err = {
             let mut conn = DiscardOnDropGuard::new(self.acquire(cx).await?);
             match conn.exec(cx, args).await {
                 Ok(resp) => {
-                    conn.return_to_pool();
+                    if reusable {
+                        conn.return_to_pool();
+                    }
                     return Ok(resp);
                 }
                 Err(RedisError::Redis(msg)) => {
                     // Server-level error — connection is still healthy.
-                    conn.return_to_pool();
+                    if reusable {
+                        conn.return_to_pool();
+                    }
                     msg
                 }
                 Err(e) => return Err(e),
@@ -3618,6 +3636,7 @@ impl RedisClient {
         Pipeline {
             client: self,
             encoded: Vec::new(),
+            changes_connection_state: false,
         }
     }
 }
@@ -3841,6 +3860,53 @@ fn validate_session_command(args: &[&[u8]]) -> Result<(), RedisError> {
     Ok(())
 }
 
+/// Commands that open connection-scoped protocol state: a transaction, a WATCH
+/// set, subscriber or monitor mode, replication, suppressed replies, or a
+/// server-side close. A pooled one-shot call cannot use that state, and the
+/// next borrower of the connection would inherit it.
+fn opens_connection_protocol_state(args: &[&[u8]]) -> bool {
+    let Some(command) = args.first() else {
+        return false;
+    };
+    let openers = [
+        "MULTI", "WATCH", "SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE", "MONITOR", "SYNC", "PSYNC",
+        "QUIT",
+    ];
+    openers.iter().any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
+        || (command.eq_ignore_ascii_case(b"CLIENT")
+            && args.get(1).is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
+}
+
+/// Commands whose effect outlives their reply on the same connection: the
+/// protocol openers plus database, identity, protocol-version, cluster-routing
+/// and client-attribute changes. A pooled connection that ran one is closed
+/// instead of being handed to the next borrower.
+fn changes_connection_state(args: &[&[u8]]) -> bool {
+    let Some(command) = args.first() else {
+        return false;
+    };
+    if opens_connection_protocol_state(args) {
+        return true;
+    }
+    if command.eq_ignore_ascii_case(b"CLIENT") {
+        // Only subcommands that leave this connection's attributes unchanged
+        // keep it reusable; KILL is excluded because it can target itself.
+        let inspecting = [
+            "ID", "INFO", "LIST", "GETNAME", "GETREDIR", "TRACKINGINFO", "PAUSE", "UNPAUSE",
+            "UNBLOCK", "HELP",
+        ];
+        return !args.get(1).is_some_and(|subcommand| {
+            inspecting.iter().any(|name| subcommand.eq_ignore_ascii_case(name.as_bytes()))
+        });
+    }
+    let changers = ["SELECT", "AUTH", "HELLO", "RESET", "READONLY", "READWRITE", "ASKING"];
+    changers.iter().any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
+}
+
+const POOLED_PROTOCOL_STATE_REFUSAL: &str = "command opens connection-scoped Redis protocol \
+     state that a pooled RedisClient call cannot keep; use RedisClient::transaction, \
+     RedisClient::session or RedisClient::pubsub";
+
 /// The observed result of a session transaction's EXEC exchange.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedisTransactionOutcome {
@@ -3977,6 +4043,7 @@ impl Drop for RedisSessionTransaction<'_> {
 pub struct Pipeline<'a> {
     client: &'a RedisClient,
     encoded: Vec<Vec<u8>>,
+    changes_connection_state: bool,
 }
 
 impl Pipeline<'_> {
@@ -3994,6 +4061,7 @@ impl Pipeline<'_> {
         let mut buf = Vec::new();
         encode_command_into(&mut buf, args);
         self.encoded.push(buf);
+        self.changes_connection_state |= changes_connection_state(args);
         self
     }
 
@@ -4004,7 +4072,9 @@ impl Pipeline<'_> {
     /// blob-error reply becomes `Err(RedisError::Redis(msg))` for that single
     /// command; the loop continues to drain remaining responses so the
     /// wire-protocol framing stays in sync. The connection is returned to the
-    /// pool regardless of how many per-command errors occurred.
+    /// pool regardless of how many per-command errors occurred, unless a
+    /// queued command changed connection-scoped state (see
+    /// [`RedisClient::cmd_bytes`]); that connection is closed instead.
     ///
     /// The outer `Err(...)` is reserved for IO / protocol failures
     /// (write, flush, framing read, EOF) which DO invalidate the
@@ -4042,8 +4112,12 @@ impl Pipeline<'_> {
 
         // Protocol exchange complete — defuse the guard so the connection
         // returns to the pool instead of being discarded. Server error replies
-        // are application-level and do NOT invalidate the connection.
-        conn.return_to_pool();
+        // are application-level and do NOT invalidate the connection. A
+        // pipeline that changed connection state (SELECT, or MULTI without its
+        // EXEC) keeps the guard armed so the next borrower gets a clean one.
+        if !self.changes_connection_state {
+            conn.return_to_pool();
+        }
         Ok(out)
     }
 }
@@ -4056,6 +4130,7 @@ pub struct Transaction {
     conn: Option<PooledResource<RedisConnection>>,
     queued_commands: usize,
     finished: bool,
+    changes_connection_state: bool,
 }
 
 impl Transaction {
@@ -4069,6 +4144,7 @@ impl Transaction {
             conn: Some(conn.defuse()),
             queued_commands: 0,
             finished: false,
+            changes_connection_state: false,
         })
     }
 
@@ -4129,6 +4205,7 @@ impl Transaction {
             Ok(RespValue::SimpleString(s)) if s == "QUEUED" => {
                 self.conn = Some(conn.defuse());
                 self.queued_commands = self.queued_commands.saturating_add(1);
+                self.changes_connection_state |= changes_connection_state(args);
                 Ok(())
             }
             Err(error) => {
@@ -4153,7 +4230,9 @@ impl Transaction {
 
     /// Execute the transaction with `EXEC`.
     ///
-    /// Returns all command replies in queue order.
+    /// Returns all command replies in queue order. If a queued command changed
+    /// connection-scoped state (for example `SELECT`), the connection is closed
+    /// after EXEC instead of returning to the pool.
     pub async fn exec(mut self, cx: &Cx) -> Result<Vec<RespValue>, RedisError> {
         let conn = self.conn.take().ok_or_else(|| {
             RedisError::Protocol("cannot EXEC: transaction already finished".to_string())
@@ -4167,7 +4246,11 @@ impl Transaction {
 
         match resp {
             RespValue::Array(Some(values)) => {
-                conn.return_to_pool();
+                // A queued SELECT, CLIENT or SUBSCRIBE took effect at EXEC;
+                // that connection is closed rather than handed to a borrower.
+                if !self.changes_connection_state {
+                    conn.return_to_pool();
+                }
                 Ok(values)
             }
             RespValue::Array(None) => {
