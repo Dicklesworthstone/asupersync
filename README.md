@@ -453,6 +453,8 @@ P_H0(∃ t : E_t ≥ 1/α) ≤ α
 
 So you can "peek" after every scheduling step and still control type-I error, which is exactly what you want in a deterministic scheduler + oracle setting.
 
+`LabRuntime` feeds the monitor one observation per run that advances the lab (`run_until_quiescent_with_report`); a plain `report()` re-reads the same state and adds no evidence. The rejected invariants are available from `runtime.oracles.eprocess_rejected_invariants()`.
+
 ### Distribution-Free Conformal Calibration for Lab Metrics
 
 For lab metrics that benefit from calibrated prediction sets, Asupersync uses split conformal calibration (`src/lab/conformal.rs`) with finite-sample, distribution-free guarantees (under exchangeability):
@@ -461,11 +463,11 @@ For lab metrics that benefit from calibrated prediction sets, Asupersync uses sp
 P(Y ∈ C(X)) ≥ 1 − α
 ```
 
-This is used to keep alerting and invariant diagnostics robust without baking in fragile distributional assumptions.
+The calibrator is opt-in today: you feed it oracle reports yourself (`ConformalCalibrator::calibrate`, then `predict`). No lab oracle or schedule explorer feeds it yet, so no built-in alert or verdict depends on it (`asupersync-bi2462.150.1` tracks that wire).
 
 ### Explainable Evidence Ledgers (Bayes Factors, Galaxy-Brain Diagnostics)
 
-When a run violates an invariant (or conspicuously does not), Asupersync can produce a structured evidence ledger (`src/lab/oracle/evidence.rs`) using Bayes factors and log-likelihood contributions. This enables agent-friendly debugging: equations, substitutions, and one-line intuitions, so you can see *exactly why* the system believes "task leak" (or "clean close") is happening.
+When a run violates an invariant (or conspicuously does not), Asupersync can produce a structured evidence ledger (`src/lab/oracle/evidence.rs`) using Bayes factors and log-likelihood contributions. This enables agent-friendly debugging: equations, substitutions, and one-line intuitions, so you can see *exactly why* the system believes "task leak" (or "clean close") is happening. Build one on request with `EvidenceLedger::from_report(&report.oracle_report)`; no lab path emits it automatically.
 
 ### Deterministic Algorithms in the Hot Path (Not Just in Tests)
 
@@ -996,6 +998,7 @@ Region memory uses stable handles (`HeapIndex`) with slot index, generation, and
 - Generation increments on slot reuse, so stale handles fail closed and ABA-style reuse bugs are blocked (`src/runtime/region_heap.rs`).
 - Reuse order is deterministic for identical allocation/deallocation sequences, which keeps trace behavior stable across runs (`src/runtime/region_heap.rs`).
 - Heap reclamation is wired to region close/quiescence, not opportunistic frees, and stats track live vs. reclaimed objects for runtime auditing (`src/runtime/region_heap.rs`).
+- There is no public allocation API yet: every region carries a heap and reclaims it on close, but nothing outside the crate's tests allocates in it, and `RRef` handles cannot be minted (`asupersync-bi2462.39` tracks safe opt-in placement).
 
 ### Runtime Control Surfaces: Causal Time, Cancel Attribution, and Deadline Signals
 
@@ -1219,7 +1222,7 @@ or establish general WAN reliability.
 | Named remote spawn | `src/remote.rs` | `spawn_remote` creates a region-owned `RemoteHandle`; attached runtimes send protocol messages, while missing runtimes fail closed to an explicit deterministic fallback |
 | Lease obligations | `src/remote.rs` | Leases are obligation-backed and participate in region close/quiescence |
 | Idempotency store | `src/remote.rs` | Deduplicates spawn retries for the in-flight operation lifetime plus a bounded terminal-result retention window, with conflict detection |
-| Session-typed protocol | `src/remote.rs` | Origin/remote state machines validate legal spawn/ack/cancel/result/renewal transitions |
+| Session-typed protocol | `src/remote.rs` | Typestate model (`OriginSession`/`RemoteSession`) of the legal spawn/ack/cancel/result/renewal transitions; `NativeRemoteRuntime` does not drive it yet |
 | Logical-time envelopes | `src/remote.rs` | Protocol messages carry logical clock metadata for causal correlation |
 | Saga compensations | `src/remote.rs` | Forward steps and compensations are tracked as a structured rollback flow for distributed workflows |
 | Native V3 runtime | `src/remote.rs` | `NativeRemoteRuntime` maps region-owned remote handles onto bounded TCP+mTLS sessions, supports ordered static pre-delivery bootstrap failover plus caller-owned single-destination discovery refresh, propagates cancel/lease traffic, and drains owned operations during close |
@@ -1768,7 +1771,7 @@ deterministic lab runtime.
 | OTP Concept | Spork / Asupersync Interpretation |
 |------------|-----------------------------------|
 | Process | A region-owned task/actor (cannot orphan) |
-| Supervisor | A compiled, deterministic restart *topology* over regions — boot ordering + restart-plan computation; tree-level live restart-on-failure is pending (`asupersync-8y37kz.2`), so today live restart is per-actor (`src/actor.rs`) |
+| Supervisor | A compiled, deterministic restart *topology* over regions (boot ordering, dependencies, shutdown budgets). `CompiledSupervisor::bind_managed` runs it live: a failed child is cancelled, drained and restarted one-for-one, one-for-all or rest-for-one under a shared intensity/backoff policy (`src/supervision.rs`, used by `src/app.rs`). Actors also restart on failure individually (`src/actor.rs`) |
 | Link | Failure propagation rule (sibling/parent coupling; deterministic) |
 | Monitor + DOWN | Observation without coupling: deterministic notifications |
 | Registry | Names as lease obligations: reserve/commit or abort (no stale names) |
@@ -1822,7 +1825,7 @@ Asupersync is intentionally "math-forward": it uses advanced math and theory-gra
 | Spectral wait-graph health | Implemented observability diagnostic; advisory early warning, not a standalone deadlock proof |
 | Mazurkiewicz/Foata trace canonicalization and DPOR | Implemented lab/trace exploration machinery |
 | Persistent homology trace scoring | Implemented lab exploration prototype; used to prioritize interesting schedules, not a production runtime gate |
-| Sheaf-style saga consistency and TLA+ export | Implemented analysis/export surfaces for verification workflows |
+| Sheaf-style saga consistency and TLA+ export | Implemented analysis/export APIs for verification workflows; the in-process saga executor does not run the sheaf check |
 
 ### Online Control of Cancel Preemption (Discounted UCB1)
 
@@ -1872,23 +1875,29 @@ Payoff: an evidence-ledger, structure-aware notion of "interesting schedules" th
 
 In distributed obligation tracking, pairwise lattice merges can hide *global* inconsistency (phantom commits). Asupersync models this as a sheaf-style gluing problem and detects obstructions where no global assignment explains all local observations. See `src/trace/distributed/sheaf.rs`.
 
+Status: an API you call on saga observations (`SagaConsistencyChecker`); nothing in the runtime runs it automatically.
+
 Payoff: catches split-brain-style saga states that evade purely pairwise conflict checks.
 
 ### Anytime-Valid Invariant Monitoring (E-Processes, Ville's Inequality)
 
-The lab runtime can continuously monitor invariants (task leaks, obligation leaks, region quiescence) using e-processes (`src/lab/oracle/eprocess.rs`). Separately, the production runtime provides an anytime-valid obligation-only leak monitor (`src/obligation/eprocess.rs`). Both use a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties".
+The lab runtime monitors invariants (task leaks, obligation leaks, region quiescence) with e-processes (`src/lab/oracle/eprocess.rs`), adding one observation per run that advances the lab. Separately, `src/obligation/eprocess.rs` provides an anytime-valid obligation-leak monitor as an opt-in, caller-fed API: the runtime does not create or feed one (`asupersync-bi2462.150.2` tracks that wire). Both use a supermartingale-based, anytime-valid testing framework that supports optional stopping without "peeking penalties".
 
 Payoff: turn long-running exploration into statistically sound monitoring, with deterministic, explainable rejection thresholds.
 
 ### Distribution-Free Conformal Calibration for Oracle Metrics
 
-Oracle anomaly thresholds are calibrated using split conformal prediction, giving finite-sample, distribution-free coverage guarantees under exchangeability assumptions across deterministic schedule seeds. See `src/lab/conformal.rs`.
+`src/lab/conformal.rs` calibrates oracle-metric thresholds with split conformal prediction, giving finite-sample, distribution-free coverage guarantees under exchangeability assumptions across deterministic schedule seeds.
 
-Payoff: stable false-alarm behavior under workload drift, without hand-tuned magic constants.
+Status: opt-in. You feed the calibrator oracle reports yourself; no lab oracle or schedule explorer feeds it yet (`asupersync-bi2462.150.1`).
+
+Payoff, once fed: stable false-alarm behavior under workload drift, without hand-tuned magic constants.
 
 ### Algebraic Law Sheets + Rewrite Engines With Side-Condition Lattices
 
 Asupersync's concurrency combinators come with an explicit law sheet (severity lattices, budget semirings, race/join laws, etc.) and a rewrite engine guarded by conservative static analyses (obligation-safety and cancel-safety lattices; deadline min-plus reasoning). See `src/combinator/laws.rs`, `src/plan/rewrite.rs`, and `src/plan/analysis.rs`.
+
+Status: the rewrite engine is opt-in through `plan::execute::capture_optimized`; no runtime path invokes it, and an executed plan race drops its losers the way `Cx::race` does (use `Scope::race` when losers must be drained).
 
 Payoff: principled plan optimization without silently breaking cancel/drain/quiescence invariants.
 
@@ -2468,7 +2477,7 @@ GA.
 | **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
 | **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 native core with default static-only QPACK plus opt-in dynamic field-section context; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
-| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete for live per-actor supervision (`src/actor.rs` drives restart-on-failure with backoff/intensity); the Spork `CompiledSupervisor` tree computes restart *plans* but its tree-level live restart loop is pending (`asupersync-dist-otp-completeness-8y37kz.2`, blocked as of 2026-09-01) |
+| **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Live supervision: actors restart on failure with backoff/intensity (`src/actor.rs`), and `CompiledSupervisor::bind_managed` runs Spork supervision trees live with one-for-one, one-for-all and rest-for-one restarts (`src/supervision.rs`, used by `src/app.rs`) |
 | **Phase 4** | Distributed structured concurrency | ✅ Core primitives complete; production remote network adapters remain support-class scoped |
 | **Phase 5** | Schedule exploration + formal tooling | ⚠️ Partial (DPOR-style race-guided seed exploration, TLA+ export, and Lean-checked model invariants exist; exact-prefix DPOR and a production-Rust-to-model refinement proof do not) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |

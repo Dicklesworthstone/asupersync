@@ -8,6 +8,9 @@
 //!
 //! for **any** joint distribution of (X, Y), with no parametric assumptions.
 //!
+//! The calibrator is opt-in: callers feed it oracle reports. No lab oracle or
+//! schedule explorer feeds it yet (`asupersync-bi2462.150.1` tracks that wire).
+//!
 //! # Algorithm: Split Conformal Prediction
 //!
 //! 1. **Calibration phase**: Accumulate conformity scores `s_1, ..., s_n` from
