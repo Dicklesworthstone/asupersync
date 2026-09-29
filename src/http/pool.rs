@@ -430,6 +430,49 @@ impl Pool {
         true
     }
 
+    /// Makes room for a new connection to `key` when connections to other
+    /// hosts fill `max_total_connections`.
+    ///
+    /// Removes the least recently used idle connection of another host and
+    /// returns it so the caller can close its socket. Returns `None` when no
+    /// eviction is needed or none would help: the total limit is not reached,
+    /// `key` is at its own per-host limit, or no other host has an idle
+    /// connection. Without this, idle connections to hosts contacted once
+    /// refused every new host until they expired.
+    pub(crate) fn evict_idle_for(&mut self, key: &PoolKey, now: Time) -> Option<(PoolKey, u64)> {
+        let idle_timeout = self.config.idle_timeout;
+        let live = |conn: &PooledConnectionMeta| !conn.is_expired(now, idle_timeout);
+        let total = self
+            .hosts
+            .values()
+            .map(|host_pool| host_pool.connections.values().filter(|c| live(c)).count())
+            .sum::<usize>();
+        if total < self.config.max_total_connections {
+            return None;
+        }
+        if self.hosts.get(key).is_some_and(|host_pool| {
+            host_pool.connections.values().filter(|c| live(c)).count()
+                >= self.config.max_connections_per_host
+        }) {
+            return None;
+        }
+        let (victim_key, victim_id) = self
+            .hosts
+            .iter()
+            .filter(|(host_key, _)| *host_key != key)
+            .flat_map(|(host_key, host_pool)| {
+                host_pool
+                    .connections
+                    .values()
+                    .filter(|conn| conn.state == PooledConnectionState::Idle && live(conn))
+                    .map(move |conn| (conn.last_used, conn.id, host_key))
+            })
+            .min_by_key(|(last_used, id, _)| (*last_used, *id))
+            .map(|(_, id, host_key)| (host_key.clone(), id))?;
+        self.remove(&victim_key, victim_id);
+        Some((victim_key, victim_id))
+    }
+
     fn maybe_cleanup(&mut self, now: Time) {
         let elapsed = now.as_nanos().saturating_sub(self.last_cleanup.as_nanos());
         let interval_nanos =
@@ -699,6 +742,73 @@ mod tests {
         assert_eq!(removed, vec![(key.clone(), expired_id)]);
         assert!(pool.get_connection_meta(&key, expired_id).is_none());
         assert!(pool.get_connection_meta(&key, live_id).is_some());
+    }
+
+    #[test]
+    fn evict_idle_for_frees_the_least_recently_used_idle_connection_of_another_host() {
+        let config = PoolConfig::builder()
+            .max_connections_per_host(2)
+            .max_total_connections(3)
+            .build();
+        let mut pool = Pool::with_config(config);
+        let older = PoolKey::http("older.example", None);
+        let newer = PoolKey::http("newer.example", None);
+        let busy = PoolKey::http("busy.example", None);
+        let fresh = PoolKey::http("fresh.example", None);
+
+        let older_id = pool.register_connecting(older.clone(), make_time(0), 1);
+        assert!(pool.mark_connected(&older, older_id, make_time(10)));
+        let newer_id = pool.register_connecting(newer.clone(), make_time(0), 1);
+        assert!(pool.mark_connected(&newer, newer_id, make_time(20)));
+        let busy_id = pool.register_connecting(busy.clone(), make_time(0), 1);
+        assert!(pool.mark_connected(&busy, busy_id, make_time(5)));
+        assert_eq!(pool.try_acquire(&busy, make_time(30)), Some(busy_id));
+
+        assert!(!pool.can_create_connection(&fresh, make_time(30)));
+        assert_eq!(
+            pool.evict_idle_for(&fresh, make_time(30)),
+            Some((older.clone(), older_id)),
+            "the least recently used idle connection makes room; in-use ones never do"
+        );
+        assert!(pool.get_connection_meta(&older, older_id).is_none());
+        assert!(pool.can_create_connection(&fresh, make_time(30)));
+        assert_eq!(
+            pool.evict_idle_for(&fresh, make_time(30)),
+            None,
+            "no eviction below the total limit"
+        );
+    }
+
+    #[test]
+    fn evict_idle_for_never_evicts_for_a_host_at_its_own_limit_or_when_nothing_is_idle() {
+        let config = PoolConfig::builder()
+            .max_connections_per_host(1)
+            .max_total_connections(2)
+            .build();
+        let mut pool = Pool::with_config(config);
+        let full = PoolKey::http("full.example", None);
+        let idle = PoolKey::http("idle.example", None);
+
+        let full_id = pool.register_connecting(full.clone(), make_time(0), 1);
+        assert!(pool.mark_connected(&full, full_id, make_time(0)));
+        assert_eq!(pool.try_acquire(&full, make_time(1)), Some(full_id));
+        let idle_id = pool.register_connecting(idle.clone(), make_time(0), 1);
+        assert!(pool.mark_connected(&idle, idle_id, make_time(0)));
+
+        assert_eq!(
+            pool.evict_idle_for(&full, make_time(1)),
+            None,
+            "an eviction cannot help a host at its own limit"
+        );
+        assert!(pool.get_connection_meta(&idle, idle_id).is_some());
+
+        assert_eq!(pool.try_acquire(&idle, make_time(1)), Some(idle_id));
+        let other = PoolKey::http("other.example", None);
+        assert_eq!(
+            pool.evict_idle_for(&other, make_time(1)),
+            None,
+            "in-use connections are never evicted"
+        );
     }
 
     #[test]

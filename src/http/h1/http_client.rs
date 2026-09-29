@@ -2278,6 +2278,12 @@ impl HttpClient {
 
         let fresh_id = {
             let mut pool = self.pool.lock();
+            // Idle connections to other hosts must not lock this host out of
+            // a full pool: close the least recently used one to make room.
+            if let Some((evicted_key, evicted_id)) = pool.evict_idle_for(&key, now) {
+                let mut idle = self.idle_connections.lock();
+                Self::remove_idle_connection_locked(&mut idle, &evicted_key, evicted_id);
+            }
             if pool.can_create_connection(&key, now) {
                 Some(pool.register_connecting(key.clone(), now, 1))
             } else {
@@ -5685,6 +5691,67 @@ mod tests {
                 Err(io_err) => panic!("accept failed: {io_err}"),
             }
         }
+    }
+
+    #[test]
+    fn acquire_connection_closes_an_idle_connection_to_another_host_when_the_pool_is_full() {
+        use std::io::Read;
+        use std::time::Duration;
+
+        let client = HttpClient::builder().max_total_connections(1).build();
+
+        // An idle keep-alive connection to host A fills the pool.
+        let listener_a = TcpListener::bind("127.0.0.1:0").expect("bind host A");
+        let addr_a = listener_a.local_addr().expect("host A address");
+        let key_a = ParsedUrl::parse(&format!("http://{addr_a}/"))
+            .expect("parse host A url")
+            .pool_key();
+        let client_side = std::net::TcpStream::connect(addr_a).expect("connect host A");
+        let (mut server_side_a, _) = listener_a.accept().expect("accept host A");
+        let id_a = client
+            .pool
+            .lock()
+            .register_connecting(key_a.clone(), client.pool_now(), 1);
+        client.release_connection(
+            &key_a,
+            Some(id_a),
+            true,
+            ClientIo::Plain(TcpStream::from_std(client_side).expect("wrap host A stream")),
+        );
+
+        let listener_b = TcpListener::bind("127.0.0.1:0").expect("bind host B");
+        let addr_b = listener_b.local_addr().expect("host B address");
+        let parsed_b = ParsedUrl::parse(&format!("http://{addr_b}/")).expect("parse host B url");
+
+        let cx = Cx::for_testing();
+        let acquired = match block_on(client.acquire_connection(&cx, &parsed_b)) {
+            Ok(acquired) => acquired,
+            Err(err) => panic!("a full pool of idle connections must not refuse host B: {err:?}"),
+        };
+        assert!(acquired.fresh, "host B gets a new connection");
+        assert!(
+            client
+                .pool
+                .lock()
+                .get_connection_meta(&key_a, id_a)
+                .is_none(),
+            "host A's idle connection left the pool"
+        );
+        assert!(
+            client.idle_connections.lock().get(&key_a).is_none(),
+            "host A's idle socket was dropped with its metadata"
+        );
+        server_side_a
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set host A read timeout");
+        let mut byte = [0_u8; 1];
+        assert_eq!(
+            server_side_a
+                .read(&mut byte)
+                .expect("host A observes the close"),
+            0,
+            "the evicted connection is closed, not leaked"
+        );
     }
 
     #[test]
