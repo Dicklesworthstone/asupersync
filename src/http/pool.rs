@@ -430,6 +430,24 @@ impl Pool {
         true
     }
 
+    /// Removes every idle connection to `key` and returns their ids, so the
+    /// caller can close their sockets.
+    pub(crate) fn remove_idle(&mut self, key: &PoolKey) -> Vec<u64> {
+        let Some(host_pool) = self.hosts.get(key) else {
+            return Vec::new();
+        };
+        let ids: Vec<u64> = host_pool
+            .connections
+            .values()
+            .filter(|conn| conn.state == PooledConnectionState::Idle)
+            .map(|conn| conn.id)
+            .collect();
+        for &id in &ids {
+            self.remove(key, id);
+        }
+        ids
+    }
+
     /// Makes room for a new connection to `key` when connections to other
     /// hosts fill `max_total_connections`.
     ///

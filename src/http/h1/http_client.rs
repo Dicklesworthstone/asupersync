@@ -566,8 +566,9 @@ pub enum RetryPolicy {
     SafeMethodsOnStaleReuse,
     /// Retry idempotent methods on retryable response status codes.
     ///
-    /// A valid `Retry-After` delta-seconds header is honored before the retry.
-    /// The same policy also keeps the stale pooled-connection retry enabled.
+    /// A valid `Retry-After` delta-seconds header is honored before the retry;
+    /// a response asking for more than 60 seconds is returned instead. The same
+    /// policy also keeps the stale pooled-connection retry enabled.
     IdempotentStatusCodes {
         /// Maximum number of response-status retries after the first attempt.
         max_retries: u32,
@@ -600,9 +601,15 @@ impl RetryPolicy {
             return None;
         }
 
-        Some(retry_after_delay(&response.headers).unwrap_or(std::time::Duration::ZERO))
+        let delay = retry_after_delay(&response.headers).unwrap_or(std::time::Duration::ZERO);
+        // A server asking for a longer wait than the client will sleep gets its
+        // response returned, not a request parked for that long.
+        (delay <= MAX_RETRY_AFTER).then_some(delay)
     }
 }
+
+/// The longest `Retry-After` delay an automatic retry waits for.
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Builder for [`HttpClient`].
 ///
@@ -713,8 +720,9 @@ impl HttpClientBuilder {
     /// Retries idempotent methods on retryable response status codes.
     ///
     /// Valid `Retry-After` delta-seconds response headers are honored before
-    /// retrying. Use [`Self::no_retries`] when no automatic retry behavior is
-    /// desired.
+    /// retrying. A response asking for more than 60 seconds is returned
+    /// without a retry. Use [`Self::no_retries`] when no automatic retry
+    /// behavior is desired.
     #[must_use]
     pub fn retry_idempotent_statuses(mut self, max_retries: u32) -> Self {
         self.config.retry_policy = RetryPolicy::IdempotentStatusCodes { max_retries };
@@ -1699,7 +1707,7 @@ impl HttpClient {
             self.build_request_with_origin(method, parsed, extra_headers, body, None, None, origin);
         let request_forbids_reuse = request_forbids_connection_reuse(&req.headers);
         let key = parsed.pool_key();
-        let acquired = self.acquire_connection(cx, parsed).await?;
+        let acquired = self.acquire_fresh_connection(cx, parsed).await?;
         let mut guard = ConnectionGuard::new(self, key.clone(), acquired.pool_id);
 
         check_cx(cx)?;
@@ -2240,6 +2248,37 @@ impl HttpClient {
         cx: &Cx,
         parsed: &ParsedUrl,
     ) -> Result<AcquiredConnection, ClientError> {
+        self.acquire_connection_with(cx, parsed, true).await
+    }
+
+    /// Dials a new connection for a request retried after its reused
+    /// connection turned out stale.
+    ///
+    /// The host's other idle connections are closed first: the server event
+    /// that closed one (a restart, or its keep-alive timeout) closed the others
+    /// of the same age too, and the retry must not land on one of them.
+    async fn acquire_fresh_connection(
+        &self,
+        cx: &Cx,
+        parsed: &ParsedUrl,
+    ) -> Result<AcquiredConnection, ClientError> {
+        let key = parsed.pool_key();
+        {
+            let mut pool = self.pool.lock();
+            let mut idle = self.idle_connections.lock();
+            for id in pool.remove_idle(&key) {
+                Self::remove_idle_connection_locked(&mut idle, &key, id);
+            }
+        }
+        self.acquire_connection_with(cx, parsed, false).await
+    }
+
+    async fn acquire_connection_with(
+        &self,
+        cx: &Cx,
+        parsed: &ParsedUrl,
+        reuse_idle: bool,
+    ) -> Result<AcquiredConnection, ClientError> {
         struct ConnectGuard<'a> {
             client: &'a HttpClient,
             key: PoolKey,
@@ -2257,7 +2296,7 @@ impl HttpClient {
         let now = self.pool_now();
         self.cleanup_expired_idle_connections(now);
 
-        {
+        if reuse_idle {
             let mut pool = self.pool.lock();
             let mut idle = self.idle_connections.lock();
             match pool.try_acquire(&key, now) {
@@ -5388,6 +5427,89 @@ mod tests {
                 0
             ),
             None
+        );
+    }
+
+    #[test]
+    fn retry_after_beyond_the_retry_cap_returns_the_response() {
+        let policy = RetryPolicy::IdempotentStatusCodes { max_retries: 1 };
+        let response = |retry_after: &str| Response {
+            version: Version::Http11,
+            status: 503,
+            reason: "Service Unavailable".to_owned(),
+            headers: vec![("Retry-After".to_owned(), retry_after.to_owned())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+        };
+        assert_eq!(
+            policy.response_retry_delay(&Method::Get, &response("60"), 0),
+            Some(MAX_RETRY_AFTER)
+        );
+        for too_long in ["61", "4000000000"] {
+            assert_eq!(
+                policy.response_retry_delay(&Method::Get, &response(too_long), 0),
+                None,
+                "Retry-After: {too_long} must not park the request"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_reuse_retry_dials_a_new_connection_instead_of_another_idle_one() {
+        use std::io::{Read, Write};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let url = format!("http://{addr}/stale");
+        let key = ParsedUrl::parse(&url).expect("parse url").pool_key();
+        let client = HttpClient::builder()
+            .retry_safe_methods_on_stale_reuse()
+            .build();
+
+        // Two idle keep-alive connections whose server side already closed,
+        // as after a server restart.
+        for _ in 0..2 {
+            let client_side = std::net::TcpStream::connect(addr).expect("connect idle");
+            let (server_side, _) = listener.accept().expect("accept idle");
+            drop(server_side);
+            let id = client
+                .pool
+                .lock()
+                .register_connecting(key.clone(), client.pool_now(), 1);
+            client.release_connection(
+                &key,
+                Some(id),
+                true,
+                ClientIo::Plain(TcpStream::from_std(client_side).expect("wrap idle stream")),
+            );
+        }
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept fresh connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).expect("read request");
+                assert!(n > 0, "request must arrive before the client closes");
+                request.extend_from_slice(&buf[..n]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write response");
+        });
+
+        let cx = Cx::for_testing();
+        let response = block_on(client.request(&cx, Method::Get, &url, Vec::new(), Vec::new()))
+            .expect("the retry after a stale idle connection must reach the server");
+        server.join().expect("server thread");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+        assert!(
+            client.idle_connections.lock().get(&key).is_none(),
+            "the other stale idle connection was closed, not left for the next request"
         );
     }
 
