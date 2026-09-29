@@ -41,6 +41,10 @@ use super::h3_native::{
 /// RFC 9114 application error code `H3_REQUEST_CANCELLED`.
 pub const H3_REQUEST_CANCELLED: u64 = 0x010c;
 
+/// RFC 9114 application error code `H3_REQUEST_REJECTED`: the request was
+/// not processed, so the client may retry it.
+pub const H3_REQUEST_REJECTED: u64 = 0x010b;
+
 /// RFC 9114 application error code `H3_MESSAGE_ERROR`.
 const H3_MESSAGE_ERROR: u64 = 0x010e;
 
@@ -861,14 +865,27 @@ impl NativeH3Session {
         connection: &mut QuicConnection,
         stream_id: StreamId,
     ) -> Result<(), NativeH3SessionError> {
+        self.reset_request(cx, connection, stream_id, H3_REQUEST_CANCELLED)
+    }
+
+    /// Reset a request stream in both directions with `error_code`, for
+    /// callers that must say more than [`H3_REQUEST_CANCELLED`]: for example
+    /// [`H3_REQUEST_REJECTED`] for a request no handler has seen.
+    pub(crate) fn reset_request(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        stream_id: StreamId,
+        error_code: u64,
+    ) -> Result<(), NativeH3SessionError> {
         self.ensure_ready_for_messages(connection)?;
         if !is_client_bidi(stream_id) {
             return Err(NativeH3SessionError::InvalidState(
                 "request cancellation requires a client bidirectional stream",
             ));
         }
-        connection.reset_stream(cx, stream_id, H3_REQUEST_CANCELLED)?;
-        connection.stop_stream_receiving(cx, stream_id, H3_REQUEST_CANCELLED)?;
+        connection.reset_stream(cx, stream_id, error_code)?;
+        connection.stop_stream_receiving(cx, stream_id, error_code)?;
         Ok(())
     }
 

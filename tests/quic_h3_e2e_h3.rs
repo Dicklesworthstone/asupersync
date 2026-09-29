@@ -23,7 +23,7 @@ use asupersync::http::h3_native::{
 };
 #[cfg(feature = "http3")]
 use asupersync::http::h3_quic::{
-    H3_REQUEST_CANCELLED, NativeH3Event, NativeH3Session, NativeH3SessionError,
+    H3_REQUEST_CANCELLED, H3_REQUEST_REJECTED, NativeH3Event, NativeH3Session, NativeH3SessionError,
 };
 #[cfg(all(feature = "http3", feature = "test-internals"))]
 use asupersync::net::quic_native::drop_app_data_packet;
@@ -2299,11 +2299,12 @@ fn native_h3_router_dispatches_completed_streams_and_refuses_invalid_messages() 
                 event,
                 NativeH3Event::StreamReset {
                     stream_id,
-                    error_code: H3_REQUEST_CANCELLED,
+                    error_code: H3_REQUEST_REJECTED,
                     final_size: 0,
                 } if *stream_id == over_budget_stream
             )),
-        "in-flight body retention must fail closed before dispatching the next handler"
+        "in-flight body retention must fail closed before dispatching the next handler, \
+         with the code that tells the client a retry is safe"
     );
     let _ = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
 

@@ -1570,8 +1570,10 @@ impl ListenerConnection {
                 || self.retiring
                 || self.assembly.len() >= config.router.max_pending_requests
             {
-                let reason = if draining || self.retiring {
-                    NativeH3RouterRefusal::DispatchCancelled
+                let reason = if draining {
+                    NativeH3RouterRefusal::Draining
+                } else if self.retiring {
+                    NativeH3RouterRefusal::ConnectionRetiring
                 } else {
                     NativeH3RouterRefusal::TooManyPendingRequests {
                         limit: config.router.max_pending_requests,
@@ -1675,7 +1677,7 @@ impl ListenerConnection {
                 &mut self.session,
                 connection,
                 id,
-                NativeH3RouterRefusal::DispatchCancelled,
+                NativeH3RouterRefusal::RequestAssemblyTimeout,
                 true,
             )?;
             report.refused_requests = report.refused_requests.saturating_add(1);
@@ -1700,7 +1702,7 @@ impl ListenerConnection {
                     &mut self.session,
                     connection,
                     id,
-                    NativeH3RouterRefusal::DispatchCancelled,
+                    NativeH3RouterRefusal::ConnectionRetiring,
                     true,
                 )?;
                 report.refused_requests = report.refused_requests.saturating_add(1);
@@ -1731,7 +1733,7 @@ impl ListenerConnection {
                             &mut self.session,
                             connection,
                             id,
-                            NativeH3RouterRefusal::DispatchCancelled,
+                            NativeH3RouterRefusal::Draining,
                             true,
                         )?;
                         report.refused_requests = report.refused_requests.saturating_add(1);
@@ -1755,12 +1757,17 @@ impl ListenerConnection {
                     // Raw-stream admission may already have refused this
                     // stream before its buffered HEADERS were decoded.
                     if !self.bridge.discarding.contains(stream_id) {
+                        let reason = if draining {
+                            NativeH3RouterRefusal::Draining
+                        } else {
+                            NativeH3RouterRefusal::ConnectionRetiring
+                        };
                         self.bridge.refuse_request(
                             cx,
                             &mut self.session,
                             connection,
                             *stream_id,
-                            NativeH3RouterRefusal::DispatchCancelled,
+                            reason,
                             true,
                         )?;
                         report.refused_requests = report.refused_requests.saturating_add(1);
