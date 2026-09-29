@@ -306,10 +306,7 @@ impl<T> WatchInner<T> {
             let mut w = self.waiters.lock();
             std::mem::take(&mut *w)
         };
-        for w in waiters {
-            w.queued.store(false, Ordering::Release);
-            w.waker.wake();
-        }
+        wake_waiters(waiters);
     }
 
     fn register_waker(&self, waiter: WatchWaiter) {
@@ -539,25 +536,29 @@ impl<T> Sender<T> {
         // `send_modify` cannot commit between our read and write and be lost
         // (the closure still runs WITHOUT the value `RwLock` held, so the
         // no-reentrancy-deadlock / no-reader-stall contract is preserved).
-        let _write_serialize = self.inner.send_lock.lock();
-
-        // Clone current value while holding read lock to avoid calling user code under write lock
-        let mut value = {
-            let guard = self.inner.value.read();
-            guard.0.clone()
-        };
-
-        // Call user closure without holding the value lock to prevent deadlocks
-        f(&mut value);
-
-        // Write back under the value lock, but drop the PREVIOUS value only
-        // after releasing the guard — a `T::Drop` that reentrantly reads this
-        // channel (`borrow`/`current_version`/…) would otherwise self-deadlock
-        // on the non-reentrant `RwLock`, and a slow drop would stall every
-        // reader. This mirrors `send()`'s `mem::replace` discipline (see above);
-        // the wholesale `guard.0 = value` it replaced dropped the old value
-        // while the write lock was held.
+        // The lock is released before the waiters are woken and the previous
+        // value is dropped, as in `send()`: a waker that polls inline, or a
+        // `T::Drop` that sends on this channel, would otherwise deadlock on it.
         let _old_value = {
+            let _write_serialize = self.inner.send_lock.lock();
+
+            // Clone current value while holding read lock to avoid calling
+            // user code under write lock
+            let mut value = {
+                let guard = self.inner.value.read();
+                guard.0.clone()
+            };
+
+            // Call user closure without holding the value lock to prevent deadlocks
+            f(&mut value);
+
+            // Write back under the value lock, but drop the PREVIOUS value only
+            // after releasing the guard — a `T::Drop` that reentrantly reads this
+            // channel (`borrow`/`current_version`/…) would otherwise self-deadlock
+            // on the non-reentrant `RwLock`, and a slow drop would stall every
+            // reader. This mirrors `send()`'s `mem::replace` discipline (see above);
+            // the wholesale `guard.0 = value` it replaced dropped the old value
+            // while the write lock was held.
             let mut guard = self.inner.value.write();
             let old = std::mem::replace(&mut guard.0, value);
             guard.1 = guard.1.wrapping_add(1);
@@ -644,10 +645,39 @@ impl<T> Drop for Sender<T> {
             let mut w = self.inner.waiters.lock();
             std::mem::take(&mut *w)
         };
-        for w in waiters {
-            w.queued.store(false, Ordering::Release);
-            w.waker.wake();
+        wake_waiters(waiters);
+    }
+}
+
+/// Wakes every drained waiter behind its own unwind boundary, so one panicking
+/// waker, or its destructor, cannot strand the rest parked forever. Every
+/// `queued` flag is cleared first. The first panic resumes afterwards; during
+/// an existing unwind the later payloads are forgotten, never dropped.
+fn wake_waiters(waiters: SmallVec<[WatchWaiter; 4]>) {
+    for waiter in &waiters {
+        waiter.queued.store(false, Ordering::Release);
+    }
+    let already_panicking = std::thread::panicking();
+    let mut first_panic = None;
+    let mut record = |result: std::thread::Result<()>| {
+        if let Err(payload) = result {
+            if already_panicking || first_panic.is_some() {
+                std::mem::forget(payload);
+            } else {
+                first_panic = Some(payload);
+            }
         }
+    };
+    for waiter in waiters {
+        record(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || waiter.waker.wake_by_ref(),
+        )));
+        record(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            move || drop(waiter),
+        )));
+    }
+    if let Some(payload) = first_panic {
+        std::panic::resume_unwind(payload);
     }
 }
 
@@ -1046,6 +1076,47 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    /// One panicking waker must not strand the other parked receivers: the
+    /// sender's drop wakes every one of them, then resumes the first panic.
+    #[test]
+    fn sender_drop_wakes_every_parked_receiver_despite_a_panicking_waker() {
+        struct PanickingWaker {
+            wakes: Arc<AtomicUsize>,
+        }
+        impl std::task::Wake for PanickingWaker {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+                panic!("planted watch receiver wake panic");
+            }
+        }
+
+        init_test("sender_drop_wakes_every_parked_receiver_despite_a_panicking_waker");
+        let cx = test_cx();
+        let (tx, mut first) = channel(0_u32);
+        let mut second = tx.subscribe();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(PanickingWaker {
+            wakes: Arc::clone(&wakes),
+        }));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut first_changed = Box::pin(first.changed(&cx));
+        let mut second_changed = Box::pin(second.changed(&cx));
+        assert!(first_changed.as_mut().poll(&mut task_cx).is_pending());
+        assert!(second_changed.as_mut().poll(&mut task_cx).is_pending());
+
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(tx)));
+        assert!(dropped.is_err(), "the first wake panic resumes afterwards");
+        assert_eq!(
+            wakes.load(Ordering::SeqCst),
+            2,
+            "every parked receiver is woken"
+        );
+        crate::test_complete!("sender_drop_wakes_every_parked_receiver_despite_a_panicking_waker");
     }
 
     #[test]

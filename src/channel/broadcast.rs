@@ -587,9 +587,12 @@ impl<T> Drop for Sender<T> {
             let mut inner = self.channel.inner.lock();
             inner.wakers.drain_values().collect()
         };
-        for waker in wakers_to_wake {
-            waker.wake();
-        }
+        // Each receiver is woken behind its own unwind boundary, so one
+        // panicking waker cannot leave the others parked with no sender left.
+        drop(CheckedSendNotifications {
+            obligation: None,
+            receivers: wakers_to_wake,
+        });
     }
 }
 
@@ -768,15 +771,17 @@ impl<T: Clone> SendPermit<'_, T> {
         let wakers_to_wake: SmallVec<[Waker; 4]> = inner.wakers.drain_values().collect();
 
         drop(inner);
-        if self.checked {
-            let _notifications = self.checked_notifications(wakers_to_wake);
-            drop(popped);
+        // Own the wakers before the evicted message's destructor runs: a
+        // panicking `T::drop`, or waker, must still wake every receiver.
+        let _notifications = if self.checked {
+            self.checked_notifications(wakers_to_wake)
         } else {
-            drop(popped);
-            for waker in wakers_to_wake {
-                waker.wake();
+            CheckedSendNotifications {
+                obligation: None,
+                receivers: wakers_to_wake,
             }
-        }
+        };
+        drop(popped);
 
         live_receivers
     }
@@ -1159,6 +1164,79 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.wakes.fetch_add(1, AtomicOrdering::AcqRel);
         }
+    }
+
+    /// An unchecked send whose evicted message panics in `Drop` still wakes
+    /// the receivers parked for the new message.
+    #[test]
+    fn unchecked_send_wakes_parked_receivers_when_the_evicted_message_drop_panics() {
+        thread_local! {
+            static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        #[derive(Clone, Debug, PartialEq)]
+        struct Bomb(u32);
+        impl Drop for Bomb {
+            fn drop(&mut self) {
+                if ARMED.with(|armed| armed.replace(false)) {
+                    panic!("planted evicted-message drop panic");
+                }
+            }
+        }
+
+        let cx = test_cx();
+        let (tx, _first) = channel::<Bomb>(1);
+        assert_eq!(tx.send(&cx, Bomb(1)), Ok(1));
+        let mut fast = tx.subscribe();
+        let wakes = CountingWaker::new();
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut context = Context::from_waker(&waker);
+        let mut receiver = Box::pin(fast.recv(&cx));
+        assert!(receiver.as_mut().poll(&mut context).is_pending());
+
+        ARMED.with(|armed| armed.set(true));
+        let sent = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tx.send(&cx, Bomb(2))));
+        ARMED.with(|armed| armed.set(false));
+        assert!(sent.is_err(), "the evicted message's destructor panicked");
+        assert_eq!(wakes.wake_count(), 1, "the parked receiver is woken anyway");
+    }
+
+    /// One panicking waker must not strand the other parked receivers when the
+    /// last sender drops.
+    #[test]
+    fn last_sender_drop_wakes_every_parked_receiver_despite_a_panicking_waker() {
+        struct PanickingWaker {
+            wakes: Arc<AtomicUsize>,
+        }
+        impl std::task::Wake for PanickingWaker {
+            fn wake(self: Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.wakes.fetch_add(1, AtomicOrdering::SeqCst);
+                panic!("planted broadcast receiver wake panic");
+            }
+        }
+
+        let cx = test_cx();
+        let (tx, mut first) = channel::<u32>(1);
+        let mut second = tx.subscribe();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(PanickingWaker {
+            wakes: Arc::clone(&wakes),
+        }));
+        let mut context = Context::from_waker(&waker);
+        let mut first_recv = Box::pin(first.recv(&cx));
+        let mut second_recv = Box::pin(second.recv(&cx));
+        assert!(first_recv.as_mut().poll(&mut context).is_pending());
+        assert!(second_recv.as_mut().poll(&mut context).is_pending());
+
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(tx)));
+        assert!(dropped.is_err(), "the first wake panic resumes afterwards");
+        assert_eq!(
+            wakes.load(AtomicOrdering::SeqCst),
+            2,
+            "every parked receiver is woken"
+        );
     }
 
     fn checked_admission_fixture(
