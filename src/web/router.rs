@@ -702,6 +702,10 @@ pub enum NativeH3RouterRefusal {
     InvalidContentLength,
     /// TE contained a value other than the sole HTTP/3-permitted `trailers`.
     InvalidTransferEncoding,
+    /// `:authority` and Host named different targets, Host was repeated or
+    /// empty, or an `http`/`https` request named neither (RFC 9114 section
+    /// 4.3.1).
+    InvalidAuthority,
     /// The caller cancelled an admitted handler scope before it produced a
     /// response.
     DispatchCancelled,
@@ -1355,7 +1359,8 @@ impl NativeH3Router {
             Ok(admitted) => admitted,
             Err(
                 reason @ (NativeH3RouterRefusal::InvalidContentLength
-                | NativeH3RouterRefusal::InvalidTransferEncoding),
+                | NativeH3RouterRefusal::InvalidTransferEncoding
+                | NativeH3RouterRefusal::InvalidAuthority),
             ) => {
                 // RFC 9114 section 4.1.2 distinguishes malformed HTTP
                 // messages from an application's voluntary cancellation.
@@ -4175,8 +4180,15 @@ fn validate_h3_request_head_semantics(
     head: &H3RequestHead,
 ) -> Result<Option<usize>, NativeH3RouterRefusal> {
     let mut content_length = None;
+    let mut host = None;
     for (name, value) in &head.headers {
-        if name == "content-length" {
+        if name == "host" {
+            // One non-empty Host at most: the handler sees a single value, so
+            // a repeated field would let a later copy override the checked one.
+            if value.is_empty() || host.replace(value.as_str()).is_some() {
+                return Err(NativeH3RouterRefusal::InvalidAuthority);
+            }
+        } else if name == "content-length" {
             if content_length.is_some()
                 || value.is_empty()
                 || !value.bytes().all(|byte| byte.is_ascii_digit())
@@ -4191,6 +4203,17 @@ fn validate_h3_request_head_semantics(
         } else if name == "te" && !value.trim().eq_ignore_ascii_case("trailers") {
             return Err(NativeH3RouterRefusal::InvalidTransferEncoding);
         }
+    }
+    // Host takes precedence over :authority for the handler, so a mismatch
+    // would let it route on a target that TLS SNI or an upstream check never
+    // saw. Host names compare case-insensitively.
+    let consistent = match (head.pseudo.authority.as_deref(), host) {
+        (Some(authority), Some(host)) => authority.eq_ignore_ascii_case(host),
+        (None, None) => !matches!(head.pseudo.scheme.as_deref(), Some("http" | "https")),
+        _ => true,
+    };
+    if !consistent {
+        return Err(NativeH3RouterRefusal::InvalidAuthority);
     }
     Ok(content_length)
 }
@@ -5584,6 +5607,56 @@ mod tests {
             validate_h3_request_semantics(&head(Some("8")), 0),
             Err(NativeH3RouterRefusal::InvalidContentLength)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "http3")]
+    fn h3_request_semantics_reject_inconsistent_authority_and_host() {
+        use crate::http::h3::H3PseudoHeaders;
+
+        let head = |authority: Option<&str>, hosts: &[&str]| {
+            H3RequestHead::new(
+                H3PseudoHeaders {
+                    method: Some("GET".to_string()),
+                    scheme: Some("https".to_string()),
+                    authority: authority.map(str::to_string),
+                    path: Some("/".to_string()),
+                    ..H3PseudoHeaders::default()
+                },
+                hosts
+                    .iter()
+                    .map(|host| ("host".to_string(), (*host).to_string()))
+                    .collect(),
+            )
+            .expect("syntactically valid H3 request head")
+        };
+
+        // Host wins over :authority in the handler's view, so any of these
+        // would let it route on a target nothing upstream checked.
+        for (authority, hosts) in [
+            (Some("api.example"), &["admin.internal"][..]),
+            (Some("api.example"), &["api.example", "admin.internal"][..]),
+            (None, &["api.example", "api.example"][..]),
+            (None, &[""][..]),
+            (None, &[][..]),
+        ] {
+            assert_eq!(
+                validate_h3_request_head_semantics(&head(authority, hosts)),
+                Err(NativeH3RouterRefusal::InvalidAuthority),
+                ":authority {authority:?} with Host {hosts:?}"
+            );
+        }
+        for (authority, hosts) in [
+            (Some("api.example"), &[][..]),
+            (Some("api.example"), &["API.Example"][..]),
+            (None, &["api.example"][..]),
+        ] {
+            assert_eq!(
+                validate_h3_request_head_semantics(&head(authority, hosts)),
+                Ok(None),
+                ":authority {authority:?} with Host {hosts:?}"
+            );
+        }
     }
 
     #[test]
