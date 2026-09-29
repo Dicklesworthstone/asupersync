@@ -2046,6 +2046,74 @@ mod native_h3_listener_live {
                 assert!(!report.drain_timed_out);
             });
         }
+
+        #[test]
+        fn authenticated_buffered_listener_closes_a_protocol_violation_with_an_h3_code() {
+            run(1, async {
+                let cx = Cx::current().unwrap();
+                let router = Router::new().route(
+                    "/healthy",
+                    post(FnHandler::new(|| {
+                        Response::new(StatusCode::OK, "listener retained")
+                    })),
+                );
+                // The buffered default, which used to drop the connection
+                // without telling the peer why.
+                let mut listener_config = config(8);
+                listener_config.streaming_request_body_buffer_bytes = None;
+                listener_config.endpoint.max_connections = 2;
+                let listener = bind(&cx, router, listener_config).await;
+                let address = listener.local_addr();
+                let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                let serving = listener.serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                });
+                let client = async {
+                    let (mut owner, _session) = connect(&cx, address, 71).await;
+                    // A dynamic-table insert on the peer's QPACK encoder
+                    // stream, which the static-only session refuses.
+                    let encoder = owner.connection_mut().open_uni_stream(&cx).unwrap();
+                    owner
+                        .connection_mut()
+                        .write_stream(&cx, encoder, Bytes::from_static(&[0x02, 0xC0, 0x00]), false)
+                        .unwrap();
+                    owner.flush(&cx).await.unwrap();
+                    for _ in 0..4 {
+                        if owner.connection().close_was_peer_initiated() {
+                            break;
+                        }
+                        owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    }
+                    assert!(
+                        owner.connection().close_was_peer_initiated(),
+                        "the listener tells the peer it closed the connection"
+                    );
+                    assert_eq!(
+                        owner.connection().inner().transport().close_code(),
+                        Some(0x101),
+                        "RFC 9114 H3_GENERAL_PROTOCOL_ERROR"
+                    );
+                    let (mut healthy, mut healthy_h3) = connect(&cx, address, 72).await;
+                    response(
+                        &cx,
+                        &mut healthy,
+                        &mut healthy_h3,
+                        "/healthy",
+                        &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                        b"listener retained",
+                    )
+                    .await;
+                    shutdown_tx.send(&cx, ()).unwrap();
+                    acknowledge_shutdown_goaway(&cx, &mut healthy, &mut healthy_h3, 4, None).await;
+                };
+                let (report, ()) = zip(serving, client).await;
+                let report = report.unwrap();
+                assert_eq!(report.accepted_connections, 2);
+                assert_eq!(report.completed_requests, 1);
+                assert_eq!(report.failed_connections, 1);
+                assert!(!report.drain_timed_out);
+            });
+        }
         async fn write_trailers(
             cx: &Cx,
             owner: &mut NativeQuicUdpConnection,
