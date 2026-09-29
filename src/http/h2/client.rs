@@ -48,6 +48,11 @@ const DEFAULT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 const HEADER_LIMIT: usize = 64 * 1024;
 const DATA_CHUNK: usize = 16 * 1024;
 const POLL_STEPS: usize = 32;
+/// Advertised receive-window bounds (RFC 9113 §6.9.2). The response body is
+/// buffered up to its limit anyway, so the windows track that limit within
+/// these bounds instead of granting 64 KiB of credit per round trip.
+const MIN_RECEIVE_WINDOW: u32 = 65_535;
+const MAX_RECEIVE_WINDOW: u32 = 16 * 1024 * 1024;
 
 /// Failure of a bounded HTTP/2 request.
 #[derive(Debug)]
@@ -741,12 +746,18 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     transport.write_all(CLIENT_PREFACE).await?;
+    let receive_window = u32::try_from(limit)
+        .unwrap_or(u32::MAX)
+        .clamp(MIN_RECEIVE_WINDOW, MAX_RECEIVE_WINDOW);
     let settings = Settings {
         max_header_list_size: HEADER_LIMIT as u32,
+        initial_window_size: receive_window,
         ..Settings::client()
     };
     let mut connection = Connection::client(settings);
     connection.queue_initial_settings();
+    // SETTINGS must be the first frame; the connection WINDOW_UPDATE follows it.
+    connection.set_initial_connection_recv_window(receive_window)?;
     let mut wire =
         Framed::new(transport, FrameCodec::new()).with_max_buffer_len(DATA_CHUNK + 8192 + 9);
     let mut headers = Some(request.headers);

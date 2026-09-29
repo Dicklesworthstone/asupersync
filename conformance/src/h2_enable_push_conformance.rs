@@ -289,7 +289,7 @@ impl EnablePushConformanceTester {
         let mut evidence = Vec::new();
         assert_settings_parser_accepts_enable_push(test_case.enable_push_setting, &mut evidence)?;
         assert_server_applies_client_enable_push(test_case.enable_push_setting, &mut evidence)?;
-        assert_client_rejects_server_enable_push(test_case.enable_push_setting, &mut evidence)?;
+        assert_client_applies_server_enable_push_rule(test_case.enable_push_setting, &mut evidence)?;
 
         let mut accepted_push_promises = 0;
         let mut local_settings = Settings::client();
@@ -537,24 +537,39 @@ fn assert_server_applies_client_enable_push(
     }
 }
 
-fn assert_client_rejects_server_enable_push(
+/// RFC 9113 §6.5.2: a server may include SETTINGS_ENABLE_PUSH only with the
+/// value 0, which the client acknowledges; the value 1 is a PROTOCOL_ERROR.
+fn assert_client_applies_server_enable_push_rule(
     enable_push: bool,
     evidence: &mut Vec<String>,
 ) -> Result<(), String> {
     let mut client = Connection::client(Settings::client());
     let frame = Frame::Settings(SettingsFrame::new(vec![Setting::EnablePush(enable_push)]));
+    if !enable_push {
+        client.process_frame(frame).map_err(|err| {
+            format!("client rejected a legal server SETTINGS_ENABLE_PUSH=0: {err}")
+        })?;
+        return match client.next_frame() {
+            Some(Frame::Settings(settings)) if settings.ack => {
+                evidence.push(
+                    "client accepted server SETTINGS_ENABLE_PUSH=0 and queued ACK".to_string(),
+                );
+                Ok(())
+            }
+            other => Err(format!(
+                "client did not queue SETTINGS ACK after server ENABLE_PUSH=0: {other:?}"
+            )),
+        };
+    }
     let err = client
         .process_frame(frame)
-        .expect_err("client must reject server-sent SETTINGS_ENABLE_PUSH");
+        .expect_err("client must reject server-sent SETTINGS_ENABLE_PUSH=1");
     if err.code != ErrorCode::ProtocolError || !err.message.contains("server MUST NOT send") {
         return Err(format!(
-            "client rejected server SETTINGS_ENABLE_PUSH with wrong error: {err}"
+            "client rejected server SETTINGS_ENABLE_PUSH=1 with wrong error: {err}"
         ));
     }
-    evidence.push(format!(
-        "client rejected server SETTINGS_ENABLE_PUSH={} as PROTOCOL_ERROR",
-        u32::from(enable_push)
-    ));
+    evidence.push("client rejected server SETTINGS_ENABLE_PUSH=1 as PROTOCOL_ERROR".to_string());
     Ok(())
 }
 
@@ -663,8 +678,10 @@ mod tests {
     fn role_rules_use_connection_state_machine() {
         let mut evidence = Vec::new();
         assert_server_applies_client_enable_push(false, &mut evidence).unwrap();
-        assert_client_rejects_server_enable_push(false, &mut evidence).unwrap();
-        assert!(evidence.iter().any(|line| line.contains("queued ACK")));
+        assert_client_applies_server_enable_push_rule(false, &mut evidence).unwrap();
+        assert_client_applies_server_enable_push_rule(true, &mut evidence).unwrap();
+        assert!(evidence.iter().any(|line| line.contains("server applied")));
+        assert!(evidence.iter().any(|line| line.contains("SETTINGS_ENABLE_PUSH=0 and queued ACK")));
         assert!(evidence.iter().any(|line| line.contains("PROTOCOL_ERROR")));
     }
 

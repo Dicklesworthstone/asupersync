@@ -1754,11 +1754,12 @@ impl Connection {
         // successfully.
         let mut staged = self.remote_settings.clone();
         for setting in &frame.settings {
-            // RFC 7540 §6.5.2: A server MUST NOT send SETTINGS_ENABLE_PUSH.
-            // Therefore a client that receives it must treat this as PROTOCOL_ERROR.
-            if self.is_client && matches!(setting, Setting::EnablePush(_)) {
+            // RFC 9113 §6.5.2: a server MAY include SETTINGS_ENABLE_PUSH, but
+            // only with the value 0. A client MUST treat the value 1 as a
+            // connection error of type PROTOCOL_ERROR.
+            if self.is_client && matches!(setting, Setting::EnablePush(true)) {
                 return Err(H2Error::protocol(
-                    "server MUST NOT send SETTINGS_ENABLE_PUSH",
+                    "server MUST NOT send SETTINGS_ENABLE_PUSH=1",
                 ));
             }
             if let Setting::InitialWindowSize(size) = setting {
@@ -3487,10 +3488,20 @@ mod tests {
     }
 
     #[test]
-    fn test_connection_client_rejects_server_enable_push_setting() {
+    fn test_connection_client_accepts_server_enable_push_zero_and_rejects_one() {
+        // RFC 9113 §6.5.2: a server that includes SETTINGS_ENABLE_PUSH must
+        // send 0, which a client accepts and acknowledges.
         let mut conn = Connection::client(Settings::client());
         let settings = SettingsFrame::new(vec![Setting::EnablePush(false)]);
+        conn.process_frame(Frame::Settings(settings))
+            .expect("a server may send SETTINGS_ENABLE_PUSH=0");
+        assert!(
+            matches!(conn.next_frame(), Some(Frame::Settings(settings)) if settings.ack),
+            "SETTINGS_ENABLE_PUSH=0 must be acknowledged"
+        );
 
+        let mut conn = Connection::client(Settings::client());
+        let settings = SettingsFrame::new(vec![Setting::EnablePush(true)]);
         let err = conn.process_frame(Frame::Settings(settings)).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
         assert!(
