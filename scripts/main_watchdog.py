@@ -1587,6 +1587,178 @@ def file_or_queue_rounds(case: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Rotation: every default integration target runs in turn (execution debt)
+# ---------------------------------------------------------------------------
+
+ROTATION_LANE = "rotation[default]"
+
+
+def default_test_targets(root_paths: list[str], registry: dict[str, dict[str, Any]]) -> list[str]:
+    """Integration targets that build with default features, sorted.
+
+    Registered targets without required-features count by their `name`; any other
+    top-level `tests/*.rs` is auto-discovered under its file stem. Targets with
+    required-features are gated and left to the feature lanes.
+    """
+    names = {entry["name"] for entry in registry.values() if not entry["features"]}
+    for path in root_paths:
+        if re.fullmatch(r"tests/[^/]+\.rs", path) and path not in registry:
+            names.add(path[len("tests/") : -len(".rs")])
+    return sorted(names)
+
+
+def rotation_pick(names: list[str], cursor: int, count: int) -> tuple[list[str], int]:
+    """The next `count` names round-robin from `cursor`, and the cursor after them."""
+    if not names or count <= 0:
+        return [], 0
+    start = cursor % len(names)
+    picked = [names[(start + i) % len(names)] for i in range(min(count, len(names)))]
+    return picked, (start + len(picked)) % len(names)
+
+
+def rotation_fold(
+    results: dict[str, Any], picked: list[str], outcome: dict[str, Any], head: str, now: str
+) -> dict[str, list[str]]:
+    """Fold one rotation run into the per-target results.
+
+    A target is red when a failing key names it and green when it ran with no
+    failing key. A target the run proved nothing about (the build stopped first,
+    or the lane was not decisive) keeps its previous result. Returns the targets
+    that are newly red and those that healed.
+    """
+    red_keys: dict[str, list[str]] = {}
+    for key in outcome.get("failing_targets") or []:
+        target = target_of(key)
+        if target in picked:
+            red_keys.setdefault(target, []).append(key)
+    decisive = outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED)
+    ran = set(outcome.get("targets_seen") or []) | set(outcome.get("targets_executed") or [])
+    new_red: list[str] = []
+    healed: list[str] = []
+    for name in picked:
+        previous = results.get(name, {})
+        if name in red_keys:
+            verdict = "red"
+        elif decisive and name in ran:
+            verdict = "green"
+        else:
+            continue
+        entry: dict[str, Any] = {"verdict": verdict, "sha": head, "at": now}
+        if verdict == "red":
+            entry["failing"] = sorted(red_keys[name])
+            if previous.get("verdict") == "red":
+                entry["bead"] = previous.get("bead")
+            else:
+                new_red.append(name)
+        elif previous.get("verdict") == "red":
+            healed.append(name)
+            entry["healed_bead"] = previous.get("bead")
+        results[name] = entry
+    return {"new_red": new_red, "healed": healed}
+
+
+def rotation_payload(lane: dict[str, Any], head: str, outcome: dict[str, Any], new_red: list[str], results: dict[str, Any]) -> dict[str, Any]:
+    shown = ", ".join(new_red[:3]) + (f" +{len(new_red) - 3}" if len(new_red) > 3 else "")
+    failing = sorted(key for name in new_red for key in results[name]["failing"])
+    description = "\n".join(
+        [
+            "## What the rotation saw",
+            "The watchdog's rotation runs the default-feature integration targets in turn, whatever a batch",
+            "touched, so a target no batch lane selects still runs (execution debt, asupersync-kh02d2). It does",
+            "not bisect: a rotation red is not attributed to a commit.",
+            f"- Head: `{head}`",
+            f"- Lane: `{lane['id']}`: `{lane['display_command']}`",
+            f"- Worker: {outcome.get('worker') or 'unknown'}",
+            f"- Newly red targets: {', '.join(new_red)}",
+            f"- Failing tests: {', '.join(failing)}",
+            f"- First error: `{outcome.get('first_error', '')}`",
+            "",
+            "## Triage",
+            "A real defect gets its own bead. A test that fell behind an intentional, correct change is healed to",
+            "the current contract without weakening it. A stale whole-file hash pin goes to asupersync-8xb1id.",
+            "Reproduce with the lane command via `rch exec --base <sha> --clean-overlay --no-overlay`.",
+        ]
+    )
+    return {
+        "title": f"[main-watchdog] ROTATION RED at {head[:9]}: {shown}",
+        "type": "bug",
+        "priority": 1,
+        "labels": ["watchdog", "rotation", "execution-debt"],
+        "parent": WATCHDOG_BEAD,
+        "description": description,
+        "lane": lane["id"],
+        "new_targets": failing,
+        "signature": red_signature(lane["id"], set(failing)),
+    }
+
+
+def rotation_file(
+    payload: dict[str, Any] | None,
+    new_red: list[str],
+    rotation: dict[str, Any],
+    open_issues: list[dict[str, Any]],
+    filer: Callable[[dict[str, Any]], str | None],
+) -> list[str]:
+    """File (or find) the beads for queued and new rotation reds; record them per target.
+
+    A failed filing stays in `rotation["pending"]` and every later run retries it,
+    so a red is never dropped. Returns the beads filed or found this time.
+    """
+    queue = rotation.get("pending", []) + ([{"payload": payload, "targets": new_red}] if payload else [])
+    still_pending = []
+    beads = []
+    for item in queue:
+        found = existing_bead_for(item["payload"]["new_targets"], open_issues) or filer(item["payload"])
+        if not found:
+            still_pending.append(item)
+            continue
+        beads.append(found)
+        for name in item["targets"]:
+            entry = rotation["results"].get(name)
+            if entry is not None and entry.get("verdict") == "red":
+                entry["bead"] = found
+    rotation["pending"] = still_pending
+    return beads
+
+
+def rotation_probe(case: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate helper: rotation selection and folding over scripted runs."""
+    names = default_test_targets(case.get("root_paths", []), case.get("registry", {}))
+    rotation: dict[str, Any] = {"cursor": case.get("cursor", 0), "results": {}}
+    rounds = []
+    filings: list[dict[str, Any]] = []
+    for step in case.get("runs", []):
+        picked, cursor = rotation_pick(names, rotation["cursor"], case["count"])
+        lane = {"id": ROTATION_LANE, "kind": "test", "expected_targets": picked, "display_command": "rotation"}
+        outcome = classify_lane_output(step["log"], step.get("client_exit", 0), lane)
+        fold = {"new_red": [], "healed": []}
+        if outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED):
+            fold = rotation_fold(rotation["results"], picked, outcome, step["sha"], "2026-01-01T00:00:00+00:00")
+            rotation["cursor"] = cursor
+
+        def filer(payload: dict[str, Any], bead: str | None = step.get("file_as")) -> str | None:
+            filings.append({k: payload[k] for k in ("title", "priority", "labels", "new_targets")} | {"bead": bead})
+            return bead
+
+        filed: list[str] = []
+        if fold["new_red"] or rotation.get("pending"):
+            payload = rotation_payload(lane, step["sha"], outcome, fold["new_red"], rotation["results"]) if fold["new_red"] else None
+            filed = rotation_file(payload, fold["new_red"], rotation, case.get("open_issues", []), filer)
+        rounds.append(
+            {
+                "picked": picked,
+                "verdict": outcome["verdict"],
+                "cursor": rotation["cursor"],
+                **fold,
+                "filed": filed,
+                "pending": len(rotation.get("pending", [])),
+                "results": {name: [r["verdict"], r.get("bead")] for name, r in sorted(rotation["results"].items())},
+            }
+        )
+    return {"names": names, "rounds": rounds, "filings": filings}
+
+
+# ---------------------------------------------------------------------------
 # Summary / exit metrics
 # ---------------------------------------------------------------------------
 
@@ -2099,6 +2271,62 @@ def summary(receipts_path: Path, since: str, until: str, issues_path: Path, now:
     }
 
 
+def rotate(args: argparse.Namespace, now: dt.datetime) -> int:
+    """Run the next `--count` default-feature integration targets at the head.
+
+    Each run advances a cursor over every default target, so the whole suite runs
+    in turn whatever the batches touch. Per-target results live in
+    `state["rotation"]`, receipts in `rotation.jsonl`. A failing test is keyed by
+    the `Running` line before it; RCH can interleave stdout and stderr, so a
+    rotation bead names the failing tests themselves.
+    """
+    state_path = args.state_dir / "state.json"
+    state = load_state(state_path)
+    if not args.no_fetch:
+        git("fetch", "-q", "origin", check=False)
+    head = git("rev-parse", args.until).strip()
+    rotation = state.setdefault("rotation", {"cursor": 0, "results": {}})
+    names = default_test_targets(git("ls-tree", "--name-only", head, "tests/").split(), cargo_test_registry(head))
+    picked, cursor = rotation_pick(names, rotation.get("cursor", 0), args.count)
+    lane: dict[str, Any] = {
+        "id": ROTATION_LANE,
+        "kind": "test",
+        "argv": [*LEAN_TEST_ENV, "cargo", "test", "-j", str(args.jobs), "-p", "asupersync", "--no-fail-fast"]
+        + [arg for name in picked for arg in ("--test", name)],
+        "expected_targets": picked,
+    }
+    lane["display_command"] = " ".join(lane["argv"])
+    args.state_dir.mkdir(parents=True, exist_ok=True)
+    runner = rch_runner(str(args.state_dir / "target"), args.admission_attempts, args.admission_sleep, args.state_dir / "logs")
+    text, code = runner(lane, head)
+    outcome = classify_lane_output(text, code, lane)
+    fold: dict[str, list[str]] = {"new_red": [], "healed": []}
+    if outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED):
+        fold = rotation_fold(rotation["results"], picked, outcome, head, now.isoformat())
+        rotation["cursor"] = cursor
+    filed: list[str] = []
+    if args.file_beads and (fold["new_red"] or rotation.get("pending")):
+        payload = rotation_payload(lane, head, outcome, fold["new_red"], rotation["results"]) if fold["new_red"] else None
+        filed = rotation_file(payload, fold["new_red"], rotation, open_tracker_issues(), file_bead)
+    receipt = {
+        "schema": SCHEMA_VERSION,
+        "recorded_at": now.isoformat(),
+        "lane": ROTATION_LANE,
+        "sha": head,
+        "picked": picked,
+        "of": len(names),
+        "filed_beads": filed,
+        **fold,
+        **{k: outcome[k] for k in ("verdict", "reason", "worker", "failing_targets", "first_error", "counts", "targets_seen")},
+    }
+    with open(args.state_dir / "rotation.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(receipt, sort_keys=True) + "\n")
+    state_path.write_text(json.dumps(state, indent=2, sort_keys=True))
+    json.dump(receipt, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return 1 if fold["new_red"] else 0
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2135,6 +2363,15 @@ def main(argv: list[str]) -> int:
     s.add_argument("--issues", type=Path, default=Path(".beads/issues.jsonl"))
     r = sub.add_parser("registration", help="feature-gated test files without matching [[test]] required-features")
     r.add_argument("--root", type=Path, default=Path("."))
+    o = sub.add_parser("rotate", help="run the next default-feature integration targets in turn (execution debt)")
+    o.add_argument("--until", default="origin/main")
+    o.add_argument("--count", type=int, default=25)
+    o.add_argument("--jobs", type=int, default=2)
+    o.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    o.add_argument("--no-fetch", action="store_true", help="skip `git fetch origin` before selecting")
+    o.add_argument("--file-beads", action="store_true", help="file a P1 bead per rotation run with new reds")
+    o.add_argument("--admission-attempts", type=int, default=40)
+    o.add_argument("--admission-sleep", type=int, default=90)
     args = parser.parse_args(argv)
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
 
@@ -2219,6 +2456,7 @@ def main(argv: list[str]) -> int:
             "select_batch": [
                 select_batch(case["shas"], case["max_batch"], case["state"]) for case in probes.get("select_batch", [])
             ],
+            "rotation": [rotation_probe(case) for case in probes.get("rotation", [])],
         }
         json.dump(result, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
@@ -2234,6 +2472,9 @@ def main(argv: list[str]) -> int:
         json.dump(test_registration_census(args.root), sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
+
+    if args.mode == "rotate":
+        return rotate(args, now)
 
     state_path = args.state_dir / "state.json"
     state = load_state(state_path)
