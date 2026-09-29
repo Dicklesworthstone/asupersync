@@ -359,12 +359,16 @@ fn golden_task_output_json_pretty() {
 fn golden_task_output_tsv() {
     let tasks = sample_tasks();
     let output = capture_output(OutputFormat::Tsv, &tasks);
-    assert_snapshot!(output, @r###"
-    1	Initialize runtime	Completed	1	150	startup,critical
-    2	Load configuration	Running	2		config
-    3	Background cleanup	Pending	5
-    4	Network sync	Failed	3	2450	network,retry,timeout
-    "###);
+    // Explicit escapes: every row keeps all six columns, and task 3 ends in two
+    // empty ones (no duration, no tags). An inline snapshot cannot hold those
+    // trailing tabs; the one first written here had lost them.
+    assert_eq!(
+        output,
+        "1\tInitialize runtime\tCompleted\t1\t150\tstartup,critical\n\
+         2\tLoad configuration\tRunning\t2\t\tconfig\n\
+         3\tBackground cleanup\tPending\t5\t\t\n\
+         4\tNetwork sync\tFailed\t3\t2450\tnetwork,retry,timeout\n"
+    );
 }
 
 #[test]
@@ -438,20 +442,30 @@ fn golden_single_item_all_formats() {
         tags: vec!["test".to_string()],
     }];
 
-    let formats = [
-        OutputFormat::Human,
-        OutputFormat::Json,
-        OutputFormat::StreamJson,
-        OutputFormat::JsonPretty,
-        OutputFormat::Tsv,
+    // The same contract as the multi-task goldens above, for one item. (The
+    // per-format snapshot files this test once named were never committed.)
+    let json = r#"{"id":42,"name":"Test task","status":"completed","priority":1,"duration_ms":999,"tags":["test"]}"#;
+    let expected = [
+        (
+            OutputFormat::Human,
+            "Task 42: Test task - Completed (P1) (999ms) [test]\n".to_string(),
+        ),
+        (OutputFormat::Json, format!("{json}\n")),
+        (OutputFormat::StreamJson, format!("{json}\n")),
+        (
+            OutputFormat::JsonPretty,
+            "{\n  \"id\": 42,\n  \"name\": \"Test task\",\n  \"status\": \"completed\",\n  \
+             \"priority\": 1,\n  \"duration_ms\": 999,\n  \"tags\": [\n    \"test\"\n  ]\n}\n"
+                .to_string(),
+        ),
+        (
+            OutputFormat::Tsv,
+            "42\tTest task\tCompleted\t1\t999\ttest\n".to_string(),
+        ),
     ];
 
-    for format in &formats {
-        let output = capture_output(*format, &single_task);
-        insta::with_settings!({
-            snapshot_suffix => format!("{:?}", format).to_lowercase()
-        }, {
-            assert_snapshot!(output);
-        });
+    for (format, expected) in expected {
+        let output = capture_output(format, &single_task);
+        assert_eq!(output, expected, "{format:?}");
     }
 }
