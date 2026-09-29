@@ -503,6 +503,12 @@ macro_rules! conformance_test {
     };
 }
 
+/// How long [`LabRuntimeTarget::block_on`] waits, per stretch, for a wake from
+/// outside the lab before it resumes stepping (asupersync-a95wv9).
+const LAB_EXTERNAL_WAKE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+/// Poll interval of that wait.
+const LAB_EXTERNAL_WAKE_POLL: std::time::Duration = std::time::Duration::from_micros(100);
+
 /// Implementation of `ConformanceTarget` for the Lab runtime.
 ///
 /// This allows conformance tests to run against the deterministic Lab runtime,
@@ -728,6 +734,9 @@ impl ConformanceTarget for LabRuntimeTarget {
         let session = LabConformanceSession::new();
         let _session_guard = session.enter();
 
+        // Wall-clock time spent in the current stretch of waiting for a wake from
+        // outside the lab.
+        let mut external_wait = std::time::Duration::ZERO;
         loop {
             session.drain(runtime);
 
@@ -747,6 +756,28 @@ impl ConformanceTarget for LabRuntimeTarget {
             // does (br-asupersync-uvqpga). No-op when no timer is pending.
             if runtime.scheduler.lock().is_empty() {
                 runtime.advance_to_next_timer();
+            }
+
+            // Nothing runnable, no timer and no pending command: only a real thread
+            // outside the lab (SQLite's blocking pool, for one) can wake the parked
+            // task. Stepping here would count each iteration as an idle step of that
+            // task, and one holding an obligation (a permit it handed to the thread)
+            // trips the futurelock oracle after 10k steps, about a millisecond
+            // (asupersync-a95wv9). No virtual time passes while the lab waits, so wait
+            // in wall-clock time. The wait is bounded per stretch; past the bound the
+            // loop steps as before, so a genuine futurelock is still reported. A
+            // wasm32 page has no other thread to wait for (and cannot sleep).
+            if cfg!(not(target_arch = "wasm32"))
+                && !session.has_pending()
+                && runtime.awaits_external_wake()
+            {
+                if external_wait < LAB_EXTERNAL_WAKE_BUDGET {
+                    std::thread::sleep(LAB_EXTERNAL_WAKE_POLL);
+                    external_wait += LAB_EXTERNAL_WAKE_POLL;
+                    continue;
+                }
+            } else {
+                external_wait = std::time::Duration::ZERO;
             }
 
             runtime.step_for_test();
@@ -1043,6 +1074,35 @@ mod tests {
         let result = LabRuntimeTarget::block_on(&mut runtime, async { 42 });
 
         assert_eq!(result, 42);
+    }
+
+    /// A task that reserves a oneshot permit (a SendPermit obligation it holds)
+    /// and hands it to a real thread is parked on work outside the lab. The
+    /// harness must wait for that thread instead of counting idle steps: those
+    /// tripped the futurelock oracle whenever the thread was slower than the
+    /// threshold's worth of steps (asupersync-a95wv9). A 64-step threshold makes
+    /// the old loop trip it on every run; the thread answers after 50 ms.
+    #[test]
+    fn lab_runtime_target_waits_for_a_permit_sent_from_a_real_thread() {
+        let config = crate::lab::LabConfig::new(7)
+            .max_steps(20_000)
+            .futurelock_max_idle_steps(64);
+        let mut runtime = crate::lab::LabRuntime::new(config);
+
+        let value = LabRuntimeTarget::block_on(&mut runtime, async {
+            let cx = Cx::current().expect("lab root task installs a Cx");
+            let (tx, mut rx) = crate::channel::oneshot::channel::<u32>();
+            let permit = tx.reserve(&cx).expect("reserve before the hand-off");
+            let sender = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                permit.send(7).expect("the receiver is still waiting");
+            });
+            let value = rx.recv(&cx).await.expect("the thread sends");
+            sender.join().expect("sender thread");
+            value
+        });
+
+        assert_eq!(value, 7);
     }
 
     #[test]
