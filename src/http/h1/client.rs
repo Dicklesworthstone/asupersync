@@ -32,6 +32,11 @@ const MAX_HEADERS: usize = 128;
 /// Maximum informational responses accepted before a final response is required.
 const MAX_INFORMATIONAL_RESPONSES: usize = 8;
 
+/// How long an `Expect: 100-continue` request waits for any response before
+/// sending its body anyway (RFC 9110 section 10.1.1). Servers that ignore the
+/// expectation never send `100 Continue`.
+const EXPECT_CONTINUE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// HTTP/1.1 client codec that encodes *requests* and decodes *responses*.
 ///
 /// This is the mirror of [`Http1Codec`](super::Http1Codec) which decodes
@@ -884,15 +889,35 @@ impl Http1Client {
                 return Err(HttpError::HeadersTooLarge);
             }
 
-            let n = poll_fn(|cx| {
+            let read = poll_fn(|cx| {
                 let mut rb = ReadBuf::new(&mut scratch);
                 match Pin::new(&mut io).poll_read(cx, &mut rb) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(Ok(())) => Poll::Ready(Ok(rb.filled().len())),
                     Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
                 }
-            })
-            .await?;
+            });
+            let n = if request_body_sent || !read_buf.is_empty() {
+                read.await?
+            } else {
+                // Nothing has answered the expectation yet. A server that
+                // ignores it would wait for the body forever, so send it once
+                // the wait elapses. Dropping the pending read loses nothing.
+                let now = crate::cx::Cx::with_current(|cx| cx.timer_driver())
+                    .flatten()
+                    .map_or_else(crate::time::wall_now, |timer| timer.now());
+                let waited =
+                    crate::time::timeout(now, EXPECT_CONTINUE_WAIT, std::pin::pin!(read)).await;
+                match waited {
+                    Ok(read) => read?,
+                    Err(_elapsed) => {
+                        io.write_all(body_bytes).await?;
+                        io.flush().await?;
+                        request_body_sent = true;
+                        continue;
+                    }
+                }
+            };
 
             if n == 0 {
                 return Err(HttpError::Io(std::io::Error::new(
@@ -1784,6 +1809,91 @@ mod tests {
         assert!(
             !first_write.contains("hello"),
             "request body must not be sent after early final response"
+        );
+    }
+
+    /// A server that ignores `Expect: 100-continue`: it sends nothing until it
+    /// has read the whole request body, then answers.
+    #[derive(Debug)]
+    struct IgnoresExpectationIo {
+        body: Vec<u8>,
+        written: Vec<u8>,
+        response: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl AsyncRead for IgnoresExpectationIo {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if !self.written.ends_with(&self.body) {
+                return Poll::Pending;
+            }
+            let dst = buf.unfilled();
+            let n = std::io::Read::read(&mut self.response, dst)?;
+            buf.advance(n);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for IgnoresExpectationIo {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            src: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.written.extend_from_slice(src);
+            Poll::Ready(Ok(src.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn request_streaming_expect_continue_sends_the_body_when_the_server_ignores_it() {
+        let io = IgnoresExpectationIo {
+            body: b"hello".to_vec(),
+            written: Vec::new(),
+            response: std::io::Cursor::new(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+            ),
+        };
+        let req = Request {
+            method: Method::Post,
+            uri: "/upload".to_string(),
+            version: Version::Http11,
+            headers: vec![
+                ("Host".to_string(), "example.com".to_string()),
+                ("Expect".to_string(), "100-continue".to_string()),
+            ],
+            body: b"hello".to_vec(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+
+        // Without the fallback the request waits for a 100 Continue that never
+        // comes, so run it on a thread and bound the wait.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(block_on(Http1Client::request_with_io(io, req)));
+        });
+        let (response, io, body_withheld) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the body is sent once the expectation wait elapses")
+            .expect("response");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+        assert!(!body_withheld, "the body was sent");
+        assert!(
+            io.written.ends_with(b"\r\n\r\nhello"),
+            "head, then the body"
         );
     }
 
