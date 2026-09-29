@@ -846,6 +846,25 @@ impl EpochConsistencyConfig {
         }
     }
 
+    /// Checks each module's own transition sequence only.
+    ///
+    /// For a tracker fed by independent per-module counters, like the runtime
+    /// state's region, task and obligation tables: each bumps its own epoch
+    /// once per mutation of that table, so their values are not comparable,
+    /// and cross-module skew or ordering checks would flag normal operation on
+    /// every transition. Skipped and non-advancing epochs within a module are
+    /// still recorded.
+    #[inline]
+    #[must_use]
+    pub fn independent_modules() -> Self {
+        Self {
+            max_epoch_skew: u64::MAX,
+            slow_transition_threshold_ns: 1_000_000, // 1ms
+            strict_ordering: false,
+            enabled: true,
+        }
+    }
+
     /// Creates a strict configuration suitable for testing.
     #[inline]
     #[must_use]
@@ -903,6 +922,13 @@ impl EpochConsistencyTracker {
     #[must_use]
     pub fn new() -> Self {
         Self::with_config(EpochConsistencyConfig::default())
+    }
+
+    /// The tracker a runtime state keeps for its independent per-table epoch
+    /// counters (see [`EpochConsistencyConfig::independent_modules`]).
+    #[must_use]
+    pub(crate) fn for_runtime_tables() -> Self {
+        Self::with_config(EpochConsistencyConfig::independent_modules())
     }
 
     /// Creates a new epoch consistency tracker with the given configuration.
@@ -3460,5 +3486,45 @@ mod tests {
         }
 
         crate::test_complete!("tracker_violation_correlation_ids");
+    }
+
+    #[test]
+    fn independent_modules_ignore_cross_module_counters_but_keep_continuity() {
+        init_test("independent_modules_ignore_cross_module_counters_but_keep_continuity");
+        let tracker =
+            EpochConsistencyTracker::with_config(EpochConsistencyConfig::independent_modules());
+        let now = Time::from_nanos(1000);
+
+        // Obligation mutations outnumber task mutations, as in a real
+        // runtime: the obligation counter runs far ahead of the task counter.
+        let mut obligation = EpochId::GENESIS;
+        for _ in 0..20 {
+            let next = obligation.next();
+            tracker.notify_epoch_transition(ModuleId::ObligationTable, obligation, next, now);
+            obligation = next;
+        }
+        tracker.notify_epoch_transition(
+            ModuleId::TaskTable,
+            EpochId::GENESIS,
+            EpochId::GENESIS.next(),
+            now,
+        );
+        assert_eq!(tracker.violation_count(), 0);
+        assert!(tracker.check_consistency().is_none());
+
+        // A skipped epoch within one module is still a violation.
+        let skipped = obligation.next().next();
+        tracker.notify_epoch_transition(ModuleId::ObligationTable, obligation, skipped, now);
+        assert_eq!(tracker.violation_count(), 1);
+        assert!(matches!(
+            tracker.all_violations()[0],
+            EpochConsistencyViolation::MissingTransition {
+                module: ModuleId::ObligationTable,
+                ..
+            }
+        ));
+        crate::test_complete!(
+            "independent_modules_ignore_cross_module_counters_but_keep_continuity"
+        );
     }
 }
