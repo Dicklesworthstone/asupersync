@@ -532,6 +532,9 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
     // A dependency that fails on its own diagnostics can be caused by a manifest or
     // lockfile change in the commit under test.
     let dependency_error = "  INFO rch::hook: Selected worker: hz3 at ubuntu@host\nerror[E0277]: the trait bound `T: Send` is not satisfied\nerror: could not compile `serde` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 1000ms\n";
+    // The check-wasm32 lane on a worker without the rustup target: every crate fails
+    // on a missing `core` before any code of this repository is reached.
+    let missing_target = "  INFO rch::hook: Selected worker: hz2 at ubuntu@host\n    Checking cfg-if v1.0.4\nerror[E0463]: can't find crate for `core`\n  |\n  = note: the `wasm32-unknown-unknown` target may not be installed\n  = help: consider downloading the target with `rustup target add wasm32-unknown-unknown`\nerror: could not compile `cfg-if` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 900ms\n";
     let scenario = json!({
         "plan": {
             "commits": [commit(9, "dev@example.com", "nine")],
@@ -539,7 +542,9 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
                 one("fault-build", "build"),
                 one("fault-test", "test"),
                 one("fault-missing-source", "build"),
+                one("fault-missing-target", "build"),
                 one("fault-beside-workspace-error", "build"),
+                one("fault-beside-member-error", "build"),
                 one("dependency-error", "build"),
             ],
         },
@@ -547,14 +552,20 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
             "fault-build": {head.clone(): {"log": dependency_fault("")}},
             "fault-test": {head.clone(): {"log": dependency_fault("")}},
             "fault-missing-source": {head.clone(): {"log": missing_source}},
+            "fault-missing-target": {head.clone(): {"log": missing_target}},
             "fault-beside-workspace-error": {head.clone(): {"log": dependency_fault(
                 "src/lib.rs:10:5: error[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib) due to 1 previous error\n"
+            )}},
+            // A workspace member whose package name is not asupersync-*: its local path
+            // on the Checking line marks it as this repository's code.
+            "fault-beside-member-error": {head.clone(): {"log": dependency_fault(
+                "    Checking franken-kernel v0.1.0 (/data/tmp/rch/asupersync/0123abcd/franken_kernel)\nfranken_kernel/src/lib.rs:3:5: error[E0425]: cannot find value `x` in this scope\nerror: could not compile `franken-kernel` (lib) due to 1 previous error\n"
             )}},
             "dependency-error": {head.clone(): {"log": dependency_error}},
         },
     });
     let result = evaluate(&scenario);
-    for lane in ["fault-build", "fault-test", "fault-missing-source"] {
+    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target"] {
         let outcome = receipt(&result, lane);
         assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
         assert!(
@@ -565,7 +576,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
             "{lane}: {outcome:#}"
         );
     }
-    for lane in ["fault-beside-workspace-error", "dependency-error"] {
+    for lane in ["fault-beside-workspace-error", "fault-beside-member-error", "dependency-error"] {
         assert_eq!(
             receipt(&result, lane)["verdict"],
             "red",
@@ -578,7 +589,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
         .iter()
         .filter_map(|payload| payload["lane"].as_str())
         .collect();
-    for lane in ["fault-build", "fault-test", "fault-missing-source"] {
+    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target"] {
         assert!(!filed.contains(&lane), "a worker fault must never file a bead: {filed:?}");
     }
     assert!(
@@ -926,6 +937,78 @@ fn rotation_walks_default_targets_and_files_each_new_red_once() {
         assert_eq!(filing["priority"], 1);
         assert_eq!(filing["new_targets"], json!(["beta::pins"]));
     }
+}
+
+/// RCH delivers cargo's stderr (the `Running` headers) apart from libtest's stdout
+/// (the result blocks); the runner concatenates them. Reading "the last header
+/// seen" filed rotation failures under the wrong target and recorded the failing
+/// ones green (2026-09-29: api_surface_map_contract and
+/// artifact_governance_scanner_contract). The k-th libtest block belongs to the
+/// k-th header. A target at a nested path is named by its binary, not its file stem
+/// (atp_per_module_logging_redaction_contract kept the rotation cursor stuck). When
+/// blocks and headers do not pair up, only cargo's own list of failed binaries
+/// names a target, and nothing is recorded green.
+#[test]
+fn rotation_attributes_each_failure_to_the_binary_that_printed_it() {
+    let nested = "atp_per_module_logging_redaction_contract";
+    let ok = |n: usize| {
+        format!("running {n} tests\ntest result: ok. {n} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n")
+    };
+    let headers = format!(
+        "     Running tests/alpha.rs (target/debug/deps/alpha-0123abcd)\n     Running tests/atp/per_module/logging_redaction_contract.rs (target/debug/deps/{nested}-4567ef01)\n     Running tests/beta.rs (target/debug/deps/beta-89abcdef)\n"
+    );
+    // stdout first, then stderr: every header sits below every block.
+    let paired = ok(3)
+        + "running 1 test\ntest pins ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        + &ok(2)
+        + &headers
+        + &format!("error: 1 target failed:\n    `-p asupersync --test {nested}`\n  Remote command finished: exit=101 in 1ms\n");
+    // A failing test's captured output echoes a libtest header: four blocks, three
+    // headers. cargo names two failed binaries, so neither test can be placed.
+    let unpaired = String::from(
+        "running 1 test\ntest one ... FAILED\n\nfailures:\n\n---- one stdout ----\nrunning 1 test\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n",
+    ) + &ok(3)
+        + "running 2 tests\ntest two ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n"
+        + &headers
+        + "error: 2 targets failed:\n    `-p asupersync --test alpha`\n    `-p asupersync --test beta`\n  Remote command finished: exit=101 in 1ms\n";
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"rotation": [{
+            "root_paths": ["tests/alpha.rs", "tests/beta.rs", "tests/atp"],
+            "registry": {
+                "tests/atp/per_module/logging_redaction_contract.rs": {"name": nested, "features": []},
+            },
+            "count": 3,
+            "runs": [
+                {"sha": "b1", "log": paired, "client_exit": 101, "file_as": "asupersync-rota"},
+                {"sha": "b2", "log": unpaired, "client_exit": 101, "file_as": "asupersync-rotb"},
+            ],
+        }]},
+    }));
+    let rotation = &probed["probe_results"]["rotation"][0];
+    let rounds = rotation["rounds"].as_array().expect("rounds");
+    assert_eq!(rounds[0]["verdict"], "red", "{probed:#}");
+    assert_eq!(rounds[0]["new_red"], json!([nested]), "{probed:#}");
+    assert_eq!(
+        rounds[0]["results"],
+        json!({"alpha": ["green", null], nested: ["red", "asupersync-rota"], "beta": ["green", null]}),
+        "{probed:#}"
+    );
+    assert_eq!(
+        rotation["filings"][0]["new_targets"],
+        json!([format!("{nested}::pins")]),
+        "{probed:#}"
+    );
+    // Unpaired: cargo's list still marks alpha and beta red; the nested target, which
+    // may well have passed, is not healed on this evidence.
+    assert_eq!(rounds[1]["new_red"], json!(["alpha", "beta"]), "{probed:#}");
+    assert_eq!(rounds[1]["healed"], json!([]), "{probed:#}");
+    assert_eq!(
+        rounds[1]["results"][nested],
+        json!(["red", "asupersync-rota"]),
+        "{probed:#}"
+    );
 }
 
 fn hedge_log(with_newer: bool) -> String {

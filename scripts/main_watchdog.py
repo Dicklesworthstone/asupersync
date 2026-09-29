@@ -124,8 +124,20 @@ EXECUTED_TEST_RE = re.compile(r"^test (\S+) \.\.\. (?:ok|FAILED)$")
 TEST_RESULT_RE = re.compile(
     r"^test result: (ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out"
 )
-RUNNING_TARGET_RE = re.compile(r"^\s*Running (?:tests|benches|examples)/([A-Za-z0-9_\-/]+)\.rs\b")
+# The binary in parentheses carries the target's name; a target at a nested path
+# (tests/atp/per_module/logging_redaction_contract.rs) is not named by its file stem.
+RUNNING_TARGET_RE = re.compile(
+    r"^\s*Running (?:tests|benches|examples)/([A-Za-z0-9_\-/]+)\.rs\b(?: \((?:[^()\s]*/)?([A-Za-z0-9_]+)-[0-9a-f]+\))?"
+)
 RUNNING_UNITTESTS_RE = re.compile(r"^\s*Running unittests (\S+)")
+DOC_TESTS_RE = re.compile(r"^\s*Doc-tests (\S+)")
+LIBTEST_BLOCK_RE = re.compile(r"^running \d+ tests?$")
+# cargo names each failed test binary: "error: test failed, to rerun pass `-p asupersync
+# --test x`", and under --no-fail-fast a closing "N targets failed:" list of the same form.
+CARGO_FAILED_TARGET_RE = re.compile(
+    r"^(?:error: (?:test|doctest) failed, to rerun pass |\s+)`(?:-p \S+ )?--(?:(lib|doc)|(?:test|bench|example|bin) ([A-Za-z0-9_\-]+))`\s*$",
+    re.MULTILINE,
+)
 COULD_NOT_COMPILE_RE = re.compile(r"error: could not compile `([^`]+)`(?: \(([^)]*)\))?")
 FIRST_ERROR_RE = re.compile(r"^(?:\S+\.rs:\d+:\d+: error(?:\[E\d+\])?:.*|error(?:\[E\d+\])?: (?!could not compile|aborting).*)$")
 FAILED_TEST_RE = re.compile(r"^test (\S+) \.\.\. FAILED$")
@@ -137,13 +149,18 @@ COMPILER_KILLED_RE = re.compile(
     r"\(signal: 9, SIGKILL: kill\)"
 )
 # The worker lost files a dependency build needed (a registry cache pruned mid-build,
-# a rustc it could not start, a failed download). No commit here can cause these.
+# a rustc it could not start, a failed download), or lacks the rustup target a
+# cross-target lane builds for. No commit here can cause these.
 WORKER_FAULT_RE = re.compile(
     r"could not execute process `[^`]*rustc"
     r"|could not parse/generate dep info"
     r"|failed to download `"
     r"|couldn't read `[^`]*/registry/src/[^`]*`: No such file or directory"
+    r"|target may not be installed"
 )
+# A crate built from a local path ("Checking franken-kernel v0.1.0 (/…/franken_kernel)")
+# belongs to this repository; registry and git dependencies carry no absolute path.
+LOCAL_CRATE_RE = re.compile(r"^\s*(?:Compiling|Checking) (\S+) v\S+ \(/", re.MULTILINE)
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -570,16 +587,18 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     killed_reason = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
     # Likewise a worker fault while only third-party crates failed: such reds were
     # bisected across innocent commits on hz4 (2026-09-28). A workspace crate that
-    # failed beside it is still red.
+    # failed beside it is still red, including a member not named asupersync-*.
     failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
+    local_crates = set(LOCAL_CRATE_RE.findall(clean))
     worker_fault = (
         bool(WORKER_FAULT_RE.search(clean))
         and bool(failing_crates)
-        and not any(name.startswith("asupersync") for name in failing_crates)
+        and not any(name.startswith("asupersync") or name in local_crates for name in failing_crates)
     )
     fault_reason = (
         "the worker could not build a third-party dependency (missing registry files, "
-        "an unexecutable rustc, or a failed download): nothing of this repository was compiled or tested"
+        "an unexecutable rustc, a failed download, or a missing rustup target): "
+        "nothing of this repository was compiled or tested"
     )
 
     if lane["kind"] == "build":
@@ -601,25 +620,46 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
 
     # Test lane. Failing tests are named `<target>::<test>` so a known red can later be
     # healed only by a run that actually executed its target.
-    seen: list[str] = []
+    #
+    # cargo prints a binary's `Running` header on stderr and libtest prints its `running N
+    # tests` block on stdout. RCH delivers the two streams separately (the runner even
+    # concatenates them), so a header need not sit above its block. Reading "the last
+    # header seen" filed failures under the wrong target and recorded the failing one as
+    # green (rotation, 2026-09-29). Each stream keeps its own order and cargo runs one
+    # binary at a time, so the k-th block belongs to the k-th header.
+    headers: list[str] = []
+    for line in lines:
+        if running := RUNNING_TARGET_RE.match(line):
+            headers.append(running.group(2) or running.group(1).split("/")[-1])
+        elif RUNNING_UNITTESTS_RE.match(line):
+            headers.append("lib")
+        elif DOC_TESTS_RE.match(line):
+            headers.append("doc")
+    aligned = sum(1 for line in lines if LIBTEST_BLOCK_RE.match(line.strip())) == len(headers)
+    # When blocks and headers do not pair up, only cargo's own list of failed binaries
+    # names a target, and only when it names exactly one.
+    cargo_failed = sorted({m.group(1) or m.group(2) for m in CARGO_FAILED_TARGET_RE.finditer(clean)})
+    fallback = cargo_failed[0] if len(cargo_failed) == 1 else "?"
+    seen: list[str] = headers
     failed_tests: list[str] = []
     lib_tests: list[str] = []
     executed_targets: set[str] = set()
-    current = "?"
+    block = -1
     for line in lines:
-        running = RUNNING_TARGET_RE.match(line)
-        if running:
-            current = running.group(1).split("/")[-1]
-            seen.append(current)
-        elif RUNNING_UNITTESTS_RE.match(line):
-            current = "lib"
-            seen.append("lib")
-        elif failed := FAILED_TEST_RE.match(line.strip()):
+        stripped = line.strip()
+        if LIBTEST_BLOCK_RE.match(stripped):
+            block += 1
+            continue
+        current = (headers[block] if 0 <= block < len(headers) else "?") if aligned else fallback
+        if failed := FAILED_TEST_RE.match(stripped):
             failed_tests.append(f"{current}::{failed.group(1)}")
-        if current == "lib" and (executed := EXECUTED_TEST_RE.match(line.strip())):
+        if current == "lib" and (executed := EXECUTED_TEST_RE.match(stripped)):
             lib_tests.append(executed.group(1))
-        if (tr := TEST_RESULT_RE.match(line.strip())) and int(tr.group(2)) + int(tr.group(3)) > 0:
+        if (tr := TEST_RESULT_RE.match(stripped)) and int(tr.group(2)) + int(tr.group(3)) > 0:
             executed_targets.add(current)
+    # A binary that died without a FAILED line (killed, aborted) is still named by cargo.
+    named = {key.split("::", 1)[0] for key in failed_tests}
+    failed_tests += [f"{name}::(test binary failed)" for name in cargo_failed if name not in named]
     result["targets_executed"] = sorted(executed_targets - {"?"})
     counts = result["counts"]
     for line in lines:
@@ -907,6 +947,8 @@ def heal_candidates(lane: dict[str, Any], lane_known: dict[str, Any], failing: s
     """
     if lane["kind"] == "build":
         return sorted(set(lane_known) - failing)
+    if any(target_of(key) in (None, "?") for key in failing):
+        return []  # a failure no target owns could be any known red's: none is healed
     seen = set(outcome.get("targets_seen") or [])
     return sorted(t for t in lane_known if t not in failing and target_of(t) in seen)
 
@@ -1301,6 +1343,22 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
             ],
             "expected_targets": ["runtime_abort_vs_cancel_semantics_audit"],
         },
+        {
+            # The workspace has no default-members, so check-default builds the root package
+            # alone: a root change that breaks another member stayed invisible unless the
+            # batch also touched that member (asupersync-kh02d2).
+            "id": "check-members",
+            "kind": "build",
+            "argv": ["cargo", "check", "-j", str(jobs), "--workspace", "--exclude", "asupersync", "--all-targets", "--keep-going", "--message-format=short"],
+        },
+        {
+            # Nothing else builds for the browser. The core crate stopped compiling for wasm32
+            # (listener-only h2 items are dead there) and no lane saw it (bi2462.86.6).
+            # Browser-core's default profile builds the core crate with wasm-browser-prod.
+            "id": "check-wasm32",
+            "kind": "build",
+            "argv": ["cargo", "check", "-j", str(jobs), "-p", "asupersync-browser-core", "--target", "wasm32-unknown-unknown", "--keep-going", "--message-format=short"],
+        },
     ]
     if with_all_features:
         lanes.insert(1, {"id": "check-all-features", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--all-features", "--keep-going", "--message-format=short"]})
@@ -1631,12 +1689,16 @@ def rotation_fold(
     that are newly red and those that healed.
     """
     red_keys: dict[str, list[str]] = {}
+    unattributed = False
     for key in outcome.get("failing_targets") or []:
         target = target_of(key)
         if target in picked:
             red_keys.setdefault(target, []).append(key)
+        else:
+            unattributed = True
     decisive = outcome["verdict"] in (VERDICT_GREEN, VERDICT_RED)
-    ran = set(outcome.get("targets_seen") or []) | set(outcome.get("targets_executed") or [])
+    # A failure no picked target owns could be any of them: nothing is green this run.
+    ran = set() if unattributed else set(outcome.get("targets_seen") or []) | set(outcome.get("targets_executed") or [])
     new_red: list[str] = []
     healed: list[str] = []
     for name in picked:
@@ -2281,8 +2343,8 @@ def rotate(args: argparse.Namespace, now: dt.datetime) -> int:
     Each run advances a cursor over every default target, so the whole suite runs
     in turn whatever the batches touch. Per-target results live in
     `state["rotation"]`, receipts in `rotation.jsonl`. A failing test is keyed by
-    the `Running` line before it; RCH can interleave stdout and stderr, so a
-    rotation bead names the failing tests themselves.
+    the target whose `Running` header pairs with its libtest block
+    (classify_lane_output); a failure no picked target owns marks nothing green.
     """
     state_path = args.state_dir / "state.json"
     state = load_state(state_path)
