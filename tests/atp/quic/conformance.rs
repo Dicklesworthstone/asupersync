@@ -122,26 +122,37 @@ fn test_quic_frame_roundtrip_conformance() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-/// Test that standard QUIC frame tags missing from the current frame enum fail closed.
+/// Test that frame tags outside the codec, and truncated standard frames, fail closed.
 #[test]
 fn test_unsupported_standard_frame_types_fail_closed() -> Result<(), Box<dyn std::error::Error>> {
-    let unsupported = [
+    // NEW_TOKEN, NEW_CONNECTION_ID and RETIRE_CONNECTION_ID joined the decoded
+    // set in a0ed597cf; a bare type byte must still be rejected as truncated.
+    let truncated = [
         ("NEW_TOKEN", Bytes::from_static(&[0x07])),
         ("NEW_CONNECTION_ID", Bytes::from_static(&[0x18])),
         ("RETIRE_CONNECTION_ID", Bytes::from_static(&[0x19])),
     ];
-
-    for (name, wire) in unsupported {
+    for (name, wire) in truncated {
         let mut decode_buf = std::io::Cursor::new(wire.as_ref());
         match QuicFrame::decode(&mut decode_buf) {
-            Err(QuicFrameError::UnknownFrameType(_)) => {}
+            Err(QuicFrameError::UnexpectedEof) => {}
             Ok(Some(frame)) => {
-                return Err(format!("{name} decoded unexpectedly as {frame:?}").into());
+                return Err(format!("{name} decoded from a bare type byte as {frame:?}").into());
             }
             Ok(None) => {
-                return Err(format!("{name} returned incomplete instead of unsupported").into());
+                return Err(format!("{name} returned incomplete instead of an error").into());
             }
             Err(err) => return Err(format!("{name} returned wrong error: {err}").into()),
+        }
+    }
+
+    // Code points outside the implemented set are rejected as unknown.
+    for code in [0x1fu8, 0x20, 0x2f, 0x3f] {
+        let wire = [code];
+        let mut decode_buf = std::io::Cursor::new(&wire[..]);
+        match QuicFrame::decode(&mut decode_buf) {
+            Err(QuicFrameError::UnknownFrameType(found)) if found == u64::from(code) => {}
+            other => return Err(format!("frame type {code:#x} returned {other:?}").into()),
         }
     }
 

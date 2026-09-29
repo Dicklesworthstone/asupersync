@@ -169,17 +169,40 @@ fn postgres_row_stream_next_checkpoints_per_call() {
 fn sqlite_query_unchecked_checkpoints_at_entry_twice() {
     let source = read("src/database/sqlite.rs");
 
-    let fn_marker = "pub async fn query_unchecked(";
-    let pos = source.find(fn_marker).expect("sqlite query_unchecked fn");
-    let body = &source[pos..pos + 1200];
-
-    let count = body.matches("if cx.checkpoint().is_err() {").count();
+    // Since 3e5b6fadf the public entry delegates to query_unchecked_impl,
+    // which transaction-scoped queries share; the checkpoints live there.
+    let entry = "pub async fn query_unchecked(";
+    let pos = source.find(entry).expect("sqlite query_unchecked fn");
+    let entry_end = source[pos..]
+        .find("\n    }\n")
+        .expect("query_unchecked close");
     assert!(
-        count >= 2,
+        source[pos..pos + entry_end]
+            .contains("self.query_unchecked_impl(cx, sql, params, None).await"),
+        "REGRESSION: sqlite::query_unchecked no longer goes through query_unchecked_impl.",
+    );
+
+    let fn_marker = "async fn query_unchecked_impl(";
+    let pos = source
+        .find(fn_marker)
+        .expect("sqlite query_unchecked_impl fn");
+    let entry_end = source[pos..]
+        .find("self.run_connection_op_inner(")
+        .expect("query_unchecked_impl connection op");
+    let body = &source[pos..pos + entry_end];
+    let drain = body
+        .find("self.drain_orphaned_transaction(cx).await")
+        .expect("query_unchecked_impl drains an orphaned transaction");
+
+    let checkpoint = "if cx.checkpoint().is_err() {";
+    let before = body[..drain].matches(checkpoint).count();
+    let after = body[drain..].matches(checkpoint).count();
+    assert!(
+        before >= 1 && after >= 1,
         "REGRESSION: sqlite::query_unchecked has fewer than \
-         2 cx.checkpoint() calls at entry (found {count}). \
-         The pattern of checkpoint-before-drain + checkpoint-\
-         after-drain is broken.",
+         2 cx.checkpoint() calls at entry (found {before} before \
+         and {after} after the drain). The pattern of \
+         checkpoint-before-drain + checkpoint-after-drain is broken.",
     );
 }
 
