@@ -217,7 +217,7 @@ async fn drive_with_budget_deadline<T>(
         .flatten()
         .min();
     let Some(effective) = effective else {
-        return fut.await;
+        return cancellation_reported_as_cancelled(cx, fut.await);
     };
     if effective.is_zero() {
         return Err(ClientError::DeadlineExceeded);
@@ -228,9 +228,30 @@ async fn drive_with_budget_deadline<T>(
         effective.as_nanos(),
     ));
     match crate::time::timeout(now, effective, std::pin::pin!(fut)).await {
-        Ok(result) => result,
+        Ok(result) => cancellation_reported_as_cancelled(cx, result),
         Err(_elapsed) => Err(ClientError::DeadlineExceeded),
     }
+}
+
+/// Cancelling the `Cx` interrupts a socket operation parked on it, which
+/// surfaces as an `Interrupted` I/O error. Report it as the cancellation it
+/// is, so `ClientError::is_cancelled` holds as documented.
+fn cancellation_reported_as_cancelled<T>(
+    cx: &Cx,
+    result: Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    let interrupted = match &result {
+        Err(
+            ClientError::Io(error)
+            | ClientError::ConnectError(error)
+            | ClientError::HttpError(crate::http::h1::codec::HttpError::Io(error)),
+        ) => error.kind() == io::ErrorKind::Interrupted,
+        _ => false,
+    };
+    if interrupted && cx.checkpoint().is_err() {
+        return Err(ClientError::Cancelled);
+    }
+    result
 }
 
 fn wall_clock_now() -> Time {
@@ -417,9 +438,10 @@ where
 impl ParsedUrl {
     /// Parse a URL string into components.
     pub fn parse(url: &str) -> Result<Self, ClientError> {
-        let (scheme, rest) = if let Some(rest) = url.strip_prefix("https://") {
+        // RFC 3986 §3.1: the scheme is case-insensitive.
+        let (scheme, rest) = if let Some(rest) = strip_prefix_ignore_ascii_case(url, "https://") {
             (Scheme::Https, rest)
-        } else if let Some(rest) = url.strip_prefix("http://") {
+        } else if let Some(rest) = strip_prefix_ignore_ascii_case(url, "http://") {
             (Scheme::Http, rest)
         } else {
             return Err(ClientError::InvalidUrl(format!(
@@ -430,12 +452,21 @@ impl ParsedUrl {
         // RFC 3986: authority ends at the first '/', '?', or '#'.
         let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let authority = &rest[..authority_end];
-        let path_and_rest = &rest[authority_end..];
-        let path = if path_and_rest.is_empty() {
-            "/"
+        // The fragment is for the client and is never sent (RFC 9110 §7.1).
+        let path_and_query = rest[authority_end..].split('#').next().unwrap_or_default();
+        // An empty path is sent as "/" (RFC 9112 §3.2.1).
+        let path = if path_and_query.is_empty() {
+            "/".to_owned()
+        } else if path_and_query.starts_with('?') {
+            format!("/{path_and_query}")
         } else {
-            path_and_rest
+            path_and_query.to_owned()
         };
+        if path.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+            return Err(ClientError::InvalidUrl(
+                "URL path cannot contain control characters".into(),
+            ));
+        }
 
         // Reject userinfo (user:pass@host) per RFC 9110 Section 4.2.4.
         // Forwarding credentials in the URL to the Host header can cause
@@ -498,7 +529,7 @@ impl ParsedUrl {
             scheme,
             host,
             port,
-            path: path.to_owned(),
+            path,
         })
     }
 
@@ -1477,6 +1508,13 @@ impl HttpClient {
                                 &next_parsed,
                                 extra_headers,
                             );
+                            // A redirect that changes the method drops the body,
+                            // and the headers that described it (RFC 9110 §15.4).
+                            let next_headers = if next_method == method {
+                                next_headers
+                            } else {
+                                strip_content_headers(next_headers)
+                            };
 
                             // Pin the credential origin to the first request's
                             // URL for the whole chain, so client-wide default
@@ -1590,6 +1628,13 @@ impl HttpClient {
                                 &next_parsed,
                                 extra_headers,
                             );
+                            // A redirect that changes the method drops the body,
+                            // and the headers that described it (RFC 9110 §15.4).
+                            let next_headers = if next_method == method {
+                                next_headers
+                            } else {
+                                strip_content_headers(next_headers)
+                            };
 
                             // Pin the credential origin to the first request's
                             // URL for the whole chain (see the buffered path).
@@ -1792,14 +1837,17 @@ impl HttpClient {
     ) -> Result<Response, ClientError> {
         check_cx(cx)?;
         let proxy = parse_proxy_endpoint(proxy_url)?;
-        let proxy_conn = self.connect_via_proxy(cx, parsed, &proxy).await?;
+        let caller_proxy_authorization = self.caller_proxy_authorization(extra_headers);
+        let proxy_conn = self
+            .connect_via_proxy(cx, parsed, &proxy, caller_proxy_authorization.as_deref())
+            .await?;
         check_cx(cx)?;
         let request_target = if proxy_conn.use_absolute_form {
             Some(absolute_request_target(parsed))
         } else {
             None
         };
-        let req = self.build_request_with_origin(
+        let mut req = self.build_request_with_origin(
             method,
             parsed,
             extra_headers,
@@ -1808,6 +1856,9 @@ impl HttpClient {
             proxy_conn.proxy_authorization.as_deref(),
             origin,
         );
+        if !proxy_conn.use_absolute_form {
+            strip_proxy_authorization(&mut req.headers);
+        }
         let (response, _io, _body_withheld) = if let Some(max_body_size) = self.config.max_body_size
         {
             Http1Client::request_with_io_and_max_body_size(proxy_conn.io, req, max_body_size)
@@ -1832,14 +1883,17 @@ impl HttpClient {
     ) -> Result<ClientStreamingResponse<ClientIo>, ClientError> {
         check_cx(cx)?;
         let proxy = parse_proxy_endpoint(proxy_url)?;
-        let proxy_conn = self.connect_via_proxy(cx, parsed, &proxy).await?;
+        let caller_proxy_authorization = self.caller_proxy_authorization(extra_headers);
+        let proxy_conn = self
+            .connect_via_proxy(cx, parsed, &proxy, caller_proxy_authorization.as_deref())
+            .await?;
         check_cx(cx)?;
         let request_target = if proxy_conn.use_absolute_form {
             Some(absolute_request_target(parsed))
         } else {
             None
         };
-        let req = self.build_request_with_origin(
+        let mut req = self.build_request_with_origin(
             method,
             parsed,
             extra_headers,
@@ -1848,6 +1902,9 @@ impl HttpClient {
             proxy_conn.proxy_authorization.as_deref(),
             origin,
         );
+        if !proxy_conn.use_absolute_form {
+            strip_proxy_authorization(&mut req.headers);
+        }
         let resp = if let Some(max_body_size) = self.config.max_body_size {
             Http1Client::request_streaming_with_max_body_size(proxy_conn.io, req, max_body_size)
                 .await?
@@ -1859,11 +1916,22 @@ impl HttpClient {
         Ok(resp)
     }
 
+    /// The `Proxy-Authorization` the caller set, for this request or as a
+    /// client-wide default.
+    fn caller_proxy_authorization(&self, extra_headers: &[(String, String)]) -> Option<String> {
+        get_header(extra_headers, "proxy-authorization")
+            .or_else(|| get_header(&self.config.default_headers, "proxy-authorization"))
+    }
+
+    /// Connects through `proxy`. `caller_proxy_authorization` authenticates an
+    /// HTTP CONNECT tunnel and takes precedence over credentials in the proxy
+    /// URL, as it does for a forward-proxied request.
     async fn connect_via_proxy(
         &self,
         cx: &Cx,
         parsed: &ParsedUrl,
         proxy: &ProxyEndpoint,
+        caller_proxy_authorization: Option<&str>,
     ) -> Result<ProxyConnection, ClientError> {
         match proxy.scheme {
             ProxyScheme::Http | ProxyScheme::Https => {
@@ -1894,7 +1962,9 @@ impl HttpClient {
                 }
 
                 let mut connect_headers = Vec::new();
-                if let Some(auth) = proxy.http_proxy_authorization() {
+                if let Some(auth) =
+                    caller_proxy_authorization.or_else(|| proxy.http_proxy_authorization())
+                {
                     connect_headers.push(("Proxy-Authorization".to_owned(), auth.to_owned()));
                 }
                 let tunnel = establish_http_connect_tunnel(
@@ -2551,6 +2621,13 @@ fn is_redirect(status: u16) -> bool {
 }
 
 /// Get the first value for a header name (case-insensitive).
+/// Proxy credentials are for the proxy. A request carried through a tunnel
+/// (HTTP CONNECT or SOCKS5) reaches the origin itself, which must not see
+/// them.
+fn strip_proxy_authorization(headers: &mut Vec<(String, String)>) {
+    headers.retain(|(name, _)| !name.eq_ignore_ascii_case("proxy-authorization"));
+}
+
 fn get_header(headers: &[(String, String)], name: &str) -> Option<String> {
     headers
         .iter()
@@ -2575,7 +2652,9 @@ fn ensure_multipart_content_type(headers: &mut Vec<(String, String)>, form: &Mul
 /// Determine the method for the redirected request.
 fn redirect_method(status: u16, original: &Method) -> Method {
     match status {
-        // 303 See Other: always GET
+        // 303 See Other: retrieve with GET, or HEAD for a HEAD request
+        // (RFC 9110 §15.4.4)
+        303 if *original == Method::Head => Method::Head,
         303 => Method::Get,
         // 301/302: convert POST to GET (traditional browser behavior)
         301 | 302 if *original == Method::Post => Method::Get,
@@ -3071,10 +3150,18 @@ fn header_has_token(headers: &[(String, String)], name: &str, token: &str) -> bo
     })
 }
 
+/// `s` without `prefix`, compared ASCII case-insensitively.
+fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let (head, rest) = (s.get(..prefix.len())?, s.get(prefix.len()..)?);
+    head.eq_ignore_ascii_case(prefix).then_some(rest)
+}
+
 /// Resolve a redirect Location header relative to the current URL.
 fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
-    // Absolute URL
-    if location.starts_with("http://") || location.starts_with("https://") {
+    // Absolute URL (the scheme is case-insensitive, RFC 3986 §3.1)
+    if strip_prefix_ignore_ascii_case(location, "http://").is_some()
+        || strip_prefix_ignore_ascii_case(location, "https://").is_some()
+    {
         return location.to_owned();
     }
 
@@ -3144,6 +3231,30 @@ fn is_sensitive_redirect_header(name: &str) -> bool {
 }
 
 /// Strip security-sensitive headers when redirecting to a different origin.
+/// Drops the headers that describe a request body, for a redirect that changes
+/// the method and so drops the body. A kept Content-Length would contradict
+/// the empty body and fail the redirected request.
+fn strip_content_headers(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+    const CONTENT_HEADERS: [&str; 8] = [
+        "content-length",
+        "content-type",
+        "content-encoding",
+        "content-language",
+        "content-location",
+        "transfer-encoding",
+        "digest",
+        "last-modified",
+    ];
+    headers
+        .into_iter()
+        .filter(|(name, _)| {
+            !CONTENT_HEADERS
+                .iter()
+                .any(|content| name.eq_ignore_ascii_case(content))
+        })
+        .collect()
+}
+
 fn strip_sensitive_headers_on_redirect(
     from: &ParsedUrl,
     to: &ParsedUrl,
@@ -3484,6 +3595,44 @@ mod tests {
     fn parse_url_no_path() {
         let url = ParsedUrl::parse("http://example.com").unwrap();
         assert_eq!(url.path, "/");
+    }
+
+    #[test]
+    fn parse_url_never_sends_the_fragment_and_roots_a_bare_query() {
+        let url = ParsedUrl::parse("http://example.com/a/b?x=1#section").unwrap();
+        assert_eq!(url.path, "/a/b?x=1");
+        let url = ParsedUrl::parse("http://example.com#top").unwrap();
+        assert_eq!(url.path, "/");
+        let url = ParsedUrl::parse("http://example.com?x=1").unwrap();
+        assert_eq!(url.path, "/?x=1");
+    }
+
+    #[test]
+    fn parse_url_rejects_control_bytes_in_the_path() {
+        for url in [
+            "http://example.com/a\u{0}b",
+            "http://example.com/a\u{7f}b",
+            "http://example.com/a\u{1b}b",
+            "http://example.com/a\r\nX-Injected: 1",
+        ] {
+            assert!(
+                matches!(ParsedUrl::parse(url), Err(ClientError::InvalidUrl(_))),
+                "{url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn url_schemes_are_case_insensitive() {
+        let url = ParsedUrl::parse("HTTPS://Example.com/path").unwrap();
+        assert_eq!(url.scheme, Scheme::Https);
+        assert_eq!(url.port, 443);
+        let current = ParsedUrl::parse("http://example.com/old").unwrap();
+        assert_eq!(
+            resolve_redirect(&current, "HTTPS://other.example/new"),
+            "HTTPS://other.example/new",
+            "an absolute Location with an uppercase scheme is not a relative path"
+        );
     }
 
     #[test]
@@ -5113,6 +5262,180 @@ mod tests {
         }
     }
 
+    fn read_http_head(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            let n = stream.read(&mut byte).expect("read request head");
+            assert!(n > 0, "peer closed before the request head ended");
+            head.push(byte[0]);
+        }
+        String::from_utf8(head).expect("utf-8 request head")
+    }
+
+    #[test]
+    fn socks5_tunnelled_request_does_not_carry_proxy_authorization_to_the_origin() {
+        use std::io::{Read, Write};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind SOCKS5 proxy");
+        let proxy_addr = listener.local_addr().expect("proxy address");
+        let proxy = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut greeting = [0_u8; 2];
+            stream.read_exact(&mut greeting).expect("read greeting");
+            let mut methods = vec![0_u8; usize::from(greeting[1])];
+            stream.read_exact(&mut methods).expect("read auth methods");
+            stream.write_all(&[5, 0]).expect("choose no authentication");
+            let mut connect = [0_u8; 4];
+            stream.read_exact(&mut connect).expect("read CONNECT head");
+            let address_len = match connect[3] {
+                1 => 4,
+                4 => 16,
+                _ => {
+                    let mut len = [0_u8; 1];
+                    stream.read_exact(&mut len).expect("read domain length");
+                    usize::from(len[0])
+                }
+            };
+            let mut target = vec![0_u8; address_len + 2];
+            stream.read_exact(&mut target).expect("read CONNECT target");
+            stream
+                .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+                .expect("accept CONNECT");
+            let request = read_http_head(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .expect("answer tunnelled request");
+            request
+        });
+
+        let client = HttpClient::builder()
+            .proxy(format!("socks5://{proxy_addr}"))
+            .default_header("Proxy-Authorization", "Basic cHJveHk=")
+            .build();
+        let cx = Cx::for_testing();
+        let response = block_on(client.request(
+            &cx,
+            Method::Get,
+            "http://origin.example/",
+            Vec::new(),
+            Vec::new(),
+        ))
+        .expect("request through the SOCKS5 tunnel");
+        let request = proxy.join().expect("proxy thread");
+        assert_eq!(response.status, 204);
+        assert!(request.starts_with("GET / HTTP/1.1\r\n"), "{request}");
+        assert!(
+            !request.to_ascii_lowercase().contains("proxy-authorization"),
+            "proxy credentials reached the origin: {request}"
+        );
+    }
+
+    #[test]
+    fn redirect_to_get_drops_the_content_headers_of_the_dropped_body() {
+        use std::io::{Read, Write};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let mut heads = Vec::new();
+            for (index, response) in [
+                "HTTP/1.1 302 Found\r\nLocation: /done\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (mut stream, _) = listener.accept().expect("accept client");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .expect("set read timeout");
+                heads.push(read_http_head(&mut stream));
+                if index == 0 {
+                    let mut body = [0_u8; 3];
+                    stream.read_exact(&mut body).expect("read POST body");
+                }
+                stream.write_all(response.as_bytes()).expect("respond");
+            }
+            heads
+        });
+
+        let client = HttpClient::builder().build();
+        let cx = Cx::for_testing();
+        let response = block_on(client.request(
+            &cx,
+            Method::Post,
+            &format!("http://{addr}/submit"),
+            vec![
+                ("Content-Length".to_owned(), "3".to_owned()),
+                ("Content-Type".to_owned(), "text/plain".to_owned()),
+            ],
+            b"abc".to_vec(),
+        ))
+        .expect("the redirected GET succeeds");
+        let heads = server.join().expect("server thread");
+        assert_eq!(response.status, 200);
+        assert!(
+            heads[1].starts_with("GET /done HTTP/1.1\r\n"),
+            "{}",
+            heads[1]
+        );
+        let redirected = heads[1].to_ascii_lowercase();
+        assert!(
+            !redirected.contains("content-length") && !redirected.contains("content-type"),
+            "the GET must not describe the dropped POST body: {}",
+            heads[1]
+        );
+        assert_eq!(redirect_method(303, &Method::Head), Method::Head);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn connect_tunnel_carries_the_callers_proxy_authorization() {
+        use std::io::Write;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP proxy");
+        let proxy_addr = listener.local_addr().expect("proxy address");
+        let proxy = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("set read timeout");
+            let connect = read_http_head(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .expect("establish tunnel");
+            // Close instead of speaking TLS: only the CONNECT request matters.
+            connect
+        });
+
+        let client = HttpClient::builder()
+            .proxy(format!("http://{proxy_addr}"))
+            .default_header("Proxy-Authorization", "Basic cHJveHk=")
+            .build();
+        let cx = Cx::for_testing();
+        let _ = block_on(client.request(
+            &cx,
+            Method::Get,
+            "https://origin.example/",
+            Vec::new(),
+            Vec::new(),
+        ));
+        let connect = proxy.join().expect("proxy thread");
+        assert!(
+            connect.starts_with("CONNECT origin.example:443 HTTP/1.1\r\n"),
+            "{connect}"
+        );
+        assert!(
+            connect.contains("\r\nProxy-Authorization: Basic cHJveHk=\r\n"),
+            "the tunnel request must carry the caller's proxy credentials: {connect}"
+        );
+    }
+
     #[test]
     fn connect_tunnel_writes_expected_request() {
         let io = ConnectTestIo::new("HTTP/1.1 200 Connection Established\r\n\r\n");
@@ -5945,6 +6268,50 @@ mod tests {
             stats.idle_connections, 0,
             "late-cancelled responses must not be returned to the idle pool"
         );
+    }
+
+    #[test]
+    fn request_cancelled_while_parked_on_the_socket_reports_cancelled() {
+        use std::io::Write;
+        use std::sync::{Arc, mpsc};
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener address");
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let _ = read_http_head(&mut stream);
+            seen_tx.send(()).expect("report the request");
+            // Answer nothing until the request is cancelled, then make its
+            // parked read runnable. The read checks the ambient Cx first.
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            let _ = stream.write_all(b"H");
+            let _ = stream.flush();
+        });
+
+        let client = Arc::new(HttpClient::builder().build());
+        let cx = Cx::for_testing();
+        let request_cx = cx.clone();
+        let request_client = Arc::clone(&client);
+        let url = format!("http://{addr}/parked");
+        let (done_tx, done_rx) = mpsc::channel();
+        let request = std::thread::spawn(move || {
+            // Socket reads observe the ambient Cx, as inside a runtime task.
+            let _ambient = Cx::set_current(Some(request_cx.clone()));
+            let _ = done_tx.send(block_on(request_client.send_get(&request_cx, &url)));
+        });
+        seen_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the request reached the server");
+        cx.set_cancel_requested(true);
+        let _ = release_tx.send(());
+        let result = done_rx.recv_timeout(Duration::from_secs(5));
+        server.join().expect("server thread");
+        request.join().expect("request thread");
+        let result = result.expect("the woken request observes its cancellation");
+        assert!(matches!(result, Err(ClientError::Cancelled)), "{result:?}");
     }
 
     #[test]
