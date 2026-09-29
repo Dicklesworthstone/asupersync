@@ -232,23 +232,17 @@ impl Output {
                 writeln!(self.writer, "{}", value.human_format())?;
             }
             OutputFormat::Json => {
-                let json = value
-                    .json()
-                    .and_then(|json| serde_json::to_string(&json))
+                let json = render_json(value, false)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
             }
             OutputFormat::JsonPretty => {
-                let json = value
-                    .json()
-                    .and_then(|json| serde_json::to_string_pretty(&json))
+                let json = render_json(value, true)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
             }
             OutputFormat::StreamJson => {
-                let json = value
-                    .json()
-                    .and_then(|json| serde_json::to_string(&json))
+                let json = render_json(value, false)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
                 self.writer.flush()?; // Flush for streaming
@@ -276,30 +270,18 @@ impl Output {
                 }
             }
             OutputFormat::Json => {
-                let values = values
-                    .iter()
-                    .map(Outputtable::json)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let json = serde_json::to_string(&values)
+                let json = render_json_list(values, false)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
             }
             OutputFormat::JsonPretty => {
-                let values = values
-                    .iter()
-                    .map(Outputtable::json)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let json = serde_json::to_string_pretty(&values)
+                let json = render_json_list(values, true)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 writeln!(self.writer, "{json}")?;
             }
             OutputFormat::StreamJson => {
                 for value in values {
-                    let json = value
-                        .json()
-                        .and_then(|json| serde_json::to_string(&json))
+                    let json = render_json(value, false)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                     writeln!(self.writer, "{json}")?;
                     self.writer.flush()?;
@@ -321,6 +303,50 @@ impl Output {
     /// Returns an error if flushing fails.
     pub fn flush(&mut self) -> io::Result<()> {
         self.writer.flush()
+    }
+}
+
+/// Renders `value` as JSON text for the machine-readable formats.
+///
+/// When [`Outputtable::json`] yields exactly the serde value of `value` (the
+/// default, or an override that keeps the serde shape), `value` itself is
+/// serialized. Objects then keep their field declaration order and `f32`
+/// fields their shortest form, as in v0.4.3. A detour through
+/// `serde_json::Value` sorts every object's keys and prints an `f32` `12.34`
+/// as `12.34000015258789`. An override that changes the shape, or one whose
+/// type cannot serialize itself, is rendered from its `Value`.
+fn render_json<T: Outputtable>(value: &T, pretty: bool) -> Result<String, serde_json::Error> {
+    let shaped = value.json()?;
+    match serde_json::to_value(value) {
+        Ok(serde_shape) if serde_shape == shaped => json_text(value, pretty),
+        _ => json_text(&shaped, pretty),
+    }
+}
+
+/// [`render_json`] for a list written as one JSON array.
+fn render_json_list<T: Outputtable>(
+    values: &[T],
+    pretty: bool,
+) -> Result<String, serde_json::Error> {
+    let shaped = values
+        .iter()
+        .map(Outputtable::json)
+        .collect::<Result<Vec<_>, _>>()?;
+    let serde_shape = values
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>();
+    match serde_shape {
+        Ok(serde_shape) if serde_shape == shaped => json_text(values, pretty),
+        _ => json_text(&shaped, pretty),
+    }
+}
+
+fn json_text<S: Serialize + ?Sized>(value: &S, pretty: bool) -> Result<String, serde_json::Error> {
+    if pretty {
+        serde_json::to_string_pretty(value)
+    } else {
+        serde_json::to_string(value)
     }
 }
 
@@ -713,6 +739,140 @@ mod tests {
         ];
         output.write_list(&items).unwrap();
         crate::test_complete!("output_writer_list_json_is_array");
+    }
+
+    #[derive(Serialize)]
+    struct DeclaredOrderItem {
+        zeta: u32,
+        alpha: f32,
+        tags: Vec<&'static str>,
+    }
+
+    impl Outputtable for DeclaredOrderItem {
+        fn human_format(&self) -> String {
+            format!("{} {}", self.zeta, self.alpha)
+        }
+    }
+
+    #[derive(Serialize)]
+    struct ReshapedItem {
+        inner: u32,
+    }
+
+    impl Outputtable for ReshapedItem {
+        fn json(&self) -> Result<Value, serde_json::Error> {
+            Ok(serde_json::json!({ "value": self.inner, "kind": "reshaped" }))
+        }
+
+        fn human_format(&self) -> String {
+            self.inner.to_string()
+        }
+    }
+
+    /// Serializes only through its `json()` override.
+    struct OverrideOnlyItem;
+
+    impl Serialize for OverrideOnlyItem {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(S::Error::custom("internal shape is not serializable"))
+        }
+    }
+
+    impl Outputtable for OverrideOnlyItem {
+        fn json(&self) -> Result<Value, serde_json::Error> {
+            Ok(serde_json::json!({ "ok": true }))
+        }
+
+        fn human_format(&self) -> String {
+            "ok".to_string()
+        }
+    }
+
+    fn rendered<T: Outputtable>(format: OutputFormat, items: &[T], list: bool) -> String {
+        let buffer = SharedBuffer::default();
+        let mut output = Output::with_writer(format, buffer.clone());
+        if list {
+            output.write_list(items).unwrap();
+        } else {
+            output.write(&items[0]).unwrap();
+        }
+        buffer.snapshot_string()
+    }
+
+    #[test]
+    fn json_formats_keep_declared_field_order_and_shortest_f32() {
+        init_test("json_formats_keep_declared_field_order_and_shortest_f32");
+        let items = [
+            DeclaredOrderItem {
+                zeta: 1,
+                alpha: 12.34,
+                tags: vec!["x"],
+            },
+            DeclaredOrderItem {
+                zeta: 2,
+                alpha: 0.1,
+                tags: vec![],
+            },
+        ];
+        let first = "{\"zeta\":1,\"alpha\":12.34,\"tags\":[\"x\"]}";
+        let second = "{\"zeta\":2,\"alpha\":0.1,\"tags\":[]}";
+
+        assert_eq!(
+            rendered(OutputFormat::Json, &items, false),
+            format!("{first}\n")
+        );
+        assert_eq!(
+            rendered(OutputFormat::StreamJson, &items, false),
+            format!("{first}\n")
+        );
+        assert_eq!(
+            rendered(OutputFormat::JsonPretty, &items, false),
+            "{\n  \"zeta\": 1,\n  \"alpha\": 12.34,\n  \"tags\": [\n    \"x\"\n  ]\n}\n"
+        );
+        assert_eq!(
+            rendered(OutputFormat::Json, &items, true),
+            format!("[{first},{second}]\n")
+        );
+        assert_eq!(
+            rendered(OutputFormat::StreamJson, &items, true),
+            format!("{first}\n{second}\n")
+        );
+        crate::test_complete!("json_formats_keep_declared_field_order_and_shortest_f32");
+    }
+
+    #[test]
+    fn json_override_that_reshapes_is_rendered_from_its_value() {
+        init_test("json_override_that_reshapes_is_rendered_from_its_value");
+        let items = [ReshapedItem { inner: 5 }];
+        let reshaped = "{\"kind\":\"reshaped\",\"value\":5}";
+
+        assert_eq!(
+            rendered(OutputFormat::Json, &items, false),
+            format!("{reshaped}\n")
+        );
+        assert_eq!(
+            rendered(OutputFormat::Json, &items, true),
+            format!("[{reshaped}]\n")
+        );
+        assert_eq!(
+            rendered(OutputFormat::StreamJson, &items, true),
+            format!("{reshaped}\n")
+        );
+
+        // An override stands in for a type that cannot serialize itself.
+        let override_only = [OverrideOnlyItem];
+        assert_eq!(
+            rendered(OutputFormat::Json, &override_only, false),
+            "{\"ok\":true}\n"
+        );
+        assert_eq!(
+            rendered(OutputFormat::JsonPretty, &override_only, true),
+            "[\n  {\n    \"ok\": true\n  }\n]\n"
+        );
+        crate::test_complete!("json_override_that_reshapes_is_rendered_from_its_value");
     }
 
     #[test]

@@ -489,7 +489,9 @@ fn workspace_scan_stage_script_contains_fail_closed_rch_tokens() {
         "rch_attempt_went_local()",
         "update_run_failure_class()",
         "fell back to local cargo; rejecting attempt",
-        "rm -f \"${run_json}\"",
+        // A fallback payload leaves the canonical name for a forensic one
+        // (doctor_e2e_proof_lane_contract forbids `rm -f` in these scripts).
+        "mv -f \"${run_json}\" \"${run_json%.json}.local_fallback.json\"",
         "DOCTOR_FULLSTACK_SINGLE_RUN",
         "FAILURE_CLASS=\"rch_local_fallback\"",
     ];
@@ -508,7 +510,9 @@ fn report_export_stage_script_contains_fail_closed_rch_tokens() {
         "rch_attempt_went_local()",
         "update_run_failure_class()",
         "fell back to local cargo; rejecting attempt",
-        "rm -f \"${run_json}\"",
+        // A fallback payload leaves the canonical name for a forensic one
+        // (doctor_e2e_proof_lane_contract forbids `rm -f` in these scripts).
+        "mv -f \"${run_json}\" \"${run_json%.json}.local_fallback.json\"",
         "DOCTOR_FULLSTACK_SINGLE_RUN",
         "FAILURE_CLASS=\"rch_local_fallback\"",
     ];
@@ -640,6 +644,10 @@ ENDLOG
         !artifact_dir.join("scan_run1.json").exists(),
         "workspace scan should not keep captured JSON from a local fallback attempt"
     );
+    assert!(
+        artifact_dir.join("scan_run1.local_fallback.json").exists(),
+        "workspace scan should keep the local fallback payload for forensic review"
+    );
 }
 
 #[test]
@@ -699,6 +707,12 @@ ENDLOG
     assert!(
         !artifact_dir.join("report_export_run1.json").exists(),
         "report export should not keep captured JSON from a local fallback attempt"
+    );
+    assert!(
+        artifact_dir
+            .join("report_export_run1.local_fallback.json")
+            .exists(),
+        "report export should keep the local fallback payload for forensic review"
     );
 }
 
