@@ -102,10 +102,14 @@ fn cc04_cancel_request_is_callable_via_pin() {
         src.contains("self.project().cancel_signal.cancel();"),
         "request_cancel must publish cancellation through the stored CancelSignal"
     );
+    // Since 7fb2cbb68 the flag lives in shared state beside the waiter
+    // registry, and the first request publishes it with AcqRel (Release
+    // included) before waking every registered future.
     assert!(
         src.contains("pub struct CancelSignal")
-            && src.contains("requested: Arc<AtomicBool>")
-            && src.contains("self.requested.store(true, Ordering::Release)"),
+            && src.contains("state: Arc<SignalState>")
+            && src.contains("requested: AtomicBool")
+            && src.contains("self.state.requested.swap(true, Ordering::AcqRel)"),
         "CancelSignal must own the shared atomic cancel flag and publish cancellation with Release ordering"
     );
 }
@@ -161,7 +165,7 @@ fn cc_no_cancel_polls_normally() {
     // When cancel_requested is false, future is polled normally.
     let src = load_source("cancel.rs");
     assert!(
-        src.contains("Poll::Pending => Poll::Pending"),
+        src.contains("Poll::Pending if !cancelled => return Poll::Pending"),
         "uncancelled Pending must propagate as Pending"
     );
 }

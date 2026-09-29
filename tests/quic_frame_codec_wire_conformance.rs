@@ -394,16 +394,23 @@ fn truncated_frames_fail_closed_with_unexpected_eof() {
 
 #[test]
 fn unknown_frame_types_fail_closed() {
-    // The codec implements a bounded set of frame types. NEW_TOKEN (0x07),
-    // NEW_CONNECTION_ID (0x18), RETIRE_CONNECTION_ID (0x19) are intentionally not
-    // decoded, and arbitrary high code points are rejected — never panicking.
-    for ft in [0x07u8, 0x18, 0x19, 0x20, 0x3f] {
+    // The codec implements a bounded set of frame types: code points outside it
+    // are rejected, never panicking. (NEW_TOKEN 0x07, NEW_CONNECTION_ID 0x18 and
+    // RETIRE_CONNECTION_ID 0x19 joined the decoded set in a0ed597cf.)
+    for ft in [0x1fu8, 0x20, 0x2f, 0x3f] {
         assert!(
             matches!(
                 decode_one(&[ft]),
                 Err(QuicFrameError::UnknownFrameType(code)) if code == u64::from(ft)
             ),
             "frame type {ft:#x} must be rejected as UnknownFrameType"
+        );
+    }
+    // The newly decoded types still fail closed on a bare type byte.
+    for ft in [0x07u8, 0x18, 0x19] {
+        assert!(
+            matches!(decode_one(&[ft]), Err(QuicFrameError::UnexpectedEof)),
+            "a bare {ft:#x} frame type must be rejected as truncated"
         );
     }
 }
