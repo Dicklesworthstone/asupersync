@@ -131,7 +131,7 @@ selected=re.findall(r"Selected worker: ([A-Za-z0-9_.-]+) at ",log)
 terminal=re.findall(r"^\[RCH\] remote ([A-Za-z0-9_.-]+) \([^\n]+\)$",log,re.M)
 assert len(selected)==1 and terminal==selected and (not worker or selected==[worker])
 assert not re.search(r"^\[RCH\] local \(|falling back to local|local fallback|executing locally",log,re.M)
-receipts=re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})$",log,re.M)
+receipts=re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})(?: tree=[0-9a-f]{40})?$",log,re.M)
 assert len(receipts)==1 and receipts[0][0]==source["base"]
 assert not fingerprint or receipts[0][1]==fingerprint
 counts=re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;",log,re.M)

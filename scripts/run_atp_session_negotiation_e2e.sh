@@ -62,7 +62,8 @@ path, worker, base, expected_overlay, stage = sys.argv[1:]
 text = re.sub(r"\x1b\[[0-9;]*m", "", pathlib.Path(path).read_text())
 selected = re.findall(r"Selected worker: ([A-Za-z0-9_.-]+) at ", text)
 terminal = re.findall(r"^\[RCH\] remote ([A-Za-z0-9_.-]+) \([^\n]+\)$", text, re.M)
-receipts = re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})$", text, re.M)
+# RCH 2.1.5+ appends the overlaid tree id to the receipt line.
+receipts = re.findall(r"^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})(?: tree=[0-9a-f]{40})?$", text, re.M)
 assert len(selected) == 1, ("selected worker ambiguous/absent", selected)
 if worker:
     assert selected == [worker], ("selected worker mismatch", selected, worker)

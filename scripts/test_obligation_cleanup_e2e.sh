@@ -89,7 +89,8 @@ checked_verify_receipt() {
         printf 'FATAL: %s selected a different worker\n' "$stage" >&2
         return 86
     fi
-    source=$(sed -nE 's/^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})$/\1 \2/p' "$log")
+    # RCH 2.1.5+ appends " tree=<id>" to the receipt line.
+    source=$(sed -nE 's/^\[RCH\] clean-overlay receipt: base=([0-9a-f]{40}) overlay-fingerprint=([0-9a-f]{64})( tree=[0-9a-f]{40})?$/\1 \2/p' "$log")
     [[ "$source" =~ ^[0-9a-f]{40}\ [0-9a-f]{64}$ && "${source%% *}" == "$CHECKED_BASE" ]] || {
         printf 'FATAL: %s lacks one admitted receipt for the requested base\n' "$stage" >&2
         return 86
