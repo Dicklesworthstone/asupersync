@@ -154,9 +154,10 @@ run_scan_call() {
             printf '%s\n' "${payload}" > "${run_json}"
             if [[ ${rc} -ne 0 ]]; then
                 if [[ "${last_failure_reason}" == "rch_local_fallback" ]]; then
-                    # Keep the captured payload for forensic review; the stage
-                    # remains failed because local fallback is forbidden.
-                    :
+                    # Local fallback is forbidden: keep the payload for forensic
+                    # review under a non-canonical name, so nothing downstream
+                    # ingests the canonical artifact as a result.
+                    mv -f "${run_json}" "${run_json%.json}.local_fallback.json"
                 else
                     echo "  WARN: ${run_label} exited ${rc}; proceeding with captured JSON payload"
                     return 0
