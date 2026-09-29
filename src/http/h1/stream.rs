@@ -2627,6 +2627,24 @@ impl OutgoingBody {
         }
     }
 
+    /// Reads the next frame once the producer has returned.
+    ///
+    /// Every frame the producer sent is queued by then, including terminal
+    /// frames it committed under a mask after its context was cancelled. So
+    /// this reads the queue without consulting that context, and ignores an
+    /// earlier cancelled receive. `None` means the queue is empty: the body
+    /// has ended.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn take_frame_after_producer_returned(
+        &mut self,
+    ) -> Option<Result<Frame<BytesCursor>, HttpError>> {
+        let frame = self.take_committed_frame();
+        if frame.is_none() {
+            self.done = true;
+        }
+        frame
+    }
+
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn take_committed_frame(&mut self) -> Option<Result<Frame<BytesCursor>, HttpError>> {
         let frame = self.receiver.try_recv().ok()?;
@@ -4710,6 +4728,35 @@ mod tests {
             empty.poll_committed_frame(&mut task),
             Poll::Ready(Some(Err(HttpError::BodyCancelled)))
         ));
+    }
+
+    #[test]
+    fn frames_committed_after_an_observed_cancellation_drain_once_the_producer_returns() {
+        let mut task = Context::from_waker(Waker::noop());
+        let producer_cx: Cx = Cx::for_testing();
+        let (mut sender, mut body) = OutgoingBody::channel(&producer_cx, BodyKind::Chunked);
+        producer_cx.cancel_fast(CancelKind::User);
+        // The transport reads before the producer's masked terminal commit.
+        assert!(matches!(
+            body.poll_committed_frame(&mut task),
+            Poll::Ready(Some(Err(HttpError::BodyCancelled)))
+        ));
+        {
+            let mut send = std::pin::pin!(sender.send_trailers(&producer_cx, HeaderMap::new()));
+            assert!(matches!(
+                producer_cx.masked(|| send.as_mut().poll(&mut task)),
+                Poll::Ready(Ok(()))
+            ));
+        }
+        drop(sender);
+        // A live read has ended; once the producer returned, its queue drains.
+        assert!(matches!(body.poll_committed_frame(&mut task), Poll::Ready(None)));
+        assert!(matches!(
+            body.take_frame_after_producer_returned(),
+            Some(Ok(frame)) if frame.is_trailers()
+        ));
+        assert!(body.take_frame_after_producer_returned().is_none());
+        assert!(body.is_end_stream());
     }
 
     #[test]
