@@ -3331,7 +3331,9 @@ impl RedisClient {
     /// connection is closed instead of being reused.
     pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
         if opens_connection_protocol_state(args) {
-            return Err(RedisError::Protocol(POOLED_PROTOCOL_STATE_REFUSAL.to_string()));
+            return Err(RedisError::Protocol(
+                POOLED_PROTOCOL_STATE_REFUSAL.to_string(),
+            ));
         }
         // A later borrower must never inherit this command's connection state.
         let reusable = !changes_connection_state(args);
@@ -3869,12 +3871,23 @@ fn opens_connection_protocol_state(args: &[&[u8]]) -> bool {
         return false;
     };
     let openers = [
-        "MULTI", "WATCH", "SUBSCRIBE", "PSUBSCRIBE", "SSUBSCRIBE", "MONITOR", "SYNC", "PSYNC",
+        "MULTI",
+        "WATCH",
+        "SUBSCRIBE",
+        "PSUBSCRIBE",
+        "SSUBSCRIBE",
+        "MONITOR",
+        "SYNC",
+        "PSYNC",
         "QUIT",
     ];
-    openers.iter().any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
+    openers
+        .iter()
+        .any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
         || (command.eq_ignore_ascii_case(b"CLIENT")
-            && args.get(1).is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
+            && args
+                .get(1)
+                .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case(b"REPLY")))
 }
 
 /// Commands whose effect outlives their reply on the same connection: the
@@ -3892,15 +3905,35 @@ fn changes_connection_state(args: &[&[u8]]) -> bool {
         // Only subcommands that leave this connection's attributes unchanged
         // keep it reusable; KILL is excluded because it can target itself.
         let inspecting = [
-            "ID", "INFO", "LIST", "GETNAME", "GETREDIR", "TRACKINGINFO", "PAUSE", "UNPAUSE",
-            "UNBLOCK", "HELP",
+            "ID",
+            "INFO",
+            "LIST",
+            "GETNAME",
+            "GETREDIR",
+            "TRACKINGINFO",
+            "PAUSE",
+            "UNPAUSE",
+            "UNBLOCK",
+            "HELP",
         ];
         return !args.get(1).is_some_and(|subcommand| {
-            inspecting.iter().any(|name| subcommand.eq_ignore_ascii_case(name.as_bytes()))
+            inspecting
+                .iter()
+                .any(|name| subcommand.eq_ignore_ascii_case(name.as_bytes()))
         });
     }
-    let changers = ["SELECT", "AUTH", "HELLO", "RESET", "READONLY", "READWRITE", "ASKING"];
-    changers.iter().any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
+    let changers = [
+        "SELECT",
+        "AUTH",
+        "HELLO",
+        "RESET",
+        "READONLY",
+        "READWRITE",
+        "ASKING",
+    ];
+    changers
+        .iter()
+        .any(|name| command.eq_ignore_ascii_case(name.as_bytes()))
 }
 
 const POOLED_PROTOCOL_STATE_REFUSAL: &str = "command opens connection-scoped Redis protocol \

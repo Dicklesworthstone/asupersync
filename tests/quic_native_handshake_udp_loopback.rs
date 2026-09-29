@@ -909,7 +909,9 @@ fn spoofed_stale_key_datagrams_do_not_amplify_client_flights() {
         let client_addr = loop {
             match raw.recv_from(&mut buffer) {
                 Ok((_, addr)) => break addr,
-                Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
                     assert!(started.elapsed() < Duration::from_secs(5), "no ClientHello");
                 }
                 Err(error) => panic!("raw server receive failed: {error}"),
@@ -921,7 +923,8 @@ fn spoofed_stale_key_datagrams_do_not_amplify_client_flights() {
         stale.extend_from_slice(&client_scid_bytes);
         stale.extend_from_slice(&[0, 0]);
         for _ in 0..64 {
-            raw.send_to(&stale, client_addr).expect("send spoofed datagram");
+            raw.send_to(&stale, client_addr)
+                .expect("send spoofed datagram");
         }
         // Count client datagrams well inside one 1.5 s handshake PTO.
         let burst_sent = Instant::now();
@@ -929,7 +932,8 @@ fn spoofed_stale_key_datagrams_do_not_amplify_client_flights() {
         while burst_sent.elapsed() < Duration::from_millis(800) {
             match raw.recv_from(&mut buffer) {
                 Ok(_) => replies += 1,
-                Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                 Err(error) => panic!("raw server receive failed: {error}"),
             }
         }
@@ -961,7 +965,14 @@ fn spoofed_stale_key_datagrams_do_not_amplify_client_flights() {
         let handshake = timeout(
             wall_now(),
             Duration::from_millis(1200),
-            client_handshake_over_udp(&cx, &mut client_ep, server_addr, &mut client, dcid, client_scid),
+            client_handshake_over_udp(
+                &cx,
+                &mut client_ep,
+                server_addr,
+                &mut client,
+                dcid,
+                client_scid,
+            ),
         )
         .await;
         assert!(handshake.is_err(), "no server ever answers this client");

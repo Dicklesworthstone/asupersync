@@ -1493,8 +1493,11 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
             // done, as for an executed task. Otherwise the pool sees an idle
             // worker and spawns none for new work (br-asupersync-q1pr9n).
             if task.cancelled.load(Ordering::Acquire) {
-                let BlockingTask { work, completion, .. } = task;
-                let _dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(work)));
+                let BlockingTask {
+                    work, completion, ..
+                } = task;
+                let _dropped =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(work)));
                 inner.busy_threads.fetch_sub(1, Ordering::Relaxed);
                 completion.signal_done();
                 continue;

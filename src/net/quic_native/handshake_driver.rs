@@ -2564,8 +2564,14 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         assert!(initial_crypto_chunk_size(1110, retry_cid, client_cid, 1200).is_none());
         let empty = ConnectionId::new(&[]).unwrap();
         assert!(initial_crypto_chunk_size(1427, empty, client_cid, 1500).is_none());
-        assert_eq!(initial_crypto_chunk_size(1000, retry_cid, client_cid, 16_384), Some(128));
-        assert_eq!(initial_crypto_chunk_size(0, retry_cid, client_cid, 1200), Some(1120));
+        assert_eq!(
+            initial_crypto_chunk_size(1000, retry_cid, client_cid, 16_384),
+            Some(128)
+        );
+        assert_eq!(
+            initial_crypto_chunk_size(0, retry_cid, client_cid, 1200),
+            Some(1120)
+        );
         let chunk_size = 10;
         let segment = HandshakeSegment {
             level: HandshakeLevel::Initial,

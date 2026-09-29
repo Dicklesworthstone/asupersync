@@ -5715,7 +5715,11 @@ impl PgConnection {
                     // A FATAL error is followed by EOF, not ReadyForQuery: keep
                     // the server's diagnostic rather than the transport's end.
                     // A protocol violation or cancellation is still reported.
-                    return if matches!(error, PgError::Io(_)) { server_error } else { error };
+                    return if matches!(error, PgError::Io(_)) {
+                        server_error
+                    } else {
+                        error
+                    };
                 }
             };
             if message_type == b'Z' {

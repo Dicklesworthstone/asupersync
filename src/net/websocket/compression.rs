@@ -209,7 +209,12 @@ fn inflate(payload: &[u8], max: usize) -> Result<Bytes, WsError> {
 /// Decode `payload` over a `fill` window. With `reference`, output is compared
 /// against it chunk by chunk and not retained; the result is then empty.
 #[cfg(feature = "compression")]
-fn inflate_over(payload: &[u8], max: usize, fill: u8, reference: Option<&[u8]>) -> Result<Bytes, WsError> {
+fn inflate_over(
+    payload: &[u8],
+    max: usize,
+    fill: u8,
+    reference: Option<&[u8]>,
+) -> Result<Bytes, WsError> {
     use flate2::{Decompress, FlushDecompress, Status};
     // Complete the removed sync-flush block, then append a final empty block.
     // Requiring StreamEnd at this exact boundary rejects truncated streams;

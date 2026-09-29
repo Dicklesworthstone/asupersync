@@ -4750,7 +4750,10 @@ mod tests {
         }
         drop(sender);
         // A live read has ended; once the producer returned, its queue drains.
-        assert!(matches!(body.poll_committed_frame(&mut task), Poll::Ready(None)));
+        assert!(matches!(
+            body.poll_committed_frame(&mut task),
+            Poll::Ready(None)
+        ));
         assert!(matches!(
             body.take_frame_after_producer_returned(),
             Some(Ok(frame)) if frame.is_trailers()

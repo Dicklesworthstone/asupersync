@@ -462,36 +462,78 @@ fn native_http1_router_handoff_bounds_inflated_messages_by_the_configured_limit(
         runtime.block_on(async {
             let outcome = Arc::new(std::sync::Mutex::new(None));
             let handler_outcome = Arc::clone(&outcome);
-            let router = Router::new().route("/ws", get(FnHandler1::<_, WebSocketUpgrade>::new(move |upgrade: WebSocketUpgrade| {
-                let outcome = Arc::clone(&handler_outcome);
-                upgrade.skip_origin_check().extensions(["permessage-deflate"]).max_message_size(1024)
-                    .on_upgrade(move |cx, mut ws| async move {
-                        let received = ws.recv(&cx).await;
-                        *outcome.lock().unwrap() = Some(format!("{received:?}"));
+            let router = Router::new().route(
+                "/ws",
+                get(FnHandler1::<_, WebSocketUpgrade>::new(
+                    move |upgrade: WebSocketUpgrade| {
+                        let outcome = Arc::clone(&handler_outcome);
+                        upgrade
+                            .skip_origin_check()
+                            .extensions(["permessage-deflate"])
+                            .max_message_size(1024)
+                            .on_upgrade(move |cx, mut ws| async move {
+                                let received = ws.recv(&cx).await;
+                                *outcome.lock().unwrap() = Some(format!("{received:?}"));
+                            })
+                    },
+                )),
+            );
+            let listener = Http1Listener::bind_upgradeable_with_config(
+                "127.0.0.1:0",
+                router.into_http1_handler(),
+                Http1ListenerConfig::default()
+                    .http_config(Http1Config {
+                        allowed_hosts: HostPolicy::allow_list(vec!["127.0.0.1".to_owned()]),
+                        ..Http1Config::default()
                     })
-            })));
-            let listener = Http1Listener::bind_upgradeable_with_config("127.0.0.1:0", router.into_http1_handler(),
-                Http1ListenerConfig::default().http_config(Http1Config {
-                    allowed_hosts: HostPolicy::allow_list(vec!["127.0.0.1".to_owned()]), ..Http1Config::default()
-                }).drain_timeout(WATCHDOG).hard_drain_timeout(WATCHDOG)).await.unwrap();
+                    .drain_timeout(WATCHDOG)
+                    .hard_drain_timeout(WATCHDOG),
+            )
+            .await
+            .unwrap();
             let address = listener.local_addr().unwrap();
             let manager = listener.connection_manager().clone();
             let run_handle = handle.clone();
-            let mut listener_task = handle.try_spawn(async move { listener.run(&run_handle).await }).unwrap();
-            let mut client_task = handle.try_spawn(async move {
-                let cx = Cx::current().unwrap();
-                let mut ws = WebSocket::connect_with_compression(&cx, &format!("ws://{address}/ws"),
-                    WebSocketConfig::new().ping_interval(None)).await.unwrap();
-                assert!(ws.compression_enabled());
-                // 4 KiB of one byte compresses to a few bytes on the wire.
-                ws.send(&cx, Message::text("a".repeat(4096))).await.unwrap();
-                let _ = ws.recv(&cx).await;
-            }).unwrap();
-            asupersync::time::timeout(asupersync::time::wall_now(), WATCHDOG, &mut client_task).await.unwrap();
-            let received = outcome.lock().unwrap().clone().expect("upgrade callback ran");
-            assert!(received.contains("PayloadTooLarge"), "server accepted an over-limit inflated message: {received}");
+            let mut listener_task = handle
+                .try_spawn(async move { listener.run(&run_handle).await })
+                .unwrap();
+            let mut client_task = handle
+                .try_spawn(async move {
+                    let cx = Cx::current().unwrap();
+                    let mut ws = WebSocket::connect_with_compression(
+                        &cx,
+                        &format!("ws://{address}/ws"),
+                        WebSocketConfig::new().ping_interval(None),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(ws.compression_enabled());
+                    // 4 KiB of one byte compresses to a few bytes on the wire.
+                    ws.send(&cx, Message::text("a".repeat(4096))).await.unwrap();
+                    let _ = ws.recv(&cx).await;
+                })
+                .unwrap();
+            asupersync::time::timeout(asupersync::time::wall_now(), WATCHDOG, &mut client_task)
+                .await
+                .unwrap();
+            let received = outcome
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("upgrade callback ran");
+            assert!(
+                received.contains("PayloadTooLarge"),
+                "server accepted an over-limit inflated message: {received}"
+            );
             assert!(manager.begin_drain(WATCHDOG));
-            let stats = asupersync::time::timeout(asupersync::time::wall_now(), WATCHDOG, &mut listener_task).await.unwrap().unwrap();
+            let stats = asupersync::time::timeout(
+                asupersync::time::wall_now(),
+                WATCHDOG,
+                &mut listener_task,
+            )
+            .await
+            .unwrap()
+            .unwrap();
             assert_eq!(stats.force_closed, 0);
         });
         assert_retired(&runtime);

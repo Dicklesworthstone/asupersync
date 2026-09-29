@@ -433,7 +433,14 @@ mod keepalive {
     use crate::runtime::RootDrainOutcome;
 
     #[derive(Clone, Copy, Debug)]
-    enum Mode { Ack, Silent, WrongAck, Cancel, SlowUpload, EchoingUpload }
+    enum Mode {
+        Ack,
+        Silent,
+        WrongAck,
+        Cancel,
+        SlowUpload,
+        EchoingUpload,
+    }
 
     /// Response frames an EchoingUpload peer queues ahead of each PING ACK:
     /// more than the uploads that fit in one keepalive timeout at one frame
@@ -753,7 +760,9 @@ mod keepalive {
                             closed = true;
                         }
                     }
-                    Ok(Some(NativeDuplexEvent::Message(message))) if matches!(mode, Mode::EchoingUpload) => {
+                    Ok(Some(NativeDuplexEvent::Message(message)))
+                        if matches!(mode, Mode::EchoingUpload) =>
+                    {
                         assert_eq!(message.as_ref(), b"echo");
                         echoes += 1;
                     }

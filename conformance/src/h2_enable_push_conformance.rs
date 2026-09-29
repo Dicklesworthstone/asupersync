@@ -289,7 +289,10 @@ impl EnablePushConformanceTester {
         let mut evidence = Vec::new();
         assert_settings_parser_accepts_enable_push(test_case.enable_push_setting, &mut evidence)?;
         assert_server_applies_client_enable_push(test_case.enable_push_setting, &mut evidence)?;
-        assert_client_applies_server_enable_push_rule(test_case.enable_push_setting, &mut evidence)?;
+        assert_client_applies_server_enable_push_rule(
+            test_case.enable_push_setting,
+            &mut evidence,
+        )?;
 
         let mut accepted_push_promises = 0;
         let mut local_settings = Settings::client();
@@ -681,7 +684,11 @@ mod tests {
         assert_client_applies_server_enable_push_rule(false, &mut evidence).unwrap();
         assert_client_applies_server_enable_push_rule(true, &mut evidence).unwrap();
         assert!(evidence.iter().any(|line| line.contains("server applied")));
-        assert!(evidence.iter().any(|line| line.contains("SETTINGS_ENABLE_PUSH=0 and queued ACK")));
+        assert!(
+            evidence
+                .iter()
+                .any(|line| line.contains("SETTINGS_ENABLE_PUSH=0 and queued ACK"))
+        );
         assert!(evidence.iter().any(|line| line.contains("PROTOCOL_ERROR")));
     }
 

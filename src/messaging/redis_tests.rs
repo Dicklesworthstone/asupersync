@@ -3272,7 +3272,9 @@ mod tests {
                     Ok(0) => {}
                     Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
                     Ok(_) => panic!("{scenario:?}: connection reused after SELECT 5"),
-                    Err(error) => panic!("{scenario:?}: connection neither closed nor reused: {error}"),
+                    Err(error) => {
+                        panic!("{scenario:?}: connection neither closed nor reused: {error}")
+                    }
                 }
                 let (mut second, _) = listener.accept().expect("accept replacement connection");
                 second
@@ -3303,7 +3305,10 @@ mod tests {
                     }
                     PooledStateChange::Transaction => {
                         let mut transaction = client.transaction(&cx).await.expect("MULTI");
-                        transaction.cmd(&cx, &["SELECT", "5"]).await.expect("queue SELECT");
+                        transaction
+                            .cmd(&cx, &["SELECT", "5"])
+                            .await
+                            .expect("queue SELECT");
                         let replies = transaction.exec(&cx).await.expect("EXEC");
                         assert_eq!(replies.len(), 1, "{replies:?}");
                     }
@@ -3312,7 +3317,11 @@ mod tests {
                     .cmd(&cx, &["PING"])
                     .await
                     .expect("PING must run on a fresh connection");
-                assert_eq!(pong, RespValue::SimpleString("PONG".to_string()), "{scenario:?}");
+                assert_eq!(
+                    pong,
+                    RespValue::SimpleString("PONG".to_string()),
+                    "{scenario:?}"
+                );
             });
             server.join().expect("server join");
         }

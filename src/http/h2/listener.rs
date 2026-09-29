@@ -6706,8 +6706,16 @@ mod tests {
             let state = produced_bodies.get_mut(&1).expect("body remains active");
             state.body_eof = true;
             state.receive = ProducedReceive::Cancelled;
-            finalize_produced_body_if_ready(&mut conn, 1, &mut produced_bodies, &mut response_guards);
-            assert!(produced_bodies.contains_key(&1), "no outcome yet: keep waiting");
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            assert!(
+                produced_bodies.contains_key(&1),
+                "no outcome yet: keep waiting"
+            );
 
             let mut trailers = HeaderMap::new();
             trailers.insert(
@@ -6716,17 +6724,28 @@ mod tests {
             );
             {
                 let mut send = std::pin::pin!(sender.send_trailers(&producer_cx, trailers));
-                let committed =
-                    std::future::poll_fn(|task| Poll::Ready(producer_cx.masked(|| send.as_mut().poll(task))))
-                        .await;
-                assert!(matches!(committed, Poll::Ready(Ok(()))), "masked trailers commit");
+                let committed = std::future::poll_fn(|task| {
+                    Poll::Ready(producer_cx.masked(|| send.as_mut().poll(task)))
+                })
+                .await;
+                assert!(
+                    matches!(committed, Poll::Ready(Ok(()))),
+                    "masked trailers commit"
+                );
             }
-            produced_bodies.get_mut(&1).expect("body remains active").producer_outcome =
-                Some(Http2ProducerOutcome::Finished {
-                    total_bytes: 0,
-                    terminal: sender.terminal,
-                });
-            finalize_produced_body_if_ready(&mut conn, 1, &mut produced_bodies, &mut response_guards);
+            produced_bodies
+                .get_mut(&1)
+                .expect("body remains active")
+                .producer_outcome = Some(Http2ProducerOutcome::Finished {
+                total_bytes: 0,
+                terminal: sender.terminal,
+            });
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
             assert!(
                 produced_bodies.contains_key(&1),
                 "the stream stays open until its committed trailers are read"
@@ -6747,7 +6766,12 @@ mod tests {
                 .get_mut(&1)
                 .expect("body remains active until trailers queue")
                 .pending_trailers = Some(trailers);
-            finalize_produced_body_if_ready(&mut conn, 1, &mut produced_bodies, &mut response_guards);
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
             assert!(produced_bodies.is_empty());
             match conn.next_frame().expect("terminal trailing HEADERS queue") {
                 Frame::Headers(headers) => {
@@ -6803,15 +6827,31 @@ mod tests {
             )]);
             let mut poll_after = None;
             let mut response_guards = HashMap::new();
-            finalize_produced_body_if_ready(&mut conn, 1, &mut produced_bodies, &mut response_guards);
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
             let event = std::future::poll_fn(|task_cx| {
                 poll_produced_body_event(&conn, &mut produced_bodies, &mut poll_after, task_cx)
             })
             .await;
             assert!(matches!(event, ProducedBodyEvent::Eof { stream_id: 1 }));
-            produced_bodies.get_mut(&1).expect("body remains active").body_eof = true;
-            finalize_produced_body_if_ready(&mut conn, 1, &mut produced_bodies, &mut response_guards);
-            assert!(produced_bodies.is_empty(), "a missing terminal frame must not wait forever");
+            produced_bodies
+                .get_mut(&1)
+                .expect("body remains active")
+                .body_eof = true;
+            finalize_produced_body_if_ready(
+                &mut conn,
+                1,
+                &mut produced_bodies,
+                &mut response_guards,
+            );
+            assert!(
+                produced_bodies.is_empty(),
+                "a missing terminal frame must not wait forever"
+            );
             assert!(
                 matches!(conn.next_frame(), Some(Frame::RstStream(reset)) if reset.error_code == ErrorCode::InternalError),
                 "the stream resets with INTERNAL_ERROR"

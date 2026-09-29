@@ -693,7 +693,9 @@ mod tests {
 
     #[test]
     fn scoped_kafka_cancelled_unclaimed_publication_waits_for_native_destruction() {
-        for (multithread, fail_cleanup) in [(false, false), (true, false), (false, true), (true, true)] {
+        for (multithread, fail_cleanup) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             bounded(move || {
                 let builder = if multithread {
                     RuntimeBuilder::new().worker_threads(2)

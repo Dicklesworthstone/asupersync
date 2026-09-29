@@ -11677,8 +11677,11 @@ mod gh67_liveness_tests {
         let address = server.local_addr().expect("raw server address");
         let client_tls = QuicClientTls {
             server_name: ServerName::try_from("localhost").unwrap(),
-            config: client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![ATP_QUIC_ALPN.to_vec()])
-                .unwrap(),
+            config: client_config(
+                vec![parse_one_cert(CA_CERT_PEM)],
+                vec![ATP_QUIC_ALPN.to_vec()],
+            )
+            .unwrap(),
         };
         let config = QuicConfig {
             handshake_timeout: Duration::from_millis(300),
@@ -11708,9 +11711,16 @@ mod gh67_liveness_tests {
         }
         for scid in &seen {
             assert_eq!(scid.len(), ATP_QUIC_CLIENT_SCID_LEN);
-            assert_ne!(scid.as_slice(), FORMER_CONSTANT, "client SCID must not be a protocol constant");
+            assert_ne!(
+                scid.as_slice(),
+                FORMER_CONSTANT,
+                "client SCID must not be a protocol constant"
+            );
         }
-        assert_ne!(seen[0], seen[1], "each connection draws a fresh client SCID");
+        assert_ne!(
+            seen[0], seen[1],
+            "each connection draws a fresh client SCID"
+        );
     }
 
     // asupersync-gsnci5: RFC 9001 §6.6 — the send path must not protect beyond

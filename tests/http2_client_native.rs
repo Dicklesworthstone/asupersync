@@ -578,7 +578,9 @@ fn client_receive_windows_track_the_response_body_limit() {
         let credit = (
             peer.connection.remote_settings().initial_window_size,
             peer.connection.send_window(),
-            peer.connection.stream(id).map(|stream| stream.send_window()),
+            peer.connection
+                .stream(id)
+                .map(|stream| stream.send_window()),
         );
         peer.connection
             .send_headers(id, vec![Header::new(":status", "204")], true)
@@ -603,8 +605,18 @@ fn client_receive_windows_track_the_response_body_limit() {
     let (initial, connection, stream) = peer.join().unwrap();
     let limit = u32::try_from(LIMIT).unwrap();
     let credit = i32::try_from(LIMIT).unwrap();
-    assert_eq!(initial, limit, "SETTINGS_INITIAL_WINDOW_SIZE must track max_response_body");
-    assert_eq!(connection, credit, "connection window must track max_response_body");
-    assert_eq!(stream, Some(credit), "stream window must track max_response_body");
+    assert_eq!(
+        initial, limit,
+        "SETTINGS_INITIAL_WINDOW_SIZE must track max_response_body"
+    );
+    assert_eq!(
+        connection, credit,
+        "connection window must track max_response_body"
+    );
+    assert_eq!(
+        stream,
+        Some(credit),
+        "stream window must track max_response_body"
+    );
     quiescent(&runtime);
 }

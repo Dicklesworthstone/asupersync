@@ -2526,7 +2526,11 @@ where
                 // are the whole body, and an unfinished one keeps the error.
                 producer_result = Some(
                     finish_producer_within_idle(
-                        cx, producer.as_mut(), &response.body, response_write, drain_grace,
+                        cx,
+                        producer.as_mut(),
+                        &response.body,
+                        response_write,
+                        drain_grace,
                     )
                     .await,
                 );
@@ -5524,10 +5528,19 @@ mod tests {
             move |_cx, _request| async move {
                 if content_length {
                     Http1ProducedResponse::with_content_length(
-                        NonZeroUsize::new(2).unwrap(), 200, "OK", 7, produce,
+                        NonZeroUsize::new(2).unwrap(),
+                        200,
+                        "OK",
+                        7,
+                        produce,
                     )
                 } else {
-                    Http1ProducedResponse::chunked(NonZeroUsize::new(2).unwrap(), 200, "OK", produce)
+                    Http1ProducedResponse::chunked(
+                        NonZeroUsize::new(2).unwrap(),
+                        200,
+                        "OK",
+                        produce,
+                    )
                 }
             },
             localhost_server_config(),

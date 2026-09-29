@@ -2111,7 +2111,9 @@ mod tests {
                     ));
                     copy.next_chunk(&cx).await.map(drop)
                 } else {
-                    conn.copy_out(&cx, "COPY terminated TO STDOUT").await.map(drop)
+                    conn.copy_out(&cx, "COPY terminated TO STDOUT")
+                        .await
+                        .map(drop)
                 };
                 assert!(
                     matches!(&result, Outcome::Err(PgError::Server { code, .. }) if code == "57P01"),
