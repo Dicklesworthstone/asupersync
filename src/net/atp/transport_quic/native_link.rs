@@ -133,8 +133,8 @@ macro_rules! quic_rqtrace {
 }
 
 const ATP_QUIC_INITIAL_DCID: &[u8] = &[0xA7, 0x9C, 0x10, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6];
-/// Client source connection ID carried in the client's handshake long headers.
-const ATP_QUIC_CLIENT_SCID: &[u8] = &[0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+/// Length of the client's per-connection random source connection ID.
+const ATP_QUIC_CLIENT_SCID_LEN: usize = 8;
 /// Server source connection ID carried in the server's handshake long headers.
 const ATP_QUIC_SERVER_SCID: &[u8] = &[0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00];
 /// Process-unique counter for QUIC receive staging directories.
@@ -6453,7 +6453,14 @@ async fn connect(
     .map_err(map_tls_error)?;
     let dcid = ConnectionId::new(ATP_QUIC_INITIAL_DCID)
         .map_err(|err| QuicTransportError::Quic(format!("initial dcid: {err}")))?;
-    let scid = ConnectionId::new(ATP_QUIC_CLIENT_SCID)
+    // RFC 9000 §7.2: an unpredictable source CID. Forged server packets
+    // (a Retry, stale-key long headers) must carry it as their destination,
+    // so an off-path sender can no longer aim them at this client
+    // (br-asupersync-18hhdp). The Initial DCID stays the protocol constant:
+    // servers derive Initial keys from it.
+    let mut scid_bytes = [0_u8; ATP_QUIC_CLIENT_SCID_LEN];
+    cx.random_bytes(&mut scid_bytes);
+    let scid = ConnectionId::new(&scid_bytes)
         .map_err(|err| QuicTransportError::Quic(format!("client scid: {err}")))?;
     match crate::time::timeout(
         cx.now(),
@@ -11655,6 +11662,55 @@ mod gh67_liveness_tests {
         let (mut server, early) = server.expect("server link");
         server.ingest_packets(cx, early).expect("early packets");
         (client, server)
+    }
+
+    // asupersync-18hhdp: the client's handshake source CID is per connection,
+    // not the former protocol constant, so an off-path sender cannot aim a
+    // forged Retry or stale-key long header at it.
+    #[test]
+    fn client_handshake_source_connection_id_is_per_connection() {
+        const FORMER_CONSTANT: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind raw server");
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("raw server read timeout");
+        let address = server.local_addr().expect("raw server address");
+        let client_tls = QuicClientTls {
+            server_name: ServerName::try_from("localhost").unwrap(),
+            config: client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![ATP_QUIC_ALPN.to_vec()])
+                .unwrap(),
+        };
+        let config = QuicConfig {
+            handshake_timeout: Duration::from_millis(300),
+            ..QuicConfig::default()
+        };
+        let cx = Cx::for_testing();
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let result = block_on(connect(&cx, address, &client_tls, &config));
+            assert!(
+                matches!(result, Err(QuicTransportError::Timeout { .. })),
+                "no server answers: {:?}",
+                result.as_ref().err()
+            );
+            let mut datagram = vec![0_u8; 65_536];
+            let (len, _) = server.recv_from(&mut datagram).expect("client Initial");
+            // Long header: flags, version (4), DCID length + DCID, SCID length + SCID.
+            let dcid_len = usize::from(datagram[5]);
+            let scid_len = usize::from(datagram[6 + dcid_len]);
+            assert!(len > 7 + dcid_len + scid_len, "truncated client Initial");
+            assert_eq!(&datagram[6..6 + dcid_len], ATP_QUIC_INITIAL_DCID);
+            seen.push(datagram[7 + dcid_len..7 + dcid_len + scid_len].to_vec());
+            // Discard anything else this attempt sent before the next one.
+            server.set_nonblocking(true).expect("drain mode");
+            while server.recv_from(&mut datagram).is_ok() {}
+            server.set_nonblocking(false).expect("blocking mode");
+        }
+        for scid in &seen {
+            assert_eq!(scid.len(), ATP_QUIC_CLIENT_SCID_LEN);
+            assert_ne!(scid.as_slice(), FORMER_CONSTANT, "client SCID must not be a protocol constant");
+        }
+        assert_ne!(seen[0], seen[1], "each connection draws a fresh client SCID");
     }
 
     // asupersync-gsnci5: RFC 9001 §6.6 — the send path must not protect beyond
