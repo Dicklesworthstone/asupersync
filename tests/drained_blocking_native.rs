@@ -111,6 +111,15 @@ impl Drop for ParkedDrop {
     }
 }
 
+/// Records the name of the thread that destroys it.
+struct ThreadOfDrop(Arc<std::sync::Mutex<Option<String>>>);
+
+impl Drop for ThreadOfDrop {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = Some(std::thread::current().name().unwrap_or("<unnamed>").to_owned());
+    }
+}
+
 fn parked_drop() -> (ParkedDrop, mpsc::Receiver<()>, mpsc::Sender<()>, Arc<AtomicUsize>) {
     let (entered, wait_entered) = mpsc::channel();
     let (release, wait_release) = mpsc::channel();
@@ -156,8 +165,11 @@ fn queued_cancellation_waits_for_capture_destruction_even_after_handle_drop() {
                 assert_eq!(dropped.load(Ordering::SeqCst), 0);
                 release_pool.send(()).unwrap();
                 dropping.recv_timeout(Duration::from_secs(5)).unwrap();
-                // The pool's completion bit may already be true here. The
-                // controller must instead await our blocked capture destructor.
+                // The worker destroying the skipped closure's captures still
+                // counts as busy (br-asupersync-q1pr9n). An idle count would
+                // keep the pool from starting a worker for new work.
+                assert_eq!(pool.busy_threads(), 1, "workers={workers} abandon={abandon}");
+                // The controller must await our blocked capture destructor.
                 assert_owned_timeout(&runtime);
                 assert_eq!(dropped.load(Ordering::SeqCst), 0);
                 if let Some(task) = &task { assert!(!task.is_finished()); }
@@ -282,9 +294,12 @@ fn success_panic_prestart_abort_and_missing_pool_have_exact_results() {
         let runtime = runtime(1);
         let calls = Arc::new(AtomicUsize::new(0));
         let called = Arc::clone(&calls);
+        let destroyed_on = Arc::new(std::sync::Mutex::new(None));
+        let capture = ThreadOfDrop(Arc::clone(&destroyed_on));
         runtime.block_on(async {
             let cx = Cx::current().unwrap();
             let mut task = cx.spawn_blocking_drained(move |_| {
+                let _capture = &capture;
                 called.fetch_add(1, Ordering::SeqCst);
             }).unwrap();
             task.abort();
@@ -293,6 +308,12 @@ fn success_panic_prestart_abort_and_missing_pool_have_exact_results() {
                 Err(JoinError::Cancelled(reason)) if reason.kind == CancelKind::User));
         });
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // Captures may block when destroyed, so even a closure cancelled
+        // before its first poll is destroyed on a pool worker, never on the
+        // executor (br-asupersync-q1pr9n).
+        let destroyed_on = destroyed_on.lock().unwrap().clone();
+        assert!(destroyed_on.as_deref().is_some_and(|name| name.contains("-blocking-")),
+            "pre-start captures were destroyed on {destroyed_on:?}");
         drained(&runtime);
         let runtime = RuntimeBuilder::current_thread().build().unwrap();
         assert!(matches!(runtime.spawn_blocking_drained(|_| ()),

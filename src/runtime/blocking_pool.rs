@@ -1487,10 +1487,16 @@ fn blocking_worker_loop(inner: &BlockingPoolInner, assigned_cohort: Option<usize
             inner.pending_count.fetch_sub(1, Ordering::Relaxed);
             inner.busy_threads.fetch_add(1, Ordering::Relaxed);
 
-            // Check if task was cancelled before execution
+            // Check if task was cancelled before execution. A skipped task still
+            // owns its captures, whose destructors may block: destroy them
+            // while this worker counts as busy and before the task reports
+            // done, as for an executed task. Otherwise the pool sees an idle
+            // worker and spawns none for new work (br-asupersync-q1pr9n).
             if task.cancelled.load(Ordering::Acquire) {
+                let BlockingTask { work, completion, .. } = task;
+                let _dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(work)));
                 inner.busy_threads.fetch_sub(1, Ordering::Relaxed);
-                task.completion.signal_done();
+                completion.signal_done();
                 continue;
             }
 
