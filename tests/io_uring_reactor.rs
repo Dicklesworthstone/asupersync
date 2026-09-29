@@ -703,8 +703,11 @@ fn poll_respects_timeout_duration() {
 // Edge: re-arming after event delivery
 // =========================================================================
 
+/// Poll registrations are one-shot, as on the epoll and kqueue backends (see
+/// the module docs): an observed event does not recur until the caller
+/// re-arms with `modify`.
 #[test]
-fn events_are_rearmed_automatically() {
+fn events_fire_again_after_explicit_rearm() {
     let reactor = IoUringReactor::new().unwrap();
     let listener = bind_ephemeral().unwrap();
     let addr = listener.local_addr().unwrap();
@@ -738,8 +741,18 @@ fn events_are_rearmed_automatically() {
     // Accept the first connection.
     let _accepted1 = listener.accept();
 
-    // Second connection — re-arming should allow us to see this.
+    // Second connection before any re-arm: the one-shot registration is spent.
     let _client2 = TcpStream::connect(addr).unwrap();
+    let n = reactor
+        .poll(&mut events, Some(Duration::from_millis(100)))
+        .unwrap();
+    assert!(
+        n == 0 || events.iter().all(|event| event.token != token),
+        "a one-shot registration must not fire again before it is re-armed"
+    );
+
+    // Re-arm; the pending second connection is now reported.
+    reactor.modify(token, Interest::READABLE).unwrap();
 
     let mut found2 = false;
     for _ in 0..10 {
@@ -757,7 +770,7 @@ fn events_are_rearmed_automatically() {
     }
     assert!(
         found2,
-        "second connection should be detected (re-arming works)"
+        "second connection should be detected after an explicit re-arm"
     );
 
     reactor.deregister(token).unwrap();
