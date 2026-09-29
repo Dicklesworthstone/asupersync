@@ -21,7 +21,8 @@
       "Passing the contract proves source/ledger locator alignment only; category evidence still controls any safety claim.",
       "The v0.5.0 release reconciliation updates eight existing ATP and ATPD locators against dc3123d8632fe330b4e87983eb321cb6b1689e62 after safe-only PEM parser and test insertions shifted their lines. Operation patterns, categories, invariants, evidence, and no-claim boundaries are unchanged; this note does not replace earlier source provenance or establish fresh unsafe-operation safety proof.",
       "asupersync-31jdkv (2026-09-27) reconciles against 93ded6fe73136947a65d938637570ad5e0b2c469: re-locates 39 locators in eight rows after safe-only line shifts (net/tcp/stream.rs, bin/atpd.rs, observability/otel.rs, signal/signal.rs, runtime/builder.rs, database/mysql.rs, atp/journal/sparse_writer.rs, bin/atp.rs); ledgers the io_uring fstat fd-identity and reused-fd test sites that 746367874 added (reviewed) and drops its two removed fcntl(F_GETFD) sites; and removes the asupersync-tokio-compat/src/cancel.rs row, whose only unsafe block 7fb2cbb68 deleted.",
-      "asupersync-yo6fck (2026-09-28) re-locates 35 src/process.rs locators (every one after register_interest) by -24 lines: the safe-only child-pipe registration change shortened register_interest. Operation patterns, categories, invariants, evidence, and no-claim boundaries are unchanged."
+      "asupersync-yo6fck (2026-09-28) re-locates 35 src/process.rs locators (every one after register_interest) by -24 lines: the safe-only child-pipe registration change shortened register_interest. Operation patterns, categories, invariants, evidence, and no-claim boundaries are unchanged.",
+      "asupersync-z24vta (2026-09-29) replaces one test-only site in src/fs/uring.rs: test_uring_from_raw_fd_closes_fd_when_position_probe_fails no longer double-closes the transferred fd (a race with concurrent tests); it probes the pipe with libc::write instead (line 1924). The write-end close moves from line 1934 to 1939. Categories, invariants, evidence, and no-claim boundaries are unchanged."
     ]
   },
   "required_row_fields": [
@@ -2101,12 +2102,12 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 1920,
-          "pattern": "let close_result = unsafe { libc::close(read_fd) };"
+          "line": 1924,
+          "pattern": "let write_result = unsafe { libc::write(write_fd, [0u8].as_ptr().cast(), 1) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1934,
+          "line": 1939,
           "pattern": "let write_close_result = unsafe { libc::close(write_fd) };"
         },
         {

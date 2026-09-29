@@ -1917,18 +1917,23 @@ mod tests {
             err.raw_os_error()
         );
 
-        let close_result = unsafe { libc::close(read_fd) };
+        // The failed constructor owned `read_fd` and closed it. Probe the pipe, not the
+        // number: closing `read_fd` again here can close an fd a concurrent test was just
+        // handed (it did on 2026-09-29, and the lib test binary died with SIGBUS right
+        // after). With no reader left, a write fails with EPIPE; Rust ignores SIGPIPE.
+        let write_result = unsafe { libc::write(write_fd, [0u8].as_ptr().cast(), 1) };
+        let write_errno = io::Error::last_os_error().raw_os_error();
         crate::assert_with_log!(
-            close_result == -1,
+            write_result == -1,
             "failed construction must still consume and close the transferred fd",
             -1,
-            close_result
+            write_result
         );
         crate::assert_with_log!(
-            io::Error::last_os_error().raw_os_error() == Some(libc::EBADF),
-            "transferred fd is already closed after failure",
-            Some(libc::EBADF),
-            io::Error::last_os_error().raw_os_error()
+            write_errno == Some(libc::EPIPE),
+            "the pipe has no reader left",
+            Some(libc::EPIPE),
+            write_errno
         );
 
         let write_close_result = unsafe { libc::close(write_fd) };
