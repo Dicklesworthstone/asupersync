@@ -1584,10 +1584,13 @@ impl NativeH3Session {
                 .ok_or(NativeH3SessionError::InvalidState(
                     "FIN arrived for an unknown HTTP/3 stream",
                 ))?;
-        if !incoming.bytes.is_empty()
-            || incoming.data_frame.is_some()
-            || incoming.kind == IncomingStreamKind::AwaitingUniType
-        {
+        if incoming.kind == IncomingStreamKind::AwaitingUniType {
+            // RFC 9114 section 6.2: receivers MUST tolerate a unidirectional
+            // stream that ends before its type is known. Its bytes, if any,
+            // are an incomplete type prefix; discard them.
+            return Ok(());
+        }
+        if !incoming.bytes.is_empty() || incoming.data_frame.is_some() {
             return Err(NativeH3SessionError::TruncatedStream {
                 stream_id,
                 buffered_bytes: incoming.bytes.len(),

@@ -3386,6 +3386,31 @@ fn native_h3_static_session_ignores_stream_cancellations_and_refuses_acknowledge
 
 #[test]
 #[cfg(feature = "http3")]
+fn native_h3_session_tolerates_uni_streams_that_end_before_their_type() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // RFC 9114 section 6.2: a peer may end a unidirectional stream before
+    // sending its type, or partway through a multi-byte type varint.
+    let empty = client.open_uni_stream(&cx).expect("open empty uni stream");
+    client
+        .write_stream(&cx, empty, Bytes::new(), true)
+        .expect("finish the stream with no type");
+    let partial = client
+        .open_uni_stream(&cx)
+        .expect("open partial uni stream");
+    client
+        .write_stream(&cx, partial, Bytes::from_static(&[0x40]), true)
+        .expect("finish the stream inside a two-byte type");
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(
+        events.is_empty(),
+        "a typeless stream is discarded, not an event"
+    );
+}
+
+#[test]
+#[cfg(feature = "http3")]
 fn native_h3_client_accepts_informational_then_final_response_and_trailers() {
     let cx = test_cx();
     let config = NativeQuicConnectionConfig {
