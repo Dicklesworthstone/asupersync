@@ -3587,16 +3587,29 @@ fn managed_executable_sha256() -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Bounds how long a managed process waits for another to reach a checkpoint.
+/// Loaded RCH workers stalled healthy children for 15 to 34 s inside operations
+/// that normally take a millisecond (fsync, runtime construction), so these
+/// waits detect hangs, not slowness; the receipts make no performance claim.
+const MANAGED_PEER_CHECKPOINT_BUDGET: Duration = Duration::from_secs(60);
+
 fn managed_write_receipt(path: &std::path::Path, value: &serde_json::Value) {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
+    // These receipts pass state between processes on one host, so the page
+    // cache makes them visible; durability adds nothing. An fsync here
+    // stalled for tens of seconds on loaded workers and tripped the
+    // two-process watchdogs. Publish by rename so a reader never sees a
+    // partial receipt, and keep the write-once contract.
+    let mut bytes = serde_json::to_vec(value).unwrap();
+    bytes.push(b'\n');
+    let partial = path.with_extension("json.partial");
+    std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
+        .open(&partial)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, &bytes))
         .unwrap();
-    serde_json::to_writer(&mut file, value).unwrap();
-    file.write_all(b"\n").unwrap();
-    file.sync_all().unwrap();
+    assert!(!path.exists(), "receipt {path:?} is written once");
+    std::fs::rename(&partial, path).unwrap();
 }
 
 #[test]
@@ -3648,6 +3661,26 @@ fn authenticated_managed_process_peer() {
             assert!(address.ip().is_loopback() && address.port() != 0);
             address
         };
+        // The server's handshake gives up after a fixed silence from its peer.
+        // Start it only once the client is bound and about to send, so that
+        // budget never includes the client's process start: on a loaded worker
+        // one client spent 15 s building its runtime.
+        let client_bound = artifacts.join("client-bound.json");
+        if server {
+            let started = Instant::now();
+            while !client_bound.exists() {
+                assert!(
+                    started.elapsed() < MANAGED_PEER_CHECKPOINT_BUDGET,
+                    "client never bound; artifacts={artifacts:?}"
+                );
+                asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
+            }
+        } else {
+            managed_write_receipt(
+                &client_bound,
+                &serde_json::json!({"pid": std::process::id(), "local_addr": local.to_string()}),
+            );
+        }
         let owner = managed_handshake(&cx, socket, server, server_addr).await;
         let peer = owner.peer_addr();
         let local_cid = format!("{:?}", owner.local_connection_id());
@@ -3677,7 +3710,7 @@ fn authenticated_managed_process_peer() {
                 let started = Instant::now();
                 while !other.exists() {
                     assert!(
-                        started.elapsed() < Duration::from_secs(10),
+                        started.elapsed() < MANAGED_PEER_CHECKPOINT_BUDGET,
                         "other real peer did not complete cancellation; artifacts={artifacts:?}"
                     );
                     asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
@@ -3801,10 +3834,10 @@ fn authenticated_managed_two_process_public_exchange_cancel_and_restart() {
                 break value;
             }
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(15),
-            "server bind watchdog; artifacts={artifacts:?}"
-        );
+        if started.elapsed() >= MANAGED_PEER_CHECKPOINT_BUDGET {
+            managed_print_child_logs(&artifacts, "server");
+            panic!("server bind watchdog; artifacts={artifacts:?}");
+        }
         std::thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(ready["pid"], server.0.id());
@@ -3830,7 +3863,9 @@ fn authenticated_managed_two_process_public_exchange_cancel_and_restart() {
         if server_status.is_some() && client_status.is_some() {
             break;
         }
-        if started.elapsed() >= Duration::from_secs(45) {
+        // Two healthy children can each stall at a checkpoint on a loaded
+        // worker; this bounds a hang, not the exchange's speed.
+        if started.elapsed() >= 2 * MANAGED_PEER_CHECKPOINT_BUDGET {
             managed_print_child_logs(&artifacts, "server");
             managed_print_child_logs(&artifacts, "client");
             panic!("actual managed two-process watchdog; artifacts={artifacts:?}");
