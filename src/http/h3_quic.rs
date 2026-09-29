@@ -50,7 +50,7 @@ const H3_MESSAGE_ERROR: u64 = 0x010e;
 
 const H3_CONTROL_STREAM_TYPE: u64 = 0x00;
 const FRAME_HEADER_MAX_BYTES: usize = 16;
-const MAX_SPARSE_TERMINAL_STREAMS: usize = 4096;
+const MAX_OPEN_STREAM_RUNS: usize = 4096;
 const STREAMING_READINESS_BATCH: usize = 32;
 const STREAMING_POLL_STEPS: usize = 32;
 
@@ -214,10 +214,19 @@ struct StreamingReceive {
     waker: Option<Waker>,
 }
 
+/// Remembers which streams have terminated, in memory bounded by how many
+/// streams are open at once rather than by the connection's history.
+///
+/// Per stream-id class (`id & 0x03`), every id at or below the class
+/// watermark (the highest terminated id) has terminated, except the ids in
+/// that class's open runs. A run `start..=end` holds ids of the class that are
+/// still open or not yet seen; QUIC opens every lower id of a class
+/// implicitly. So a long-lived stream, such as a control stream or a streaming
+/// request, costs one run however many later streams finish.
 #[derive(Debug, Clone, Default)]
 struct TerminalStreamTracker {
-    contiguous: [Option<u64>; 4],
-    sparse: BTreeSet<StreamId>,
+    watermark: [Option<u64>; 4],
+    open_runs: [BTreeMap<u64, u64>; 4],
     overflowed: bool,
 }
 
@@ -234,8 +243,29 @@ impl TerminalStreamTracker {
 
     fn contains(&self, stream_id: StreamId) -> bool {
         let class = usize::try_from(stream_id.0 & 0x03).expect("stream-id class fits usize");
-        self.contiguous[class].is_some_and(|high| stream_id.0 <= high)
-            || self.sparse.contains(&stream_id)
+        self.watermark[class].is_some_and(|high| stream_id.0 <= high)
+            && self.open_run(class, stream_id.0).is_none()
+    }
+
+    /// The open run of `class` holding `id`, as `(start, end)`.
+    fn open_run(&self, class: usize, id: u64) -> Option<(u64, u64)> {
+        self.open_runs[class]
+            .range(..=id)
+            .next_back()
+            .filter(|&(_, &end)| id <= end)
+            .map(|(&start, &end)| (start, end))
+    }
+
+    fn add_open_run(&mut self, class: usize, start: u64, end: u64) -> Result<(), H3NativeError> {
+        let runs: usize = self.open_runs.iter().map(BTreeMap::len).sum();
+        if runs >= MAX_OPEN_STREAM_RUNS {
+            self.overflowed = true;
+            return Err(H3NativeError::ControlProtocol(
+                "terminal stream tracking window exceeded",
+            ));
+        }
+        self.open_runs[class].insert(start, end);
+        Ok(())
     }
 
     fn insert(&mut self, stream_id: StreamId) -> Result<(), H3NativeError> {
@@ -243,24 +273,33 @@ impl TerminalStreamTracker {
         if self.contains(stream_id) {
             return Ok(());
         }
-        let class_id = stream_id.0 & 0x03;
+        let id = stream_id.0;
+        let class_id = id & 0x03;
         let class = usize::try_from(class_id).expect("stream-id class fits usize");
-        let next_contiguous =
-            self.contiguous[class].map_or(class_id, |high| high.saturating_add(4));
-        if self.sparse.len() >= MAX_SPARSE_TERMINAL_STREAMS && stream_id.0 != next_contiguous {
-            self.overflowed = true;
-            return Err(H3NativeError::ControlProtocol(
-                "terminal stream tracking window exceeded",
-            ));
-        }
-        self.sparse.insert(stream_id);
-        let mut next = next_contiguous;
-        while self.sparse.remove(&StreamId(next)) {
-            self.contiguous[class] = Some(next);
-            let Some(successor) = next.checked_add(4) else {
-                break;
-            };
-            next = successor;
+        match self.watermark[class] {
+            Some(high) if id <= high => {
+                // Below the watermark and not terminated, so `id` is in an
+                // open run: split the run around it.
+                let (start, end) = self
+                    .open_run(class, id)
+                    .expect("an unterminated id below the watermark is in an open run");
+                self.open_runs[class].remove(&start);
+                if id < end {
+                    self.open_runs[class].insert(id + 4, end);
+                }
+                if start < id {
+                    self.add_open_run(class, start, id - 4)?;
+                }
+            }
+            high => {
+                // Every id of the class between the old watermark and `id` is
+                // open or not yet seen.
+                let first = high.map_or(class_id, |high| high.saturating_add(4));
+                if first < id {
+                    self.add_open_run(class, first, id - 4)?;
+                }
+                self.watermark[class] = Some(id);
+            }
         }
         Ok(())
     }
@@ -1990,35 +2029,71 @@ mod tests {
     }
 
     #[test]
-    fn native_h3_adapter_terminal_stream_tracker_compacts_contiguous_classes() {
+    fn native_h3_adapter_terminal_stream_tracker_tracks_out_of_order_classes() {
         let mut tracker = TerminalStreamTracker::default();
         tracker.insert(StreamId(8)).expect("track stream 8");
-        assert_eq!(tracker.sparse.len(), 1);
+        assert!(tracker.contains(StreamId(8)));
+        for open in [0, 4, 12] {
+            assert!(!tracker.contains(StreamId(open)));
+        }
         tracker.insert(StreamId(0)).expect("track stream 0");
-        assert_eq!(tracker.sparse.len(), 1);
+        assert!(!tracker.contains(StreamId(4)));
         tracker.insert(StreamId(4)).expect("track stream 4");
-        assert!(tracker.sparse.is_empty());
-        assert_eq!(tracker.contiguous[0], Some(8));
         for stream_id in [0, 4, 8] {
             assert!(tracker.contains(StreamId(stream_id)));
         }
 
-        tracker.insert(StreamId(3)).expect("track stream 3");
         tracker.insert(StreamId(7)).expect("track stream 7");
-        assert_eq!(tracker.contiguous[3], Some(7));
-        assert!(tracker.sparse.is_empty());
+        assert!(!tracker.contains(StreamId(3)));
+        tracker.insert(StreamId(3)).expect("track stream 3");
+        assert!(tracker.contains(StreamId(3)) && tracker.contains(StreamId(7)));
+        for untouched_class in [1, 2] {
+            assert!(!tracker.contains(StreamId(untouched_class)));
+        }
     }
 
     #[test]
-    fn native_h3_adapter_terminal_stream_tracker_fails_closed_at_sparse_budget() {
+    fn native_h3_adapter_terminal_stream_tracker_survives_a_long_lived_stream() {
+        // Stream 0 stays open, like a control stream or a streaming request,
+        // while many later streams finish. That must not exhaust the tracker.
         let mut tracker = TerminalStreamTracker::default();
-        for ordinal in 1..=MAX_SPARSE_TERMINAL_STREAMS {
+        let finished = 3 * u64::try_from(MAX_OPEN_STREAM_RUNS).unwrap();
+        for ordinal in 1..=finished {
             tracker
-                .insert(StreamId((ordinal as u64) * 4))
-                .expect("within sparse terminal budget");
+                .insert(StreamId(ordinal * 4))
+                .expect("a long-lived stream must not pin the tracking window");
+        }
+        assert_eq!(tracker.ensure_healthy(), Ok(()));
+        assert!(!tracker.contains(StreamId(0)));
+        assert!(tracker.contains(StreamId(4)) && tracker.contains(StreamId(finished * 4)));
+        tracker
+            .insert(StreamId(0))
+            .expect("the long-lived stream finishes");
+        assert!(tracker.contains(StreamId(0)));
+
+        // A peer may open a high stream first; every lower id is implicitly
+        // open, and that costs one run rather than one entry per id.
+        let mut tracker = TerminalStreamTracker::default();
+        tracker
+            .insert(StreamId(4 * 1_000_000))
+            .expect("a far jump is one open run");
+        assert!(tracker.contains(StreamId(4 * 1_000_000)));
+        assert!(!tracker.contains(StreamId(4 * 500_000)));
+    }
+
+    #[test]
+    fn native_h3_adapter_terminal_stream_tracker_fails_closed_at_open_run_budget() {
+        // Finishing every other stream leaves one open run per unfinished
+        // stream; the tracker refuses past its bound instead of growing.
+        let mut tracker = TerminalStreamTracker::default();
+        let budget = u64::try_from(MAX_OPEN_STREAM_RUNS).unwrap();
+        for ordinal in 0..budget {
+            tracker
+                .insert(StreamId((2 * ordinal + 1) * 4))
+                .expect("within the open-run budget");
         }
         let error = tracker
-            .insert(StreamId(((MAX_SPARSE_TERMINAL_STREAMS as u64) + 1) * 4))
+            .insert(StreamId((2 * budget + 1) * 4))
             .expect_err("terminal tracker must fail closed at its hard bound");
         assert_eq!(
             error,
