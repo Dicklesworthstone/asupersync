@@ -3278,12 +3278,20 @@ fn validate_header_name(name: &str) -> Result<(), H3NativeError> {
     Ok(())
 }
 
-/// Validate that a header field value does not contain null bytes, CR, or LF.
+/// Validate a header field value against RFC 9114 §10.3: every character must
+/// be allowed by the field-content rule of RFC 9110 §5.5. Control characters
+/// other than HTAB, and DEL, make the message malformed; forwarded to
+/// HTTP/1.1 they could split or smuggle a request.
 fn validate_header_value(value: &str) -> Result<(), H3NativeError> {
     for &b in value.as_bytes() {
         if b == 0 || b == b'\r' || b == b'\n' {
             return Err(H3NativeError::InvalidFrame(
                 "header field value contains forbidden character (NUL, CR, or LF)",
+            ));
+        }
+        if (b < 0x20 && b != b'\t') || b == 0x7f {
+            return Err(H3NativeError::InvalidFrame(
+                "header field value contains a control character (RFC 9114 §10.3)",
             ));
         }
     }
@@ -3417,6 +3425,14 @@ fn validate_request_path(method: &str, path: &str) -> Result<(), H3NativeError> 
     if !path.starts_with('/') {
         return Err(H3NativeError::InvalidRequestPseudoHeader(
             ":path must start with /",
+        ));
+    }
+    // RFC 9114 §4.3.1: :path carries only the path and query of the target
+    // URI. Whitespace would split the request line if the request were
+    // forwarded to HTTP/1.1, and a fragment is never sent.
+    if path.bytes().any(|b| b.is_ascii_whitespace() || b == b'#') {
+        return Err(H3NativeError::InvalidRequestPseudoHeader(
+            ":path must not contain whitespace or a fragment",
         ));
     }
     Ok(())

@@ -5027,6 +5027,50 @@ mod tests {
     }
 
     #[test]
+    fn header_value_rejects_other_control_characters_and_del() {
+        for value in ["a\x01b", "a\x0bb", "a\x1fb", "a\x7fb"] {
+            assert_eq!(
+                validate_header_value(value),
+                Err(H3NativeError::InvalidFrame(
+                    "header field value contains a control character (RFC 9114 §10.3)"
+                )),
+                "{value:?}"
+            );
+        }
+        validate_header_value("caf\u{e9}\tau lait").expect("HTAB and non-ASCII text are allowed");
+    }
+
+    #[test]
+    fn request_rejects_path_with_whitespace_or_fragment() {
+        for path in ["/a b", "/a\tb", "/a#fragment"] {
+            let pseudo = H3PseudoHeaders {
+                method: Some("GET".to_string()),
+                scheme: Some("https".to_string()),
+                authority: Some("example.com".to_string()),
+                path: Some(path.to_string()),
+                status: None,
+                protocol: None,
+            };
+            assert_eq!(
+                validate_request_pseudo_headers(&pseudo),
+                Err(H3NativeError::InvalidRequestPseudoHeader(
+                    ":path must not contain whitespace or a fragment"
+                )),
+                "{path:?}"
+            );
+        }
+        let pseudo = H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.com".to_string()),
+            path: Some("/a/b?q=c%20d".to_string()),
+            status: None,
+            protocol: None,
+        };
+        validate_request_pseudo_headers(&pseudo).expect("path and query are valid");
+    }
+
+    #[test]
     fn unknown_uni_stream_type_accepted_and_data_ignored() {
         let mut c = H3ConnectionState::new();
         let kind = c

@@ -3472,6 +3472,67 @@ fn native_h3_session_rejects_a_malformed_request_without_ending_its_siblings() {
 
 #[test]
 #[cfg(feature = "http3")]
+fn native_h3_session_rejects_a_request_path_with_whitespace_as_malformed() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // Static :method GET and :scheme https, :authority example.test, then a
+    // literal :path "/a b". Forwarded to HTTP/1.1, the space would split the
+    // request line (RFC 9114 section 10.3).
+    let mut section = vec![0x00, 0x00, 0xD1, 0xD7, 0x50, 0x0C];
+    section.extend_from_slice(b"example.test");
+    section.extend_from_slice(&[0x51, 0x04, b'/', b'a', b' ', b'b']);
+    let mut smuggled = Vec::new();
+    H3Frame::Headers(section)
+        .encode(&mut smuggled)
+        .expect("encode HEADERS with a space in :path");
+    let first = client
+        .open_bidi_stream(&cx)
+        .expect("open the request stream with a space in :path");
+    client
+        .write_stream(&cx, first, Bytes::from(smuggled), true)
+        .expect("send the request with a space in :path");
+
+    let head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.test".to_string()),
+            path: Some("/a%20b".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request head");
+    let mut valid = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&head).expect("encode request head"))
+        .encode(&mut valid)
+        .expect("encode valid HEADERS");
+    let second = client
+        .open_bidi_stream(&cx)
+        .expect("open valid request stream");
+    client
+        .write_stream(&cx, second, Bytes::from(valid), true)
+        .expect("send valid request");
+
+    // The request is malformed, so only its stream is reset with
+    // H3_MESSAGE_ERROR; the percent-encoded sibling is served.
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(events.contains(&NativeH3Event::StreamReset {
+        stream_id: first,
+        error_code: 0x10e,
+        final_size: 0,
+    }));
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: second,
+        head,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: second }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
 fn native_h3_client_accepts_informational_then_final_response_and_trailers() {
     let cx = test_cx();
     let config = NativeQuicConnectionConfig {
