@@ -154,7 +154,9 @@ fn stop_named_server(
         scheduler.schedule(counter_task, 0);
     }
 
-    runtime.run_until_quiescent();
+    // The app region stays open until the supervisor drain below, so this phase
+    // only needs the counter's stop to run to completion.
+    runtime.run_until_idle();
 
     let now = runtime.state.now;
     let mut guard = named_handle_slot.lock();
@@ -214,7 +216,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scheduler.schedule(client_task, 0);
     }
 
-    runtime.run_until_quiescent();
+    // Idle, not quiescent: the counter stays alive on its mailbox by design, so
+    // run_until_quiescent would spend the lab's whole step budget (max_steps)
+    // waiting for it, and no later phase could run the shutdown.
+    runtime.run_until_idle();
 
     let observed =
         futures_lite::future::block_on(client_handle.join(&cx)).expect("client join must succeed");
@@ -225,17 +230,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _stopped = app.stop(&mut runtime.state)?;
     request_cancel_and_drain(&mut runtime, app_region);
 
-    let app_region_record = runtime
-        .state
-        .region(app_region)
-        .ok_or("app region missing after stop")?;
-    assert_ne!(app_region_record.state(), RegionState::Open);
-    assert!(
-        app_region_record.cancel_reason().is_some(),
-        "stop must mark cancel intent on the app region"
-    );
-    if app_region_record.state() == RegionState::Closed {
-        assert!(app_region_record.is_quiescent());
+    // A region that has finished closing leaves the live table; only a region
+    // still draining keeps its record.
+    if let Some(app_region_record) = runtime.state.region(app_region) {
+        assert_ne!(app_region_record.state(), RegionState::Open);
+        assert!(
+            app_region_record.cancel_reason().is_some(),
+            "stop must mark cancel intent on the app region"
+        );
+        if app_region_record.state() == RegionState::Closed {
+            assert!(app_region_record.is_quiescent());
+        }
+    } else {
+        assert!(
+            runtime.state.region_was_closed(app_region),
+            "an app region missing from the live table must have completed close"
+        );
     }
 
     assert!(
