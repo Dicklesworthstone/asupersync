@@ -1424,6 +1424,12 @@ struct SharedState {
     closed: std::sync::atomic::AtomicBool,
     connected: std::sync::atomic::AtomicBool,
     processed_epoch: AtomicU64,
+    /// Set once a supervisor owns the connection. Only a supervised client
+    /// unsubscribes dropped subscriptions.
+    supervised: std::sync::atomic::AtomicBool,
+    /// SIDs of subscriptions dropped without an unsubscribe, awaiting their
+    /// UNSUB. Lock order: `subscriptions`, then `dropped_sids`.
+    dropped_sids: Mutex<Vec<u64>>,
 }
 
 impl SharedState {
@@ -1434,6 +1440,8 @@ impl SharedState {
             closed: std::sync::atomic::AtomicBool::new(false),
             connected: std::sync::atomic::AtomicBool::new(false),
             processed_epoch: AtomicU64::new(0),
+            supervised: std::sync::atomic::AtomicBool::new(false),
+            dropped_sids: Mutex::new(Vec::new()),
         }
     }
 }
@@ -2128,6 +2136,8 @@ impl NatsConnection {
     async fn replay_subscriptions_after_reconnect(&mut self, cx: &Cx) -> Result<usize, NatsError> {
         let mut subscriptions = {
             let subscriptions = self.state.subscriptions.lock();
+            // The new connection carries none of the dropped subscriptions.
+            self.state.dropped_sids.lock().clear();
             subscriptions
                 .iter()
                 .map(|(&sid, state)| SubscriptionReplay {
@@ -2261,6 +2271,26 @@ impl NatsConnection {
             self.connected = true;
         }
 
+        Ok(())
+    }
+
+    /// Send UNSUB for subscriptions dropped without an unsubscribe.
+    ///
+    /// Like every multi-part write, the connection stays marked unusable
+    /// until the whole batch is flushed.
+    async fn flush_dropped_subscriptions(&mut self, cx: &Cx) -> Result<(), NatsError> {
+        let sids = std::mem::take(&mut *self.state.dropped_sids.lock());
+        if sids.is_empty() || !self.connected {
+            return Ok(());
+        }
+        let mut cmd = String::new();
+        for sid in sids {
+            cmd.push_str(&format!("UNSUB {sid}\r\n"));
+        }
+        self.connected = false;
+        nats_io(cx, self.stream.write_all(cmd.as_bytes())).await?;
+        nats_io(cx, self.stream.flush()).await?;
+        self.connected = true;
         Ok(())
     }
 
@@ -3310,6 +3340,27 @@ enum NatsSupervisorCommand {
     },
 }
 
+impl NatsSupervisorCommand {
+    /// Whether the caller stopped waiting before the supervisor reached this
+    /// command, for example because a timeout dropped its future. Such a
+    /// command is skipped, so a publish the caller saw fail is not sent later.
+    /// Unsubscribe and close still run: they release server state.
+    fn caller_gave_up(&self) -> bool {
+        match self {
+            Self::Publish { reply, .. }
+            | Self::PublishRequest { reply, .. }
+            | Self::PublishRequestWithHeaders { reply, .. }
+            | Self::Ping { reply, .. }
+            | Self::Process { reply, .. } => reply.is_closed(),
+            Self::Request { reply, .. } | Self::RequestWithHeaders { reply, .. } => {
+                reply.is_closed()
+            }
+            Self::Subscribe { reply, .. } => reply.is_closed(),
+            Self::Unsubscribe { .. } | Self::Close { .. } => false,
+        }
+    }
+}
+
 impl fmt::Debug for NatsClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let connected = match &self.mode {
@@ -3686,8 +3737,13 @@ async fn run_nats_supervisor(
     mut commands: mpsc::Receiver<NatsSupervisorCommand>,
 ) {
     let mut streak = ReconnectStreak::default();
+    connection.state.supervised.store(true, Ordering::Release);
     loop {
-        match drain_supervisor_frames(supervisor_cx, &mut connection).await {
+        let pumped = match connection.flush_dropped_subscriptions(supervisor_cx).await {
+            Ok(()) => drain_supervisor_frames(supervisor_cx, &mut connection).await,
+            Err(error) => Err(error),
+        };
+        match pumped {
             Ok(processed) => {
                 if processed > 0 {
                     connection
@@ -3737,6 +3793,19 @@ async fn run_nats_supervisor(
                 }
             }
             Ok(Either::Right(Ok(command))) => {
+                // A subscription dropped while the supervisor waited is
+                // unsubscribed before the command writes anything.
+                if let Err(error) = connection.flush_dropped_subscriptions(supervisor_cx).await
+                    && !recover_supervisor_connection(
+                        supervisor_cx,
+                        &mut connection,
+                        &mut streak,
+                        error,
+                    )
+                    .await
+                {
+                    break;
+                }
                 if !handle_supervisor_command(&mut connection, command).await {
                     break;
                 }
@@ -3831,6 +3900,9 @@ async fn handle_supervisor_command(
     connection: &mut NatsConnection,
     command: NatsSupervisorCommand,
 ) -> bool {
+    if command.caller_gave_up() {
+        return true;
+    }
     match command {
         NatsSupervisorCommand::Publish {
             cx,
@@ -4141,9 +4213,16 @@ impl Subscription {
 
 impl Drop for Subscription {
     fn drop(&mut self) {
-        // Remove from shared state
+        // Remove from shared state. A subscription still registered here was
+        // never unsubscribed, and the server keeps routing to it until told
+        // otherwise, so a supervised client queues its UNSUB.
         let mut subs = self.state.subscriptions.lock();
-        subs.remove(&self.sid);
+        if subs.remove(&self.sid).is_some()
+            && self.state.supervised.load(Ordering::Acquire)
+            && !self.state.closed.load(Ordering::Acquire)
+        {
+            self.state.dropped_sids.lock().push(self.sid);
+        }
     }
 }
 
