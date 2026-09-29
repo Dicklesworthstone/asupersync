@@ -150,9 +150,13 @@ pub(super) enum DecodedFrame {
     PriorityError(H2Error),
 }
 
+// The listener that uses this codec is native-only (`h2::listener` is
+// `cfg(not(target_arch = "wasm32"))`).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Debug)]
 pub(super) struct ListenerFrameCodec(FrameCodec);
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl ListenerFrameCodec {
     pub(super) fn new() -> Self {
         Self(FrameCodec::new())
@@ -1153,6 +1157,7 @@ impl Connection {
         Ok(())
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // native-only listener caller
     pub(super) fn process_decoded_frame(
         &mut self,
         frame: DecodedFrame,
