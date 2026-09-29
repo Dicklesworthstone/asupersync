@@ -48,7 +48,14 @@ pub struct Http1ClientCodec {
     max_headers_size: usize,
     max_body_size: usize,
     max_trailers_size: usize,
+    /// Methods of the requests this codec encoded that have no final response
+    /// yet, oldest first.
+    pending_methods: std::collections::VecDeque<Method>,
 }
+
+/// Requests remembered for response framing. A codec used only to encode
+/// never pops them, so the oldest are dropped past this depth.
+const MAX_PENDING_METHODS: usize = 1024;
 
 enum ClientDecodeState {
     Head,
@@ -86,6 +93,7 @@ impl Http1ClientCodec {
             max_headers_size: DEFAULT_MAX_HEADERS_SIZE,
             max_body_size: DEFAULT_MAX_BODY_SIZE,
             max_trailers_size: DEFAULT_MAX_TRAILERS_SIZE,
+            pending_methods: std::collections::VecDeque::new(),
         }
     }
 
@@ -115,6 +123,29 @@ impl Default for Http1ClientCodec {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A response head as text.
+///
+/// Heads are ASCII apart from obs-text (0x80-0xFF) in field values and the
+/// reason phrase, which legacy servers send as Latin-1, for example in a
+/// Content-Disposition filename. Valid UTF-8 is kept as it is; any other line
+/// is decoded byte for byte as Latin-1, as the server-side parser does for
+/// field values. The field syntax is still validated afterwards.
+fn response_head_str(head: &[u8]) -> std::borrow::Cow<'_, str> {
+    if let Ok(text) = std::str::from_utf8(head) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(
+        head.split_inclusive(|&byte| byte == b'\n')
+            .map(|line| {
+                std::str::from_utf8(line).map_or_else(
+                    |_| line.iter().copied().map(char::from).collect::<String>(),
+                    str::to_owned,
+                )
+            })
+            .collect(),
+    )
 }
 
 /// Find `\r\n\r\n` delimiter.
@@ -263,8 +294,7 @@ impl Http1ClientCodec {
                     }
 
                     let head_bytes = src.split_to(end);
-                    let head_str = std::str::from_utf8(head_bytes.as_ref())
-                        .map_err(|_| HttpError::BadRequestLine)?;
+                    let head_str = response_head_str(head_bytes.as_ref());
 
                     let mut lines = head_str.split("\r\n");
                     let status_line = lines.next().ok_or(HttpError::BadRequestLine)?;
@@ -281,8 +311,22 @@ impl Http1ClientCodec {
                         }
                     }
 
+                    // A final response answers the oldest request this codec
+                    // encoded. A response to HEAD, or a 2xx to CONNECT, has no
+                    // body whatever its headers say (RFC 9110 §6.4.1).
+                    let request_method = if matches!(status, 100..=199) && status != 101 {
+                        None
+                    } else {
+                        self.pending_methods.pop_front()
+                    };
+                    let bodyless_request = match request_method {
+                        Some(Method::Head) => true,
+                        Some(Method::Connect) => (200..=299).contains(&status),
+                        _ => false,
+                    };
+
                     // RFC 7230/9110: responses with these status codes have no body.
-                    if matches!(status, 100..=199 | 204 | 304) {
+                    if matches!(status, 100..=199 | 204 | 304) || bodyless_request {
                         *state = ClientDecodeState::Head;
                         return Ok(Some(Response {
                             version,
@@ -481,6 +525,20 @@ impl crate::codec::Encoder<Request> for Http1ClientCodec {
     type Error = HttpError;
 
     fn encode(&mut self, req: Request, dst: &mut BytesMut) -> Result<(), HttpError> {
+        let method = req.method.clone();
+        Self::encode_request(req, dst)?;
+        // The decoder needs the method of the request each response answers:
+        // a response to HEAD has no body, whatever its headers say.
+        if self.pending_methods.len() >= MAX_PENDING_METHODS {
+            self.pending_methods.pop_front();
+        }
+        self.pending_methods.push_back(method);
+        Ok(())
+    }
+}
+
+impl Http1ClientCodec {
+    fn encode_request(req: Request, dst: &mut BytesMut) -> Result<(), HttpError> {
         if req.uri.contains('\r')
             || req.uri.contains('\n')
             || req.uri.contains(' ')
@@ -759,8 +817,7 @@ impl Http1Client {
                 }
 
                 let head_bytes = read_buf.split_to(end);
-                let head_str = std::str::from_utf8(head_bytes.as_ref())
-                    .map_err(|_| HttpError::BadRequestLine)?;
+                let head_str = response_head_str(head_bytes.as_ref());
 
                 let mut lines = head_str.split("\r\n");
                 let status_line = lines.next().ok_or(HttpError::BadRequestLine)?;
@@ -1247,6 +1304,63 @@ mod tests {
         assert_eq!(resp.version, Version::Http11);
         assert_eq!(resp.body, b"hello");
         assert!(resp.trailers.is_empty());
+    }
+
+    /// A pipelined HEAD response carries Content-Length but no body. The codec
+    /// must frame it by the HEAD it encoded, not read the next response as the
+    /// HEAD body.
+    #[test]
+    fn head_response_is_bodyless_and_leaves_the_next_response_intact() {
+        let request = |method: Method, uri: &str| Request {
+            method,
+            uri: uri.to_string(),
+            version: Version::Http11,
+            headers: vec![("Host".to_string(), "example.com".to_string())],
+            body: Vec::new(),
+            trailers: Vec::new(),
+            peer_addr: None,
+        };
+        let mut codec = Http1ClientCodec::new();
+        let mut wire = BytesMut::new();
+        codec
+            .encode(request(Method::Head, "/head"), &mut wire)
+            .expect("encode HEAD");
+        codec
+            .encode(request(Method::Get, "/get"), &mut wire)
+            .expect("encode GET");
+
+        let mut buf = BytesMut::from(
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"[..],
+        );
+        let head = codec.decode(&mut buf).unwrap().expect("HEAD response");
+        assert_eq!(head.status, 200);
+        assert!(head.body.is_empty(), "a HEAD response has no body");
+        let get = codec.decode(&mut buf).unwrap().expect("GET response");
+        assert_eq!(get.body, b"ok");
+        assert!(buf.is_empty());
+    }
+
+    /// A legacy server's Latin-1 byte in a field value (obs-text) is decoded
+    /// as Latin-1 instead of failing the whole response.
+    #[test]
+    fn latin1_obs_text_in_a_response_head_is_decoded_not_rejected() {
+        let mut codec = Http1ClientCodec::new();
+        let mut buf = BytesMut::from(
+            &b"HTTP/1.1 200 OK\r\nContent-Disposition: attachment; filename=\"caf\xe9.txt\"\r\nContent-Length: 2\r\n\r\nok"[..],
+        );
+        let response = codec
+            .decode(&mut buf)
+            .expect("obs-text is legal in a field value")
+            .expect("complete response");
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-disposition"))
+                .map(|(_, value)| value.as_str()),
+            Some("attachment; filename=\"caf\u{e9}.txt\"")
+        );
+        assert_eq!(response.body, b"ok");
     }
 
     #[test]
