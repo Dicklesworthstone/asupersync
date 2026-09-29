@@ -20,7 +20,8 @@
       "asupersync-8ktzrj reconciles 56 existing locators on shared main after safe-only ATP, network, process, and runtime changes. The coordinated builder source overlay is hash-pinned above; the other four reconciled sources match source_revision. This manual reconciliation preserves every operation, category, invariant, and evidence boundary; the exact syntax contract remains the verification authority.",
       "Passing the contract proves source/ledger locator alignment only; category evidence still controls any safety claim.",
       "The v0.5.0 release reconciliation updates eight existing ATP and ATPD locators against dc3123d8632fe330b4e87983eb321cb6b1689e62 after safe-only PEM parser and test insertions shifted their lines. Operation patterns, categories, invariants, evidence, and no-claim boundaries are unchanged; this note does not replace earlier source provenance or establish fresh unsafe-operation safety proof.",
-      "asupersync-31jdkv (2026-09-27) reconciles against 93ded6fe73136947a65d938637570ad5e0b2c469: re-locates 39 locators in eight rows after safe-only line shifts (net/tcp/stream.rs, bin/atpd.rs, observability/otel.rs, signal/signal.rs, runtime/builder.rs, database/mysql.rs, atp/journal/sparse_writer.rs, bin/atp.rs); ledgers the io_uring fstat fd-identity and reused-fd test sites that 746367874 added (reviewed) and drops its two removed fcntl(F_GETFD) sites; and removes the asupersync-tokio-compat/src/cancel.rs row, whose only unsafe block 7fb2cbb68 deleted."
+      "asupersync-31jdkv (2026-09-27) reconciles against 93ded6fe73136947a65d938637570ad5e0b2c469: re-locates 39 locators in eight rows after safe-only line shifts (net/tcp/stream.rs, bin/atpd.rs, observability/otel.rs, signal/signal.rs, runtime/builder.rs, database/mysql.rs, atp/journal/sparse_writer.rs, bin/atp.rs); ledgers the io_uring fstat fd-identity and reused-fd test sites that 746367874 added (reviewed) and drops its two removed fcntl(F_GETFD) sites; and removes the asupersync-tokio-compat/src/cancel.rs row, whose only unsafe block 7fb2cbb68 deleted.",
+      "asupersync-yo6fck (2026-09-28) re-locates 35 src/process.rs locators (every one after register_interest) by -24 lines: the safe-only child-pipe registration change shortened register_interest. Operation patterns, categories, invariants, evidence, and no-claim boundaries are unchanged."
     ]
   },
   "required_row_fields": [
@@ -2573,177 +2574,177 @@
         },
         {
           "kind": "unsafe_block",
-          "line": 288,
+          "line": 264,
           "pattern": "if unsafe { libc::setpgid(0, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 295,
+          "line": 271,
           "pattern": "if unsafe { libc::setsid() } >= 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 310,
+          "line": 286,
           "pattern": "if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal) } != 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 315,
+          "line": 291,
           "pattern": "if unsafe { libc::getppid() } != parent {"
         },
         {
           "kind": "unsafe_block",
-          "line": 316,
+          "line": 292,
           "pattern": "unsafe { libc::_exit(127) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 371,
+          "line": 347,
           "pattern": "let ret = unsafe { libc::kill(target, sig) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 532,
+          "line": 508,
           "pattern": "let result = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1267,
+          "line": 1243,
           "pattern": "if unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1288,
+          "line": 1264,
           "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), 0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1299,
+          "line": 1275,
           "pattern": "let wait = unsafe { WaitForSingleObject(self.process.as_raw_handle(), INFINITE) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1312,
+          "line": 1288,
           "pattern": "if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1335,
+          "line": 1311,
           "pattern": "let _ = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1347,
+          "line": 1323,
           "pattern": "if unsafe { InitializeProcThreadAttributeList(pointer, attribute_count, 0, &mut bytes) }"
         },
         {
           "kind": "unsafe_block",
-          "line": 1368,
+          "line": 1344,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1395,
+          "line": 1371,
           "pattern": "unsafe { DeleteProcThreadAttributeList(self.pointer) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1406,
+          "line": 1382,
           "pattern": "let _ = unsafe { CloseHandle(handle) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1424,
+          "line": 1400,
           "pattern": "Ok(unsafe { OwnedHandle::from_raw_handle(handle) })"
         },
         {
           "kind": "unsafe_block",
-          "line": 1443,
+          "line": 1419,
           "pattern": "if unsafe { CreatePipe(&mut read, &mut write, &mut security, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1459,
+          "line": 1435,
           "pattern": "if unsafe { SetHandleInformation(handle.as_raw_handle(), HANDLE_FLAG_INHERIT, 0) } == 0 {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1478,
+          "line": 1454,
           "pattern": "let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 1482,
+          "line": 1458,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 1682,
+          "line": 1658,
           "pattern": "if unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 2173,
+          "line": 2149,
           "pattern": "unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 4182,
+          "line": 4158,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4222,
+          "line": 4198,
           "pattern": "let _ = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4409,
+          "line": 4385,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4452,
+          "line": 4428,
           "pattern": "let waited = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4898,
+          "line": 4874,
           "pattern": "let sigterm_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGTERM) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4910,
+          "line": 4886,
           "pattern": "let still_alive = unsafe {"
         },
         {
           "kind": "unsafe_block",
-          "line": 4921,
+          "line": 4897,
           "pattern": "let sigkill_result = unsafe { libc::kill(pid.cast_signed(), libc::SIGKILL) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 4991,
+          "line": 4967,
           "pattern": "let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }"
         },
         {
           "kind": "unsafe_block",
-          "line": 5067,
+          "line": 5043,
           "pattern": "let our_pgid = unsafe { libc::getpgid(0) };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5072,
+          "line": 5048,
           "pattern": "let read_isolated_pgid = || -> libc::pid_t { unsafe { libc::getpgid(isolated_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5126,
+          "line": 5102,
           "pattern": "let read_target_pgid = || -> libc::pid_t { unsafe { libc::getpgid(target_pid) } };"
         },
         {
           "kind": "unsafe_block",
-          "line": 5190,
+          "line": 5166,
           "pattern": "let child_alive = unsafe { libc::kill(isolated_pid, 0) == 0 };"
         }
       ]
