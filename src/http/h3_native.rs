@@ -2768,7 +2768,7 @@ fn qpack_absolute_to_relative(base: u64, absolute_index: u64) -> Result<u64, H3N
     ))
 }
 
-fn qpack_decode_field_section_with_context(
+pub(crate) fn qpack_decode_field_section_with_context(
     input: &[u8],
     mode: H3QpackMode,
     qpack_context: Option<&QpackContext>,
@@ -3434,7 +3434,7 @@ fn parse_status_code(value: &str) -> Result<u16, H3NativeError> {
         .map_err(|_| H3NativeError::InvalidResponsePseudoHeader("invalid :status value"))
 }
 
-fn header_fields_to_request_head(
+pub(crate) fn header_fields_to_request_head(
     fields: &[(String, String)],
 ) -> Result<H3RequestHead, H3NativeError> {
     let mut pseudo = H3PseudoHeaders::default();

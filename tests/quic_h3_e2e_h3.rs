@@ -3411,6 +3411,66 @@ fn native_h3_session_tolerates_uni_streams_that_end_before_their_type() {
 
 #[test]
 #[cfg(feature = "http3")]
+fn native_h3_session_rejects_a_malformed_request_without_ending_its_siblings() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // A field section QPACK decodes but HTTP/3 forbids: static :method GET,
+    // :scheme https and :path /, then a literal with the uppercase name X-Bad.
+    let malformed_section = vec![
+        0x00, 0x00, 0xD1, 0xD7, 0xC1, 0x25, b'X', b'-', b'B', b'a', b'd', 0x01, b'v',
+    ];
+    let mut malformed = Vec::new();
+    H3Frame::Headers(malformed_section)
+        .encode(&mut malformed)
+        .expect("encode malformed HEADERS");
+    let first = client
+        .open_bidi_stream(&cx)
+        .expect("open malformed request stream");
+    client
+        .write_stream(&cx, first, Bytes::from(malformed), true)
+        .expect("send malformed request");
+
+    let head = H3RequestHead::new(
+        H3PseudoHeaders {
+            method: Some("GET".to_string()),
+            scheme: Some("https".to_string()),
+            authority: Some("example.test".to_string()),
+            path: Some("/ok".to_string()),
+            ..H3PseudoHeaders::default()
+        },
+        vec![],
+    )
+    .expect("valid request head");
+    let mut valid = Vec::new();
+    H3Frame::Headers(qpack_encode_request_field_section(&head).expect("encode request head"))
+        .encode(&mut valid)
+        .expect("encode valid HEADERS");
+    let second = client
+        .open_bidi_stream(&cx)
+        .expect("open valid request stream");
+    client
+        .write_stream(&cx, second, Bytes::from(valid), true)
+        .expect("send valid request");
+
+    // RFC 9114 section 4.1.2: the malformed request is a stream error. The
+    // session resets only that stream and keeps serving the other one.
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(events.contains(&NativeH3Event::StreamReset {
+        stream_id: first,
+        error_code: 0x10e,
+        final_size: 0,
+    }));
+    assert!(events.contains(&NativeH3Event::RequestHeaders {
+        stream_id: second,
+        head,
+    }));
+    assert!(events.contains(&NativeH3Event::Finished { stream_id: second }));
+}
+
+#[test]
+#[cfg(feature = "http3")]
 fn native_h3_client_accepts_informational_then_final_response_and_trailers() {
     let cx = test_cx();
     let config = NativeQuicConnectionConfig {

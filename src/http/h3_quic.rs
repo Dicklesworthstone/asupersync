@@ -30,8 +30,9 @@ use receive_frame::{DataFrameCursor, FrameHeader, FrameHeaderError};
 use super::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
     H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, H3UniStreamType,
-    QpackDecoderInstruction, QpackEncoderInstruction, qpack_decode_decoder_instruction,
-    qpack_decode_encoder_instruction, qpack_decode_request_field_section,
+    QpackDecoderInstruction, QpackEncoderInstruction, header_fields_to_request_head,
+    qpack_decode_decoder_instruction, qpack_decode_encoder_instruction,
+    qpack_decode_field_section_with_context, qpack_plan_to_header_fields,
     qpack_decode_response_field_section, qpack_decode_trailer_field_section,
     qpack_encode_request_field_section, qpack_encode_response_field_section,
     qpack_encode_trailer_field_section,
@@ -39,6 +40,9 @@ use super::h3_native::{
 
 /// RFC 9114 application error code `H3_REQUEST_CANCELLED`.
 pub const H3_REQUEST_CANCELLED: u64 = 0x010c;
+
+/// RFC 9114 application error code `H3_MESSAGE_ERROR`.
+const H3_MESSAGE_ERROR: u64 = 0x010e;
 
 const H3_CONTROL_STREAM_TYPE: u64 = 0x00;
 const FRAME_HEADER_MAX_BYTES: usize = 16;
@@ -163,6 +167,10 @@ pub enum NativeH3Event {
         stream_id: StreamId,
     },
     /// Peer reset one request/response stream.
+    ///
+    /// A server session also reports a request it rejected as malformed this
+    /// way, with `error_code` H3_MESSAGE_ERROR (0x10e) and `final_size` 0,
+    /// after resetting that stream itself. Other requests are unaffected.
     StreamReset {
         /// Reset QUIC stream.
         stream_id: StreamId,
@@ -512,6 +520,9 @@ pub struct NativeH3Session {
     closing: bool,
     next_local_request_stream_id: u64,
     streaming_receive: Option<StreamingReceive>,
+    /// Malformed requests already reported, whose RESET_STREAM and
+    /// STOP_SENDING are still to be queued on the connection.
+    rejected_requests: Vec<StreamId>,
 }
 
 impl NativeH3Session {
@@ -550,6 +561,7 @@ impl NativeH3Session {
             closing: false,
             next_local_request_stream_id: 0,
             streaming_receive: None,
+            rejected_requests: Vec::new(),
         }
     }
 
@@ -1099,6 +1111,9 @@ impl NativeH3Session {
                 .extend_from_slice(&bytes);
             self.decode_stream(stream_id)?;
         }
+        if self.reset_rejected_requests(cx, connection)? {
+            return Ok(true);
+        }
 
         let emitted = !self.events.is_empty();
         let eof = readiness.fin_received && connection.is_stream_eof(stream_id)?;
@@ -1210,11 +1225,50 @@ impl NativeH3Session {
             incoming.bytes.extend_from_slice(&bytes);
         }
         self.decode_stream(stream_id)?;
+        if self.reset_rejected_requests(cx, connection)? {
+            return Ok(());
+        }
 
         if readiness.fin_received && connection.is_stream_eof(stream_id)? {
             self.finish_stream(stream_id)?;
         }
         Ok(())
+    }
+
+    /// Reject a request whose field section decoded but is malformed: it ends
+    /// only its own stream, with `H3_MESSAGE_ERROR`. The stream is reported as
+    /// a [`NativeH3Event::StreamReset`] so owners release its per-stream
+    /// state, and its later bytes are discarded.
+    fn reject_malformed_request(&mut self, stream_id: StreamId) -> Result<(), NativeH3SessionError> {
+        self.state.abort_request_stream(stream_id.0)?;
+        self.incoming.remove(&stream_id);
+        self.forget_streaming_readiness(stream_id);
+        self.terminal_streams.insert(stream_id)?;
+        self.rejected_requests.push(stream_id);
+        self.events.push_back(NativeH3Event::StreamReset {
+            stream_id,
+            error_code: H3_MESSAGE_ERROR,
+            final_size: 0,
+        });
+        Ok(())
+    }
+
+    /// Queue RESET_STREAM and STOP_SENDING for every request rejected as
+    /// malformed. Returns true when any was rejected, so the caller stops
+    /// processing a stream it may no longer own.
+    fn reset_rejected_requests(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+    ) -> Result<bool, NativeH3SessionError> {
+        if self.rejected_requests.is_empty() {
+            return Ok(false);
+        }
+        for stream_id in std::mem::take(&mut self.rejected_requests) {
+            connection.reset_stream(cx, stream_id, H3_MESSAGE_ERROR)?;
+            connection.stop_stream_receiving(cx, stream_id, H3_MESSAGE_ERROR)?;
+        }
+        Ok(true)
     }
 
     fn classify_reset_stream(
@@ -1438,6 +1492,10 @@ impl NativeH3Session {
                 frame
             };
             self.on_frame(stream_id, kind, frame)?;
+            if !self.incoming.contains_key(&stream_id) {
+                // The frame rejected this stream as a malformed request.
+                return Ok(());
+            }
         }
     }
 
@@ -1469,11 +1527,20 @@ impl NativeH3Session {
                         .expect("request stream exists while decoding")
                         .header_blocks_seen;
                     if header_block_index == 0 {
-                        let head = qpack_decode_request_field_section(
+                        // A field section QPACK cannot decode stays a
+                        // connection error. One that decodes but is not a
+                        // valid request is malformed, a stream error (RFC 9114
+                        // section 4.1.2): reject it without ending the other
+                        // requests on this connection.
+                        let plan = qpack_decode_field_section_with_context(
                             &field_section,
                             H3QpackMode::StaticOnly,
                             None,
                         )?;
+                        let fields = qpack_plan_to_header_fields(&plan, None)?;
+                        let Ok(head) = header_fields_to_request_head(&fields) else {
+                            return self.reject_malformed_request(stream_id);
+                        };
                         self.state.on_request_stream_frame(
                             stream_id.0,
                             &H3Frame::Headers(field_section),
