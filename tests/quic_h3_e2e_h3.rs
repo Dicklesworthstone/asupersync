@@ -3998,6 +3998,28 @@ fn native_h3_router_produced_response_is_demand_driven_and_head_suppresses_facto
     ));
     assert_eq!(bridge.in_flight_dispatch_count(), 0);
 
+    // The bridge answered the peer's reset with STOP_SENDING, and RFC 9000
+    // section 3.5 requires the client to answer that with its own
+    // RESET_STREAM. Deliver it before the next request, so it is not read as
+    // part of that request.
+    let answering_reset = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3).0;
+    assert!(
+        answering_reset.iter().any(|event| matches!(
+            event,
+            NativeH3Event::StreamReset {
+                stream_id,
+                error_code: H3_REQUEST_CANCELLED,
+                ..
+            } if *stream_id == cancelled_stream
+        )),
+        "the client answers STOP_SENDING with RESET_STREAM: {answering_reset:?}"
+    );
+    for event in answering_reset {
+        bridge
+            .ingest_event_with_cx(&cx, &mut server_h3, &mut server, event)
+            .expect("ingest the client's answering reset");
+    }
+
     let buffered_stream = client_h3
         .send_request(
             &cx,
