@@ -255,9 +255,12 @@ fn runtime_block_on_drives_specific_future_to_completion() {
     let start = source.find(fn_marker).expect("block_on fn");
     let body_end = source[start..].find("\n    }\n").expect("block_on close");
     let body = &source[start..start + body_end];
+    // Whitespace is ignored: the call takes the caller's cancel
+    // owner as a third argument, and rustfmt wraps it.
+    let compact: String = body.split_whitespace().collect();
 
     assert!(
-        body.contains("run_future_with_budget(future, self.inner.config.poll_budget)"),
+        compact.contains("run_future_with_budget(future,self.inner.config.poll_budget,"),
         "REGRESSION: Runtime::block_on no longer uses \
          run_future_with_budget. Either it uses run_loop \
          (would block on shutdown, defeating the future-\
