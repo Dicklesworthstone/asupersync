@@ -141,6 +141,19 @@
       "notes": "Source-local PBFT tests assert that unsupported view-change/new-view paths fail closed instead of silently succeeding."
     },
     {
+      "id": "src-pbft-authenticated-driver-real-quorum-test-name",
+      "paths": [
+        "src/distributed/consensus/authenticated/driver.rs"
+      ],
+      "terms": [
+        "fn waiting_for_a_real_quorum_does_not_return_a_placeholder"
+      ],
+      "disposition": "legitimate-test-harness",
+      "support_class": "test_harness",
+      "blocker_bead_id": "",
+      "notes": "Source-local test name (897d33b51): it asserts the authenticated driver waits for a real quorum instead of returning a placeholder. A negative assertion, not a stub."
+    },
+    {
       "id": "src-atp-protocol-e701-fail-closed",
       "paths": [
         "src/net/atp/protocol/outcome.rs"
