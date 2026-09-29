@@ -30,7 +30,8 @@ use receive_frame::{DataFrameCursor, FrameHeader, FrameHeaderError};
 use super::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
     H3QpackMode, H3RequestHead, H3ResponseHead, H3Settings, H3UniStreamType,
-    QpackEncoderInstruction, qpack_decode_encoder_instruction, qpack_decode_request_field_section,
+    QpackDecoderInstruction, QpackEncoderInstruction, qpack_decode_decoder_instruction,
+    qpack_decode_encoder_instruction, qpack_decode_request_field_section,
     qpack_decode_response_field_section, qpack_decode_trailer_field_section,
     qpack_encode_request_field_section, qpack_encode_response_field_section,
     qpack_encode_trailer_field_section,
@@ -1302,7 +1303,17 @@ impl NativeH3Session {
                     .incoming
                     .get_mut(&stream_id)
                     .expect("stream checked above");
-                while !stream.bytes.is_empty() {
+                while let Some(&first) = stream.bytes.first() {
+                    // Only Set Dynamic Table Capacity (`001xxxxx`) is legal here.
+                    // Refuse anything else on its first byte: waiting for a
+                    // complete insert would buffer a peer-declared string
+                    // length without bound. The capacity integer is itself
+                    // bounded, so a partial one stays a few bytes long.
+                    if first & 0b1110_0000 != 0b0010_0000 {
+                        return Err(NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+                            "static QPACK forbids dynamic encoder instructions",
+                        )));
+                    }
                     match qpack_decode_encoder_instruction(&stream.bytes) {
                         Ok((
                             QpackEncoderInstruction::SetDynamicTableCapacity { capacity: 0 },
@@ -1324,16 +1335,30 @@ impl NativeH3Session {
                 return Ok(());
             }
             if kind == IncomingStreamKind::QpackDecoder {
-                if !self
+                // A peer whose own table capacity is non-zero sends Stream
+                // Cancellation whenever it resets or abandons a request stream
+                // (RFC 9204 section 4.4.2), whether or not our encoder used the
+                // table. The other two instructions acknowledge dynamic-table
+                // state that a static encoder never creates.
+                let stream = self
                     .incoming
-                    .get(&stream_id)
-                    .expect("stream checked above")
-                    .bytes
-                    .is_empty()
-                {
-                    return Err(NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
-                        "static QPACK forbids decoder instructions",
-                    )));
+                    .get_mut(&stream_id)
+                    .expect("stream checked above");
+                while !stream.bytes.is_empty() {
+                    match qpack_decode_decoder_instruction(&stream.bytes) {
+                        Ok((QpackDecoderInstruction::StreamCancellation { .. }, n)) => {
+                            stream.bytes.drain(..n);
+                        }
+                        Ok(_) => {
+                            return Err(NativeH3SessionError::Protocol(
+                                H3NativeError::QpackPolicy(
+                                    "static QPACK never sends dynamic-table state to acknowledge",
+                                ),
+                            ));
+                        }
+                        Err(H3NativeError::UnexpectedEof) => return Ok(()),
+                        Err(error) => return Err(NativeH3SessionError::Protocol(error)),
+                    }
                 }
                 return Ok(());
             }

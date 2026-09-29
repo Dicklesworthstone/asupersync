@@ -3278,6 +3278,112 @@ fn native_h3_static_encoder_accepts_peer_capacity_but_advertises_zero_decoder_li
     );
 }
 
+/// A native QUIC pair whose static server session has read the client's
+/// SETTINGS, ready for raw bytes on peer-opened QPACK streams.
+#[cfg(feature = "http3")]
+fn static_h3_server_after_settings(cx: &Cx) -> (QuicConnection, QuicConnection, NativeH3Session) {
+    let config = NativeQuicConnectionConfig::default();
+    let mut client = QuicConnection::client(config);
+    let mut server = QuicConnection::server(config);
+    client.record_verified_server_identity();
+    establish_loopback(cx, &mut client, &mut server).expect("establish native QUIC pair");
+    let mut client_h3 = NativeH3Session::client();
+    let mut server_h3 = NativeH3Session::server();
+    client_h3
+        .initialize(cx, &mut client, H3Settings::default())
+        .expect("initialize static client H3");
+    server_h3
+        .initialize(cx, &mut server, H3Settings::default())
+        .expect("initialize static server H3");
+    let (events, _) = pump_h3_events(cx, &mut client, &mut server, &mut server_h3);
+    assert!(matches!(events.as_slice(), [NativeH3Event::Settings(_)]));
+    (client, server, server_h3)
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_static_session_refuses_an_encoder_insert_on_its_first_byte() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // Insert Without Name Reference declaring a name about 2^35 bytes long.
+    // Waiting for the whole instruction would let one anonymous peer grow
+    // this buffer without bound, so it must fail before any string byte.
+    let qpack_encoder = client
+        .open_uni_stream(&cx)
+        .expect("open peer QPACK encoder stream");
+    client
+        .write_stream(
+            &cx,
+            qpack_encoder,
+            Bytes::from_static(&[0x02, 0x5F, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]),
+            false,
+        )
+        .expect("queue QPACK encoder type and a partial insert");
+    assert!(
+        pump_app_data(&cx, &mut client, &mut server, 1200, 1)
+            .expect("deliver partial QPACK insert")
+            > 0
+    );
+    let error = server_h3
+        .next_event(&cx, &mut server)
+        .expect_err("a partial insert is refused, not buffered");
+    assert_eq!(
+        error,
+        NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+            "static QPACK forbids dynamic encoder instructions"
+        ))
+    );
+}
+
+#[test]
+#[cfg(feature = "http3")]
+fn native_h3_static_session_ignores_stream_cancellations_and_refuses_acknowledgements() {
+    let cx = test_cx();
+    let (mut client, mut server, mut server_h3) = static_h3_server_after_settings(&cx);
+
+    // A peer with a non-zero table capacity cancels abandoned request streams
+    // on its decoder stream even though our encoder never used the table.
+    let qpack_decoder = client
+        .open_uni_stream(&cx)
+        .expect("open peer QPACK decoder stream");
+    client
+        .write_stream(
+            &cx,
+            qpack_decoder,
+            Bytes::from_static(&[0x03, 0x40, 0x7F]),
+            false,
+        )
+        .expect("queue decoder type, a cancellation and half of another");
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(events.is_empty(), "stream cancellations are not H3 events");
+    client
+        .write_stream(&cx, qpack_decoder, Bytes::from_static(&[0x01]), false)
+        .expect("queue the rest of the split cancellation for stream 64");
+    let (events, _) = pump_h3_events(&cx, &mut client, &mut server, &mut server_h3);
+    assert!(events.is_empty(), "a split cancellation is reassembled");
+
+    // Section Acknowledgement for stream 0: this encoder never sent a field
+    // section with a non-zero Required Insert Count (RFC 9204 section 4.4.1).
+    client
+        .write_stream(&cx, qpack_decoder, Bytes::from_static(&[0x80]), false)
+        .expect("queue an unexpected section acknowledgement");
+    assert!(
+        pump_app_data(&cx, &mut client, &mut server, 1200, 1)
+            .expect("deliver section acknowledgement")
+            > 0
+    );
+    let error = server_h3
+        .next_event(&cx, &mut server)
+        .expect_err("static encoder has no section to acknowledge");
+    assert_eq!(
+        error,
+        NativeH3SessionError::Protocol(H3NativeError::QpackPolicy(
+            "static QPACK never sends dynamic-table state to acknowledge"
+        ))
+    );
+}
+
 #[test]
 #[cfg(feature = "http3")]
 fn native_h3_client_accepts_informational_then_final_response_and_trailers() {
