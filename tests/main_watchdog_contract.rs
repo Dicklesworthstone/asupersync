@@ -535,6 +535,9 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
     // The check-wasm32 lane on a worker without the rustup target: every crate fails
     // on a missing `core` before any code of this repository is reached.
     let missing_target = "  INFO rch::hook: Selected worker: hz2 at ubuntu@host\n    Checking cfg-if v1.0.4\nerror[E0463]: can't find crate for `core`\n  |\n  = note: the `wasm32-unknown-unknown` target may not be installed\n  = help: consider downloading the target with `rustup target add wasm32-unknown-unknown`\nerror: could not compile `cfg-if` (lib) due to 1 previous error\n  Remote command finished: exit=101 in 900ms\n";
+    // A dep-info fault can stop cargo before any crate reports `could not compile`
+    // (hz4, 2026-09-29: filed as the false P0 bi2462.147.66).
+    let dep_info_only = "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\n   Compiling syn v2.0.119\nerror: could not parse/generate dep info at: /data/tmp/rch/asupersync/08eb264dca0e0e69/.rch-target-hz4-job-1/debug/build/syn/0f39f05953ee3969/out/syn-0f39f05953ee3969.d\n\nCaused by:\n  No such file or directory (os error 2)\n  Remote command finished: exit=101 in 7561ms\n";
     let scenario = json!({
         "plan": {
             "commits": [commit(9, "dev@example.com", "nine")],
@@ -543,6 +546,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
                 one("fault-test", "test"),
                 one("fault-missing-source", "build"),
                 one("fault-missing-target", "build"),
+                one("fault-dep-info-only", "test"),
                 one("fault-beside-workspace-error", "build"),
                 one("fault-beside-member-error", "build"),
                 one("dependency-error", "build"),
@@ -553,6 +557,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
             "fault-test": {head.clone(): {"log": dependency_fault("")}},
             "fault-missing-source": {head.clone(): {"log": missing_source}},
             "fault-missing-target": {head.clone(): {"log": missing_target}},
+            "fault-dep-info-only": {head.clone(): {"log": dep_info_only}},
             "fault-beside-workspace-error": {head.clone(): {"log": dependency_fault(
                 "src/lib.rs:10:5: error[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib) due to 1 previous error\n"
             )}},
@@ -565,7 +570,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
         },
     });
     let result = evaluate(&scenario);
-    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target"] {
+    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target", "fault-dep-info-only"] {
         let outcome = receipt(&result, lane);
         assert_eq!(outcome["verdict"], "no-evidence", "{lane}: {result:#}");
         assert!(
@@ -589,7 +594,7 @@ fn a_dependency_the_worker_could_not_build_is_undecided_unless_a_workspace_crate
         .iter()
         .filter_map(|payload| payload["lane"].as_str())
         .collect();
-    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target"] {
+    for lane in ["fault-build", "fault-test", "fault-missing-source", "fault-missing-target", "fault-dep-info-only"] {
         assert!(!filed.contains(&lane), "a worker fault must never file a bead: {filed:?}");
     }
     assert!(
@@ -1008,6 +1013,81 @@ fn rotation_attributes_each_failure_to_the_binary_that_printed_it() {
         rounds[1]["results"][nested],
         json!(["red", "asupersync-rota"]),
         "{probed:#}"
+    );
+}
+
+/// The browser SDK's Node suites run on the watchdog host (Node, not Cargo), one
+/// `=== node-suite <path> exit=<code>` marker after each suite's output (bi2462.135).
+/// A failing test is keyed by suite and test name. The file-level entry, which names
+/// the suite by its path in a per-run temporary snapshot, never becomes a key, so a
+/// persisting red is not refiled every run. A missing fake-indexeddb reference is the
+/// host's gap: undecided, never green and never red.
+#[test]
+fn node_suites_are_keyed_by_suite_and_test_and_a_missing_reference_proves_nothing() {
+    let head = sha(9);
+    let node = |id: &str| json!({"id": id, "kind": "node", "argv": ["node"], "suites": ["scripts/test_browser_a.mjs", "scripts/test_browser_b.mjs"]});
+    let stats = |pass: u32, fail: u32| format!("ℹ tests {}\nℹ pass {pass}\nℹ fail {fail}\n", pass + fail);
+    let green = format!(
+        "✔ one (1.0ms)\n{}=== node-suite scripts/test_browser_a.mjs exit=0\n{}=== node-suite scripts/test_browser_b.mjs exit=0\n",
+        stats(3, 0),
+        stats(2, 0)
+    );
+    let red = format!(
+        "{}=== node-suite scripts/test_browser_a.mjs exit=0\n✖ fails on purpose (1.04ms)\n{}✖ failing tests:\n✖ fails on purpose (1.04ms)\n✖ /tmp/asupersync_watchdog_node_x1/scripts/test_browser_b.mjs (5.1ms)\n=== node-suite scripts/test_browser_b.mjs exit=1\n",
+        stats(3, 0),
+        stats(1, 1)
+    );
+    let timed_out = format!("{}=== node-suite scripts/test_browser_a.mjs exit=0\n=== node-suite scripts/test_browser_b.mjs exit=timeout\n", stats(3, 0));
+    let no_reference = format!(
+        "{}=== node-suite scripts/test_browser_a.mjs exit=0\nError: Artifact transaction tests require fake-indexeddb 6.2.5.\n{}=== node-suite scripts/test_browser_b.mjs exit=1\n",
+        stats(3, 0),
+        stats(0, 1)
+    );
+    let absent = "=== node-suite scripts/test_browser_a.mjs exit=absent\n=== node-suite scripts/test_browser_b.mjs exit=absent\n";
+    let no_node = "=== node-suite scripts/test_browser_a.mjs exit=no-node\n=== node-suite scripts/test_browser_b.mjs exit=no-node\n";
+    let scenario = json!({
+        "plan": {
+            "commits": [commit(9, "dev@example.com", "nine")],
+            "lanes": [node("green"), node("red"), node("timed-out"), node("no-reference"), node("absent"), node("no-node")],
+        },
+        "lane_logs": {
+            "green": {head.clone(): {"log": green}},
+            "red": {head.clone(): {"log": red}},
+            "timed-out": {head.clone(): {"log": timed_out}},
+            "no-reference": {head.clone(): {"log": no_reference}},
+            "absent": {head.clone(): {"log": absent}},
+            "no-node": {head.clone(): {"log": no_node}},
+        },
+    });
+    let result = evaluate(&scenario);
+    let green = receipt(&result, "green");
+    assert_eq!(green["verdict"], "green", "{result:#}");
+    assert_eq!(green["counts"]["passed"], 5);
+    let red = receipt(&result, "red");
+    assert_eq!(red["verdict"], "red", "{result:#}");
+    assert_eq!(
+        red["failing_targets"],
+        json!(["scripts/test_browser_b.mjs::fails on purpose"]),
+        "{result:#}"
+    );
+    assert_eq!(
+        receipt(&result, "timed-out")["failing_targets"],
+        json!(["scripts/test_browser_b.mjs::(suite failed, exit timeout)"]),
+        "{result:#}"
+    );
+    for lane in ["no-reference", "absent", "no-node"] {
+        assert_eq!(
+            receipt(&result, lane)["verdict"],
+            "no-evidence",
+            "{lane}: {result:#}"
+        );
+    }
+    assert!(
+        receipt(&result, "no-reference")["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("WATCHDOG_FAKE_INDEXEDDB_SOURCE"),
+        "{result:#}"
     );
 }
 

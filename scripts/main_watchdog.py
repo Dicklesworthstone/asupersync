@@ -163,6 +163,15 @@ WORKER_FAULT_RE = re.compile(
 LOCAL_CRATE_RE = re.compile(r"^\s*(?:Compiling|Checking) (\S+) v\S+ \(/", re.MULTILINE)
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# The browser SDK's Node suites read the TypeScript sources through Node's own type
+# stripping: no install, no build, and no Cargo, so they run on the watchdog host.
+NODE_SUITE_RE = re.compile(r"^scripts/test_browser_[A-Za-z0-9_]+\.mjs$")
+NODE_TRIGGER_PREFIXES = ("packages/browser/", "packages/browser-core/", "scripts/test_browser_")
+NODE_MARKER_RE = re.compile(r"^=== node-suite (\S+) exit=(\S+)$", re.MULTILINE)
+NODE_STAT_RE = re.compile(r"^ℹ (tests|pass|fail) (\d+)$", re.MULTILINE)
+NODE_FAILED_TEST_RE = re.compile(r"^\s*✖ (.+?) \(\d[\d.]*m?s\)$", re.MULTILINE)
+# The artifact-transaction suite fails closed without its pinned reference implementation.
+NODE_REFERENCE_MISSING = "require fake-indexeddb"
 
 
 # ---------------------------------------------------------------------------
@@ -532,11 +541,66 @@ def compress_lib_filters(filters: list[str], limit: int = MAX_LIB_FILTERS) -> li
     return kept
 
 
+def classify_node_suites(clean: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Fail-closed verdict for a node lane (node_suites_run output).
+
+    A failing test is keyed `<suite>::<test>`; a suite that failed without naming a
+    test (an import error, a timeout) is keyed `<suite>::(suite failed)`. A missing
+    fake-indexeddb reference is the host's gap, not the code's: that suite proves
+    nothing, and the lane is undecided unless another suite is red.
+    """
+    counts = result["counts"]
+    failing: list[str] = []
+    seen: list[str] = []
+    executed: list[str] = []
+    unproven: list[str] = []
+    start = 0
+    for marker in NODE_MARKER_RE.finditer(clean):
+        suite, code = marker.group(1), marker.group(2)
+        section = clean[start : marker.start()]
+        start = marker.end()
+        if code == "absent":
+            continue  # not at this commit (a bisect probe before the suite existed)
+        seen.append(suite)
+        if code == "no-node":
+            unproven.append(f"{suite} (no node binary: set WATCHDOG_NODE to Node 24 or later)")
+            continue
+        if NODE_REFERENCE_MISSING in section:
+            unproven.append(f"{suite} (fake-indexeddb reference missing: set WATCHDOG_FAKE_INDEXEDDB_SOURCE)")
+            continue
+        stats = {key: int(value) for key, value in NODE_STAT_RE.findall(section)}
+        counts["results"] += 1
+        counts["passed"] += stats.get("pass", 0)
+        counts["failed"] += stats.get("fail", 0)
+        if stats.get("pass", 0) + stats.get("fail", 0) > 0:
+            executed.append(suite)
+        # The file-level entry names the suite by its absolute path in a per-run temporary
+        # snapshot: keying on it would make a persisting red look new on every run.
+        named = sorted({f"{suite}::{name}" for name in NODE_FAILED_TEST_RE.findall(section) if not name.endswith(".mjs")})
+        if code != "0" or stats.get("fail", 0):
+            failing += named or [f"{suite}::(suite failed, exit {code})"]
+        elif not stats.get("pass", 0):
+            unproven.append(f"{suite} (zero tests passed)")
+    result.update(targets_seen=sorted(seen), targets_executed=sorted(executed))
+    if failing:
+        result.update(
+            verdict=VERDICT_RED, failing_targets=sorted(set(failing)), first_error=failing[0], reason="node suite failure"
+        )
+    elif not seen:
+        result["reason"] = "no node suite ran"
+    elif unproven:
+        result["reason"] = "node suites proved nothing: " + "; ".join(unproven)
+    else:
+        result.update(verdict=VERDICT_GREEN, reason="every node suite passed")
+    return result
+
+
 def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> dict[str, Any]:
     """Fail-closed verdict for one lane log.
 
-    `lane["kind"]` is "build" (check/clippy) or "test". Test lanes carry
-    `expected_targets` (integration target names) and may set `lib_filters`.
+    `lane["kind"]` is "build" (check/clippy), "test", or "node" (classify_node_suites).
+    Test lanes carry `expected_targets` (integration target names) and may set
+    `lib_filters`.
     """
     clean = ANSI_RE.sub("", text)
     lines = clean.splitlines()
@@ -556,6 +620,8 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         "targets_executed": [],
         "env_gated_targets": list(lane.get("env_gated_targets", [])),
     }
+    if lane["kind"] == "node":
+        return classify_node_suites(clean, result)
     if remote_exit is None and DEPENDENCY_PREFLIGHT_RE.search(clean):
         result["reason"] = DEPENDENCY_PREFLIGHT_REASON
         return result
@@ -587,13 +653,14 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     killed_reason = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
     # Likewise a worker fault while only third-party crates failed: such reds were
     # bisected across innocent commits on hz4 (2026-09-28). A workspace crate that
-    # failed beside it is still red, including a member not named asupersync-*.
+    # failed beside it is still red, including a member not named asupersync-*. A
+    # dep-info fault can also stop cargo before any crate reports `could not compile`
+    # (a syn build script on hz4, 2026-09-29, filed as false P0 bi2462.147.66): with no
+    # failing crate at all, nothing of this repository ran either.
     failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
     local_crates = set(LOCAL_CRATE_RE.findall(clean))
-    worker_fault = (
-        bool(WORKER_FAULT_RE.search(clean))
-        and bool(failing_crates)
-        and not any(name.startswith("asupersync") or name in local_crates for name in failing_crates)
+    worker_fault = bool(WORKER_FAULT_RE.search(clean)) and not any(
+        name.startswith("asupersync") or name in local_crates for name in failing_crates
     )
     fault_reason = (
         "the worker could not build a third-party dependency (missing registry files, "
@@ -1408,6 +1475,18 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
                 "expected_targets": [],
             }
         )
+    if any(path.startswith(NODE_TRIGGER_PREFIXES) for path in paths):
+        # The browser SDK changes often, and no lane ran its Node suites (bi2462.135).
+        suites = sorted(p for p in git("ls-tree", "--name-only", head, "scripts/").split() if NODE_SUITE_RE.match(p))
+        if suites:
+            lanes.append(
+                {
+                    "id": "node-browser-suites",
+                    "kind": "node",
+                    "argv": ["node", "--unhandled-rejections=strict", "--experimental-vm-modules", "--test", *suites],
+                    "suites": suites,
+                }
+            )
     for lane in lanes:
         lane["display_command"] = " ".join(lane["argv"])
     return lanes, unmapped
@@ -1466,8 +1545,53 @@ def make_plan(since: str | None, until: str, max_batch: int, jobs: int, with_all
 # ---------------------------------------------------------------------------
 
 
+def node_suites_run(lane: dict[str, Any], sha: str) -> tuple[str, int]:
+    """Run a node lane's suites on an exported snapshot of `sha` (Node, not Cargo: no RCH).
+
+    Each suite's output is followed by `=== node-suite <path> exit=<code|absent|timeout>`;
+    a suite that does not exist at `sha` is `absent`. The suites need Node 24 or later
+    (WATCHDOG_NODE, default `node` on PATH). The artifact-transaction suite needs its
+    pinned fake-indexeddb reference: WATCHDOG_FAKE_INDEXEDDB_SOURCE names its src/index.ts.
+    """
+    node = os.environ.get("WATCHDOG_NODE", "node")
+    parts: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="asupersync_watchdog_node_") as root:
+        archive = subprocess.run(["git", "archive", sha, "scripts", "packages"], capture_output=True, check=False)
+        if archive.returncode != 0:
+            return f"git archive {sha} failed: {archive.stderr.decode(errors='replace')}\n", archive.returncode
+        subprocess.run(["tar", "-x", "-C", root], input=archive.stdout, check=True)
+        env = dict(os.environ)
+        if os.environ.get("WATCHDOG_FAKE_INDEXEDDB_SOURCE"):
+            env["ASUPERSYNC_FAKE_INDEXEDDB_SOURCE"] = os.environ["WATCHDOG_FAKE_INDEXEDDB_SOURCE"]
+        for suite in lane["suites"]:
+            if not (Path(root) / suite).exists():
+                parts.append(f"=== node-suite {suite} exit=absent")
+                continue
+            try:
+                proc = subprocess.run(
+                    [node, "--unhandled-rejections=strict", "--experimental-vm-modules", "--test", suite],
+                    cwd=root, capture_output=True, text=True, env=env, timeout=900, check=False,
+                )
+                parts += [proc.stdout + proc.stderr, f"=== node-suite {suite} exit={proc.returncode}"]
+            except subprocess.TimeoutExpired:
+                parts.append(f"=== node-suite {suite} exit=timeout")
+            except FileNotFoundError:
+                parts.append(f"=== node-suite {suite} exit=no-node")
+    return "\n".join(parts) + "\n", 0
+
+
 def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, log_dir: Path) -> Runner:
     def run(lane: dict[str, Any], sha: str) -> tuple[str, int]:
+        if lane["kind"] == "node":
+            text, code = node_suites_run(lane, sha)
+        else:
+            text, code = rch_run(lane, sha)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / f"{sha[:12]}_{re.sub(r'[^A-Za-z0-9_.+-]', '_', lane['id'])}.log", "a", encoding="utf-8") as log:
+            log.write(text)
+        return text, code
+
+    def rch_run(lane: dict[str, Any], sha: str) -> tuple[str, int]:
         env = dict(os.environ)
         env.update(
             RCH_REQUIRE_REMOTE="1",
@@ -1487,9 +1611,6 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
             if not (code == 103 and not REMOTE_EXIT_RE.search(text)) or DEPENDENCY_PREFLIGHT_RE.search(text):
                 break
             subprocess.run(["sleep", str(admission_sleep)], check=False)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        with open(log_dir / f"{sha[:12]}_{re.sub(r'[^A-Za-z0-9_.+-]', '_', lane['id'])}.log", "a", encoding="utf-8") as log:
-            log.write(text)
         return text, code
 
     return run
