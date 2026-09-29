@@ -6512,9 +6512,8 @@ impl Drop for RuntimeInner {
             if let Some(thread) = deadline_monitor {
                 let _ = thread.join();
             }
-            if let Some(pool) = blocking_pool {
-                pool.shutdown();
-            }
+            let blocking_pool =
+                blocking_pool.inspect(crate::runtime::blocking_pool::BlockingPool::shutdown);
             for handle in handles {
                 let _ = handle.join();
             }
@@ -6591,6 +6590,7 @@ impl Drop for RuntimeInner {
             }
             drop(sharded_state);
             drop(state);
+            drop(blocking_pool); // Joined last: its jobs may wait on retired values.
         };
         if on_worker {
             Self::finish_teardown_off_worker(teardown);

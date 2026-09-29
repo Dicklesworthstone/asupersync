@@ -303,3 +303,33 @@ fn success_panic_prestart_abort_and_missing_pool_have_exact_results() {
         drained(&runtime);
     });
 }
+
+#[test]
+fn runtime_drop_retires_tasks_before_joining_blocking_work_they_release() {
+    bounded(|| {
+        for workers in [1, 2] {
+            let runtime = runtime(workers);
+            // A pool job waits on a sender that only an unfinished runtime task
+            // owns, as a scoped Kafka consumer's lifetime job waits for its lease.
+            let (release, released) = mpsc::channel::<()>();
+            let (entered, blocked) = mpsc::channel();
+            let job = runtime.spawn_blocking(move || {
+                entered.send(()).unwrap();
+                let _ = released.recv();
+            }).unwrap();
+            blocked.recv_timeout(Duration::from_secs(5)).expect("pool job is running");
+            let task = runtime.handle().spawn(async move {
+                let _release = release;
+                std::future::pending::<()>().await;
+            });
+            let started = Instant::now();
+            drop(runtime);
+            let elapsed = started.elapsed();
+            assert!(job.is_done(), "workers={workers}: the released job must finish before drop returns");
+            assert!(elapsed < Duration::from_secs(2),
+                "workers={workers}: runtime drop waited {elapsed:?} on a pool job that its own tasks release");
+            drop(task);
+            println!("drained_blocking workers={workers} phase=runtime_drop elapsed_ms={}", elapsed.as_millis());
+        }
+    });
+}
