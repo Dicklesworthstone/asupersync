@@ -2,6 +2,7 @@
 
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::{
+    Connection, Frame, Settings,
     error::ErrorCode,
     frame::{ContinuationFrame, FrameHeader, FrameType, SettingsFrame, WindowUpdateFrame},
 };
@@ -184,12 +185,24 @@ impl H2SettingsFlowContinuationHarness {
                     stream_id: 0,
                 };
                 let payload = Bytes::from_static(&[0, 0, 0, 0]);
-                let result = WindowUpdateFrame::parse(&header, &payload);
-                if let Err(e) = result {
-                    assert_eq!(e.code, ErrorCode::ProtocolError);
-                    Ok(())
-                } else {
-                    Err("Accepted WINDOW_UPDATE with 0 increment".into())
+                // Framing only decodes the increment (br-asupersync-x8re31);
+                // the connection rejects it, scoped per RFC 9113 §6.9.1. On
+                // stream 0 that is a connection error.
+                let frame = WindowUpdateFrame::parse(&header, &payload)
+                    .map_err(|e| format!("WINDOW_UPDATE framing failed: {e:?}"))?;
+                let mut conn = Connection::server(Settings::default());
+                // Complete the SETTINGS handshake first, so the rejection below
+                // cannot come from the first-frame guard instead.
+                conn.process_frame(Frame::Settings(SettingsFrame::new(Vec::new())))
+                    .map_err(|e| format!("SETTINGS handshake failed: {e:?}"))?;
+                match conn.process_frame(Frame::WindowUpdate(frame)) {
+                    Err(e) => {
+                        assert_eq!(e.code, ErrorCode::ProtocolError);
+                        assert_eq!(e.stream_id, None, "must be a connection error");
+                        assert!(e.message.contains("zero increment"), "{}", e.message);
+                        Ok(())
+                    }
+                    Ok(_) => Err("Accepted WINDOW_UPDATE with 0 increment".into()),
                 }
             },
         ));

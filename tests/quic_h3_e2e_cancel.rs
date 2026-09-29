@@ -455,21 +455,21 @@ fn stop_receiving_blocks_future_receives() {
         .expect("stream view after stop");
     assert_eq!(view.receive_stopped_error_code, Some(0x42));
 
-    // Subsequent receives should fail with ReceiveStopped.
-    let err = pair
-        .client
+    // RFC 9000 §3.5: the peer may keep sending until it processes our
+    // STOP_SENDING. That data, in order or not, is discarded on receipt; it is
+    // not a connection error.
+    pair.client
         .receive_stream(cx, stream, 1)
-        .expect_err("receive after stop_receiving");
-    assert_eq!(
-        err,
-        NativeQuicConnectionError::Stream(QuicStreamError::ReceiveStopped { code: 0x42 })
-    );
+        .expect("data after our STOP_SENDING is discarded");
+    pair.client
+        .receive_stream_segment(cx, stream, 100, 10, false)
+        .expect("an out-of-order segment after our STOP_SENDING is discarded");
 
-    // Out-of-order segment receives should also fail.
+    // The application read side stays stopped.
     let err = pair
         .client
-        .receive_stream_segment(cx, stream, 100, 10, false)
-        .expect_err("segment after stop_receiving");
+        .read_stream_bytes(cx, stream, 1)
+        .expect_err("read after stop_receiving");
     assert_eq!(
         err,
         NativeQuicConnectionError::Stream(QuicStreamError::ReceiveStopped { code: 0x42 })

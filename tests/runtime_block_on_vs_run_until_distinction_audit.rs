@@ -265,15 +265,28 @@ fn run_until_is_only_on_lab_not_production_runtime() {
     let source = read("src/runtime/builder.rs");
 
     let suspect_methods = ["pub fn run_until_quiescent(", "pub fn run_until_idle("];
+    // The browser host's microtask pump drains its own queue
+    // (`BrowserWorkerPump::run_until_idle`, fff4532f9). It is the
+    // host-side event-loop driver, not a method of the production
+    // `Runtime`/`RuntimeHandle`, so it is the one allowed owner.
+    // Any other owner fails.
+    let allowed_owner = "impl BrowserWorkerPump {";
     for pat in &suspect_methods {
-        assert!(
-            !source.contains(pat),
-            "REGRESSION: production Runtime now has `{pat}` \
-             — deterministic lab semantic leaked into \
-             production. The production runtime cannot \
-             have a 'quiescent' notion (real I/O blocks \
-             indefinitely).",
-        );
+        for (at, _) in source.match_indices(pat) {
+            let owner = source[..at]
+                .lines()
+                .rev()
+                .find(|line| line.starts_with("impl"))
+                .unwrap_or("<no impl>");
+            assert_eq!(
+                owner, allowed_owner,
+                "REGRESSION: `{pat}` now appears in `{owner}` \
+                 — deterministic lab semantic leaked into \
+                 production. The production runtime cannot \
+                 have a 'quiescent' notion (real I/O blocks \
+                 indefinitely).",
+            );
+        }
     }
 }
 
@@ -293,9 +306,11 @@ fn block_on_returns_future_output_not_step_count() {
     // The body must call run_future_with_budget which
     // returns F::Output. If it called something returning
     // u64, the type system would error — but we also pin
-    // the call here for clarity.
+    // the call here for clarity. Whitespace is ignored, since
+    // rustfmt wraps the call once it takes a third argument.
+    let compact: String = body.split_whitespace().collect();
     assert!(
-        body.contains("run_future_with_budget(future, "),
+        compact.contains("run_future_with_budget(future,"),
         "REGRESSION: block_on body no longer calls \
          run_future_with_budget. The future-driving path \
          has changed — re-audit.",
