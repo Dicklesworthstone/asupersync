@@ -406,6 +406,14 @@ fn decoder(
     let mut server = Server::builder().build();
     server.config.max_recv_message_size = max_message;
     server.config.max_request_body_bytes = total;
+    // A server accepts only identity-encoded requests unless configured to
+    // accept an encoding (decode_live_request refuses others as Unimplemented).
+    if let Some(encoding) = encoding {
+        server
+            .config
+            .accept_compression
+            .extend(CompressionEncoding::from_header_value(encoding));
+    }
     let mut head = RequestHead {
         method: Method::Post,
         uri: "/native.Duplex/Echo".to_owned(),
