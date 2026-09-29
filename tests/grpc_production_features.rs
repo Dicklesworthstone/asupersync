@@ -989,7 +989,7 @@ fn channel_builder_fluent_api() {
             );
             assert_eq!(
                 message,
-                "gRPC TLS is available only on the native localhost transport; \
+                "gRPC TLS is available only on the native transport; \
                  deterministic loopback channels do not negotiate TLS"
             );
         }
