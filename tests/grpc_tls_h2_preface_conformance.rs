@@ -547,6 +547,38 @@ SrXuVI5uunTgPWuOtJOP+KM=
         }
 
         #[test]
+        fn tls_listener_refuses_an_acceptor_that_cannot_negotiate_h2() {
+            let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
+            let handle = runtime.handle();
+            runtime.block_on(bounded(async move {
+                let (chain, key, _) = create_tls_materials();
+                let http1_only = TlsAcceptorBuilder::new(chain, key)
+                    .alpn_protocols(vec![b"http/1.1".to_vec()])
+                    .build()
+                    .expect("HTTP/1.1-only acceptor");
+                let listener = Http2Listener::bind_with_config(
+                    "127.0.0.1:0",
+                    |_| async { Response::new(200, "OK", Vec::new()) },
+                    config(),
+                )
+                .await
+                .unwrap()
+                .with_tls(http1_only);
+                // Such a listener would handshake with every client and then
+                // reject it; run must refuse at once instead of accepting.
+                let run = asupersync::time::timeout(
+                    Cx::current().unwrap().now(),
+                    Duration::from_secs(5),
+                    listener.run(&handle),
+                )
+                .await
+                .expect("run returns at once");
+                let error = run.expect_err("an acceptor without h2 cannot serve HTTP/2");
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            }));
+        }
+
+        #[test]
         fn tls_handshake_timeout_releases_capacity_for_a_real_request() {
             let runtime = RuntimeBuilder::new().worker_threads(2).build().unwrap();
             let handle = runtime.handle();

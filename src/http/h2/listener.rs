@@ -5012,6 +5012,21 @@ impl<F> Http2Listener<F> {
         M: Fn(Arc<F>, Request) -> MFut + Clone + Send + Sync + 'static,
         MFut: Future<Output = H2DispatchResponse> + Send + 'static,
     {
+        // An acceptor that cannot negotiate h2 would complete a full handshake
+        // with every client and then reject it: refuse it at startup instead.
+        #[cfg(feature = "tls")]
+        if let Some(acceptor) = &self.tls_acceptor
+            && !acceptor
+                .config()
+                .alpn_protocols
+                .iter()
+                .any(|protocol| protocol.as_slice() == b"h2")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Http2Listener::with_tls needs an acceptor that advertises the h2 ALPN protocol",
+            ));
+        }
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
         // Independent push counter so finished connection tasks are reaped
         // periodically instead of accumulating for the listener's lifetime
