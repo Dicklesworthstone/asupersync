@@ -216,7 +216,10 @@ impl<T> WatchInner<T> {
     }
 
     fn current_version(&self) -> u64 {
-        self.value.read().1
+        // Recursive: the caller may already hold a `Ref`. The lock is fair, so
+        // a plain read queues behind a waiting writer that is itself waiting
+        // for that `Ref`, and both threads deadlock.
+        self.value.read_recursive().1
     }
 
     fn insert_receiver_version(&self, version: u64) -> ArenaIndex {
@@ -575,7 +578,8 @@ impl<T> Sender<T> {
     /// Returns a reference to the current value.
     ///
     /// This acquires a read lock on the value. The returned `Ref` holds
-    /// the lock and provides access to the value.
+    /// the lock and provides access to the value. Keep it short-lived: a send
+    /// waits for it, and another `borrow` queues behind that waiting send.
     #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
@@ -597,7 +601,8 @@ impl<T> Sender<T> {
         // receivers (the same TOCTOU class fixed in broadcast subscribe
         // by commit e9314df5).
         let (current_version, receiver_token) = {
-            let guard = self.inner.value.read();
+            // Recursive for the same reason as `current_version`.
+            let guard = self.inner.value.read_recursive();
             self.inner.receiver_count.fetch_add(1, Ordering::Relaxed);
             let receiver_token = self.inner.insert_receiver_version(guard.1);
             (guard.1, receiver_token)
@@ -815,6 +820,10 @@ impl<T> Receiver<T> {
     /// the same version, use [`Receiver::borrow_and_update`] instead.
     /// Calling [`Receiver::mark_seen`] later acknowledges whatever version is
     /// current at that later instant and can therefore skip an intervening send.
+    ///
+    /// The `Ref` holds the value's read lock. Keep it short-lived: a send
+    /// waits for it, and another `borrow` queues behind that waiting send.
+    /// [`Receiver::has_changed`] is safe to call while it is held.
     #[inline]
     #[must_use]
     pub fn borrow(&self) -> Ref<'_, T> {
@@ -1117,6 +1126,52 @@ mod tests {
             "every parked receiver is woken"
         );
         crate::test_complete!("sender_drop_wakes_every_parked_receiver_despite_a_panicking_waker");
+    }
+
+    /// `has_changed()` under a held `borrow()` must not queue behind a sender
+    /// that is waiting for that borrow: the lock is fair, so a plain read
+    /// would, and neither thread could proceed.
+    #[test]
+    fn has_changed_under_a_held_borrow_does_not_wait_for_a_blocked_sender() {
+        init_test("has_changed_under_a_held_borrow_does_not_wait_for_a_blocked_sender");
+        let (tx, rx) = channel(0_u32);
+        let rx_ref = &rx;
+        let answered = std::thread::scope(|scope| {
+            let held = rx.borrow();
+            let sender = scope.spawn(|| tx.send(1));
+            // The sender claims the writer bit before it waits for readers;
+            // from then on only recursive reads get in.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while tx.inner.value.try_read().is_some() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the sender never queued for the write lock"
+                );
+                std::thread::yield_now();
+            }
+            let (answer_tx, answer_rx) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let _ = answer_tx.send(rx_ref.has_changed());
+            });
+            let answered = answer_rx.recv_timeout(std::time::Duration::from_secs(5));
+            // Release the sender either way, so the scope can join.
+            drop(held);
+            sender
+                .join()
+                .expect("sender thread")
+                .expect("send succeeds");
+            answered
+        });
+        assert_eq!(
+            answered,
+            Ok(false),
+            "has_changed answered while the sender waited"
+        );
+        assert!(
+            rx.has_changed(),
+            "the send lands once the borrow is released"
+        );
+        crate::test_complete!("has_changed_under_a_held_borrow_does_not_wait_for_a_blocked_sender");
     }
 
     #[test]

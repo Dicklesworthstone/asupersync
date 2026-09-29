@@ -2668,6 +2668,12 @@ where
             }
 
             drop(idle_resources);
+
+            // Resources returned before the close are still in the return
+            // channel. Settle them now: the pool is closed, so each one is
+            // destroyed and leaves the active count, rather than staying open
+            // until some later acquire, stats call or the pool's drop.
+            self.process_returns();
         })
     }
 }
